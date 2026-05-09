@@ -481,10 +481,24 @@ func (store *MessageStore) Close() error {
 	return store.db.Close()
 }
 
-// Store a chat in the database
+// Store a chat in the database. An empty `name` preserves any existing
+// resolved contact/group name on the row — outbound-message persistence
+// doesn't have a friendly name available at send time and must not clobber
+// names set by inbound handling or history sync. last_message_time is
+// merged monotonically so out-of-order delivery (history sync, backfill)
+// can't move it backwards.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+		`INSERT INTO chats (jid, name, last_message_time)
+		VALUES (?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			name = CASE WHEN excluded.name = '' THEN chats.name ELSE excluded.name END,
+			last_message_time = CASE
+				WHEN chats.last_message_time IS NULL THEN excluded.last_message_time
+				WHEN excluded.last_message_time IS NULL THEN chats.last_message_time
+				WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
+				ELSE chats.last_message_time
+			END`,
 		jid, name, lastMessageTime,
 	)
 	return err
@@ -666,8 +680,36 @@ type SendMessageRequest struct {
 	MediaPath string `json:"media_path,omitempty"`
 }
 
+// classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
+// type, persist-side category). Single source of truth for the upload path
+// (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
+// (which stores the short category string).
+func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
+	switch ext {
+	case "jpg", "jpeg":
+		return whatsmeow.MediaImage, "image/jpeg", "image"
+	case "png":
+		return whatsmeow.MediaImage, "image/png", "image"
+	case "gif":
+		return whatsmeow.MediaImage, "image/gif", "image"
+	case "webp":
+		return whatsmeow.MediaImage, "image/webp", "image"
+	case "ogg":
+		return whatsmeow.MediaAudio, "audio/ogg; codecs=opus", "audio"
+	case "mp4":
+		return whatsmeow.MediaVideo, "video/mp4", "video"
+	case "avi":
+		return whatsmeow.MediaVideo, "video/avi", "video"
+	case "mov":
+		return whatsmeow.MediaVideo, "video/quicktime", "video"
+	default:
+		return whatsmeow.MediaDocument, "application/octet-stream", "document"
+	}
+}
+
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -692,6 +734,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			Server: "s.whatsapp.net", // For personal chats
 		}
 	}
+
+	// Capture pre-LID-resolution JID for SQLite storage.
+	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
+	// for outbound we keep the pre-resolution form so the chat stays unified
+	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
+	storageJID := recipientJID
 
 	// For personal chats, resolve phone number JID to LID (Linked Identity).
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
@@ -727,48 +775,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			return false, fmt.Sprintf("Error reading media file: %v", err)
 		}
 
-		// Determine media type and mime type based on file extension
-		fileExt := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
-		var mediaType whatsmeow.MediaType
-		var mimeType string
-
-		// Handle different media types
-		switch fileExt {
-		// Image types
-		case "jpg", "jpeg":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/jpeg"
-		case "png":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/png"
-		case "gif":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/gif"
-		case "webp":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/webp"
-
-		// Audio types
-		case "ogg":
-			mediaType = whatsmeow.MediaAudio
-			mimeType = "audio/ogg; codecs=opus"
-
-		// Video types
-		case "mp4":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/mp4"
-		case "avi":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/avi"
-		case "mov":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/quicktime"
-
-		// Document types (for any other file type)
-		default:
-			mediaType = whatsmeow.MediaDocument
-			mimeType = "application/octet-stream"
-		}
+		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
 
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
@@ -850,10 +857,57 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
+	}
+
+	// whatsmeow does not re-emit events.Message for messages this client
+	// itself just sent, so without an explicit StoreMessage call here
+	// list_messages / get_last_interaction never see our own outbound
+	// traffic until WhatsApp's multi-device sync echoes them back.
+	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+		// Normalize @lid recipients to phone JID so outbound rows land in
+		// the same chat row as inbound (which handleMessage normalizes via
+		// resolveLIDChat). Otherwise sending to an @lid input would
+		// fragment the chat under a separate jid.
+		persistJID := resolveUserJID(client, storageJID, types.EmptyJID)
+		chatJID := persistJID.String()
+		senderUser := client.Store.ID.User
+		timestamp := resp.Timestamp
+		if timestamp.IsZero() {
+			timestamp = time.Now()
+		}
+
+		var mediaType, filename string
+		if mediaPath != "" {
+			filename = filepath.Base(mediaPath)
+			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
+			switch ext {
+			case "jpg", "jpeg", "png", "gif", "webp":
+				mediaType = "image"
+			case "ogg":
+				mediaType = "audio"
+			case "mp4", "avi", "mov":
+				mediaType = "video"
+			default:
+				mediaType = "document"
+			}
+		}
+
+		// Pass empty name so StoreChat preserves any existing resolved
+		// contact/group name; we don't have one available here and
+		// must not clobber names from inbound handling or history sync.
+		if chatErr := messageStore.StoreChat(chatJID, "", timestamp); chatErr != nil {
+			fmt.Printf("Warning: failed to store outbound chat metadata: %v\n", chatErr)
+		}
+		if storeErr := messageStore.StoreMessage(
+			resp.ID, chatJID, senderUser, message, timestamp, true,
+			mediaType, filename, "", nil, nil, nil, 0,
+		); storeErr != nil {
+			fmt.Printf("Warning: failed to persist outbound message: %v\n", storeErr)
+		}
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
@@ -1436,7 +1490,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
