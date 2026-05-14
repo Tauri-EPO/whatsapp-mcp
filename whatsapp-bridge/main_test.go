@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +127,49 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
+}
+
+func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = writePipe
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = writePipe.Close()
+		_ = readPipe.Close()
+	})
+
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader("{"))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "unit-test-fingerprint")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	os.Stdout = oldStdout
+	_ = writePipe.Close()
+	outputBytes, readErr := io.ReadAll(readPipe)
+	_ = readPipe.Close()
+	if readErr != nil {
+		t.Fatalf("failed to read captured stdout: %v", readErr)
+	}
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed body to return 400, got %d", resp.Code)
+	}
+
+	output := string(outputBytes)
+	if !strings.Contains(output, "→ /api/send from=") {
+		t.Fatalf("expected caller fingerprint log, got output %q", output)
+	}
+	if !strings.Contains(output, `user_agent="unit-test-fingerprint"`) {
+		t.Fatalf("expected user agent in caller fingerprint log, got output %q", output)
+	}
 }
 
 func TestStoreChatPreservesEphemeralSettings(t *testing.T) {

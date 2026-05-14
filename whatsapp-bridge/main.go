@@ -1716,14 +1716,15 @@ func extractDirectPathFromURL(url string) string {
 // Outbound media: req.MediaPath in /api/send is validated against
 // allowedMediaRoots before sendWhatsAppMessage ever sees it. See
 // media_path.go.
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
+func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) *http.ServeMux {
 	allowedHosts := buildAllowedHosts(port)
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
 	}
+	mux := http.NewServeMux()
 
 	// Health check endpoint
-	http.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
 			"status":    "ok",
@@ -1738,12 +1739,14 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}))
 
 	// Handler for sending messages
-	http.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		fmt.Printf("→ /api/send from=%q user_agent=%q\n", r.RemoteAddr, r.UserAgent())
 
 		// Parse the request body
 		var req SendMessageRequest
@@ -1805,7 +1808,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}))
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", auth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/download", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1870,7 +1873,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}))
 
 	// Handler for sending typing indicator
-	http.HandleFunc("/api/typing", auth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/typing", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1945,6 +1948,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 	}))
 
+	return mux
+}
+
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
+	handler := newRESTMux(client, messageStore, port, token, allowedMediaRoots)
+
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -1956,6 +1965,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second, // Longer for media downloads
 		IdleTimeout:  120 * time.Second,
+		Handler:      handler,
 	}
 
 	// Run server in a goroutine so it doesn't block
