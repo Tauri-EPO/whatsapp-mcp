@@ -104,6 +104,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
+			deleted_at TIMESTAMP,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -1431,5 +1432,197 @@ func TestCallChatJID_Precedence(t *testing.T) {
 				t.Errorf("callChatJID() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// revokeEvent builds an inbound events.Message carrying a
+// ProtocolMessage_REVOKE that targets the given message ID. Tests use
+// this to drive handleMessage end-to-end rather than reaching into
+// internal helpers.
+func revokeEvent(targetID string, ts time.Time) *events.Message {
+	revokeType := waProto.ProtocolMessage_REVOKE
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        "carrier-" + targetID,
+			Timestamp: ts,
+		},
+		Message: &waProto.Message{
+			ProtocolMessage: &waProto.ProtocolMessage{
+				Type: &revokeType,
+				Key: &waCommon.MessageKey{
+					RemoteJID: proto.String(phonePN.String()),
+					ID:        proto.String(targetID),
+					FromMe:    proto.Bool(false),
+				},
+			},
+		},
+	}
+}
+
+// readDeletedAt returns the deleted_at value for a message row, with
+// ok=false if the row doesn't exist or the column is NULL.
+func readDeletedAt(t *testing.T, ms *MessageStore, chatJID, messageID string) (time.Time, bool) {
+	t.Helper()
+	var got sql.NullTime
+	if err := ms.db.QueryRow(
+		"SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
+		messageID, chatJID,
+	).Scan(&got); err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, false
+		}
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	return got.Time, got.Valid
+}
+
+func TestHandleMessage_RevokeMarksTargetDeleted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokedAt := time.Unix(1710000010, 0)
+	handleMessage(client, ms, revokeEvent(targetID, revokedAt), testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid {
+		t.Fatalf("expected REVOKE to mark target row as deleted")
+	}
+	if !got.Equal(revokedAt) {
+		t.Fatalf("expected deleted_at=%v, got %v", revokedAt, got)
+	}
+
+	var content string
+	if err := ms.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
+		targetID, chatJID).Scan(&content); err != nil {
+		t.Fatalf("read content: %v", err)
+	}
+	if content != "secret" {
+		t.Fatalf("content must be preserved on revoke, got %q", content)
+	}
+}
+
+func TestHandleMessage_RevokeIsNoopForUnknownTarget(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+
+	// No seeded row — bridge was offline when the original arrived, or it
+	// was deleted before this code path shipped. The handler must not
+	// error and must not invent a row.
+	handleMessage(client, ms, revokeEvent("NEVER_SEEN", time.Unix(1710000010, 0)), testLogger())
+
+	var rowCount int
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rowCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if rowCount != 0 {
+		t.Fatalf("expected no rows in messages, got %d", rowCount)
+	}
+}
+
+func TestHandleMessage_DuplicateRevokeKeepsEarliestDeletedAt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "x", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	earlier := time.Unix(1710000010, 0)
+	later := time.Unix(1710000020, 0)
+
+	handleMessage(client, ms, revokeEvent(targetID, earlier), testLogger())
+	handleMessage(client, ms, revokeEvent(targetID, later), testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid || !got.Equal(earlier) {
+		t.Fatalf("expected earlier deleted_at=%v to be preserved across a duplicate revoke, got %v", earlier, got)
+	}
+}
+
+func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokedAt := time.Unix(1710000010, 0)
+	handleMessage(client, ms, revokeEvent(targetID, revokedAt), testLogger())
+
+	replayedOriginal := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: phonePN, Sender: phonePN, IsFromMe: false},
+			ID:            targetID,
+			Timestamp:     time.Unix(1710000020, 0),
+		},
+		Message: &waProto.Message{Conversation: proto.String("replayed original")},
+	}
+	handleMessage(client, ms, replayedOriginal, testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid || !got.Equal(revokedAt) {
+		t.Fatalf("expected replayed original to preserve deleted_at=%v, got %v (valid=%v)", revokedAt, got, valid)
+	}
+}
+
+func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	seededID := "PRE_EXISTING_MESSAGE"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		seededID, chatJID, phonePN.User, "still here", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A regular text message arriving in the same chat must not touch
+	// deleted_at on any existing row, and must not mark itself deleted.
+	regular := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: phonePN, Sender: phonePN, IsFromMe: false},
+			ID:            "REGULAR_MSG",
+			Timestamp:     time.Unix(1710000010, 0),
+		},
+		Message: &waProto.Message{Conversation: proto.String("just a normal hello")},
+	}
+	handleMessage(client, ms, regular, testLogger())
+
+	if _, valid := readDeletedAt(t, ms, chatJID, seededID); valid {
+		t.Fatalf("regular message must not flip deleted_at on the pre-existing row")
+	}
+	if _, valid := readDeletedAt(t, ms, chatJID, "REGULAR_MSG"); valid {
+		t.Fatalf("regular message must not flip its own deleted_at")
 	}
 }

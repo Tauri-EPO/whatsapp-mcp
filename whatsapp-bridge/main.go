@@ -120,6 +120,7 @@ func NewMessageStore() (*MessageStore, error) {
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
+			deleted_at TIMESTAMP,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -161,6 +162,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}
 	if err := ensureColumn(db, "chats", "ephemeral_setting_timestamp", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("failed to ensure chats.ephemeral_setting_timestamp column: %w", err)
+	}
+	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
+		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
 	return nil
 }
@@ -617,10 +621,39 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	}
 
 	_, err := store.db.Exec(
-		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			sender = excluded.sender,
+			content = excluded.content,
+			timestamp = excluded.timestamp,
+			is_from_me = excluded.is_from_me,
+			media_type = excluded.media_type,
+			filename = excluded.filename,
+			url = excluded.url,
+			media_key = excluded.media_key,
+			file_sha256 = excluded.file_sha256,
+			file_enc_sha256 = excluded.file_enc_sha256,
+			file_length = excluded.file_length`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+	)
+	return err
+}
+
+// MarkMessageDeleted records a "delete for everyone" event by stamping
+// deleted_at on the target row. Content is preserved on purpose — the
+// local DB is an archive, and the value is in knowing the message was
+// retracted, not in erasing what was said.
+//
+// First-revoke-wins: once deleted_at is set, a later REVOKE does not
+// overwrite it. Calling this for a message that does not exist (e.g.
+// the bridge missed the original) is a silent no-op, not an error.
+func (store *MessageStore) MarkMessageDeleted(messageID, chatJID string, deletedAt time.Time) error {
+	_, err := store.db.Exec(
+		`UPDATE messages SET deleted_at = ?
+		 WHERE id = ? AND chat_jid = ? AND deleted_at IS NULL`,
+		deletedAt, messageID, chatJID,
 	)
 	return err
 }
@@ -922,6 +955,35 @@ func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, 
 
 	if err := messageStore.UpdateChatEphemeralSettings(chatJID, expiration, settingTimestamp); err != nil {
 		logger.Warnf("Failed to update ephemeral settings for %s: %v", chatJID, err)
+	}
+}
+
+// handleMessageRevoke records a "delete for everyone" event by stamping
+// deleted_at on the target message row. The original content is kept on
+// purpose so the local archive can still surface what was retracted.
+//
+// chatJID is the already-LID-normalised chat from the carrier event;
+// using it (rather than Key.RemoteJID, which may carry the raw @lid
+// form) keeps the UPDATE aligned with how StoreMessage wrote the row.
+func handleMessageRevoke(messageStore *MessageStore, msg *waProto.Message, chatJID string, eventTimestamp int64, logger waLog.Logger) {
+	if msg == nil || msg.GetProtocolMessage() == nil {
+		return
+	}
+	protoMsg := msg.GetProtocolMessage()
+	if protoMsg.GetType() != waProto.ProtocolMessage_REVOKE {
+		return
+	}
+	key := protoMsg.GetKey()
+	if key == nil {
+		return
+	}
+	targetID := key.GetID()
+	if targetID == "" {
+		return
+	}
+	deletedAt := time.Unix(eventTimestamp, 0)
+	if err := messageStore.MarkMessageDeleted(targetID, chatJID, deletedAt); err != nil {
+		logger.Warnf("Failed to mark message %s in %s as deleted: %v", targetID, chatJID, err)
 	}
 }
 
@@ -1362,6 +1424,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	}
 
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
+	handleMessageRevoke(messageStore, msg.Message, chatJID, msg.Info.Timestamp.Unix(), logger)
 
 	// Backfill ephemeral state from any regular message's ContextInfo.
 	// EPHEMERAL_SETTING ProtocolMessages and GroupInfo events only fire on
