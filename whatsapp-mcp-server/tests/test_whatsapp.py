@@ -65,6 +65,37 @@ class TestMessageConversion:
 
         assert result["media_type"] == "image"
 
+    def test_msg_to_dict_quoted_message_id_present(self):
+        """Quoted-reply messages expose quoted_message_id."""
+        msg = Message(
+            id="reply-001",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="Great point!",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            quoted_message_id="3AORIGINAL0000001",
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["quoted_message_id"] == "3AORIGINAL0000001"
+
+    def test_msg_to_dict_quoted_message_id_absent(self):
+        """Plain messages have quoted_message_id as None."""
+        msg = Message(
+            id="plain-001",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="Hello!",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["quoted_message_id"] is None
+
 
 class TestChatConversion:
     """Tests for chat conversion functions."""

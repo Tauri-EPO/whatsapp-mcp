@@ -173,17 +173,23 @@ Get messages with filters, date ranges, and sorting.
 
 #### `send_message`
 
-Send a text message to a contact or group.
+Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
 - `recipient` (required): Phone number or group JID
 - `message` (required): Text content to send
+- `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
+- `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
+- `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
+
+Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
 **Natural Language Examples:**
 
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
+- "Reply to that message saying 'Sounds good'"
 
 #### `send_file`
 

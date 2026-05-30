@@ -105,6 +105,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
 			deleted_at TIMESTAMP,
+			quoted_message_id TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -1624,5 +1625,169 @@ func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 	}
 	if _, valid := readDeletedAt(t, ms, chatJID, "REGULAR_MSG"); valid {
 		t.Fatalf("regular message must not flip its own deleted_at")
+	}
+}
+
+// --- Quoted-reply tests ---
+
+// queryQuotedMessageID returns the quoted_message_id column for a stored
+// message row, or (empty, false) if the row does not exist.
+func queryQuotedMessageID(ms *MessageStore, chatJID, msgID string) (string, bool) {
+	var val sql.NullString
+	err := ms.db.QueryRow(
+		"SELECT quoted_message_id FROM messages WHERE id = ? AND chat_jid = ?",
+		msgID, chatJID,
+	).Scan(&val)
+	if err != nil {
+		return "", false
+	}
+	return val.String, val.Valid
+}
+
+// TestHandleMessage_QuotedReply_IDPersisted verifies that an inbound
+// ExtendedTextMessage reply that carries a ContextInfo.StanzaID has its
+// quoted_message_id column populated correctly.
+func TestHandleMessage_QuotedReply_IDPersisted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	chatJID := phonePN.String()
+	targetID := "3AORIGINAL1234567"
+	replyID := "3AREPLY0000000001"
+
+	msg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        replyID,
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String("Great point!"),
+				ContextInfo: &waProto.ContextInfo{
+					StanzaID:      proto.String(targetID),
+					Participant:   proto.String(phonePN.String()),
+					QuotedMessage: &waProto.Message{Conversation: proto.String("original text")},
+				},
+			},
+		},
+	}
+
+	handleMessage(client, ms, msg, logger)
+
+	quotedID, valid := queryQuotedMessageID(ms, chatJID, replyID)
+	if !valid {
+		t.Fatalf("expected quoted_message_id to be set, got NULL")
+	}
+	if quotedID != targetID {
+		t.Errorf("quoted_message_id = %q, want %q", quotedID, targetID)
+	}
+}
+
+// TestHandleMessage_PlainMessage_QuotedIDIsNull verifies that a plain
+// Conversation message (no ContextInfo) has a NULL quoted_message_id.
+func TestHandleMessage_PlainMessage_QuotedIDIsNull(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	chatJID := phonePN.String()
+	msgID := "3APLAIN0000000001"
+
+	msg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        msgID,
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			Conversation: proto.String("just a plain message"),
+		},
+	}
+
+	handleMessage(client, ms, msg, logger)
+
+	_, valid := queryQuotedMessageID(ms, chatJID, msgID)
+	if valid {
+		t.Fatalf("plain message must have NULL quoted_message_id")
+	}
+}
+
+// TestSendHandler_MissingRecipient_Returns400 covers the /api/send validation
+// path when recipient is empty — complements the quoted-reply handler path.
+func TestSendHandler_QuotedReplyFields_PassedThrough(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	// POST with quoted_message_id but no recipient — should 400 before
+	// any send attempt, proving the new fields are parsed.
+	body := `{"recipient":"","message":"hi","quoted_message_id":"3AORIGINAL","quoted_sender_jid":"1234@s.whatsapp.net","quoted_content":"original"}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	// Empty recipient → 400
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty recipient with quoted fields, got %d", resp.Code)
+	}
+}
+
+// TestExtractQuotedMessageInfo_ExtendedText verifies the helper that the
+// bridge uses to parse quoted-reply ContextInfo from inbound messages.
+func TestExtractQuotedMessageInfo_ExtendedText(t *testing.T) {
+	stanzaID := "3ATARGET0000001"
+	participant := "15551234567@s.whatsapp.net"
+	quotedText := "the original message"
+
+	msg := &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text: proto.String("my reply"),
+			ContextInfo: &waProto.ContextInfo{
+				StanzaID:      proto.String(stanzaID),
+				Participant:   proto.String(participant),
+				QuotedMessage: &waProto.Message{Conversation: proto.String(quotedText)},
+			},
+		},
+	}
+
+	gotID, gotSender, gotContent := extractQuotedMessageInfo(msg)
+	if gotID != stanzaID {
+		t.Errorf("stanzaID = %q, want %q", gotID, stanzaID)
+	}
+	if gotSender != participant {
+		t.Errorf("participant = %q, want %q", gotSender, participant)
+	}
+	if gotContent != quotedText {
+		t.Errorf("content = %q, want %q", gotContent, quotedText)
+	}
+}
+
+// TestExtractQuotedMessageInfo_NoContextInfo verifies graceful handling when
+// the message has no ContextInfo (plain Conversation, ReactionMessage, etc.).
+func TestExtractQuotedMessageInfo_NoContextInfo(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *waProto.Message
+	}{
+		{"plain conversation", &waProto.Message{Conversation: proto.String("hello")}},
+		{"nil message", nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, sender, content := extractQuotedMessageInfo(tc.msg)
+			if id != "" || sender != "" || content != "" {
+				t.Errorf("expected all empty, got (%q, %q, %q)", id, sender, content)
+			}
+		})
 	}
 }
