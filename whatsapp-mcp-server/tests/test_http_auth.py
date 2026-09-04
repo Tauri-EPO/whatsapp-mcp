@@ -142,3 +142,58 @@ class TestResolveHttpToken:
     def test_explicit_short_token_still_rejected(self):
         with pytest.raises(ValueError):
             self._resolve("short", "0.0.0.0", None)
+
+
+class TestRateLimit:
+    def test_resolve_rate_limit(self):
+        from http_auth import DEFAULT_RATE_LIMIT_PER_MINUTE, resolve_rate_limit
+
+        assert resolve_rate_limit(None, token_enforced=True) == DEFAULT_RATE_LIMIT_PER_MINUTE
+        assert resolve_rate_limit(None, token_enforced=False) == 0
+        assert resolve_rate_limit("off", token_enforced=True) == 0
+        assert resolve_rate_limit(" 30 ", token_enforced=False) == 30
+        with pytest.raises(ValueError):
+            resolve_rate_limit("many", token_enforced=True)
+        with pytest.raises(ValueError):
+            resolve_rate_limit("-1", token_enforced=True)
+
+    def test_resolve_max_body(self):
+        from http_auth import DEFAULT_MAX_BODY_BYTES, resolve_max_body_bytes
+
+        assert resolve_max_body_bytes(None) == DEFAULT_MAX_BODY_BYTES
+        assert resolve_max_body_bytes("65536") == 65536
+        with pytest.raises(ValueError):
+            resolve_max_body_bytes("10")
+
+    def test_bucket_allows_burst_then_429_then_refills(self):
+        from http_auth import RateLimitMiddleware
+
+        now = [1000.0]
+        client = TestClient(RateLimitMiddleware(_ok_app, per_minute=3, clock=lambda: now[0]))
+        for _ in range(3):
+            assert client.get("/mcp").status_code == 200
+        blocked = client.get("/mcp")
+        assert blocked.status_code == 429
+        assert int(blocked.headers["retry-after"]) >= 1
+        assert blocked.json()["error"] == "rate_limited"
+        now[0] += 20.0  # one token refilled at 3/min
+        assert client.get("/mcp").status_code == 200
+        assert client.get("/mcp").status_code == 429
+
+    def test_clients_are_independent_and_forwarded_for_wins(self):
+        from http_auth import RateLimitMiddleware
+
+        client = TestClient(RateLimitMiddleware(_ok_app, per_minute=1))
+        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.1, 10.0.0.1"}).status_code == 200
+        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.1"}).status_code == 429
+        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.2"}).status_code == 200
+
+    def test_limiter_runs_before_auth(self):
+        from mcp.server.mcpserver import MCPServer
+
+        from main import build_http_app
+
+        app = build_http_app(MCPServer("t"), "streamable-http", TOKEN, rate_limit_per_minute=1, host="0.0.0.0")
+        with TestClient(app) as client:
+            assert client.get("/mcp").status_code == 401  # first request: auth decides
+            assert client.get("/mcp").status_code == 429  # second: throttled before auth

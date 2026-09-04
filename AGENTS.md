@@ -177,6 +177,8 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only | Extra `Host` header values accepted by the `http`/`sse` transports (comma-separated; bare hostnames match any port; `*` disables the check). Unset + non-loopback bind disables the check with a warning |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
+| `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per client (X-Forwarded-For first hop or peer) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; `0`/`off` disables |
+| `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304` | Max request body for `http`/`sse` (passed to the SDK app) |
 | `WHATSAPP_MCP_TOKEN` | bridge token when bound off-loopback; none on loopback | Static bearer token enforced on the `http`/`sse` transports (`http_auth.resolve_http_token`, min 16 chars). Unset + non-loopback bind → reuses the bridge token (env or `.bridge-token`); `off` disables auth explicitly. stdio unaffected |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty falls back to this default) |
 | `WEBHOOK_ENABLED` | `true` (compose: `false`) | Set to `false` to disable outbound webhooks entirely |

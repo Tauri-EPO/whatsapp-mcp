@@ -13,6 +13,8 @@ This mirrors what the Go bridge does for its own REST API (see auth.go).
 from __future__ import annotations
 
 import secrets
+import threading
+import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
@@ -26,6 +28,9 @@ REALM = "whatsapp-mcp"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 # WHATSAPP_MCP_TOKEN values that mean "no auth, and do not fall back to the bridge token".
 DISABLE_VALUES = ("off", "none", "disabled")
+# Requests per minute per client when a token is enforced and nothing is configured.
+DEFAULT_RATE_LIMIT_PER_MINUTE = 120
+DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024  # the SDK's own default
 
 
 def resolve_mcp_token(value: str | None) -> str | None:
@@ -115,6 +120,114 @@ class BearerTokenMiddleware:
                     (b"content-type", b"application/json"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"www-authenticate", f'Bearer realm="{REALM}"'.encode("ascii")),
+                    (b"cache-control", b"no-store"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def resolve_rate_limit(value: str | None, token_enforced: bool) -> int:
+    """Parse WHATSAPP_MCP_RATE_LIMIT (requests per minute per client). 0 disables.
+
+    Unset → DEFAULT_RATE_LIMIT_PER_MINUTE when a bearer token is enforced (the
+    endpoint is reachable from beyond loopback), 0 otherwise.
+    """
+    raw = (value or "").strip().lower()
+    if not raw:
+        return DEFAULT_RATE_LIMIT_PER_MINUTE if token_enforced else 0
+    if raw in DISABLE_VALUES:
+        return 0
+    try:
+        limit = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"Invalid WHATSAPP_MCP_RATE_LIMIT={value!r}; must be an integer (requests/minute) or off"
+        ) from None
+    if limit < 0:
+        raise ValueError(f"Invalid WHATSAPP_MCP_RATE_LIMIT={value!r}; must be >= 0")
+    return limit
+
+
+def resolve_max_body_bytes(value: str | None) -> int:
+    """Parse WHATSAPP_MCP_MAX_BODY_BYTES (default 4 MiB, the SDK default)."""
+    raw = (value or "").strip()
+    if not raw:
+        return DEFAULT_MAX_BODY_BYTES
+    try:
+        size = int(raw)
+    except ValueError:
+        raise ValueError(f"Invalid WHATSAPP_MCP_MAX_BODY_BYTES={value!r}; must be an integer") from None
+    if size < 1024:
+        raise ValueError(f"Invalid WHATSAPP_MCP_MAX_BODY_BYTES={value!r}; must be at least 1024")
+    return size
+
+
+def client_key(scope: Scope) -> str:
+    """Identify the caller: first X-Forwarded-For hop (Tailscale Serve / a proxy
+    set it) or the socket peer."""
+    for name, value in scope.get("headers", []):
+        if name.lower() == b"x-forwarded-for":
+            first = value.decode("latin-1").split(",")[0].strip()
+            if first:
+                return first
+    client = scope.get("client")
+    return client[0] if client else "unknown"
+
+
+class RateLimitMiddleware:
+    """Pure-ASGI token bucket per client: `per_minute` requests sustained, a burst
+    of the same size, 429 + Retry-After when exhausted. Sits in front of the
+    bearer check so credential guessing is throttled too."""
+
+    def __init__(self, app: ASGIApp, per_minute: int, clock: Callable[[], float] = time.monotonic):
+        if per_minute <= 0:
+            raise ValueError("RateLimitMiddleware requires per_minute > 0")
+        self.app = app
+        self.capacity = float(per_minute)
+        self.refill_per_second = per_minute / 60.0
+        self._clock = clock
+        self._buckets: dict[str, tuple[float, float]] = {}  # key -> (tokens, last_refill)
+        self._lock = threading.Lock()
+        self._last_prune = clock()
+
+    def _take(self, key: str) -> float:
+        """Consume one token; return 0 when allowed, else seconds until one is available."""
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (self.capacity, now))
+            tokens = min(self.capacity, tokens + (now - last) * self.refill_per_second)
+            if tokens >= 1.0:
+                self._buckets[key] = (tokens - 1.0, now)
+                allowed = 0.0
+            else:
+                self._buckets[key] = (tokens, now)
+                allowed = (1.0 - tokens) / self.refill_per_second
+            if now - self._last_prune > 300:
+                self._last_prune = now
+                stale = [k for k, (t, ts) in self._buckets.items() if t >= self.capacity - 0.01 or now - ts > 600]
+                for k in stale:
+                    self._buckets.pop(k, None)
+        return allowed
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        wait = self._take(client_key(scope))
+        if wait <= 0:
+            await self.app(scope, receive, send)
+            return
+        retry_after = max(1, int(wait + 0.999))
+        body = b'{"error":"rate_limited","message":"Too many requests; slow down"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"retry-after", str(retry_after).encode("ascii")),
                     (b"cache-control", b"no-store"),
                 ],
             }

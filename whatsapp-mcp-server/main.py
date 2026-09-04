@@ -6,7 +6,13 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from http_auth import BearerTokenMiddleware, resolve_http_token
+from http_auth import (
+    BearerTokenMiddleware,
+    RateLimitMiddleware,
+    resolve_http_token,
+    resolve_max_body_bytes,
+    resolve_rate_limit,
+)
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
@@ -600,18 +606,23 @@ def shutdown_handler(signum, frame):
     sys.exit(0)
 
 
-def build_http_app(server: MCPServer, transport: str, token: str | None, **app_kwargs: Any):
-    """Build the ASGI app for the http/sse transports, wrapped in bearer auth when a token is set.
+def build_http_app(
+    server: MCPServer, transport: str, token: str | None, rate_limit_per_minute: int = 0, **app_kwargs: Any
+):
+    """Build the ASGI app for the http/sse transports.
 
     Mirrors what MCPServer.run(transport=...) does internally, but returns the app so
-    the auth middleware can sit in front of the SDK's own DNS-rebinding middleware.
+    our middleware can sit in front of the SDK's own DNS-rebinding middleware:
+    rate limit (outermost, throttles credential guessing too) → bearer auth → SDK.
     """
     if transport == "sse":
         app = server.sse_app(**app_kwargs)
     else:
         app = server.streamable_http_app(**app_kwargs)
     if token:
-        return BearerTokenMiddleware(app, token)
+        app = BearerTokenMiddleware(app, token)
+    if rate_limit_per_minute > 0:
+        app = RateLimitMiddleware(app, rate_limit_per_minute)
     return app
 
 
@@ -644,7 +655,11 @@ if __name__ == "__main__":
         # Explicit WHATSAPP_MCP_TOKEN wins; a non-loopback bind without one reuses
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
-        app_kwargs: dict[str, Any] = {"host": host}
+        rate_limit = resolve_rate_limit(os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None)
+        app_kwargs: dict[str, Any] = {
+            "host": host,
+            "max_request_body_size": resolve_max_body_bytes(os.getenv("WHATSAPP_MCP_MAX_BODY_BYTES")),
+        }
         # The SDK enables a loopback-only Host allow-list when bound to loopback
         # and none otherwise; WHATSAPP_MCP_ALLOWED_HOSTS lets an operator keep
         # DNS-rebinding protection on for a non-loopback bind.
@@ -673,8 +688,17 @@ if __name__ == "__main__":
 
     # stdout is reserved for the protocol on stdio; log startup to stderr.
     auth_state = f"bearer token required, from {token_source}" if token else f"no auth ({token_source})"
-    print(f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state})", file=sys.stderr)
+    limit_state = f"{rate_limit} req/min per client" if rate_limit else "no rate limit"
+    print(
+        f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state}; {limit_state})",
+        file=sys.stderr,
+    )
 
     import uvicorn
 
-    uvicorn.run(build_http_app(mcp, transport, token, **app_kwargs), host=host, port=port, log_level="info")
+    uvicorn.run(
+        build_http_app(mcp, transport, token, rate_limit_per_minute=rate_limit, **app_kwargs),
+        host=host,
+        port=port,
+        log_level="info",
+    )
