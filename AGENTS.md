@@ -85,6 +85,7 @@ whatsapp-mcp/
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
 │   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
+│   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
@@ -100,7 +101,7 @@ whatsapp-mcp/
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
 
-Two SQLite databases: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `messages_fts`). The bridge owns the schema; the MCP server only reads.
+Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `messages_fts`) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash) is created lazily and owned by the MCP server, and the bridge never opens it.
 
 Compose topology: the `mcp` container joins the bridge's network namespace (`network_mode: service:bridge`), so the bridge keeps its loopback bind and loopback-only Host allow-list; the MCP port is published on the bridge service. An alternative topology is issue #58.
 

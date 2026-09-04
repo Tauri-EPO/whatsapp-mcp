@@ -16,6 +16,9 @@ from http_auth import (
 )
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_inventory import list_media_page, media_stats
+from media_notes import annotate_media as notes_annotate_media
+from media_notes import get_media_notes as notes_get_media_notes
+from media_notes import search_media_notes as notes_search_media_notes
 from observability import JSON_FORMAT_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
@@ -867,6 +870,62 @@ def get_media_stats(chat_jid: str = "") -> dict[str, Any]:
          "by_type": [{media_type, files, bytes}], "media_root": path}
     """
     return media_stats(chat_jid or None)
+
+
+@mcp.tool()
+@tool_errors
+def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
+    """Remember something about a media file: a summary, tags, keep/disposable, a transcript.
+
+    Notes live in notes.db (owned by the MCP server) and are keyed by the file's
+    sha256, so the same file forwarded into several chats has one note and the
+    note survives the cached bytes being purged. Free-form `key` (summary, tags,
+    keep, transcript, ...) and text `value` (JSON is fine, up to 64 KB); the same
+    key overwrites, an empty value deletes. Only hashes visible through
+    list_media / list_messages can be annotated.
+
+    Args:
+        sha256: Content hash from list_media or list_messages (64 hex chars)
+        key: Note name, up to 64 characters
+        value: Note text; empty string removes the note
+
+    Returns:
+        {"success": true, "sha256", "key", "value", "updated_at"} or, when deleting, "deleted"
+    """
+    return notes_annotate_media(sha256, key, value)
+
+
+@mcp.tool()
+@tool_errors
+def get_media_notes(sha256: str) -> dict[str, Any]:
+    """Every note on a media file plus the messages that carry it.
+
+    Args:
+        sha256: Content hash from list_media or list_messages
+
+    Returns:
+        {"sha256", "notes": {key: {"value", "updated_at"}}, "messages": [{message_id, chat_jid,
+        chat_name, timestamp, media_type, filename, bytes}]} restricted to allowed chats; not_found
+        when no visible message carries the hash
+    """
+    return notes_get_media_notes(sha256)
+
+
+@mcp.tool()
+@tool_errors
+def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    """Find media by what was noted about it (substring match over note values).
+
+    Args:
+        query: Text to look for in note values, case-insensitive
+        key: Restrict to one note name (default: any)
+        limit: Max notes to return (default 50, max 200)
+
+    Returns:
+        [{"sha256", "key", "value", "updated_at"}] newest first, only for files in allowed chats;
+        pass a sha256 to get_media_notes or list_media(...) to find the messages
+    """
+    return notes_search_media_notes(query, key or None, limit)
 
 
 @mcp.tool()

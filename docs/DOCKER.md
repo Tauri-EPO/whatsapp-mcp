@@ -236,7 +236,8 @@ works as before.
 The `whatsapp-store` volume holds everything worth keeping: `whatsapp.db`
 (the WhatsApp session keys; losing it means re-pairing), `messages.db`
 (local history and read state), the per-chat media directories,
-`.bridge-token` (the REST bearer) and, once #97 lands, `notes.db`.
+`.bridge-token` (the REST bearer) and `notes.db` (the agent's notes about
+media, written by the MCP server).
 `scripts/backup.sh` snapshots it **while the stack runs**:
 
 ```bash
