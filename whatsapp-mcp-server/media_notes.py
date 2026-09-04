@@ -80,8 +80,9 @@ def visible_hashes(hashes: list[str]) -> set[str]:
     wanted = sorted({h for h in hashes if h})
     if not wanted:
         return set()
-    clauses = [f"lower(hex(file_sha256)) IN ({','.join('?' * len(wanted))})"]
-    params: list[Any] = list(wanted)
+    # Compare the blob, not lower(hex(...)): that is what idx_messages_file_sha256 indexes.
+    clauses = [f"file_sha256 IN ({','.join('?' * len(wanted))})"]
+    params: list[Any] = [bytes.fromhex(h) for h in wanted]
     if CHAT_POLICY.restricted:
         clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
         clauses.append(clause)
@@ -100,8 +101,8 @@ def visible_hashes(hashes: list[str]) -> set[str]:
 
 
 def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
-    clauses = ["lower(hex(m.file_sha256)) = ?"]
-    params: list[Any] = [sha256]
+    clauses = ["m.file_sha256 = ?"]
+    params: list[Any] = [bytes.fromhex(sha256)]
     if CHAT_POLICY.restricted:
         clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
         clauses.append(clause)

@@ -137,3 +137,29 @@ def test_note_survives_purge_of_the_cached_file(notes_store):
     item = main.list_media(chat_jid=BOB)["items"][0]
     assert item["cached"] is False and item["sha256"] == SHA_B and item["notes"] == {"keep": "yes"}
     assert main.get_media_notes(SHA_B)["notes"]["keep"]["value"] == "yes"
+
+
+def test_hash_lookups_use_the_bridge_index(notes_store, monkeypatch):
+    """The bridge creates idx_messages_file_sha256; the note/inventory queries must be able to use it."""
+    import sqlite3
+
+    with notes_store.messages() as c:
+        c.execute("CREATE INDEX idx_messages_file_sha256 ON messages(file_sha256) WHERE file_sha256 IS NOT NULL")
+    executed = []
+    real_connect = whatsapp._connect_messages_db
+
+    def recording_connect():
+        conn = real_connect()
+        conn.set_trace_callback(executed.append)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", recording_connect)
+    main.get_media_notes(SHA_A)
+    media_notes.visible_hashes([SHA_A, SHA_B])
+    main.list_media()
+    hash_queries = [q for q in executed if "file_sha256" in q and q.lstrip().upper().startswith(("SELECT", "WITH"))]
+    assert len(hash_queries) >= 3
+    with sqlite3.connect(notes_store.messages_db) as c:
+        for q in hash_queries:
+            plan = "\n".join(row[3] for row in c.execute("EXPLAIN QUERY PLAN " + q))
+            assert "idx_messages_file_sha256" in plan, (q, plan)
