@@ -71,7 +71,7 @@ func TestGetChatName_GroupResolutionOrder(t *testing.T) {
 			t.Fatalf("failed lookup retried too soon (calls=%d)", calls)
 		}
 		// After the window it is retried.
-		ms.names.groupErr[other.String()] = time.Now().Add(-groupInfoRetryAfter - time.Second)
+		ms.names.groupErr[other.String()] = time.Now().Add(-groupInfoRetryAfter - time.Second) // expired: lookup allowed again
 		_ = GetChatName(client, ms, other, other.String(), nil, "", true, logger)
 		if calls != 2 {
 			t.Fatalf("expected retry after window (calls=%d)", calls)

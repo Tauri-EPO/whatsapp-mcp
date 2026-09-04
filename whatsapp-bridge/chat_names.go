@@ -15,7 +15,10 @@ package main
 //   - live messages may fetch group info, but a failed lookup is remembered
 //     for groupInfoRetryAfter so a flaky group does not trigger a fetch per
 //     message;
-//   - resolved names are cached in memory for the life of the process.
+//   - resolved names are cached in memory for chatNameTTL and refreshed from
+//     the chats table afterwards; a GroupInfo name change updates both at
+//     once (events.go), so renames show up without a restart. Failed group
+//     lookups are pruned as they expire so neither map grows without bound.
 
 import (
 	"context"
@@ -30,7 +33,12 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-const groupInfoRetryAfter = 10 * time.Minute
+const (
+	groupInfoRetryAfter = 10 * time.Minute
+	// chatNameTTL bounds how long an in-memory name is trusted before the
+	// chats table is consulted again.
+	chatNameTTL = 24 * time.Hour
+)
 
 // groupInfoLookup fetches group metadata; nil means "no network available"
 // (tests, or before the client is connected).
@@ -39,12 +47,18 @@ type groupInfoLookup func(ctx context.Context, jid types.JID) (*types.GroupInfo,
 // chatNameCache remembers resolved names and failed group lookups.
 type chatNameCache struct {
 	mu       sync.Mutex
-	names    map[string]string
+	names    map[string]cachedName
 	groupErr map[string]time.Time
+	now      func() time.Time // injectable clock for tests
+}
+
+type cachedName struct {
+	name    string
+	expires time.Time
 }
 
 func newChatNameCache() *chatNameCache {
-	return &chatNameCache{names: map[string]string{}, groupErr: map[string]time.Time{}}
+	return &chatNameCache{names: map[string]cachedName{}, groupErr: map[string]time.Time{}, now: time.Now}
 }
 
 func (c *chatNameCache) get(chatJID string) (string, bool) {
@@ -53,8 +67,15 @@ func (c *chatNameCache) get(chatJID string) (string, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	name, ok := c.names[chatJID]
-	return name, ok
+	entry, ok := c.names[chatJID]
+	if !ok {
+		return "", false
+	}
+	if c.now().After(entry.expires) {
+		delete(c.names, chatJID)
+		return "", false
+	}
+	return entry.name, true
 }
 
 func (c *chatNameCache) put(chatJID, name string) {
@@ -62,8 +83,27 @@ func (c *chatNameCache) put(chatJID, name string) {
 		return
 	}
 	c.mu.Lock()
-	c.names[chatJID] = name
+	c.names[chatJID] = cachedName{name: name, expires: c.now().Add(chatNameTTL)}
 	c.mu.Unlock()
+}
+
+// invalidate forgets a cached name and any remembered lookup failure, so the
+// next resolution goes back to the chats table (or the network).
+func (c *chatNameCache) invalidate(chatJID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	delete(c.names, chatJID)
+	delete(c.groupErr, chatJID)
+	c.mu.Unlock()
+}
+
+// size reports cached names and remembered failures (tests, health).
+func (c *chatNameCache) size() (names, failures int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.names), len(c.groupErr)
 }
 
 func (c *chatNameCache) groupLookupAllowed(chatJID string, now time.Time) bool {
@@ -81,8 +121,29 @@ func (c *chatNameCache) rememberGroupFailure(chatJID string, now time.Time) {
 		return
 	}
 	c.mu.Lock()
+	// Prune entries whose retry window has passed so the map stays bounded by
+	// the number of groups that failed recently, not ever.
+	for jid, last := range c.groupErr {
+		if now.Sub(last) >= groupInfoRetryAfter {
+			delete(c.groupErr, jid)
+		}
+	}
 	c.groupErr[chatJID] = now
 	c.mu.Unlock()
+}
+
+// RenameChat records a new display name (group subject change) in the chats
+// table and the cache, without touching last_message_time.
+func (store *MessageStore) RenameChat(chatJID, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if _, err := store.db.Exec(`UPDATE chats SET name = ? WHERE jid = ?`, name, chatJID); err != nil {
+		return err
+	}
+	store.names.put(chatJID, name)
+	return nil
 }
 
 // conversationName extracts the name a history-sync conversation carries.
