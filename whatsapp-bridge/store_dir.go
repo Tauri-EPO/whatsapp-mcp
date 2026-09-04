@@ -42,6 +42,14 @@ func sqliteURI(path, query string) string {
 	return uri
 }
 
+// SQLite DSN options for every handle the bridge opens. WAL lets readers
+// (the MCP server, our own contact lookups) proceed while a writer holds the
+// file; the busy timeout turns "database is locked" into a short wait.
+const (
+	sqliteWriterOptions   = "_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"
+	sqliteReadOnlyOptions = "mode=ro&_busy_timeout=5000"
+)
+
 func whatsmeowDBPath() string  { return storePath("whatsapp.db") }
 func messagesDBPath() string   { return storePath("messages.db") }
 func tokenFilePath() string    { return storePath(".bridge-token") }
