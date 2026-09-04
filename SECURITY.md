@@ -13,9 +13,7 @@ Security fixes ship on the latest minor release. Older minors are not patched.
 
 Please report vulnerabilities **privately** — do not open a public issue, PR, or discussion.
 
-**Preferred:** Use GitHub's [private vulnerability reporting](https://github.com/verygoodplugins/whatsapp-mcp/security/advisories/new) on this repository. This creates a draft Security Advisory visible only to maintainers and you, and lets us collaborate on a fix in a private fork before disclosure.
-
-**Alternative:** Email `security@verygoodplugins.com` with details.
+**Preferred:** Use GitHub's [private vulnerability reporting](https://github.com/Tauri-EPO/whatsapp-mcp/security/advisories/new) on this repository. This creates a draft Security Advisory visible only to maintainers and you, and lets us collaborate on a fix in a private fork before disclosure.
 
 When reporting, please include where possible:
 

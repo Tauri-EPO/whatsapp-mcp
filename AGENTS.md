@@ -38,13 +38,13 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
   1. `scripts/upstream-harvest.sh` — fetches both remotes and prints the bridge/server commits since the last harvest (`.upstream-harvest`) plus their open PRs and issues; `--all` ignores the marks. After reviewing, `scripts/upstream-harvest.sh --mark` records the new heads. (Manual equivalent: `git log --oneline main..upstream/main -- whatsapp-bridge/`; protocol/whatsmeow changes are the most valuable to harvest.)
   2. `gh pr list --repo verygoodplugins/whatsapp-mcp --state all --search "<topic>"` and the same on `lharries/whatsapp-mcp`; read the PR description first — it usually explains the WhatsApp behaviour better than the diff.
   3. Reimplement the delta against our code (`git cherry-pick -x <sha>` only when the patch applies cleanly to files we have not diverged in). Credit the source in the commit body ("Reimplements upstream VGP #NNN"), as every PR in this repo has done so far.
-  4. Do not bring upstream's release-please, CHANGELOG or version bumps.
+  4. Do not bring upstream's release-please, CHANGELOG or version bumps; this repo has no releases and no changelog file.
 - **whatsmeow protocol drift** is the one thing upstream will keep fixing before us. Monthly routine (first done 2026-09-04):
   1. In `whatsapp-bridge/`: `go get go.mau.fi/whatsmeow@latest && go mod tidy` (inside the `golang:<version>-alpine` container on Windows). If the new version needs a newer Go, bump `go.mod`, the Dockerfile base image, `go-version` in every workflow and the golangci-lint version together — they must agree.
   2. `go vet`/`go test ./...`, `golangci-lint run`, `docker compose build`.
   3. Pair a test store, send/receive one text, one media, one poll; watch the log for new event types whatsmeow now emits.
   4. PR titled `chore(deps): bump whatsmeow to <version>`; commit body lists notable upstream changes.
-- `ROADMAP.md` is upstream's. Its "out of scope" list no longer binds this fork; use it only to understand why upstream will not take something.
+- Upstream's `ROADMAP.md` (read it in their repo) lists what they will not take; it does not bind this fork.
 
 ## 3. Architecture
 
@@ -122,7 +122,7 @@ Rules that stay true across all steps:
 - **No drive-by formatting** and no unrelated cleanups in a PR.
 - **No new top-level dependencies** without a sentence of justification in the PR.
 - **Security-sensitive changes** (auth, file paths, network bind, command exec, allow-lists) must be called out in the PR body and get tests for the deny path.
-- **Never** hand-edit `CHANGELOG.md`, versions in `pyproject.toml`/`server.json`, or `.release-please-manifest.json`; they are upstream artefacts kept only so files stay comparable.
+- **Versions.** `pyproject.toml` keeps a nominal version; there are no tags, releases or changelog. `/api/version` and the MCP `version` report the git SHA baked at build time.
 
 ## 5. Local commands and tooling
 
@@ -168,12 +168,11 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must b
 | Python Tests | `pytest` |
 | Go Lint | golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
 | Go Build | `go build`, `go vet`, `go test` |
-| Version Consistency | `pyproject.toml` vs `server.json` (kept for file parity with upstream) |
 | CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image |
 
-Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` only and not used by this fork. Dependabot auto-merge was removed; merge its PRs through the normal routine.
+There are no release workflows. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
 ## 7. Environment variables
 
