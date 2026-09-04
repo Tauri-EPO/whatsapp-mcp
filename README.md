@@ -191,7 +191,7 @@ The full comparison and the reasoning are in [AGENTS.md](AGENTS.md) section 2.
 - [docs/DOCKER.md](docs/DOCKER.md): pairing, Tailscale and Funnel, health, updates, backups, split topology
 - [docs/TOOLS.md](docs/TOOLS.md): every tool with parameters
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every variable, transports, auth, allow-list, history backfill
-- [docs/LAPTOP.md](docs/LAPTOP.md): stdio setup for Claude Desktop / Cursor, macOS launchd, Windows
+- [docs/LAPTOP.md](docs/LAPTOP.md): stdio setup for Claude Desktop / Cursor, Windows notes
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md): pairing, 401/403/421, sync, app-state conflicts
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): diagrams
 - [AGENTS.md](AGENTS.md): how this repo is developed (by humans and AI agents), routine, gotchas

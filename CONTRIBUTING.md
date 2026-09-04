@@ -27,7 +27,7 @@ uv run main.py
 
 ## Workflow
 
-1. **Discuss** — open or comment on an issue. Confirm scope (`ROADMAP.md`).
+1. **Discuss** — open or comment on an issue (see `AGENTS.md` §11 for the format).
 2. **Branch** — fork or push to a branch named `<type>/<short-slug>`, e.g. `fix/lid-sender-filter`, `feat/typing-indicator`.
 3. **Commit** — use [Conventional Commits](https://www.conventionalcommits.org/):
    - `feat:` user-visible feature → minor bump
@@ -63,7 +63,6 @@ uv run main.py
 - Massive refactors with no behavior change.
 - Mega-PRs (> ~500 LOC) without a prior issue.
 
-(See `ROADMAP.md` for the full out-of-scope list.)
 
 ## Code style
 
@@ -73,11 +72,11 @@ uv run main.py
 
 ## Security
 
-If you find a vulnerability, **please don't open a public issue**. Email security@verygoodplugins.com (or open a private security advisory on GitHub) with details.
+If you find a vulnerability, **please don't open a public issue**. Open a [private security advisory](https://github.com/Tauri-EPO/whatsapp-mcp/security/advisories/new) on this repository.
 
 ## Credit
 
-If a contribution is non-trivial, your name lands in the release notes (auto-generated). Significant ongoing contributors may be invited as repo collaborators.
+Non-trivial contributions are credited in the README. Significant ongoing contributors may be invited as repo collaborators.
 
 Thanks for keeping this project small, sharp, and useful.
 
