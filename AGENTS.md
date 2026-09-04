@@ -152,8 +152,9 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must b
 | Version Consistency | `pyproject.toml` vs `server.json` (kept for file parity with upstream) |
 | CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
+| Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image |
 
-Missing today and tracked: Docker image build job (#52). Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` only and not used by this fork. Dependabot auto-merge was removed; merge its PRs through the normal routine.
+Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` only and not used by this fork. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
 ## 7. Environment variables
 
