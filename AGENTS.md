@@ -94,7 +94,7 @@ whatsapp-mcp/
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.11-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
-├── scripts/                    # backup.sh (hot backup/restore of the store volume), upstream-harvest.sh
+├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
 └── .github/workflows/          # ci.yml, security.yml (release workflows are manual-only)
@@ -115,7 +115,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
 5. **Docs in the same PR.** New env var → this file §7, `docs/CONFIGURATION.md`, `.env.example`, and `docker-compose.yml` passthrough if containers need it. New tool → `docs/TOOLS.md` + the README "What your agent can do" table if it adds a capability + tool docstring (that docstring is what the model reads). `README.md` is the landing page for people arriving from search (Claude Code / Codex / Cursor / bots wanting WhatsApp): keep it short and outcome-oriented; technical detail goes in `docs/`.
-6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and the curl smoke test in `docs/DOCKER.md`.
+6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and `scripts/smoke.sh` (CI runs it on the unpaired stack too).
 7. **Commit message = the PR description.** Conventional-commit title; body says the problem, the fix, what was verified and `Closes #N`. Co-author trailer for agents.
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
 9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks.
