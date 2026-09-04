@@ -199,10 +199,7 @@ works as before.
   `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`
   (version, commit, Go and whatsmeow versions, FTS5 state); the MCP server
   reports its version in the `initialize` response and its startup log.
-- Backup: the `whatsapp-store` volume holds the session, `messages.db`,
-  `whatsapp.db`, downloaded media and `.bridge-token`. Stop the stack before
-  copying it (`docker compose stop`), or snapshot the volume with your usual
-  tooling.
+- Backup: see [Backup and restore](#backup-and-restore) below.
 - If the phone unlinks the device (WhatsApp > Linked Devices > Log out) or
   WhatsApp rejects the client version as outdated, the bridge exits (code 3
   or 4) instead of idling; `restart: unless-stopped` brings it back into the
@@ -210,6 +207,62 @@ works as before.
 - Only one bridge may use a session at a time. Do not run the compose stack
   and a laptop bridge against the same store, and do not pair the same phone
   twice with two different stores: WhatsApp will keep replacing the stream.
+
+## Backup and restore
+
+The `whatsapp-store` volume holds everything worth keeping: `whatsapp.db`
+(the WhatsApp session keys; losing it means re-pairing), `messages.db`
+(local history and read state), the per-chat media directories,
+`.bridge-token` (the REST bearer) and, once #97 lands, `notes.db`.
+`scripts/backup.sh` snapshots it **while the stack runs**:
+
+```bash
+scripts/backup.sh backup                 # -> ./backups/<UTC timestamp>/
+scripts/backup.sh backup /mnt/nas/wamcp  # explicit destination
+scripts/backup.sh prune ./backups 7      # keep the newest 7 snapshots
+```
+
+It starts a throwaway `alpine` container with the `sqlite3` CLI, copies each
+database with `.backup` (a consistent snapshot even mid-write, thanks to WAL
+mode), verifies it with `PRAGMA integrity_check`, tars the media directories
+and copies the token. A snapshot is a plain directory:
+
+```
+messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
+```
+
+The script resolves the volume from the compose project labels; outside the
+repo directory set `COMPOSE_PROJECT_NAME` or `WHATSAPP_STORE_VOLUME`. A nightly
+cron entry, with the snapshot shipped off-box afterwards:
+
+```cron
+15 3 * * * cd /opt/whatsapp-mcp && scripts/backup.sh backup >/dev/null && scripts/backup.sh prune backups 14 && rsync -a --delete backups/ nas:/backups/whatsapp-mcp/
+```
+
+**The backup is a credential.** `whatsapp.db` lets anyone who has it act as
+your linked device and `bridge-token` opens the REST API. Keep snapshots
+encrypted at rest (`age`, `restic`, an encrypted NAS share) and out of shared
+drives; delete old ones (`prune`). Media can be large: with
+`WHATSAPP_MEDIA_RETENTION_DAYS` set, the tree stays bounded and the tar stays
+small, and every file can be re-fetched on demand while WhatsApp still serves
+it.
+
+Restore onto **one** host only. Restoring `whatsapp.db` on a second machine
+while the first still runs makes WhatsApp replace the stream on both, and the
+bridge exits until you unlink one of them.
+
+```bash
+docker compose stop                       # the script refuses to restore into a running bridge
+scripts/backup.sh restore backups/20260904T031500Z
+docker compose up -d
+docker compose logs -f bridge             # expect "connected", no QR
+```
+
+Restore removes stale `-wal`/`-shm` files and the instance lock, copies the
+databases, media and token back, and resets ownership to the container user.
+To move to a new server, restore the snapshot into the fresh volume before the
+first `docker compose up`, and keep the same `WHATSAPP_BRIDGE_TOKEN` in `.env`
+if you had set one (otherwise the restored `.bridge-token` is used).
 
 ## Split topology (MCP server on another container or host)
 

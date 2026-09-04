@@ -89,6 +89,7 @@ whatsapp-mcp/
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.11-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
+├── scripts/                    # backup.sh (hot backup/restore of the store volume), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
 └── .github/workflows/          # ci.yml, security.yml (release workflows are manual-only)
