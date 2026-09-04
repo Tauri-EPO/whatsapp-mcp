@@ -19,15 +19,31 @@ namespace, the MCP port is **published on the `bridge` service**.
 ## Quick start
 
 ```bash
-git clone https://github.com/verygoodplugins/whatsapp-mcp.git
+git clone https://github.com/Tauri-EPO/whatsapp-mcp.git
 cd whatsapp-mcp
-cp .env.example .env          # optional, see "Configuration"
-docker compose up -d --build
-docker compose logs -f bridge # first run: scan the QR code shown here
+cp .env.example .env          # see "Configuration" and the checklist below
+GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build
+docker compose logs -f bridge # first run: token banner, then the QR code to scan
 ```
 
-Once the phone confirms the link, `docker compose ps` shows `bridge` as
-`healthy` and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`.
+Before the first `up`, decide these in `.env` (all optional, all safe to add
+later, but the first three save a re-pair or a token rotation):
+
+- `WHATSAPP_BRIDGE_TOKEN`: set your own (32+ random chars) so both containers
+  and your MCP client share one known secret from the start; otherwise copy
+  the generated one from the bridge log banner.
+- `WHATSAPP_DEVICE_NAME`: the label shown under Linked Devices; only applied
+  at pair time.
+- `WHATSAPP_ALLOWED_CHATS`: the groups/contacts the bot may touch. Start
+  narrow; widen later.
+- `WHATSAPP_MCP_ALLOWED_HOSTS`: your MagicDNS name (`box.tailnet.ts.net`) so
+  Host checking stays on. `WHISPER_URL` + `COMPOSE_PROFILES=whisper` for
+  transcription; `WHATSAPP_MEDIA_RETENTION_DAYS` on a small disk.
+
+`mcp` (and `whisper`) start only after the bridge healthcheck passes, i.e.
+once the REST API is up and `.bridge-token` exists. Once the phone confirms
+the link, `docker compose ps` shows `bridge` as `healthy`, `GET /api/ready`
+returns 200 and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`.
 
 Verify from the host:
 
