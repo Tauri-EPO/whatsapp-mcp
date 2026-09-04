@@ -106,6 +106,9 @@ func validateMediaPath(mediaPath string, allowedRoots []string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("resolve media_path: %w", err)
 	}
+	// EvalSymlinks already returns a clean path; the explicit Clean + HasPrefix
+	// pair below is the sanitiser shape static analysers (CodeQL) recognise.
+	resolved = filepath.Clean(resolved)
 
 	info, err := os.Stat(resolved)
 	if err != nil {
@@ -116,7 +119,7 @@ func validateMediaPath(mediaPath string, allowedRoots []string) (string, error) 
 	}
 
 	for _, root := range allowedRoots {
-		if pathHasPrefix(resolved, root) {
+		if strings.HasPrefix(resolved, root) && pathHasPrefix(resolved, root) {
 			return resolved, nil
 		}
 	}
