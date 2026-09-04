@@ -9,8 +9,13 @@ on:
     types: [checks_requested]
   workflow_dispatch:
 
+# A newer push to the same branch/PR cancels the run in flight.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  python-lint:
+  python:
     name: Python Lint
     runs-on: ubuntu-latest
     steps:
@@ -30,15 +35,26 @@ jobs:
         run: |
           cd whatsapp-mcp-server
           uv run ruff format --check .
+      - name: Run tests
+        run: |
+          cd whatsapp-mcp-server
+          uv run pytest -q
 
-  go-lint:
-    name: Go Lint
+  go:
+    name: Go Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
+          cache-dependency-path: whatsapp-bridge/go.sum
+      - name: Build, vet, test
+        run: |
+          cd whatsapp-bridge
+          go build -v ./...
+          go vet ./...
+          go test ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -49,49 +65,15 @@ jobs:
           # the lint run itself.
           verify: false
 
-  go-build:
-    name: Go Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-      - name: Build
-        run: |
-          cd whatsapp-bridge
-          go build -v ./...
-          go vet ./...
-      - name: Test
-        run: |
-          cd whatsapp-bridge
-          go test ./...
-
-  python-test:
-    name: Python Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-      - name: Install dependencies (locked)
-        run: |
-          cd whatsapp-mcp-server
-          uv sync --frozen --extra dev
-      - name: Run tests
-        run: |
-          cd whatsapp-mcp-server
-          uv run pytest -v
-
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
       - name: Build bridge image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: whatsapp-bridge
           push: false
@@ -103,7 +85,7 @@ jobs:
           cache-from: type=gha,scope=bridge
           cache-to: type=gha,scope=bridge,mode=max
       - name: Build MCP image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: whatsapp-mcp-server
           push: false
@@ -119,4 +101,17 @@ jobs:
           # Bridge: the binary starts, prints its banner and creates the store (no pairing needed for this).
           docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
           # MCP: every module imports inside the image (catches a missing COPY like the transcribe.py incident).
-          docker run --rm whatsapp-mcp-server:ci python -c "import main, whatsapp, transcribe, http_auth, chat_policy, mcp_config, parent_watchdog, audio; print('imports ok')"
+          docker run --rm whatsapp-mcp-server:ci python -c "import main, whatsapp, transcribe, http_auth, chat_policy, mcp_config, parent_watchdog, audio, errors; print('imports ok')"
+      - name: Build bridge image for arm64
+        # Raspberry Pi / ARM VPS users build this themselves; make sure the pure-Go
+        # build keeps cross-compiling. Not loaded or smoke-tested (QEMU is slow).
+        uses: docker/build-push-action@v6
+        with:
+          context: whatsapp-bridge
+          platforms: linux/arm64
+          push: false
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=ci
+          cache-from: type=gha,scope=bridge-arm64
+          cache-to: type=gha,scope=bridge-arm64,mode=max

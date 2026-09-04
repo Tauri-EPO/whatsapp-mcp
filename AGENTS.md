@@ -160,17 +160,15 @@ Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `
 
 ## 6. CI gates
 
-Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must be green before merging (the informational ones too: investigate, do not ignore):
+Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancels the run in flight). All of these must be green before merging (the informational ones too: investigate, do not ignore):
 
 | Job | What |
 |---|---|
-| Python Lint | `ruff check` + `ruff format --check` |
-| Python Tests | `pytest` |
-| Go Lint | golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
-| Go Build | `go build`, `go vet`, `go test` |
-| CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
+| Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pytest` (one job, one toolchain setup) |
+| Go Build | `go build`, `go vet`, `go test`, then golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
+| CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
-| Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image |
+| Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |
 
 There are no release workflows. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
