@@ -273,6 +273,22 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 - "Message the team group saying 'Meeting at 3pm'"
 - "Reply to that message saying 'Sounds good'"
 
+#### `delete_message`
+
+Revoke a message for everyone (WhatsApp's "Delete for everyone", own messages
+only) or drop it from the local archive without touching WhatsApp.
+
+**Parameters:**
+
+- `chat_jid` (required): JID of the chat
+- `message_id` (required): ID of the message
+- `for_everyone` (optional, default `false`): `true` revokes on WhatsApp; `false` only removes the local copy
+
+Revoked messages keep their content locally with `deleted_at` set, the same as
+revokes received from another device. Local-only deletion removes the row (the
+FTS index follows); downloaded media is left in `store/`. Respects
+`WHATSAPP_ALLOWED_CHATS`.
+
 #### `mark_messages_read`
 
 Mark one or more messages from the same chat and sender as read. This explicitly

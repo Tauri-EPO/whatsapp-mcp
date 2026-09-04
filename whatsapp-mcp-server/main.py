@@ -11,6 +11,9 @@ from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
 from whatsapp import (
+    delete_message as whatsapp_delete_message,
+)
+from whatsapp import (
     download_media as whatsapp_download_media,
 )
 from whatsapp import (
@@ -414,6 +417,28 @@ def list_group_members(group_jid: str) -> dict[str, Any]:
         group_jid: The group JID (e.g. "120363000000000001@g.us")
     """
     return whatsapp_get_group_members(group_jid)
+
+
+@mcp.tool()
+def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -> dict[str, Any]:
+    """Delete a WhatsApp message: revoke it for everyone, or only forget it locally.
+
+    for_everyone=True performs WhatsApp's "Delete for everyone" and only works for
+    messages sent by this account (recipients see "This message was deleted"). This
+    is an irreversible external side effect. for_everyone=False removes the message
+    from the local archive only; it stays on every phone.
+
+    Args:
+        chat_jid: JID of the chat containing the message
+        message_id: ID of the message to delete
+        for_everyone: True to revoke on WhatsApp (own messages only); False (default)
+                      to delete the local copy only
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_delete_message(chat_jid, message_id, for_everyone)
+    return {"success": success, "message": status_message, "for_everyone": for_everyone}
 
 
 @mcp.tool()

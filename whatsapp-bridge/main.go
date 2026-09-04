@@ -2401,6 +2401,19 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		outboundChatPolicy,
 	)))
 
+	// Delete a message: revoke for everyone (own messages) or drop the local
+	// row only. See delete_message.go.
+	mux.HandleFunc("/api/delete", auth(handleDeleteMessage(messageStore,
+		func(ctx context.Context, chat types.JID, id types.MessageID) error {
+			if client == nil || !client.IsConnected() {
+				return errors.New("WhatsApp client is not connected")
+			}
+			_, err := client.RevokeMessage(ctx, chat, id)
+			return err
+		},
+		outboundChatPolicy,
+	)))
+
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests

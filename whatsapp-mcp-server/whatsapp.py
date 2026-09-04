@@ -1389,6 +1389,30 @@ def get_group_members(group_jid: str) -> dict[str, Any]:
         return {"success": False, "message": f"Bridge request failed: {exc}"}
 
 
+def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -> tuple[bool, str]:
+    """Revoke a sent message for everyone, or remove it from the local archive only."""
+    chat_jid, message_id = (chat_jid or "").strip(), (message_id or "").strip()
+    if not chat_jid or not message_id:
+        return False, "chat_jid and message_id are required"
+    if denied := _policy_denied(chat_jid):
+        return False, denied
+    try:
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/delete",
+            json={"chat_jid": chat_jid, "message_id": message_id, "for_everyone": bool(for_everyone)},
+            headers=_bridge_headers(),
+            timeout=30,
+        )
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+        message = payload.get("message") or f"HTTP {response.status_code}: {response.text[:200]}"
+        return bool(payload.get("success")) and response.status_code == 200, message
+    except requests.RequestException as exc:
+        return False, f"Bridge request failed: {exc}"
+
+
 def mark_messages_read(
     message_ids: list[str],
     chat_jid: str,
