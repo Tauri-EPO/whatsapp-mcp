@@ -549,7 +549,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
-| `WHATSAPP_MCP_TOKEN`   | *(unset = no auth)*                      | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Set it before exposing the port beyond loopback/tailnet |
+| `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
@@ -596,9 +596,12 @@ client the same way you would for any bearer-protected remote MCP server:
 }
 ```
 
-Leaving `WHATSAPP_MCP_TOKEN` unset keeps the transport open, which is only
-sensible on loopback or a tailnet-only listener. The stdio transport is not
-affected by any of this.
+If `WHATSAPP_MCP_TOKEN` is unset and the server is bound to a non-loopback
+address, it **reuses the bridge token** (`WHATSAPP_BRIDGE_TOKEN` or the
+`.bridge-token` file next to `WHATSMEOW_DB_PATH`), so a deployment has one
+secret to manage; the startup line says which one is in use. Set
+`WHATSAPP_MCP_TOKEN=off` to run without auth deliberately. On loopback no token
+is required. The stdio transport is not affected by any of this.
 
 #### Reaching the server by a non-loopback hostname
 

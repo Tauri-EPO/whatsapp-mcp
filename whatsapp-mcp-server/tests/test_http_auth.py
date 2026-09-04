@@ -114,3 +114,31 @@ class TestBuildHttpApp:
         app = build_http_app(MCPServer("t"), "sse", TOKEN, host="0.0.0.0")
         with TestClient(app) as client:
             assert client.post("/messages/?session_id=x", json={}).status_code == 401
+
+
+class TestResolveHttpToken:
+    def _resolve(self, explicit, host, bridge):
+        from http_auth import resolve_http_token
+
+        return resolve_http_token(explicit, host, lambda: bridge)
+
+    def test_explicit_token_wins(self):
+        assert self._resolve(TOKEN, "0.0.0.0", "bridge-token-0123456789") == (TOKEN, "WHATSAPP_MCP_TOKEN")
+
+    def test_loopback_needs_no_token(self):
+        assert self._resolve(None, "127.0.0.1", "bridge-token-0123456789") == (None, "loopback")
+
+    def test_non_loopback_reuses_bridge_token(self):
+        assert self._resolve("", "0.0.0.0", "bridge-token-0123456789") == ("bridge-token-0123456789", "bridge token")
+
+    def test_non_loopback_without_any_token(self):
+        assert self._resolve(None, "0.0.0.0", None) == (None, "none")
+        assert self._resolve(None, "0.0.0.0", "short") == (None, "none")
+
+    @pytest.mark.parametrize("value", ["off", "OFF", " none ", "disabled"])
+    def test_explicit_off_disables_even_with_bridge_token(self, value):
+        assert self._resolve(value, "0.0.0.0", "bridge-token-0123456789") == (None, "disabled")
+
+    def test_explicit_short_token_still_rejected(self):
+        with pytest.raises(ValueError):
+            self._resolve("short", "0.0.0.0", None)
