@@ -3,12 +3,12 @@ package main
 import (
 	"testing"
 
-	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"google.golang.org/protobuf/proto"
 )
 
-func viewOnceImage(caption string) *waProto.Message {
-	img := &waProto.ImageMessage{
+func viewOnceImage(caption string) *waE2E.Message {
+	img := &waE2E.ImageMessage{
 		URL:           proto.String("https://mmg.whatsapp.net/v/vo.enc?oh=1&oe=2"),
 		MediaKey:      []byte("key"),
 		FileSHA256:    []byte("sha"),
@@ -19,21 +19,21 @@ func viewOnceImage(caption string) *waProto.Message {
 	if caption != "" {
 		img.Caption = proto.String(caption)
 	}
-	return &waProto.Message{ViewOnceMessageV2: &waProto.FutureProofMessage{Message: &waProto.Message{ImageMessage: img}}}
+	return &waE2E.Message{ViewOnceMessageV2: &waE2E.FutureProofMessage{Message: &waE2E.Message{ImageMessage: img}}}
 }
 
 func TestUnwrapViewOnce(t *testing.T) {
-	plain := &waProto.Message{Conversation: proto.String("hi")}
+	plain := &waE2E.Message{Conversation: proto.String("hi")}
 	if inner, wrapped := unwrapViewOnce(plain); wrapped || inner != plain {
 		t.Fatal("plain message must pass through")
 	}
 	if _, wrapped := unwrapViewOnce(nil); wrapped {
 		t.Fatal("nil is not wrapped")
 	}
-	for name, env := range map[string]*waProto.Message{
-		"v1":    {ViewOnceMessage: &waProto.FutureProofMessage{Message: &waProto.Message{AudioMessage: &waProto.AudioMessage{}}}},
+	for name, env := range map[string]*waE2E.Message{
+		"v1":    {ViewOnceMessage: &waE2E.FutureProofMessage{Message: &waE2E.Message{AudioMessage: &waE2E.AudioMessage{}}}},
 		"v2":    viewOnceImage(""),
-		"v2ext": {ViewOnceMessageV2Extension: &waProto.FutureProofMessage{Message: &waProto.Message{VideoMessage: &waProto.VideoMessage{}}}},
+		"v2ext": {ViewOnceMessageV2Extension: &waE2E.FutureProofMessage{Message: &waE2E.Message{VideoMessage: &waE2E.VideoMessage{}}}},
 	} {
 		inner, wrapped := unwrapViewOnce(env)
 		if !wrapped || inner == nil || inner == env {

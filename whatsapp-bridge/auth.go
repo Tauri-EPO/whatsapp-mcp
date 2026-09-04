@@ -77,7 +77,7 @@ func loadOrCreateBridgeToken() (token string, freshlyGenerated bool, err error) 
 
 	// Ensure parent directory exists. main.go already creates store/ before
 	// this is called, but being defensive here keeps the helper testable.
-	if mkErr := os.MkdirAll(filepath.Dir(tokenFilePath()), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(tokenFilePath()), 0o750); mkErr != nil {
 		return "", false, fmt.Errorf("create token dir: %w", mkErr)
 	}
 	if writeErr := os.WriteFile(tokenFilePath(), []byte(newToken+"\n"), tokenFileMode); writeErr != nil {

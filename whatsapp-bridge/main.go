@@ -28,8 +28,8 @@ import (
 	"bytes"
 
 	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -99,7 +99,7 @@ type ChatEphemeralSettings struct {
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll(storeDir(), 0755); err != nil {
+	if err := os.MkdirAll(storeDir(), 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create store directory %q: %v", storeDir(), err)
 	}
 
@@ -1025,7 +1025,7 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 }
 
 // Extract text content from a message
-func extractTextContent(msg *waProto.Message) string {
+func extractTextContent(msg *waE2E.Message) string {
 	if msg == nil {
 		return ""
 	}
@@ -1229,16 +1229,16 @@ func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
 	}
 }
 
-func buildDisappearingMode() *waProto.DisappearingMode {
-	return &waProto.DisappearingMode{
-		Initiator: waProto.DisappearingMode_CHANGED_IN_CHAT.Enum(),
-		Trigger:   waProto.DisappearingMode_CHAT_SETTING.Enum(),
+func buildDisappearingMode() *waE2E.DisappearingMode {
+	return &waE2E.DisappearingMode{
+		Initiator: waE2E.DisappearingMode_CHANGED_IN_CHAT.Enum(),
+		Trigger:   waE2E.DisappearingMode_CHAT_SETTING.Enum(),
 	}
 }
 
-func mergeEphemeralContextInfo(existing *waProto.ContextInfo, settings ChatEphemeralSettings) *waProto.ContextInfo {
+func mergeEphemeralContextInfo(existing *waE2E.ContextInfo, settings ChatEphemeralSettings) *waE2E.ContextInfo {
 	if existing == nil {
-		existing = &waProto.ContextInfo{}
+		existing = &waE2E.ContextInfo{}
 	}
 	existing.Expiration = proto.Uint32(settings.Expiration)
 	existing.EphemeralSettingTimestamp = proto.Int64(settings.SettingTimestamp)
@@ -1246,7 +1246,7 @@ func mergeEphemeralContextInfo(existing *waProto.ContextInfo, settings ChatEphem
 	return existing
 }
 
-func applyChatEphemeralSettings(msg *waProto.Message, settings ChatEphemeralSettings) {
+func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettings) {
 	if msg == nil || settings.Expiration == 0 || settings.SettingTimestamp == 0 {
 		return
 	}
@@ -1265,7 +1265,7 @@ func applyChatEphemeralSettings(msg *waProto.Message, settings ChatEphemeralSett
 	case msg.Conversation != nil:
 		text := msg.GetConversation()
 		msg.Conversation = nil
-		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{
 			Text:        proto.String(text),
 			ContextInfo: mergeEphemeralContextInfo(nil, settings),
 		}
@@ -1279,11 +1279,11 @@ func applyChatEphemeralSettings(msg *waProto.Message, settings ChatEphemeralSett
 // was set before the bridge ever saw an EPHEMERAL_SETTING toggle or a
 // fresh history sync. Returns the zero ChatEphemeralSettings when no
 // ContextInfo is present (e.g. plain Conversation, ProtocolMessage).
-func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings {
+func extractChatEphemeralFromMessage(msg *waE2E.Message) ChatEphemeralSettings {
 	if msg == nil {
 		return ChatEphemeralSettings{}
 	}
-	var ctx *waProto.ContextInfo
+	var ctx *waE2E.ContextInfo
 	switch {
 	case msg.ExtendedTextMessage != nil:
 		ctx = msg.ExtendedTextMessage.GetContextInfo()
@@ -1307,13 +1307,13 @@ func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings
 	}
 }
 
-func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, chatJID string, msg *waProto.Message, eventTimestamp int64, logger waLog.Logger) {
+func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, chatJID string, msg *waE2E.Message, eventTimestamp int64, logger waLog.Logger) {
 	if msg == nil || msg.GetProtocolMessage() == nil {
 		return
 	}
 
 	protoMsg := msg.GetProtocolMessage()
-	if protoMsg.GetType() != waProto.ProtocolMessage_EPHEMERAL_SETTING {
+	if protoMsg.GetType() != waE2E.ProtocolMessage_EPHEMERAL_SETTING {
 		return
 	}
 
@@ -1339,12 +1339,12 @@ func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, 
 // chatJID is the already-LID-normalised chat from the carrier event;
 // using it (rather than Key.RemoteJID, which may carry the raw @lid
 // form) keeps the UPDATE aligned with how StoreMessage wrote the row.
-func handleMessageRevoke(messageStore *MessageStore, msg *waProto.Message, chatJID string, eventTimestamp int64, logger waLog.Logger) {
+func handleMessageRevoke(messageStore *MessageStore, msg *waE2E.Message, chatJID string, eventTimestamp int64, logger waLog.Logger) {
 	if msg == nil || msg.GetProtocolMessage() == nil {
 		return
 	}
 	protoMsg := msg.GetProtocolMessage()
-	if protoMsg.GetType() != waProto.ProtocolMessage_REVOKE {
+	if protoMsg.GetType() != waE2E.ProtocolMessage_REVOKE {
 		return
 	}
 	key := protoMsg.GetKey()
@@ -1370,7 +1370,7 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 	if strings.Contains(recipient, "@") {
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return types.JID{}, fmt.Errorf("Error parsing JID: %v", err)
+			return types.JID{}, fmt.Errorf("error parsing JID: %v", err)
 		}
 	} else {
 		recipientJID = types.JID{
@@ -1468,12 +1468,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		return false, err.Error()
 	}
 
-	msg := &waProto.Message{}
+	msg := &waE2E.Message{}
 
 	// Check if we have media to send
 	if mediaPath != "" {
 		// Read media file
-		mediaData, err := os.ReadFile(mediaPath)
+		mediaData, err := os.ReadFile(mediaPath) //nolint:gosec // mediaPath was canonicalised and confined to WHATSAPP_MEDIA_ROOTS by validateMediaPath
 		if err != nil {
 			return false, fmt.Sprintf("Error reading media file: %v", err)
 		}
@@ -1491,7 +1491,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Create the appropriate message type based on media type
 		switch mediaType {
 		case whatsmeow.MediaImage:
-			msg.ImageMessage = &waProto.ImageMessage{
+			msg.ImageMessage = &waE2E.ImageMessage{
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -1519,7 +1519,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
 			}
 
-			msg.AudioMessage = &waProto.AudioMessage{
+			msg.AudioMessage = &waE2E.AudioMessage{
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
 				DirectPath:    &resp.DirectPath,
@@ -1532,7 +1532,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				Waveform:      waveform,
 			}
 		case whatsmeow.MediaVideo:
-			msg.VideoMessage = &waProto.VideoMessage{
+			msg.VideoMessage = &waE2E.VideoMessage{
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -1543,7 +1543,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileLength:    &resp.FileLength,
 			}
 		case whatsmeow.MediaDocument:
-			msg.DocumentMessage = &waProto.DocumentMessage{
+			msg.DocumentMessage = &waE2E.DocumentMessage{
 				// outboundFileName, not a manual split on "/": the document
 				// filename travels to the recipient, and on Windows the path
 				// is already backslash-normalised, so the naive split leaks
@@ -1566,16 +1566,16 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// messages is not exposed because the quoted preview on the
 		// recipient's device requires the original media's key/URL, which is
 		// not available to the API caller.
-		ctx := &waProto.ContextInfo{}
+		ctx := &waE2E.ContextInfo{}
 		if quotedMsgID != "" {
 			ctx.StanzaID = proto.String(quotedMsgID)
 			// Normalise to a JID recipients can match (bare numbers, LID upgrade);
 			// otherwise the quoted bubble shows "You" for everyone. See #13.
 			ctx.Participant = proto.String(resolveQuotedParticipantJID(client, quotedSenderJID))
-			ctx.QuotedMessage = &waProto.Message{Conversation: proto.String(quotedContent)}
+			ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quotedContent)}
 		}
 		ctx.MentionedJID = mentionedJIDs
-		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{
 			Text:        proto.String(message),
 			ContextInfo: ctx,
 		}
@@ -1587,11 +1587,11 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	if len(mentionedJIDs) > 0 {
 		switch {
 		case msg.ImageMessage != nil:
-			msg.ImageMessage.ContextInfo = &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+			msg.ImageMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
 		case msg.VideoMessage != nil:
-			msg.VideoMessage.ContextInfo = &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+			msg.VideoMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
 		case msg.DocumentMessage != nil:
-			msg.DocumentMessage.ContextInfo = &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+			msg.DocumentMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
 		}
 	}
 
@@ -1665,12 +1665,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 }
 
 // Extract quoted message info from ContextInfo
-func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quotedSender string, quotedContent string) {
+func extractQuotedMessageInfo(msg *waE2E.Message) (quotedMessageId string, quotedSender string, quotedContent string) {
 	if msg == nil {
 		return "", "", ""
 	}
 
-	var contextInfo *waProto.ContextInfo
+	var contextInfo *waE2E.ContextInfo
 
 	// Check all message types that can have ContextInfo
 	if extText := msg.GetExtendedTextMessage(); extText != nil {
@@ -1708,12 +1708,12 @@ func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quo
 }
 
 // extractMentionedJIDs returns native WhatsApp mention targets from ContextInfo.
-func extractMentionedJIDs(msg *waProto.Message) []string {
+func extractMentionedJIDs(msg *waE2E.Message) []string {
 	if msg == nil {
 		return nil
 	}
 
-	var contextInfo *waProto.ContextInfo
+	var contextInfo *waE2E.ContextInfo
 	if extText := msg.GetExtendedTextMessage(); extText != nil {
 		contextInfo = extText.GetContextInfo()
 	} else if img := msg.GetImageMessage(); img != nil {
@@ -1735,7 +1735,7 @@ func extractMentionedJIDs(msg *waProto.Message) []string {
 
 // Extract media info from a message. Filenames embed the message ID so that
 // two messages arriving in the same second do not collide on a single file.
-func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+func extractMediaInfo(msg *waE2E.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
@@ -2126,7 +2126,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			imageDownloadPath = dlPath
 			// Detect MIME type by sniffing the actual file bytes rather than
 			// trusting the generated filename extension (always .jpg).
-			if f, openErr := os.Open(dlPath); openErr == nil {
+			if f, openErr := os.Open(dlPath); openErr == nil { //nolint:gosec // dlPath is built by downloadMedia under the store directory
 				buf := make([]byte, 512)
 				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
 					imageMimeType = http.DetectContentType(buf[:n])
@@ -2332,7 +2332,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	chatDir := storePath(strings.ReplaceAll(chatJID, ":", "_"))
 
 	// Create directory for the chat if it doesn't exist
-	if err := os.MkdirAll(chatDir, 0755); err != nil {
+	if err := os.MkdirAll(chatDir, 0o750); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
@@ -2405,7 +2405,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	}
 
 	// Save the downloaded media to file
-	if err := os.WriteFile(localPath, mediaData, 0644); err != nil {
+	if err := os.WriteFile(localPath, mediaData, 0o600); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to save media file: %v", err)
 	}
 
@@ -2493,7 +2493,8 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 			if client == nil || !client.IsConnected() {
 				return errors.New("WhatsApp client is not connected")
 			}
-			_, err := client.RevokeMessage(ctx, chat, id)
+			// Revoke = a protocol message keyed to the original (own) message.
+			_, err := client.SendMessage(ctx, chat, client.BuildRevoke(chat, types.EmptyJID, id))
 			return err
 		},
 		b.Policy,
@@ -2536,7 +2537,9 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		// Validate and canonicalize media_path against the configured roots
 		// before reading. This prevents the bridge from being used as a
 		// generic file-read primitive (e.g. media_path=/Users/x/.ssh/id_rsa).
-		resolvedMediaPath := req.MediaPath
+		// Only the canonical path ever reaches sendWhatsAppMessage; the raw
+		// request value is never used as a file path.
+		resolvedMediaPath := ""
 		if req.MediaPath != "" {
 			canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
 			if mpErr != nil {
@@ -2977,7 +2980,7 @@ func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll(storeDir(), 0755); err != nil {
+	if err := os.MkdirAll(storeDir(), 0o750); err != nil {
 		logger.Errorf("Failed to create store directory %q: %v", storeDir(), err)
 		return
 	}
@@ -3207,7 +3210,7 @@ func main() {
 			if v.Media == "video" {
 				callType = "video"
 			}
-			isGroup := v.Type == "group" || !v.BasicCallMeta.GroupJID.IsEmpty()
+			isGroup := v.Type == "group" || !v.GroupJID.IsEmpty()
 			handleCallOffer(client, messageStore, v.BasicCallMeta, callType, isGroup, logger)
 
 		case *events.CallAccept:
@@ -3580,7 +3583,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			if ts == 0 {
 				continue
 			}
-			timestamp := time.Unix(int64(ts), 0)
+			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 
 			_ = messageStore.StoreChat(chatJID, name, timestamp)
 			// Backfill read state only when WhatsApp explicitly reports unread
@@ -3703,7 +3706,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				if ts == 0 {
 					continue
 				}
-				msgTimestamp := time.Unix(int64(ts), 0)
+				msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 
 				err = messageStore.StoreMessage(
 					msgID,
@@ -3868,8 +3871,9 @@ func placeholderWaveform(duration uint32) []byte {
 	const waveformLength = 64
 	waveform := make([]byte, waveformLength)
 
-	// Seed the random number generator for consistent results with the same duration
-	rand.Seed(int64(duration))
+	// Deterministic per duration so the same voice note always renders the same
+	// waveform (rand.Seed is deprecated; a local generator gives the same effect).
+	rng := rand.New(rand.NewSource(int64(duration))) //nolint:gosec // decorative waveform, not a secret
 
 	// Create a more natural looking waveform with some patterns and variability
 	// rather than completely random values
@@ -3888,7 +3892,7 @@ func placeholderWaveform(duration uint32) []byte {
 		val += (baseAmplitude / 2) * math.Sin(pos*math.Pi*frequencyFactor*16)
 
 		// Add some randomness to make it look more natural
-		val += (rand.Float64() - 0.5) * 15
+		val += (rng.Float64() - 0.5) * 15
 
 		// Add some fade-in and fade-out effects
 		fadeInOut := math.Sin(pos * math.Pi)

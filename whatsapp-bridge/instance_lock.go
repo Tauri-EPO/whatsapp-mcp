@@ -46,7 +46,7 @@ type instanceLock struct {
 // written into the file. If another process holds the lock, the returned
 // error wraps errInstanceLocked and, when readable, names the holder's PID.
 func acquireInstanceLock(path string) (*instanceLock, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // path is the fixed lock file inside the store directory
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
