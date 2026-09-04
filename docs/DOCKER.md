@@ -77,6 +77,7 @@ Compose reads `.env` from the repo root (copy `.env.example`). Relevant keys:
 | `WHATSAPP_ALLOWED_CHATS` | *(empty = all chats)* | Least-privilege allow-list of conversations for the agent (JIDs, numbers, `*@g.us`). Passed to both containers. Strongly recommended for a bot that can send messages. |
 | `WHATSAPP_MCP_BIND` | `127.0.0.1` | Host interface the MCP port is published on. Keep loopback and front it with `tailscale serve` or a reverse proxy. |
 | `WHATSAPP_MCP_PORT` | `8000` | Host port for `/mcp`. |
+| `WHATSAPP_BRIDGE_BIND`, `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | `127.0.0.1`, *(loopback only)* | Only needed for the [split topology](#split-topology-mcp-server-on-another-container-or-host). Leave unset with the default compose file. |
 | `WHATSAPP_BRIDGE_TOKEN` | *(generated)* | Inject the bridge REST token from outside (e.g. a secret store). Empty lets the bridge generate `/app/store/.bridge-token`, which the MCP server reads from the shared volume. |
 | `WHATSAPP_DEVICE_NAME` | `WhatsApp MCP` | Linked-device label; applied at pair time only. |
 | `WEBHOOK_ENABLED` | `false` | Outbound webhooks are off in the container by default because the upstream default URL points at `localhost:8769`. Set to `true` together with `WEBHOOK_URL`. |
@@ -179,6 +180,37 @@ works as before.
 - Only one bridge may use a session at a time. Do not run the compose stack
   and a laptop bridge against the same store, and do not pair the same phone
   twice with two different stores: WhatsApp will keep replacing the stream.
+
+## Split topology (MCP server on another container or host)
+
+The default compose file keeps the bridge loopback-only and puts the MCP
+server in the same network namespace. If you would rather run the MCP
+server elsewhere (another compose project, another machine on your
+tailnet), open the bridge up explicitly:
+
+```yaml
+services:
+  bridge:
+    environment:
+      WHATSAPP_BRIDGE_BIND: 0.0.0.0          # listen on every interface
+      WHATSAPP_BRIDGE_ALLOWED_HOSTS: bridge  # Host names clients will use
+  mcp:
+    # network_mode: "service:bridge"        # remove; use a normal network
+    environment:
+      WHATSAPP_API_URL: http://bridge:8080/api
+```
+
+Rules of thumb:
+
+- The bearer token is still required; share `.bridge-token` (or set
+  `WHATSAPP_BRIDGE_TOKEN` on both sides).
+- `WHATSAPP_BRIDGE_ALLOWED_HOSTS` takes `host` (any port), `host:port`
+  (exact) or `*` (any Host, DNS-rebinding protection off). Loopback
+  spellings are always accepted. A non-loopback bind **without** the
+  allow-list keeps refusing non-loopback Hosts with 403 and logs a warning,
+  so forgetting it fails closed.
+- Never publish the bridge port to the internet; keep it on a private
+  network or the tailnet. Only `/mcp` is meant to be exposed.
 
 ## Running the images without compose
 

@@ -2441,7 +2441,10 @@ func extractDirectPathFromURL(url string) string {
 // media_path.go.
 func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) *http.ServeMux {
 	client, messageStore := b.Client, b.Store
-	allowedHosts := buildAllowedHosts(port)
+	allowedHosts, hostWarning := buildHostAllowList(port, b.RESTBind, b.RESTAllowedHosts)
+	if hostWarning != "" {
+		bridgeLog.Warnf("%s", hostWarning)
+	}
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
 	}
@@ -2920,9 +2923,9 @@ func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []str
 
 	handler := b.newRESTMux(port, token, allowedMediaRoots)
 
-	// Start the server with proper timeouts. Bind to loopback so the bridge is
-	// not reachable from the LAN; MCP clients talk to it over localhost.
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	// Loopback by default so the bridge is not reachable from the LAN;
+	// WHATSAPP_BRIDGE_BIND widens that on purpose (rest_bind.go).
+	serverAddr := listenAddr(b.RESTBind, port)
 	bridgeLog.Infof("Starting REST API server on %s...", serverAddr)
 
 	// Create server with timeouts for stability
@@ -3095,6 +3098,12 @@ func main() {
 		port = v
 	}
 
+	restBind, restAllowedHosts, bindErr := loadRESTBindConfig()
+	if bindErr != nil {
+		logger.Errorf("%v", bindErr)
+		return
+	}
+
 	// Load (or generate on first run) the bearer token used to authenticate
 	// REST callers; the Bridge attaches it to outbound webhook POSTs too.
 	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
@@ -3104,6 +3113,7 @@ func main() {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken)
+	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 
 	// Resolve the allow-listed roots that media_path values in /api/send must
 	// live under. See media_path.go for the rationale.

@@ -540,6 +540,8 @@ Copy `.env.example` to `.env` and configure as needed:
 
 | Variable               | Default                                  | Description                                  |
 | ---------------------- | ---------------------------------------- | -------------------------------------------- |
+| `WHATSAPP_BRIDGE_BIND`  | `127.0.0.1`                              | Address the bridge REST API listens on. `0.0.0.0` / `::` to expose it to other containers or hosts (pair with `WHATSAPP_BRIDGE_ALLOWED_HOSTS`) |
+| `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)*                 | Comma-separated `Host` values accepted besides loopback (`host` = any port, `host:port` exact, `*` any). Off-loopback binds refuse non-loopback Hosts until this names them |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
 | `WEBHOOK_ENABLED`      | `true`                                   | Set to `false` to disable outbound webhooks  |

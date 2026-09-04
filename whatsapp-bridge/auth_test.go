@@ -32,7 +32,7 @@ func TestCheckBearerToken(t *testing.T) {
 }
 
 func TestHostAllowed(t *testing.T) {
-	allowed := buildAllowedHosts(8080)
+	allowed, _ := buildHostAllowList(8080, defaultBridgeBind, "")
 	cases := []struct {
 		host string
 		want bool
@@ -49,8 +49,8 @@ func TestHostAllowed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.host, func(t *testing.T) {
-			if got := hostAllowed(tc.host, allowed); got != tc.want {
-				t.Fatalf("hostAllowed(%q) = %v, want %v", tc.host, got, tc.want)
+			if got := allowed.allows(tc.host); got != tc.want {
+				t.Fatalf("allows(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
 	}
@@ -58,7 +58,7 @@ func TestHostAllowed(t *testing.T) {
 
 func TestWithAuthRejectsMissingToken(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	allowed := buildAllowedHosts(8080)
+	allowed, _ := buildHostAllowList(8080, defaultBridgeBind, "")
 	called := false
 	handler := withAuth(token, allowed, func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -83,7 +83,7 @@ func TestWithAuthRejectsMissingToken(t *testing.T) {
 
 func TestWithAuthRejectsBadHost(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	allowed := buildAllowedHosts(8080)
+	allowed, _ := buildHostAllowList(8080, defaultBridgeBind, "")
 	handler := withAuth(token, allowed, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -101,7 +101,7 @@ func TestWithAuthRejectsBadHost(t *testing.T) {
 
 func TestWithAuthAcceptsValidRequest(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	allowed := buildAllowedHosts(8080)
+	allowed, _ := buildHostAllowList(8080, defaultBridgeBind, "")
 	handler := withAuth(token, allowed, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
