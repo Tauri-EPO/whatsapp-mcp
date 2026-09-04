@@ -46,15 +46,18 @@ step()  { printf '\n== %s\n' "$*"; }
 fail()  { red "FAIL: $1"; [ -n "${2:-}" ] && echo "      $2"; exit 1; }
 
 compose() { docker compose "$@"; }
-bridge_get() { # $1 path -> body on stdout, HTTP status in BRIDGE_STATUS
+bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
+  # Results go through globals on purpose: `x=$(bridge_get ...)` would run the
+  # function in a subshell and lose the status.
   # busybox wget: exit 0 with the body on a 2xx; on other statuses it prints
   # "server returned error: HTTP/1.1 503 Service Unavailable" and exits 1.
   local out rc
   out=$(compose exec -T bridge wget -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
   rc=$?
+  BRIDGE_BODY=""
   if [ "$rc" -eq 0 ]; then
     BRIDGE_STATUS=200
-    printf '%s\n' "$out"
+    BRIDGE_BODY="$out"
   else
     BRIDGE_STATUS=$(printf '%s\n' "$out" | sed -n 's/.*HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' | tail -n1)
     [ -n "$BRIDGE_STATUS" ] || BRIDGE_STATUS="no response ($(printf '%s' "$out" | head -c 120))"
@@ -80,7 +83,8 @@ fi
 step "1. bridge /api/health"
 deadline=$(( $(date +%s) + WAIT ))
 while :; do
-  body=$(bridge_get /api/health)
+  bridge_get /api/health
+  body="$BRIDGE_BODY"
   [ "${BRIDGE_STATUS:-}" = "200" ] && break
   if [ "$(date +%s)" -ge "$deadline" ]; then
     fail "bridge /api/health answered '${BRIDGE_STATUS:-no response}'" "docker compose logs --tail 50 bridge"
@@ -94,7 +98,7 @@ case "$body" in
 esac
 
 step "2. bridge /api/ready"
-bridge_get /api/ready >/dev/null
+bridge_get /api/ready
 case "${BRIDGE_STATUS:-}" in
   200) green "  connected to WhatsApp" ;;
   503) echo "  503: not connected (unpaired, or reconnecting)"; PAIRED=no ;;
@@ -106,7 +110,10 @@ if [ "$(printf '%s' "${WHATSAPP_MCP_METRICS:-true}" | tr '[:upper:]' '[:lower:]'
   echo "  skipped (WHATSAPP_MCP_METRICS=false)"
 else
   while :; do
-    code=$(curl -sS -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "$URL/metrics" 2>/dev/null || echo 000)
+    # WHATSAPP_MCP_METRICS_TOKEN (optional) gates /metrics on its own bearer.
+    metrics_auth=()
+    [ -n "${WHATSAPP_MCP_METRICS_TOKEN:-}" ] && metrics_auth=(-H "Authorization: Bearer ${WHATSAPP_MCP_METRICS_TOKEN}")
+    code=$(curl -sS -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null || echo 000)
     [ "$code" = "200" ] || [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 3 # the mcp container starts after the bridge is healthy
   done
