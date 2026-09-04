@@ -1,0 +1,16 @@
+# Never bake a WhatsApp session, message DB or token into an image.
+store/
+*.db
+*.log
+.env
+.env.*
+
+# Local build artefacts
+whatsapp-bridge
+whatsapp-client
+*.exe
+
+# Not needed to build
+*_test.go
+Dockerfile
+.dockerignore

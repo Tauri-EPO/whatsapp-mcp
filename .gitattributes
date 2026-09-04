@@ -1,0 +1,4 @@
+# Shell scripts and Dockerfiles are copied into Linux images verbatim;
+# a CRLF shebang breaks them, so pin LF regardless of core.autocrlf.
+*.sh text eol=lf
+Dockerfile text eol=lf

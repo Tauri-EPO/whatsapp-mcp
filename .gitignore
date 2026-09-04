@@ -53,3 +53,6 @@ build/
 .coverage
 htmlcov/
 /store
+
+# Docker Compose outbox bind mount (local files handed to send_file)
+/outbox/

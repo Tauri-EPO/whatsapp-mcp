@@ -1,0 +1,64 @@
+# WhatsApp MCP: Go bridge + Python MCP server (streamable HTTP) for an
+# always-on box. Full walkthrough (pairing, Tailscale, backups): docs/DOCKER.md
+#
+#   cp .env.example .env            # optional: set WHATSAPP_MCP_ALLOWED_HOSTS etc.
+#   docker compose up -d --build
+#   docker compose logs -f bridge   # scan the QR code on first run
+#
+# Topology: `mcp` joins the bridge container's network namespace
+# (network_mode: service:bridge). That keeps the bridge exactly as upstream
+# ships it (bound to 127.0.0.1, loopback-only Host allow-list, token file on
+# disk) while letting the MCP server reach it at http://127.0.0.1:8080 and
+# read messages.db from the shared volume. Consequently the MCP port is
+# published on the *bridge* service.
+
+services:
+  bridge:
+    build: ./whatsapp-bridge
+    image: whatsapp-mcp-bridge:local
+    restart: unless-stopped
+    environment:
+      WHATSAPP_BRIDGE_PORT: "8080"
+      WHATSAPP_MEDIA_ROOTS: /app/outbox
+      # Provide a token here (or in .env) to inject it from outside; leave empty
+      # to let the bridge generate one into /app/store/.bridge-token, which the
+      # MCP server picks up from the shared volume.
+      WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
+      WHATSAPP_DEVICE_NAME: ${WHATSAPP_DEVICE_NAME:-WhatsApp MCP}
+      # Webhooks are off by default in the container: the upstream default URL
+      # points at localhost:8769, which is nothing inside this namespace.
+      WEBHOOK_ENABLED: ${WEBHOOK_ENABLED:-false}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      FORWARD_SELF: ${FORWARD_SELF:-false}
+    volumes:
+      - whatsapp-store:/app/store
+      - ${WHATSAPP_OUTBOX:-./outbox}:/app/outbox
+    ports:
+      # MCP streamable-HTTP endpoint (served by the `mcp` service below).
+      # Bound to loopback by default: put `tailscale serve` or an authenticating
+      # reverse proxy in front of it. Set WHATSAPP_MCP_BIND=0.0.0.0 to expose on
+      # every interface (not recommended without auth in front).
+      - "${WHATSAPP_MCP_BIND:-127.0.0.1}:${WHATSAPP_MCP_PORT:-8000}:8000"
+
+  mcp:
+    build: ./whatsapp-mcp-server
+    image: whatsapp-mcp-server:local
+    restart: unless-stopped
+    network_mode: "service:bridge"
+    depends_on:
+      - bridge
+    environment:
+      # Hostnames clients use to reach /mcp (Tailscale MagicDNS name, reverse
+      # proxy name...). Empty = accept any Host (a warning is logged).
+      WHATSAPP_MCP_ALLOWED_HOSTS: ${WHATSAPP_MCP_ALLOWED_HOSTS:-}
+      WHATSAPP_MCP_ALLOWED_ORIGINS: ${WHATSAPP_MCP_ALLOWED_ORIGINS:-}
+      WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
+    volumes:
+      - whatsapp-store:/app/store
+      # Same path as in the bridge so send_file(media_path=/app/outbox/x) works.
+      - ${WHATSAPP_OUTBOX:-./outbox}:/app/outbox
+
+volumes:
+  # WhatsApp session, messages.db, downloaded media and .bridge-token.
+  # Back this up; losing it means re-pairing and losing local history.
+  whatsapp-store:
