@@ -100,7 +100,7 @@ shared code are reported upstream as well.
 
    ```bash
    cd whatsapp-bridge
-   go run .
+   go run -tags sqlite_fts5 .   # the tag enables full-text message search
    ```
 
    On first start, the bridge prints and stores a local REST API token at
@@ -158,8 +158,8 @@ git pull
 
 | You changed                                                              | What to do                                                                                                                                            |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bridge code** (`whatsapp-bridge/*.go`) and you run `go run .`          | Nothing — `go run` recompiles each launch. Just restart the bridge.                                                                                   |
-| **Bridge code** and you run a built binary                               | `cd whatsapp-bridge && go build -o whatsapp-bridge && ./whatsapp-bridge`                                                                              |
+| **Bridge code** (`whatsapp-bridge/*.go`) and you run `go run -tags sqlite_fts5 .` | Nothing — `go run` recompiles each launch. Just restart the bridge.                                                                          |
+| **Bridge code** and you run a built binary                               | `cd whatsapp-bridge && go build -tags sqlite_fts5 -o whatsapp-bridge && ./whatsapp-bridge`                                                            |
 | **MCP server** (`whatsapp-mcp-server/*.py`, `pyproject.toml`, `uv.lock`) | Restart Claude Desktop / Cursor — `uv` re-resolves from the lockfile on next launch. Force a sync with `cd whatsapp-mcp-server && uv sync` if needed. |
 
 Updates do **not** require re-pairing or deleting `whatsapp.db` — your session and message history are preserved. Re-pairing is only needed when explicitly requesting full history (see [Requesting full history](#requesting-full-history)).
@@ -238,7 +238,8 @@ Get messages with filters, date ranges, and sorting.
 - `limit` (optional): Number of messages (default 50, max 500)
 - `before_date` (optional): Messages before this date (YYYY-MM-DD)
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
-- `sort_by` (optional): "newest" or "oldest" (default "newest")
+- `query` (optional): Search term. With the bridge's FTS5 index (default in the Docker image and in builds with `-tags sqlite_fts5`) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use a plain substring match
+- `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
 
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
@@ -897,15 +898,17 @@ golangci-lint run
 ### Building
 
 ```bash
-# Go bridge
+# Go bridge. -tags sqlite_fts5 compiles SQLite's FTS5 module in, which the
+# bridge uses for the full-text message index; without the tag the bridge
+# still runs and search falls back to a substring scan.
 cd whatsapp-bridge
-go build -o whatsapp-bridge
+go build -tags sqlite_fts5 -o whatsapp-bridge
 
 # Run the binary
 ./whatsapp-bridge
 
 # During development (avoids stale binaries)
-go run .
+go run -tags sqlite_fts5 .
 
 # Container images (see docs/DOCKER.md)
 docker compose build
@@ -980,7 +983,7 @@ mv whatsapp-bridge/store/whatsapp.db whatsapp-bridge/store/whatsapp.db.lthash.ba
 
 # Restart the bridge and scan the new QR code.
 cd whatsapp-bridge
-./whatsapp-bridge    # or `go run .` during development
+./whatsapp-bridge    # or `go run -tags sqlite_fts5 .` during development
 ```
 
 Do not remove `whatsapp-bridge/store/messages.db` for this recovery unless you
@@ -992,7 +995,7 @@ Windows requires CGO for go-sqlite3. Install [MSYS2](https://www.msys2.org/) and
 
 ```bash
 go env -w CGO_ENABLED=1
-go run .
+go run -tags sqlite_fts5 .
 ```
 
 ## Security Notice
