@@ -106,28 +106,41 @@ func validateMediaPath(mediaPath string, allowedRoots []string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("resolve media_path: %w", err)
 	}
-	// EvalSymlinks already returns a clean path; the explicit Clean + HasPrefix
-	// pair below is the sanitiser shape static analysers (CodeQL) recognise.
-	resolved = filepath.Clean(resolved)
+	resolved = filepath.Clean(resolved) // EvalSymlinks already cleans; explicit for readers
 
-	info, err := os.Stat(resolved)
+	// Confine to the roots before touching the filesystem again, so not even
+	// a stat happens outside WHATSAPP_MEDIA_ROOTS. The confined path is
+	// rebuilt as root + relative part, and the relative part must not contain
+	// ".." (a real descendant never does after EvalSymlinks/Clean; the check
+	// is the shape static analysers recognise as a path-traversal barrier).
+	confined := ""
+	for _, root := range allowedRoots {
+		if !pathHasPrefix(resolved, root) {
+			continue
+		}
+		rel, relErr := filepath.Rel(root, resolved)
+		if relErr != nil || strings.Contains(rel, "..") {
+			continue
+		}
+		confined = filepath.Join(root, rel)
+		break
+	}
+	if confined == "" {
+		return "", fmt.Errorf(
+			"media_path %q is outside the configured media roots; "+
+				"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
+			resolved,
+		)
+	}
+
+	info, err := os.Stat(confined)
 	if err != nil {
 		return "", fmt.Errorf("stat media_path: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("media_path is not a regular file: %q", resolved)
+		return "", fmt.Errorf("media_path is not a regular file: %q", confined)
 	}
-
-	for _, root := range allowedRoots {
-		if strings.HasPrefix(resolved, root) && pathHasPrefix(resolved, root) {
-			return resolved, nil
-		}
-	}
-	return "", fmt.Errorf(
-		"media_path %q is outside the configured media roots; "+
-			"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
-		resolved,
-	)
+	return confined, nil
 }
 
 // pathHasPrefix returns true when child is the same path as parent, or a
