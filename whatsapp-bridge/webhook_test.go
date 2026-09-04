@@ -36,23 +36,39 @@ func unsetWebhookEnabled(t *testing.T) {
 	})
 }
 
-// setWebhookAuthToken sets the package-level outbound webhook token for the
-// duration of a test and restores the previous value on cleanup.
+// Test-scoped webhook configuration: the sender under test is built from these
+// by newTestWebhook() instead of mutating package state.
+var (
+	testWebhookToken      string
+	testDefaultWebhookURL string
+)
+
+// setWebhookAuthToken sets the outbound webhook token used by newTestWebhook()
+// for the duration of a test.
 func setWebhookAuthToken(t *testing.T, token string) {
 	t.Helper()
-	prev := webhookAuthToken
-	webhookAuthToken = token
-	t.Cleanup(func() { webhookAuthToken = prev })
+	prev := testWebhookToken
+	testWebhookToken = token
+	t.Cleanup(func() { testWebhookToken = prev })
 }
 
-// setDefaultWebhookURL points the built-in fallback webhook URL (used when
-// WEBHOOK_URL is unset) at a test server for the duration of a test, and
-// restores the previous value on cleanup.
+// setDefaultWebhookURL points the fallback webhook URL (used when WEBHOOK_URL
+// is unset) at a test server for the duration of a test.
 func setDefaultWebhookURL(t *testing.T, url string) {
 	t.Helper()
-	prev := defaultWebhookURL
-	defaultWebhookURL = url
-	t.Cleanup(func() { defaultWebhookURL = prev })
+	prev := testDefaultWebhookURL
+	testDefaultWebhookURL = url
+	t.Cleanup(func() { testDefaultWebhookURL = prev })
+}
+
+// newTestWebhook builds a sender with the production HTTP client and the
+// test-scoped token/default URL.
+func newTestWebhook() *webhookSender {
+	w := newWebhookSender(testWebhookToken)
+	if testDefaultWebhookURL != "" {
+		w.defaultURL = testDefaultWebhookURL
+	}
+	return w
 }
 
 // TestSendWebhookDisabledByEnv verifies that WEBHOOK_ENABLED=false suppresses
@@ -71,7 +87,7 @@ func TestSendWebhookDisabledByEnv(t *testing.T) {
 	t.Setenv("WEBHOOK_ENABLED", "false")
 	t.Setenv("WEBHOOK_URL", srv.URL)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if received {
 		t.Fatal("webhook was delivered despite WEBHOOK_ENABLED=false")
@@ -91,7 +107,7 @@ func TestSendWebhookEnabledByDefault(t *testing.T) {
 
 	t.Setenv("WEBHOOK_URL", srv.URL)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered with WEBHOOK_ENABLED unset")
@@ -113,7 +129,7 @@ func TestSendWebhookWithMessageIDSerializesID(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("WEBHOOK_URL", srv.URL)
-	SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D")
+	newTestWebhook().SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D")
 
 	if payload.MessageID != "3EB0F00D" {
 		t.Fatalf("messageId = %q, want %q", payload.MessageID, "3EB0F00D")
@@ -138,7 +154,7 @@ func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
 	}
 	previousStdout := os.Stdout
 	os.Stdout = writeEnd
-	SendWebhookWithMedia(
+	newTestWebhook().SendWebhookWithMedia(
 		"123@s.whatsapp.net", "", "123@s.whatsapp.net", false,
 		"", "", "", nil, nil,
 		"message-id", "image", "image/jpeg", "missing.jpg", missingPath,
@@ -180,7 +196,7 @@ func TestSendWebhookAttachesBridgeTokenHeader(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if gotToken != token {
 		t.Fatalf("X-Bridge-Token header = %q, want %q", gotToken, token)
@@ -206,7 +222,7 @@ func TestSendWebhookOmitsBridgeTokenHeaderWhenNoToken(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	setWebhookAuthToken(t, "")
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered")
@@ -245,7 +261,7 @@ func TestSendWebhookPreservesURLBasicAuth(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", u.String())
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 	if gotAuth != wantAuth {
@@ -280,7 +296,7 @@ func TestSendWebhookOmitsBridgeTokenOnImplicitDefaultURL(t *testing.T) {
 	setDefaultWebhookURL(t, srv.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered to the default URL")
@@ -318,7 +334,7 @@ func TestSendWebhookDoesNotFollowRedirects(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", redirector.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	newTestWebhook().SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 	if !redirectHit {
 		t.Fatal("expected the configured webhook URL to be hit")
 	}
@@ -341,7 +357,7 @@ func TestSendWebhookSerializesNativeMentionAndQuotedOrigin(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	quotedIsFromMe := true
 	quotedOrigin := &quotedIsFromMe
-	SendWebhook(
+	newTestWebhook().SendWebhook(
 		"123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false,
 		"quoted-id", "456@s.whatsapp.net", "[🤖] prior response",
 		quotedOrigin, []string{"491742555497@s.whatsapp.net"},

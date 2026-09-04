@@ -1866,48 +1866,56 @@ func senderAltForMessage(client *whatsmeow.Client, info types.MessageInfo) types
 }
 
 // Handle regular incoming messages with media support
-// origMsgTime remembers the true send-time of messages that first arrived
-// undecryptable (e.g. after an offline gap, when our session lacked the sender
-// key). WhatsApp re-sends such messages after a retry receipt, but the re-sent
-// copy carries a fresh `t` (the resend time) rather than the original send time.
-// The first (undecryptable) delivery *does* carry the original `t`, so we cache
-// it here and reuse it when the decrypted retry finally lands — otherwise those
-// messages get stored with reconnect-time and corrupt recency ordering.
-var (
-	origMsgTimeMu sync.Mutex
-	origMsgTime   = make(map[string]time.Time)
-)
+// originalTimestamps remembers the true send-time of messages that first
+// arrived undecryptable (e.g. after an offline gap, when our session lacked
+// the sender key). WhatsApp re-sends such messages after a retry receipt, but
+// the re-sent copy carries a fresh `t` (the resend time) rather than the
+// original send time. The first (undecryptable) delivery *does* carry the
+// original `t`, so we cache it and reuse it when the decrypted retry finally
+// lands — otherwise those messages get stored with reconnect-time and corrupt
+// recency ordering.
+type originalTimestamps struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}
 
-// rememberOriginalTimestamp records the earliest timestamp seen for a message ID.
-// A resend's `t` is always >= the original, so the earliest is the true one.
-func rememberOriginalTimestamp(id string, ts time.Time) {
-	if id == "" || ts.IsZero() {
+func newOriginalTimestamps() *originalTimestamps {
+	return &originalTimestamps{m: make(map[string]time.Time)}
+}
+
+// remember records the earliest timestamp seen for a message ID. A resend's
+// `t` is always >= the original, so the earliest is the true one.
+func (o *originalTimestamps) remember(id string, ts time.Time) {
+	if o == nil || id == "" || ts.IsZero() {
 		return
 	}
-	origMsgTimeMu.Lock()
-	defer origMsgTimeMu.Unlock()
-	if existing, ok := origMsgTime[id]; !ok || ts.Before(existing) {
-		origMsgTime[id] = ts
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if existing, ok := o.m[id]; !ok || ts.Before(existing) {
+		o.m[id] = ts
 	}
 	// Soft cap so a burst of never-retried undecryptable messages can't grow this
 	// map unbounded. Entries are normally consumed on successful decrypt.
-	if len(origMsgTime) > 5000 {
-		for k := range origMsgTime {
-			delete(origMsgTime, k)
-			if len(origMsgTime) <= 4000 {
+	if len(o.m) > 5000 {
+		for k := range o.m {
+			delete(o.m, k)
+			if len(o.m) <= 4000 {
 				break
 			}
 		}
 	}
 }
 
-// takeOriginalTimestamp returns and removes the cached original timestamp for id.
-func takeOriginalTimestamp(id string) (time.Time, bool) {
-	origMsgTimeMu.Lock()
-	defer origMsgTimeMu.Unlock()
-	ts, ok := origMsgTime[id]
+// take returns and removes the cached original timestamp for id.
+func (o *originalTimestamps) take(id string) (time.Time, bool) {
+	if o == nil {
+		return time.Time{}, false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	ts, ok := o.m[id]
 	if ok {
-		delete(origMsgTime, id)
+		delete(o.m, id)
 	}
 	return ts, ok
 }
@@ -1947,9 +1955,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	// Recover the true send-time if this message first arrived undecryptable and is
 	// now landing via a retry-resend (whose stanza `t` is the resend time, not the
-	// original). See origMsgTime / rememberOriginalTimestamp.
+	// original). See originalTimestamps.
 	msgTimestamp := msg.Info.Timestamp
-	if orig, ok := takeOriginalTimestamp(msg.Info.ID); ok && orig.Before(msgTimestamp) {
+	if orig, ok := b.origTimes.take(msg.Info.ID); ok && orig.Before(msgTimestamp) {
 		logger.Infof("Using original pre-retry timestamp for %s: %s (resend `t` was %s)",
 			msg.Info.ID, orig.Format(time.RFC3339), msgTimestamp.Format(time.RFC3339))
 		msgTimestamp = orig
@@ -2012,7 +2020,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				logger.Warnf("Failed to store reaction: %v", err)
 			}
 			if b.ForwardSelf || !msg.Info.IsFromMe {
-				SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
+				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
 			}
 		}
 		return
@@ -2099,7 +2107,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	var imageMimeType string
 	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, _, dlPath, dlErr := b.DownloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		success, _, _, dlPath, dlErr := b.DownloadMedia(msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			imageDownloadPath = dlPath
 			// Detect MIME type by sniffing the actual file bytes rather than
@@ -2119,14 +2127,14 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to async download so media is cached for future MCP tool calls
 			go func() {
-				_, _, _, _, _ = b.DownloadMedia(client, messageStore, msg.Info.ID, chatJID)
+				_, _, _, _, _ = b.DownloadMedia(msg.Info.ID, chatJID)
 			}()
 		}
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
-			success, _, _, downloadPath, err := b.DownloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			success, _, _, downloadPath, err := b.DownloadMedia(msg.Info.ID, chatJID)
 			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
@@ -2144,13 +2152,13 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	if shouldForward && (hasText || hasImage) {
 		if hasImage {
-			SendWebhookWithMedia(
+			b.Webhook.SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
 			)
 		} else {
-			SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID)
+			b.Webhook.SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID)
 		}
 	}
 
@@ -2255,7 +2263,8 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 }
 
 // Function to download media from a message
-func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) (bool, string, string, string, error) {
+func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string, string, error) {
+	client, messageStore := b.Client, b.Store
 	// Query the database for the message including timestamp
 	var mediaType, url string
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
@@ -2367,7 +2376,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		// Ask the sender's phone to re-upload and download from the fresh path.
 		// See media_retry.go.
 		fmt.Printf("🔁 Media URL expired for %s (%v); requesting media retry from sender's phone...\n", messageID, err)
-		mediaData, err = downloadViaMediaRetry(context.Background(), client, messageStore, messageID, chatJID, downloader)
+		mediaData, err = downloadViaMediaRetry(context.Background(), client, messageStore, b.mediaRetry, messageID, chatJID, downloader)
 	}
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
@@ -2736,7 +2745,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		fmt.Printf("📥 Download request: message_id=%s chat_jid=%s\n", req.MessageID, req.ChatJID)
 
 		// Download the media
-		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID)
+		success, mediaType, filename, path, err := b.DownloadMedia(req.MessageID, req.ChatJID)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -3026,21 +3035,14 @@ func main() {
 	}
 
 	// Load (or generate on first run) the bearer token used to authenticate
-	// REST callers, and attach it to outbound webhook POSTs so the hub's
-	// fail-closed inbound-auth middleware accepts them (see auth.go and
-	// webhook.go). This MUST happen before the event handler below is
-	// registered: WhatsApp can deliver messages — including a burst of
-	// history-sync backlog — as soon as the connection succeeds, and any
-	// message handled before this assignment would go out with no bridge
-	// token attached.
+	// REST callers; the Bridge attaches it to outbound webhook POSTs too.
 	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
 	if tokErr != nil {
 		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
 		return
 	}
-	webhookAuthToken = bridgeToken
 
-	bridge := newBridge(client, messageStore, logger)
+	bridge := newBridge(client, messageStore, logger, bridgeToken)
 	logger.Infof("%s", bridge.Policy.Summary())
 
 	// Print the one-time setup banner immediately, before attempting to
@@ -3068,7 +3070,7 @@ func main() {
 			// The first (failed) delivery carries the original send-time. WhatsApp
 			// re-sends after our retry receipt, but that copy's `t` is the resend
 			// time — so stash the original now and reuse it in handleMessage.
-			rememberOriginalTimestamp(v.Info.ID, v.Info.Timestamp)
+			bridge.origTimes.remember(v.Info.ID, v.Info.Timestamp)
 
 		case *events.HistorySync:
 			// Process history sync events
@@ -3077,7 +3079,7 @@ func main() {
 		case *events.MediaRetry:
 			// The sender's phone answered a media-retry request issued by
 			// downloadMedia (see media_retry.go); route it to the waiting call.
-			if !dispatchMediaRetry(v) {
+			if !bridge.mediaRetry.dispatch(v) {
 				logger.Debugf("Unclaimed media retry response for %s", v.MessageID)
 			}
 

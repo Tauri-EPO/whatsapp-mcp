@@ -102,18 +102,19 @@ func TestMediaRetryMessageInfo(t *testing.T) {
 }
 
 func TestMediaRetryWaiterDispatch(t *testing.T) {
-	ch, cancel := registerMediaRetryWaiter("WAIT1")
+	hub := newMediaRetryHub()
+	ch, cancel := hub.register("WAIT1")
 	defer cancel()
 
-	if dispatchMediaRetry(&events.MediaRetry{MessageID: "OTHER"}) {
+	if hub.dispatch(&events.MediaRetry{MessageID: "OTHER"}) {
 		t.Fatal("dispatch for unregistered ID should return false")
 	}
-	if dispatchMediaRetry(nil) {
+	if hub.dispatch(nil) {
 		t.Fatal("nil event should be ignored")
 	}
 
 	evt := &events.MediaRetry{MessageID: "WAIT1"}
-	if !dispatchMediaRetry(evt) {
+	if !hub.dispatch(evt) {
 		t.Fatal("dispatch for registered ID should succeed")
 	}
 	select {
@@ -126,26 +127,27 @@ func TestMediaRetryWaiterDispatch(t *testing.T) {
 	}
 
 	// Buffer is 1: a second undelivered event is dropped instead of blocking the event loop.
-	if !dispatchMediaRetry(evt) {
+	if !hub.dispatch(evt) {
 		t.Fatal("first buffered dispatch should succeed")
 	}
-	if dispatchMediaRetry(evt) {
+	if hub.dispatch(evt) {
 		t.Fatal("dispatch into a full buffer must not block or succeed")
 	}
 
 	cancel()
-	if dispatchMediaRetry(evt) {
+	if hub.dispatch(evt) {
 		t.Fatal("dispatch after cancel should return false")
 	}
 }
 
 func TestMediaRetryWaiterCancelDoesNotRemoveReplacement(t *testing.T) {
-	_, cancelOld := registerMediaRetryWaiter("DUP")
-	chNew, cancelNew := registerMediaRetryWaiter("DUP")
+	hub := newMediaRetryHub()
+	_, cancelOld := hub.register("DUP")
+	chNew, cancelNew := hub.register("DUP")
 	defer cancelNew()
 
 	cancelOld() // stale cancel must not evict the newer waiter
-	if !dispatchMediaRetry(&events.MediaRetry{MessageID: "DUP"}) {
+	if !hub.dispatch(&events.MediaRetry{MessageID: "DUP"}) {
 		t.Fatal("newer waiter should still receive events")
 	}
 	<-chNew

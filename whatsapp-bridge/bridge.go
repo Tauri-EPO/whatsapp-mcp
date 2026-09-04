@@ -16,7 +16,7 @@ import (
 )
 
 // mediaDownloader is downloadMedia's signature; tests substitute a fake.
-type mediaDownloader func(client *whatsmeow.Client, store *MessageStore, messageID, chatJID string) (bool, string, string, string, error)
+type mediaDownloader func(messageID, chatJID string) (bool, string, string, string, error)
 
 type Bridge struct {
 	Client *whatsmeow.Client
@@ -31,17 +31,29 @@ type Bridge struct {
 	DownloadMedia mediaDownloader
 	// ForwardSelf forwards self-sent messages to the webhook (FORWARD_SELF).
 	ForwardSelf bool
+	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
+	Webhook *webhookSender
+
+	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
+	origTimes *originalTimestamps
+	// mediaRetry routes MediaRetry events to waiting downloads (see mediaRetryHub).
+	mediaRetry *mediaRetryHub
 }
 
 // newBridge wires the production dependencies from a live client and store.
-func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *Bridge {
-	return &Bridge{
+// bridgeToken is the REST bearer token, also attached to outbound webhooks.
+func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string) *Bridge {
+	b := &Bridge{
 		Client:          client,
 		Store:           store,
 		Log:             logger,
 		Policy:          loadChatPolicy(),
 		PollVoteDecrypt: whatsmeowPollVoteDecrypter(client),
-		DownloadMedia:   downloadMedia,
 		ForwardSelf:     getEnvBool("FORWARD_SELF", true),
+		Webhook:         newWebhookSender(bridgeToken),
+		origTimes:       newOriginalTimestamps(),
+		mediaRetry:      newMediaRetryHub(),
 	}
+	b.DownloadMedia = b.downloadMedia
+	return b
 }

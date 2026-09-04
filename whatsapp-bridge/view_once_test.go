@@ -3,7 +3,6 @@ package main
 import (
 	"testing"
 
-	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"google.golang.org/protobuf/proto"
 )
@@ -57,7 +56,7 @@ func TestHandleMessage_ViewOnceImageIsStored(t *testing.T) {
 
 	// Never download in this test: replace the async downloader.
 	b := testBridge(client, ms, logger)
-	b.DownloadMedia = func(_ *whatsmeow.Client, _ *MessageStore, _ string, _ string) (bool, string, string, string, error) {
+	b.DownloadMedia = func(_ string, _ string) (bool, string, string, string, error) {
 		return false, "", "", "", nil
 	}
 

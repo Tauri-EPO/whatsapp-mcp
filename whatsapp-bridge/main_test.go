@@ -561,13 +561,17 @@ func testLogger() waLog.Logger {
 // not care about; individual tests override fields (DownloadMedia, Policy,
 // PollVoteDecrypt, ForwardSelf) instead of touching package state.
 func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger) *Bridge {
-	return &Bridge{
-		Client:        client,
-		Store:         ms,
-		Log:           logger,
-		DownloadMedia: downloadMedia,
-		ForwardSelf:   true,
+	b := &Bridge{
+		Client:      client,
+		Store:       ms,
+		Log:         logger,
+		ForwardSelf: true,
+		Webhook:     newWebhookSender(""),
+		origTimes:   newOriginalTimestamps(),
+		mediaRetry:  newMediaRetryHub(),
 	}
+	b.DownloadMedia = b.downloadMedia
+	return b
 }
 
 // buildTextMessage constructs an events.Message with the given source fields.
@@ -1724,7 +1728,7 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 	downloadStarted := make(chan struct{})
 	releaseDownload := make(chan struct{})
 	b := testBridge(client, ms, logger)
-	b.DownloadMedia = func(_ *whatsmeow.Client, _ *MessageStore, _ string, _ string) (bool, string, string, string, error) {
+	b.DownloadMedia = func(_ string, _ string) (bool, string, string, string, error) {
 		close(downloadStarted)
 		<-releaseDownload
 		return false, "", "", "", nil
