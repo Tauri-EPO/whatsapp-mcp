@@ -67,8 +67,12 @@ services:
     image: whatsapp-mcp-server:local
     restart: unless-stopped
     network_mode: "service:bridge"
+    # Wait for the bridge healthcheck (REST up), which only happens after the
+    # bridge has written /app/store/.bridge-token: the MCP server resolves its
+    # own HTTP bearer token from that file once, at startup.
     depends_on:
-      - bridge
+      bridge:
+        condition: service_healthy
     environment:
       # Hostnames clients use to reach /mcp (Tailscale MagicDNS name, reverse
       # proxy name...). Empty = accept any Host (a warning is logged).
@@ -101,8 +105,12 @@ services:
     image: ghcr.io/ggml-org/whisper.cpp:main
     restart: unless-stopped
     network_mode: "service:bridge"
+    # Wait for the bridge healthcheck (REST up), which only happens after the
+    # bridge has written /app/store/.bridge-token: the MCP server resolves its
+    # own HTTP bearer token from that file once, at startup.
     depends_on:
-      - bridge
+      bridge:
+        condition: service_healthy
     environment:
       # tiny | base | small | medium | large-v3 | large-v3-turbo (+ ".en" variants, "-q5_1" quantised...)
       WHISPER_MODEL_NAME: ${WHISPER_MODEL_NAME:-small}
