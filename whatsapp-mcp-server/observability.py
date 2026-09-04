@@ -11,6 +11,7 @@ uptime in the Prometheus text exposition format.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import threading
@@ -20,6 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 JSON_FORMAT_ENV = "WHATSAPP_MCP_LOG_FORMAT"
+METRICS_TOKEN_ENV = "WHATSAPP_MCP_METRICS_TOKEN"
 
 
 class JSONFormatter(logging.Formatter):
@@ -103,30 +105,38 @@ metrics = Metrics()
 
 
 class MetricsMiddleware:
-    """Pure-ASGI: answers GET /metrics itself, counts everything else by status."""
+    """Pure-ASGI: answers GET /metrics itself, counts everything else by status.
 
-    def __init__(self, app: Any, registry: Metrics = metrics, path: str = "/metrics") -> None:
+    With ``token`` set, /metrics needs ``Authorization: Bearer <token>`` (401
+    otherwise); Prometheus supports this through ``bearer_token_file``. Without
+    a token the endpoint is open, which is fine on loopback or a tailnet but
+    not behind Tailscale Funnel (see docs/DOCKER.md).
+    """
+
+    def __init__(self, app: Any, registry: Metrics = metrics, path: str = "/metrics", token: str | None = None) -> None:
         self.app = app
         self.registry = registry
         self.path = path
+        self.token = (token or "").strip() or None
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
         if scope.get("path") == self.path:
-            status = 200 if scope.get("method") == "GET" else 405
-            body = self.registry.render().encode("utf-8") if status == 200 else b""
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": status,
-                    "headers": [
-                        (b"content-type", b"text/plain; version=0.0.4; charset=utf-8"),
-                        (b"content-length", str(len(body)).encode()),
-                    ],
-                }
-            )
+            if scope.get("method") != "GET":
+                status, body = 405, b""
+            elif not self._authorized(scope):
+                status, body = 401, b""
+            else:
+                status, body = 200, self.registry.render().encode("utf-8")
+            headers = [
+                (b"content-type", b"text/plain; version=0.0.4; charset=utf-8"),
+                (b"content-length", str(len(body)).encode()),
+            ]
+            if status == 401:
+                headers.append((b"www-authenticate", b'Bearer realm="whatsapp-mcp-metrics"'))
+            await send({"type": "http.response.start", "status": status, "headers": headers})
             await send({"type": "http.response.body", "body": body})
             return
 
@@ -141,6 +151,16 @@ class MetricsMiddleware:
             await self.app(scope, receive, send_wrapper)
         finally:
             self.registry.record_http(status_seen["status"])
+
+    def _authorized(self, scope: dict[str, Any]) -> bool:
+        if self.token is None:
+            return True
+        for name, value in scope.get("headers") or []:
+            if name.lower() == b"authorization":
+                presented = value.decode("latin-1").strip()
+                if presented[:7].lower() == "bearer " and hmac.compare_digest(presented[7:].strip(), self.token):
+                    return True
+        return False
 
 
 def metrics_enabled(value: str | None) -> bool:
