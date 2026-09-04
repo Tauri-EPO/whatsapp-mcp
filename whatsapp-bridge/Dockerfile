@@ -8,7 +8,7 @@
 # generated REST token under /app/store. Mount a volume there or you will have
 # to re-pair on every container recreation. See docs/DOCKER.md.
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
 # go-sqlite3 needs cgo.
 RUN apk add --no-cache gcc musl-dev
