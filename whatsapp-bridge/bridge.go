@@ -39,6 +39,9 @@ type Bridge struct {
 	ForwardSelf bool
 	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
 	MediaAutoDownload bool
+	// MediaMaxBytes: inbound files larger than this are not auto-downloaded
+	// (WHATSAPP_MEDIA_MAX_BYTES); /api/download still fetches them on demand.
+	MediaMaxBytes uint64
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
 	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.
@@ -81,6 +84,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		PollVoteDecrypt:   whatsmeowPollVoteDecrypter(client),
 		ForwardSelf:       getEnvBool("FORWARD_SELF", true),
 		MediaAutoDownload: getEnvBool(mediaAutoDownloadEnv, true),
+		MediaMaxBytes:     resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
 		Webhook:           newWebhookSender(bridgeToken),
 		RESTBind:          defaultBridgeBind,
 		origTimes:         newOriginalTimestamps(),

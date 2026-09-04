@@ -181,26 +181,51 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 		MediaType:     waMediaType,
 	}
 
-	// Download the media using whatsmeow client
-	mediaData, err := client.Download(context.Background(), downloader)
+	// Stream straight to a temp file next to the target (whatsmeow decrypts
+	// and verifies in place), then rename: no full copy of the media in RAM
+	// and no half-written file ever appears under the final name.
+	written, err := downloadToPath(context.Background(), client, downloader, localPath)
 	if isExpiredMediaError(err) {
 		// The CDN token in the stored URL has expired (old history, forwards).
 		// Ask the sender's phone to re-upload and download from the fresh path.
 		// See media_retry.go.
 		bridgeLog.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
-		mediaData, err = downloadViaMediaRetry(context.Background(), client, messageStore, b.mediaRetry, messageID, chatJID, downloader)
+		written, err = downloadViaMediaRetry(context.Background(), client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
 	}
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
 
-	// Save the downloaded media to file
-	if err := os.WriteFile(localPath, mediaData, 0o600); err != nil {
-		return false, "", "", "", fmt.Errorf("failed to save media file: %v", err)
-	}
-
-	bridgeLog.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, len(mediaData))
+	bridgeLog.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
 	return true, mediaType, filename, absPath, nil
+}
+
+// downloadToPath downloads msg into localPath through a ".part" temp file and
+// an atomic rename. Returns the byte count written.
+func downloadToPath(ctx context.Context, client *whatsmeow.Client, msg whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+	tmpPath := localPath + ".part"
+	f, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path is built by downloadMedia under the store directory
+	if err != nil {
+		return 0, fmt.Errorf("create media file: %w", err)
+	}
+	if err := client.DownloadToFile(ctx, msg, f); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return 0, err
+	}
+	info, statErr := f.Stat()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("close media file: %w", err)
+	}
+	if err := os.Rename(tmpPath, localPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("finalise media file: %w", err)
+	}
+	if statErr != nil {
+		return 0, nil
+	}
+	return info.Size(), nil
 }
 
 // Extract direct path from a WhatsApp media URL
