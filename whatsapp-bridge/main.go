@@ -278,98 +278,20 @@ func main() {
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) { bridge.handleEvent(evt, reconnectChan) })
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
-	// Add connection retry logic
-	maxRetries := 3
-	var connErr error
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		logger.Infof("Connection attempt %d/%d...", attempt, maxRetries)
-
-		// Connect to WhatsApp
-		if client.Store.ID == nil {
-			// No ID stored, this is a new client, need to pair with phone
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-
-			qrChan, connErr := client.GetQRChannel(ctx)
-			if connErr != nil {
-				logger.Errorf("Failed to get QR channel: %v", connErr)
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			connErr = client.Connect()
-			if connErr != nil {
-				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Print the QR code for pairing with the phone. whatsmeow rotates the
-			// code roughly every 20 seconds and a scan of an expired one is
-			// rejected by the phone, so every "code" event must be redrawn — not
-			// just the first (see #14).
-			qrCodesShown := 0
-			for evt := range qrChan {
-				switch evt.Event {
-				case "code":
-					qrCodesShown++
-					printQRCode(os.Stdout, evt.Code, qrCodesShown)
-				case "success":
-					connected <- true
-				case "timeout":
-					logger.Warnf("QR pairing timed out after %d code(s)", qrCodesShown)
-				default:
-					if evt.Error != nil {
-						logger.Errorf("QR pairing error (%s): %v", evt.Event, evt.Error)
-					} else {
-						logger.Warnf("QR pairing event: %s", evt.Event)
-					}
-				}
-				if evt.Event == "success" || evt.Event == "timeout" || evt.Error != nil {
-					break
-				}
-			}
-			// Wait for connection with timeout
-			select {
-			case <-connected:
-				bridgeLog.Infof("Successfully connected and authenticated!")
-				goto connectionSuccess
-			case <-ctx.Done():
-				logger.Errorf("Timeout waiting for QR code scan (attempt %d)", attempt)
-				client.Disconnect()
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(10 * time.Second)
-				continue
-			}
-		} else {
-			// Already logged in, just connect
-			connErr = client.Connect()
-			if connErr != nil {
-				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			connected <- true
-			break
-		}
+	// Connect, or pair over QR on a fresh store. Each attempt has its own
+	// deadline; a rotated-code timeout starts the next attempt at once
+	// (pairing.go). bridge.ctx lets a SIGTERM during pairing abort cleanly.
+	if err := connectOrPair(bridge.ctx, client, client.Store.ID != nil, pairingOptions{
+		attempts:       3,
+		attemptTimeout: 5 * time.Minute,
+		retryDelay:     5 * time.Second,
+		out:            os.Stdout,
+		log:            logger,
+	}); err != nil {
+		logger.Errorf("%v", err)
+		return
 	}
-
-connectionSuccess:
+	bridgeLog.Infof("Successfully connected and authenticated!")
 
 	// Wait a moment for connection to stabilize
 	time.Sleep(2 * time.Second)
