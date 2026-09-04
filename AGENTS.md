@@ -23,7 +23,7 @@ whatsapp-mcp/
 │   ├── Dockerfile          # Bridge image (alpine, cgo sqlite)
 │   └── store/              # SQLite (whatsapp.db, messages.db) + media — gitignored
 ├── whatsapp-mcp-server/    # Python MCP server — exposes tools to AI clients
-│   ├── main.py             # FastMCP tool definitions
+│   ├── main.py             # MCPServer (MCP SDK v2) tool definitions
 │   ├── whatsapp.py         # DB queries + bridge HTTP client
 │   ├── audio.py            # FFmpeg helpers
 │   └── Dockerfile          # MCP image (http transport by default)

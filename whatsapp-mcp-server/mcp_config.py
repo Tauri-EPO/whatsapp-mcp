@@ -1,6 +1,6 @@
 """Side-effect-free helpers for MCP server configuration env vars."""
 
-# Accepted WHATSAPP_MCP_TRANSPORT values mapped to FastMCP transport names.
+# Accepted WHATSAPP_MCP_TRANSPORT values mapped to MCP SDK transport names.
 # "http" is a friendly alias for the spec's current "streamable-http" transport.
 TRANSPORT_ALIASES = {
     "stdio": "stdio",
@@ -14,7 +14,7 @@ DEFAULT_MCP_PORT = 8000
 
 
 def resolve_transport(value: str | None) -> str:
-    """Map a WHATSAPP_MCP_TRANSPORT value to a FastMCP transport name.
+    """Map a WHATSAPP_MCP_TRANSPORT value to an MCP SDK transport name.
 
     Unset or whitespace-only values default to "stdio".
     Raises ValueError for unrecognized values.
@@ -54,7 +54,7 @@ def resolve_port(value: str | None) -> int:
 
 
 # Host header values the MCP SDK accepts by default when bound to loopback.
-# Mirrors FastMCP's own construction-time allow-list so that enabling extra
+# Mirrors the SDK's own loopback allow-list so that enabling extra
 # hosts never locks out local clients.
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 LOOPBACK_BIND_ADDRESSES = ("127.0.0.1", "localhost", "::1")
@@ -119,15 +119,15 @@ def resolve_allowed_hosts(value: str | None) -> list[str] | None:
 
 
 def build_transport_security(host: str, allowed_hosts_env: str | None, allowed_origins_env: str | None = None):
-    """Derive FastMCP transport-security settings for the network transports.
+    """Derive the transport-security settings passed to ``MCPServer.run()``.
 
-    FastMCP decides its DNS-rebinding allow-list when it is constructed (with the
-    default loopback host), so a server later re-pointed at ``0.0.0.0`` still
-    rejects every non-loopback ``Host`` header with 421. This recomputes the
-    policy once the real bind address and the operator's allow-list are known.
+    The SDK auto-enables a loopback-only DNS-rebinding ``Host`` allow-list when
+    the bind address is loopback and applies none otherwise. This adds the
+    operator's allow-list on top so a non-loopback bind (Tailscale, Docker,
+    reverse proxy) can keep the protection on instead of turning it off.
 
-    Returns None when the SDK's construction-time default (loopback only) should
-    be kept, otherwise a ``TransportSecuritySettings`` instance.
+    Returns None when the SDK default for the given host should be kept,
+    otherwise a ``TransportSecuritySettings`` instance.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -136,7 +136,7 @@ def build_transport_security(host: str, allowed_hosts_env: str | None, allowed_o
         if host in LOOPBACK_BIND_ADDRESSES:
             return None
         # Bound to a non-loopback address without an allow-list: any Host is
-        # accepted. main.py warns about this on stderr.
+        # accepted (explicitly, so the intent is visible). main.py warns on stderr.
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     if not allowed_hosts:
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)

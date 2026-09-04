@@ -133,15 +133,14 @@ class TestBuildTransportSecurity:
 
 
 def _streamable_http_app(host: str, allowed_hosts: str | None):
-    """Build a FastMCP streamable-http app the way main.py configures it at runtime."""
-    from mcp.server.fastmcp import FastMCP
+    """Build a streamable-http app the way main.py configures MCPServer.run() at runtime."""
+    from mcp.server.mcpserver import MCPServer
 
-    server = FastMCP("test")  # constructed with the default loopback host, like main.py
-    server.settings.host = host
+    kwargs = {"host": host}
     security = build_transport_security(host, allowed_hosts)
     if security is not None:
-        server.settings.transport_security = security
-    return server.streamable_http_app()
+        kwargs["transport_security"] = security
+    return MCPServer("test").streamable_http_app(**kwargs)
 
 
 class TestStreamableHttpHostHeader:

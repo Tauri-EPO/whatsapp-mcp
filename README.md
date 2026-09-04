@@ -714,7 +714,7 @@ flowchart TB
     end
 
     subgraph MCP["MCP Layer"]
-        PY[Python MCP Server<br/>FastMCP]
+        PY[Python MCP Server<br/>MCP SDK v2 MCPServer]
     end
 
     subgraph Bridge["WhatsApp Bridge"]

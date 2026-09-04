@@ -3,7 +3,7 @@ import signal
 import sys
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
@@ -58,9 +58,11 @@ from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
 
-# Initialize FastMCP server. Env-var handling is deferred to the __main__ block
-# so importing this module never parses env vars or exits the process.
-mcp = FastMCP("whatsapp")
+# Initialize the MCP server. Env-var handling is deferred to the __main__ block
+# so importing this module never parses env vars or exits the process. With SDK
+# v2, host/port/transport security are passed to run() rather than stored on the
+# server, so nothing network-related is decided at import time either.
+mcp = MCPServer("whatsapp")
 
 
 @mcp.tool()
@@ -525,21 +527,23 @@ if __name__ == "__main__":
     # Resolve the transport first: host/port are only used (and validated) for the
     # network transports, so a bad WHATSAPP_MCP_PORT can't break a stdio launch.
     # The localhost default keeps a remote server unreachable until explicitly opened up.
+    run_kwargs: dict[str, Any] = {}
     try:
         transport = resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT"))
         if transport != "stdio":
-            mcp.settings.host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
-            mcp.settings.port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
-            # FastMCP froze a loopback-only Host allow-list when it was constructed
-            # above (default host). Re-derive it for the real bind address, or every
-            # non-loopback caller gets 421 Misdirected Request.
+            host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
+            port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
+            run_kwargs = {"host": host, "port": port}
+            # The SDK enables a loopback-only Host allow-list when bound to loopback
+            # and none otherwise; WHATSAPP_MCP_ALLOWED_HOSTS lets an operator keep
+            # DNS-rebinding protection on for a non-loopback bind.
             security = build_transport_security(
-                mcp.settings.host,
+                host,
                 os.getenv("WHATSAPP_MCP_ALLOWED_HOSTS"),
                 os.getenv("WHATSAPP_MCP_ALLOWED_ORIGINS"),
             )
             if security is not None:
-                mcp.settings.transport_security = security
+                run_kwargs["transport_security"] = security
                 if not security.enable_dns_rebinding_protection:
                     print(
                         "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
@@ -547,13 +551,10 @@ if __name__ == "__main__":
                         file=sys.stderr,
                     )
             # stdout is reserved for the protocol on stdio; log startup to stderr.
-            print(
-                f"WhatsApp MCP server listening on {mcp.settings.host}:{mcp.settings.port} via {transport}",
-                file=sys.stderr,
-            )
+            print(f"WhatsApp MCP server listening on {host}:{port} via {transport}", file=sys.stderr)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
     if transport == "stdio":
         install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
-    mcp.run(transport=transport)
+    mcp.run(transport=transport, **run_kwargs)
