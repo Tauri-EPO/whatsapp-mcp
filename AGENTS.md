@@ -59,7 +59,10 @@ whatsapp-mcp/
 │   ├── jid.go                  # phone <-> LID resolution helpers
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
 │   ├── media.go                # inbound media download into store/<chat>/
-│   ├── rest.go                 # newRESTMux route table, health/ready, HTTP server
+│   ├── rest.go                 # newRESTMux route table + HTTP server; handlers live next to their features
+│   ├── rest_middleware.go      # writeError (JSON error shape), requireMethod, requestLog
+│   ├── health.go               # /api/health (liveness), /api/ready (readiness)
+│   ├── chat_actions.go         # /api/mark-read, /api/react, /api/typing
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
 │   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS
@@ -242,7 +245,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 | Change HTTP transport, auth, allowed hosts | `whatsapp-mcp-server/main.py` (`__main__`), `mcp_config.py`, `http_auth.py` |
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
 | Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
-| Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`), tests with fakes |
+| Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
 | Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`); FTS in `fts.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |

@@ -64,7 +64,7 @@ func writeDeleteResponse(w http.ResponseWriter, status int, resp DeleteMessageRe
 func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
 		var req DeleteMessageRequest
