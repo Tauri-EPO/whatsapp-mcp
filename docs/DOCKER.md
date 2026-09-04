@@ -41,7 +41,9 @@ later, but the first three save a re-pair or a token rotation):
   transcription; `WHATSAPP_MEDIA_RETENTION_DAYS` on a small disk.
 
 `mcp` (and `whisper`) start only after the bridge healthcheck passes, i.e.
-once the REST API is up and `.bridge-token` exists. Once the phone confirms
+once the REST API is up and `.bridge-token` exists, and are recreated whenever
+the bridge container is (they share its network namespace, which does not
+survive a recreate). This needs Docker Compose v2.17 or newer. Once the phone confirms
 the link, `docker compose ps` shows `bridge` as `healthy`, `GET /api/ready`
 returns 200 and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`.
 
