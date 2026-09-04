@@ -775,6 +775,13 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
+- **`Refusing to start: another whatsapp-bridge already holds this store (pid N)`**:
+  a second bridge is running against the same `store/` directory (typically a
+  service-managed instance plus a manual `./whatsapp-bridge`). Two bridges on one
+  session evict each other in a loop and silently stop saving messages, so the
+  newcomer exits instead. Stop the other process, or use a different working
+  directory. The lock (`store/.bridge.lock`) is released automatically when the
+  holder exits or crashes; no cleanup is needed.
 - **Out of Sync**: Back up `whatsapp-bridge/store`, then move
   `whatsapp-bridge/store/whatsapp.db` aside and re-authenticate. Keep
   `messages.db` unless you intentionally want to discard local message history.
