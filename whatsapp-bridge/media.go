@@ -250,10 +250,9 @@ func extractDirectPathFromURL(url string) string {
 
 // handleDownload serves POST /api/download.
 func (b *Bridge) handleDownload() http.HandlerFunc {
-	client := b.Client
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check if connected
-		if !client.IsConnected() {
+		if !b.Connected() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(DownloadMediaResponse{

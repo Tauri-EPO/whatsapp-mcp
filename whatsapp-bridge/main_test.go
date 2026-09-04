@@ -569,6 +569,7 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.Connect = func() error { return nil }
+	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
