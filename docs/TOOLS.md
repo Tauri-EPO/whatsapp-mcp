@@ -2,6 +2,16 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
+## Pagination
+
+`list_messages`, `list_chats` and `get_contact_chats` return one page:
+
+```json
+{"items": [...], "next_cursor": "eyJrIjoi...", "has_more": true}
+```
+
+Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based (`timestamp, id`), so paging stays consistent while new messages arrive and does not slow down on deep pages. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor.
+
 ## Errors
 
 Every tool returns its documented payload on success. On failure it returns one shape:
@@ -63,7 +73,8 @@ Get messages with filters, date ranges, and sorting.
 
 - `chat_jid` (optional): Filter by specific chat JID
 - `limit` (optional): Number of messages (default 50, max 500)
-- `page` (optional): Page number (default 0)
+- `page` (optional): Page number (default 0); ignored when `cursor` is set
+- `cursor` (optional): `next_cursor` from the previous page
 - `before` / `after` (optional): ISO-8601 bounds (`2026-01-09` or `2026-01-09T18:00:00`)
 - `sender_jid` (optional): Only messages from this sender (phone number or JID)
 - `include_context` (optional, default `true`), `context_before` / `context_after` (default 1, max 50 each): surrounding messages for every match. The whole result is capped at 2000 rows; with large `limit` values the windows shrink to fit, so prefer `include_context=false` when paging through many matches
