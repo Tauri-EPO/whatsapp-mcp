@@ -227,6 +227,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
 		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
+	if _, err := db.Exec(pollsSchema); err != nil {
+		return fmt.Errorf("failed to ensure poll tables: %w", err)
+	}
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
@@ -1964,6 +1967,22 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Poll votes arrive as PollUpdateMessage stanzas: decrypt, map to option
+	// names, keep a structured copy for /api/poll and a message row with the
+	// poll's ID in `filename` (same convention as reactions). See polls.go.
+	if handled, pollID, voteContent := handlePollVote(context.Background(), pollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
+		if voteContent != "" {
+			if err := messageStore.StoreMessage(
+				msg.Info.ID, chatJID, sender, voteContent,
+				msgTimestamp, msg.Info.IsFromMe,
+				"poll_vote", pollID, "", nil, nil, nil, 0, "",
+			); err != nil {
+				logger.Warnf("Failed to store poll vote: %v", err)
+			}
+		}
+		return
+	}
+
 	// Reactions arrive as their own message stanza rather than message content.
 	// Persist them in the messages table as media_type="reaction", with the
 	// emoji in `content` and the reacted-to message ID in `filename`, then
@@ -1999,6 +2018,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// rebuilds the on-disk filename from the stored timestamp.
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msgTimestamp, msg.Info.ID)
 
+	// Native polls: the creation carries no text, so render question + options
+	// as content and remember the option list for vote decoding (polls.go).
+	poll := extractPollCreation(msg.Message)
+	if poll != nil {
+		content = pollContent(poll)
+		mediaType = "poll"
+	}
+
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
 	mentionedJIDs := extractMentionedJIDs(msg.Message)
@@ -2028,6 +2055,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	)
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
+	}
+	if poll != nil {
+		if err := messageStore.StorePoll(msg.Info.ID, chatJID, poll, msgTimestamp); err != nil {
+			logger.Warnf("Failed to store poll: %v", err)
+		}
 	}
 
 	var quotedIsFromMe *bool
@@ -2413,6 +2445,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		},
 		outboundChatPolicy,
 	)))
+
+	// Poll results (see polls.go).
+	mux.HandleFunc("/api/poll", auth(handlePollResults(messageStore, outboundChatPolicy)))
 
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -2991,6 +3026,7 @@ func main() {
 	webhookAuthToken = bridgeToken
 
 	outboundChatPolicy = loadChatPolicy()
+	pollVoteDecrypt = whatsmeowPollVoteDecrypter(client)
 	logger.Infof("%s", outboundChatPolicy.Summary())
 
 	// Print the one-time setup banner immediately, before attempting to
@@ -3585,6 +3621,10 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				// Conversation/ExtendedText and silently dropped everything
 				// else arriving through history sync.
 				content := extractTextContent(msg.Message.Message)
+				histPoll := extractPollCreation(msg.Message.Message)
+				if histPoll != nil {
+					content = pollContent(histPoll)
+				}
 
 				// Extract media info - pass message timestamp + ID for unique filenames
 				var mediaType, filename, url string
@@ -3598,6 +3638,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 
 				if msg.Message.Message != nil {
 					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp, histMsgID)
+				}
+				if histPoll != nil {
+					mediaType = "poll"
 				}
 
 				// Log the message content for debugging
