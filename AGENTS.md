@@ -119,6 +119,10 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 | `WEBHOOK_ENABLED` | `true` | Set to `false` to disable outbound webhooks entirely |
 | `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded (`getEnvBool` default; set `FORWARD_SELF=false` to disable) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds). Exits when the original parent is gone (POSIX reparent). Soft stdin EOF alone does not exit. |
+| `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint used by `transcribe_audio` (fork feature; `transcribe.py`). Wins over `WHISPER_BIN` |
+| `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend for `transcribe_audio` |
+| `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
+| `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
 
 When adding a new env var: document it here, in `README.md`, and in `.env.example`.
 
@@ -138,6 +142,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 |---|---|
 | Change how the containers are built or wired | `whatsapp-bridge/Dockerfile`, `whatsapp-mcp-server/Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md` |
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` |
+| Change voice-note transcription (whisper backends) | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
 | Change DB queries / data conversion | `whatsapp-mcp-server/whatsapp.py` |
 | Change bridge REST API or event handling | `whatsapp-bridge/main.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
