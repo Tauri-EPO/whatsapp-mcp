@@ -2722,6 +2722,18 @@ func main() {
 		return
 	}
 
+	// Refuse to run alongside another bridge on the same store. Two processes
+	// sharing one WhatsApp session evict each other forever (StreamReplaced)
+	// and neither persists messages reliably. Must happen before the session
+	// database is opened or WhatsApp is dialled. See instance_lock.go.
+	lock, lockErr := acquireInstanceLock(instanceLockPath)
+	if lockErr != nil {
+		logger.Errorf("Refusing to start: %v", lockErr)
+		logger.Errorf("Stop the other bridge (or point this one at a different store directory) and retry.")
+		os.Exit(1)
+	}
+	defer lock.Release()
+
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
