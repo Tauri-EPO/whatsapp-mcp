@@ -338,6 +338,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				}()
 			}
 		}
+	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
+		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)

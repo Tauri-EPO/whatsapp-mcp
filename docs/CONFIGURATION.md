@@ -21,6 +21,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_TIMEOUT_S` | `30`                                | Timeout for each MCP → bridge call; media upload/download use 120 s. Connection errors are retried twice, read timeouts are not |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable) |
+| `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |

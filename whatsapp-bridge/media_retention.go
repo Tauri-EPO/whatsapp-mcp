@@ -31,6 +31,8 @@ import (
 const (
 	mediaAutoDownloadEnv = "WHATSAPP_MEDIA_AUTODOWNLOAD"
 	mediaRetentionEnv    = "WHATSAPP_MEDIA_RETENTION_DAYS"
+	mediaMaxBytesEnv     = "WHATSAPP_MEDIA_MAX_BYTES"
+	defaultMediaMaxBytes = 256 * 1024 * 1024
 	mediaSweepInterval   = 24 * time.Hour
 	storeUsageTTL        = 5 * time.Minute
 )
@@ -47,6 +49,19 @@ func resolveMediaRetention(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of days", mediaRetentionEnv, value)
 	}
 	return time.Duration(days) * 24 * time.Hour, nil
+}
+
+// resolveMediaMaxBytes parses WHATSAPP_MEDIA_MAX_BYTES (default 256 MiB; 0 = no limit).
+func resolveMediaMaxBytes(value string) uint64 {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return defaultMediaMaxBytes
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return defaultMediaMaxBytes
+	}
+	return n
 }
 
 // retentionSummary renders the retention setting for the startup log.

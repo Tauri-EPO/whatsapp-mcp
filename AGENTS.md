@@ -187,6 +187,7 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge listens on |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls; also signed onto outbound webhooks |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true` | Cache inbound media on arrival; `false` = fetch only on `/api/download` (`media_retention.go`) |
+| `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB) | Inbound files larger than this are not auto-downloaded (`/api/download` still fetches them); `0` = no limit. Downloads stream to `<file>.part` then rename (`media.go`) |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset)* | Daily sweep deletes media files older than N days under `store/<chat>/`; DB rows untouched |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |

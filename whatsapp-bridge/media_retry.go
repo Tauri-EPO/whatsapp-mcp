@@ -160,29 +160,29 @@ func mediaRetryDirectPath(evt *events.MediaRetry, mediaKey []byte) (string, erro
 // downloadViaMediaRetry asks the sender's phone to re-upload the media behind
 // (messageID, chatJID) and downloads it from the refreshed direct path. On
 // success the new URL is persisted so the next download skips the retry.
-func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader) ([]byte, error) {
+func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader, localPath string) (int64, error) {
 	var sender string
 	var isFromMe bool
 	if err := messageStore.db.QueryRow(
 		"SELECT sender, is_from_me FROM messages WHERE id = ? AND chat_jid = ?",
 		messageID, chatJID,
 	).Scan(&sender, &isFromMe); err != nil {
-		return nil, fmt.Errorf("look up message for media retry: %w", err)
+		return 0, fmt.Errorf("look up message for media retry: %w", err)
 	}
 	info, err := mediaRetryMessageInfo(messageID, chatJID, sender, isFromMe)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	// Register before sending so a fast phone can't answer into the void.
 	if hub == nil {
-		return nil, errors.New("media retry unavailable: no retry hub configured")
+		return 0, errors.New("media retry unavailable: no retry hub configured")
 	}
 	ch, cancel := hub.register(messageID)
 	defer cancel()
 
 	if err := client.SendMediaRetryReceipt(ctx, info, downloader.MediaKey); err != nil {
-		return nil, fmt.Errorf("send media retry receipt: %w", err)
+		return 0, fmt.Errorf("send media retry receipt: %w", err)
 	}
 
 	timer := time.NewTimer(mediaRetryTimeout)
@@ -191,22 +191,22 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 	case evt := <-ch:
 		directPath, err := mediaRetryDirectPath(evt, downloader.MediaKey)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		refreshed := *downloader
 		refreshed.DirectPath = directPath
 		refreshed.URL = mediaURLFromDirectPath(directPath)
-		data, err := client.Download(ctx, &refreshed)
+		written, err := downloadToPath(ctx, client, &refreshed, localPath)
 		if err != nil {
-			return nil, fmt.Errorf("download after media retry: %w", err)
+			return 0, fmt.Errorf("download after media retry: %w", err)
 		}
 		if err := messageStore.StoreMediaInfo(messageID, chatJID, refreshed.URL, refreshed.MediaKey, refreshed.FileSHA256, refreshed.FileEncSHA256, refreshed.FileLength); err != nil {
 			bridgeLog.Warnf("Media retry succeeded but failed to persist refreshed URL for %s: %v", messageID, err)
 		}
-		return data, nil
+		return written, nil
 	case <-timer.C:
-		return nil, fmt.Errorf("timed out after %s waiting for the sender's phone to re-upload the media (it must be online)", mediaRetryTimeout)
+		return 0, fmt.Errorf("timed out after %s waiting for the sender's phone to re-upload the media (it must be online)", mediaRetryTimeout)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return 0, ctx.Err()
 	}
 }
