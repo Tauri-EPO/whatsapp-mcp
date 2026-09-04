@@ -154,6 +154,11 @@ class Message:
     filename: str | None = None
     # ID of the message this one is replying to (NULL for non-replies).
     quoted_message_id: str | None = None
+    # Set when the message was revoked ("delete for everyone"), by the sender or
+    # by us. Content, media and filename are kept on purpose: this archive is
+    # the account owner's copy. Only delete_message(for_everyone=False) removes
+    # a row.
+    deleted_at: datetime | None = None
 
 
 # One column list and one mapper for every query that yields Message rows.
@@ -161,13 +166,14 @@ class Message:
 # elsewhere is a bug.
 MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
-    "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename"
+    "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
+    "messages.deleted_at"
 )
 
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
-    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, quoted_id, filename = row
+    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, quoted_id, filename, deleted = row
     return Message(
         timestamp=datetime.fromisoformat(timestamp),
         sender=sender,
@@ -179,6 +185,7 @@ def _row_to_message(row: tuple) -> Message:
         media_type=media_type,
         quoted_message_id=quoted_id,
         filename=filename,
+        deleted_at=datetime.fromisoformat(deleted) if deleted else None,
     )
 
 
@@ -275,6 +282,7 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
         "poll_message_id": (message.filename if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
+        "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
     }
 
 
@@ -544,6 +552,7 @@ def list_messages(
     context_before: int = 1,
     context_after: int = 1,
     sort_by: str = "newest",
+    include_deleted: bool = True,
 ) -> list[dict[str, Any]]:
     """Get messages matching the specified criteria with optional context.
 
@@ -563,6 +572,8 @@ def list_messages(
         context_after: Number of messages to include after each match (default 1)
         sort_by: Sort order - "newest" (default), "oldest" for chronological ordering, or
             "relevance" (best match first; only meaningful with query and the FTS index)
+        include_deleted: Keep revoked messages in the result (default True; they carry
+            deleted_at and their original content). False hides them.
 
     Returns:
         List of message dictionaries with id, timestamp, sender, content, etc.
@@ -615,6 +626,9 @@ def list_messages(
             where_clauses.append(clause)
             params.extend(clause_params)
 
+        if not include_deleted:
+            where_clauses.append("messages.deleted_at IS NULL")
+
         match_param_index = None
         if query and use_fts:
             where_clauses.append(f"{MESSAGES_FTS_TABLE} MATCH ?")
@@ -658,7 +672,9 @@ def list_messages(
             seen_ids = set()
             messages_with_context = []
             for msg in result:
-                context = get_message_context(msg.id, context_before, context_after, msg.chat_jid)
+                context = get_message_context(
+                    msg.id, context_before, context_after, msg.chat_jid, include_deleted=include_deleted
+                )
                 for ctx_msg in context.before:
                     if ctx_msg.id not in seen_ids:
                         seen_ids.add(ctx_msg.id)
@@ -685,7 +701,7 @@ def list_messages(
 
 
 def get_message_context(
-    message_id: str, before: int = 5, after: int = 5, chat_jid: str | None = None
+    message_id: str, before: int = 5, after: int = 5, chat_jid: str | None = None, include_deleted: bool = True
 ) -> MessageContext:
     """Get context around a specific message.
 
@@ -712,6 +728,7 @@ def get_message_context(
         target_message = _row_to_message(msg_data)
         if denied := _policy_denied(target_message.chat_jid):
             raise ValueError(denied)
+        deleted_filter = "" if include_deleted else "AND messages.deleted_at IS NULL"
 
         # Get messages before
         cursor.execute(
@@ -719,7 +736,7 @@ def get_message_context(
             SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp < ?
+            WHERE messages.chat_jid = ? AND messages.timestamp < ? {deleted_filter}
             ORDER BY messages.timestamp DESC
             LIMIT ?
         """,
@@ -734,7 +751,7 @@ def get_message_context(
             SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp > ?
+            WHERE messages.chat_jid = ? AND messages.timestamp > ? {deleted_filter}
             ORDER BY messages.timestamp ASC
             LIMIT ?
         """,

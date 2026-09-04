@@ -191,6 +191,7 @@ def list_messages(
     context_before: int = 1,
     context_after: int = 1,
     sort_by: str = "newest",
+    include_deleted: bool = True,
 ) -> list[dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -215,6 +216,9 @@ def list_messages(
         context_after: Messages to include after each match (default 1)
         sort_by: "newest" (default, most recent first), "oldest" (chronological) or
                  "relevance" (best match for query first)
+        include_deleted: Revoked ("deleted for everyone") messages are kept in this
+                 archive with their original content and a deleted_at timestamp;
+                 they are returned by default. Pass False to hide them.
     """
     # Cap limit at 500 to prevent excessive queries
     limit = min(limit, 500)
@@ -230,6 +234,7 @@ def list_messages(
         context_before=context_before,
         context_after=context_after,
         sort_by=sort_by,
+        include_deleted=include_deleted,
     )
     return messages
 
