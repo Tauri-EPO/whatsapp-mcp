@@ -228,6 +228,16 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
 		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
+	// target_message_id: the message a reaction or poll vote refers to. Older
+	// rows kept that ID in `filename`; the migration below copies it over once
+	// and is a no-op afterwards (WHERE target_message_id IS NULL).
+	if err := ensureColumn(db, "messages", "target_message_id", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.target_message_id column: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE messages SET target_message_id = filename
+		WHERE media_type IN ('reaction', 'poll_vote') AND target_message_id IS NULL AND filename IS NOT NULL AND filename != ''`); err != nil {
+		return fmt.Errorf("failed to migrate target_message_id: %w", err)
+	}
 	if err := ensureColumn(db, "messages", "view_once", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("failed to ensure messages.view_once column: %w", err)
 	}
@@ -1994,6 +2004,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				"poll_vote", pollID, "", nil, nil, nil, 0, "",
 			); err != nil {
 				logger.Warnf("Failed to store poll vote: %v", err)
+			} else if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, pollID); err != nil {
+				logger.Warnf("Failed to set poll vote target: %v", err)
 			}
 		}
 		return
@@ -2018,6 +2030,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				"reaction", reactedToID, "", nil, nil, nil, 0, "",
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
+			} else if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
+				logger.Warnf("Failed to set reaction target: %v", err)
 			}
 			if b.ForwardSelf || !msg.Info.IsFromMe {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
@@ -2191,6 +2205,14 @@ type DownloadMediaResponse struct {
 	Message  string `json:"message"`
 	Filename string `json:"filename,omitempty"`
 	Path     string `json:"path,omitempty"`
+}
+
+// SetTargetMessageID records which message a reaction or poll vote refers to.
+// `filename` still carries the same value for one release so older readers
+// keep working; new readers use target_message_id.
+func (store *MessageStore) SetTargetMessageID(id, chatJID, target string) error {
+	_, err := store.db.Exec(`UPDATE messages SET target_message_id = ? WHERE id = ? AND chat_jid = ?`, target, id, chatJID)
+	return err
 }
 
 // Store additional media info in the database

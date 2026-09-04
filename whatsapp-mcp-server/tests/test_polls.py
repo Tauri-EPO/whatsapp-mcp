@@ -65,3 +65,15 @@ def test_get_poll_results_errors(monkeypatch):
     assert whatsapp.get_poll_results("", CHAT)["success"] is False
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
     assert "WHATSAPP_ALLOWED_CHATS" in whatsapp.get_poll_results("POLL1", CHAT)["message"]
+
+
+def test_target_message_id_preferred_over_legacy_filename():
+    legacy = _msg("reaction", "OLD")
+    assert msg_to_dict(legacy, include_sender_name=False)["reaction_to_message_id"] == "OLD"
+    migrated = _msg("poll_vote", "OLD")
+    migrated.target_message_id = "NEW"
+    d = msg_to_dict(migrated, include_sender_name=False)
+    assert d["poll_message_id"] == "NEW" and d["target_message_id"] == "NEW" and d["filename"] is None
+    plain = _msg("image", "photo.jpg")
+    d = msg_to_dict(plain, include_sender_name=False)
+    assert d["filename"] == "photo.jpg" and d["target_message_id"] is None
