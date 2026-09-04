@@ -151,7 +151,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must b
 |---|---|
 | Python Lint | `ruff check` + `ruff format --check` |
 | Python Tests | `pytest` |
-| Go Lint | golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`; more in issue #53) |
+| Go Lint | golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
 | Go Build | `go build -tags sqlite_fts5`, `go vet`, `go test` |
 | Version Consistency | `pyproject.toml` vs `server.json` (kept for file parity with upstream) |
 | CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |

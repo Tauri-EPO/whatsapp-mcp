@@ -18,7 +18,7 @@ func TestAcquireInstanceLock_RecordsPIDAndReleases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // temp file created by this test
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestAcquireInstanceLock_ReleasedWhenHolderDies(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), ".bridge.lock")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestAcquireInstanceLock_ReleasedWhenHolderDies$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAcquireInstanceLock_ReleasedWhenHolderDies$") //nolint:gosec // re-executes the test binary itself
 	cmd.Env = append(os.Environ(), "BRIDGE_LOCK_HELPER=1", "BRIDGE_LOCK_PATH="+path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("helper failed: %v\n%s", err, out)

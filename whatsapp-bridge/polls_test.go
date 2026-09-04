@@ -10,18 +10,18 @@ import (
 	"testing"
 	"time"
 
-	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
-func pollCreationMsg(question string, options ...string) *waProto.Message {
-	pc := &waProto.PollCreationMessage{Name: proto.String(question), SelectableOptionsCount: proto.Uint32(1)}
+func pollCreationMsg(question string, options ...string) *waE2E.Message {
+	pc := &waE2E.PollCreationMessage{Name: proto.String(question), SelectableOptionsCount: proto.Uint32(1)}
 	for _, o := range options {
-		pc.Options = append(pc.Options, &waProto.PollCreationMessage_Option{OptionName: proto.String(o)})
+		pc.Options = append(pc.Options, &waE2E.PollCreationMessage_Option{OptionName: proto.String(o)})
 	}
-	return &waProto.Message{PollCreationMessageV3: pc}
+	return &waE2E.Message{PollCreationMessageV3: pc}
 }
 
 func hashOf(s string) []byte {
@@ -30,7 +30,7 @@ func hashOf(s string) []byte {
 }
 
 func TestExtractPollCreationAndContent(t *testing.T) {
-	if extractPollCreation(&waProto.Message{Conversation: proto.String("hi")}) != nil {
+	if extractPollCreation(&waE2E.Message{Conversation: proto.String("hi")}) != nil {
 		t.Fatal("text message is not a poll")
 	}
 	p := extractPollCreation(pollCreationMsg("Almoço?", "Pizza", " Sushi ", ""))
@@ -145,9 +145,9 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 
 	vote := buildImageMessage(phonePN, phonePN, false, "")
 	vote.Info.ID = "VOTE1"
-	vote.Message = &waProto.Message{PollUpdateMessage: &waProto.PollUpdateMessage{
+	vote.Message = &waE2E.Message{PollUpdateMessage: &waE2E.PollUpdateMessage{
 		PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String("POLL1"), RemoteJID: proto.String(phonePN.String())},
-		Vote:                   &waProto.PollEncValue{EncPayload: []byte("x"), EncIV: []byte("y")},
+		Vote:                   &waE2E.PollEncValue{EncPayload: []byte("x"), EncIV: []byte("y")},
 	}}
 	b.handleMessage(vote)
 

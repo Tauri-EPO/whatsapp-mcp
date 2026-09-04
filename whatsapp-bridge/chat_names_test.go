@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
-	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -33,7 +35,7 @@ func TestGetChatName_GroupResolutionOrder(t *testing.T) {
 	}
 
 	t.Run("conversation name wins without network", func(t *testing.T) {
-		conv := &waProto.Conversation{ID: proto.String(jid.String()), Name: proto.String("From Sync")}
+		conv := &waHistorySync.Conversation{ID: proto.String(jid.String()), Name: proto.String("From Sync")}
 		if got := GetChatName(client, ms, jid, jid.String(), conv, "", false, logger); got != "From Sync" {
 			t.Fatalf("got %q", got)
 		}
@@ -50,7 +52,7 @@ func TestGetChatName_GroupResolutionOrder(t *testing.T) {
 
 	other := groupJID("120363000000000002")
 	t.Run("history sync without a name yields placeholder, no network", func(t *testing.T) {
-		if got := GetChatName(client, ms, other, other.String(), &waProto.Conversation{}, "", false, logger); got != "Group 120363000000000002" {
+		if got := GetChatName(client, ms, other, other.String(), &waHistorySync.Conversation{}, "", false, logger); got != "Group 120363000000000002" {
 			t.Fatalf("got %q", got)
 		}
 		if calls != 0 {
@@ -100,23 +102,23 @@ func TestHandleHistorySync_NeverFetchesGroupInfo(t *testing.T) {
 	}
 	logger := testLogger()
 
-	var conversations []*waProto.Conversation
+	var conversations []*waHistorySync.Conversation
 	for i := 1; i <= 3; i++ {
 		jid := groupJID("12036300000000000" + string(rune('0'+i)))
-		conversations = append(conversations, &waProto.Conversation{
+		conversations = append(conversations, &waHistorySync.Conversation{
 			ID: proto.String(jid.String()), // no Name on purpose
-			Messages: []*waProto.HistorySyncMsg{{
-				Message: &waProto.WebMessageInfo{
+			Messages: []*waHistorySync.HistorySyncMsg{{
+				Message: &waWeb.WebMessageInfo{
 					Key:              &waCommon.MessageKey{ID: proto.String("hist-" + jid.User), FromMe: proto.Bool(false), RemoteJID: proto.String(jid.String())},
 					Participant:      proto.String("5511888888888@s.whatsapp.net"),
-					MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
-					Message:          &waProto.Message{Conversation: proto.String("hello")},
+					MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())), //nolint:gosec // test fixture
+					Message:          &waE2E.Message{Conversation: proto.String("hello")},
 				},
 			}},
 		})
 	}
-	testBridge(client, ms, logger).handleHistorySync(&events.HistorySync{Data: &waProto.HistorySync{
-		SyncType: waProto.HistorySync_RECENT.Enum(), Conversations: conversations,
+	testBridge(client, ms, logger).handleHistorySync(&events.HistorySync{Data: &waHistorySync.HistorySync{
+		SyncType: waHistorySync.HistorySync_RECENT.Enum(), Conversations: conversations,
 	}})
 
 	var n int

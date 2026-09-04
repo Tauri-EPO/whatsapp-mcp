@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
@@ -86,7 +86,7 @@ func (c *chatNameCache) rememberGroupFailure(chatJID string, now time.Time) {
 }
 
 // conversationName extracts the name a history-sync conversation carries.
-func conversationName(conversation *waProto.Conversation) string {
+func conversationName(conversation *waHistorySync.Conversation) string {
 	if conversation == nil {
 		return ""
 	}
@@ -104,7 +104,7 @@ func placeholderGroupName(jid types.JID) string {
 // history-sync payload (nil for live messages); allowNetwork permits a group
 // metadata fetch through store.groupInfo. sender is the last-resort name for
 // direct chats.
-func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, chatJID string, conversation *waProto.Conversation, sender string, allowNetwork bool, logger waLog.Logger) string {
+func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, chatJID string, conversation *waHistorySync.Conversation, sender string, allowNetwork bool, logger waLog.Logger) string {
 	if store != nil {
 		if name, ok := store.names.get(chatJID); ok {
 			return name

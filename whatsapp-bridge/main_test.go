@@ -15,8 +15,10 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -419,49 +421,49 @@ func TestIsSelfReadReceipt(t *testing.T) {
 // from this so it doesn't depend on receiving a live EPHEMERAL_SETTING toggle
 // or a fresh history sync.
 func TestExtractChatEphemeralFromMessage(t *testing.T) {
-	ctx := &waProto.ContextInfo{
+	ctx := &waE2E.ContextInfo{
 		Expiration:                proto.Uint32(604800),
 		EphemeralSettingTimestamp: proto.Int64(1710000000),
 	}
 
 	cases := []struct {
 		name string
-		msg  *waProto.Message
+		msg  *waE2E.Message
 		want ChatEphemeralSettings
 	}{
 		{
 			name: "ExtendedTextMessage",
-			msg:  &waProto.Message{ExtendedTextMessage: &waProto.ExtendedTextMessage{ContextInfo: ctx}},
+			msg:  &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{ContextInfo: ctx}},
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
 			name: "ImageMessage",
-			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{ContextInfo: ctx}},
+			msg:  &waE2E.Message{ImageMessage: &waE2E.ImageMessage{ContextInfo: ctx}},
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
 			name: "VideoMessage",
-			msg:  &waProto.Message{VideoMessage: &waProto.VideoMessage{ContextInfo: ctx}},
+			msg:  &waE2E.Message{VideoMessage: &waE2E.VideoMessage{ContextInfo: ctx}},
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
 			name: "AudioMessage",
-			msg:  &waProto.Message{AudioMessage: &waProto.AudioMessage{ContextInfo: ctx}},
+			msg:  &waE2E.Message{AudioMessage: &waE2E.AudioMessage{ContextInfo: ctx}},
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
 			name: "DocumentMessage",
-			msg:  &waProto.Message{DocumentMessage: &waProto.DocumentMessage{ContextInfo: ctx}},
+			msg:  &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{ContextInfo: ctx}},
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
 			name: "StickerMessage",
-			msg:  &waProto.Message{StickerMessage: &waProto.StickerMessage{ContextInfo: ctx}},
+			msg:  &waE2E.Message{StickerMessage: &waE2E.StickerMessage{ContextInfo: ctx}},
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
 			name: "Conversation (no ContextInfo at all)",
-			msg:  &waProto.Message{Conversation: proto.String("plain text")},
+			msg:  &waE2E.Message{Conversation: proto.String("plain text")},
 			want: ChatEphemeralSettings{},
 		},
 		{
@@ -501,10 +503,10 @@ func TestHandleMessage_BackfillsEphemeralFromContextInfo(t *testing.T) {
 			ID:        "ephemeral-backfill-001",
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
-			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+		Message: &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 				Text: proto.String("hi from a disappearing chat"),
-				ContextInfo: &waProto.ContextInfo{
+				ContextInfo: &waE2E.ContextInfo{
 					Expiration:                proto.Uint32(604800),
 					EphemeralSettingTimestamp: proto.Int64(1710000000),
 				},
@@ -525,7 +527,7 @@ func TestHandleMessage_BackfillsEphemeralFromContextInfo(t *testing.T) {
 }
 
 func TestApplyChatEphemeralSettingsConvertsConversation(t *testing.T) {
-	msg := &waProto.Message{
+	msg := &waE2E.Message{
 		Conversation: proto.String("hello"),
 	}
 
@@ -549,7 +551,7 @@ func TestApplyChatEphemeralSettingsConvertsConversation(t *testing.T) {
 	if got := msg.GetExtendedTextMessage().GetContextInfo().GetEphemeralSettingTimestamp(); got != 1710000000 {
 		t.Fatalf("expected setting timestamp 1710000000, got %d", got)
 	}
-	if got := msg.GetExtendedTextMessage().GetContextInfo().GetDisappearingMode().GetTrigger(); got != waProto.DisappearingMode_CHAT_SETTING {
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetDisappearingMode().GetTrigger(); got != waE2E.DisappearingMode_CHAT_SETTING {
 		t.Fatalf("expected disappearing mode trigger CHAT_SETTING, got %v", got)
 	}
 }
@@ -590,7 +592,7 @@ func buildTextMessage(chat, sender, senderAlt, recipientAlt types.JID, isFromMe 
 			ID:        "test-msg-001",
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
+		Message: &waE2E.Message{
 			Conversation: proto.String(text),
 		},
 	}
@@ -1040,7 +1042,7 @@ func TestHandleMessage_GroupParticipantLID_ResolvedViaStore(t *testing.T) {
 			ID:        "test-group-001",
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
+		Message: &waE2E.Message{
 			Conversation: proto.String("group hello"),
 		},
 	}
@@ -1070,21 +1072,21 @@ func TestHandleHistorySync_LIDParticipant_ResolvedViaStore(t *testing.T) {
 	logger := testLogger()
 
 	historySync := &events.HistorySync{
-		Data: &waProto.HistorySync{
-			SyncType: waProto.HistorySync_RECENT.Enum(),
-			Conversations: []*waProto.Conversation{
+		Data: &waHistorySync.HistorySync{
+			SyncType: waHistorySync.HistorySync_RECENT.Enum(),
+			Conversations: []*waHistorySync.Conversation{
 				{
 					ID: proto.String(chatJID),
-					Messages: []*waProto.HistorySyncMsg{
+					Messages: []*waHistorySync.HistorySyncMsg{
 						{
-							Message: &waProto.WebMessageInfo{
+							Message: &waWeb.WebMessageInfo{
 								Key: &waCommon.MessageKey{
 									ID:          proto.String("hist-msg-001"),
 									FromMe:      proto.Bool(false),
 									Participant: proto.String(participantLID.String()),
 								},
-								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
-								Message: &waProto.Message{
+								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())), //nolint:gosec // test fixture
+								Message: &waE2E.Message{
 									Conversation: proto.String("history payload"),
 								},
 							},
@@ -1116,24 +1118,24 @@ func TestHandleHistorySync_TopLevelParticipant_IsStoredAsSender(t *testing.T) {
 	logger := testLogger()
 
 	historySync := &events.HistorySync{
-		Data: &waProto.HistorySync{
-			SyncType: waProto.HistorySync_RECENT.Enum(),
-			Conversations: []*waProto.Conversation{
+		Data: &waHistorySync.HistorySync{
+			SyncType: waHistorySync.HistorySync_RECENT.Enum(),
+			Conversations: []*waHistorySync.Conversation{
 				{
 					ID: proto.String(groupJID.String()),
 					// A name keeps GetChatName off the network (no GetGroupInfo call).
 					Name: proto.String("Test Group"),
-					Messages: []*waProto.HistorySyncMsg{
+					Messages: []*waHistorySync.HistorySyncMsg{
 						{
-							Message: &waProto.WebMessageInfo{
+							Message: &waWeb.WebMessageInfo{
 								Key: &waCommon.MessageKey{
 									ID:        proto.String("hist-group-001"),
 									FromMe:    proto.Bool(false),
 									RemoteJID: proto.String(groupJID.String()),
 								},
 								Participant:      proto.String(participant.String()),
-								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
-								Message: &waProto.Message{
+								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())), //nolint:gosec // test fixture
+								Message: &waE2E.Message{
 									Conversation: proto.String("who said this?"),
 								},
 							},
@@ -1254,47 +1256,47 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MissingWhatsAppDBIsNoOp(t *testing.T) 
 func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 	cases := []struct {
 		name string
-		msg  *waProto.Message
+		msg  *waE2E.Message
 		want string
 	}{
 		{
 			name: "Conversation",
-			msg:  &waProto.Message{Conversation: proto.String("hola")},
+			msg:  &waE2E.Message{Conversation: proto.String("hola")},
 			want: "hola",
 		},
 		{
 			name: "ExtendedTextMessage",
-			msg: &waProto.Message{
-				ExtendedTextMessage: &waProto.ExtendedTextMessage{Text: proto.String("quoted reply")},
+			msg: &waE2E.Message{
+				ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("quoted reply")},
 			},
 			want: "quoted reply",
 		},
 		{
 			name: "ImageMessage with caption",
-			msg: &waProto.Message{
-				ImageMessage: &waProto.ImageMessage{Caption: proto.String("sunset on the beach")},
+			msg: &waE2E.Message{
+				ImageMessage: &waE2E.ImageMessage{Caption: proto.String("sunset on the beach")},
 			},
 			want: "sunset on the beach",
 		},
 		{
 			name: "VideoMessage with caption",
-			msg: &waProto.Message{
-				VideoMessage: &waProto.VideoMessage{Caption: proto.String("the kids playing")},
+			msg: &waE2E.Message{
+				VideoMessage: &waE2E.VideoMessage{Caption: proto.String("the kids playing")},
 			},
 			want: "the kids playing",
 		},
 		{
 			name: "DocumentMessage with caption",
-			msg: &waProto.Message{
-				DocumentMessage: &waProto.DocumentMessage{Caption: proto.String("invoice attached")},
+			msg: &waE2E.Message{
+				DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String("invoice attached")},
 			},
 			want: "invoice attached",
 		},
 		{
 			name: "TemplateMessage with hydrated content text",
-			msg: &waProto.Message{
-				TemplateMessage: &waProto.TemplateMessage{
-					HydratedTemplate: &waProto.TemplateMessage_HydratedFourRowTemplate{
+			msg: &waE2E.Message{
+				TemplateMessage: &waE2E.TemplateMessage{
+					HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
 						HydratedContentText: proto.String("template body"),
 					},
 				},
@@ -1303,41 +1305,41 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ButtonsMessage with content text",
-			msg: &waProto.Message{
-				ButtonsMessage: &waProto.ButtonsMessage{ContentText: proto.String("buttons body")},
+			msg: &waE2E.Message{
+				ButtonsMessage: &waE2E.ButtonsMessage{ContentText: proto.String("buttons body")},
 			},
 			want: "buttons body",
 		},
 		{
 			name: "ButtonsMessage with header text",
-			msg: &waProto.Message{
-				ButtonsMessage: &waProto.ButtonsMessage{
-					Header: &waProto.ButtonsMessage_Text{Text: "buttons fallback"},
+			msg: &waE2E.Message{
+				ButtonsMessage: &waE2E.ButtonsMessage{
+					Header: &waE2E.ButtonsMessage_Text{Text: "buttons fallback"},
 				},
 			},
 			want: "buttons fallback",
 		},
 		{
 			name: "InteractiveMessage with body text",
-			msg: &waProto.Message{
-				InteractiveMessage: &waProto.InteractiveMessage{
-					Body: &waProto.InteractiveMessage_Body{Text: proto.String("interactive body")},
+			msg: &waE2E.Message{
+				InteractiveMessage: &waE2E.InteractiveMessage{
+					Body: &waE2E.InteractiveMessage_Body{Text: proto.String("interactive body")},
 				},
 			},
 			want: "interactive body",
 		},
 		{
 			name: "ListMessage with description",
-			msg: &waProto.Message{
-				ListMessage: &waProto.ListMessage{Description: proto.String("choose an option")},
+			msg: &waE2E.Message{
+				ListMessage: &waE2E.ListMessage{Description: proto.String("choose an option")},
 			},
 			want: "choose an option",
 		},
 		{
 			name: "ButtonsResponseMessage with selected display text",
-			msg: &waProto.Message{
-				ButtonsResponseMessage: &waProto.ButtonsResponseMessage{
-					Response: &waProto.ButtonsResponseMessage_SelectedDisplayText{
+			msg: &waE2E.Message{
+				ButtonsResponseMessage: &waE2E.ButtonsResponseMessage{
+					Response: &waE2E.ButtonsResponseMessage_SelectedDisplayText{
 						SelectedDisplayText: "selected display",
 					},
 				},
@@ -1346,8 +1348,8 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "TemplateButtonReplyMessage with selected display text",
-			msg: &waProto.Message{
-				TemplateButtonReplyMessage: &waProto.TemplateButtonReplyMessage{
+			msg: &waE2E.Message{
+				TemplateButtonReplyMessage: &waE2E.TemplateButtonReplyMessage{
 					SelectedDisplayText: proto.String("template selection"),
 				},
 			},
@@ -1355,13 +1357,13 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ImageMessage without caption returns empty",
-			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{}},
+			msg:  &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}},
 			want: "",
 		},
 		{
 			name: "ContactMessage with phone number in vCard",
-			msg: &waProto.Message{
-				ContactMessage: &waProto.ContactMessage{
+			msg: &waE2E.Message{
+				ContactMessage: &waE2E.ContactMessage{
 					DisplayName: proto.String("John Doe"),
 					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nN:;John Doe;;;\nFN:John Doe\n" +
 						"TEL;type=CELL;waid=6281234567890:+62 812-3456-7890\nEND:VCARD"),
@@ -1371,8 +1373,8 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ContactMessage with iPhone-style grouped TEL property",
-			msg: &waProto.Message{
-				ContactMessage: &waProto.ContactMessage{
+			msg: &waE2E.Message{
+				ContactMessage: &waE2E.ContactMessage{
 					DisplayName: proto.String("Adie Taxi"),
 					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Adie Taxi\n" +
 						"item1.TEL;waid=6281338417222:+62 813-3841-7222\nitem1.X-ABLabel:Mobil\nEND:VCARD"),
@@ -1382,8 +1384,8 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ContactMessage with multiple TEL lines keeps every number",
-			msg: &waProto.Message{
-				ContactMessage: &waProto.ContactMessage{
+			msg: &waE2E.Message{
+				ContactMessage: &waE2E.ContactMessage{
 					DisplayName: proto.String("John Doe"),
 					Vcard: proto.String("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Doe\r\n" +
 						"TEL;type=CELL:+62 812-3456-7890\r\nTEL;type=WORK:+47 22 33 44 55\r\nEND:VCARD"),
@@ -1393,8 +1395,8 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ContactMessage without a TEL line falls back to name only",
-			msg: &waProto.Message{
-				ContactMessage: &waProto.ContactMessage{
+			msg: &waE2E.Message{
+				ContactMessage: &waE2E.ContactMessage{
 					DisplayName: proto.String("Jane Doe"),
 					Vcard:       proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\nEND:VCARD"),
 				},
@@ -1403,8 +1405,8 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ContactMessage with neither name nor TEL returns empty (no placeholder row)",
-			msg: &waProto.Message{
-				ContactMessage: &waProto.ContactMessage{
+			msg: &waE2E.Message{
+				ContactMessage: &waE2E.ContactMessage{
 					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nEND:VCARD"),
 				},
 			},
@@ -1412,10 +1414,10 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ContactsArrayMessage with multiple shared contacts",
-			msg: &waProto.Message{
-				ContactsArrayMessage: &waProto.ContactsArrayMessage{
+			msg: &waE2E.Message{
+				ContactsArrayMessage: &waE2E.ContactsArrayMessage{
 					DisplayName: proto.String("2 contacts"),
-					Contacts: []*waProto.ContactMessage{
+					Contacts: []*waE2E.ContactMessage{
 						{
 							DisplayName: proto.String("John Doe"),
 							Vcard:       proto.String("BEGIN:VCARD\nTEL;waid=1:+1 111\nEND:VCARD"),
@@ -1431,8 +1433,8 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 		},
 		{
 			name: "ContactsArrayMessage with no contacts returns empty (no placeholder row)",
-			msg: &waProto.Message{
-				ContactsArrayMessage: &waProto.ContactsArrayMessage{
+			msg: &waE2E.Message{
+				ContactsArrayMessage: &waE2E.ContactsArrayMessage{
 					DisplayName: proto.String("0 contacts"),
 				},
 			},
@@ -1465,8 +1467,8 @@ func TestExtractMediaInfo_Sticker(t *testing.T) {
 	encSha := []byte{0xcc, 0xdd}
 	var length uint64 = 660
 
-	msg := &waProto.Message{
-		StickerMessage: &waProto.StickerMessage{
+	msg := &waE2E.Message{
+		StickerMessage: &waE2E.StickerMessage{
 			URL:           proto.String(url),
 			MediaKey:      mediaKey,
 			FileSHA256:    sha,
@@ -1502,7 +1504,7 @@ func TestExtractMediaInfo_Sticker(t *testing.T) {
 }
 
 func TestExtractMediaInfo_NoMediaReturnsEmpty(t *testing.T) {
-	msg := &waProto.Message{Conversation: proto.String("plain text, not media")}
+	msg := &waE2E.Message{Conversation: proto.String("plain text, not media")}
 	gotType, gotFile, gotURL, gotKey, _, _, gotLen := extractMediaInfo(msg, time.Unix(1710000000, 0), "X")
 	if gotType != "" || gotFile != "" || gotURL != "" || gotKey != nil || gotLen != 0 {
 		t.Errorf("non-media should return empty: type=%q file=%q url=%q keyLen=%d len=%d",
@@ -1586,7 +1588,7 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(
 // with no download metadata (URL/media-key are empty), so handleMessage will
 // classify it as an image but skip the synchronous download attempt.
 func buildImageMessage(chat, sender types.JID, isFromMe bool, caption string) *events.Message {
-	img := &waProto.ImageMessage{}
+	img := &waE2E.ImageMessage{}
 	if caption != "" {
 		img.Caption = proto.String(caption)
 	}
@@ -1600,7 +1602,7 @@ func buildImageMessage(chat, sender types.JID, isFromMe bool, caption string) *e
 			ID:        "test-img-001",
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{ImageMessage: img},
+		Message: &waE2E.Message{ImageMessage: img},
 	}
 }
 
@@ -1998,7 +2000,7 @@ func TestCallChatJID_Precedence(t *testing.T) {
 // this to drive handleMessage end-to-end rather than reaching into
 // internal helpers.
 func revokeEvent(targetID string, ts time.Time) *events.Message {
-	revokeType := waProto.ProtocolMessage_REVOKE
+	revokeType := waE2E.ProtocolMessage_REVOKE
 	return &events.Message{
 		Info: types.MessageInfo{
 			MessageSource: types.MessageSource{
@@ -2009,8 +2011,8 @@ func revokeEvent(targetID string, ts time.Time) *events.Message {
 			ID:        "carrier-" + targetID,
 			Timestamp: ts,
 		},
-		Message: &waProto.Message{
-			ProtocolMessage: &waProto.ProtocolMessage{
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
 				Type: &revokeType,
 				Key: &waCommon.MessageKey{
 					RemoteJID: proto.String(phonePN.String()),
@@ -2141,7 +2143,7 @@ func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
 			ID:            targetID,
 			Timestamp:     time.Unix(1710000020, 0),
 		},
-		Message: &waProto.Message{Conversation: proto.String("replayed original")},
+		Message: &waE2E.Message{Conversation: proto.String("replayed original")},
 	}
 	testBridge(client, ms, testLogger()).handleMessage(replayedOriginal)
 
@@ -2176,8 +2178,8 @@ func buildReactionMessage(chat, sender types.JID, isFromMe bool, reactedToID, em
 			ID:        "react-" + reactedToID,
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
-			ReactionMessage: &waProto.ReactionMessage{
+		Message: &waE2E.Message{
+			ReactionMessage: &waE2E.ReactionMessage{
 				Key: &waCommon.MessageKey{
 					RemoteJID: proto.String(chat.String()),
 					ID:        proto.String(reactedToID),
@@ -2389,8 +2391,8 @@ func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
 			ID:        "react-no-key",
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
-			ReactionMessage: &waProto.ReactionMessage{
+		Message: &waE2E.Message{
+			ReactionMessage: &waE2E.ReactionMessage{
 				Key:  nil, // no key — no reacted-to ID
 				Text: proto.String("👍"),
 			},
@@ -2692,7 +2694,7 @@ func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 			ID:            "REGULAR_MSG",
 			Timestamp:     time.Unix(1710000010, 0),
 		},
-		Message: &waProto.Message{Conversation: proto.String("just a normal hello")},
+		Message: &waE2E.Message{Conversation: proto.String("just a normal hello")},
 	}
 	testBridge(client, ms, testLogger()).handleMessage(regular)
 
@@ -2741,13 +2743,13 @@ func TestHandleMessage_QuotedReply_IDPersisted(t *testing.T) {
 			ID:        replyID,
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
-			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+		Message: &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 				Text: proto.String("Great point!"),
-				ContextInfo: &waProto.ContextInfo{
+				ContextInfo: &waE2E.ContextInfo{
 					StanzaID:      proto.String(targetID),
 					Participant:   proto.String(phonePN.String()),
-					QuotedMessage: &waProto.Message{Conversation: proto.String("original text")},
+					QuotedMessage: &waE2E.Message{Conversation: proto.String("original text")},
 				},
 			},
 		},
@@ -2783,7 +2785,7 @@ func TestHandleMessage_PlainMessage_QuotedIDIsNull(t *testing.T) {
 			ID:        msgID,
 			Timestamp: time.Now(),
 		},
-		Message: &waProto.Message{
+		Message: &waE2E.Message{
 			Conversation: proto.String("just a plain message"),
 		},
 	}
@@ -2824,13 +2826,13 @@ func TestExtractQuotedMessageInfo_ExtendedText(t *testing.T) {
 	participant := "15551234567@s.whatsapp.net"
 	quotedText := "the original message"
 
-	msg := &waProto.Message{
-		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+	msg := &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text: proto.String("my reply"),
-			ContextInfo: &waProto.ContextInfo{
+			ContextInfo: &waE2E.ContextInfo{
 				StanzaID:      proto.String(stanzaID),
 				Participant:   proto.String(participant),
-				QuotedMessage: &waProto.Message{Conversation: proto.String(quotedText)},
+				QuotedMessage: &waE2E.Message{Conversation: proto.String(quotedText)},
 			},
 		},
 	}
@@ -2848,9 +2850,9 @@ func TestExtractQuotedMessageInfo_ExtendedText(t *testing.T) {
 }
 
 func TestExtractMentionedJIDs_ExtendedText(t *testing.T) {
-	msg := &waProto.Message{
-		ExtendedTextMessage: &waProto.ExtendedTextMessage{
-			ContextInfo: &waProto.ContextInfo{
+	msg := &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			ContextInfo: &waE2E.ContextInfo{
 				MentionedJID: []string{"491742555497@s.whatsapp.net"},
 			},
 		},
@@ -2885,9 +2887,9 @@ func TestGetMessageIsFromMe(t *testing.T) {
 func TestExtractQuotedMessageInfo_NoContextInfo(t *testing.T) {
 	cases := []struct {
 		name string
-		msg  *waProto.Message
+		msg  *waE2E.Message
 	}{
-		{"plain conversation", &waProto.Message{Conversation: proto.String("hello")}},
+		{"plain conversation", &waE2E.Message{Conversation: proto.String("hello")}},
 		{"nil message", nil},
 	}
 

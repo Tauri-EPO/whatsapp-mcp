@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -65,12 +65,12 @@ type pollCreation struct {
 }
 
 // extractPollCreation returns the poll if msg carries one (any proto version).
-func extractPollCreation(msg *waProto.Message) *pollCreation {
+func extractPollCreation(msg *waE2E.Message) *pollCreation {
 	if msg == nil {
 		return nil
 	}
-	var pc *waProto.PollCreationMessage
-	for _, candidate := range []*waProto.PollCreationMessage{
+	var pc *waE2E.PollCreationMessage
+	for _, candidate := range []*waE2E.PollCreationMessage{
 		msg.GetPollCreationMessage(), msg.GetPollCreationMessageV2(), msg.GetPollCreationMessageV3(),
 		msg.GetPollCreationMessageV5(), msg.GetPollCreationMessageV6(),
 	} {

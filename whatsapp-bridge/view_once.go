@@ -16,16 +16,16 @@ package main
 import (
 	"strings"
 
-	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 )
 
 // unwrapViewOnce returns the inner message when msg is a view-once envelope,
 // or msg itself otherwise. The second value reports whether it was wrapped.
-func unwrapViewOnce(msg *waProto.Message) (*waProto.Message, bool) {
+func unwrapViewOnce(msg *waE2E.Message) (*waE2E.Message, bool) {
 	if msg == nil {
 		return nil, false
 	}
-	for _, env := range []*waProto.FutureProofMessage{
+	for _, env := range []*waE2E.FutureProofMessage{
 		msg.GetViewOnceMessage(), msg.GetViewOnceMessageV2(), msg.GetViewOnceMessageV2Extension(),
 	} {
 		if env != nil && env.GetMessage() != nil {

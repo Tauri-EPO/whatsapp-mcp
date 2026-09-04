@@ -112,7 +112,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData)) //nolint:gosec // WEBHOOK_URL is operator configuration, not request input
 	if err != nil {
 		fmt.Printf("Error building webhook request: %v\n", err)
 		return
@@ -129,7 +129,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 		req.Header.Set("X-Bridge-Token", w.token)
 	}
 
-	resp, err := w.client.Do(req)
+	resp, err := w.client.Do(req) //nolint:gosec // operator-configured destination, redirects disabled
 	if err != nil {
 		fmt.Printf("Error sending webhook: %v\n", err)
 		return
@@ -188,7 +188,7 @@ func (w *webhookSender) SendWebhookWithMedia(
 			fmt.Printf("⚠ Could not stat media file for base64 encoding: %v\n", statErr)
 		} else if info.Size() > maxMediaBase64Bytes {
 			fmt.Printf("⚠ Media file too large for base64 encoding (%d bytes), skipping MediaBase64\n", info.Size())
-		} else if data, err := os.ReadFile(localPath); err == nil {
+		} else if data, err := os.ReadFile(localPath); err == nil { //nolint:gosec // localPath comes from downloadMedia inside the store directory
 			mediaBase64 = base64.StdEncoding.EncodeToString(data)
 		} else {
 			fmt.Printf("⚠ Could not read media file for base64 encoding: %v\n", err)
