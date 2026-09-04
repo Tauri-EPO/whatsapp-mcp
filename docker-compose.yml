@@ -58,6 +58,8 @@ services:
       # Bearer token clients must send to /mcp. Leave empty only for a
       # loopback/tailnet-only listener; mandatory before any Funnel exposure.
       WHATSAPP_MCP_TOKEN: ${WHATSAPP_MCP_TOKEN:-}
+      WHATSAPP_MCP_RATE_LIMIT: ${WHATSAPP_MCP_RATE_LIMIT:-}
+      WHATSAPP_MCP_MAX_BODY_BYTES: ${WHATSAPP_MCP_MAX_BODY_BYTES:-}
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
       WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
