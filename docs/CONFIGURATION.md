@@ -18,6 +18,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir)                      |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir) |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
+| `WHATSAPP_BRIDGE_TIMEOUT_S` | `30`                                | Timeout for each MCP → bridge call; media upload/download use 120 s. Connection errors are retried twice, read timeouts are not |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable) |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand |
