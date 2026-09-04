@@ -548,13 +548,15 @@ func testLogger() waLog.Logger {
 // PollVoteDecrypt, ForwardSelf) instead of touching package state.
 func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger) *Bridge {
 	b := &Bridge{
-		Client:      client,
-		Store:       ms,
-		Log:         logger,
-		ForwardSelf: true,
-		Webhook:     newWebhookSender(""),
-		origTimes:   newOriginalTimestamps(),
-		mediaRetry:  newMediaRetryHub(),
+		Client:            client,
+		Store:             ms,
+		Log:               logger,
+		ForwardSelf:       true,
+		MediaAutoDownload: true,
+		Webhook:           newWebhookSender(""),
+		origTimes:         newOriginalTimestamps(),
+		mediaRetry:        newMediaRetryHub(),
+		storeStats:        newStoreStats(storeDir()),
 	}
 	b.DownloadMedia = b.downloadMedia
 	return b

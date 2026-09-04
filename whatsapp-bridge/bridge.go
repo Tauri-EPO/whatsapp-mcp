@@ -33,6 +33,8 @@ type Bridge struct {
 	DownloadMedia mediaDownloader
 	// ForwardSelf forwards self-sent messages to the webhook (FORWARD_SELF).
 	ForwardSelf bool
+	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
+	MediaAutoDownload bool
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
 	// RESTBind is the REST listen address (WHATSAPP_BRIDGE_BIND, default 127.0.0.1).
@@ -46,23 +48,27 @@ type Bridge struct {
 	mediaRetry *mediaRetryHub
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
+	// storeStats caches store/media sizes for /api/health (see media_retention.go).
+	storeStats *storeStats
 }
 
 // newBridge wires the production dependencies from a live client and store.
 // bridgeToken is the REST bearer token, also attached to outbound webhooks.
 func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string) *Bridge {
 	b := &Bridge{
-		Client:          client,
-		Store:           store,
-		Log:             logger,
-		Policy:          loadChatPolicy(),
-		PollVoteDecrypt: whatsmeowPollVoteDecrypter(client),
-		ForwardSelf:     getEnvBool("FORWARD_SELF", true),
-		Webhook:         newWebhookSender(bridgeToken),
-		RESTBind:        defaultBridgeBind,
-		origTimes:       newOriginalTimestamps(),
-		mediaRetry:      newMediaRetryHub(),
-		startedAt:       time.Now(),
+		Client:            client,
+		Store:             store,
+		Log:               logger,
+		Policy:            loadChatPolicy(),
+		PollVoteDecrypt:   whatsmeowPollVoteDecrypter(client),
+		ForwardSelf:       getEnvBool("FORWARD_SELF", true),
+		MediaAutoDownload: getEnvBool(mediaAutoDownloadEnv, true),
+		Webhook:           newWebhookSender(bridgeToken),
+		RESTBind:          defaultBridgeBind,
+		origTimes:         newOriginalTimestamps(),
+		mediaRetry:        newMediaRetryHub(),
+		startedAt:         time.Now(),
+		storeStats:        newStoreStats(storeDir()),
 	}
 	b.DownloadMedia = b.downloadMedia
 	return b
