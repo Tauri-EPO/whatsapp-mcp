@@ -41,6 +41,7 @@ USER app
 VOLUME ["/app/store"]
 
 ENV WHATSAPP_BRIDGE_PORT=8080 \
+    WHATSAPP_STORE_DIR=/app/store \
     WHATSAPP_MEDIA_ROOTS=/app/outbox
 
 EXPOSE 8080

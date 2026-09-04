@@ -28,9 +28,8 @@ import (
 	"strings"
 )
 
-// instanceLockPath is relative to the bridge's working directory, like every
-// other store/ path in this program.
-const instanceLockPath = "store/.bridge.lock"
+// The lock file lives at instanceLockPath() inside the store directory (see
+// store_dir.go).
 
 // errInstanceLocked is returned by acquireInstanceLock when another process
 // already holds the lock.

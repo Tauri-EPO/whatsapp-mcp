@@ -47,8 +47,6 @@ import (
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
-const whatsmeowDBPath = "store/whatsapp.db"
-
 // getEnvBool reads a boolean env var with a default.
 // Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
 func getEnvBool(key string, def bool) bool {
@@ -100,15 +98,15 @@ type ChatEphemeralSettings struct {
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
-		return nil, fmt.Errorf("failed to create store directory: %v", err)
+	if err := os.MkdirAll(storeDir(), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create store directory %q: %v", storeDir(), err)
 	}
 
 	// Open SQLite database for messages
 	// WAL lets the MCP server read messages.db while the bridge writes (a
 	// history-sync burst used to make readers hit SQLITE_BUSY), and the busy
 	// timeout makes both sides wait instead of failing on a short lock.
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", sqliteURI(messagesDBPath(), "_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -169,7 +167,7 @@ func NewMessageStore() (*MessageStore, error) {
 
 	// Open whatsmeow's database read-only for contact name resolution fallback.
 	// Missing DBs are expected on first run and should not create a new file.
-	waDB, err := openWhatsmeowContactsDB(whatsmeowDBPath)
+	waDB, err := openWhatsmeowContactsDB(whatsmeowDBPath())
 	if err != nil {
 		fmt.Printf("Warning: could not open whatsmeow database for contact resolution: %v\n", err)
 	}
@@ -2329,7 +2327,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	filename := fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
 
 	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := storePath(strings.ReplaceAll(chatJID, ":", "_"))
 
 	// Create directory for the chat if it doesn't exist
 	if err := os.MkdirAll(chatDir, 0755); err != nil {
@@ -2337,7 +2335,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	}
 
 	// Generate a local path for the file
-	localPath := fmt.Sprintf("%s/%s", chatDir, filename)
+	localPath := filepath.Join(chatDir, filename)
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
@@ -2941,16 +2939,19 @@ func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
-		logger.Errorf("Failed to create store directory: %v", err)
+	if err := os.MkdirAll(storeDir(), 0755); err != nil {
+		logger.Errorf("Failed to create store directory %q: %v", storeDir(), err)
 		return
+	}
+	if abs, err := filepath.Abs(storeDir()); err == nil {
+		logger.Infof("Store directory: %s", abs)
 	}
 
 	// Refuse to run alongside another bridge on the same store. Two processes
 	// sharing one WhatsApp session evict each other forever (StreamReplaced)
 	// and neither persists messages reliably. Must happen before the session
 	// database is opened or WhatsApp is dialled. See instance_lock.go.
-	lock, lockErr := acquireInstanceLock(instanceLockPath)
+	lock, lockErr := acquireInstanceLock(instanceLockPath())
 	if lockErr != nil {
 		logger.Errorf("Refusing to start: %v", lockErr)
 		logger.Errorf("Stop the other bridge (or point this one at a different store directory) and retry.")
@@ -2958,7 +2959,7 @@ func main() {
 	}
 	defer lock.Release()
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", sqliteURI(whatsmeowDBPath(), "_foreign_keys=on"), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
@@ -3032,12 +3033,12 @@ func main() {
 	messageStore.groupInfo = client.GetGroupInfo
 	defer func() { _ = messageStore.Close() }()
 
-	if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs("store/whatsapp.db", logger); err != nil {
+	if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs(whatsmeowDBPath(), logger); err != nil {
 		logger.Errorf("Failed to migrate legacy LID chat rows: %v", err)
 		return
 	}
 
-	if err := messageStore.MigrateLegacyLIDSendersToPhones("store/whatsapp.db", logger); err != nil {
+	if err := messageStore.MigrateLegacyLIDSendersToPhones(whatsmeowDBPath(), logger); err != nil {
 		logger.Errorf("Failed to migrate legacy LID sender rows: %v", err)
 		return
 	}

@@ -17,8 +17,12 @@ from chat_policy import load_chat_policy
 # transport stdout is the MCP protocol channel and stray output breaks it.
 logger = logging.getLogger("whatsapp_mcp")
 
-# Configuration via environment variables with sensible defaults
-_DEFAULT_BRIDGE_STORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store")
+# Configuration via environment variables with sensible defaults. The bridge's
+# WHATSAPP_STORE_DIR, when set, locates both databases; the explicit *_DB_PATH
+# variables still win.
+_DEFAULT_BRIDGE_STORE_DIR = (os.getenv("WHATSAPP_STORE_DIR") or "").strip() or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store"
+)
 MESSAGES_DB_PATH = os.getenv(
     "WHATSAPP_DB_PATH",
     os.path.join(_DEFAULT_BRIDGE_STORE_DIR, "messages.db"),

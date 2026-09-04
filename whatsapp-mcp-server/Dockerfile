@@ -35,8 +35,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     WHATSAPP_MCP_TRANSPORT=http \
     WHATSAPP_MCP_HOST=0.0.0.0 \
     WHATSAPP_MCP_PORT=8000 \
-    WHATSAPP_DB_PATH=/app/store/messages.db \
-    WHATSMEOW_DB_PATH=/app/store/whatsapp.db \
+    WHATSAPP_STORE_DIR=/app/store \
     WHATSAPP_API_URL=http://127.0.0.1:8080/api
 
 EXPOSE 8000
