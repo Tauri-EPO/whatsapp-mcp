@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -559,6 +560,7 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 		storeStats:        newStoreStats(storeDir()),
 	}
 	b.DownloadMedia = b.downloadMedia
+	b.Exit = func(reason string, code int) { panic(fmt.Sprintf("unexpected Exit(%d): %s", code, reason)) }
 	return b
 }
 

@@ -230,6 +230,14 @@ func main() {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken)
+	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
+	// the store is closed and the lock released before the supervisor restarts us.
+	bridge.Exit = func(reason string, code int) {
+		logger.Errorf("%s", reason)
+		_ = messageStore.Close()
+		lock.Release()
+		os.Exit(code)
+	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 
 	// Resolve the allow-listed roots that media_path values in /api/send must

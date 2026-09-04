@@ -195,6 +195,10 @@ works as before.
   `whatsapp.db`, downloaded media and `.bridge-token`. Stop the stack before
   copying it (`docker compose stop`), or snapshot the volume with your usual
   tooling.
+- If the phone unlinks the device (WhatsApp > Linked Devices > Log out) or
+  WhatsApp rejects the client version as outdated, the bridge exits (code 3
+  or 4) instead of idling; `restart: unless-stopped` brings it back into the
+  pairing flow and `docker compose logs -f bridge` shows a fresh QR code.
 - Only one bridge may use a session at a time. Do not run the compose stack
   and a laptop bridge against the same store, and do not pair the same phone
   twice with two different stores: WhatsApp will keep replacing the stream.

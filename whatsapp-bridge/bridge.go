@@ -11,6 +11,7 @@ package main
 // timestamp registry) is tracked separately in issue #47.
 
 import (
+	"os"
 	"sync"
 	"time"
 
@@ -38,6 +39,10 @@ type Bridge struct {
 	MediaAutoDownload bool
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
+	// Exit terminates the process for conditions the bridge cannot recover from in-place
+	// (device logged out, client outdated); main() wires it to a clean os.Exit so the
+	// supervisor restarts into the pairing path. Tests inject a recorder.
+	Exit func(reason string, code int)
 	// RESTBind is the REST listen address (WHATSAPP_BRIDGE_BIND, default 127.0.0.1).
 	RESTBind string
 	// RESTAllowedHosts is the raw WHATSAPP_BRIDGE_ALLOWED_HOSTS value (see rest_bind.go).
@@ -74,5 +79,9 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		storeStats:        newStoreStats(storeDir()),
 	}
 	b.DownloadMedia = b.downloadMedia
+	b.Exit = func(reason string, code int) {
+		logger.Errorf("%s", reason)
+		os.Exit(code)
+	}
 	return b
 }
