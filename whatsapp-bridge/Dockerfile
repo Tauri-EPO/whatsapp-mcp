@@ -46,9 +46,9 @@ ENV WHATSAPP_BRIDGE_PORT=8080 \
 
 EXPOSE 8080
 
-# Healthy only while the WhatsApp connection is up (GET /api/health -> 200).
-# During first-run QR pairing the container therefore shows "unhealthy" until
-# the code is scanned; that is expected.
+# Liveness: GET /api/health -> 200 as soon as the REST server is up (also while
+# waiting for the QR scan). Connection state is in the body; /api/ready is the
+# readiness probe.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/usr/local/bin/bridge-healthcheck"]
 

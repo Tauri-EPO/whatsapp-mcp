@@ -1,9 +1,9 @@
 #!/bin/sh
 # Container healthcheck for the Go bridge.
 #
-# /api/health requires the bridge bearer token and answers 200 only while the
-# WhatsApp connection is up (503 otherwise), so a failing check means either
-# "REST not answering" or "WhatsApp disconnected / not paired yet".
+# /api/health (bearer token required) answers 200 as soon as the REST server
+# is up, even while waiting for the QR scan; the body carries connected/paired.
+# Use /api/ready when you need "WhatsApp is connected" semantics.
 set -eu
 
 port="${WHATSAPP_BRIDGE_PORT:-8080}"

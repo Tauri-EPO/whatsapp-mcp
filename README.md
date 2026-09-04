@@ -918,7 +918,7 @@ flowchart LR
         REACT["/api/react"]
         TYPE["/api/typing"]
         HIST["/api/history"]
-        HEALTH["/api/health"]
+        HEALTH["/api/health, /api/ready"]
     end
 
     subgraph MCPTools["MCP Tools (15 total)"]
