@@ -35,7 +35,7 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
 - **Dependencies move here first.** Dependabot stays on; its PRs are merged once CI is green. Never pin a dependency just because upstream did (`mcp<2` and `cryptography<49` were both dropped).
 - **Refactors are allowed.** The current plan is the "fork hardening" epic (issue #64). Keep each PR small (§4) even when the overall change is large.
 - **Upstream is a source of ideas and cherry-picks, never a merge target.** When asked to "look upstream", "get ideas from the original", "check what VGP/lharries did", do this:
-  1. `git fetch upstream lharries` and `git log --oneline main..upstream/main -- whatsapp-bridge/` (protocol/whatsmeow changes are the most valuable to harvest).
+  1. `scripts/upstream-harvest.sh` — fetches both remotes and prints the bridge/server commits since the last harvest (`.upstream-harvest`) plus their open PRs and issues; `--all` ignores the marks. After reviewing, `scripts/upstream-harvest.sh --mark` records the new heads. (Manual equivalent: `git log --oneline main..upstream/main -- whatsapp-bridge/`; protocol/whatsmeow changes are the most valuable to harvest.)
   2. `gh pr list --repo verygoodplugins/whatsapp-mcp --state all --search "<topic>"` and the same on `lharries/whatsapp-mcp`; read the PR description first — it usually explains the WhatsApp behaviour better than the diff.
   3. Reimplement the delta against our code (`git cherry-pick -x <sha>` only when the patch applies cleanly to files we have not diverged in). Credit the source in the commit body ("Reimplements upstream VGP #NNN"), as every PR in this repo has done so far.
   4. Do not bring upstream's release-please, CHANGELOG or version bumps.
