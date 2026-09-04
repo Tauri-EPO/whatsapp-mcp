@@ -148,10 +148,12 @@ class Message:
     chat_name: str | None = None
     media_type: str | None = None
     # Bridge-side filename of the media (documents keep the sender's original
-    # name; other media get a generated `<type>_<timestamp>_<id>.<ext>`). For
-    # media_type == "reaction" the bridge reuses this column for the reacted-to
-    # message ID, exposed to callers as `reaction_to_message_id` instead.
+    # name; other media get a generated `<type>_<timestamp>_<id>.<ext>`).
+    # Rows written before target_message_id existed also carry the reaction /
+    # poll-vote target here; _target_id() handles both.
     filename: str | None = None
+    # For reactions and poll votes: the message they refer to.
+    target_message_id: str | None = None
     # ID of the message this one is replying to (NULL for non-replies).
     quoted_message_id: str | None = None
     # Set when the message was revoked ("delete for everyone"), by the sender or
@@ -170,7 +172,7 @@ class Message:
 MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
-    "messages.deleted_at, messages.view_once"
+    "messages.deleted_at, messages.view_once, messages.target_message_id"
 )
 
 
@@ -189,6 +191,7 @@ def _row_to_message(row: tuple) -> Message:
         filename,
         deleted,
         view_once,
+        target,
     ) = row
     return Message(
         timestamp=datetime.fromisoformat(timestamp),
@@ -203,6 +206,7 @@ def _row_to_message(row: tuple) -> Message:
         filename=filename,
         deleted_at=datetime.fromisoformat(deleted) if deleted else None,
         view_once=bool(view_once),
+        target_message_id=target,
     )
 
 
@@ -260,6 +264,18 @@ class MessageContext:
     after: list[Message]
 
 
+def _is_pointer_row(message: Message) -> bool:
+    """Reactions and poll votes point at another message instead of carrying media."""
+    return message.media_type in ("reaction", "poll_vote")
+
+
+def _target_id(message: Message) -> str | None:
+    """Target message ID for pointer rows; falls back to the legacy filename slot."""
+    if not _is_pointer_row(message):
+        return None
+    return message.target_message_id or message.filename or None
+
+
 def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str, Any]:
     """Convert a Message dataclass to a dictionary for JSON serialization."""
     # Extract phone number from JID (e.g., "1234567890@s.whatsapp.net" -> "1234567890")
@@ -293,11 +309,10 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "chat_jid": message.chat_jid,
         "chat_name": message.chat_name,
         "media_type": message.media_type,
-        "filename": (message.filename or None)
-        if message.media_type and message.media_type not in ("reaction", "poll_vote")
-        else None,
-        "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
-        "poll_message_id": (message.filename if message.media_type == "poll_vote" else None),
+        "filename": (message.filename or None) if message.media_type and not _is_pointer_row(message) else None,
+        "target_message_id": _target_id(message),
+        "reaction_to_message_id": (_target_id(message) if message.media_type == "reaction" else None),
+        "poll_message_id": (_target_id(message) if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
         "view_once": message.view_once,
