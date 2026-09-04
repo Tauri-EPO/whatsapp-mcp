@@ -201,7 +201,7 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 			return nil, fmt.Errorf("download after media retry: %w", err)
 		}
 		if err := messageStore.StoreMediaInfo(messageID, chatJID, refreshed.URL, refreshed.MediaKey, refreshed.FileSHA256, refreshed.FileEncSHA256, refreshed.FileLength); err != nil {
-			fmt.Printf("⚠️  Media retry succeeded but failed to persist refreshed URL for %s: %v\n", messageID, err)
+			bridgeLog.Warnf("Media retry succeeded but failed to persist refreshed URL for %s: %v", messageID, err)
 		}
 		return data, nil
 	case <-timer.C:

@@ -135,7 +135,7 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			return
 		}
 
-		fmt.Printf("→ /api/history from=%q user_agent=%q\n", r.RemoteAddr, r.UserAgent())
+		bridgeLog.Debugf("→ /api/history from=%q user_agent=%q", r.RemoteAddr, r.UserAgent())
 
 		var req HistoryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -201,7 +201,7 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			return
 		}
 
-		fmt.Printf("← /api/history chat=%q count=%d anchor=%q\n", req.ChatJID, count, id)
+		bridgeLog.Debugf("← /api/history chat=%q count=%d anchor=%q", req.ChatJID, count, id)
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: true,
 			Message: fmt.Sprintf(
