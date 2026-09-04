@@ -1,15 +1,20 @@
 name: Security
 
+# Runs on pull requests (where the results gate the merge), weekly on main
+# (catches new advisories against unchanged code) and by hand. Not on every
+# push to main: a squash-merged PR was already scanned as a PR.
 on:
   schedule:
     - cron: "0 0 * * 0" # Weekly on Sunday
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
