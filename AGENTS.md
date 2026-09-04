@@ -173,6 +173,8 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)* | Conversation allow-list (JIDs, bare numbers, `*@g.us` / `*@s.whatsapp.net`). MCP server filters reads and refuses writes (`chat_policy.py`); bridge returns 403 on send/react/mark-read/typing/delete/group/poll (`chat_policy.go`). Set for both processes |
+| `WHATSAPP_LOG_LEVEL` | `INFO` | Bridge log level (`DEBUG`/`INFO`/`WARN`/`ERROR`), applied to the bridge logger and the whatsmeow client. `DEBUG` echoes each stored message |
+| `WHATSAPP_MCP_LOG_LEVEL` | `INFO` | MCP server log level (stderr) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
@@ -205,10 +207,11 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 7. **`messages.db` is the source of truth for reads.** The MCP server must never need the bridge for read-only tools. The bridge opens the DB in WAL mode with a busy timeout; the MCP side uses a 5 s timeout via `_connect_messages_db()`.
 8. **Search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; it creates them when built with `-tags sqlite_fts5` and *drops* them otherwise so writes never fail. The MCP server uses `MATCH` only when the table exists and falls back to `instr()`. Never create FTS triggers from Python.
 9. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`); a second bridge exits naming the holder's PID. Tests that need concurrent bridge processes must use separate working directories.
-10. **Package-level globals in the bridge** (`outboundChatPolicy`, `pollVoteDecrypt`, `webhookAuthToken`, …) are set in `main()`; tests swap them with `t.Cleanup`. Do not add new ones; issue #47 replaces them with a `Bridge` struct.
-11. **stdout is the protocol on stdio.** Anything the MCP server prints to stdout can corrupt a stdio session; log to stderr (issue #43 removes the remaining `print()` calls).
-12. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.
-13. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
+10. **No package-level state in the bridge.** Runtime dependencies live on the `Bridge` struct (`bridge.go`); tests build one with `testBridge(...)` and override fields. The one sanctioned global is `bridgeLog` (`logging.go`), write-once configuration set by `initLogging()`; tests swap it with `installRecordingLogger(t)`.
+11. **stdout is the protocol on stdio.** Anything the MCP server prints to stdout can corrupt a stdio session; log through `logging` (stderr), never `print()`.
+12. **Bridge logs go through `bridgeLog`, not `fmt.Print*`.** Levels: `Errorf` for failures that lose data, `Warnf` for degraded-but-continuing, `Infof` for lifecycle, `Debugf` for per-request traces and message echoes (user content stays out of `INFO`). The only `fmt.Print*` left are the first-run token banner and the pairing QR code, which are meant for a human.
+13. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.
+14. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 
 ## 9. Where to make changes
 

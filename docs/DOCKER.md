@@ -163,7 +163,10 @@ works as before.
   a first run shows `healthy` while you scan the QR. To wait for WhatsApp
   itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
-- Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`.
+- Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`. Both
+  services log one line per event with a level; raise verbosity with
+  `WHATSAPP_LOG_LEVEL=DEBUG` (bridge, also echoes stored messages) or
+  `WHATSAPP_MCP_LOG_LEVEL=DEBUG` (MCP server) in `.env`.
 - Update: `git pull && GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build`.
   Check what is running with
   `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`

@@ -170,7 +170,7 @@ func NewMessageStore() (*MessageStore, error) {
 	// Missing DBs are expected on first run and should not create a new file.
 	waDB, err := openWhatsmeowContactsDB(whatsmeowDBPath())
 	if err != nil {
-		fmt.Printf("Warning: could not open whatsmeow database for contact resolution: %v\n", err)
+		bridgeLog.Warnf("could not open whatsmeow database for contact resolution: %v", err)
 	}
 
 	if err := ensureMessageStoreSchema(db); err != nil {
@@ -186,11 +186,11 @@ func NewMessageStore() (*MessageStore, error) {
 	ftsOn, ftsErr := ensureMessagesFTS(db)
 	switch {
 	case ftsErr != nil:
-		fmt.Printf("Warning: full-text search index unavailable: %v\n", ftsErr)
+		bridgeLog.Warnf("full-text search index unavailable: %v", ftsErr)
 	case ftsOn:
-		fmt.Println("Full-text search index (FTS5) active for messages.content")
+		bridgeLog.Infof("Full-text search index (FTS5) active for messages.content")
 	default:
-		fmt.Println("SQLite built without FTS5: message search uses the substring scan (build with -tags sqlite_fts5 to enable)")
+		bridgeLog.Infof("SQLite built without FTS5: message search uses the substring scan (build with -tags sqlite_fts5 to enable)")
 	}
 
 	return &MessageStore{db: db, waDB: waDB, names: newChatNameCache(), fts: ftsOn}, nil
@@ -1386,18 +1386,18 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 		ctx := context.Background()
 		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
 		if lidErr == nil && !lid.IsEmpty() {
-			fmt.Printf("Resolved %s -> %s (LID)\n", recipientJID, lid)
+			bridgeLog.Debugf("Resolved %s -> %s (LID)", recipientJID, lid)
 			recipientJID = lid
 		} else {
 			// Cache miss or cache error — ask the WhatsApp server.
 			if lidErr != nil {
-				fmt.Printf("Warning: LID cache lookup failed for %s: %v, falling back to server\n", recipientJID, lidErr)
+				bridgeLog.Warnf("LID cache lookup failed for %s: %v, falling back to server", recipientJID, lidErr)
 			}
 			info, infoErr := client.GetUserInfo(ctx, []types.JID{recipientJID})
 			if infoErr != nil {
-				fmt.Printf("Warning: server LID lookup failed for %s: %v\n", recipientJID, infoErr)
+				bridgeLog.Warnf("server LID lookup failed for %s: %v", recipientJID, infoErr)
 			} else if userInfo, ok := info[recipientJID]; ok && !userInfo.LID.IsEmpty() {
-				fmt.Printf("Resolved %s -> %s (LID via server)\n", recipientJID, userInfo.LID)
+				bridgeLog.Debugf("Resolved %s -> %s (LID via server)", recipientJID, userInfo.LID)
 				recipientJID = userInfo.LID
 			}
 		}
@@ -1417,7 +1417,7 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 		if strings.Contains(mention, "@") {
 			parsed, err := types.ParseJID(mention)
 			if err != nil {
-				fmt.Printf("Warning: skipping unparseable mention %q: %v\n", mention, err)
+				bridgeLog.Warnf("skipping unparseable mention %q: %v", mention, err)
 				continue
 			}
 			jid = parsed
@@ -1486,7 +1486,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			return false, fmt.Sprintf("Error uploading media: %v", err)
 		}
 
-		fmt.Println("Media uploaded", resp)
+		bridgeLog.Debugf("Media uploaded (%d bytes)", resp.FileLength)
 
 		// Create the appropriate message type based on media type
 		switch mediaType {
@@ -1516,7 +1516,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err)
 				}
 			} else {
-				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
+				bridgeLog.Warnf("Not an Ogg Opus file: %s", mimeType)
 			}
 
 			msg.AudioMessage = &waE2E.AudioMessage{
@@ -1651,13 +1651,13 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// contact/group name; we don't have one available here and
 		// must not clobber names from inbound handling or history sync.
 		if chatErr := messageStore.StoreChat(chatJID, "", timestamp); chatErr != nil {
-			fmt.Printf("Warning: failed to store outbound chat metadata: %v\n", chatErr)
+			bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
 		}
 		if storeErr := messageStore.StoreMessage(
 			resp.ID, chatJID, senderUser, message, timestamp, true,
 			mediaType, filename, "", nil, nil, nil, 0, quotedMsgID,
 		); storeErr != nil {
-			fmt.Printf("Warning: failed to persist outbound message: %v\n", storeErr)
+			bridgeLog.Warnf("failed to persist outbound message: %v", storeErr)
 		}
 	}
 
@@ -1812,18 +1812,18 @@ func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt type
 	}
 
 	if !alt.IsEmpty() {
-		fmt.Printf("Resolved LID chat %s -> %s (from message alt)\n", chat, alt)
+		bridgeLog.Debugf("Resolved LID chat %s -> %s (from message alt)", chat, alt)
 		return alt
 	}
 
 	// Fallback: query the whatsmeow LID-PN mapping store.
 	pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
 	if err == nil && !pn.IsEmpty() {
-		fmt.Printf("Resolved LID chat %s -> %s (from LID store)\n", chat, pn.ToNonAD())
+		bridgeLog.Debugf("Resolved LID chat %s -> %s (from LID store)", chat, pn.ToNonAD())
 		return pn.ToNonAD()
 	}
 
-	fmt.Printf("Warning: could not resolve LID chat %s to phone JID\n", chat)
+	bridgeLog.Warnf("could not resolve LID chat %s to phone JID", chat)
 	return chat
 }
 
@@ -2186,9 +2186,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 		// Log based on message type
 		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
+			bridgeLog.Debugf("[%s] %s %s: [%s: %s] %s", timestamp, direction, sender, mediaType, filename, content)
 		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+			bridgeLog.Debugf("[%s] %s %s: %s", timestamp, direction, sender, content)
 		}
 	}
 }
@@ -2348,7 +2348,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	// Check if file already exists
 	if _, err := os.Stat(localPath); err == nil {
 		// File exists, return it
-		fmt.Printf("📁 File already exists: %s\n", absPath)
+		bridgeLog.Debugf("📁 File already exists: %s", absPath)
 		return true, mediaType, filename, absPath, nil
 	}
 
@@ -2357,7 +2357,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
-	fmt.Printf("Attempting to download media for message %s in chat %s...\n", messageID, chatJID)
+	bridgeLog.Debugf("Attempting to download media for message %s in chat %s...", messageID, chatJID)
 
 	// Extract direct path from URL
 	directPath := extractDirectPathFromURL(url)
@@ -2397,7 +2397,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 		// The CDN token in the stored URL has expired (old history, forwards).
 		// Ask the sender's phone to re-upload and download from the fresh path.
 		// See media_retry.go.
-		fmt.Printf("🔁 Media URL expired for %s (%v); requesting media retry from sender's phone...\n", messageID, err)
+		bridgeLog.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
 		mediaData, err = downloadViaMediaRetry(context.Background(), client, messageStore, b.mediaRetry, messageID, chatJID, downloader)
 	}
 	if err != nil {
@@ -2409,7 +2409,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 		return false, "", "", "", fmt.Errorf("failed to save media file: %v", err)
 	}
 
-	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, absPath, len(mediaData))
+	bridgeLog.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, len(mediaData))
 	return true, mediaType, filename, absPath, nil
 }
 
@@ -2511,7 +2511,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 			return
 		}
 
-		fmt.Printf("→ /api/send from=%q user_agent=%q\n", r.RemoteAddr, r.UserAgent())
+		bridgeLog.Debugf("→ /api/send from=%q user_agent=%q", r.RemoteAddr, r.UserAgent())
 
 		// Parse the request body
 		var req SendMessageRequest
@@ -2556,12 +2556,12 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 
 		// Avoid logging req.Message verbatim — it's user content and may
 		// contain secrets the user pasted into a chat.
-		fmt.Printf("→ /api/send recipient=%q message_len=%d has_media=%v\n",
+		bridgeLog.Debugf("→ /api/send recipient=%q message_len=%d has_media=%v",
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
 		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
-		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
+		bridgeLog.Debugf("← /api/send success=%v status=%q", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -2684,7 +2684,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		}
 		if err := messageStore.MarkChatRead(req.ChatJID, localReadAt); err != nil {
 			// Receipt already sent; log but still report success to the caller.
-			fmt.Printf("Warning: failed to persist local read marker for %s: %v\n", req.ChatJID, err)
+			bridgeLog.Warnf("failed to persist local read marker for %s: %v", req.ChatJID, err)
 		}
 
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
@@ -2776,7 +2776,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		}
 
 		// Log download request for debugging
-		fmt.Printf("📥 Download request: message_id=%s chat_jid=%s\n", req.MessageID, req.ChatJID)
+		bridgeLog.Debugf("📥 Download request: message_id=%s chat_jid=%s", req.MessageID, req.ChatJID)
 
 		// Download the media
 		success, mediaType, filename, path, err := b.DownloadMedia(req.MessageID, req.ChatJID)
@@ -2923,7 +2923,7 @@ func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []str
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
-	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
+	bridgeLog.Infof("Starting REST API server on %s...", serverAddr)
 
 	// Create server with timeouts for stability
 	server := &http.Server{
@@ -2937,7 +2937,7 @@ func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []str
 	// Run server in a goroutine so it doesn't block
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Printf("REST API server error: %v\n", err)
+			bridgeLog.Errorf("REST API server error: %v", err)
 		}
 	}()
 }
@@ -2969,15 +2969,12 @@ func webhookStartupMessage(forwardSelf bool) string {
 func main() {
 	flag.Parse()
 
-	// Set up logger with DEBUG level for more detailed logging
-	logger := waLog.Stdout("Client", "DEBUG", true)
+	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
+	logger, clientLog, dbLog := initLogging()
 	logger.Infof("Starting WhatsApp client...")
 	logger.Infof("%s", buildInfo(false).String())
 
 	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
-
-	// Create database connection for storing session data
-	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(storeDir(), 0o750); err != nil {
@@ -3059,7 +3056,7 @@ func main() {
 	}
 
 	// Create client instance
-	client := whatsmeow.NewClient(deviceStore, logger)
+	client := whatsmeow.NewClient(deviceStore, clientLog)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
@@ -3348,7 +3345,7 @@ func main() {
 			// Wait for connection with timeout
 			select {
 			case <-connected:
-				fmt.Println("\nSuccessfully connected and authenticated!")
+				bridgeLog.Infof("Successfully connected and authenticated!")
 				goto connectionSuccess
 			case <-ctx.Done():
 				logger.Errorf("Timeout waiting for QR code scan (attempt %d)", attempt)
@@ -3385,13 +3382,13 @@ connectionSuccess:
 		return
 	}
 
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+	bridgeLog.Infof("Connected to WhatsApp! Type 'help' for commands.")
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
 	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
+	bridgeLog.Infof("REST server is running. Press Ctrl+C to disconnect and exit.")
 
 	// Start reconnection handler goroutine
 	go func() {
@@ -3440,7 +3437,7 @@ connectionSuccess:
 	// Wait for termination signal
 	<-exitChan
 
-	fmt.Println("Disconnecting...")
+	bridgeLog.Infof("Disconnecting...")
 	// Disconnect client
 	client.Disconnect()
 }
@@ -3746,7 +3743,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 		}
 	}
 
-	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	bridgeLog.Infof("History sync complete. Stored %d messages.", syncedCount)
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
@@ -3808,7 +3805,7 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 					preSkip = binary.LittleEndian.Uint16(pageData[headPos+10 : headPos+12])
 					sampleRate = binary.LittleEndian.Uint32(pageData[headPos+12 : headPos+16])
 					foundOpusHead = true
-					fmt.Printf("Found OpusHead: sampleRate=%d, preSkip=%d\n", sampleRate, preSkip)
+					bridgeLog.Debugf("Found OpusHead: sampleRate=%d, preSkip=%d", sampleRate, preSkip)
 				}
 			}
 		}
@@ -3823,7 +3820,7 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 	}
 
 	if !foundOpusHead {
-		fmt.Println("Warning: OpusHead not found, using default values")
+		bridgeLog.Warnf("OpusHead not found, using default values")
 	}
 
 	// Calculate duration based on granule position
@@ -3831,11 +3828,11 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 		// Formula for duration: (lastGranule - preSkip) / sampleRate
 		durationSeconds := float64(lastGranule-uint64(preSkip)) / float64(sampleRate)
 		duration = uint32(math.Ceil(durationSeconds))
-		fmt.Printf("Calculated Opus duration from granule: %f seconds (lastGranule=%d)\n",
+		bridgeLog.Debugf("Calculated Opus duration from granule: %f seconds (lastGranule=%d)",
 			durationSeconds, lastGranule)
 	} else {
 		// Fallback to rough estimation if granule position not found
-		fmt.Println("Warning: No valid granule position found, using estimation")
+		bridgeLog.Warnf("No valid granule position found, using estimation")
 		durationEstimate := float64(len(data)) / 2000.0 // Very rough approximation
 		duration = uint32(durationEstimate)
 	}
@@ -3850,7 +3847,7 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 	// Generate waveform
 	waveform = placeholderWaveform(duration)
 
-	fmt.Printf("Ogg Opus analysis: size=%d bytes, calculated duration=%d sec, waveform=%d bytes\n",
+	bridgeLog.Debugf("Ogg Opus analysis: size=%d bytes, calculated duration=%d sec, waveform=%d bytes",
 		len(data), duration, len(waveform))
 
 	return duration, waveform, nil
