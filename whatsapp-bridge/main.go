@@ -80,6 +80,9 @@ func webhookStartupMessage(forwardSelf bool) string {
 	return "FORWARD_SELF disabled: self messages will NOT be forwarded"
 }
 
+// shutdownTimeout bounds the drain on SIGTERM; compose's stop_grace_period is 30s.
+const shutdownTimeout = 10 * time.Second
+
 func main() {
 	flag.Parse()
 
@@ -256,8 +259,7 @@ func main() {
 	bridge.startRESTServer(port, bridgeToken, allowedMediaRoots)
 	logger.Infof("%s", bridge.Policy.Summary())
 	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(mediaRetention))
-	retentionStop := make(chan struct{})
-	go bridge.runMediaRetention(mediaRetention, retentionStop)
+	go bridge.runMediaRetention(mediaRetention)
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
@@ -386,13 +388,12 @@ connectionSuccess:
 	bridgeLog.Infof("REST server is running. Press Ctrl+C to disconnect and exit.")
 
 	// Start reconnection handler goroutine
-	go bridge.reconnectLoop(reconnectChan, exitChan)
+	go bridge.reconnectLoop(reconnectChan)
 
 	// Wait for termination signal
 	<-exitChan
 
-	bridgeLog.Infof("Disconnecting...")
-	close(retentionStop)
-	// Disconnect client
+	bridgeLog.Infof("Shutting down: draining REST, stopping loops, disconnecting...")
+	bridge.Shutdown(shutdownTimeout)
 	client.Disconnect()
 }
