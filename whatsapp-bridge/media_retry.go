@@ -38,41 +38,45 @@ const mediaRetryTimeout = 30 * time.Second
 // which extractDirectPathFromURL later splits on ".net/".
 const mediaCDNHost = "https://mmg.whatsapp.net"
 
-// Pending retry requests keyed by message ID. The event loop routes the
-// phone's MediaRetry response to whichever downloadMedia call is waiting.
-var (
-	mediaRetryWaiters = map[string]chan *events.MediaRetry{}
-	mediaRetryMu      sync.Mutex
-)
+// mediaRetryHub routes the phone's MediaRetry responses to the downloadMedia
+// call waiting for them, keyed by message ID. One instance lives on Bridge.
+type mediaRetryHub struct {
+	mu      sync.Mutex
+	waiters map[string]chan *events.MediaRetry
+}
 
-// registerMediaRetryWaiter creates the channel a MediaRetry event for
-// messageID will be delivered to. The returned cancel func must be called
-// once the caller stops waiting. A second registration for the same ID
-// replaces the first (the earlier waiter simply times out).
-func registerMediaRetryWaiter(messageID string) (<-chan *events.MediaRetry, func()) {
+func newMediaRetryHub() *mediaRetryHub {
+	return &mediaRetryHub{waiters: map[string]chan *events.MediaRetry{}}
+}
+
+// register creates the channel a MediaRetry event for messageID will be
+// delivered to. The returned cancel func must be called once the caller stops
+// waiting. A second registration for the same ID replaces the first (the
+// earlier waiter simply times out).
+func (h *mediaRetryHub) register(messageID string) (<-chan *events.MediaRetry, func()) {
 	ch := make(chan *events.MediaRetry, 1)
-	mediaRetryMu.Lock()
-	mediaRetryWaiters[messageID] = ch
-	mediaRetryMu.Unlock()
+	h.mu.Lock()
+	h.waiters[messageID] = ch
+	h.mu.Unlock()
 	return ch, func() {
-		mediaRetryMu.Lock()
-		if cur, ok := mediaRetryWaiters[messageID]; ok && cur == ch {
-			delete(mediaRetryWaiters, messageID)
+		h.mu.Lock()
+		if cur, ok := h.waiters[messageID]; ok && cur == ch {
+			delete(h.waiters, messageID)
 		}
-		mediaRetryMu.Unlock()
+		h.mu.Unlock()
 	}
 }
 
-// dispatchMediaRetry hands a MediaRetry event to the waiter registered for its
-// message ID. Returns false when nobody is waiting (e.g. the request timed
-// out already, or the retry was triggered by another linked device).
-func dispatchMediaRetry(evt *events.MediaRetry) bool {
-	if evt == nil {
+// dispatch hands a MediaRetry event to the waiter registered for its message
+// ID. Returns false when nobody is waiting (e.g. the request timed out
+// already, or the retry was triggered by another linked device).
+func (h *mediaRetryHub) dispatch(evt *events.MediaRetry) bool {
+	if h == nil || evt == nil {
 		return false
 	}
-	mediaRetryMu.Lock()
-	ch, ok := mediaRetryWaiters[string(evt.MessageID)]
-	mediaRetryMu.Unlock()
+	h.mu.Lock()
+	ch, ok := h.waiters[string(evt.MessageID)]
+	h.mu.Unlock()
 	if !ok {
 		return false
 	}
@@ -156,7 +160,7 @@ func mediaRetryDirectPath(evt *events.MediaRetry, mediaKey []byte) (string, erro
 // downloadViaMediaRetry asks the sender's phone to re-upload the media behind
 // (messageID, chatJID) and downloads it from the refreshed direct path. On
 // success the new URL is persisted so the next download skips the retry.
-func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string, downloader *MediaDownloader) ([]byte, error) {
+func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader) ([]byte, error) {
 	var sender string
 	var isFromMe bool
 	if err := messageStore.db.QueryRow(
@@ -171,7 +175,10 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 	}
 
 	// Register before sending so a fast phone can't answer into the void.
-	ch, cancel := registerMediaRetryWaiter(messageID)
+	if hub == nil {
+		return nil, errors.New("media retry unavailable: no retry hub configured")
+	}
+	ch, cancel := hub.register(messageID)
 	defer cancel()
 
 	if err := client.SendMediaRetryReceipt(ctx, info, downloader.MediaKey); err != nil {
