@@ -230,6 +230,9 @@ The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
 additional absolute directories.
 
+**Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
+
+
 ### `send_audio_message`
 
 Send a voice message (automatically converts to Opus .ogg format).
@@ -241,6 +244,9 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 Converted audio is sent through the same media-path confinement as
 `send_file`.
+
+**Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
+
 
 ### `transcribe_audio`
 

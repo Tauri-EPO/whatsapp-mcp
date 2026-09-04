@@ -98,3 +98,27 @@ def test_connection_error_recovers(monkeypatch):
     monkeypatch.setattr(whatsapp.requests, "get", flaky)
     resp = whatsapp._bridge_request("GET", "/poll", params={})
     assert resp.status_code == 200 and len(attempts) == 2
+
+
+def test_send_message_returns_bridge_message_id(monkeypatch):
+    class Sent:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "success": True,
+                "message": "Message sent",
+                "message_id": "3EB0ABC",
+                "chat_jid": "5511999999999@s.whatsapp.net",
+                "timestamp": "2026-09-04T12:00:00Z",
+            }
+
+    monkeypatch.setattr(whatsapp.requests, "post", lambda url, **kwargs: Sent())
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
+    ok, msg, sent = whatsapp.send_message("5511999999999", "hi")
+    assert ok and sent == {
+        "message_id": "3EB0ABC",
+        "chat_jid": "5511999999999@s.whatsapp.net",
+        "timestamp": "2026-09-04T12:00:00Z",
+    }

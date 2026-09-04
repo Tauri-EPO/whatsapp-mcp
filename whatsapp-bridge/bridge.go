@@ -46,6 +46,8 @@ type Bridge struct {
 	Webhook *webhookSender
 	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.
 	Connect func() error
+	// Send performs /api/send (defaults to sendWhatsAppMessage); tests inject a fake.
+	Send sendFunc
 	// Exit terminates the process for conditions the bridge cannot recover from in-place
 	// (device logged out, client outdated); main() wires it to a clean os.Exit so the
 	// supervisor restarts into the pairing path. Tests inject a recorder.
@@ -95,6 +97,9 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.Connect = client.Connect
+	b.Send = func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+		return sendWhatsAppMessage(b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+	}
 	b.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
 		os.Exit(code)

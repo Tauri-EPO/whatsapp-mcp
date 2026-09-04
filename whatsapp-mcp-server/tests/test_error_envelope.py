@@ -58,8 +58,17 @@ def test_tools_report_not_found_and_denied(monkeypatch):
     out = main.send_message("x@s.whatsapp.net", "hi")
     assert out["error"]["code"] == "denied"
 
-    monkeypatch.setattr(main, "whatsapp_send_message", lambda *a, **k: (True, "sent"))
-    assert main.send_message("x@s.whatsapp.net", "hi") == {"success": True, "message": "sent"}
+    monkeypatch.setattr(
+        main,
+        "whatsapp_send_message",
+        lambda *a, **k: (True, "sent", {"message_id": "ABC", "chat_jid": "x@s.whatsapp.net"}),
+    )
+    assert main.send_message("x@s.whatsapp.net", "hi") == {
+        "success": True,
+        "message": "sent",
+        "message_id": "ABC",
+        "chat_jid": "x@s.whatsapp.net",
+    }
 
 
 def test_codes_are_documented():

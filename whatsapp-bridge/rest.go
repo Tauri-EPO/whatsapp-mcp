@@ -167,8 +167,8 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
-		bridgeLog.Debugf("← /api/send success=%v status=%q", success, message)
+		success, message, sent := b.Send(req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
+		bridgeLog.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -178,10 +178,12 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		}
 
 		// Send response
-		_ = json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
-		})
+		resp := SendMessageResponse{Success: success, Message: message}
+		if success {
+			resp.MessageID, resp.ChatJID = sent.ID, sent.ChatJID
+			resp.Timestamp = sent.Timestamp.UTC().Format(time.RFC3339)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 
 	// Handler for explicitly sending read receipts for selected messages.

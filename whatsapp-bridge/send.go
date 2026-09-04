@@ -28,6 +28,21 @@ import (
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	// Set on a successful /api/send so the caller can react to, quote or
+	// delete what it just sent without searching for it.
+	MessageID string `json:"message_id,omitempty"`
+	ChatJID   string `json:"chat_jid,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"` // RFC 3339
+}
+
+// sendFunc is the /api/send backend (sendWhatsAppMessage in production).
+type sendFunc func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage)
+
+// sentMessage identifies a message the bridge just sent.
+type sentMessage struct {
+	ID        string
+	ChatJID   string
+	Timestamp time.Time
 }
 
 // SendMessageRequest represents the request body for the send message API
@@ -192,9 +207,9 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, "Not connected to WhatsApp", sentMessage{}
 	}
 
 	mentionedJIDs := resolveMentionJIDs(client, mentions)
@@ -205,7 +220,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	if strings.Contains(recipient, "@") {
 		settingsLookupJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), sentMessage{}
 		}
 	} else {
 		settingsLookupJID = types.JID{
@@ -222,7 +237,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 	recipientJID, err := resolveRecipientJID(client, recipient)
 	if err != nil {
-		return false, err.Error()
+		return false, err.Error(), sentMessage{}
 	}
 
 	msg := &waE2E.Message{}
@@ -232,7 +247,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Read media file
 		mediaData, err := os.ReadFile(mediaPath) //nolint:gosec // mediaPath was canonicalised and confined to WHATSAPP_MEDIA_ROOTS by validateMediaPath
 		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err)
+			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
 		}
 
 		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
@@ -240,7 +255,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
 		if err != nil {
-			return false, fmt.Sprintf("Error uploading media: %v", err)
+			return false, fmt.Sprintf("Error uploading media: %v", err), sentMessage{}
 		}
 
 		bridgeLog.Debugf("Media uploaded (%d bytes)", resp.FileLength)
@@ -270,7 +285,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 					seconds = analyzedSeconds
 					waveform = analyzedWaveform
 				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err)
+					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), sentMessage{}
 				}
 			} else {
 				bridgeLog.Warnf("Not an Ogg Opus file: %s", mimeType)
@@ -358,7 +373,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	// recipient would silently miss the disappearing-message settings row.
 	settings, err := messageStore.GetChatEphemeralSettings(resolveUserJID(client, settingsLookupJID, types.EmptyJID).String())
 	if err != nil && err != sql.ErrNoRows {
-		return false, fmt.Sprintf("Error loading chat settings: %v", err)
+		return false, fmt.Sprintf("Error loading chat settings: %v", err), sentMessage{}
 	}
 	if err == nil {
 		applyChatEphemeralSettings(msg, settings)
@@ -368,7 +383,11 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
+		return false, fmt.Sprintf("Error sending message: %v", err), sentMessage{}
+	}
+	sent := sentMessage{ID: resp.ID, ChatJID: storageJID.String(), Timestamp: resp.Timestamp}
+	if sent.Timestamp.IsZero() {
+		sent.Timestamp = time.Now()
 	}
 
 	// whatsmeow does not re-emit events.Message for messages this client
@@ -382,11 +401,9 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// fragment the chat under a separate jid.
 		persistJID := resolveUserJID(client, storageJID, types.EmptyJID)
 		chatJID := persistJID.String()
+		sent.ChatJID = chatJID
 		senderUser := client.Store.ID.User
-		timestamp := resp.Timestamp
-		if timestamp.IsZero() {
-			timestamp = time.Now()
-		}
+		timestamp := sent.Timestamp
 
 		var mediaType, filename string
 		if mediaPath != "" {
@@ -418,7 +435,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient)
+	return true, fmt.Sprintf("Message sent to %s", recipient), sent
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file

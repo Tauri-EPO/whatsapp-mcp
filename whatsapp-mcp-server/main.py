@@ -445,16 +445,17 @@ def send_message(
                   mention won't render on recipients' devices. Only meaningful in groups.
 
     Returns:
-        A dictionary containing success status and a status message
+        {"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}.
+        Keep message_id + chat_jid to react to, quote, edit or delete this message later.
     """
     # Validate input
     if not chat_jid:
         raise ToolError("invalid_argument", "chat_jid must be provided")
 
-    success, status_message = whatsapp_send_message(
+    success, status_message, sent = whatsapp_send_message(
         chat_jid, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
     )
-    return {"success": success, "message": status_message}
+    return {"success": success, "message": status_message, **sent}
 
 
 @mcp.tool()
@@ -594,8 +595,8 @@ def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, An
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(chat_jid, media_path, caption)
-    return {"success": success, "message": status_message}
+    success, status_message, sent = whatsapp_send_file(chat_jid, media_path, caption)
+    return {"success": success, "message": status_message, **sent}
 
 
 @mcp.tool()
@@ -611,8 +612,8 @@ def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_audio_voice_message(chat_jid, media_path)
-    return {"success": success, "message": status_message}
+    success, status_message, sent = whatsapp_audio_voice_message(chat_jid, media_path)
+    return {"success": success, "message": status_message, **sent}
 
 
 @mcp.tool()
