@@ -10,17 +10,15 @@ import (
 
 // handleHealth serves GET /api/health.
 func (b *Bridge) handleHealth() http.HandlerFunc {
-	client := b.Client
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, healthStatus(client, b.startedAt, b.storeStats))
+		writeJSON(w, http.StatusOK, b.healthStatus())
 	}
 }
 
 // handleReady serves GET /api/ready.
 func (b *Bridge) handleReady() http.HandlerFunc {
-	client := b.Client
 	return func(w http.ResponseWriter, r *http.Request) {
-		status := healthStatus(client, b.startedAt, b.storeStats)
+		status := b.healthStatus()
 		code := http.StatusOK
 		if status["status"] != "ok" {
 			code = http.StatusServiceUnavailable

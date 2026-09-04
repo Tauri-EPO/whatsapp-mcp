@@ -638,7 +638,7 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 			}
 
 			// Try to reconnect
-			if !b.Client.IsConnected() {
+			if !b.Connected() {
 				err := b.Connect()
 				if err != nil {
 					b.Log.Errorf("❌ Reconnection failed: %v", err)

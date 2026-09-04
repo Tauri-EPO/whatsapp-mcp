@@ -45,11 +45,8 @@ func (m *metricsRegistry) recordRequest(status int) {
 // render writes the Prometheus text exposition for the bridge.
 func (b *Bridge) renderMetrics() string {
 	m := b.metrics
-	connected, paired := false, false
-	if b.Client != nil {
-		connected = b.Client.IsConnected()
-		paired = b.Client.Store != nil && b.Client.Store.ID != nil
-	}
+	connected := b.Connected()
+	paired := b.Client != nil && b.Client.Store != nil && b.Client.Store.ID != nil
 	storeBytes, mediaBytes, mediaFiles := int64(0), int64(0), 0
 	if b.storeStats != nil {
 		storeBytes, mediaBytes, mediaFiles = b.storeStats.snapshot(time.Now())

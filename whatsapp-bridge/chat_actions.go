@@ -70,7 +70,7 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if !client.IsConnected() {
+		if !b.Connected() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(SendMessageResponse{
 				Success: false,

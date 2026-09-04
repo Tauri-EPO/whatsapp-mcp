@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"time"
 
-	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -56,7 +55,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// On-demand history sync endpoint (see history_ondemand.go)
-	registerHistoryEndpoint(mux, auth, client, messageStore)
+	registerHistoryEndpoint(mux, auth, client, func() bool { return b.Connected() }, messageStore)
 
 	// Health check endpoint
 	// Liveness: the process serves requests. Always 200 once the listener is up,
@@ -80,7 +79,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// Group participants (see group_members.go). Needs a live connection.
 	mux.HandleFunc("/api/group/members", auth(handleGroupMembers(
 		func(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
-			if client == nil || !client.IsConnected() {
+			if !b.Connected() {
 				return nil, errors.New("WhatsApp client is not connected")
 			}
 			return client.GetGroupInfo(ctx, jid)
@@ -92,7 +91,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// Edit an own message / forward a message (edit_forward.go).
 	mux.HandleFunc("/api/edit", auth(handleEditMessage(messageStore,
 		func(ctx context.Context, chat types.JID, id types.MessageID, text string) error {
-			if client == nil || !client.IsConnected() {
+			if !b.Connected() {
 				return errors.New("WhatsApp client is not connected")
 			}
 			_, err := client.SendMessage(ctx, chat, client.BuildEdit(chat, id, &waE2E.Message{Conversation: proto.String(text)}))
@@ -107,13 +106,13 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	}, b.Policy)))
 
 	// Group management: participants, subject/description, invite link, leave (group_manage.go).
-	registerGroupManagement(mux, auth, liveGroupOps(client), b.Policy)
+	registerGroupManagement(mux, auth, liveGroupOps(client, func() bool { return b.Connected() }), b.Policy)
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.
 	mux.HandleFunc("/api/delete", auth(handleDeleteMessage(messageStore,
 		func(ctx context.Context, chat types.JID, id types.MessageID) error {
-			if client == nil || !client.IsConnected() {
+			if !b.Connected() {
 				return errors.New("WhatsApp client is not connected")
 			}
 			// Revoke = a protocol message keyed to the original (own) message.
@@ -148,8 +147,9 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 }
 
 // healthStatus is the body of /api/health and /api/ready.
-func healthStatus(client *whatsmeow.Client, startedAt time.Time, stats *storeStats) map[string]interface{} {
-	connected := client != nil && client.IsConnected()
+func (b *Bridge) healthStatus() map[string]interface{} {
+	client, startedAt, stats := b.Client, b.startedAt, b.storeStats
+	connected := b.Connected()
 	paired := client != nil && client.Store != nil && client.Store.ID != nil
 	status := "ok"
 	switch {
