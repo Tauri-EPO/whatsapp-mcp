@@ -610,12 +610,19 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 // session took our slot (avoids ping-ponging with it). Tests shorten it.
 var streamReplacedDelay = 30 * time.Second
 
+// reconnectInitialBackoff is the first wait before redialling; it doubles per
+// failure up to reconnectMaxBackoff and resets on success. Tests shorten it.
+var (
+	reconnectInitialBackoff = 5 * time.Second
+	reconnectMaxBackoff     = 5 * time.Minute
+)
+
 // reconnectLoop redials with exponential backoff whenever handleEvent
 // reports a lost connection, until Shutdown cancels b.ctx. The backoff wait
 // is interruptible so shutdown never waits out a five-minute sleep.
 func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
-	reconnectBackoff := time.Second * 5
-	maxBackoff := time.Minute * 5
+	reconnectBackoff := reconnectInitialBackoff
+	maxBackoff := reconnectMaxBackoff
 
 	for {
 		select {
@@ -648,11 +655,11 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 				} else {
 					b.Log.Infof("✓ Reconnected successfully")
 					// Reset backoff on successful connection
-					reconnectBackoff = time.Second * 5
+					reconnectBackoff = reconnectInitialBackoff
 				}
 			} else {
 				b.Log.Infof("Already connected, skipping reconnection")
-				reconnectBackoff = time.Second * 5
+				reconnectBackoff = reconnectInitialBackoff
 			}
 
 		case <-b.ctx.Done():
