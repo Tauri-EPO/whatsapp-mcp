@@ -156,6 +156,32 @@ class Message:
     quoted_message_id: str | None = None
 
 
+# One column list and one mapper for every query that yields Message rows.
+# Every column added here is available to all readers; positional indexing
+# elsewhere is a bug.
+MESSAGE_COLUMNS = (
+    "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
+    "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename"
+)
+
+
+def _row_to_message(row: tuple) -> Message:
+    """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
+    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, quoted_id, filename = row
+    return Message(
+        timestamp=datetime.fromisoformat(timestamp),
+        sender=sender,
+        chat_name=chat_name,
+        content=content,
+        is_from_me=is_from_me,
+        chat_jid=chat_jid,
+        id=msg_id,
+        media_type=media_type,
+        quoted_message_id=quoted_id,
+        filename=filename,
+    )
+
+
 @dataclass
 class Chat:
     jid: str
@@ -548,9 +574,7 @@ def list_messages(
         use_fts = bool(query) and _fts_query_kind(query) == "fts" and _fts_available(conn)
 
         # Build base query
-        query_parts = [
-            "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename FROM messages"
-        ]
+        query_parts = [f"SELECT {MESSAGE_COLUMNS} FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         if use_fts:
             query_parts.append(f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid")
@@ -627,21 +651,7 @@ def list_messages(
             cursor.execute(sql, tuple(params))
         messages = cursor.fetchall()
 
-        result = []
-        for msg in messages:
-            message = Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7],
-                quoted_message_id=msg[8] if len(msg) > 8 else None,
-                filename=msg[9] if len(msg) > 9 else None,
-            )
-            result.append(message)
+        result = [_row_to_message(msg) for msg in messages]
 
         if include_context and result:
             # Add context for each message, deduplicated by message ID
@@ -689,11 +699,7 @@ def get_message_context(
         cursor = conn.cursor()
 
         # Get the target message first
-        select = """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-        """
+        select = f"SELECT {MESSAGE_COLUMNS} FROM messages JOIN chats ON messages.chat_jid = chats.jid"
         if chat_jid:
             cursor.execute(select + " WHERE messages.id = ? AND messages.chat_jid = ?", (message_id, chat_jid))
         else:
@@ -703,81 +709,39 @@ def get_message_context(
         if not msg_data:
             where = f" in chat {chat_jid}" if chat_jid else ""
             raise ValueError(f"Message with ID {message_id}{where} not found")
-        if denied := _policy_denied(msg_data[7]):
+        target_message = _row_to_message(msg_data)
+        if denied := _policy_denied(target_message.chat_jid):
             raise ValueError(denied)
-
-        target_message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[8],
-            quoted_message_id=msg_data[9] if len(msg_data) > 9 else None,
-            filename=msg_data[10] if len(msg_data) > 10 else None,
-        )
 
         # Get messages before
         cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
+            f"""
+            SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
             ORDER BY messages.timestamp DESC
             LIMIT ?
         """,
-            (msg_data[7], msg_data[0], before),
+            (target_message.chat_jid, msg_data[0], before),
         )
 
-        before_messages = []
-        for msg in cursor.fetchall():
-            before_messages.append(
-                Message(
-                    timestamp=datetime.fromisoformat(msg[0]),
-                    sender=msg[1],
-                    chat_name=msg[2],
-                    content=msg[3],
-                    is_from_me=msg[4],
-                    chat_jid=msg[5],
-                    id=msg[6],
-                    media_type=msg[7],
-                    quoted_message_id=msg[8] if len(msg) > 8 else None,
-                    filename=msg[9] if len(msg) > 9 else None,
-                )
-            )
+        before_messages = [_row_to_message(msg) for msg in cursor.fetchall()]
 
         # Get messages after
         cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
+            f"""
+            SELECT {MESSAGE_COLUMNS}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
             ORDER BY messages.timestamp ASC
             LIMIT ?
         """,
-            (msg_data[7], msg_data[0], after),
+            (target_message.chat_jid, msg_data[0], after),
         )
 
-        after_messages = []
-        for msg in cursor.fetchall():
-            after_messages.append(
-                Message(
-                    timestamp=datetime.fromisoformat(msg[0]),
-                    sender=msg[1],
-                    chat_name=msg[2],
-                    content=msg[3],
-                    is_from_me=msg[4],
-                    chat_jid=msg[5],
-                    id=msg[6],
-                    media_type=msg[7],
-                    quoted_message_id=msg[8] if len(msg) > 8 else None,
-                    filename=msg[9] if len(msg) > 9 else None,
-                )
-            )
+        after_messages = [_row_to_message(msg) for msg in cursor.fetchall()]
 
         return MessageContext(message=target_message, before=before_messages, after=after_messages)
 
@@ -1028,7 +992,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         Message dictionary or None if no messages found
     """
     try:
-        policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
@@ -1036,19 +1000,11 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         placeholders = ",".join("?" * len(aliases))
         cursor.execute(
             f"""
-            SELECT
-                m.timestamp,
-                m.sender,
-                c.name,
-                m.content,
-                m.is_from_me,
-                c.jid,
-                m.id,
-                m.media_type
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE (m.sender IN ({placeholders}) OR c.jid = ?) AND {policy_clause}
-            ORDER BY m.timestamp DESC
+            SELECT {MESSAGE_COLUMNS}
+            FROM messages
+            JOIN chats ON messages.chat_jid = chats.jid
+            WHERE (messages.sender IN ({placeholders}) OR chats.jid = ?) AND {policy_clause}
+            ORDER BY messages.timestamp DESC
             LIMIT 1
         """,
             (*aliases, jid, *policy_params),
@@ -1059,18 +1015,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         if not msg_data:
             return None
 
-        message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[7],
-        )
-
-        return msg_to_dict(message)
+        return msg_to_dict(_row_to_message(msg_data))
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
