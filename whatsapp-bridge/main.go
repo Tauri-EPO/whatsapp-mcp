@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +88,9 @@ type Message struct {
 type MessageStore struct {
 	db   *sql.DB
 	waDB *sql.DB // whatsmeow's DB for contact name resolution fallback
+
+	names     *chatNameCache  // resolved chat names + failed group lookups (chat_names.go)
+	groupInfo groupInfoLookup // live group metadata fetch; nil = no network
 }
 
 type ChatEphemeralSettings struct {
@@ -192,7 +194,7 @@ func NewMessageStore() (*MessageStore, error) {
 		fmt.Println("SQLite built without FTS5: message search uses the substring scan (build with -tags sqlite_fts5 to enable)")
 	}
 
-	return &MessageStore{db: db, waDB: waDB}, nil
+	return &MessageStore{db: db, waDB: waDB, names: newChatNameCache()}, nil
 }
 
 func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
@@ -1925,7 +1927,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	sender := resolvedSender.User
 
 	// Get appropriate chat name (pass resolved JID so contact lookup works)
-	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, logger)
+	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, true, logger)
 
 	// If contact resolution fails (common for LIDs), PushName is often the best available display name.
 	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user.
@@ -2984,6 +2986,7 @@ func main() {
 		logger.Errorf("Failed to initialize message store: %v", err)
 		return
 	}
+	messageStore.groupInfo = client.GetGroupInfo
 	defer func() { _ = messageStore.Close() }()
 
 	if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs("store/whatsapp.db", logger); err != nil {
@@ -3365,92 +3368,6 @@ connectionSuccess:
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
-func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
-	// First, check if chat already exists in database with a name
-	var existingName string
-	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
-		// Chat exists with a name, use that
-		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
-		return existingName
-	}
-
-	// Need to determine chat name
-	var name string
-
-	if jid.Server == "g.us" {
-		// This is a group chat
-		logger.Infof("Getting name for group: %s", chatJID)
-
-		// Use conversation data if provided (from history sync)
-		if conversation != nil {
-			// Extract name from conversation if available
-			// This uses type assertions to handle different possible types
-			var displayName, convName *string
-			// Try to extract the fields we care about regardless of the exact type
-			v := reflect.ValueOf(conversation)
-			if v.Kind() == reflect.Pointer && !v.IsNil() {
-				v = v.Elem()
-
-				// Try to find DisplayName field
-				if displayNameField := v.FieldByName("DisplayName"); displayNameField.IsValid() && displayNameField.Kind() == reflect.Pointer && !displayNameField.IsNil() {
-					dn := displayNameField.Elem().String()
-					displayName = &dn
-				}
-
-				// Try to find Name field
-				if nameField := v.FieldByName("Name"); nameField.IsValid() && nameField.Kind() == reflect.Pointer && !nameField.IsNil() {
-					n := nameField.Elem().String()
-					convName = &n
-				}
-			}
-
-			// Use the name we found
-			if displayName != nil && *displayName != "" {
-				name = *displayName
-			} else if convName != nil && *convName != "" {
-				name = *convName
-			}
-		}
-
-		// If we didn't get a name, try group info
-		if name == "" {
-			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
-			if err == nil && groupInfo.Name != "" {
-				name = groupInfo.Name
-			} else {
-				// Fallback name for groups
-				name = fmt.Sprintf("Group %s", jid.User)
-			}
-		}
-
-		logger.Infof("Using group name: %s", name)
-	} else {
-		// This is an individual contact
-		logger.Infof("Getting name for contact: %s", chatJID)
-
-		// Use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else {
-			name = lookupLocalContactName(client, messageStore, chatJID, logger)
-
-			if name == "" {
-				if sender != "" {
-					name = sender
-				} else {
-					name = jid.User
-				}
-			}
-		}
-
-		logger.Infof("Using contact name: %s", name)
-	}
-
-	return name
-}
-
 func lookupLocalContactName(client *whatsmeow.Client, messageStore *MessageStore, chatJID string, logger waLog.Logger) string {
 	if client == nil || client.Store == nil || client.Store.ID == nil || messageStore == nil || messageStore.waDB == nil {
 		return ""
@@ -3570,7 +3487,8 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		chatJID := resolved.String()
 
 		// Get appropriate chat name by passing the history sync conversation directly
-		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", logger)
+		// History sync never fetches group metadata (see chat_names.go).
+		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", false, logger)
 
 		// Process messages
 		messages := conversation.Messages
