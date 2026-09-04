@@ -19,9 +19,9 @@ classifiers = [
 ]
 dependencies = [
     # MCP Python SDK v2 (FastMCP renamed to MCPServer, transport config on run()).
-    # httpx and cryptography come in through mcp; nothing here imports them directly.
     "mcp[cli]>=2.1.1,<3",
-    "requests>=2.34.2",
+    # Bridge REST and whisper-server client; the same HTTP stack the SDK uses.
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]

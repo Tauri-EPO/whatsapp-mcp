@@ -43,7 +43,7 @@ def test_get_group_members_happy_path(monkeypatch):
         )
 
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token-0123456789")
-    monkeypatch.setattr(whatsapp.requests, "get", fake_get)
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fake_get)
 
     result = whatsapp.get_group_members(GROUP)
 
@@ -55,7 +55,7 @@ def test_get_group_members_happy_path(monkeypatch):
 
 
 def test_get_group_members_rejects_non_group(monkeypatch):
-    monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "get", lambda *a, **k: pytest.fail("bridge called"))
     with pytest.raises(ToolError, match="Not a group JID") as exc:
         whatsapp.get_group_members("5511999999999@s.whatsapp.net")
     assert exc.value.code == "invalid_argument"
@@ -63,7 +63,7 @@ def test_get_group_members_rejects_non_group(monkeypatch):
 
 def test_get_group_members_respects_policy(monkeypatch):
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
-    monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "get", lambda *a, **k: pytest.fail("bridge called"))
     with pytest.raises(ToolError, match="WHATSAPP_ALLOWED_CHATS") as exc:
         whatsapp.get_group_members(GROUP)
     assert exc.value.code == "denied"
@@ -71,7 +71,7 @@ def test_get_group_members_respects_policy(monkeypatch):
 
 def test_get_group_members_bridge_error(monkeypatch):
     monkeypatch.setattr(
-        whatsapp.requests, "get", lambda *a, **k: Resp(502, {"success": False, "message": "not connected"})
+        whatsapp.bridge_http, "get", lambda *a, **k: Resp(502, {"success": False, "message": "not connected"})
     )
     with pytest.raises(ToolError, match="not connected") as exc:
         whatsapp.get_group_members(GROUP)
@@ -79,7 +79,7 @@ def test_get_group_members_bridge_error(monkeypatch):
 
 
 def test_get_group_members_non_json_error(monkeypatch):
-    monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: Resp(500, None, "boom"))
+    monkeypatch.setattr(whatsapp.bridge_http, "get", lambda *a, **k: Resp(500, None, "boom"))
     with pytest.raises(ToolError, match="boom") as exc:
         whatsapp.get_group_members(GROUP)
     assert exc.value.code == "bridge_unavailable"

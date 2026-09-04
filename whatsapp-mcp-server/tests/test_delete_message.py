@@ -27,7 +27,7 @@ def test_delete_message_posts_expected_payload(monkeypatch):
         return Resp(payload={"success": True, "message": "Message deleted for everyone", "for_everyone": True})
 
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token-0123456789")
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     ok, msg = whatsapp.delete_message(CHAT, "m1", for_everyone=True)
 
@@ -40,7 +40,7 @@ def test_delete_message_posts_expected_payload(monkeypatch):
 def test_delete_message_default_is_local_only(monkeypatch):
     seen = {}
     monkeypatch.setattr(
-        whatsapp.requests,
+        whatsapp.bridge_http,
         "post",
         lambda url, json=None, **k: seen.update(json) or Resp(payload={"success": True, "message": "ok"}),
     )
@@ -50,7 +50,7 @@ def test_delete_message_default_is_local_only(monkeypatch):
 
 def test_delete_message_bridge_refusal_is_surfaced(monkeypatch):
     monkeypatch.setattr(
-        whatsapp.requests,
+        whatsapp.bridge_http,
         "post",
         lambda *a, **k: Resp(
             403, {"success": False, "message": "Only messages sent by this account can be deleted for everyone"}
@@ -62,7 +62,7 @@ def test_delete_message_bridge_refusal_is_surfaced(monkeypatch):
 
 
 def test_delete_message_validation_and_policy(monkeypatch):
-    monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge called"))
     for chat, mid in (("", "m1"), (CHAT, "  ")):
         with pytest.raises(ToolError) as exc:
             whatsapp.delete_message(chat, mid)

@@ -1,7 +1,7 @@
 """_bridge_request: every bridge call carries a timeout; connection errors retry, read timeouts do not."""
 
+import httpx
 import pytest
-import requests
 
 import whatsapp
 from errors import ToolError
@@ -23,8 +23,8 @@ def test_every_bridge_call_passes_a_timeout(monkeypatch, tmp_path):
         seen.append((url.rsplit("/", 1)[-1], kwargs.get("timeout")))
         return _Resp()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake)
-    monkeypatch.setattr(whatsapp.requests, "get", fake)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake)
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fake)
     monkeypatch.setattr(whatsapp, "_policy_denied", lambda *_a, **_k: None, raising=False)
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
 
@@ -58,9 +58,9 @@ def test_connection_errors_retry_then_raise(monkeypatch):
 
     def refused(url, **kwargs):
         calls.append(("post", url))
-        raise requests.ConnectionError("refused")
+        raise httpx.ConnectError("refused")
 
-    monkeypatch.setattr(whatsapp.requests, "post", refused)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", refused)
     with pytest.raises(ToolError) as exc:
         whatsapp._bridge_request("POST", "/send", json={})
     assert exc.value.code == "bridge_unavailable"
@@ -75,9 +75,9 @@ def test_read_timeout_is_not_retried(monkeypatch):
 
     def slow(url, **kwargs):
         calls.append(url)
-        raise requests.exceptions.ReadTimeout("slow")
+        raise httpx.ReadTimeout("slow")
 
-    monkeypatch.setattr(whatsapp.requests, "post", slow)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", slow)
     monkeypatch.setattr(whatsapp.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
     with pytest.raises(ToolError) as exc:
         whatsapp._bridge_request("POST", "/send", json={})
@@ -92,10 +92,10 @@ def test_connection_error_recovers(monkeypatch):
     def flaky(url, **kwargs):
         attempts.append(url)
         if len(attempts) == 1:
-            raise requests.ConnectionError("reset")
+            raise httpx.ConnectError("reset")
         return _Resp()
 
-    monkeypatch.setattr(whatsapp.requests, "get", flaky)
+    monkeypatch.setattr(whatsapp.bridge_http, "get", flaky)
     resp = whatsapp._bridge_request("GET", "/poll", params={})
     assert resp.status_code == 200 and len(attempts) == 2
 
@@ -114,7 +114,7 @@ def test_send_message_returns_bridge_message_id(monkeypatch):
                 "timestamp": "2026-09-04T12:00:00Z",
             }
 
-    monkeypatch.setattr(whatsapp.requests, "post", lambda url, **kwargs: Sent())
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: Sent())
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     ok, msg, sent = whatsapp.send_message("5511999999999", "hi")
     assert ok and sent == {

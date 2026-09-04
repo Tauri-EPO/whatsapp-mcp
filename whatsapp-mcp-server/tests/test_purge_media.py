@@ -28,7 +28,7 @@ def _bridge(monkeypatch, payload=None, status=200, text=""):
         return Resp(status=status, payload=payload, text=text)
 
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token-0123456789")
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
     return calls
 
 

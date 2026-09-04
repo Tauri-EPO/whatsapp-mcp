@@ -137,7 +137,7 @@ class TestWritesAreRefused:
     def _policy(self, monkeypatch):
         monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([DM_A]))
         # Any bridge call would be a test failure: the refusal must happen before it.
-        monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge was called"))
+        monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge was called"))
 
     def test_send_message(self):
         with pytest.raises(ToolError, match="WHATSAPP_ALLOWED_CHATS") as exc:

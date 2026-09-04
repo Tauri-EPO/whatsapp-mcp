@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-import requests
+import httpx
 
 import audio
 from chat_policy import load_chat_policy
@@ -233,28 +233,57 @@ BRIDGE_CONNECT_RETRIES = 2
 BRIDGE_RETRY_BACKOFF_S = 0.5
 
 
+class _BridgeHTTP:
+    """The httpx client behind ``get``/``post``, created on first use.
+
+    httpx is already the MCP SDK's HTTP stack, so the bridge client rides on it
+    instead of a second library. Tests monkeypatch ``bridge_http.get`` /
+    ``bridge_http.post`` with fakes returning objects that have ``status_code``,
+    ``json()`` and ``text``.
+    """
+
+    def __init__(self) -> None:
+        self._client: httpx.Client | None = None
+
+    def _client_or_new(self) -> httpx.Client:
+        if self._client is None:
+            # No redirects: the bridge never redirects, and following one could
+            # replay a POST (with the bearer token) to an unexpected host.
+            self._client = httpx.Client(follow_redirects=False)
+        return self._client
+
+    def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self._client_or_new().get(url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self._client_or_new().post(url, **kwargs)
+
+
+bridge_http = _BridgeHTTP()
+
+
 def _bridge_request(method: str, path: str, *, timeout: float | None = None, **kwargs):
     """Call the bridge REST API with a timeout and a short retry on connection errors.
 
     Only errors raised before any bytes reach the bridge (connection refused,
     reset, connect timeout) are retried, so a POST is never delivered twice; a
-    read timeout surfaces immediately. ``requests.post``/``requests.get`` are
-    looked up at call time so tests can monkeypatch them.
+    read timeout surfaces immediately. ``bridge_http.post``/``bridge_http.get``
+    are looked up at call time so tests can monkeypatch them.
     """
     url = f"{WHATSAPP_API_BASE_URL}{path}"
     kwargs.setdefault("headers", _bridge_headers())
     kwargs["timeout"] = timeout if timeout is not None else _bridge_timeout()
-    fn = requests.get if method.upper() == "GET" else requests.post
+    fn = bridge_http.get if method.upper() == "GET" else bridge_http.post
     for attempt in range(BRIDGE_CONNECT_RETRIES + 1):
         try:
             return fn(url, **kwargs)
-        except (requests.ConnectionError, requests.exceptions.ConnectTimeout) as exc:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             if attempt >= BRIDGE_CONNECT_RETRIES:
                 raise ToolError("bridge_unavailable", f"bridge unreachable at {WHATSAPP_API_BASE_URL}: {exc}") from exc
             delay = BRIDGE_RETRY_BACKOFF_S * (2**attempt)
             logger.warning("Bridge unreachable (%s), retrying in %.1fs: %s", path, delay, exc)
             time.sleep(delay)
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             raise ToolError("bridge_unavailable", f"bridge request failed ({path}): {exc}") from exc
     raise AssertionError("unreachable")
 

@@ -19,7 +19,7 @@ def _capture_post(monkeypatch, calls):
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
 
 def test_send_file_with_caption_sends_one_request(monkeypatch, tmp_path):
@@ -69,7 +69,7 @@ def test_send_file_empty_caption_omits_message_field(monkeypatch, tmp_path):
 
 def test_send_file_missing_file_does_not_call_bridge(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **kw: calls.append(1))
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **kw: calls.append(1))
 
     with pytest.raises(ToolError, match="not found") as exc:
         whatsapp.send_file("12025551234@s.whatsapp.net", str(tmp_path / "absent.pdf"), "hi")
