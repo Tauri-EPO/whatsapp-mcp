@@ -71,17 +71,18 @@ type mediaRow struct {
 	ChatJID   string
 	MediaType string
 	Timestamp time.Time
+	Filename  string // sender's document name; picks the on-disk extension
 }
 
 // MediaRow returns the row for one (id, chat) pair; sql.ErrNoRows when absent.
 func (store *MessageStore) MediaRow(messageID, chatJID string) (mediaRow, error) {
 	var row mediaRow
-	var mediaType sql.NullString
+	var mediaType, filename sql.NullString
 	err := store.db.QueryRow(
-		`SELECT id, chat_jid, media_type, timestamp FROM messages WHERE id = ? AND chat_jid = ?`,
+		`SELECT id, chat_jid, media_type, timestamp, filename FROM messages WHERE id = ? AND chat_jid = ?`,
 		messageID, chatJID,
-	).Scan(&row.ID, &row.ChatJID, &mediaType, &row.Timestamp)
-	row.MediaType = mediaType.String
+	).Scan(&row.ID, &row.ChatJID, &mediaType, &row.Timestamp, &filename)
+	row.MediaType, row.Filename = mediaType.String, filename.String
 	return row, err
 }
 
@@ -109,7 +110,7 @@ func (store *MessageStore) MediaRowsMatching(chatJID string, before time.Time, m
 		args = append(args, mediaType)
 	}
 	rows, err := store.db.Query(
-		`SELECT id, chat_jid, media_type, timestamp FROM messages WHERE `+strings.Join(clauses, " AND ")+
+		`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, '') FROM messages WHERE `+strings.Join(clauses, " AND ")+
 			` ORDER BY timestamp ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
@@ -118,7 +119,7 @@ func (store *MessageStore) MediaRowsMatching(chatJID string, before time.Time, m
 	var out []mediaRow
 	for rows.Next() {
 		var row mediaRow
-		if err := rows.Scan(&row.ID, &row.ChatJID, &row.MediaType, &row.Timestamp); err != nil {
+		if err := rows.Scan(&row.ID, &row.ChatJID, &row.MediaType, &row.Timestamp, &row.Filename); err != nil {
 			return nil, err
 		}
 		if !policy.Allows(row.ChatJID) {
@@ -144,7 +145,14 @@ func purgeOne(row mediaRow, dryRun bool) PurgeResult {
 		res.Reason = "store directory unavailable"
 		return res
 	}
-	path, err := filepath.Abs(filepath.Join(chatMediaDir(row.ChatJID), mediaFileName(row.MediaType, row.Timestamp, row.ID)))
+	chatDir := chatMediaDir(row.ChatJID)
+	cached := cachedMediaPath(chatDir, row.MediaType, row.Timestamp, row.ID, row.Filename)
+	if cached == "" {
+		// Still run the containment check on the would-be path so a bad row is
+		// reported as such rather than as "not cached".
+		cached = filepath.Join(chatDir, mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename))
+	}
+	path, err := filepath.Abs(cached)
 	if err != nil {
 		res.Reason = "invalid path"
 		return res

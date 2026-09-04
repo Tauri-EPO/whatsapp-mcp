@@ -317,7 +317,11 @@ Download media from a received message.
 - `message_id` (required): ID of the message with media
 
 By default the bridge caches every inbound file as it arrives, so this tool
-usually returns immediately. On a server you can turn that off
+usually returns immediately. The file on disk is named
+`<type>_<yyyymmdd_hhmmss>_<message id><ext>` under `store/<chat_jid>/`; images,
+audio, video and stickers get a fixed extension, documents take the sender's
+(`.pdf`, `.docx`, ...) sanitised to letters and digits. Files cached before
+documents kept an extension are still found under their old name. On a server you can turn that off
 (`WHATSAPP_MEDIA_AUTODOWNLOAD=false`) and/or expire old files
 (`WHATSAPP_MEDIA_RETENTION_DAYS=N`); either way `download_media` fetches
 what is missing. `/api/health` reports `store_bytes`, `media_bytes` and

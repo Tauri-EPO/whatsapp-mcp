@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"go.mau.fi/whatsmeow"
@@ -80,6 +81,7 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	client, messageStore := b.Client, b.Store
 	// Query the database for the message including timestamp
 	var mediaType, url string
+	var originalName sql.NullString
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
 	var fileLength uint64
 	var timestamp time.Time
@@ -87,9 +89,9 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 
 	// Get media info AND timestamp from the database
 	err = messageStore.db.QueryRow(
-		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp, filename FROM messages WHERE id = ? AND chat_jid = ?",
 		messageID, chatJID,
-	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp)
+	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp, &originalName)
 
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to find message: %v", err)
@@ -100,7 +102,7 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		return false, "", "", "", fmt.Errorf("not a media message")
 	}
 
-	filename := mediaFileName(mediaType, timestamp, messageID)
+	filename := mediaFileName(mediaType, timestamp, messageID, originalName.String)
 
 	// First, check if we already have this file
 	chatDir := chatMediaDir(chatJID)
@@ -119,11 +121,13 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	// Check if file already exists
-	if _, err := os.Stat(localPath); err == nil {
-		// File exists, return it
+	// Check if file already exists (under the current or the legacy name)
+	if cached := cachedMediaPath(chatDir, mediaType, timestamp, messageID, originalName.String); cached != "" {
+		if abs, err := filepath.Abs(cached); err == nil {
+			absPath = abs
+		}
 		b.Log.Debugf("📁 File already exists: %s", absPath)
-		return true, mediaType, filename, absPath, nil
+		return true, mediaType, filepath.Base(absPath), absPath, nil
 	}
 
 	// If we don't have all the media info we need, we can't download
@@ -186,10 +190,12 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	return true, mediaType, filename, absPath, nil
 }
 
-// mediaFileName rebuilds the cached file name from (type, timestamp, message
-// ID); it must match extractMediaInfo. The message ID disambiguates two
-// messages that arrive in the same second. Documents carry no extension.
-func mediaFileName(mediaType string, timestamp time.Time, messageID string) string {
+// mediaFileName is the cached file name for a media row:
+// <type>_<yyyymmdd_hhmmss>_<message id><ext>. The message ID disambiguates
+// two messages that arrive in the same second. Documents take a sanitised
+// extension from the sender's filename (messages.filename) so the cached file
+// opens with the right application; anything else is fixed per type.
+func mediaFileName(mediaType string, timestamp time.Time, messageID, originalName string) string {
 	var ext string
 	switch mediaType {
 	case "image":
@@ -200,8 +206,47 @@ func mediaFileName(mediaType string, timestamp time.Time, messageID string) stri
 		ext = ".ogg"
 	case "sticker":
 		ext = ".webp"
+	case "document":
+		ext = documentExt(originalName)
 	}
 	return fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
+}
+
+// legacyMediaFileName is the name used before documents kept an extension;
+// readers try it after mediaFileName so files cached earlier stay reachable.
+func legacyMediaFileName(mediaType string, timestamp time.Time, messageID string) string {
+	return mediaFileName(mediaType, timestamp, messageID, "")
+}
+
+// documentExt returns the lower-cased extension of a sender-supplied file
+// name when it is plain ASCII letters/digits of 1..10 characters, "" otherwise.
+// Only the extension is reused: the rest of the name never reaches the disk.
+func documentExt(name string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
+	if len(ext) < 2 || len(ext) > 11 {
+		return ""
+	}
+	for _, r := range ext[1:] {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return ""
+		}
+	}
+	return ext
+}
+
+// cachedMediaPath returns the existing cached file for a row (current name
+// first, then the legacy one) or "" when nothing is cached.
+func cachedMediaPath(chatDir, mediaType string, timestamp time.Time, messageID, originalName string) string {
+	for _, name := range []string{
+		mediaFileName(mediaType, timestamp, messageID, originalName),
+		legacyMediaFileName(mediaType, timestamp, messageID),
+	} {
+		p := filepath.Join(chatDir, name)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 // chatMediaDir is store/<chat_jid> with ':' (device suffix) mapped to '_'.

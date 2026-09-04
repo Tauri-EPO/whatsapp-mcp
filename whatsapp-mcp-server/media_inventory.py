@@ -49,8 +49,9 @@ def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
     """Map message id -> cached file for one chat directory.
 
     Filenames are ``<type>_<date>_<time>_<id>[.ext]``; the id is what follows
-    the third underscore, minus the extension the bridge appends for its type.
-    Documents keep no extension (the original name lives in messages.filename).
+    the third underscore, minus the extension (fixed per type; documents take
+    the sender's, and files cached before that change have none). Message IDs
+    never contain a dot, so splitting the extension is safe for every shape.
     A missing or unreadable directory means nothing is cached.
     """
     found: dict[str, CachedFile] = {}
@@ -62,9 +63,7 @@ def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
                 parts = entry.name.split("_", 3)
                 if len(parts) != 4 or parts[0] not in MEDIA_TYPES:
                     continue
-                tail = parts[3]
-                if parts[0] != "document":
-                    tail = os.path.splitext(tail)[0]
+                tail = os.path.splitext(parts[3])[0]
                 try:
                     size = entry.stat().st_size
                 except OSError:

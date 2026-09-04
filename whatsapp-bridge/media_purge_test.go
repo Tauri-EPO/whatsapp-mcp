@@ -47,7 +47,7 @@ func purgeFixture(t *testing.T) (*Bridge, map[string]string) {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(dir, mediaFileName(mediaType, ts, id))
+		path := filepath.Join(dir, mediaFileName(mediaType, ts, id, ""))
 		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
 			t.Fatal(err)
 		}
