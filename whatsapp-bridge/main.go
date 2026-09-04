@@ -2389,6 +2389,18 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		_ = json.NewEncoder(w).Encode(status)
 	}))
 
+	// Group participants (see group_members.go). Needs a live connection.
+	mux.HandleFunc("/api/group/members", auth(handleGroupMembers(
+		func(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
+			if client == nil || !client.IsConnected() {
+				return nil, errors.New("WhatsApp client is not connected")
+			}
+			return client.GetGroupInfo(ctx, jid)
+		},
+		storeContactName(client),
+		outboundChatPolicy,
+	)))
+
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests

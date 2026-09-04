@@ -466,6 +466,18 @@ Get the last message exchanged with a contact.
 
 - `phone` (required): Phone number of the contact
 
+#### `list_group_members`
+
+List the participants of a group (live query through the bridge).
+
+**Parameters:**
+
+- `group_jid` (required): The group JID (`...@g.us`)
+
+Returns the group's `name`, `topic`, `owner_jid` and a `members` list with
+`jid`, `phone_number`, `lid`, `name` (from your contacts when known),
+`display`, `is_admin` and `is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
+
 #### `get_message_context`
 
 Get messages around a specific message for context.
