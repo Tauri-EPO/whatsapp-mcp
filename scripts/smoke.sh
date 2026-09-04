@@ -46,11 +46,19 @@ step()  { printf '\n== %s\n' "$*"; }
 fail()  { red "FAIL: $1"; [ -n "${2:-}" ] && echo "      $2"; exit 1; }
 
 compose() { docker compose "$@"; }
-bridge_get() { # $1 path -> body on stdout, status in BRIDGE_STATUS
-  local out
-  out=$(compose exec -T bridge wget -qO- -S --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
-  BRIDGE_STATUS=$(printf '%s\n' "$out" | sed -n 's/^ *HTTP\/[0-9.]* \([0-9]*\).*/\1/p' | tail -n1)
-  printf '%s\n' "$out" | grep -v '^ ' | grep -v '^wget:' || true
+bridge_get() { # $1 path -> body on stdout, HTTP status in BRIDGE_STATUS
+  # busybox wget: exit 0 with the body on a 2xx; on other statuses it prints
+  # "server returned error: HTTP/1.1 503 Service Unavailable" and exits 1.
+  local out rc
+  out=$(compose exec -T bridge wget -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    BRIDGE_STATUS=200
+    printf '%s\n' "$out"
+  else
+    BRIDGE_STATUS=$(printf '%s\n' "$out" | sed -n 's/.*HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' | tail -n1)
+    [ -n "$BRIDGE_STATUS" ] || BRIDGE_STATUS="no response ($(printf '%s' "$out" | head -c 120))"
+  fi
 }
 
 step "containers"
