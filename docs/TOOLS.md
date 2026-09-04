@@ -374,6 +374,35 @@ hash add up to), `by_chat` (with `distinct_files`, `cached_files`,
 shows the same cache from the operator's side (`store_bytes`, `media_bytes`,
 `media_files`).
 
+### `annotate_media` / `get_media_notes` / `search_media_notes`
+
+The agent's own memory about files. Notes live in **`notes.db`** next to
+`messages.db` (owned by the MCP server; the bridge never opens it) and are
+keyed by the file's **sha256**, not by message: the same file forwarded into
+three chats has one note, and the note survives the cached bytes being purged
+or the file being re-downloaded.
+
+- `annotate_media(sha256, key, value)`: set a note. `key` is free text up to 64
+  characters (`summary`, `tags`, `keep`, `transcript`, ...); `value` is text up
+  to 64 KB (JSON is fine). The same key overwrites; an empty value deletes.
+- `get_media_notes(sha256)`: every note on the hash (`{key: {value, updated_at}}`)
+  plus the messages that carry the file (`message_id`, `chat_jid`, `chat_name`,
+  `timestamp`, `media_type`, `filename`, `bytes`).
+- `search_media_notes(query, key=None, limit=50)`: case-insensitive substring
+  match over note values, newest first.
+
+Only hashes visible through `list_media` / `list_messages` can be annotated or
+read; a hash that exists solely in chats outside `WHATSAPP_ALLOWED_CHATS` is
+reported as `not_found`, the same as an unknown one. `list_media` shows the
+notes of each entry inline (`notes: {key: value}`), so a cleanup pass can see
+`keep: yes` before deciding anything.
+
+**Natural Language Examples:**
+
+- "Summarise this PDF and remember the summary for later"
+- "Tag the contract from Ana as keep"
+- "Which files did I note as disposable?"
+
 ## Chat Operations
 
 All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,

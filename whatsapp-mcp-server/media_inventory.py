@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import media_notes
 import whatsapp
 from errors import ToolError
 from whatsapp import CHAT_POLICY, PageResult, decode_cursor, encode_cursor
@@ -183,12 +184,13 @@ def list_media_page(
     has_more = len(rows) > limit
     rows = rows[:limit]
     cache = _CacheIndex()
-    items = [_row_to_item(row, cache) for row in rows]
+    notes = media_notes.fetch_notes([row[9] for row in rows])
+    items = [_row_to_item(row, cache, notes) for row in rows]
     next_cursor = encode_cursor({"k": "media", "o": offset + limit}) if has_more else None
     return PageResult(items, next_cursor, has_more)
 
 
-def _row_to_item(row: tuple, cache: _CacheIndex) -> dict[str, Any]:
+def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]]) -> dict[str, Any]:
     (
         msg_id,
         chat_jid,
@@ -222,6 +224,7 @@ def _row_to_item(row: tuple, cache: _CacheIndex) -> dict[str, Any]:
         "copies": int(copies),
         "copies_in": int(copies_in),
         "deleted_at": datetime.fromisoformat(deleted_at).isoformat() if deleted_at else None,
+        "notes": notes.get(sha256 or "", {}),
     }
 
 
