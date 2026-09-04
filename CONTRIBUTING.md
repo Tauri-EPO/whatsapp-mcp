@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in `verygoodplugins/whatsapp-mcp`. This fork is small and intentionally narrow — please read [`ROADMAP.md`](./ROADMAP.md) and [`AGENTS.md`](./AGENTS.md) before opening a PR.
+Thanks for your interest in `Tauri-EPO/whatsapp-mcp`. This fork is small and intentionally narrow — please read [`AGENTS.md`](./AGENTS.md) (the routine, the gates, the gotchas) before opening a PR.
 
 ## TL;DR
 
@@ -12,7 +12,7 @@ Thanks for your interest in `verygoodplugins/whatsapp-mcp`. This fork is small a
 ## Setup
 
 ```bash
-git clone https://github.com/verygoodplugins/whatsapp-mcp.git
+git clone https://github.com/Tauri-EPO/whatsapp-mcp.git
 cd whatsapp-mcp
 
 # Bridge
@@ -35,7 +35,7 @@ uv run main.py
    - `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `perf:` → no version bump
    - `feat!:` / `fix!:` / `BREAKING CHANGE:` in body → major bump
 4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go test -tags sqlite_fts5 ./...`, `go build -tags sqlite_fts5 ./...`.
-5. **Open a PR** to `main` against `verygoodplugins/whatsapp-mcp`. Use the PR template.
+5. **Open a PR** to `main` against `Tauri-EPO/whatsapp-mcp`. Use the PR template.
 6. **Iterate** — address review comments. Squash isn't required; meaningful commit history is fine.
 7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please cuts the next release automatically.
 
@@ -80,3 +80,45 @@ If you find a vulnerability, **please don't open a public issue**. Email securit
 If a contribution is non-trivial, your name lands in the release notes (auto-generated). Significant ongoing contributors may be invited as repo collaborators.
 
 Thanks for keeping this project small, sharp, and useful.
+
+## Tests, lint, build
+
+### Running Tests
+
+```bash
+cd whatsapp-mcp-server
+uv pip install -e ".[dev]"
+uv run pytest -v
+```
+
+### Linting
+
+```bash
+# Python
+cd whatsapp-mcp-server
+uv run ruff check .
+uv run ruff format .
+
+# Go
+cd whatsapp-bridge
+golangci-lint run
+```
+
+### Building
+
+```bash
+# Go bridge. -tags sqlite_fts5 compiles SQLite's FTS5 module in, which the
+# bridge uses for the full-text message index; without the tag the bridge
+# still runs and search falls back to a substring scan.
+cd whatsapp-bridge
+go build -tags sqlite_fts5 -o whatsapp-bridge
+
+# Run the binary
+./whatsapp-bridge
+
+# During development (avoids stale binaries)
+go run -tags sqlite_fts5 .
+
+# Container images (see docs/DOCKER.md)
+docker compose build
+```

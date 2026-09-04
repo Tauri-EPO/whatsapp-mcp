@@ -86,7 +86,8 @@ whatsapp-mcp/
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.11-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
-├── docs/DOCKER.md              # pairing, Tailscale, tokens, health, backups
+├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
+│                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
 └── .github/workflows/          # ci.yml, security.yml (release workflows are manual-only)
 ```
 
@@ -104,7 +105,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 2. **Branch from current `main`:** `git fetch origin && git checkout -b <type>/<slug> origin/main`. Types: `fix`, `feat`, `perf`, `refactor`, `docs`, `ci`, `chore`, `test`.
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
-5. **Docs in the same PR.** New env var → this file §7, `README.md` config table, `.env.example`, and `docker-compose.yml` passthrough if containers need it. New tool → README "Tools" section + tool docstring (that docstring is what the model reads).
+5. **Docs in the same PR.** New env var → this file §7, `docs/CONFIGURATION.md`, `.env.example`, and `docker-compose.yml` passthrough if containers need it. New tool → `docs/TOOLS.md` + the README "What your agent can do" table if it adds a capability + tool docstring (that docstring is what the model reads). `README.md` is the landing page for people arriving from search (Claude Code / Codex / Cursor / bots wanting WhatsApp): keep it short and outcome-oriented; technical detail goes in `docs/`.
 6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test -tags sqlite_fts5`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and the curl smoke test in `docs/DOCKER.md`.
 7. **Commit message = the PR description.** Conventional-commit title; body says the problem, the fix, what was verified and `Closes #N`. Co-author trailer for agents.
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
@@ -210,7 +211,7 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 
 Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`, `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `COMPOSE_PROFILES`) are documented in `.env.example` and `docs/DOCKER.md`.
 
-When adding a new env var: document it here, in `README.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it.
+When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
 
 ## 8. Gotchas (read before editing)
 
@@ -233,7 +234,7 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 
 | You want to… | Touch |
 |---|---|
-| Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ README "Tools", tests) |
+| Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ `docs/TOOLS.md`, tests) |
 | Change DB queries / dict conversion | `whatsapp-mcp-server/whatsapp.py` |
 | Change HTTP transport, auth, allowed hosts | `whatsapp-mcp-server/main.py` (`__main__`), `mcp_config.py`, `http_auth.py` |
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
@@ -263,4 +264,4 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 - Bugs from operation: include bridge log lines, `docker compose ps`, the tool call and its result; redact phone numbers.
 - "Won't do" is a valid outcome; close with a sentence explaining why.
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the human-facing contribution guide and [`docs/DOCKER.md`](./docs/DOCKER.md) for operations.
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the human-facing contribution guide, [`docs/DOCKER.md`](./docs/DOCKER.md) for operations and [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) for the user-facing variable reference.
