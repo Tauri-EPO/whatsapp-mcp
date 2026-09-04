@@ -1,9 +1,12 @@
 name: Release Please
 
+# Fork note (Tauri-EPO/whatsapp-mcp): releases are cut upstream by
+# verygoodplugins/whatsapp-mcp. Running release-please on every push to main
+# here would open release PRs, tag the fork and diverge CHANGELOG.md from
+# upstream (and it needs "Allow GitHub Actions to create and approve pull
+# requests" plus a token). Kept manual-only so the file stays close to upstream
+# and can still be triggered deliberately.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
