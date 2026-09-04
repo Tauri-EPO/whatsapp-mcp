@@ -93,6 +93,9 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		b.Policy,
 	)))
 
+	// Group management: participants, subject/description, invite link, leave (group_manage.go).
+	registerGroupManagement(mux, auth, liveGroupOps(client), b.Policy)
+
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.
 	mux.HandleFunc("/api/delete", auth(handleDeleteMessage(messageStore,

@@ -40,6 +40,9 @@ from whatsapp import (
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
 )
 from whatsapp import (
+    get_group_invite_link as whatsapp_get_group_invite_link,
+)
+from whatsapp import (
     get_group_members as whatsapp_get_group_members,
 )
 from whatsapp import (
@@ -55,6 +58,9 @@ from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
+    leave_group as whatsapp_leave_group,
+)
+from whatsapp import (
     list_chats_page as whatsapp_list_chats,
 )
 from whatsapp import (
@@ -62,6 +68,9 @@ from whatsapp import (
 )
 from whatsapp import (
     list_unread as whatsapp_list_unread,
+)
+from whatsapp import (
+    manage_group_participants as whatsapp_manage_group_participants,
 )
 from whatsapp import (
     mark_messages_read as whatsapp_mark_messages_read,
@@ -83,6 +92,12 @@ from whatsapp import (
 )
 from whatsapp import (
     send_reaction as whatsapp_send_reaction,
+)
+from whatsapp import (
+    send_typing as whatsapp_send_typing,
+)
+from whatsapp import (
+    update_group as whatsapp_update_group,
 )
 
 # Initialize the MCP server. Env-var handling is deferred to the __main__ block
@@ -543,6 +558,79 @@ def list_group_members(chat_jid: str) -> dict[str, Any]:
         chat_jid: The group JID (e.g. "120363000000000001@g.us")
     """
     return whatsapp_get_group_members(chat_jid)
+
+
+@mcp.tool()
+@tool_errors
+def manage_group_participants(chat_jid: str, action: str, participants: list[str]) -> dict[str, Any]:
+    """Add, remove, promote or demote members of a WhatsApp group you administer.
+
+    Outbound and irreversible for "remove"; the account must be a group admin.
+    Respects WHATSAPP_ALLOWED_CHATS.
+
+    Args:
+        chat_jid: The group JID ("120363000000000001@g.us")
+        action: "add" | "remove" | "promote" (to admin) | "demote"
+        participants: Phone numbers with country code ("5511999999999") or user JIDs
+
+    Returns:
+        {"success": true, "group_jid", "participants": [{jid, phone_number, is_admin, ...}]}
+    """
+    return whatsapp_manage_group_participants(chat_jid, action, participants)
+
+
+@mcp.tool()
+@tool_errors
+def update_group(chat_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
+    """Rename a WhatsApp group and/or change its description (admin only).
+
+    Args:
+        chat_jid: The group JID
+        name: New subject (omit to keep)
+        description: New description; empty string clears it (omit to keep)
+    """
+    return whatsapp_update_group(chat_jid, name=name, description=description)
+
+
+@mcp.tool()
+@tool_errors
+def get_group_invite_link(chat_jid: str, reset: bool = False) -> dict[str, Any]:
+    """Get the group's invite link (admin only). reset=True revokes the previous link first.
+
+    Args:
+        chat_jid: The group JID
+        reset: Generate a new link and invalidate the old one (default False)
+
+    Returns:
+        {"success": true, "link": "https://chat.whatsapp.com/..."}
+    """
+    return whatsapp_get_group_invite_link(chat_jid, reset=reset)
+
+
+@mcp.tool()
+@tool_errors
+def leave_group(chat_jid: str) -> dict[str, Any]:
+    """Leave a WhatsApp group. Irreversible without a new invite; the archive keeps the history.
+
+    Args:
+        chat_jid: The group JID
+    """
+    return whatsapp_leave_group(chat_jid)
+
+
+@mcp.tool()
+@tool_errors
+def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
+    """Show the "typing…" indicator in a chat (or clear it with is_typing=False).
+
+    Useful right before a slow reply so the other side knows something is coming.
+    WhatsApp clears it by itself after a few seconds or when a message is sent.
+
+    Args:
+        chat_jid: Phone number with country code, direct-chat JID or group JID
+        is_typing: True to show typing, False to clear (default True)
+    """
+    return whatsapp_send_typing(chat_jid, is_typing)
 
 
 @mcp.tool()

@@ -1936,3 +1936,64 @@ def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | Non
     finally:
         if "conn" in locals():
             conn.close()
+
+
+# --- group management (bridge group_manage.go) ---------------------------------
+
+
+def _group_jid(value: str) -> str:
+    jid = (value or "").strip()
+    if not jid.endswith("@g.us"):
+        raise ToolError("invalid_argument", f"Not a group JID: {jid!r} (expected ...@g.us)")
+    _require_allowed(jid)
+    return jid
+
+
+def manage_group_participants(group_jid: str, action: str, participants: list[str]) -> dict[str, Any]:
+    """add / remove / promote / demote participants (phone numbers or JIDs)."""
+    jid = _group_jid(group_jid)
+    action = (action or "").strip().lower()
+    if action not in ("add", "remove", "promote", "demote"):
+        raise ToolError("invalid_argument", "action must be one of add, remove, promote, demote")
+    cleaned = [str(p).strip() for p in (participants or []) if str(p).strip()]
+    if not cleaned:
+        raise ToolError("invalid_argument", "participants must list at least one phone number or JID")
+    return _bridge_json(
+        _bridge_request(
+            "POST", "/group/participants", json={"group_jid": jid, "action": action, "participants": cleaned}
+        )
+    )
+
+
+def update_group(group_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
+    """Change the group's subject (name) and/or description."""
+    jid = _group_jid(group_jid)
+    body: dict[str, Any] = {"group_jid": jid}
+    if name is not None:
+        body["name"] = name
+    if description is not None:
+        body["description"] = description
+    if len(body) == 1:
+        raise ToolError("invalid_argument", "provide name and/or description")
+    return _bridge_json(_bridge_request("POST", "/group/subject", json=body))
+
+
+def get_group_invite_link(group_jid: str, reset: bool = False) -> dict[str, Any]:
+    """The group's invite link; reset=True revokes the old one first."""
+    jid = _group_jid(group_jid)
+    return _bridge_json(_bridge_request("POST", "/group/invite", json={"group_jid": jid, "reset": bool(reset)}))
+
+
+def leave_group(group_jid: str) -> dict[str, Any]:
+    """Leave the group (irreversible without a new invite)."""
+    jid = _group_jid(group_jid)
+    return _bridge_json(_bridge_request("POST", "/group/leave", json={"group_jid": jid}))
+
+
+def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
+    """Show (or clear) the 'typing…' presence in a chat."""
+    target = (chat_jid or "").strip()
+    if not target:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    _require_allowed(target)
+    return _bridge_json(_bridge_request("POST", "/typing", json={"recipient": target, "is_typing": bool(is_typing)}))
