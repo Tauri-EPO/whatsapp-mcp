@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -56,14 +57,23 @@ def tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        from observability import metrics  # local import: observability imports nothing from here
+
+        started = time.monotonic()
+        code: str | None = None
         try:
             return fn(*args, **kwargs)
         except ToolError as exc:
+            code = exc.code
             return exc.to_dict()
         except ValueError as exc:
+            code = "invalid_argument"
             return error("invalid_argument", str(exc))
         except Exception as exc:  # noqa: BLE001 - last line of defence for a tool call
+            code = "internal"
             logger.exception("%s failed", fn.__name__)
             return error("internal", f"{type(exc).__name__}: {exc}")
+        finally:
+            metrics.record_tool(fn.__name__, time.monotonic() - started, code)
 
     return wrapper

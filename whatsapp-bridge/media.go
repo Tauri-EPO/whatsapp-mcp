@@ -194,8 +194,10 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		written, err = downloadViaMediaRetry(ctx, client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
 	}
 	if err != nil {
+		b.metrics.mediaDownloadFails.Add(1)
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
+	b.metrics.mediaDownloads.Add(1)
 
 	b.Log.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
 	return true, mediaType, filename, absPath, nil

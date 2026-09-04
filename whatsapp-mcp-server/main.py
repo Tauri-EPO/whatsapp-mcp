@@ -15,6 +15,7 @@ from http_auth import (
     resolve_rate_limit,
 )
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
+from observability import JSON_FORMAT_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
@@ -871,17 +872,19 @@ def build_http_app(
         app = BearerTokenMiddleware(app, token)
     if rate_limit_per_minute > 0:
         app = RateLimitMiddleware(app, rate_limit_per_minute)
+    if metrics_enabled(os.getenv("WHATSAPP_MCP_METRICS")):
+        # Outermost so /metrics answers without a token and counts every
+        # response, including 401/429 from the layers below.
+        app = MetricsMiddleware(app)
     return app
 
 
 if __name__ == "__main__":
     # Diagnostics go to stderr only: on the stdio transport stdout is the MCP
     # protocol channel. WHATSAPP_MCP_LOG_LEVEL controls verbosity (default INFO).
-    logging.basicConfig(
-        stream=sys.stderr,
-        level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(log_formatter(os.getenv(JSON_FORMAT_ENV)))
+    logging.basicConfig(level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(), handlers=[_handler])
     logging.getLogger("whatsapp_mcp").info("whatsapp-mcp-server %s", MCP_VERSION)
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()

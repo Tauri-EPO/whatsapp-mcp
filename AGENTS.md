@@ -65,6 +65,8 @@ whatsapp-mcp/
 │   ├── chat_actions.go         # /api/mark-read, /api/react, /api/typing
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
+│   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
+│   ├── metrics.go              # counters + GET /metrics (Prometheus text)
 │   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS
 │   ├── media_retention.go      # WHATSAPP_MEDIA_AUTODOWNLOAD / _RETENTION_DAYS, store size
 │   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
@@ -194,7 +196,11 @@ There are no release workflows. Dependabot auto-merge was removed; merge its PRs
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)* | Conversation allow-list (JIDs, bare numbers, `*@g.us` / `*@s.whatsapp.net`). MCP server filters reads and refuses writes (`chat_policy.py`); bridge returns 403 on send/react/mark-read/typing/delete/group/poll (`chat_policy.go`). Set for both processes |
 | `WHATSAPP_LOG_LEVEL` | `INFO` | Bridge log level (`DEBUG`/`INFO`/`WARN`/`ERROR`), applied to the bridge logger and the whatsmeow client. `DEBUG` echoes each stored message |
+| `WHATSAPP_LOG_FORMAT` | `text` | `json` switches the bridge (and whatsmeow) log lines to one JSON object per line (`ts`, `level`, `module`, `msg`) (`logging_json.go`) |
+| `WHATSAPP_METRICS` | `true` | Serve `GET /metrics` on the bridge (Prometheus text, unauthenticated like `/api/version`: counters and connection state only, `metrics.go`); `false` removes the route |
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO` | MCP server log level (stderr) |
+| `WHATSAPP_MCP_LOG_FORMAT` | `text` | `json` switches the MCP server stderr log to one JSON object per line (`observability.py`) |
+| `WHATSAPP_MCP_METRICS` | `true` | Serve `GET /metrics` on the `http`/`sse` transports (tool calls/errors/seconds per tool, HTTP requests by status class); `false` disables it |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |

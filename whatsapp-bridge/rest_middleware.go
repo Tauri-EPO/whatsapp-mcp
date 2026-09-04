@@ -76,11 +76,12 @@ func (s *statusRecorder) WriteHeader(code int) {
 // requestLog writes one line per request: method, path, status, duration,
 // remote address and user agent (never bodies). Health probes go to DEBUG
 // so a 30-second Docker healthcheck does not fill the log.
-func requestLog(next http.Handler) http.Handler {
+func requestLog(next http.Handler, m *metricsRegistry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		m.recordRequest(rec.status)
 		logf := bridgeLog.Infof
 		if r.URL.Path == "/api/health" || r.URL.Path == "/api/ready" {
 			logf = bridgeLog.Debugf

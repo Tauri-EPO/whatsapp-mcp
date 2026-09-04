@@ -564,6 +564,7 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 		origTimes:         newOriginalTimestamps(),
 		mediaRetry:        newMediaRetryHub(),
 		storeStats:        newStoreStats(storeDir()),
+		metrics:           newMetricsRegistry(),
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia

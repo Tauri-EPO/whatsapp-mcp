@@ -660,6 +660,11 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		defer cancel()
 		success, message, sent := b.Send(ctx, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
 		b.Log.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
+		if success {
+			b.metrics.messagesSent.Add(1)
+		} else {
+			b.metrics.sendFailures.Add(1)
+		}
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 

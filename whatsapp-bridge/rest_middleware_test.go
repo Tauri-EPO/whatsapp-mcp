@@ -41,7 +41,7 @@ func TestRequireMethod(t *testing.T) {
 
 func TestRequestLogLine(t *testing.T) {
 	rec := installRecordingLogger(t)
-	h := requestLog(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) }))
+	h := requestLog(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) }), newMetricsRegistry())
 	req := httptest.NewRequest(http.MethodPost, "/api/send", nil)
 	req.RemoteAddr = "10.0.0.7:5555"
 	req.Header.Set("User-Agent", "unit")

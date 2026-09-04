@@ -77,6 +77,8 @@ type Bridge struct {
 	cancel context.CancelFunc
 	// storeStats caches store/media sizes for /api/health (see media_retention.go).
 	storeStats *storeStats
+	// metrics feeds GET /metrics (metrics.go).
+	metrics *metricsRegistry
 }
 
 // newBridge wires the production dependencies from a live client and store.
@@ -97,8 +99,12 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		mediaRetry:        newMediaRetryHub(),
 		startedAt:         time.Now(),
 		storeStats:        newStoreStats(storeDir()),
+		metrics:           newMetricsRegistry(),
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
+	if b.Webhook != nil {
+		b.Webhook.failures = &b.metrics.webhookFailures
+	}
 	b.DownloadMedia = b.downloadMedia
 	b.Connect = client.Connect
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {

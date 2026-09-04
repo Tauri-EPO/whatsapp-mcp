@@ -193,7 +193,30 @@ works as before.
   line per REST request (`POST /api/send → 200 (12ms) from=127.0.0.1 ua="…"`,
   never bodies; health probes at DEBUG); raise verbosity with
   `WHATSAPP_LOG_LEVEL=DEBUG` (bridge, also echoes stored messages) or
-  `WHATSAPP_MCP_LOG_LEVEL=DEBUG` (MCP server) in `.env`.
+  `WHATSAPP_MCP_LOG_LEVEL=DEBUG` (MCP server) in `.env`. For a log shipper
+  (Loki, Elastic, journald) set `WHATSAPP_LOG_FORMAT=json` and
+  `WHATSAPP_MCP_LOG_FORMAT=json`: one JSON object per line with `ts`,
+  `level`, `module`/`logger` and `msg`.
+- Metrics: both processes expose Prometheus text on `GET /metrics`
+  (bridge on `8080`, MCP server on the published MCP port), unauthenticated
+  like `/api/version` and limited to counts and state (never content).
+  The bridge reports `whatsapp_bridge_connected`, `whatsapp_bridge_paired`,
+  store and media sizes, messages stored/sent, download and webhook
+  failures, reconnects and HTTP requests by status class; the MCP server
+  reports `whatsapp_mcp_tool_calls_total{tool}`, errors by tool and code,
+  seconds per tool and HTTP requests by class. Scrape from the tailnet:
+
+  ```yaml
+  scrape_configs:
+    - job_name: whatsapp-mcp
+      static_configs:
+        - targets: ["home-server:8000"]   # MCP server
+    - job_name: whatsapp-bridge
+      static_configs:
+        - targets: ["home-server:8080"]   # only if the bridge port is published
+  ```
+
+  `WHATSAPP_METRICS=false` / `WHATSAPP_MCP_METRICS=false` remove the endpoints.
 - Update: `git pull && GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build`.
   Check what is running with
   `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`

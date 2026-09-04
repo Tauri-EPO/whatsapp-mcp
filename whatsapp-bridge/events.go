@@ -252,6 +252,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// by message ID) can find the row when we call it synchronously below.
 	if err := persistMessage(messageStore, msg.Info.ID, chatJID, sender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
 		logger.Warnf("Failed to store message: %v", err)
+	} else {
+		b.metrics.messagesStored.Add(1)
 	}
 
 	var quotedIsFromMe *bool
@@ -619,6 +621,7 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 		select {
 		case <-reconnectChan:
 			b.Log.Infof("🔄 Attempting to reconnect...")
+			b.metrics.reconnects.Add(1)
 
 			// Wait before reconnecting, unless we are shutting down
 			select {

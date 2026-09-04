@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +40,8 @@ type webhookSender struct {
 	// read once when the sender is built instead of on every message.
 	enabled bool
 	url     string
+	// failures counts POSTs that errored or got a non-2xx (nil = not counted).
+	failures *atomic.Int64
 }
 
 // newWebhookSender builds the production sender. The 30-second timeout
@@ -140,6 +143,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 
 	resp, err := w.client.Do(req) //nolint:gosec // operator-configured destination, redirects disabled
 	if err != nil {
+		w.countFailure()
 		bridgeLog.Errorf("sending webhook: %v", err)
 		return
 	}
@@ -148,6 +152,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 	if resp.StatusCode == 200 {
 		bridgeLog.Debugf("✓ Webhook sent for message from %s", payload.Sender)
 	} else {
+		w.countFailure()
 		bridgeLog.Warnf("Webhook failed with status %d", resp.StatusCode)
 	}
 }
@@ -241,3 +246,9 @@ func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe boo
 
 // In main.go, handleMessage forwards webhooks for messages with text content.
 // It will forward self-sent messages when the env var FORWARD_SELF=true.
+
+func (w *webhookSender) countFailure() {
+	if w != nil && w.failures != nil {
+		w.failures.Add(1)
+	}
+}
