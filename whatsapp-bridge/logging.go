@@ -39,13 +39,10 @@ func resolveLogLevel(value string) string {
 }
 
 // initLogging creates the bridge, client and database loggers at the
-// configured level. Colour is enabled when stdout is a terminal.
+// configured level and format (logging_json.go). Colour is enabled when stdout is a terminal.
 func initLogging() (bridge, client, db waLog.Logger) {
 	level := resolveLogLevel(os.Getenv(logLevelEnv))
-	color := false
-	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		color = true
-	}
-	bridgeLog = waLog.Stdout("Bridge", level, color)
-	return bridgeLog, waLog.Stdout("Client", level, color), waLog.Stdout("Database", "INFO", color)
+	bridge, client, db = newLoggerSet(level, jsonLogsEnabled(os.Getenv(logFormatEnv)))
+	bridgeLog = bridge
+	return bridge, client, db
 }

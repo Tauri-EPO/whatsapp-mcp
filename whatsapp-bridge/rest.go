@@ -67,6 +67,10 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 
 	// Build identity; unauthenticated on purpose (see version.go).
 	mux.HandleFunc("/api/version", handleVersion(buildInfo(messageStore != nil && messageStore.fts)))
+	if getEnvBool(metricsEnv, true) {
+		// Prometheus text; unauthenticated like /api/version (counts only, see metrics.go).
+		mux.HandleFunc("/metrics", requireMethod(http.MethodGet, b.handleMetrics()))
+	}
 
 	// Readiness: 200 only while paired AND connected. whatsmeow reports
 	// IsConnected() as soon as the websocket is up, which includes the QR
@@ -188,7 +192,7 @@ func (b *Bridge) startRESTServer(port int, token string) {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second, // Longer for media downloads
 		IdleTimeout:  120 * time.Second,
-		Handler:      requestLog(handler),
+		Handler:      requestLog(handler, b.metrics),
 	}
 
 	b.httpServer = server

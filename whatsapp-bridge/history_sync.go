@@ -181,6 +181,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						logger.Warnf("Failed to store history message: %v", err)
 					} else {
 						syncedCount++
+						b.metrics.historyMessages.Add(1)
 						storedInChat++
 						// Per-message echo stays at DEBUG: user content out of INFO,
 						// and two lines per row would swamp a full sync.
