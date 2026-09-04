@@ -17,6 +17,18 @@
 # WHATSAPP_BRIDGE_ALLOWED_HOSTS=bridge on the bridge, and point the MCP
 # server at WHATSAPP_API_URL=http://bridge:8080/api. See docs/DOCKER.md.
 
+# Shared bits. json-file logging is unbounded by default: with
+# WHATSAPP_LOG_LEVEL=DEBUG the bridge echoes every message, so cap it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Resource limits are deliberately not set for bridge and mcp (they are small);
+# the whisper sidecar gets one because a model plus 4 threads can starve the
+# rest of a small box. Override in .env: WHISPER_MEM_LIMIT, WHISPER_CPUS.
+
 services:
   bridge:
     build:
@@ -26,9 +38,12 @@ services:
         VERSION: ${VERSION:-dev}
     image: whatsapp-mcp-bridge:local
     restart: unless-stopped
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
     # Drain REST, stop loops and close SQLite cleanly before SIGKILL.
     stop_grace_period: 30s
     environment:
+      TZ: ${TZ:-UTC}
       WHATSAPP_BRIDGE_PORT: "8080"
       WHATSAPP_BRIDGE_BIND: ${WHATSAPP_BRIDGE_BIND:-127.0.0.1}
       WHATSAPP_BRIDGE_ALLOWED_HOSTS: ${WHATSAPP_BRIDGE_ALLOWED_HOSTS:-}
@@ -69,6 +84,8 @@ services:
         VERSION: ${VERSION:-dev}
     image: whatsapp-mcp-server:local
     restart: unless-stopped
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
     network_mode: "service:bridge"
     # Wait for the bridge healthcheck (REST up), which only happens after the
     # bridge has written /app/store/.bridge-token: the MCP server resolves its
@@ -80,6 +97,7 @@ services:
         condition: service_healthy
         restart: true
     environment:
+      TZ: ${TZ:-UTC}
       # Hostnames clients use to reach /mcp (Tailscale MagicDNS name, reverse
       # proxy name...). Empty = accept any Host (a warning is logged).
       WHATSAPP_MCP_ALLOWED_HOSTS: ${WHATSAPP_MCP_ALLOWED_HOSTS:-}
@@ -110,19 +128,26 @@ services:
   # serves it on 127.0.0.1:8178 inside the shared network namespace (CPU only).
   whisper:
     profiles: ["whisper"]
-    image: ghcr.io/ggml-org/whisper.cpp:main
+    # Pinned by digest: the `main` tag moves and is amd64-only. Dependabot
+    # (docker-compose ecosystem) proposes digest bumps. On ARM hosts build
+    # whisper.cpp yourself and point WHISPER_URL at it.
+    image: ghcr.io/ggml-org/whisper.cpp:main@sha256:1eedd9a88bae3b1cd7066b305d22c927d7a8e036d8cf9100aae3d0a261f7d650
     restart: unless-stopped
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${WHISPER_MEM_LIMIT:-3g}
+    cpus: ${WHISPER_CPUS:-4}
     network_mode: "service:bridge"
-    # Wait for the bridge healthcheck (REST up), which only happens after the
-    # bridge has written /app/store/.bridge-token: the MCP server resolves its
-    # own HTTP bearer token from that file once, at startup.
-    # restart: true recreates this container whenever the bridge is recreated,
-    # otherwise it would keep a dead network namespace (network_mode above).
+    # Shares the bridge's network namespace (the MCP server reaches it on
+    # 127.0.0.1:8178), so it is recreated whenever the bridge is.
     depends_on:
       bridge:
         condition: service_healthy
         restart: true
+    # No healthcheck: the image ships neither wget nor curl and whisper-server
+    # has no dedicated health route; transcribe_audio reports failures itself.
     environment:
+      TZ: ${TZ:-UTC}
       # tiny | base | small | medium | large-v3 | large-v3-turbo (+ ".en" variants, "-q5_1" quantised...)
       WHISPER_MODEL_NAME: ${WHISPER_MODEL_NAME:-small}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}

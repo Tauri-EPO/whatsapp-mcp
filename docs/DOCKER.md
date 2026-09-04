@@ -101,6 +101,8 @@ Compose reads `.env` from the repo root (copy `.env.example`). The keys that mat
 | `WEBHOOK_ENABLED` | `false` | Outbound webhooks are off in the container by default because the upstream default URL points at `localhost:8769`. Set to `true` together with `WEBHOOK_URL`. |
 | `WEBHOOK_URL`, `FORWARD_SELF` | | Passed through to the bridge. |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD`, `WHATSAPP_MEDIA_RETENTION_DAYS` | `true`, *(unset)* | Keep the media cache bounded: stop caching on arrival and/or expire files older than N days. `download_media` still fetches on demand. |
+| `TZ` | `UTC` | Timezone for log lines and the media retention sweep in all containers. |
+| `WHISPER_MEM_LIMIT`, `WHISPER_CPUS` | `3g`, `4` | Resource cap for the whisper sidecar so a model never starves the bridge. |
 | `WHATSAPP_OUTBOX` | `./outbox` | Host directory mounted at `/app/outbox` in both containers. `send_file` / `send_audio_message` may only read from here (`WHATSAPP_MEDIA_ROOTS`). Give the MCP client paths like `/app/outbox/report.pdf`. |
 
 Paths returned by `download_media` are container paths under `/app/store/...`.
@@ -184,7 +186,9 @@ works as before.
   a first run shows `healthy` while you scan the QR. To wait for WhatsApp
   itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
-- Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`. Both
+- Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`. Files
+  rotate at 10 MB × 5 per container (json-file driver), so `DEBUG` cannot fill
+  the disk. Both
   services log one line per event with a level; the bridge also logs one
   line per REST request (`POST /api/send → 200 (12ms) from=127.0.0.1 ua="…"`,
   never bodies; health probes at DEBUG); raise verbosity with
