@@ -39,7 +39,11 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
   2. `gh pr list --repo verygoodplugins/whatsapp-mcp --state all --search "<topic>"` and the same on `lharries/whatsapp-mcp`; read the PR description first — it usually explains the WhatsApp behaviour better than the diff.
   3. Reimplement the delta against our code (`git cherry-pick -x <sha>` only when the patch applies cleanly to files we have not diverged in). Credit the source in the commit body ("Reimplements upstream VGP #NNN"), as every PR in this repo has done so far.
   4. Do not bring upstream's release-please, CHANGELOG or version bumps.
-- **whatsmeow protocol drift** is the one thing upstream will keep fixing before us. Routine in issue #63: monthly `go get go.mau.fi/whatsmeow@latest`, tests, image rebuild, one real send/receive on a test pairing.
+- **whatsmeow protocol drift** is the one thing upstream will keep fixing before us. Monthly routine (first done 2026-09-04):
+  1. In `whatsapp-bridge/`: `go get go.mau.fi/whatsmeow@latest && go mod tidy` (inside the `golang:<version>-alpine` container on Windows). If the new version needs a newer Go, bump `go.mod`, the Dockerfile base image, `go-version` in every workflow and the golangci-lint version together — they must agree.
+  2. `go vet`/`go test -tags sqlite_fts5 ./...`, `golangci-lint run`, `docker compose build`.
+  3. Pair a test store, send/receive one text, one media, one poll; watch the log for new event types whatsmeow now emits.
+  4. PR titled `chore(deps): bump whatsmeow to <version>`; commit body lists notable upstream changes.
 - `ROADMAP.md` is upstream's. Its "out of scope" list no longer binds this fork; use it only to understand why upstream will not take something.
 
 ## 3. Architecture
@@ -131,10 +135,10 @@ docker compose --profile whisper up -d           # + local whisper.cpp for trans
 
 ```bash
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
-  -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.25-alpine \
+  -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.26-alpine \
   sh -c 'apk add --no-cache gcc musl-dev >/dev/null; go vet -tags sqlite_fts5 ./... && go test -tags sqlite_fts5 ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
-  -w /src golangci/golangci-lint:v2.7.1 golangci-lint run
+  -w /src golangci/golangci-lint:v2.11.0 golangci-lint run
 ```
 
 Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `Dockerfile` are forced LF by `.gitattributes`. When editing files programmatically, read with universal newlines and write `\n`. Prefer writing whole files or line-anchored edits over shell heredocs containing backslash escapes.
@@ -147,7 +151,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must b
 |---|---|
 | Python Lint | `ruff check` + `ruff format --check` |
 | Python Tests | `pytest` |
-| Go Lint | golangci-lint v2.7.1 (`errcheck`, `govet`, `ineffassign`, `unused`; more in issue #53) |
+| Go Lint | golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`; more in issue #53) |
 | Go Build | `go build -tags sqlite_fts5`, `go vet`, `go test` |
 | Version Consistency | `pyproject.toml` vs `server.json` (kept for file parity with upstream) |
 | CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
