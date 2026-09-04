@@ -30,6 +30,8 @@ from dataclasses import dataclass
 
 import requests
 
+from audio import ffmpeg_timeout_s
+
 DEFAULT_LANGUAGE = "pt"
 DEFAULT_TIMEOUT_S = 300
 
@@ -109,8 +111,11 @@ def convert_to_wav16k(input_file: str, output_file: str) -> str:
         "-y",
         output_file,
     ]
+    timeout = ffmpeg_timeout_s()
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise TranscriptionError(f"ffmpeg timed out after {timeout}s preparing {input_file}") from None
     except FileNotFoundError:
         raise TranscriptionError("ffmpeg is required to prepare audio for whisper but was not found on PATH") from None
     except subprocess.CalledProcessError as exc:

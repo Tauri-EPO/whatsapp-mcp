@@ -95,6 +95,7 @@ services:
       WHATSAPP_STORE_DIR: /app/store
       WHISPER_URL: ${WHISPER_URL:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
+      FFMPEG_TIMEOUT_S: ${FFMPEG_TIMEOUT_S:-120}
     volumes:
       - whatsapp-store:/app/store
       # Same path as in the bridge so send_file(media_path=/app/outbox/x) works.

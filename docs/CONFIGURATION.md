@@ -40,6 +40,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
 | `WHISPER_LANGUAGE`     | `pt`                                     | Default transcription language (`auto` to detect) |
 | `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
+| `FFMPEG_TIMEOUT_S`     | `120`                                    | Timeout for each ffmpeg conversion (`send_audio_message` encode, whisper WAV prep) |
 
 ## MCP transport (stdio vs http/sse)
 
