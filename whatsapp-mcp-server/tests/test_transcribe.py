@@ -75,7 +75,7 @@ class TestServerBackend:
             calls.append({"url": url, "files": files, "data": data, "timeout": timeout})
             return Resp()
 
-        monkeypatch.setattr(transcribe.requests, "post", fake_post)
+        monkeypatch.setattr(transcribe.httpx, "post", fake_post)
         cfg = WhisperConfig(url="http://127.0.0.1:8178/inference", binary=None, model=None, language="pt", timeout_s=42)
 
         result = transcribe_file(str(audio), config=cfg)
@@ -100,7 +100,7 @@ class TestServerBackend:
             def json(self):
                 return {"text": "hi"}
 
-        monkeypatch.setattr(transcribe.requests, "post", lambda url, **kw: (seen.append(kw["data"]), Resp())[1])
+        monkeypatch.setattr(transcribe.httpx, "post", lambda url, **kw: (seen.append(kw["data"]), Resp())[1])
         cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
 
         assert transcribe_file(str(audio), language="en", config=cfg)["language"] == "en"
@@ -120,7 +120,7 @@ class TestServerBackend:
             def json(self):
                 return {}
 
-        monkeypatch.setattr(transcribe.requests, "post", lambda *a, **kw: Resp())
+        monkeypatch.setattr(transcribe.httpx, "post", lambda *a, **kw: Resp())
         cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
         with pytest.raises(TranscriptionError, match="HTTP 500"):
             transcribe_file(str(audio), config=cfg)

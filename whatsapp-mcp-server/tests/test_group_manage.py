@@ -30,7 +30,7 @@ def calls(monkeypatch):
             return Resp(payload={"success": True, "link": "https://chat.whatsapp.com/ABC"})
         return Resp()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     return seen
 
@@ -73,7 +73,7 @@ def test_update_invite_leave_typing(calls):
 
 def test_allow_list_blocks_before_bridge(monkeypatch):
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
-    monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge called"))
     for fn, args in (
         (whatsapp.manage_group_participants, (GROUP, "add", ["5511999999999"])),
         (whatsapp.update_group, (GROUP, "x", None)),
@@ -89,7 +89,7 @@ def test_allow_list_blocks_before_bridge(monkeypatch):
 def test_bridge_refusal_maps_to_code(monkeypatch):
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     monkeypatch.setattr(
-        whatsapp.requests, "post", lambda *a, **k: Resp(502, {"success": False, "message": "not connected"})
+        whatsapp.bridge_http, "post", lambda *a, **k: Resp(502, {"success": False, "message": "not connected"})
     )
     out = main.leave_group(GROUP)
     assert out["error"]["code"] == "bridge_unavailable" and "not connected" in out["error"]["message"]

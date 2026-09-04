@@ -53,18 +53,20 @@ def test_get_poll_results_calls_bridge(monkeypatch):
         calls.append((url, params))
         return Resp(payload={"success": True, "question": "Almoço?", "total_voters": 2, "options": [], "votes": []})
 
-    monkeypatch.setattr(whatsapp.requests, "get", fake_get)
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fake_get)
     result = whatsapp.get_poll_results("POLL1", CHAT)
     assert result["success"] is True and result["question"] == "Almoço?"
     assert calls[0][0].endswith("/poll") and calls[0][1] == {"message_id": "POLL1", "chat_jid": CHAT}
 
 
 def test_get_poll_results_errors(monkeypatch):
-    monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: Resp(404, {"success": False, "message": "no poll"}))
+    monkeypatch.setattr(
+        whatsapp.bridge_http, "get", lambda *a, **k: Resp(404, {"success": False, "message": "no poll"})
+    )
     with pytest.raises(ToolError, match="no poll") as exc:
         whatsapp.get_poll_results("X", CHAT)
     assert exc.value.code == "not_found"
-    monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "get", lambda *a, **k: pytest.fail("bridge called"))
     with pytest.raises(ToolError) as exc:
         whatsapp.get_poll_results("", CHAT)
     assert exc.value.code == "invalid_argument"

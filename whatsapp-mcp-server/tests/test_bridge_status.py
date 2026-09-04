@@ -1,6 +1,6 @@
 """bridge_status: reachable/paired/connected/version, never raises."""
 
-import requests
+import httpx
 
 import main
 import whatsapp
@@ -28,7 +28,7 @@ def _get(mapping):
 
 def test_ok_when_paired_and_connected(monkeypatch):
     monkeypatch.setattr(
-        whatsapp.requests,
+        whatsapp.bridge_http,
         "get",
         _get(
             {
@@ -58,7 +58,7 @@ def test_ok_when_paired_and_connected(monkeypatch):
 
 def test_awaiting_pairing_reports_reason(monkeypatch):
     monkeypatch.setattr(
-        whatsapp.requests,
+        whatsapp.bridge_http,
         "get",
         _get(
             {
@@ -73,9 +73,9 @@ def test_awaiting_pairing_reports_reason(monkeypatch):
 
 def test_unreachable_never_raises(monkeypatch):
     def down(url, **kwargs):
-        raise requests.ConnectionError("refused")
+        raise httpx.ConnectError("refused")
 
-    monkeypatch.setattr(whatsapp.requests, "get", down)
+    monkeypatch.setattr(whatsapp.bridge_http, "get", down)
     monkeypatch.setattr(whatsapp.time, "sleep", lambda s: None)
     out = main.bridge_status()
     assert out["ok"] is False and "unreachable" in out["reason"] and "error" not in out

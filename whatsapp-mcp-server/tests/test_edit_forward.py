@@ -23,7 +23,7 @@ class Resp:
 def test_payloads(monkeypatch):
     seen = []
     monkeypatch.setattr(
-        whatsapp.requests,
+        whatsapp.bridge_http,
         "post",
         lambda url, **kw: seen.append((url.rsplit("/api", 1)[-1], kw.get("json"), kw.get("timeout"))) or Resp(),
     )
@@ -40,7 +40,7 @@ def test_payloads(monkeypatch):
 
 
 def test_validation(monkeypatch):
-    monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge called"))
     assert main.edit_message(CHAT, "M1", "  ")["error"]["code"] == "invalid_argument"
     assert main.edit_message("", "M1", "x")["error"]["code"] == "invalid_argument"
     assert main.forward_message(CHAT, "M1", "")["error"]["code"] == "invalid_argument"
@@ -48,7 +48,7 @@ def test_validation(monkeypatch):
 
 def test_allow_list_covers_destination(monkeypatch):
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
-    monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge called"))
     with pytest.raises(ToolError) as exc:
         whatsapp.forward_message(CHAT, "M1", "5511000000000")
     assert exc.value.code == "denied"
@@ -60,13 +60,13 @@ def test_allow_list_covers_destination(monkeypatch):
 def test_bridge_refusals_map(monkeypatch):
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     monkeypatch.setattr(
-        whatsapp.requests,
+        whatsapp.bridge_http,
         "post",
         lambda *a, **k: Resp(403, {"success": False, "message": "Only messages sent by this account can be edited"}),
     )
     out = main.edit_message(CHAT, "THEIRS", "x")
     assert out["error"]["code"] == "denied" and "Only messages" in out["error"]["message"]
     monkeypatch.setattr(
-        whatsapp.requests, "post", lambda *a, **k: Resp(404, {"success": False, "message": "not found"})
+        whatsapp.bridge_http, "post", lambda *a, **k: Resp(404, {"success": False, "message": "not found"})
     )
     assert main.forward_message(CHAT, "NOPE", "5511888888888")["error"]["code"] == "not_found"

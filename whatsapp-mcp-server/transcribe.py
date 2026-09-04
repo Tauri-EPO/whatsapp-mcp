@@ -28,7 +28,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 
-import requests
+import httpx
 
 from audio import ffmpeg_timeout_s
 
@@ -129,13 +129,13 @@ def _transcribe_via_server(wav_path: str, config: WhisperConfig, language: str) 
         data["language"] = language
     try:
         with open(wav_path, "rb") as fh:
-            response = requests.post(
+            response = httpx.post(
                 config.url,
                 files={"file": (os.path.basename(wav_path), fh, "audio/wav")},
                 data=data,
                 timeout=config.timeout_s,
             )
-    except requests.RequestException as exc:
+    except httpx.HTTPError as exc:
         raise TranscriptionError(f"whisper server request failed: {exc}") from None
     if response.status_code != 200:
         raise TranscriptionError(f"whisper server returned HTTP {response.status_code}: {response.text[:300]}")

@@ -66,7 +66,7 @@ def test_send_message_without_token_surfaces_bridge_401(monkeypatch, tmp_path):
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse(status_code=401, payload={"success": False}, text="Unauthorized")
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     with pytest.raises(ToolError) as exc:
         whatsapp.send_message("12025551234", "hello")
@@ -98,7 +98,7 @@ def test_bridge_post_helpers_include_auth_headers(monkeypatch, tmp_path, func_na
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     getattr(whatsapp, func_name)(*resolved_args)
 
@@ -115,7 +115,7 @@ def test_send_reaction_posts_correct_payload(monkeypatch):
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse(payload={"ok": True})
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     success, msg = whatsapp.send_reaction(
         "12025551234@s.whatsapp.net",
@@ -146,7 +146,7 @@ def test_send_reaction_empty_emoji_sends_removal(monkeypatch):
         calls.append({"url": url, "json": json})
         return DummyResponse(payload={"ok": True})
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     success, _ = whatsapp.send_reaction("12025551234@s.whatsapp.net", "3AABCDEF01234567", "")
 
@@ -176,7 +176,7 @@ def test_mark_messages_read_posts_correct_payload(monkeypatch):
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse(payload={"success": True, "message": "Messages marked as read"})
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     success, message = whatsapp.mark_messages_read(
         [" 3AABCDEF01234567 ", "3AABCDEF76543210"],
@@ -227,7 +227,7 @@ def test_send_message_with_quoted_reply_includes_quote_fields(monkeypatch):
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     success, _, _ = whatsapp.send_message(
         "12025551234@s.whatsapp.net",
@@ -256,7 +256,7 @@ def test_send_message_without_quote_omits_quote_fields(monkeypatch):
         calls.append({"url": url, "json": json})
         return DummyResponse()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     whatsapp.send_message("12025551234@s.whatsapp.net", "Hello!")
 
@@ -275,7 +275,7 @@ def test_send_message_with_mentions_includes_mentions_field(monkeypatch):
         calls.append({"url": url, "json": json})
         return DummyResponse()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     success, _, _ = whatsapp.send_message(
         "123456789@g.us",
@@ -297,7 +297,7 @@ def test_send_message_without_mentions_omits_mentions_field(monkeypatch):
         calls.append({"url": url, "json": json})
         return DummyResponse()
 
-    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
     whatsapp.send_message("12025551234@s.whatsapp.net", "Hello!")
 
