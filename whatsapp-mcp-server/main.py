@@ -452,8 +452,11 @@ def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
     the question and options); votes appear as media_type "poll_vote" rows whose
     poll_message_id points at the poll. This tool returns the structured tally the
     bridge keeps: question, selectable_count, per-option count and voters, every
-    voter's latest selection, and total_voters. Only votes received while the bridge
-    was running are counted.
+    voter's latest selection, total_voters and undecodable_votes. Votes are
+    decrypted with the poll's secret, which the bridge learns from the creation
+    message (live or via history sync); undecodable_votes counts voters whose vote
+    could not be decrypted because that secret was never seen. They are excluded
+    from total_voters and the per-option counts.
 
     Args:
         message_id: ID of the poll message
