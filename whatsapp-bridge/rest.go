@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // MarkReadRequest is the request body for the /api/mark-read endpoint.
@@ -92,6 +94,23 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		storeContactName(client),
 		b.Policy,
 	)))
+
+	// Edit an own message / forward a message (edit_forward.go).
+	mux.HandleFunc("/api/edit", auth(handleEditMessage(messageStore,
+		func(ctx context.Context, chat types.JID, id types.MessageID, text string) error {
+			if client == nil || !client.IsConnected() {
+				return errors.New("WhatsApp client is not connected")
+			}
+			_, err := client.SendMessage(ctx, chat, client.BuildEdit(chat, id, &waE2E.Message{Conversation: proto.String(text)}))
+			return err
+		},
+		b.Policy,
+	)))
+	mux.HandleFunc("/api/forward", auth(handleForwardMessage(forwardDeps{
+		lookup:   messageStore.messageContentLookup,
+		download: b.DownloadMedia,
+		send:     b.Send,
+	}, b.Policy)))
 
 	// Group management: participants, subject/description, invite link, leave (group_manage.go).
 	registerGroupManagement(mux, auth, liveGroupOps(client), b.Policy)

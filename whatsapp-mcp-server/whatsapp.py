@@ -1997,3 +1997,33 @@ def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(target)
     return _bridge_json(_bridge_request("POST", "/typing", json={"recipient": target, "is_typing": bool(is_typing)}))
+
+
+def edit_message(chat_jid: str, message_id: str, text: str) -> dict[str, Any]:
+    """Edit an own message (WhatsApp accepts edits for ~15 minutes after sending)."""
+    chat_jid, message_id = (chat_jid or "").strip(), (message_id or "").strip()
+    if not chat_jid or not message_id:
+        raise ToolError("invalid_argument", "chat_jid and message_id are required")
+    if not (text or "").strip():
+        raise ToolError("invalid_argument", "text must not be empty")
+    _require_allowed(chat_jid)
+    return _bridge_json(
+        _bridge_request("POST", "/edit", json={"chat_jid": chat_jid, "message_id": message_id, "text": text})
+    )
+
+
+def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[str, Any]:
+    """Re-send a stored message (text or cached media with caption) to another chat."""
+    chat_jid, message_id, to = (chat_jid or "").strip(), (message_id or "").strip(), (to_chat_jid or "").strip()
+    if not chat_jid or not message_id or not to:
+        raise ToolError("invalid_argument", "chat_jid, message_id and to_chat_jid are required")
+    _require_allowed(chat_jid)
+    _require_allowed(to)
+    return _bridge_json(
+        _bridge_request(
+            "POST",
+            "/forward",
+            json={"chat_jid": chat_jid, "message_id": message_id, "to_chat_jid": to},
+            timeout=BRIDGE_MEDIA_TIMEOUT_S,
+        )
+    )
