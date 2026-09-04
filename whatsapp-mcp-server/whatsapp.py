@@ -1,6 +1,7 @@
 import json
 import os
 import os.path
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,6 +37,65 @@ def _connect_messages_db() -> sqlite3.Connection:
 
 def _connect_whatsmeow_db() -> sqlite3.Connection:
     return sqlite3.connect(WHATSMEOW_DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_S)
+
+
+# --- Full-text search -------------------------------------------------------
+#
+# The bridge owns an FTS5 index over messages.content (messages_fts, unicode61
+# tokenizer with diacritics removed; see whatsapp-bridge/fts.go). When it is
+# present, list_messages(query=...) uses MATCH: accent-insensitive, whole-word,
+# with AND / OR / NOT / "phrase" / prefix* operators and BM25 relevance. When it
+# is absent (bridge built without the sqlite_fts5 tag) the old substring scan
+# is used, so search never breaks — it is just slower and less precise.
+
+MESSAGES_FTS_TABLE = "messages_fts"
+
+# unicode61 splits only on non-word characters, so scripts without spaces
+# (Han, kana, Thai...) tokenize as one blob and MATCH would miss substrings.
+# Those queries stay on the substring scan.
+_UNSEGMENTED_SCRIPT_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u0e00-\u0e7f]")
+_FTS_TOKEN_RE = re.compile(r"\S+")
+
+
+def _fts_available(conn: sqlite3.Connection) -> bool:
+    """True when messages_fts exists and this SQLite build can read it."""
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (MESSAGES_FTS_TABLE,)
+        ).fetchone()
+        if not row or row[0] == 0:
+            return False
+        conn.execute(f"SELECT rowid FROM {MESSAGES_FTS_TABLE} LIMIT 0")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _fts_query_kind(query: str) -> str:
+    """'fts' when the query can go to the index, 'substring' otherwise."""
+    if not query or not query.strip():
+        return "substring"
+    if _UNSEGMENTED_SCRIPT_RE.search(query):
+        return "substring"
+    return "fts"
+
+
+def _fts_quote_tokens(query: str) -> str:
+    """Escape a free-text query so FTS5 treats every token literally (implicit AND).
+
+    Used as the retry when the raw query is not valid FTS5 syntax: agents pass
+    arbitrary user text, and characters like ( ) - * or bare AND/OR/NOT are
+    operators. A trailing * on a token is kept so plain prefix searches survive.
+    """
+    parts = []
+    for token in _FTS_TOKEN_RE.findall(query):
+        prefix = token.endswith("*") and len(token) > 1
+        core = token[:-1] if prefix else token
+        core = core.replace('"', '""')
+        if not core:
+            continue
+        parts.append(f'"{core}"' + ("*" if prefix else ""))
+    return " ".join(parts)
 
 
 def _read_bridge_token() -> str | None:
@@ -445,13 +505,17 @@ def list_messages(
         before: Optional ISO-8601 formatted string to only return messages before this date
         sender_phone_number: Optional phone number to filter messages by sender
         chat_jid: Optional chat JID to filter messages by chat
-        query: Optional search term to filter messages by content
+        query: Optional search term to filter messages by content. With the bridge's
+            FTS5 index this is accent-insensitive and word-based, and supports
+            AND / OR / NOT, "exact phrase" and prefix* operators; without it a
+            plain substring match is used.
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
-        sort_by: Sort order - "newest" (default) or "oldest" for chronological ordering
+        sort_by: Sort order - "newest" (default), "oldest" for chronological ordering, or
+            "relevance" (best match first; only meaningful with query and the FTS index)
 
     Returns:
         List of message dictionaries with id, timestamp, sender, content, etc.
@@ -460,11 +524,15 @@ def list_messages(
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
+        use_fts = bool(query) and _fts_query_kind(query) == "fts" and _fts_available(conn)
+
         # Build base query
         query_parts = [
             "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename FROM messages"
         ]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
+        if use_fts:
+            query_parts.append(f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid")
         where_clauses = []
         params = []
 
@@ -497,7 +565,12 @@ def list_messages(
             where_clauses.append("messages.chat_jid = ?")
             params.append(chat_jid)
 
-        if query:
+        match_param_index = None
+        if query and use_fts:
+            where_clauses.append(f"{MESSAGES_FTS_TABLE} MATCH ?")
+            match_param_index = len(params)
+            params.append(query)
+        elif query:
             # SQLite's LOWER() only handles ASCII, so LIKE LOWER(...) silently
             # excludes Unicode matches. instr() on the raw column preserves them.
             where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
@@ -508,12 +581,24 @@ def list_messages(
 
         # Add sorting and pagination
         offset = page * limit
-        order = "DESC" if sort_by == "newest" else "ASC"
-        query_parts.append(f"ORDER BY messages.timestamp {order}")
+        if sort_by == "relevance" and use_fts:
+            query_parts.append(f"ORDER BY bm25({MESSAGES_FTS_TABLE}), messages.timestamp DESC")
+        else:
+            order = "ASC" if sort_by == "oldest" else "DESC"
+            query_parts.append(f"ORDER BY messages.timestamp {order}")
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
 
-        cursor.execute(" ".join(query_parts), tuple(params))
+        sql = " ".join(query_parts)
+        try:
+            cursor.execute(sql, tuple(params))
+        except sqlite3.OperationalError:
+            if match_param_index is None:
+                raise
+            # Raw text was not valid FTS5 syntax (operator characters, unbalanced
+            # quotes...). Retry with every token quoted so it is matched literally.
+            params[match_param_index] = _fts_quote_tokens(query)
+            cursor.execute(sql, tuple(params))
         messages = cursor.fetchall()
 
         result = []
@@ -537,7 +622,7 @@ def list_messages(
             seen_ids = set()
             messages_with_context = []
             for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
+                context = get_message_context(msg.id, context_before, context_after, msg.chat_jid)
                 for ctx_msg in context.before:
                     if ctx_msg.id not in seen_ids:
                         seen_ids.add(ctx_msg.id)

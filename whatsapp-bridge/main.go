@@ -181,6 +181,17 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, err
 	}
 
+	// Full-text index (see fts.go). Never fatal: search degrades to the
+	// substring scan when the index is unavailable.
+	switch ftsOn, ftsErr := ensureMessagesFTS(db); {
+	case ftsErr != nil:
+		fmt.Printf("Warning: full-text search index unavailable: %v\n", ftsErr)
+	case ftsOn:
+		fmt.Println("Full-text search index (FTS5) active for messages.content")
+	default:
+		fmt.Println("SQLite built without FTS5: message search uses the substring scan (build with -tags sqlite_fts5 to enable)")
+	}
+
 	return &MessageStore{db: db, waDB: waDB}, nil
 }
 

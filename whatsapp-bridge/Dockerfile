@@ -17,7 +17,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/whatsapp-bridge .
+# sqlite_fts5: compiles the FTS5 module into go-sqlite3 so the bridge can keep
+# the full-text index over messages.content (see fts.go).
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath -ldflags="-s -w" -o /out/whatsapp-bridge .
 
 FROM alpine:3.21
 

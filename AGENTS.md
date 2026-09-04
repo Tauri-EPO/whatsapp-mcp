@@ -62,12 +62,13 @@ If unsure whether something is in scope, **open an issue first**. Do not open a 
 ## Local commands
 
 ```bash
-# Go bridge
+# Go bridge (-tags sqlite_fts5 compiles the FTS5 module for message search;
+# without it the bridge still runs and search falls back to a substring scan)
 cd whatsapp-bridge
-go run .                    # dev
-go build -o whatsapp-bridge && ./whatsapp-bridge   # release-ish
-golangci-lint run           # lint
-go test ./...               # tests (sparse today)
+go run -tags sqlite_fts5 .                    # dev
+go build -tags sqlite_fts5 -o whatsapp-bridge && ./whatsapp-bridge   # release-ish
+golangci-lint run           # lint (build tag set in .golangci.yml)
+go test -tags sqlite_fts5 ./...               # tests
 
 # Python MCP server
 cd whatsapp-mcp-server
@@ -139,7 +140,8 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more at pair time (see the `--full-history-pair` flag) or for a single chat at runtime (`POST /api/history`, see `history_ondemand.go`), but the phone has the final word.
 5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
-7. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`) before opening the session; a second bridge on the same store exits with a message naming the holder's PID. Tests that need a bridge process running concurrently must use separate working directories.
+7. **Message search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; it creates them when built with `-tags sqlite_fts5` and *drops* them when the build lacks FTS5, so `messages` writes can never fail on a missing module. The MCP server uses `MATCH` only if the table exists (`_fts_available`) and falls back to `instr()` otherwise. Never create FTS triggers from the Python side.
+8. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`) before opening the session; a second bridge on the same store exits with a message naming the holder's PID. Tests that need a bridge process running concurrently must use separate working directories.
 
 ## Where to make changes
 
