@@ -2221,6 +2221,13 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 
 	// Download the media using whatsmeow client
 	mediaData, err := client.Download(context.Background(), downloader)
+	if isExpiredMediaError(err) {
+		// The CDN token in the stored URL has expired (old history, forwards).
+		// Ask the sender's phone to re-upload and download from the fresh path.
+		// See media_retry.go.
+		fmt.Printf("🔁 Media URL expired for %s (%v); requesting media retry from sender's phone...\n", messageID, err)
+		mediaData, err = downloadViaMediaRetry(context.Background(), client, messageStore, messageID, chatJID, downloader)
+	}
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -2857,6 +2864,13 @@ func main() {
 		case *events.HistorySync:
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
+
+		case *events.MediaRetry:
+			// The sender's phone answered a media-retry request issued by
+			// downloadMedia (see media_retry.go); route it to the waiting call.
+			if !dispatchMediaRetry(v) {
+				logger.Debugf("Unclaimed media retry response for %s", v.MessageID)
+			}
 
 		case *events.Receipt:
 			// Persist read state so consumers can distinguish genuine unread
