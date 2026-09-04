@@ -497,6 +497,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
+| `WHATSAPP_MCP_TOKEN`   | *(unset = no auth)*                      | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Set it before exposing the port beyond loopback/tailnet |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
@@ -521,10 +522,30 @@ WHATSAPP_MCP_TRANSPORT=sse uv run main.py
 recommended choice for remote connections; `sse` is kept for older clients.
 
 > **Security:** `WHATSAPP_MCP_HOST` defaults to `127.0.0.1`, so the HTTP/SSE
-> server is reachable only from the local machine. The server has no built-in
-> authentication, and the underlying bridge can read and send WhatsApp messages
-> on your account. Only bind to a non-loopback address (e.g. `0.0.0.0`) if you
-> place an authenticating reverse proxy or tunnel in front of it.
+> server is reachable only from the local machine. The underlying bridge can read
+> and send WhatsApp messages on your account, so before binding to a non-loopback
+> address (e.g. `0.0.0.0`) set `WHATSAPP_MCP_TOKEN` or put an authenticating
+> reverse proxy / tunnel in front. Without a token the server logs a warning.
+
+#### Bearer-token authentication
+
+Set `WHATSAPP_MCP_TOKEN` (at least 16 characters; `openssl rand -hex 32` is a
+good source) and every request to `/mcp` (or `/sse` + `/messages/`) must carry
+`Authorization: Bearer <token>`. Anything else gets `401` with a
+`WWW-Authenticate: Bearer` challenge and a JSON body. The check runs in constant
+time and sits in front of the SDK's own DNS-rebinding middleware. Configure the
+client the same way you would for any bearer-protected remote MCP server:
+
+```json
+{
+  "url": "https://myserver.tail1234.ts.net/mcp",
+  "headers": { "Authorization": "Bearer <token>" }
+}
+```
+
+Leaving `WHATSAPP_MCP_TOKEN` unset keeps the transport open, which is only
+sensible on loopback or a tailnet-only listener. The stdio transport is not
+affected by any of this.
 
 #### Reaching the server by a non-loopback hostname
 

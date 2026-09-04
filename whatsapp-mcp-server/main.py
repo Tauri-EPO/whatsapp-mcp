@@ -5,6 +5,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from http_auth import BearerTokenMiddleware, resolve_mcp_token
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
@@ -517,6 +518,21 @@ def shutdown_handler(signum, frame):
     sys.exit(0)
 
 
+def build_http_app(server: MCPServer, transport: str, token: str | None, **app_kwargs: Any):
+    """Build the ASGI app for the http/sse transports, wrapped in bearer auth when a token is set.
+
+    Mirrors what MCPServer.run(transport=...) does internally, but returns the app so
+    the auth middleware can sit in front of the SDK's own DNS-rebinding middleware.
+    """
+    if transport == "sse":
+        app = server.sse_app(**app_kwargs)
+    else:
+        app = server.streamable_http_app(**app_kwargs)
+    if token:
+        return BearerTokenMiddleware(app, token)
+    return app
+
+
 if __name__ == "__main__":
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()
@@ -527,34 +543,46 @@ if __name__ == "__main__":
     # Resolve the transport first: host/port are only used (and validated) for the
     # network transports, so a bad WHATSAPP_MCP_PORT can't break a stdio launch.
     # The localhost default keeps a remote server unreachable until explicitly opened up.
-    run_kwargs: dict[str, Any] = {}
     try:
         transport = resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT"))
-        if transport != "stdio":
-            host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
-            port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
-            run_kwargs = {"host": host, "port": port}
-            # The SDK enables a loopback-only Host allow-list when bound to loopback
-            # and none otherwise; WHATSAPP_MCP_ALLOWED_HOSTS lets an operator keep
-            # DNS-rebinding protection on for a non-loopback bind.
-            security = build_transport_security(
-                host,
-                os.getenv("WHATSAPP_MCP_ALLOWED_HOSTS"),
-                os.getenv("WHATSAPP_MCP_ALLOWED_ORIGINS"),
+        if transport == "stdio":
+            install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
+            mcp.run(transport="stdio")
+            raise SystemExit(0)
+
+        host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
+        port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
+        token = resolve_mcp_token(os.getenv("WHATSAPP_MCP_TOKEN"))
+        app_kwargs: dict[str, Any] = {"host": host}
+        # The SDK enables a loopback-only Host allow-list when bound to loopback
+        # and none otherwise; WHATSAPP_MCP_ALLOWED_HOSTS lets an operator keep
+        # DNS-rebinding protection on for a non-loopback bind.
+        security = build_transport_security(
+            host,
+            os.getenv("WHATSAPP_MCP_ALLOWED_HOSTS"),
+            os.getenv("WHATSAPP_MCP_ALLOWED_ORIGINS"),
+        )
+        if security is not None:
+            app_kwargs["transport_security"] = security
+            if not security.enable_dns_rebinding_protection:
+                print(
+                    "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
+                    "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
+                    file=sys.stderr,
+                )
+        if token is None and host not in ("127.0.0.1", "localhost", "::1"):
+            print(
+                "WARNING: no WHATSAPP_MCP_TOKEN set; anyone who can reach this port can read and "
+                "send WhatsApp messages. Set a token or keep the listener tailnet/loopback-only.",
+                file=sys.stderr,
             )
-            if security is not None:
-                run_kwargs["transport_security"] = security
-                if not security.enable_dns_rebinding_protection:
-                    print(
-                        "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
-                        "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
-                        file=sys.stderr,
-                    )
-            # stdout is reserved for the protocol on stdio; log startup to stderr.
-            print(f"WhatsApp MCP server listening on {host}:{port} via {transport}", file=sys.stderr)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
-    if transport == "stdio":
-        install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
-    mcp.run(transport=transport, **run_kwargs)
+    # stdout is reserved for the protocol on stdio; log startup to stderr.
+    auth_state = "bearer token required" if token else "no auth"
+    print(f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state})", file=sys.stderr)
+
+    import uvicorn
+
+    uvicorn.run(build_http_app(mcp, transport, token, **app_kwargs), host=host, port=port, log_level="info")

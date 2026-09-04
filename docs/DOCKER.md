@@ -73,6 +73,7 @@ Compose reads `.env` from the repo root (copy `.env.example`). Relevant keys:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | *(empty = accept any Host)* | Hostnames clients use to reach `/mcp`, e.g. your Tailscale MagicDNS name. Strongly recommended; see [Tailscale](#tailscale). |
+| `WHATSAPP_MCP_TOKEN` | *(empty = no auth)* | Bearer token every MCP request must carry. Mandatory before exposing `/mcp` beyond your tailnet; see [Funnel](#funnel-public-internet). |
 | `WHATSAPP_MCP_BIND` | `127.0.0.1` | Host interface the MCP port is published on. Keep loopback and front it with `tailscale serve` or a reverse proxy. |
 | `WHATSAPP_MCP_PORT` | `8000` | Host port for `/mcp`. |
 | `WHATSAPP_BRIDGE_TOKEN` | *(generated)* | Inject the bridge REST token from outside (e.g. a secret store). Empty lets the bridge generate `/app/store/.bridge-token`, which the MCP server reads from the shared volume. |
@@ -106,12 +107,22 @@ Tailscale forwards the original `Host` header, so requests arrive as
 `Host: <host>.<tailnet>.ts.net`; a bare hostname in the allow-list matches with
 or without a port.
 
-**Funnel is not enabled by default and is not recommended.** The MCP server has
-no authentication of its own, and its tools can read and send messages on your
-WhatsApp account. `tailscale funnel` would publish that to the whole internet.
-If a client outside your tailnet genuinely needs access, put an authenticating
-reverse proxy between Funnel and the container, and keep
-`WHATSAPP_MCP_ALLOWED_HOSTS` set to the public hostname.
+### Funnel (public internet)
+
+Funnel is not enabled by default: it publishes the endpoint to the whole
+internet, and the tools can read and send messages on your WhatsApp account.
+If a client outside your tailnet (a hosted bot, for example) genuinely needs
+access, the minimum bar is:
+
+1. Set `WHATSAPP_MCP_TOKEN` (e.g. `openssl rand -hex 32`) so every request
+   needs `Authorization: Bearer <token>`; anything else gets `401`.
+2. Keep `WHATSAPP_MCP_ALLOWED_HOSTS` set to the public hostname.
+3. `sudo tailscale funnel --bg --https=443 http://127.0.0.1:8000`
+
+Then configure the remote client with the URL and the bearer header. Rotate the
+token by changing `.env` and `docker compose up -d mcp`. An authenticating
+reverse proxy in front is still a reasonable extra layer if the client supports
+it.
 
 ## Voice-note transcription (optional `whisper` profile)
 

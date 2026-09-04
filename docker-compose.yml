@@ -52,6 +52,9 @@ services:
       # proxy name...). Empty = accept any Host (a warning is logged).
       WHATSAPP_MCP_ALLOWED_HOSTS: ${WHATSAPP_MCP_ALLOWED_HOSTS:-}
       WHATSAPP_MCP_ALLOWED_ORIGINS: ${WHATSAPP_MCP_ALLOWED_ORIGINS:-}
+      # Bearer token clients must send to /mcp. Leave empty only for a
+      # loopback/tailnet-only listener; mandatory before any Funnel exposure.
+      WHATSAPP_MCP_TOKEN: ${WHATSAPP_MCP_TOKEN:-}
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
       # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
