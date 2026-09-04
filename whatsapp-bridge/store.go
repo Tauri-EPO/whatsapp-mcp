@@ -111,6 +111,9 @@ func NewMessageStore() (*MessageStore, error) {
 		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_chats_last_message ON chats(last_message_time);
+		-- Media inventory and notes (MCP server) group and look up rows by content
+		-- hash; text rows carry NULL, so a partial index stays small.
+		CREATE INDEX IF NOT EXISTS idx_messages_file_sha256 ON messages(file_sha256) WHERE file_sha256 IS NOT NULL;
 		DROP INDEX IF EXISTS idx_messages_chat_jid;
 	`)
 	if err != nil {

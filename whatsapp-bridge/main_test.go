@@ -2919,12 +2919,12 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 
 	var count int
 	if err := ms.db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_messages_chat_timestamp', 'idx_messages_sender', 'idx_messages_timestamp', 'idx_chats_last_message');`,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_messages_chat_timestamp', 'idx_messages_sender', 'idx_messages_timestamp', 'idx_chats_last_message', 'idx_messages_file_sha256');`,
 	).Scan(&count); err != nil {
 		t.Fatalf("failed to query index metadata: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("expected the four message/chat indexes to exist, found %d", count)
+	if count != 5 {
+		t.Fatalf("expected the five message/chat indexes to exist, found %d", count)
 	}
 	var redundant int
 	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_chat_jid'`).Scan(&redundant); err != nil || redundant != 0 {
