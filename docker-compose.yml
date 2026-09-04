@@ -32,6 +32,8 @@ services:
       WHATSAPP_BRIDGE_ALLOWED_HOSTS: ${WHATSAPP_BRIDGE_ALLOWED_HOSTS:-}
       WHATSAPP_STORE_DIR: /app/store
       WHATSAPP_MEDIA_ROOTS: /app/outbox
+      WHATSAPP_MEDIA_AUTODOWNLOAD: ${WHATSAPP_MEDIA_AUTODOWNLOAD:-true}
+      WHATSAPP_MEDIA_RETENTION_DAYS: ${WHATSAPP_MEDIA_RETENTION_DAYS:-}
       # Provide a token here (or in .env) to inject it from outside; leave empty
       # to let the bridge generate one into /app/store/.bridge-token, which the
       # MCP server picks up from the shared volume.

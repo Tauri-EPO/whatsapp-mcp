@@ -426,6 +426,13 @@ Download media from a received message.
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 
+By default the bridge caches every inbound file as it arrives, so this tool
+usually returns immediately. On a server you can turn that off
+(`WHATSAPP_MEDIA_AUTODOWNLOAD=false`) and/or expire old files
+(`WHATSAPP_MEDIA_RETENTION_DAYS=N`); either way `download_media` fetches
+what is missing. `/api/health` reports `store_bytes`, `media_bytes` and
+`media_files` so you can watch the cache grow.
+
 WhatsApp CDN URLs expire after a few days. When a stored URL answers 403/404/410
 (typical for history-synced or forwarded media), the bridge automatically asks
 the **sender's phone** to re-upload the file via WhatsApp's media-retry protocol,
@@ -551,6 +558,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir) |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable) |
+| `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_LOG_LEVEL`   | `INFO`                                   | Bridge log level (`DEBUG`, `INFO`, `WARN`, `ERROR`) for bridge and whatsmeow client lines. `DEBUG` also echoes every stored message |

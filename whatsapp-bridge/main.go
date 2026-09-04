@@ -2140,11 +2140,13 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to async download so media is cached for future MCP tool calls
-			go func() {
-				_, _, _, _, _ = b.DownloadMedia(msg.Info.ID, chatJID)
-			}()
+			if b.MediaAutoDownload {
+				go func() {
+					_, _, _, _, _ = b.DownloadMedia(msg.Info.ID, chatJID)
+				}()
+			}
 		}
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 {
+	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
@@ -2459,7 +2461,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 	// scan is "healthy" (alive) rather than "unhealthy" (broken). Readiness
 	// (/api/ready) is what to poll before sending.
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, healthStatus(client, b.startedAt))
+		writeJSON(w, http.StatusOK, healthStatus(client, b.startedAt, b.storeStats))
 	}))
 
 	// Build identity; unauthenticated on purpose (see version.go).
@@ -2469,7 +2471,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 	// IsConnected() as soon as the websocket is up, which includes the QR
 	// pairing phase, so "connected" alone is not "usable".
 	mux.HandleFunc("/api/ready", auth(func(w http.ResponseWriter, r *http.Request) {
-		status := healthStatus(client, b.startedAt)
+		status := healthStatus(client, b.startedAt, b.storeStats)
 		code := http.StatusOK
 		if status["status"] != "ok" {
 			code = http.StatusServiceUnavailable
@@ -2894,7 +2896,7 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 }
 
 // healthStatus is the body of /api/health and /api/ready.
-func healthStatus(client *whatsmeow.Client, startedAt time.Time) map[string]interface{} {
+func healthStatus(client *whatsmeow.Client, startedAt time.Time, stats *storeStats) map[string]interface{} {
 	connected := client != nil && client.IsConnected()
 	paired := client != nil && client.Store != nil && client.Store.ID != nil
 	status := "ok"
@@ -2904,13 +2906,20 @@ func healthStatus(client *whatsmeow.Client, startedAt time.Time) map[string]inte
 	case !connected:
 		status = "disconnected"
 	}
-	return map[string]interface{}{
+	body := map[string]interface{}{
 		"status":         status,
 		"connected":      connected,
 		"paired":         paired,
 		"uptime_seconds": int(time.Since(startedAt).Seconds()),
 		"timestamp":      time.Now().Unix(),
 	}
+	if stats != nil {
+		storeBytes, mediaBytes, mediaFiles := stats.snapshot(time.Now())
+		body["store_bytes"] = storeBytes
+		body["media_bytes"] = mediaBytes
+		body["media_files"] = mediaFiles
+	}
+	return body
 }
 
 func writeJSON(w http.ResponseWriter, code int, body interface{}) {
@@ -3112,6 +3121,12 @@ func main() {
 		return
 	}
 
+	mediaRetention, retErr := resolveMediaRetention(os.Getenv(mediaRetentionEnv))
+	if retErr != nil {
+		logger.Errorf("%v", retErr)
+		return
+	}
+
 	bridge := newBridge(client, messageStore, logger, bridgeToken)
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 
@@ -3130,6 +3145,9 @@ func main() {
 	// need WhatsApp check client.IsConnected() themselves.
 	bridge.startRESTServer(port, bridgeToken, allowedMediaRoots)
 	logger.Infof("%s", bridge.Policy.Summary())
+	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(mediaRetention))
+	retentionStop := make(chan struct{})
+	go bridge.runMediaRetention(mediaRetention, retentionStop)
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
@@ -3448,6 +3466,7 @@ connectionSuccess:
 	<-exitChan
 
 	bridgeLog.Infof("Disconnecting...")
+	close(retentionStop)
 	// Disconnect client
 	client.Disconnect()
 }

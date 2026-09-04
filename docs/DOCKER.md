@@ -82,6 +82,7 @@ Compose reads `.env` from the repo root (copy `.env.example`). Relevant keys:
 | `WHATSAPP_DEVICE_NAME` | `WhatsApp MCP` | Linked-device label; applied at pair time only. |
 | `WEBHOOK_ENABLED` | `false` | Outbound webhooks are off in the container by default because the upstream default URL points at `localhost:8769`. Set to `true` together with `WEBHOOK_URL`. |
 | `WEBHOOK_URL`, `FORWARD_SELF` | | Passed through to the bridge. |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD`, `WHATSAPP_MEDIA_RETENTION_DAYS` | `true`, *(unset)* | Keep the media cache bounded: stop caching on arrival and/or expire files older than N days. `download_media` still fetches on demand. |
 | `WHATSAPP_OUTBOX` | `./outbox` | Host directory mounted at `/app/outbox` in both containers. `send_file` / `send_audio_message` may only read from here (`WHATSAPP_MEDIA_ROOTS`). Give the MCP client paths like `/app/outbox/report.pdf`. |
 
 Paths returned by `download_media` are container paths under `/app/store/...`.
@@ -160,7 +161,8 @@ works as before.
 
 - `bridge` is healthy as soon as its REST API answers (`GET /api/health` →
   `200` with `status` = `ok` | `awaiting_pairing` | `disconnected`,
-  `connected`, `paired`, `uptime_seconds`). The API starts before pairing, so
+  `connected`, `paired`, `uptime_seconds`, `store_bytes`, `media_bytes`,
+  `media_files`). The API starts before pairing, so
   a first run shows `healthy` while you scan the QR. To wait for WhatsApp
   itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
