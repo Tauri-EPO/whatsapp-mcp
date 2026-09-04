@@ -87,6 +87,48 @@ class TestMessageConversion:
         assert result["quoted_message_id"] is None
         assert result["media_type"] == "reaction"
 
+    def test_msg_to_dict_exposes_filename_for_media(self):
+        """Document/media messages expose the bridge-side filename."""
+        msg = Message(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            id="3ADOC00000000001",
+            media_type="document",
+            filename="contrato-2024.pdf",
+        )
+        result = msg_to_dict(msg, include_sender_name=False)
+        assert result["filename"] == "contrato-2024.pdf"
+        assert result["reaction_to_message_id"] is None
+
+    def test_msg_to_dict_filename_is_null_for_text_and_reactions(self):
+        """Text messages have no filename; reactions keep it under reaction_to_message_id only."""
+        text = Message(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="hello",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            id="3ATEXT0000000001",
+        )
+        assert msg_to_dict(text, include_sender_name=False)["filename"] is None
+
+        reaction = Message(
+            timestamp=datetime(2024, 1, 1, 12, 0, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="👍",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            id="3AREACT000000001",
+            media_type="reaction",
+            filename="3AABCDEF01234567",
+        )
+        result = msg_to_dict(reaction, include_sender_name=False)
+        assert result["filename"] is None
+        assert result["reaction_to_message_id"] == "3AABCDEF01234567"
+
     def test_msg_to_dict_non_reaction_has_null_reaction_to_message_id(self):
         """Non-reaction messages always have reaction_to_message_id as None."""
         msg = Message(
