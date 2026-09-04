@@ -305,7 +305,7 @@ def get_last_interaction(jid: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
+def get_message_context(message_id: str, before: int = 5, after: int = 5, chat_jid: str = "") -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
     Messages use the same shape as list_messages (including media_type and filename
@@ -315,8 +315,11 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
+        chat_jid: JID of the chat containing the message. Recommended: message IDs
+                  are only unique per chat, and the lookup becomes an indexed
+                  primary-key hit. Without it the most recent match is used.
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
     return {
         "message": msg_to_dict(context.message),
         "before": [msg_to_dict(message) for message in context.before],

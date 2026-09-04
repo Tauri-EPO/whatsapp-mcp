@@ -472,7 +472,7 @@ Get messages around a specific message for context.
 **Parameters:**
 
 - `message_id` (required): ID of the target message
-- `chat_jid` (required): JID of the chat
+- `chat_jid` (recommended): JID of the chat. Message IDs are only unique per chat; with it the lookup is an indexed primary-key hit, without it the most recent match is used
 - `before` (optional): Number of messages before (default 5)
 - `after` (optional): Number of messages after (default 5)
 
