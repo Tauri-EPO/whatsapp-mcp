@@ -8,8 +8,9 @@ set -eu
 
 port="${WHATSAPP_BRIDGE_PORT:-8080}"
 token="${WHATSAPP_BRIDGE_TOKEN:-}"
-if [ -z "$token" ] && [ -r /app/store/.bridge-token ]; then
-    token="$(cat /app/store/.bridge-token)"
+store="${WHATSAPP_STORE_DIR:-/app/store}"
+if [ -z "$token" ] && [ -r "$store/.bridge-token" ]; then
+    token="$(cat "$store/.bridge-token")"
 fi
 
 exec wget -q -O /dev/null -T 4 \

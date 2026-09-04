@@ -63,7 +63,7 @@ whatsapp-mcp/
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
 │   ├── Dockerfile              # alpine, cgo sqlite, -tags sqlite_fts5
-│   └── store/                  # whatsapp.db, messages.db, media, .bridge-token, .bridge.lock (gitignored)
+│   └── store/                  # WHATSAPP_STORE_DIR: whatsapp.db, messages.db, media, .bridge-token, .bridge.lock (gitignored)
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
@@ -164,8 +164,9 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | SQLite path used by the MCP server |
-| `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow SQLite (LID ↔ phone resolution via `whatsmeow_lid_map`) |
+| `WHATSAPP_STORE_DIR` | `store` (bridge, relative to cwd), `../whatsapp-bridge/store` (MCP) | Directory for `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock` (`store_dir.go`: `storeDir()`, `storePath()`). Set for both processes; the compose file uses `/app/store` |
+| `WHATSAPP_DB_PATH` | `$WHATSAPP_STORE_DIR/messages.db` | SQLite path used by the MCP server (overrides the store dir) |
+| `WHATSMEOW_DB_PATH` | `$WHATSAPP_STORE_DIR/whatsapp.db` | whatsmeow SQLite (LID ↔ phone resolution via `whatsmeow_lid_map`); overrides the store dir |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to (loopback only) |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls; also signed onto outbound webhooks |
