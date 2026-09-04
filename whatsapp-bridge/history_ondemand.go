@@ -18,7 +18,6 @@ package main
 // (see AGENTS.md gotcha #4), so Count is a request, not a guarantee.
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -196,7 +195,9 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 		// SendPeerMessage is the transport whatsmeow documents for this request
 		// type. It resolves our own JID and sets the peer flag internally, so
 		// that addressing logic isn't duplicated (and drifted) here.
-		if _, err := client.SendPeerMessage(context.Background(), msg); err != nil {
+		ctx, cancel := requestContext(r, actionDeadline)
+		defer cancel()
+		if _, err := client.SendPeerMessage(ctx, msg); err != nil {
 			writeErr(http.StatusInternalServerError, fmt.Sprintf("Failed to send history request: %v", err))
 			return
 		}

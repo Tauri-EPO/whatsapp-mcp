@@ -173,7 +173,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 				return
 			}
 		default:
-			okDl, _, _, path, dlErr := deps.download(id, chat.String())
+			ctx, cancel := requestContext(r, downloadDeadline)
+			defer cancel()
+			okDl, _, _, path, dlErr := deps.download(ctx, id, chat.String())
 			if dlErr != nil || !okDl {
 				msg := "media is not available to forward"
 				if dlErr != nil {
@@ -184,7 +186,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			}
 			mediaPath = path
 		}
-		success, msg, sent := deps.send(to, content, mediaPath, "", "", "", nil)
+		sendCtx, cancelSend := requestContext(r, sendDeadline)
+		defer cancelSend()
+		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Forward failed: " + msg})
 			return

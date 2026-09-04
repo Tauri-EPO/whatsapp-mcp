@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -55,7 +56,7 @@ func TestHandleMessageSkipsAutoDownloadAboveMaxBytes(t *testing.T) {
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.MediaAutoDownload = true
 	b.MediaMaxBytes = 10 * 1024 * 1024
-	b.DownloadMedia = func(_ string, _ string) (bool, string, string, string, error) {
+	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		calls.Add(1)
 		return false, "", "", "", nil
 	}

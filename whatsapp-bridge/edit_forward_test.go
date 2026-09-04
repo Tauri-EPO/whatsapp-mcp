@@ -101,10 +101,10 @@ func TestForwardTextAndMedia(t *testing.T) {
 	var sends []struct{ to, content, media string }
 	deps := forwardDeps{
 		lookup: ms.messageContentLookup,
-		download: func(id, chat string) (bool, string, string, string, error) {
+		download: func(_ context.Context, id, chat string) (bool, string, string, string, error) {
 			return true, "image", "pic.jpg", "/store/" + chat + "/pic.jpg", nil
 		},
-		send: func(recipient, message, mediaPath, _, _, _ string, _ []string) (bool, string, sentMessage) {
+		send: func(_ context.Context, recipient, message, mediaPath, _, _, _ string, _ []string) (bool, string, sentMessage) {
 			sends = append(sends, struct{ to, content, media string }{recipient, message, mediaPath})
 			return true, "sent", sentMessage{ID: "NEW1", ChatJID: recipient, Timestamp: time.Unix(1_800_000_000, 0)}
 		},
@@ -127,10 +127,10 @@ func TestForwardRefusals(t *testing.T) {
 	ms := seedEditStore(t)
 	deps := forwardDeps{
 		lookup: ms.messageContentLookup,
-		download: func(id, chat string) (bool, string, string, string, error) {
+		download: func(_ context.Context, id, chat string) (bool, string, string, string, error) {
 			return false, "", "", "", errors.New("expired")
 		},
-		send: func(_, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
+		send: func(_ context.Context, _, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
 			t.Fatal("send must not be called")
 			return false, "", sentMessage{}
 		},

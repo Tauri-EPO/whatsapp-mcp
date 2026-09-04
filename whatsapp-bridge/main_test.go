@@ -564,8 +564,8 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.Connect = func() error { return nil }
-	b.Send = func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
-		return sendWhatsAppMessage(b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
 	b.Exit = func(reason string, code int) { panic(fmt.Sprintf("unexpected Exit(%d): %s", code, reason)) }
 	return b
@@ -1725,7 +1725,7 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 	downloadStarted := make(chan struct{})
 	releaseDownload := make(chan struct{})
 	b := testBridge(client, ms, logger)
-	b.DownloadMedia = func(_ string, _ string) (bool, string, string, string, error) {
+	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		close(downloadStarted)
 		<-releaseDownload
 		return false, "", "", "", nil

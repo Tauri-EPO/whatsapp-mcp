@@ -37,7 +37,7 @@ type SendMessageResponse struct {
 }
 
 // sendFunc is the /api/send backend (sendWhatsAppMessage in production).
-type sendFunc func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage)
+type sendFunc func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage)
 
 // sentMessage identifies a message the bridge just sent.
 type sentMessage struct {
@@ -208,7 +208,7 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
+func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp", sentMessage{}
 	}
@@ -254,7 +254,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
 
 		// Upload media to WhatsApp servers
-		resp, err := client.Upload(context.Background(), mediaData, mediaType)
+		resp, err := client.Upload(ctx, mediaData, mediaType)
 		if err != nil {
 			return false, fmt.Sprintf("Error uploading media: %v", err), sentMessage{}
 		}
@@ -381,7 +381,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	}
 
 	// Send message
-	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(ctx, recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err), sentMessage{}
@@ -656,7 +656,9 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
-		success, message, sent := b.Send(req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
+		ctx, cancel := requestContext(r, sendDeadline)
+		defer cancel()
+		success, message, sent := b.Send(ctx, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
 		b.Log.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

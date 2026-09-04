@@ -6,6 +6,7 @@ package main
 // each; the bridge logged nothing per request, so /api/send left no trail.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -97,4 +98,17 @@ func remoteHost(addr string) string {
 		return addr[:i]
 	}
 	return addr
+}
+
+// Per-endpoint deadlines for calls that go out to WhatsApp. Derived from the
+// request context so a client that disconnects (or the server draining)
+// cancels the WhatsApp call instead of leaving it running.
+const (
+	sendDeadline     = 60 * time.Second  // upload + send
+	downloadDeadline = 120 * time.Second // may wait on media-retry from the sender's phone
+	actionDeadline   = 30 * time.Second  // read receipts, reactions, presence, history requests
+)
+
+func requestContext(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), d)
 }
