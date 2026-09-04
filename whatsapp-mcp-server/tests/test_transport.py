@@ -2,7 +2,13 @@
 
 import pytest
 
-from mcp_config import resolve_host, resolve_port, resolve_transport
+from mcp_config import (
+    build_transport_security,
+    resolve_allowed_hosts,
+    resolve_host,
+    resolve_port,
+    resolve_transport,
+)
 
 
 class TestResolveTransport:
@@ -76,3 +82,105 @@ class TestResolvePort:
         for value in ("0", "-1", "65536"):
             with pytest.raises(ValueError, match="Invalid WHATSAPP_MCP_PORT"):
                 resolve_port(value)
+
+
+class TestResolveAllowedHosts:
+    """Tests for resolve_allowed_hosts()."""
+
+    @pytest.mark.parametrize("value", [None, "", "   ", ", ,"])
+    def test_unset_returns_none(self, value):
+        assert resolve_allowed_hosts(value) is None
+
+    def test_star_disables_protection(self):
+        assert resolve_allowed_hosts("*") == []
+        assert resolve_allowed_hosts("mcp.example.ts.net, *") == []
+
+    def test_bare_hostname_expands_to_exact_and_wildcard_port(self):
+        hosts = resolve_allowed_hosts("mcp.example.ts.net")
+        assert "mcp.example.ts.net" in hosts
+        assert "mcp.example.ts.net:*" in hosts
+        # Loopback spellings are always kept so local clients keep working.
+        for loopback in ("127.0.0.1", "localhost", "[::1]"):
+            assert f"{loopback}:*" in hosts
+
+    def test_explicit_port_is_kept_verbatim(self):
+        hosts = resolve_allowed_hosts("whatsapp-mcp:8000, 10.0.0.5:*")
+        assert "whatsapp-mcp:8000" in hosts
+        assert "whatsapp-mcp:*" not in hosts
+        assert "10.0.0.5:*" in hosts
+
+
+class TestBuildTransportSecurity:
+    """Tests for build_transport_security()."""
+
+    def test_loopback_without_allowlist_keeps_sdk_default(self):
+        assert build_transport_security("127.0.0.1", None) is None
+
+    def test_non_loopback_without_allowlist_disables_protection(self):
+        security = build_transport_security("0.0.0.0", None)
+        assert security is not None
+        assert security.enable_dns_rebinding_protection is False
+
+    def test_star_disables_protection(self):
+        security = build_transport_security("127.0.0.1", "*")
+        assert security.enable_dns_rebinding_protection is False
+
+    def test_allowlist_enables_protection_with_origins(self):
+        security = build_transport_security("0.0.0.0", "mcp.example.ts.net", "https://app.example.com")
+        assert security.enable_dns_rebinding_protection is True
+        assert "mcp.example.ts.net" in security.allowed_hosts
+        assert "https://mcp.example.ts.net" in security.allowed_origins
+        assert "http://localhost:*" in security.allowed_origins
+        assert "https://app.example.com" in security.allowed_origins
+
+
+def _streamable_http_app(host: str, allowed_hosts: str | None):
+    """Build a FastMCP streamable-http app the way main.py configures it at runtime."""
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP("test")  # constructed with the default loopback host, like main.py
+    server.settings.host = host
+    security = build_transport_security(host, allowed_hosts)
+    if security is not None:
+        server.settings.transport_security = security
+    return server.streamable_http_app()
+
+
+class TestStreamableHttpHostHeader:
+    """Regression tests for 421 Misdirected Request on non-loopback Host headers."""
+
+    FUNNEL_HOST = "mcp.example.ts.net"
+
+    def _get(self, app, host_header: str) -> int:
+        from starlette.testclient import TestClient
+
+        with TestClient(app) as client:
+            response = client.get(
+                "/mcp",
+                headers={"Host": host_header, "Accept": "application/json, text/event-stream"},
+            )
+        return response.status_code
+
+    def test_sdk_default_rejects_non_loopback_host(self):
+        # Documents the failure mode being fixed: loopback bind + loopback-only policy.
+        assert self._get(_streamable_http_app("127.0.0.1", None), self.FUNNEL_HOST) == 421
+
+    def test_allowlisted_host_is_accepted(self):
+        status = self._get(_streamable_http_app("0.0.0.0", self.FUNNEL_HOST), self.FUNNEL_HOST)
+        assert status != 421
+
+    def test_allowlisted_host_with_port_is_accepted(self):
+        status = self._get(_streamable_http_app("0.0.0.0", self.FUNNEL_HOST), f"{self.FUNNEL_HOST}:8000")
+        assert status != 421
+
+    def test_loopback_still_accepted_with_allowlist(self):
+        status = self._get(_streamable_http_app("0.0.0.0", self.FUNNEL_HOST), "localhost:8000")
+        assert status != 421
+
+    def test_unlisted_host_still_rejected(self):
+        status = self._get(_streamable_http_app("0.0.0.0", self.FUNNEL_HOST), "evil.example.com")
+        assert status == 421
+
+    def test_non_loopback_bind_without_allowlist_accepts_any_host(self):
+        status = self._get(_streamable_http_app("0.0.0.0", None), "whatsapp-mcp:8000")
+        assert status != 421
