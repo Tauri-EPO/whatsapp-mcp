@@ -84,7 +84,7 @@ rebuilds do **not** require re-pairing. Deleting the volume does.
 
 ## Configuration
 
-Compose reads `.env` from the repo root (copy `.env.example`). Relevant keys:
+Compose reads `.env` from the repo root (copy `.env.example`). The keys that matter for the container deployment are below; every variable is described in [CONFIGURATION.md](CONFIGURATION.md).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
