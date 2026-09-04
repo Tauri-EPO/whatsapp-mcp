@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -108,13 +107,13 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Printf("Error marshaling webhook payload: %v\n", err)
+		bridgeLog.Errorf("marshaling webhook payload: %v", err)
 		return
 	}
 
 	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData)) //nolint:gosec // WEBHOOK_URL is operator configuration, not request input
 	if err != nil {
-		fmt.Printf("Error building webhook request: %v\n", err)
+		bridgeLog.Errorf("building webhook request: %v", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -131,15 +130,15 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 
 	resp, err := w.client.Do(req) //nolint:gosec // operator-configured destination, redirects disabled
 	if err != nil {
-		fmt.Printf("Error sending webhook: %v\n", err)
+		bridgeLog.Errorf("sending webhook: %v", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 200 {
-		fmt.Printf("✓ Webhook sent for message from %s\n", payload.Sender)
+		bridgeLog.Debugf("✓ Webhook sent for message from %s", payload.Sender)
 	} else {
-		fmt.Printf("⚠ Webhook failed with status %d\n", resp.StatusCode)
+		bridgeLog.Warnf("Webhook failed with status %d", resp.StatusCode)
 	}
 }
 
@@ -185,13 +184,13 @@ func (w *webhookSender) SendWebhookWithMedia(
 	if localPath != "" {
 		info, statErr := os.Stat(localPath)
 		if statErr != nil {
-			fmt.Printf("⚠ Could not stat media file for base64 encoding: %v\n", statErr)
+			bridgeLog.Warnf("Could not stat media file for base64 encoding: %v", statErr)
 		} else if info.Size() > maxMediaBase64Bytes {
-			fmt.Printf("⚠ Media file too large for base64 encoding (%d bytes), skipping MediaBase64\n", info.Size())
+			bridgeLog.Warnf("Media file too large for base64 encoding (%d bytes), skipping MediaBase64", info.Size())
 		} else if data, err := os.ReadFile(localPath); err == nil { //nolint:gosec // localPath comes from downloadMedia inside the store directory
 			mediaBase64 = base64.StdEncoding.EncodeToString(data)
 		} else {
-			fmt.Printf("⚠ Could not read media file for base64 encoding: %v\n", err)
+			bridgeLog.Warnf("Could not read media file for base64 encoding: %v", err)
 		}
 	}
 

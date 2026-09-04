@@ -30,6 +30,7 @@ services:
       # MCP server picks up from the shared volume.
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
       WHATSAPP_DEVICE_NAME: ${WHATSAPP_DEVICE_NAME:-WhatsApp MCP}
+      WHATSAPP_LOG_LEVEL: ${WHATSAPP_LOG_LEVEL:-INFO}
       # Conversation allow-list, enforced here on outbound endpoints and by the
       # MCP server on every tool. Same value for both services.
       WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}
@@ -69,6 +70,7 @@ services:
       WHATSAPP_MCP_TOKEN: ${WHATSAPP_MCP_TOKEN:-}
       WHATSAPP_MCP_RATE_LIMIT: ${WHATSAPP_MCP_RATE_LIMIT:-}
       WHATSAPP_MCP_MAX_BODY_BYTES: ${WHATSAPP_MCP_MAX_BODY_BYTES:-}
+      WHATSAPP_MCP_LOG_LEVEL: ${WHATSAPP_MCP_LOG_LEVEL:-INFO}
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
       WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
