@@ -127,7 +127,7 @@ func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe
 }
 
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
-func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, messageStore *MessageStore) {
+func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -154,7 +154,7 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: msg})
 		}
 
-		if !client.IsConnected() {
+		if !connected() {
 			writeErr(http.StatusServiceUnavailable, "Not connected to WhatsApp")
 			return
 		}

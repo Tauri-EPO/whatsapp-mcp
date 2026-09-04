@@ -31,10 +31,11 @@ type groupOps struct {
 	leave              func(ctx context.Context, jid types.JID) error
 }
 
-// liveGroupOps binds groupOps to a whatsmeow client, refusing when offline.
-func liveGroupOps(client *whatsmeow.Client) groupOps {
+// liveGroupOps binds groupOps to a whatsmeow client, refusing when offline
+// (connected is Bridge.Connected, so tests can flip it).
+func liveGroupOps(client *whatsmeow.Client, connected func() bool) groupOps {
 	online := func() error {
-		if client == nil || !client.IsConnected() {
+		if client == nil || !connected() {
 			return errors.New("WhatsApp client is not connected")
 		}
 		return nil

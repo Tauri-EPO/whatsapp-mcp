@@ -117,12 +117,12 @@ func TestHistoryAnchorInfo(t *testing.T) {
 // TestHistoryEndpointValidation exercises the handler's own request validation.
 // The real auth wrapper is covered by auth_test.go, so an identity wrapper is
 // used here. A nil client is sufficient: each of these paths returns at or
-// before the connection check, and Client.IsConnected is nil-safe (returns
-// false), which is exactly the "not connected" response we assert.
+// before the connection check, which reports offline.
 func TestHistoryEndpointValidation(t *testing.T) {
 	identity := func(h http.HandlerFunc) http.HandlerFunc { return h }
 	mux := http.NewServeMux()
-	registerHistoryEndpoint(mux, identity, nil, nil)
+	offline := func() bool { return false }
+	registerHistoryEndpoint(mux, identity, nil, offline, nil)
 
 	cases := []struct {
 		name       string
