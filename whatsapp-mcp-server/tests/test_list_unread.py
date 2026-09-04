@@ -8,7 +8,7 @@ import main
 import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
-from tests.test_sender_name_cache import MESSAGES_SCHEMA
+from tests.conftest import MESSAGES_SCHEMA
 
 A, B, G = "5511111111111@s.whatsapp.net", "5511222222222@s.whatsapp.net", "120363000000000001@g.us"
 

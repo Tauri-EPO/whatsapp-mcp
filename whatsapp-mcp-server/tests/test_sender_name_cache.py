@@ -6,20 +6,7 @@ from datetime import datetime
 import pytest
 
 import whatsapp
-
-MESSAGES_SCHEMA = """
-CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP);
-CREATE TABLE messages (
-    id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP, is_from_me BOOLEAN,
-    media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB,
-    file_length INTEGER, quoted_message_id TEXT, deleted_at TIMESTAMP, view_once INTEGER DEFAULT 0,
-    target_message_id TEXT, PRIMARY KEY (id, chat_jid)
-);
-"""
-WHATSMEOW_SCHEMA = """
-CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT);
-CREATE TABLE whatsmeow_contacts (our_jid TEXT, their_jid TEXT, first_name TEXT, full_name TEXT, push_name TEXT, business_name TEXT);
-"""
+from tests.conftest import MESSAGES_SCHEMA, WHATSMEOW_SCHEMA
 
 
 @pytest.fixture
@@ -28,10 +15,16 @@ def dbs(tmp_path, monkeypatch):
     wdb = tmp_path / "whatsapp.db"
     with sqlite3.connect(mdb) as c:
         c.executescript(MESSAGES_SCHEMA)
-        c.execute("INSERT INTO chats VALUES ('5511999999999@s.whatsapp.net', 'Alice', '2026-09-04 10:00:00')")
-        c.execute("INSERT INTO chats VALUES ('120363000000000001@g.us', 'Family', '2026-09-04 10:00:00')")
+        c.execute(
+            "INSERT INTO chats (jid, name, last_message_time) VALUES ('5511999999999@s.whatsapp.net', 'Alice', '2026-09-04 10:00:00')"
+        )
+        c.execute(
+            "INSERT INTO chats (jid, name, last_message_time) VALUES ('120363000000000001@g.us', 'Family', '2026-09-04 10:00:00')"
+        )
         # a chat whose JID *contains* another number's digits: the old LIKE fallback matched it
-        c.execute("INSERT INTO chats VALUES ('15511999999999@s.whatsapp.net', 'Not Alice', '2026-09-04 10:00:00')")
+        c.execute(
+            "INSERT INTO chats (jid, name, last_message_time) VALUES ('15511999999999@s.whatsapp.net', 'Not Alice', '2026-09-04 10:00:00')"
+        )
     with sqlite3.connect(wdb) as c:
         c.executescript(WHATSMEOW_SCHEMA)
         c.execute("INSERT INTO whatsmeow_lid_map VALUES ('231241139937355', '5511888888888')")

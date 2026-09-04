@@ -7,7 +7,7 @@ import pytest
 import main
 import whatsapp
 from errors import ToolError
-from tests.test_sender_name_cache import MESSAGES_SCHEMA
+from tests.conftest import MESSAGES_SCHEMA
 
 CHAT = "5511999999999@s.whatsapp.net"
 
