@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -472,6 +473,12 @@ func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta 
 		kind, direction, meta.CallID, callType, fromJID, chatJID)
 }
 
+// Exit codes for conditions the bridge cannot recover from in-place.
+const (
+	exitCodeLoggedOut      = 3
+	exitCodeClientOutdated = 4
+)
+
 // handleEvent dispatches whatsmeow events. reconnectChan is signalled on
 // connection loss so reconnectLoop can dial again.
 func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
@@ -573,7 +580,10 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		b.Log.Infof("✓ Successfully connected to WhatsApp servers")
 
 	case *events.LoggedOut:
-		b.Log.Warnf("⚠️  Device logged out, please scan QR code to log in again")
+		// whatsmeow has already wiped the device row; the process cannot re-enter
+		// the pairing flow from here. Exit and let the supervisor restart us: the
+		// next start finds no session and prints a fresh QR code.
+		b.Exit(fmt.Sprintf("device logged out by the phone (reason: %v); exiting so the next start pairs again", v.Reason), exitCodeLoggedOut)
 
 	case *events.Disconnected:
 		b.Log.Warnf("⚠️  Disconnected from WhatsApp servers, will attempt reconnection...")
@@ -615,7 +625,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}()
 
 	case *events.ClientOutdated:
-		b.Log.Errorf("❌ Client outdated - please update whatsmeow library")
+		b.Exit("WhatsApp rejected this client version as outdated; rebuild with a newer whatsmeow (AGENTS.md §2 bump routine)", exitCodeClientOutdated)
 	}
 }
 
