@@ -23,7 +23,7 @@ The server can run as a local process launched by Claude Desktop, Cursor or Clau
 
    ```bash
    cd whatsapp-bridge
-   go run -tags sqlite_fts5 .   # the tag enables full-text message search
+   go run .   # the tag enables full-text message search
    ```
 
    On first start, the bridge prints and stores a local REST API token at
@@ -64,8 +64,8 @@ git pull
 
 | You changed                                                              | What to do                                                                                                                                            |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bridge code** (`whatsapp-bridge/*.go`) and you run `go run -tags sqlite_fts5 .` | Nothing — `go run` recompiles each launch. Just restart the bridge.                                                                          |
-| **Bridge code** and you run a built binary                               | `cd whatsapp-bridge && go build -tags sqlite_fts5 -o whatsapp-bridge && ./whatsapp-bridge`                                                            |
+| **Bridge code** (`whatsapp-bridge/*.go`) and you run `go run .` | Nothing — `go run` recompiles each launch. Just restart the bridge.                                                                          |
+| **Bridge code** and you run a built binary                               | `cd whatsapp-bridge && go build -o whatsapp-bridge && ./whatsapp-bridge`                                                            |
 | **MCP server** (`whatsapp-mcp-server/*.py`, `pyproject.toml`, `uv.lock`) | Restart Claude Desktop / Cursor — `uv` re-resolves from the lockfile on next launch. Force a sync with `cd whatsapp-mcp-server && uv sync` if needed. |
 
 Updates do **not** require re-pairing or deleting `whatsapp.db` — your session and message history are preserved. Re-pairing is only needed when explicitly requesting full history (see [Requesting full history](CONFIGURATION.md#requesting-full-history)).
@@ -154,9 +154,8 @@ message DBs, media, and `.bridge-token`. Logs are left in
 
 ## Windows
 
-Windows requires CGO for go-sqlite3. Install [MSYS2](https://www.msys2.org/) and enable CGO:
+The bridge is pure Go (modernc.org/sqlite), so no C toolchain or MSYS2 is needed:
 
 ```bash
-go env -w CGO_ENABLED=1
-go run -tags sqlite_fts5 .
+go run .
 ```

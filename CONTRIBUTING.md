@@ -17,7 +17,7 @@ cd whatsapp-mcp
 
 # Bridge
 cd whatsapp-bridge
-go run -tags sqlite_fts5 .   # scan QR to pair
+go run .   # scan QR to pair
 
 # MCP server (separate terminal)
 cd ../whatsapp-mcp-server
@@ -34,7 +34,7 @@ uv run main.py
    - `fix:` user-visible bug fix → patch bump
    - `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `perf:` → no version bump
    - `feat!:` / `fix!:` / `BREAKING CHANGE:` in body → major bump
-4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go test -tags sqlite_fts5 ./...`, `go build -tags sqlite_fts5 ./...`.
+4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go test ./...`, `go build ./...`.
 5. **Open a PR** to `main` against `Tauri-EPO/whatsapp-mcp`. Use the PR template.
 6. **Iterate** — address review comments. Squash isn't required; meaningful commit history is fine.
 7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please cuts the next release automatically.
@@ -107,17 +107,15 @@ golangci-lint run
 ### Building
 
 ```bash
-# Go bridge. -tags sqlite_fts5 compiles SQLite's FTS5 module in, which the
-# bridge uses for the full-text message index; without the tag the bridge
-# still runs and search falls back to a substring scan.
+# Go bridge. Pure Go (modernc.org/sqlite): no cgo, FTS5 included.
 cd whatsapp-bridge
-go build -tags sqlite_fts5 -o whatsapp-bridge
+go build -o whatsapp-bridge
 
 # Run the binary
 ./whatsapp-bridge
 
 # During development (avoids stale binaries)
-go run -tags sqlite_fts5 .
+go run .
 
 # Container images (see docs/DOCKER.md)
 docker compose build

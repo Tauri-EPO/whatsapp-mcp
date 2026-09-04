@@ -64,7 +64,7 @@ mv whatsapp-bridge/store/whatsapp.db whatsapp-bridge/store/whatsapp.db.lthash.ba
 
 # Restart the bridge and scan the new QR code.
 cd whatsapp-bridge
-./whatsapp-bridge    # or `go run -tags sqlite_fts5 .` during development
+./whatsapp-bridge    # or `go run .` during development
 ```
 
 Do not remove `whatsapp-bridge/store/messages.db` for this recovery unless you

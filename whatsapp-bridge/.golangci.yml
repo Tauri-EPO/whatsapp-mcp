@@ -10,5 +10,3 @@ linters:
 
 run:
   timeout: 5m
-  build-tags:
-    - sqlite_fts5

@@ -42,12 +42,16 @@ func sqliteURI(path, query string) string {
 	return uri
 }
 
-// SQLite DSN options for every handle the bridge opens. WAL lets readers
-// (the MCP server, our own contact lookups) proceed while a writer holds the
-// file; the busy timeout turns "database is locked" into a short wait.
+// SQLite DSN options for every handle the bridge opens (modernc.org/sqlite
+// syntax). WAL lets readers (the MCP server, our own contact lookups) proceed
+// while a writer holds the file; the busy timeout turns "database is locked"
+// into a short wait. _time_format=sqlite keeps time.Time columns in the text
+// form the cgo driver used ("2006-01-02 15:04:05.999999999-07:00"), so
+// existing stores and the MCP server's parser see no difference.
 const (
-	sqliteWriterOptions   = "_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"
-	sqliteReadOnlyOptions = "mode=ro&_busy_timeout=5000"
+	sqliteTimeFormat      = "_time_format=sqlite"
+	sqliteWriterOptions   = "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
+	sqliteReadOnlyOptions = "mode=ro&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
 )
 
 func whatsmeowDBPath() string  { return storePath("whatsapp.db") }

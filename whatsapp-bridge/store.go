@@ -53,7 +53,7 @@ func NewMessageStore() (*MessageStore, error) {
 	// WAL lets the MCP server read messages.db while the bridge writes (a
 	// history-sync burst used to make readers hit SQLITE_BUSY), and the busy
 	// timeout makes both sides wait instead of failing on a short lock.
-	db, err := sql.Open("sqlite3", sqliteURI(messagesDBPath(), sqliteWriterOptions))
+	db, err := sql.Open("sqlite", sqliteURI(messagesDBPath(), sqliteWriterOptions))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -142,7 +142,7 @@ func NewMessageStore() (*MessageStore, error) {
 	case ftsOn:
 		bridgeLog.Infof("Full-text search index (FTS5) active for messages.content")
 	default:
-		bridgeLog.Infof("SQLite built without FTS5: message search uses the substring scan (build with -tags sqlite_fts5 to enable)")
+		bridgeLog.Infof("SQLite built without FTS5: message search uses the substring scan")
 	}
 
 	return &MessageStore{db: db, waDB: waDB, names: newChatNameCache(), fts: ftsOn}, nil
@@ -156,7 +156,7 @@ func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", sqliteURI(path, sqliteReadOnlyOptions))
+	db, err := sql.Open("sqlite", sqliteURI(path, sqliteReadOnlyOptions))
 	if err != nil {
 		return nil, err
 	}

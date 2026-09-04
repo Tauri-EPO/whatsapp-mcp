@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -25,6 +24,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	_ "modernc.org/sqlite"
 )
 
 // --- Test helpers ---
@@ -79,9 +79,13 @@ func querySender(ms *MessageStore, chatJID string) string {
 	return s
 }
 
+// testMemoryDSN is an in-memory database with the production time format,
+// so raw timestamp text in tests matches what a real store holds.
+const testMemoryDSN = "file::memory:?" + sqliteTimeFormat
+
 func newTestMessageStore(t testing.TB) *MessageStore {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", testMemoryDSN)
 	if err != nil {
 		t.Fatalf("failed to open in-memory db: %v", err)
 	}
@@ -157,7 +161,7 @@ func TestOpenWhatsmeowContactsDB_MissingPathDoesNotCreateDB(t *testing.T) {
 
 func TestOpenWhatsmeowContactsDB_ReadOnly(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "whatsapp.db")
-	seedDB, err := sql.Open("sqlite3", dbPath)
+	seedDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open seed db: %v", err)
 	}
@@ -634,7 +638,7 @@ func TestGetChatName_LocalContactFallbackScopesToActiveAccount(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
 
-	waDB, err := sql.Open("sqlite3", ":memory:")
+	waDB, err := sql.Open("sqlite", testMemoryDSN)
 	if err != nil {
 		t.Fatalf("open whatsmeow db: %v", err)
 	}
@@ -652,9 +656,7 @@ func TestGetChatName_LocalContactFallbackScopesToActiveAccount(t *testing.T) {
 			PRIMARY KEY (our_jid, their_jid)
 		);
 		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name, push_name, business_name)
-			VALUES (?, ?, 'Wrong', 'Wrong Account', '', '');
-		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name, push_name, business_name)
-			VALUES (?, ?, 'Active First', '', 'Active Push', 'Active Business');
+			VALUES (?, ?, 'Wrong', 'Wrong Account', '', ''), (?, ?, 'Active First', '', 'Active Push', 'Active Business');
 	`, otherSelf.String(), phonePN.String(), activeSelf.String(), phonePN.String()); err != nil {
 		t.Fatalf("seed whatsmeow contacts: %v", err)
 	}
@@ -670,7 +672,7 @@ func TestGetChatName_LocalContactFallbackMissingTableFallsBack(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
 
-	waDB, err := sql.Open("sqlite3", ":memory:")
+	waDB, err := sql.Open("sqlite", testMemoryDSN)
 	if err != nil {
 		t.Fatalf("open whatsmeow db: %v", err)
 	}
@@ -921,7 +923,7 @@ func TestMigrateLegacyLIDSendersToPhones_RewritesAndIsIdempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	whatsappDBPath := filepath.Join(tmpDir, "whatsapp.db")
 
-	waDB, err := sql.Open("sqlite3", whatsappDBPath)
+	waDB, err := sql.Open("sqlite", whatsappDBPath)
 	if err != nil {
 		t.Fatalf("failed to create whatsapp db: %v", err)
 	}
@@ -1156,7 +1158,7 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	tmpDir := t.TempDir()
 	whatsappDBPath := filepath.Join(tmpDir, "whatsapp.db")
 
-	waDB, err := sql.Open("sqlite3", whatsappDBPath)
+	waDB, err := sql.Open("sqlite", whatsappDBPath)
 	if err != nil {
 		t.Fatalf("failed to create whatsapp db: %v", err)
 	}
@@ -1175,17 +1177,22 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	lidJID := "111@lid"
 	phoneJID := "222@s.whatsapp.net"
 
+	// One statement per Exec: the pure-Go driver binds placeholders per
+	// statement, not across a multi-statement script.
 	_, err = ms.db.Exec(`
 		INSERT INTO chats (jid, name, last_message_time, last_read_time) VALUES
 			(?, 'Legacy LID Name', '2026-03-01T10:00:00Z', '2026-03-01T09:30:00Z'),
-			(?, '', '2026-03-01T09:00:00Z', '2026-03-01T08:00:00Z');
-
+			(?, '', '2026-03-01T09:00:00Z', '2026-03-01T08:00:00Z')`, lidJID, phoneJID)
+	if err != nil {
+		t.Fatalf("failed to seed chats: %v", err)
+	}
+	_, err = ms.db.Exec(`
 		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) VALUES
 			('dup', ?, 'alice', 'lid duplicate', '2026-03-01T10:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
 			('only-lid', ?, 'alice', 'lid only', '2026-03-01T10:01:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
 			('dup', ?, 'alice', 'phone duplicate', '2026-03-01T10:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
-			('only-phone', ?, 'alice', 'phone only', '2026-03-01T10:02:00Z', 0, '', '', '', NULL, NULL, NULL, 0);
-	`, lidJID, phoneJID, lidJID, lidJID, phoneJID, phoneJID)
+			('only-phone', ?, 'alice', 'phone only', '2026-03-01T10:02:00Z', 0, '', '', '', NULL, NULL, NULL, 0)`,
+		lidJID, lidJID, phoneJID, phoneJID)
 	if err != nil {
 		t.Fatalf("failed to seed message store: %v", err)
 	}
@@ -1513,7 +1520,7 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(
 	tmpDir := t.TempDir()
 	whatsappDBPath := filepath.Join(tmpDir, "whatsapp.db")
 
-	waDB, err := sql.Open("sqlite3", whatsappDBPath)
+	waDB, err := sql.Open("sqlite", whatsappDBPath)
 	if err != nil {
 		t.Fatalf("failed to create whatsapp db: %v", err)
 	}

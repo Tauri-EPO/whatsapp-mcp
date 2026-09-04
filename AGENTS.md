@@ -41,7 +41,7 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
   4. Do not bring upstream's release-please, CHANGELOG or version bumps.
 - **whatsmeow protocol drift** is the one thing upstream will keep fixing before us. Monthly routine (first done 2026-09-04):
   1. In `whatsapp-bridge/`: `go get go.mau.fi/whatsmeow@latest && go mod tidy` (inside the `golang:<version>-alpine` container on Windows). If the new version needs a newer Go, bump `go.mod`, the Dockerfile base image, `go-version` in every workflow and the golangci-lint version together — they must agree.
-  2. `go vet`/`go test -tags sqlite_fts5 ./...`, `golangci-lint run`, `docker compose build`.
+  2. `go vet`/`go test ./...`, `golangci-lint run`, `docker compose build`.
   3. Pair a test store, send/receive one text, one media, one poll; watch the log for new event types whatsmeow now emits.
   4. PR titled `chore(deps): bump whatsmeow to <version>`; commit body lists notable upstream changes.
 - `ROADMAP.md` is upstream's. Its "out of scope" list no longer binds this fork; use it only to understand why upstream will not take something.
@@ -69,7 +69,7 @@ whatsapp-mcp/
 │   ├── media_retention.go      # WHATSAPP_MEDIA_AUTODOWNLOAD / _RETENTION_DAYS, store size
 │   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
-│   ├── fts.go                  # FTS5 index over messages.content (needs -tags sqlite_fts5)
+│   ├── fts.go                  # FTS5 index over messages.content
 │   ├── media_retry.go          # re-download expired CDN media via the sender's phone
 │   ├── instance_lock.go        # one bridge per store (flock / LockFileEx)
 │   ├── polls.go                # native polls: creation, votes, /api/poll
@@ -77,7 +77,7 @@ whatsapp-mcp/
 │   ├── delete_message.go       # /api/delete (revoke / local delete)
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
-│   ├── Dockerfile              # alpine, cgo sqlite, -tags sqlite_fts5
+│   ├── Dockerfile              # alpine, pure-Go sqlite (modernc), CGO_ENABLED=0
 │   └── store/                  # WHATSAPP_STORE_DIR: whatsapp.db, messages.db, media, .bridge-token, .bridge.lock (gitignored)
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
@@ -109,7 +109,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
 5. **Docs in the same PR.** New env var → this file §7, `docs/CONFIGURATION.md`, `.env.example`, and `docker-compose.yml` passthrough if containers need it. New tool → `docs/TOOLS.md` + the README "What your agent can do" table if it adds a capability + tool docstring (that docstring is what the model reads). `README.md` is the landing page for people arriving from search (Claude Code / Codex / Cursor / bots wanting WhatsApp): keep it short and outcome-oriented; technical detail goes in `docs/`.
-6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test -tags sqlite_fts5`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and the curl smoke test in `docs/DOCKER.md`.
+6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and the curl smoke test in `docs/DOCKER.md`.
 7. **Commit message = the PR description.** Conventional-commit title; body says the problem, the fix, what was verified and `Closes #N`. Co-author trailer for agents.
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
 9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks.
@@ -134,11 +134,10 @@ uv run ruff format . && uv run ruff check .
 uv run pytest -q
 uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT=http for HTTP
 
-# Go bridge — -tags sqlite_fts5 compiles FTS5 in (search index); without it the bridge
-# still runs and search falls back to a substring scan
+# Go bridge — pure Go (modernc.org/sqlite, FTS5 built in); no cgo, no C toolchain
 cd whatsapp-bridge
-go run -tags sqlite_fts5 .
-go vet -tags sqlite_fts5 ./... && go test -tags sqlite_fts5 ./...
+go run .
+go vet ./... && go test ./...
 golangci-lint run                                # build tag is set in .golangci.yml
 
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
@@ -152,7 +151,7 @@ docker compose --profile whisper up -d           # + local whisper.cpp for trans
 ```bash
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.26-alpine \
-  sh -c 'apk add --no-cache gcc musl-dev >/dev/null; go vet -tags sqlite_fts5 ./... && go test -tags sqlite_fts5 ./...'
+  sh -c 'go vet ./... && go test ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -w /src golangci/golangci-lint:v2.11.0 golangci-lint run
 ```
@@ -168,7 +167,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must b
 | Python Lint | `ruff check` + `ruff format --check` |
 | Python Tests | `pytest` |
 | Go Lint | golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
-| Go Build | `go build -tags sqlite_fts5`, `go vet`, `go test` |
+| Go Build | `go build`, `go vet`, `go test` |
 | Version Consistency | `pyproject.toml` vs `server.json` (kept for file parity with upstream) |
 | CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
@@ -228,7 +227,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 5. **Audio.** Voice notes must be Opus `.ogg`; `send_audio_message` converts via ffmpeg. `transcribe_audio` converts to 16 kHz WAV before whisper.
 6. **History sync** is controlled by the phone. Modern syncs put the group sender in top-level `WebMessageInfo.participant`; read it before `Key.participant`. Poll votes in history cannot be decrypted (issue #59).
 7. **`messages.db` is the source of truth for reads.** The MCP server must never need the bridge for read-only tools. The bridge opens the DB in WAL mode with a busy timeout; the MCP side uses a 5 s timeout via `_connect_messages_db()`.
-8. **Search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; it creates them when built with `-tags sqlite_fts5` and *drops* them otherwise so writes never fail. The MCP server uses `MATCH` only when the table exists and falls back to `instr()`. Never create FTS triggers from Python.
+8. **Search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; the driver (modernc.org/sqlite) always ships FTS5, and the startup check still *drops* the index on a build without it so writes never fail. The MCP server uses `MATCH` only when the table exists and falls back to `instr()`. Never create FTS triggers from Python.
 9. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`); a second bridge exits naming the holder's PID. Tests that need concurrent bridge processes must use separate working directories.
 10. **Configuration is read once.** `os.Getenv` belongs in `main.go` and the `resolve*` / `load*` / `new*` helpers it calls at startup; handlers and event paths read `Bridge` fields (`MediaRoots`, `MediaRetention`, `Webhook.enabled`, …). `storeDir()` is the one per-call read left, because tests point it at temp dirs.
 11. **No package-level state in the bridge.** Runtime dependencies live on the `Bridge` struct (`bridge.go`); tests build one with `testBridge(...)` and override fields. The one sanctioned global is `bridgeLog` (`logging.go`), write-once configuration set by `initLogging()`; tests swap it with `installRecordingLogger(t)`.

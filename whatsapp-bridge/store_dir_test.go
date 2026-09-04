@@ -62,17 +62,20 @@ func TestStoreDirIsUsedByStoreTokenAndLock(t *testing.T) {
 
 func TestSQLiteOptionsCoverEveryHandle(t *testing.T) {
 	for _, opts := range []string{sqliteWriterOptions, sqliteReadOnlyOptions} {
-		if !strings.Contains(opts, "_busy_timeout=") {
+		if !strings.Contains(opts, "busy_timeout(") {
 			t.Errorf("%q must set a busy timeout", opts)
 		}
+		if !strings.Contains(opts, sqliteTimeFormat) {
+			t.Errorf("%q must keep the cgo-compatible time format", opts)
+		}
 	}
-	if !strings.Contains(sqliteWriterOptions, "_journal_mode=WAL") {
+	if !strings.Contains(sqliteWriterOptions, "journal_mode(WAL)") {
 		t.Error("writers must use WAL")
 	}
 	if !strings.HasPrefix(sqliteReadOnlyOptions, "mode=ro") {
 		t.Error("the contacts handle must stay read-only")
 	}
-	if got := sqliteURI("/x/a.db", sqliteReadOnlyOptions); got != "file:/x/a.db?mode=ro&_busy_timeout=5000" {
+	if got := sqliteURI("/x/a.db", sqliteReadOnlyOptions); got != "file:/x/a.db?"+sqliteReadOnlyOptions {
 		t.Errorf("uri = %q", got)
 	}
 }
