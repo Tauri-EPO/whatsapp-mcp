@@ -1536,7 +1536,9 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		ctx := &waProto.ContextInfo{}
 		if quotedMsgID != "" {
 			ctx.StanzaID = proto.String(quotedMsgID)
-			ctx.Participant = proto.String(quotedSenderJID)
+			// Normalise to a JID recipients can match (bare numbers, LID upgrade);
+			// otherwise the quoted bubble shows "You" for everyone. See #13.
+			ctx.Participant = proto.String(resolveQuotedParticipantJID(client, quotedSenderJID))
 			ctx.QuotedMessage = &waProto.Message{Conversation: proto.String(quotedContent)}
 		}
 		ctx.MentionedJID = mentionedJIDs
