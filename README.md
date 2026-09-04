@@ -174,6 +174,11 @@ Get messages with filters, date ranges, and sorting.
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
 - `sort_by` (optional): "newest" or "oldest" (default "newest")
 
+Each returned message includes `media_type` and, for media messages, `filename`
+(the sender's original document name, or the bridge's generated
+`<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers). Pass the
+message `id` and `chat_jid` to `download_media` to fetch the file.
+
 **Natural Language Examples:**
 
 - "Show me the last 100 messages from today"

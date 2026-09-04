@@ -56,8 +56,10 @@ class Message:
     id: str
     chat_name: str | None = None
     media_type: str | None = None
-    # For media_type == "reaction", the bridge stores the reacted-to message ID
-    # in the `filename` column. Exposed to callers as `reaction_to_message_id`.
+    # Bridge-side filename of the media (documents keep the sender's original
+    # name; other media get a generated `<type>_<timestamp>_<id>.<ext>`). For
+    # media_type == "reaction" the bridge reuses this column for the reacted-to
+    # message ID, exposed to callers as `reaction_to_message_id` instead.
     filename: str | None = None
     # ID of the message this one is replying to (NULL for non-replies).
     quoted_message_id: str | None = None
@@ -150,6 +152,7 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "chat_jid": message.chat_jid,
         "chat_name": message.chat_name,
         "media_type": message.media_type,
+        "filename": (message.filename or None) if message.media_type and message.media_type != "reaction" else None,
         "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
         "quoted_message_id": message.quoted_message_id,
     }

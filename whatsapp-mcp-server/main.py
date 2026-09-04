@@ -180,6 +180,9 @@ def list_messages(
     """Get WhatsApp messages matching specified criteria with optional context.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
+    Media messages carry media_type and filename (the sender's original document name,
+    or the bridge's generated name for images/audio/video); pass id + chat_jid to
+    download_media to fetch the file.
 
     Args:
         after: ISO-8601 date string (e.g., "2026-01-01" or "2026-01-01T09:00:00")
@@ -300,6 +303,9 @@ def get_last_interaction(jid: str) -> dict[str, Any]:
 @mcp.tool()
 def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
+
+    Messages use the same shape as list_messages (including media_type and filename
+    for media messages).
 
     Args:
         message_id: The ID of the message to get context for
