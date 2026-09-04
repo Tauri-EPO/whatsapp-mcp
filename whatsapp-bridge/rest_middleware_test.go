@@ -60,7 +60,7 @@ func TestRequestLogLine(t *testing.T) {
 func TestEveryEndpointRejectsWrongMethodAsJSON(t *testing.T) {
 	const token = "test-token-0123456789"
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
-	mux := b.newRESTMux(8080, token, nil)
+	mux := b.newRESTMux(8080, token)
 	for _, path := range []string{"/api/send", "/api/mark-read", "/api/react", "/api/download", "/api/typing", "/api/delete", "/api/edit", "/api/forward", "/api/group/leave"} {
 		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080"+path, nil)
 		req.Host = "127.0.0.1:8080"

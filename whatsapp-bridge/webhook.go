@@ -35,6 +35,10 @@ type webhookSender struct {
 	token string
 	// defaultURL is used when WEBHOOK_URL is unset (see defaultWebhookURL).
 	defaultURL string
+	// enabled mirrors WEBHOOK_ENABLED and url WEBHOOK_URL ("" = unset), both
+	// read once when the sender is built instead of on every message.
+	enabled bool
+	url     string
 }
 
 // newWebhookSender builds the production sender. The 30-second timeout
@@ -53,8 +57,13 @@ func newWebhookSender(token string) *webhookSender {
 		},
 		token:      token,
 		defaultURL: defaultWebhookURL,
+		enabled:    webhooksEnabled(),
+		url:        os.Getenv("WEBHOOK_URL"),
 	}
 }
+
+// Enabled reports whether outbound webhooks are on (WEBHOOK_ENABLED at startup).
+func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 
 // WebhookPayload represents the data sent to the webhook
 type WebhookPayload struct {
@@ -83,6 +92,7 @@ type WebhookPayload struct {
 // webhooksEnabled reports whether webhook processing is enabled. Keep this
 // separate from sendWebhookPayload so media callers can avoid their webhook-only
 // file work when delivery is disabled.
+// webhooksEnabled reads WEBHOOK_ENABLED; call it at startup only (newWebhookSender, main).
 func webhooksEnabled() bool {
 	return getEnvBool("WEBHOOK_ENABLED", true)
 }
@@ -95,11 +105,11 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 	// defaultWebhookURL below. Deployments with no webhook consumer would
 	// otherwise POST to that default for every message and log a connection
 	// refused error each time.
-	if !webhooksEnabled() {
+	if !w.enabled {
 		return
 	}
 
-	webhookURL := os.Getenv("WEBHOOK_URL")
+	webhookURL := w.url
 	explicitlyConfigured := webhookURL != ""
 	if !explicitlyConfigured {
 		webhookURL = w.defaultURL
@@ -176,7 +186,7 @@ func (w *webhookSender) SendWebhookWithMedia(
 	quotedIsFromMe *bool, mentionedJIDs []string,
 	messageID, mediaType, mimeType, mediaFilename, localPath string,
 ) {
-	if !webhooksEnabled() {
+	if !w.enabled {
 		return
 	}
 

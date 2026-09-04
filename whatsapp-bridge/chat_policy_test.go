@@ -71,7 +71,8 @@ func TestRESTSendRejectedByChatPolicy(t *testing.T) {
 	ms := newTestMessageStore(t)
 	b := testBridge(nil, ms, testLogger())
 	b.Policy = parseChatPolicy("5511999999999")
-	mux := b.newRESTMux(8080, "test-token-0123456789", []string{t.TempDir()})
+	b.MediaRoots = []string{t.TempDir()}
+	mux := b.newRESTMux(8080, "test-token-0123456789")
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send",
 		strings.NewReader(`{"recipient":"5511888888888","message":"hi"}`))

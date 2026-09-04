@@ -167,8 +167,9 @@ func (s *storeStats) invalidate() {
 }
 
 // runMediaRetention sweeps once now and then every mediaSweepInterval until
-// b.ctx is cancelled (Shutdown). maxAge <= 0 disables it.
-func (b *Bridge) runMediaRetention(maxAge time.Duration) {
+// b.ctx is cancelled (Shutdown). b.MediaRetention <= 0 disables it.
+func (b *Bridge) runMediaRetention() {
+	maxAge := b.MediaRetention
 	if maxAge <= 0 {
 		return
 	}
@@ -176,9 +177,9 @@ func (b *Bridge) runMediaRetention(maxAge time.Duration) {
 		removed, freed, failed := sweepMedia(storeDir(), maxAge, time.Now())
 		b.storeStats.invalidate()
 		if removed > 0 || failed > 0 {
-			bridgeLog.Infof("Media retention: removed %d files (%d bytes) older than %s, %d failures", removed, freed, maxAge, failed)
+			b.Log.Infof("Media retention: removed %d files (%d bytes) older than %s, %d failures", removed, freed, maxAge, failed)
 		} else {
-			bridgeLog.Debugf("Media retention: nothing older than %s", maxAge)
+			b.Log.Debugf("Media retention: nothing older than %s", maxAge)
 		}
 	}
 	sweep()

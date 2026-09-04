@@ -242,6 +242,7 @@ func main() {
 		os.Exit(code)
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
+	bridge.MediaRetention = mediaRetention
 
 	// Resolve the allow-listed roots that media_path values in /api/send must
 	// live under. See media_path.go for the rationale.
@@ -250,16 +251,17 @@ func main() {
 		logger.Errorf("Failed to resolve media roots: %v", mrErr)
 		return
 	}
+	bridge.MediaRoots = allowedMediaRoots
 	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
 
 	// Serve the REST API before pairing/connecting: /api/health answers as soon
 	// as the process is up (a container waiting for its QR scan is alive, not
 	// broken), /api/ready reports the WhatsApp connection, and endpoints that
 	// need WhatsApp check client.IsConnected() themselves.
-	bridge.startRESTServer(port, bridgeToken, allowedMediaRoots)
+	bridge.startRESTServer(port, bridgeToken)
 	logger.Infof("%s", bridge.Policy.Summary())
-	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(mediaRetention))
-	go bridge.runMediaRetention(mediaRetention)
+	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(bridge.MediaRetention))
+	go bridge.runMediaRetention()
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to

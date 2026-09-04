@@ -266,7 +266,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	shouldForward := webhooksEnabled() && (b.ForwardSelf || !msg.Info.IsFromMe)
+	shouldForward := b.Webhook.Enabled() && (b.ForwardSelf || !msg.Info.IsFromMe)
 
 	// For image messages that will be forwarded, download media synchronously so we
 	// can include the base64 payload in the webhook. Other media types (and images
@@ -344,9 +344,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 		// Log based on message type
 		if mediaType != "" {
-			bridgeLog.Debugf("[%s] %s %s: [%s: %s] %s", timestamp, direction, sender, mediaType, filename, content)
+			b.Log.Debugf("[%s] %s %s: [%s: %s] %s", timestamp, direction, sender, mediaType, filename, content)
 		} else if content != "" {
-			bridgeLog.Debugf("[%s] %s %s: %s", timestamp, direction, sender, content)
+			b.Log.Debugf("[%s] %s %s: %s", timestamp, direction, sender, content)
 		}
 	}
 }

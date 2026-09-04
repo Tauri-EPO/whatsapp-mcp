@@ -131,7 +131,7 @@ func TestHealthReportsStoreSize(t *testing.T) {
 	root, _ := seedStore(t, time.Now())
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.storeStats = newStoreStats(root)
-	mux := b.newRESTMux(8080, "test-token-0123456789", nil)
+	mux := b.newRESTMux(8080, "test-token-0123456789")
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/health", nil)
 	req.Host = "127.0.0.1:8080"
@@ -192,7 +192,8 @@ func TestRunMediaRetentionSweepsOnStart(t *testing.T) {
 	b.storeStats = newStoreStats(root)
 	done := make(chan struct{})
 	go func() {
-		b.runMediaRetention(30 * 24 * time.Hour)
+		b.MediaRetention = 30 * 24 * time.Hour
+		b.runMediaRetention()
 		close(done)
 	}()
 	deadline := time.Now().Add(2 * time.Second)

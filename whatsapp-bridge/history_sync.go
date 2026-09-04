@@ -210,5 +210,5 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 		}
 	}
 
-	bridgeLog.Infof("History sync complete. Stored %d messages.", syncedCount)
+	b.Log.Infof("History sync complete. Stored %d messages.", syncedCount)
 }
