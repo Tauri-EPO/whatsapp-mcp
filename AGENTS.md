@@ -202,7 +202,7 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 | `WHATSAPP_MCP_TOKEN` | bridge token when bound off-loopback; none on loopback | Static bearer token enforced on the `http`/`sse` transports (`http_auth.resolve_http_token`, min 16 chars). Unset + non-loopback bind → reuses the bridge token (env or `.bridge-token`); `off` disables auth explicitly. stdio unaffected |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty falls back to this default) |
 | `WEBHOOK_ENABLED` | `true` (compose: `false`) | Set to `false` to disable outbound webhooks entirely |
-| `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded to the webhook |
+| `FORWARD_SELF` | `true` (compose: `false`) | Whether self-sent messages are forwarded to the webhook |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds) |
 | `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`transcribe.py`). Wins over `WHISPER_BIN` |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |

@@ -12,8 +12,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)*                 | Comma-separated `Host` values accepted besides loopback (`host` = any port, `host:port` exact, `*` any). Off-loopback binds refuse non-loopback Hosts until this names them |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
-| `WEBHOOK_ENABLED`      | `true`                                   | Set to `false` to disable outbound webhooks  |
-| `FORWARD_SELF`         | `true`                                   | Forward messages sent by self                |
+| `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks  |
+| `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self                |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir)                      |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir) |
