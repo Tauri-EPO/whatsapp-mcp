@@ -18,9 +18,8 @@ package main
 // have created, so writes can never break. The MCP server checks for the
 // table and falls back to the substring scan when it is absent.
 //
-// go-sqlite3 only compiles FTS5 with the `sqlite_fts5` build tag; the
-// Dockerfile and CI use it. `go run .` without the tag still works — search
-// just stays on the slow path.
+// modernc.org/sqlite ships FTS5, so every build has it; the runtime check
+// stays as a guard for a future driver or build that does not.
 
 import (
 	"database/sql"
@@ -63,7 +62,7 @@ const ftsTeardown = `
 `
 
 // sqliteHasFTS5 reports whether the connected SQLite build exposes the fts5
-// module (go-sqlite3: only with the sqlite_fts5 build tag).
+// module.
 func sqliteHasFTS5(db *sql.DB) bool {
 	var enabled int
 	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_compile_options WHERE compile_options = 'ENABLE_FTS5'`).Scan(&enabled)
