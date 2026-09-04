@@ -8,29 +8,44 @@
 # The server reads messages.db directly and calls the bridge REST API, so it
 # must see the bridge's /app/store volume and reach the bridge over the
 # network. docker-compose.yml wires both up. See docs/DOCKER.md.
+#
+# Two stages: the venv is resolved with uv in a builder and copied over, so
+# the runtime carries neither uv nor its cache. ffmpeg comes as one static
+# binary (multi-arch) instead of Debian's ffmpeg package and its ~450 MB of
+# codec and X11 libraries.
 
-FROM python:3.11-slim
+FROM python:3.11-slim AS build
 
-COPY --from=ghcr.io/astral-sh/uv:0.10.10 /uv /uvx /bin/
-
-# ffmpeg: send_audio_message converts arbitrary audio to Opus/OGG voice notes.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin app
+COPY --from=ghcr.io/astral-sh/uv:0.10.10 /uv /bin/uv
 
 WORKDIR /app
+ENV UV_NO_CACHE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 # Dependencies first so source edits don't invalidate the layer.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --no-install-project
 
-COPY *.py ./
+
+FROM python:3.11-slim
+
+RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin app \
+    && mkdir -p /app/store /app/outbox \
+    && chown app:app /app/store /app/outbox
+
+# ffmpeg: send_audio_message converts arbitrary audio to Opus/OGG voice notes,
+# transcribe_audio resamples to 16 kHz WAV. Static build, linux/amd64 + arm64.
+COPY --from=mwader/static-ffmpeg:7.1 /ffmpeg /usr/local/bin/ffmpeg
+
+WORKDIR /app
+COPY --from=build --chown=app:app /app/.venv /app/.venv
+COPY --chown=app:app *.py ./
+
 # Build identity reported in the MCP initialize response and startup log.
 ARG GIT_SHA=unknown
 ARG VERSION=dev
 ENV WHATSAPP_MCP_VERSION=${VERSION}+${GIT_SHA}
-RUN mkdir -p /app/store /app/outbox && chown -R app:app /app
 
 USER app
 
