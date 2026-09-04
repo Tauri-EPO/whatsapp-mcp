@@ -201,6 +201,7 @@ def list_messages(
     context_after: int = 1,
     sort_by: str = "newest",
     include_deleted: bool = True,
+    unread_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -228,6 +229,10 @@ def list_messages(
         include_deleted: Revoked ("deleted for everyone") messages are kept in this
                  archive with their original content and a deleted_at timestamp;
                  they are returned by default. Pass False to hide them.
+        unread_only: Only messages not yet read on any of your devices (inbound and
+                 newer than the chat's read marker). Combine with sort_by="oldest"
+                 to process unread messages in order; with include_context=False
+                 to get just the unread ones.
     """
     # Cap limit at 500 to prevent excessive queries
     limit = min(limit, 500)
@@ -244,6 +249,7 @@ def list_messages(
         context_after=context_after,
         sort_by=sort_by,
         include_deleted=include_deleted,
+        unread_only=unread_only,
     )
     return messages
 
