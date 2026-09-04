@@ -70,9 +70,12 @@ services:
     # Wait for the bridge healthcheck (REST up), which only happens after the
     # bridge has written /app/store/.bridge-token: the MCP server resolves its
     # own HTTP bearer token from that file once, at startup.
+    # restart: true recreates this container whenever the bridge is recreated,
+    # otherwise it would keep a dead network namespace (network_mode above).
     depends_on:
       bridge:
         condition: service_healthy
+        restart: true
     environment:
       # Hostnames clients use to reach /mcp (Tailscale MagicDNS name, reverse
       # proxy name...). Empty = accept any Host (a warning is logged).
@@ -108,9 +111,12 @@ services:
     # Wait for the bridge healthcheck (REST up), which only happens after the
     # bridge has written /app/store/.bridge-token: the MCP server resolves its
     # own HTTP bearer token from that file once, at startup.
+    # restart: true recreates this container whenever the bridge is recreated,
+    # otherwise it would keep a dead network namespace (network_mode above).
     depends_on:
       bridge:
         condition: service_healthy
+        restart: true
     environment:
       # tiny | base | small | medium | large-v3 | large-v3-turbo (+ ".en" variants, "-q5_1" quantised...)
       WHISPER_MODEL_NAME: ${WHISPER_MODEL_NAME:-small}
