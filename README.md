@@ -45,6 +45,7 @@ cd whatsapp-mcp
 cp .env.example .env                      # set WHATSAPP_BRIDGE_TOKEN, WHATSAPP_ALLOWED_CHATS (recommended)
 GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build
 docker compose logs -f bridge             # scan the QR code with WhatsApp > Linked Devices
+scripts/smoke.sh                          # health, readiness, token and MCP handshake in one go
 ```
 
 That is the whole install. The bridge pairs as a linked device (like WhatsApp Web), stores messages in SQLite inside a Docker volume, and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`. Restarts and updates never need a new QR.

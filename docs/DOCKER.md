@@ -191,6 +191,15 @@ works as before.
   a first run shows `healthy` while you scan the QR. To wait for WhatsApp
   itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
+- `scripts/smoke.sh` runs the whole checklist from the host after a deploy:
+  bridge `/api/health` and `/api/ready` (through the container, with the
+  bridge token from `.env` or `store/.bridge-token`), MCP `/metrics`, and an
+  MCP `initialize` with the bearer token. Exit 0 = paired and answering,
+  2 = up but waiting for the QR scan, 1 = something to fix (the failing step
+  names the variable to look at: token, `WHATSAPP_MCP_ALLOWED_HOSTS`, port).
+  `--wait 90` polls while the containers start; `--url https://box.tailnet.ts.net`
+  tests the endpoint the way a remote client reaches it. CI runs it against
+  the compose stack on every PR (unpaired path).
 - Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`. Files
   rotate at 10 MB × 5 per container (json-file driver), so `DEBUG` cannot fill
   the disk. Both

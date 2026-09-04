@@ -102,6 +102,27 @@ jobs:
           docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
           # MCP: every module imports inside the image (catches a missing COPY like the transcribe.py incident).
           docker run --rm whatsapp-mcp-server:ci python -c "import main, whatsapp, transcribe, http_auth, chat_policy, mcp_config, parent_watchdog, audio, errors, observability, media_inventory, media_notes; print('imports ok')"
+      - name: Compose smoke test (unpaired stack)
+        # Start the real compose topology with the images built above and run
+        # the operator's post-deploy check. Exit 2 = up but waiting for a QR
+        # scan, which is the only outcome possible in CI.
+        run: |
+          docker tag whatsapp-mcp-bridge:ci whatsapp-mcp-bridge:local
+          docker tag whatsapp-mcp-server:ci whatsapp-mcp-server:local
+          echo 'WHATSAPP_BRIDGE_TOKEN=ci-smoke-token-0123456789abcdef' > .env
+          docker compose up -d --no-build bridge mcp
+          set +e
+          scripts/smoke.sh --wait 90
+          rc=$?
+          set -e
+          if [ "$rc" -ne 2 ]; then
+            echo "smoke.sh exited $rc (expected 2: stack up, unpaired)"
+            docker compose logs --tail 100
+            exit 1
+          fi
+      - name: Compose down
+        if: always()
+        run: docker compose down -v --remove-orphans || true
       - name: Build bridge image for arm64
         # Raspberry Pi / ARM VPS users build this themselves; make sure the pure-Go
         # build keeps cross-compiling. Not loaded or smoke-tested (QEMU is slow).
