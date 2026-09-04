@@ -1417,6 +1417,10 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	return resolved
 }
 
+// outboundChatPolicy is the WHATSAPP_ALLOWED_CHATS allow-list applied to every
+// REST endpoint with a side effect (see chat_policy.go). Loaded in main().
+var outboundChatPolicy = chatPolicy{}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
@@ -2407,6 +2411,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			http.Error(w, "Recipient is required", http.StatusBadRequest)
 			return
 		}
+		if rejectByChatPolicy(w, outboundChatPolicy, req.Recipient) {
+			return
+		}
 
 		if req.Message == "" && req.MediaPath == "" {
 			http.Error(w, "Message or media path is required", http.StatusBadRequest)
@@ -2468,6 +2475,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		}
 		if req.ChatJID == "" || len(req.MessageIDs) == 0 {
 			http.Error(w, "chat_jid and message_ids are required", http.StatusBadRequest)
+			return
+		}
+		if rejectByChatPolicy(w, outboundChatPolicy, req.ChatJID) {
 			return
 		}
 
@@ -2573,6 +2583,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		var req ReactRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Recipient == "" || req.MessageID == "" || req.Emoji == nil {
 			http.Error(w, "recipient, message_id, and emoji are required", http.StatusBadRequest)
+			return
+		}
+		if rejectByChatPolicy(w, outboundChatPolicy, req.Recipient) {
 			return
 		}
 		chatJID, err := types.ParseJID(req.Recipient)
@@ -2700,6 +2713,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		// Validate request
 		if req.Recipient == "" {
 			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+		if rejectByChatPolicy(w, outboundChatPolicy, req.Recipient) {
 			return
 		}
 
@@ -2948,6 +2964,9 @@ func main() {
 		return
 	}
 	webhookAuthToken = bridgeToken
+
+	outboundChatPolicy = loadChatPolicy()
+	logger.Infof("%s", outboundChatPolicy.Summary())
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to

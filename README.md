@@ -499,6 +499,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_MCP_TOKEN`   | *(unset = no auth)*                      | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Set it before exposing the port beyond loopback/tailnet |
+| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
@@ -572,6 +573,33 @@ WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_HOST=0.0.0.0 WHATSAPP_MCP_ALLOWED_HOSTS
 - Setting `WHATSAPP_MCP_ALLOWED_HOSTS=*` disables the check. Binding to a
   non-loopback address **without** an allow-list also disables it (with a
   warning on stderr) so the server stays reachable; prefer listing the hosts.
+
+### Restricting which chats the agent can touch
+
+`WHATSAPP_ALLOWED_CHATS` turns the whole system into least-privilege mode for
+an agent: read tools only return the listed conversations and write tools
+refuse any other target. Entries are comma-separated:
+
+```dotenv
+# one contact, one group, plus every group
+WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
+```
+
+- Bare numbers mean the direct chat with that number (`@s.whatsapp.net`).
+- `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
+- The MCP server filters `list_chats`, `list_messages`, `get_chat`,
+  `get_message_context`, `get_direct_chat_by_contact`, `get_contact_chats` and
+  `get_last_interaction`, and refuses `send_*`, `send_reaction`,
+  `mark_messages_read`, `download_media` and `transcribe_audio` for other chats
+  with a message naming the variable.
+- The bridge enforces the same list on `/api/send`, `/api/react`,
+  `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
+  reach a chat you did not enable. Set the variable for **both** processes
+  (the compose file passes it to both containers).
+- Contact search (`search_contacts`) is not filtered: it reads the address
+  book, not conversations.
+
+Unset keeps today's behaviour (everything allowed).
 
 ### Bridge authentication and media paths
 

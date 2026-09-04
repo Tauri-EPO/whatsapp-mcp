@@ -25,6 +25,9 @@ services:
       # MCP server picks up from the shared volume.
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
       WHATSAPP_DEVICE_NAME: ${WHATSAPP_DEVICE_NAME:-WhatsApp MCP}
+      # Conversation allow-list, enforced here on outbound endpoints and by the
+      # MCP server on every tool. Same value for both services.
+      WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}
       # Webhooks are off by default in the container: the upstream default URL
       # points at localhost:8769, which is nothing inside this namespace.
       WEBHOOK_ENABLED: ${WEBHOOK_ENABLED:-false}
@@ -56,6 +59,7 @@ services:
       # loopback/tailnet-only listener; mandatory before any Funnel exposure.
       WHATSAPP_MCP_TOKEN: ${WHATSAPP_MCP_TOKEN:-}
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
+      WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
       # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
       WHISPER_URL: ${WHISPER_URL:-}

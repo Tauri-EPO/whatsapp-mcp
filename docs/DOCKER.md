@@ -74,6 +74,7 @@ Compose reads `.env` from the repo root (copy `.env.example`). Relevant keys:
 | --- | --- | --- |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | *(empty = accept any Host)* | Hostnames clients use to reach `/mcp`, e.g. your Tailscale MagicDNS name. Strongly recommended; see [Tailscale](#tailscale). |
 | `WHATSAPP_MCP_TOKEN` | *(empty = no auth)* | Bearer token every MCP request must carry. Mandatory before exposing `/mcp` beyond your tailnet; see [Funnel](#funnel-public-internet). |
+| `WHATSAPP_ALLOWED_CHATS` | *(empty = all chats)* | Least-privilege allow-list of conversations for the agent (JIDs, numbers, `*@g.us`). Passed to both containers. Strongly recommended for a bot that can send messages. |
 | `WHATSAPP_MCP_BIND` | `127.0.0.1` | Host interface the MCP port is published on. Keep loopback and front it with `tailscale serve` or a reverse proxy. |
 | `WHATSAPP_MCP_PORT` | `8000` | Host port for `/mcp`. |
 | `WHATSAPP_BRIDGE_TOKEN` | *(generated)* | Inject the bridge REST token from outside (e.g. a secret store). Empty lets the bridge generate `/app/store/.bridge-token`, which the MCP server reads from the shared volume. |
