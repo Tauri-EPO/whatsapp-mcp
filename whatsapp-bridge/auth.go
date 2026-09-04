@@ -2,7 +2,8 @@ package main
 
 // Bridge authentication and request validation.
 //
-// The REST listener binds to 127.0.0.1, but loopback is not a meaningful
+// The REST listener binds to 127.0.0.1 by default (WHATSAPP_BRIDGE_BIND
+// changes that, see rest_bind.go), but loopback is not a meaningful
 // trust boundary on a developer workstation: any local process or browser
 // tab (via DNS rebinding) can issue requests. We add two layers:
 //
@@ -15,7 +16,8 @@ package main
 //     browser into resolving evil.example.com to 127.0.0.1 (DNS rebinding)
 //     could send the loopback request from same-origin context. By
 //     restricting Host to {127.0.0.1:<port>, localhost:<port>, [::1]:<port>}
-//     we close that hole.
+//     we close that hole. WHATSAPP_BRIDGE_ALLOWED_HOSTS extends the list for
+//     non-loopback deployments (rest_bind.go).
 //
 // Backwards compatibility: this is a breaking change. Existing deploys must
 // either set WHATSAPP_BRIDGE_TOKEN to the printed token in the MCP server
@@ -111,9 +113,9 @@ func printTokenBanner(token string, port int) {
 // withAuth wraps an http.HandlerFunc with bearer-token + Host validation.
 // The set of accepted Host values is computed once at server start; we pass
 // it in instead of recomputing per request.
-func withAuth(token string, allowedHosts map[string]struct{}, h http.HandlerFunc) http.HandlerFunc {
+func withAuth(token string, allowedHosts hostAllowList, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !hostAllowed(r.Host, allowedHosts) {
+		if !allowedHosts.allows(r.Host) {
 			// 403 — request reached us with a Host we don't recognise.
 			// Likely a DNS-rebinding attempt or misconfigured proxy.
 			http.Error(w, "Forbidden: host not allowed", http.StatusForbidden)
@@ -126,16 +128,6 @@ func withAuth(token string, allowedHosts map[string]struct{}, h http.HandlerFunc
 		}
 		h(w, r)
 	}
-}
-
-// hostAllowed performs an exact, case-insensitive match against the
-// allow-list. r.Host already includes the port for non-default ports, which
-// is exactly what we want — listening on :8080 means "localhost" without a
-// port should not match.
-func hostAllowed(host string, allowed map[string]struct{}) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	_, ok := allowed[h]
-	return ok
 }
 
 // checkBearerToken returns true iff the Authorization header carries our
@@ -153,7 +145,8 @@ func checkBearerToken(authHeader, expected string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(expected)) == 1
 }
 
-// buildAllowedHosts returns the static allow-list for a given bind port.
+// buildAllowedHosts returns the loopback allow-list for a given bind port;
+// buildHostAllowList (rest_bind.go) layers WHATSAPP_BRIDGE_ALLOWED_HOSTS on top.
 // We accept the three loopback spellings (IPv4, name, IPv6) because the
 // MCP server's choice of WHATSAPP_API_URL determines which Host header the
 // underlying HTTP client emits.

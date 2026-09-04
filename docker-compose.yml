@@ -11,6 +11,11 @@
 # disk) while letting the MCP server reach it at http://127.0.0.1:8080 and
 # read messages.db from the shared volume. Consequently the MCP port is
 # published on the *bridge* service.
+#
+# Alternative topology (MCP server elsewhere): give each service its own
+# network namespace, set WHATSAPP_BRIDGE_BIND=0.0.0.0 and
+# WHATSAPP_BRIDGE_ALLOWED_HOSTS=bridge on the bridge, and point the MCP
+# server at WHATSAPP_API_URL=http://bridge:8080/api. See docs/DOCKER.md.
 
 services:
   bridge:
@@ -23,6 +28,8 @@ services:
     restart: unless-stopped
     environment:
       WHATSAPP_BRIDGE_PORT: "8080"
+      WHATSAPP_BRIDGE_BIND: ${WHATSAPP_BRIDGE_BIND:-127.0.0.1}
+      WHATSAPP_BRIDGE_ALLOWED_HOSTS: ${WHATSAPP_BRIDGE_ALLOWED_HOSTS:-}
       WHATSAPP_STORE_DIR: /app/store
       WHATSAPP_MEDIA_ROOTS: /app/outbox
       # Provide a token here (or in .env) to inject it from outside; leave empty

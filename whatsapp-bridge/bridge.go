@@ -35,6 +35,10 @@ type Bridge struct {
 	ForwardSelf bool
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
+	// RESTBind is the REST listen address (WHATSAPP_BRIDGE_BIND, default 127.0.0.1).
+	RESTBind string
+	// RESTAllowedHosts is the raw WHATSAPP_BRIDGE_ALLOWED_HOSTS value (see rest_bind.go).
+	RESTAllowedHosts string
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps
@@ -55,6 +59,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		PollVoteDecrypt: whatsmeowPollVoteDecrypter(client),
 		ForwardSelf:     getEnvBool("FORWARD_SELF", true),
 		Webhook:         newWebhookSender(bridgeToken),
+		RESTBind:        defaultBridgeBind,
 		origTimes:       newOriginalTimestamps(),
 		mediaRetry:      newMediaRetryHub(),
 		startedAt:       time.Now(),
