@@ -239,6 +239,12 @@ Get messages with filters, date ranges, and sorting.
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
 - `query` (optional): Search term. With the bridge's FTS5 index (default in the Docker image and in builds with `-tags sqlite_fts5`) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use a plain substring match
 - `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
+- `include_deleted` (optional, default `true`): keep messages that were "deleted for everyone". They are returned with their original text/media and a `deleted_at` timestamp; `false` hides them
+
+Revoked messages ("delete for everyone", by the sender or by you) stay in this
+archive with their content, media and `filename`; only `deleted_at` is set.
+This is deliberate: the archive is the account owner's copy. To really forget a
+message locally use `delete_message` with `for_everyone=false`.
 
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
