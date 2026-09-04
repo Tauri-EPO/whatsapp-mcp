@@ -30,6 +30,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -1998,15 +1999,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// poll's ID in `filename` (same convention as reactions). See polls.go.
 	if handled, pollID, voteContent := handlePollVote(context.Background(), b.PollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
 		if voteContent != "" {
-			if err := messageStore.StoreMessage(
-				msg.Info.ID, chatJID, sender, voteContent,
-				msgTimestamp, msg.Info.IsFromMe,
-				"poll_vote", pollID, "", nil, nil, nil, 0, "",
-			); err != nil {
-				logger.Warnf("Failed to store poll vote: %v", err)
-			} else if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, pollID); err != nil {
-				logger.Warnf("Failed to set poll vote target: %v", err)
-			}
+			messageStore.storePollVoteMessage(msg.Info.ID, chatJID, sender, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
 		}
 		return
 	}
@@ -3631,9 +3624,17 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 			}
 
+			// Poll votes are decoded after the loop so the poll rows exist
+			// first (history chunks are newest-first). See polls.go.
+			var pendingVotes []*waWeb.WebMessageInfo
+
 			// Store messages
 			for _, msg := range messages {
 				if msg == nil || msg.Message == nil {
+					continue
+				}
+				if msg.Message.Message.GetPollUpdateMessage() != nil {
+					pendingVotes = append(pendingVotes, msg.Message)
 					continue
 				}
 
@@ -3758,6 +3759,11 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 							logger.Warnf("Failed to flag view-once history message: %v", verr)
 						}
 					}
+					if histPoll != nil {
+						if perr := messageStore.StorePoll(msgID, chatJID, histPoll, msgTimestamp); perr != nil {
+							logger.Warnf("Failed to store history poll: %v", perr)
+						}
+					}
 					syncedCount++
 					// Log successful message storage
 					if mediaType != "" {
@@ -3768,6 +3774,13 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 							msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
 					}
 				}
+			}
+			if len(pendingVotes) > 0 {
+				b.historyVotes.Add(1)
+				go func(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo) {
+					defer b.historyVotes.Done()
+					b.storeHistoryPollVotes(chat, chatJID, votes, nil)
+				}(resolved, chatJID, pendingVotes)
 			}
 		}
 	}

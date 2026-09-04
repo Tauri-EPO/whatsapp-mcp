@@ -11,6 +11,7 @@ package main
 // timestamp registry) is tracked separately in issue #47.
 
 import (
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -48,6 +49,8 @@ type Bridge struct {
 	mediaRetry *mediaRetryHub
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
+	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
+	historyVotes sync.WaitGroup
 	// storeStats caches store/media sizes for /api/health (see media_retention.go).
 	storeStats *storeStats
 }

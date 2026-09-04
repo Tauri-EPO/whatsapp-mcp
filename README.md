@@ -296,11 +296,14 @@ Tally of a native WhatsApp poll.
 The bridge stores poll creations as messages with `media_type = "poll"` (content
 `📊 <question> — options: a | b | c`) and each vote as `media_type = "poll_vote"`
 with `poll_message_id` pointing at the poll, so both show up in `list_messages`
-and search. Votes are end-to-end encrypted with the poll's key; whatsmeow keeps
-that key when it sees the creation, so only votes received while the bridge was
-running (for polls it saw) are decoded and counted. Returns `question`,
-`selectable_count`, per-option `count` and `voters`, each voter's latest
-`selected` options and `total_voters`. Respects `WHATSAPP_ALLOWED_CHATS`.
+and search. Votes are end-to-end encrypted with the poll's key. The bridge
+learns that key from the creation message, live or through history sync (so
+polls created before the bridge ran, and votes cast while it was down, are
+decoded as long as the phone included them in the sync). Votes whose key was
+never seen are kept and reported in `undecodable_votes` rather than silently
+dropped. Returns `question`, `selectable_count`, per-option `count` and
+`voters`, each voter's latest `selected` options, `total_voters` and
+`undecodable_votes`. Respects `WHATSAPP_ALLOWED_CHATS`.
 
 #### `delete_message`
 

@@ -16,7 +16,18 @@ package main
 //     "🗳️ <options>" and filename = the poll's message ID (same convention
 //     as reactions).
 //   - polls / poll_votes: structured copies used by /api/poll to tally
-//     results. One row per voter per poll (latest vote wins).
+//     results. One row per voter per poll (latest vote wins). A vote whose
+//     payload could not be decrypted is kept with selected_json NULL so
+//     /api/poll can report undecodable_votes instead of silently
+//     under-counting (issue #59).
+//
+// Polls created before the bridge ran: whatsmeow persists message secrets
+// delivered by history sync (storeHistoricalMessageSecrets), so votes for
+// any poll the phone included in the sync decode normally. Votes cast
+// while the bridge was down arrive in the same sync as PollUpdateMessage
+// rows and are decoded after the conversation is stored (the poll row must
+// exist first, and whatsmeow writes the secrets asynchronously, hence the
+// short retry). Only polls the phone never synced stay undecodable.
 
 import (
 	"context"
@@ -32,6 +43,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -129,11 +141,22 @@ func (store *MessageStore) StorePollVote(pollMessageID, chatJID, voter string, s
 	if err != nil {
 		return err
 	}
-	_, err = store.db.Exec(`INSERT INTO poll_votes (poll_message_id, chat_jid, voter, selected_json, voted_at)
+	return store.upsertPollVote(pollMessageID, chatJID, voter, sql.NullString{String: string(sel), Valid: true}, votedAt)
+}
+
+// StoreUndecodablePollVote records that voter cast a vote we could not
+// decrypt (selected_json NULL). A later decodable vote from the same voter
+// replaces it.
+func (store *MessageStore) StoreUndecodablePollVote(pollMessageID, chatJID, voter string, votedAt time.Time) error {
+	return store.upsertPollVote(pollMessageID, chatJID, voter, sql.NullString{}, votedAt)
+}
+
+func (store *MessageStore) upsertPollVote(pollMessageID, chatJID, voter string, selected sql.NullString, votedAt time.Time) error {
+	_, err := store.db.Exec(`INSERT INTO poll_votes (poll_message_id, chat_jid, voter, selected_json, voted_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(poll_message_id, chat_jid, voter) DO UPDATE SET selected_json = excluded.selected_json, voted_at = excluded.voted_at
 		WHERE excluded.voted_at >= poll_votes.voted_at`,
-		pollMessageID, chatJID, voter, string(sel), votedAt)
+		pollMessageID, chatJID, voter, selected, votedAt)
 	return err
 }
 
@@ -171,58 +194,145 @@ func whatsmeowPollVoteDecrypter(client *whatsmeow.Client) pollVoteDecrypter {
 	}
 }
 
-// handlePollVote processes a PollUpdateMessage event: decrypts it, maps the
-// selection to option names, stores the structured vote and a message row.
-// Returns (handled, content) — handled=false means msg is not a poll vote.
-func handlePollVote(ctx context.Context, decrypt pollVoteDecrypter, store *MessageStore, evt *events.Message, chatJID, sender string, ts time.Time, logger waLog.Logger) (handled bool, pollID string, content string) {
+var errNoPollVoteDecrypter = errors.New("no poll vote decrypter configured")
+
+// decodePollVote decrypts a PollUpdateMessage and maps the selection to option
+// names. pollID is empty when evt is not a poll vote (or carries no poll key).
+func decodePollVote(ctx context.Context, decrypt pollVoteDecrypter, store *MessageStore, evt *events.Message, chatJID string, logger waLog.Logger) (pollID string, names []string, err error) {
 	update := evt.Message.GetPollUpdateMessage()
 	if update == nil {
-		return false, "", ""
+		return "", nil, nil
 	}
 	pollID = update.GetPollCreationMessageKey().GetID()
 	if pollID == "" {
-		return true, "", ""
+		return "", nil, nil
 	}
 	if decrypt == nil {
-		logger.Warnf("Poll vote for %s in %s ignored: no decrypter configured", pollID, chatJID)
-		return true, pollID, ""
+		return pollID, nil, errNoPollVoteDecrypter
 	}
 	hashes, err := decrypt(ctx, evt)
 	if err != nil {
-		logger.Warnf("Could not decrypt poll vote for %s in %s: %v", pollID, chatJID, err)
-		return true, pollID, ""
+		return pollID, nil, err
 	}
-	var names []string
 	poll, err := store.GetPoll(pollID, chatJID)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			logger.Warnf("Poll lookup failed for %s: %v", pollID, err)
 		}
-		names = optionNamesForHashes(nil, hashes)
-	} else {
-		names = optionNamesForHashes(poll.Options, hashes)
+		return pollID, optionNamesForHashes(nil, hashes), nil
+	}
+	return pollID, optionNamesForHashes(poll.Options, hashes), nil
+}
+
+// pollVoteContent renders a decoded vote as message text.
+func pollVoteContent(names []string) string {
+	if len(names) == 0 {
+		return "🗳️ vote retracted"
+	}
+	return "🗳️ voted: " + strings.Join(names, ", ")
+}
+
+// handlePollVote processes a live PollUpdateMessage event: decrypts it, maps
+// the selection to option names and stores the structured vote. Returns
+// (handled, pollID, content) — handled=false means evt is not a poll vote;
+// an empty content with handled=true means the vote was recorded as
+// undecodable and no message row should be written.
+func handlePollVote(ctx context.Context, decrypt pollVoteDecrypter, store *MessageStore, evt *events.Message, chatJID, sender string, ts time.Time, logger waLog.Logger) (handled bool, pollID string, content string) {
+	if evt.Message.GetPollUpdateMessage() == nil {
+		return false, "", ""
+	}
+	pollID, names, err := decodePollVote(ctx, decrypt, store, evt, chatJID, logger)
+	if pollID == "" {
+		return true, "", ""
+	}
+	if err != nil {
+		logger.Warnf("Could not decrypt poll vote for %s in %s: %v", pollID, chatJID, err)
+		if serr := store.StoreUndecodablePollVote(pollID, chatJID, sender, ts); serr != nil {
+			logger.Warnf("Failed to record undecodable poll vote: %v", serr)
+		}
+		return true, pollID, ""
 	}
 	if err := store.StorePollVote(pollID, chatJID, sender, names, ts); err != nil {
 		logger.Warnf("Failed to store poll vote: %v", err)
 	}
-	if len(names) == 0 {
-		return true, pollID, "🗳️ vote retracted"
+	return true, pollID, pollVoteContent(names)
+}
+
+// storePollVoteMessage writes the message row for a decoded vote (media_type
+// poll_vote, target = the poll's message ID), shared by live and history paths.
+func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) {
+	if err := store.StoreMessage(id, chatJID, sender, content, ts, fromMe, "poll_vote", pollID, "", nil, nil, nil, 0, ""); err != nil {
+		logger.Warnf("Failed to store poll vote: %v", err)
+		return
 	}
-	return true, pollID, "🗳️ voted: " + strings.Join(names, ", ")
+	if err := store.SetTargetMessageID(id, chatJID, pollID); err != nil {
+		logger.Warnf("Failed to set poll vote target: %v", err)
+	}
+}
+
+// historyVoteRetryDelays paces retries while whatsmeow is still writing the
+// secrets it received in the same history-sync chunk (it stores them
+// asynchronously). Tests shorten it.
+var historyVoteRetryDelays = []time.Duration{2 * time.Second, 10 * time.Second}
+
+// storeHistoryPollVotes decodes PollUpdateMessage rows delivered by history
+// sync for one conversation. Runs after the conversation's messages (and
+// therefore the poll rows) are stored; each vote retries briefly when the
+// poll secret is not there yet and is recorded as undecodable otherwise.
+func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo, done chan<- struct{}) {
+	defer func() {
+		if done != nil {
+			close(done)
+		}
+	}()
+	for _, web := range votes {
+		evt, err := b.Client.ParseWebMessage(chat, web)
+		if err != nil {
+			b.Log.Warnf("Could not parse history poll vote %s: %v", web.GetKey().GetID(), err)
+			continue
+		}
+		sender := resolveUserJID(b.Client, evt.Info.Sender, types.EmptyJID).User
+		for attempt := 0; ; attempt++ {
+			pollID, names, derr := decodePollVote(context.Background(), b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
+			if pollID == "" {
+				break
+			}
+			if derr == nil {
+				if serr := b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp); serr != nil {
+					b.Log.Warnf("Failed to store history poll vote: %v", serr)
+				}
+				b.Store.storePollVoteMessage(evt.Info.ID, chatJID, sender, pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
+				break
+			}
+			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(historyVoteRetryDelays) {
+				time.Sleep(historyVoteRetryDelays[attempt])
+				continue
+			}
+			b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)
+			if serr := b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, evt.Info.Timestamp); serr != nil {
+				b.Log.Warnf("Failed to record undecodable poll vote: %v", serr)
+			}
+			break
+		}
+	}
 }
 
 // --- /api/poll --------------------------------------------------------------
 
 type PollResultsResponse struct {
-	Success         bool              `json:"success"`
-	Message         string            `json:"message,omitempty"`
-	MessageID       string            `json:"message_id,omitempty"`
-	ChatJID         string            `json:"chat_jid,omitempty"`
-	Question        string            `json:"question,omitempty"`
-	SelectableCount int               `json:"selectable_count,omitempty"`
-	TotalVoters     int               `json:"total_voters"`
-	Options         []PollOptionTally `json:"options"`
-	Votes           []PollVoteEntry   `json:"votes"`
+	Success         bool   `json:"success"`
+	Message         string `json:"message,omitempty"`
+	MessageID       string `json:"message_id,omitempty"`
+	ChatJID         string `json:"chat_jid,omitempty"`
+	Question        string `json:"question,omitempty"`
+	SelectableCount int    `json:"selectable_count,omitempty"`
+	TotalVoters     int    `json:"total_voters"`
+	// UndecodableVotes counts voters whose vote could not be decrypted (the
+	// poll's secret was never seen by this bridge). They are excluded from
+	// TotalVoters and the option tallies.
+	UndecodableVotes int               `json:"undecodable_votes"`
+	Options          []PollOptionTally `json:"options"`
+	Votes            []PollVoteEntry   `json:"votes"`
 }
 
 type PollOptionTally struct {
@@ -256,11 +366,15 @@ func (store *MessageStore) PollResults(messageID, chatJID string) (*PollResultsR
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var entry PollVoteEntry
-		var selJSON string
+		var selJSON sql.NullString
 		if err := rows.Scan(&entry.Voter, &selJSON, &entry.VotedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(selJSON), &entry.Selected)
+		if !selJSON.Valid {
+			resp.UndecodableVotes++
+			continue
+		}
+		_ = json.Unmarshal([]byte(selJSON.String), &entry.Selected)
 		if entry.Selected == nil {
 			entry.Selected = []string{}
 		}
