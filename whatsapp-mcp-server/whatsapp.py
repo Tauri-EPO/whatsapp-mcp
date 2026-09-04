@@ -24,6 +24,19 @@ WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api
 
 _BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
 
+# The bridge opens messages.db in WAL mode, so reads never block on its writes;
+# the timeout covers the brief exclusive locks WAL still needs (checkpoints,
+# schema changes) instead of surfacing "database is locked" to the agent.
+SQLITE_BUSY_TIMEOUT_S = 5.0
+
+
+def _connect_messages_db() -> sqlite3.Connection:
+    return sqlite3.connect(MESSAGES_DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_S)
+
+
+def _connect_whatsmeow_db() -> sqlite3.Connection:
+    return sqlite3.connect(WHATSMEOW_DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_S)
+
 
 def _read_bridge_token() -> str | None:
     env = os.getenv("WHATSAPP_BRIDGE_TOKEN", "").strip()
@@ -219,7 +232,7 @@ def _sender_aliases(value: str) -> list[str]:
     lid: str | None = None
     if os.path.isfile(WHATSMEOW_DB_PATH):
         try:
-            conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+            conn = _connect_whatsmeow_db()
             try:
                 row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)).fetchone()
                 if row:
@@ -259,7 +272,7 @@ def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
     # Extract the numeric part from JID-style strings (e.g. '35047067385985@lid')
     lid = lid_or_jid.split("@")[0] if "@" in lid_or_jid else lid_or_jid
     try:
-        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        conn = _connect_whatsmeow_db()
         cursor = conn.cursor()
         cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (lid,))
         row = cursor.fetchone()
@@ -299,7 +312,7 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
             return None
 
     try:
-        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        conn = _connect_whatsmeow_db()
         cursor = conn.cursor()
         # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
         cursor.execute(
@@ -320,7 +333,7 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # First try matching by exact JID
@@ -444,7 +457,7 @@ def list_messages(
         List of message dictionaries with id, timestamp, sender, content, etc.
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Build base query
@@ -550,26 +563,35 @@ def list_messages(
             conn.close()
 
 
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
-    """Get context around a specific message."""
+def get_message_context(
+    message_id: str, before: int = 5, after: int = 5, chat_jid: str | None = None
+) -> MessageContext:
+    """Get context around a specific message.
+
+    The messages table is keyed by (id, chat_jid): the same WhatsApp message ID
+    can legitimately exist in several chats (forwards, broadcasts). Passing
+    chat_jid makes the lookup a primary-key hit and removes the ambiguity;
+    without it the most recent row with that ID is used.
+    """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Get the target message first
-        cursor.execute(
-            """
+        select = """
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """,
-            (message_id,),
-        )
+        """
+        if chat_jid:
+            cursor.execute(select + " WHERE messages.id = ? AND messages.chat_jid = ?", (message_id, chat_jid))
+        else:
+            cursor.execute(select + " WHERE messages.id = ? ORDER BY messages.timestamp DESC LIMIT 1", (message_id,))
         msg_data = cursor.fetchone()
 
         if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
+            where = f" in chat {chat_jid}" if chat_jid else ""
+            raise ValueError(f"Message with ID {message_id}{where} not found")
 
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
@@ -667,7 +689,7 @@ def list_chats(
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # The last message is always joined — is_from_me feeds the unread
@@ -755,7 +777,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
     # 1) Search messages.db chats table (existing behavior)
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -783,7 +805,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     # 2) Search whatsmeow contact store (whatsapp.db)
     if os.path.exists(WHATSMEOW_DB_PATH):
         try:
-            conn2 = sqlite3.connect(WHATSMEOW_DB_PATH)
+            conn2 = _connect_whatsmeow_db()
             cursor2 = conn2.cursor()
             cursor2.execute(
                 """
@@ -823,7 +845,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         aliases = _sender_aliases(jid)
@@ -887,7 +909,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         Message dictionary or None if no messages found
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         aliases = _sender_aliases(jid)
@@ -945,7 +967,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary or None if not found
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # See list_chats: the last message is always joined for is_from_me,
@@ -996,7 +1018,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         cursor.execute(

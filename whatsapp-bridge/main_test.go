@@ -2848,12 +2848,21 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 
 	var count int
 	if err := ms.db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_chat_jid';`,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_messages_chat_jid', 'idx_messages_chat_timestamp');`,
 	).Scan(&count); err != nil {
 		t.Fatalf("failed to query index metadata: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
+	if count != 2 {
+		t.Fatalf("expected idx_messages_chat_jid and idx_messages_chat_timestamp to exist, found %d", count)
+	}
+
+	// The bridge opens the store in WAL mode so MCP reads don't block on writes.
+	var journalMode string
+	if err := ms.db.QueryRow(`PRAGMA journal_mode;`).Scan(&journalMode); err != nil {
+		t.Fatalf("failed to read journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("expected journal_mode=wal, got %q", journalMode)
 	}
 }
 

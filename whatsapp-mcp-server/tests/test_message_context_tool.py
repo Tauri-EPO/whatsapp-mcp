@@ -36,7 +36,7 @@ def test_get_message_context_serializes_dataclass(monkeypatch):
     monkeypatch.setattr(
         main,
         "whatsapp_get_message_context",
-        lambda message_id, before_count, after_count: MessageContext(
+        lambda message_id, before_count, after_count, chat_jid=None: MessageContext(
             message=target,
             before=[before],
             after=[after],
