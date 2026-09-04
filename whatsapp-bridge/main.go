@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"mime"
@@ -2765,6 +2766,20 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+// printQRCode renders one pairing QR code to out. index is 1 for the first
+// code of a pairing session; later codes are redraws after whatsmeow rotated
+// the previous one, and are labelled so a reader of a scrolling log (e.g.
+// `docker compose logs -f bridge`) knows the latest block is the live one.
+func printQRCode(out io.Writer, code string, index int) {
+	if index <= 1 {
+		_, _ = fmt.Fprintln(out, "\nScan this QR code with your WhatsApp app:")
+	} else {
+		_, _ = fmt.Fprintf(out, "\nQR code refreshed (#%d) — the previous one has expired, scan this one:\n", index)
+	}
+	qrterminal.GenerateHalfBlock(code, qrterminal.L, out)
+	_, _ = fmt.Fprintln(out, "\nWaiting for QR code scan... (a new code is printed each time WhatsApp rotates it)")
+}
+
 func webhookStartupMessage(forwardSelf bool) string {
 	if !webhooksEnabled() {
 		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
@@ -3113,25 +3128,31 @@ func main() {
 				continue
 			}
 
-			// Print QR code for pairing with phone
-			qrCodeShown := false
+			// Print the QR code for pairing with the phone. whatsmeow rotates the
+			// code roughly every 20 seconds and a scan of an expired one is
+			// rejected by the phone, so every "code" event must be redrawn — not
+			// just the first (see #14).
+			qrCodesShown := 0
 			for evt := range qrChan {
-				if evt.Event == "code" {
-					if !qrCodeShown {
-						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
-					}
-				} else if evt.Event == "success" {
+				switch evt.Event {
+				case "code":
+					qrCodesShown++
+					printQRCode(os.Stdout, evt.Code, qrCodesShown)
+				case "success":
 					connected <- true
-					break
-				} else if evt.Event == "timeout" {
-					logger.Warnf("QR code timed out")
+				case "timeout":
+					logger.Warnf("QR pairing timed out after %d code(s)", qrCodesShown)
+				default:
+					if evt.Error != nil {
+						logger.Errorf("QR pairing error (%s): %v", evt.Event, evt.Error)
+					} else {
+						logger.Warnf("QR pairing event: %s", evt.Event)
+					}
+				}
+				if evt.Event == "success" || evt.Event == "timeout" || evt.Error != nil {
 					break
 				}
 			}
-
 			// Wait for connection with timeout
 			select {
 			case <-connected:
