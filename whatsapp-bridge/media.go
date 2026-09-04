@@ -100,27 +100,10 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		return false, "", "", "", fmt.Errorf("not a media message")
 	}
 
-	// Rebuild filename from (timestamp, messageID) — must match extractMediaInfo.
-	// The message ID disambiguates two messages that arrive in the same second.
-	var ext string
-	switch mediaType {
-	case "image":
-		ext = ".jpg"
-	case "video":
-		ext = ".mp4"
-	case "audio":
-		ext = ".ogg"
-	case "sticker":
-		ext = ".webp"
-	case "document":
-		ext = ""
-	default:
-		ext = ""
-	}
-	filename := fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
+	filename := mediaFileName(mediaType, timestamp, messageID)
 
 	// First, check if we already have this file
-	chatDir := storePath(strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := chatMediaDir(chatJID)
 
 	// Create directory for the chat if it doesn't exist
 	if err := os.MkdirAll(chatDir, 0o750); err != nil {
@@ -201,6 +184,29 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 
 	b.Log.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
 	return true, mediaType, filename, absPath, nil
+}
+
+// mediaFileName rebuilds the cached file name from (type, timestamp, message
+// ID); it must match extractMediaInfo. The message ID disambiguates two
+// messages that arrive in the same second. Documents carry no extension.
+func mediaFileName(mediaType string, timestamp time.Time, messageID string) string {
+	var ext string
+	switch mediaType {
+	case "image":
+		ext = ".jpg"
+	case "video":
+		ext = ".mp4"
+	case "audio":
+		ext = ".ogg"
+	case "sticker":
+		ext = ".webp"
+	}
+	return fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
+}
+
+// chatMediaDir is store/<chat_jid> with ':' (device suffix) mapped to '_'.
+func chatMediaDir(chatJID string) string {
+	return storePath(strings.ReplaceAll(chatJID, ":", "_"))
 }
 
 // downloadToPath downloads msg into localPath through a ".part" temp file and

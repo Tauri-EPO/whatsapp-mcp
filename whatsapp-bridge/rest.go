@@ -138,6 +138,9 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// Handler for downloading media
 	mux.HandleFunc("/api/download", auth(requireMethod(http.MethodPost, b.handleDownload())))
 
+	// Drop cached media bytes on request, rows untouched (media_purge.go).
+	mux.HandleFunc("/api/media/purge", auth(requireMethod(http.MethodPost, b.handleMediaPurge())))
+
 	// Handler for sending typing indicator
 	mux.HandleFunc("/api/typing", auth(requireMethod(http.MethodPost, b.handleTyping())))
 
