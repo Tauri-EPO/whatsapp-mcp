@@ -29,13 +29,22 @@ tuned for that server.
 
 | Area | Upstream (VGP) | This fork |
 | --- | --- | --- |
-| Deployment | `go run` + `uv run` on a laptop; no container story | `docker-compose.yml` with bridge + MCP images, shared store volume, healthchecks. [`docs/DOCKER.md`](docs/DOCKER.md) |
-| Remote access | `WHATSAPP_MCP_HOST=0.0.0.0` answered 421 to every non-loopback `Host` | `WHATSAPP_MCP_ALLOWED_HOSTS` allow-list for Tailscale / Docker / proxy hostnames, loopback always kept |
+| Deployment | `go run` + `uv run` on a laptop; no container story | `docker-compose.yml` with bridge + MCP images, shared store volume, healthchecks, build identity (`/api/version`). [`docs/DOCKER.md`](docs/DOCKER.md) |
+| Remote access | `WHATSAPP_MCP_HOST=0.0.0.0` answered 421 to every non-loopback `Host` | `WHATSAPP_MCP_ALLOWED_HOSTS` allow-list for Tailscale / Docker / proxy hostnames, loopback always kept; optional `WHATSAPP_BRIDGE_BIND` + `WHATSAPP_BRIDGE_ALLOWED_HOSTS` when the MCP server runs elsewhere |
+| Auth | Bridge token only | Bridge bearer token reused by the MCP HTTP transport by default (`WHATSAPP_MCP_TOKEN` to override), per-client rate limit and body cap on `/mcp` |
+| Least privilege | All chats reachable | `WHATSAPP_ALLOWED_CHATS`: MCP filters reads and refuses writes, bridge returns 403 on every outbound endpoint |
+| Search | `LIKE` scan over `messages.content` | SQLite FTS5 index owned by the bridge, substring fallback when built without it |
+| Polls | Not stored | Native polls: creation, votes (live and from history sync), `get_poll_results` with `undecodable_votes` |
+| Deleted / view-once | Revoked rows overwritten; view-once dropped | Content kept with `deleted_at` (`include_deleted`); view-once media archived without consuming the phone's view |
+| Message tools | — | `delete_message` (revoke or local), `list_group_members`, `unread_only` filter, `filename` and `target_message_id` on rows |
 | Expired media | 403/404/410 from the CDN was a hard failure | Bridge asks the sender's phone to re-upload (WhatsApp media-retry) and persists the fresh path |
+| Media cache | Every file downloaded and kept forever | `WHATSAPP_MEDIA_AUTODOWNLOAD`, `WHATSAPP_MEDIA_RETENTION_DAYS`, store size in `/api/health` |
 | Voice notes | Out of scope upstream | `transcribe_audio` tool with local whisper.cpp; optional `whisper` compose profile. No cloud API |
+| Operations | Stdout `fmt.Printf`, health = REST up | Leveled logs (`WHATSAPP_LOG_LEVEL`, `WHATSAPP_MCP_LOG_LEVEL`), `/api/health` liveness vs `/api/ready` readiness, REST up before pairing, `WHATSAPP_STORE_DIR` |
 | Concurrency safety | Two bridges on one store flap forever (`StreamReplaced`) | Single-instance lock on `store/.bridge.lock`; the second bridge refuses to start |
-| Message metadata | `filename` stored but not exposed | `filename` returned on `list_messages` / `get_message_context` |
+| Code layout | One 4k-line `main.go`, package-level globals | `Bridge` struct with injected dependencies; one file per responsibility (`events.go`, `store.go`, `rest.go`, ...); `main.go` is wiring only |
 | Python SDK | `mcp<2` (FastMCP) | MCP SDK v2 (`MCPServer`), current `cryptography`, `pytest`, `ruff` |
+| CI | Lint + tests | Plus staticcheck/gosec, CodeQL, Docker image build with smoke tests |
 | Releases | release-please cuts tags and `CHANGELOG.md` | No releases here; `main` is the deployable state |
 
 **How we think about it**
@@ -55,8 +64,10 @@ tuned for that server.
   and fronted by `tailscale serve`; Funnel requires `WHATSAPP_MCP_TOKEN` and,
   ideally, `WHATSAPP_ALLOWED_CHATS`.
 - **Small PRs, always green.** One concern per PR, tests and docs in the same
-  PR, squash-merged only with every CI check passing. Open work is tracked in
-  the [fork hardening epic](https://github.com/Tauri-EPO/whatsapp-mcp/issues/64).
+  PR, squash-merged only with every CI check passing. The
+  [fork hardening epic](https://github.com/Tauri-EPO/whatsapp-mcp/issues/64)
+  (closed 2026-09-04) records how the fork got here; new work starts from an
+  issue, see [`AGENTS.md`](AGENTS.md) section 4.
 
 Issues and PRs for this fork live at
 [Tauri-EPO/whatsapp-mcp](https://github.com/Tauri-EPO/whatsapp-mcp).
@@ -75,6 +86,9 @@ Issues and PRs for this fork live at
 - **Docker Compose** *(fork)*: bridge + MCP containers for an always-on server, optional whisper.cpp sidecar
 - **Voice-note transcription** *(fork)*: `transcribe_audio` with local whisper.cpp, Portuguese by default
 - **Expired-media recovery** *(fork)*: automatic WhatsApp media-retry when CDN links have expired
+- **Bearer auth + chat allow-list** *(fork)*: one token for bridge and MCP, `WHATSAPP_ALLOWED_CHATS` to fence the agent in
+- **Full-text search, polls, deletions** *(fork)*: FTS5 index, native poll tallies, `delete_message`, deleted and view-once content kept
+- **Server hygiene** *(fork)*: leveled logs, liveness/readiness endpoints, media retention, single-instance lock
 
 ## Installation
 
