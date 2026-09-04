@@ -73,7 +73,7 @@ Compose reads `.env` from the repo root (copy `.env.example`). Relevant keys:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | *(empty = accept any Host)* | Hostnames clients use to reach `/mcp`, e.g. your Tailscale MagicDNS name. Strongly recommended; see [Tailscale](#tailscale). |
-| `WHATSAPP_MCP_TOKEN` | *(empty = no auth)* | Bearer token every MCP request must carry. Mandatory before exposing `/mcp` beyond your tailnet; see [Funnel](#funnel-public-internet). |
+| `WHATSAPP_MCP_TOKEN` | *(empty = reuse the bridge token)* | Bearer token every MCP request must carry. Empty → the bridge token from the shared volume is used; `off` disables auth. See [Funnel](#funnel-public-internet). |
 | `WHATSAPP_ALLOWED_CHATS` | *(empty = all chats)* | Least-privilege allow-list of conversations for the agent (JIDs, numbers, `*@g.us`). Passed to both containers. Strongly recommended for a bot that can send messages. |
 | `WHATSAPP_MCP_BIND` | `127.0.0.1` | Host interface the MCP port is published on. Keep loopback and front it with `tailscale serve` or a reverse proxy. |
 | `WHATSAPP_MCP_PORT` | `8000` | Host port for `/mcp`. |
@@ -115,8 +115,10 @@ internet, and the tools can read and send messages on your WhatsApp account.
 If a client outside your tailnet (a hosted bot, for example) genuinely needs
 access, the minimum bar is:
 
-1. Set `WHATSAPP_MCP_TOKEN` (e.g. `openssl rand -hex 32`) so every request
-   needs `Authorization: Bearer <token>`; anything else gets `401`.
+1. Make sure a bearer token is enforced: by default the MCP container reuses
+   the bridge token (`docker compose exec bridge cat /app/store/.bridge-token`
+   shows it), or set your own `WHATSAPP_MCP_TOKEN` (e.g. `openssl rand -hex 32`).
+   Every request then needs `Authorization: Bearer <token>`; anything else gets `401`.
 2. Keep `WHATSAPP_MCP_ALLOWED_HOSTS` set to the public hostname.
 3. `sudo tailscale funnel --bg --https=443 http://127.0.0.1:8000`
 

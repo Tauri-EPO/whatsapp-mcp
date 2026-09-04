@@ -6,11 +6,14 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from http_auth import BearerTokenMiddleware, resolve_mcp_token
+from http_auth import BearerTokenMiddleware, resolve_http_token
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
+from whatsapp import (
+    _read_bridge_token as whatsapp_read_bridge_token,
+)
 from whatsapp import (
     delete_message as whatsapp_delete_message,
 )
@@ -638,7 +641,9 @@ if __name__ == "__main__":
 
         host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
         port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
-        token = resolve_mcp_token(os.getenv("WHATSAPP_MCP_TOKEN"))
+        # Explicit WHATSAPP_MCP_TOKEN wins; a non-loopback bind without one reuses
+        # the bridge token so the deployment has a single secret to manage.
+        token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
         app_kwargs: dict[str, Any] = {"host": host}
         # The SDK enables a loopback-only Host allow-list when bound to loopback
         # and none otherwise; WHATSAPP_MCP_ALLOWED_HOSTS lets an operator keep
@@ -656,17 +661,18 @@ if __name__ == "__main__":
                     "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
                     file=sys.stderr,
                 )
-        if token is None and host not in ("127.0.0.1", "localhost", "::1"):
+        if token is None and token_source == "none":
             print(
-                "WARNING: no WHATSAPP_MCP_TOKEN set; anyone who can reach this port can read and "
-                "send WhatsApp messages. Set a token or keep the listener tailnet/loopback-only.",
+                "WARNING: no WHATSAPP_MCP_TOKEN set and no bridge token found; anyone who can reach "
+                "this port can read and send WhatsApp messages. Set a token or keep the listener "
+                "tailnet/loopback-only.",
                 file=sys.stderr,
             )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
     # stdout is reserved for the protocol on stdio; log startup to stderr.
-    auth_state = "bearer token required" if token else "no auth"
+    auth_state = f"bearer token required, from {token_source}" if token else f"no auth ({token_source})"
     print(f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state})", file=sys.stderr)
 
     import uvicorn

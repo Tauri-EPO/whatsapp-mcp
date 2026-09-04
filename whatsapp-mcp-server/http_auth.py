@@ -23,6 +23,9 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 MIN_TOKEN_LENGTH = 16
 REALM = "whatsapp-mcp"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+# WHATSAPP_MCP_TOKEN values that mean "no auth, and do not fall back to the bridge token".
+DISABLE_VALUES = ("off", "none", "disabled")
 
 
 def resolve_mcp_token(value: str | None) -> str | None:
@@ -33,6 +36,35 @@ def resolve_mcp_token(value: str | None) -> str | None:
     if len(token) < MIN_TOKEN_LENGTH:
         raise ValueError(f"WHATSAPP_MCP_TOKEN is too short (need at least {MIN_TOKEN_LENGTH} characters)")
     return token
+
+
+def resolve_http_token(
+    explicit: str | None,
+    host: str,
+    read_bridge_token: Callable[[], str | None],
+) -> tuple[str | None, str]:
+    """Decide which bearer token protects the http/sse transports.
+
+    Returns (token, source). Precedence:
+    1. WHATSAPP_MCP_TOKEN set → that token (source "WHATSAPP_MCP_TOKEN").
+       The values off/none/disabled turn auth off explicitly (source "disabled").
+    2. Loopback bind → no token (source "loopback").
+    3. Non-loopback bind → the bridge token (env or .bridge-token file), so a
+       deployment that already has one secret does not need a second
+       (source "bridge token").
+    4. Otherwise no token (source "none"); main.py warns loudly.
+    """
+    value = (explicit or "").strip()
+    if value.lower() in DISABLE_VALUES:
+        return None, "disabled"
+    if value:
+        return resolve_mcp_token(value), "WHATSAPP_MCP_TOKEN"
+    if host in LOOPBACK_HOSTS:
+        return None, "loopback"
+    bridge = (read_bridge_token() or "").strip()
+    if len(bridge) >= MIN_TOKEN_LENGTH:
+        return bridge, "bridge token"
+    return None, "none"
 
 
 def _bearer_from_headers(headers: list[tuple[bytes, bytes]]) -> str | None:
