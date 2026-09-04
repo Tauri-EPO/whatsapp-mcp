@@ -12,7 +12,7 @@ class DummyResponse:
 
 
 def _capture_post(monkeypatch, calls):
-    def fake_post(url, json, headers=None):
+    def fake_post(url, json, headers=None, timeout=None):
         calls.append({"url": url, "json": json, "headers": headers})
         return DummyResponse()
 

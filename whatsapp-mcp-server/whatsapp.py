@@ -4,6 +4,7 @@ import os
 import os.path
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -139,6 +140,48 @@ def _bridge_headers() -> dict[str, str]:
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}
+
+
+def _bridge_timeout(default: float = 30.0) -> float:
+    """Per-call timeout for bridge REST requests (WHATSAPP_BRIDGE_TIMEOUT_S, default 30 s)."""
+    raw = os.getenv("WHATSAPP_BRIDGE_TIMEOUT_S", "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Uploads and downloads may wait on WhatsApp (media-retry asks the sender's phone).
+BRIDGE_MEDIA_TIMEOUT_S = 120.0
+BRIDGE_CONNECT_RETRIES = 2
+BRIDGE_RETRY_BACKOFF_S = 0.5
+
+
+def _bridge_request(method: str, path: str, *, timeout: float | None = None, **kwargs):
+    """Call the bridge REST API with a timeout and a short retry on connection errors.
+
+    Only errors raised before any bytes reach the bridge (connection refused,
+    reset, connect timeout) are retried, so a POST is never delivered twice; a
+    read timeout surfaces immediately. ``requests.post``/``requests.get`` are
+    looked up at call time so tests can monkeypatch them.
+    """
+    url = f"{WHATSAPP_API_BASE_URL}{path}"
+    kwargs.setdefault("headers", _bridge_headers())
+    kwargs["timeout"] = timeout if timeout is not None else _bridge_timeout()
+    fn = requests.get if method.upper() == "GET" else requests.post
+    for attempt in range(BRIDGE_CONNECT_RETRIES + 1):
+        try:
+            return fn(url, **kwargs)
+        except (requests.ConnectionError, requests.exceptions.ConnectTimeout) as exc:
+            if attempt >= BRIDGE_CONNECT_RETRIES:
+                raise
+            delay = BRIDGE_RETRY_BACKOFF_S * (2**attempt)
+            logger.warning("Bridge unreachable (%s), retrying in %.1fs: %s", path, delay, exc)
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 @dataclass
@@ -1280,7 +1323,6 @@ def send_message(
         if not recipient:
             return False, "Recipient must be provided"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload: dict[str, Any] = {
             "recipient": recipient,
             "message": message,
@@ -1292,7 +1334,7 @@ def send_message(
         if mentions:
             payload["mentions"] = mentions
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = _bridge_request("POST", "/send", json=payload)
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1329,12 +1371,11 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {"recipient": recipient, "media_path": media_path}
         if caption:
             payload["message"] = caption
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = _bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S)
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1371,10 +1412,9 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {"recipient": recipient, "media_path": media_path}
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = _bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S)
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1419,7 +1459,6 @@ def send_reaction(
         if not message_id:
             return False, "Message ID must be provided"
 
-        url = f"{WHATSAPP_API_BASE_URL}/react"
         payload: dict[str, Any] = {
             "recipient": recipient,
             "message_id": message_id,
@@ -1428,7 +1467,7 @@ def send_reaction(
             "sender_jid": sender_jid,
         }
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = _bridge_request("POST", "/react", json=payload)
 
         if response.status_code == 200:
             result = response.json()
@@ -1458,9 +1497,7 @@ def get_group_members(group_jid: str) -> dict[str, Any]:
     if denied := _policy_denied(group_jid):
         return {"success": False, "message": denied}
     try:
-        response = requests.get(
-            f"{WHATSAPP_API_BASE_URL}/group/members", params={"jid": group_jid}, headers=_bridge_headers(), timeout=30
-        )
+        response = _bridge_request("GET", "/group/members", params={"jid": group_jid})
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError):
@@ -1484,12 +1521,7 @@ def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
     if denied := _policy_denied(chat_jid):
         return {"success": False, "message": denied}
     try:
-        response = requests.get(
-            f"{WHATSAPP_API_BASE_URL}/poll",
-            params={"message_id": message_id, "chat_jid": chat_jid},
-            headers=_bridge_headers(),
-            timeout=30,
-        )
+        response = _bridge_request("GET", "/poll", params={"message_id": message_id, "chat_jid": chat_jid})
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError):
@@ -1509,11 +1541,10 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     if denied := _policy_denied(chat_jid):
         return False, denied
     try:
-        response = requests.post(
-            f"{WHATSAPP_API_BASE_URL}/delete",
+        response = _bridge_request(
+            "POST",
+            "/delete",
             json={"chat_jid": chat_jid, "message_id": message_id, "for_everyone": bool(for_everyone)},
-            headers=_bridge_headers(),
-            timeout=30,
         )
         try:
             payload = response.json()
@@ -1552,11 +1583,7 @@ def mark_messages_read(
         if timestamp:
             payload["timestamp"] = timestamp
 
-        response = requests.post(
-            f"{WHATSAPP_API_BASE_URL}/mark-read",
-            json=payload,
-            headers=_bridge_headers(),
-        )
+        response = _bridge_request("POST", "/mark-read", json=payload)
 
         if response.status_code == 200:
             result = response.json()
@@ -1585,10 +1612,9 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
         logger.warning("Download refused: %s", denied)
         return None
     try:
-        url = f"{WHATSAPP_API_BASE_URL}/download"
         payload = {"message_id": message_id, "chat_jid": chat_jid}
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = _bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S)
 
         if response.status_code == 200:
             result = response.json()

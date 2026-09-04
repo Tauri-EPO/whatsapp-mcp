@@ -181,6 +181,7 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 | `WHATSAPP_DB_PATH` | `$WHATSAPP_STORE_DIR/messages.db` | SQLite path used by the MCP server (overrides the store dir) |
 | `WHATSMEOW_DB_PATH` | `$WHATSAPP_STORE_DIR/whatsapp.db` | whatsmeow SQLite (LID ↔ phone resolution via `whatsmeow_lid_map`); overrides the store dir |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
+| `WHATSAPP_BRIDGE_TIMEOUT_S` | `30` | Timeout per MCP → bridge REST call (`whatsapp._bridge_request`); uploads/downloads use 120 s. Connection errors retry twice with backoff, read timeouts never (a POST is not re-sent) |
 | `WHATSAPP_BRIDGE_BIND` | `127.0.0.1` | Bridge REST listen address; `0.0.0.0` / `::` for other containers or hosts (`rest_bind.go`) |
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)* | Extra `Host` values accepted by the bridge (`host` any port, `host:port` exact, `*` any). Same semantics as `WHATSAPP_MCP_ALLOWED_HOSTS`; loopback spellings always included; a non-loopback bind without it stays loopback-only (403) |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge listens on |
