@@ -607,7 +607,7 @@ func placeholderWaveform(duration uint32) []byte {
 // handleSend serves POST /api/send.
 func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		bridgeLog.Debugf("→ /api/send from=%q user_agent=%q", r.RemoteAddr, r.UserAgent())
+		b.Log.Debugf("→ /api/send from=%q user_agent=%q", r.RemoteAddr, r.UserAgent())
 
 		// Parse the request body
 		var req SendMessageRequest
@@ -652,12 +652,12 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 
 		// Avoid logging req.Message verbatim — it's user content and may
 		// contain secrets the user pasted into a chat.
-		bridgeLog.Debugf("→ /api/send recipient=%q message_len=%d has_media=%v",
+		b.Log.Debugf("→ /api/send recipient=%q message_len=%d has_media=%v",
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
 		success, message, sent := b.Send(req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
-		bridgeLog.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
+		b.Log.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 

@@ -18,7 +18,7 @@ func TestSendHandlerReturnsMessageID(t *testing.T) {
 			Timestamp: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
 		}
 	}
-	mux := b.newRESTMux(8080, token, nil)
+	mux := b.newRESTMux(8080, token)
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(`{"recipient":"5511999999999","message":"hi"}`))
 	req.Host = "127.0.0.1:8080"
 	req.Header.Set("Authorization", "Bearer "+token)

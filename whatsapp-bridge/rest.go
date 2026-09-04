@@ -43,11 +43,12 @@ type ReactRequest struct {
 // Outbound media: req.MediaPath in /api/send is validated against
 // allowedMediaRoots before sendWhatsAppMessage ever sees it. See
 // media_path.go.
-func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) *http.ServeMux {
+func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
+	allowedMediaRoots := b.MediaRoots
 	client, messageStore := b.Client, b.Store
 	allowedHosts, hostWarning := buildHostAllowList(port, b.RESTBind, b.RESTAllowedHosts)
 	if hostWarning != "" {
-		bridgeLog.Warnf("%s", hostWarning)
+		b.Log.Warnf("%s", hostWarning)
 	}
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
@@ -172,14 +173,14 @@ func writeJSON(w http.ResponseWriter, code int, body interface{}) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []string) {
+func (b *Bridge) startRESTServer(port int, token string) {
 
-	handler := b.newRESTMux(port, token, allowedMediaRoots)
+	handler := b.newRESTMux(port, token)
 
 	// Loopback by default so the bridge is not reachable from the LAN;
 	// WHATSAPP_BRIDGE_BIND widens that on purpose (rest_bind.go).
 	serverAddr := listenAddr(b.RESTBind, port)
-	bridgeLog.Infof("Starting REST API server on %s...", serverAddr)
+	b.Log.Infof("Starting REST API server on %s...", serverAddr)
 
 	// Create server with timeouts for stability
 	server := &http.Server{
@@ -195,7 +196,7 @@ func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []str
 	// Run server in a goroutine so it doesn't block
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			bridgeLog.Errorf("REST API server error: %v", err)
+			b.Log.Errorf("REST API server error: %v", err)
 		}
 	}()
 }

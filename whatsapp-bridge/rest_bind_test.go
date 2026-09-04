@@ -106,7 +106,7 @@ func TestRESTMuxHonoursAllowedHosts(t *testing.T) {
 	const token = "test-token-0123456789"
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.RESTBind, b.RESTAllowedHosts = "0.0.0.0", "bridge"
-	mux := b.newRESTMux(8080, token, nil)
+	mux := b.newRESTMux(8080, token)
 
 	for host, want := range map[string]int{"bridge:8080": http.StatusOK, "other:8080": http.StatusForbidden} {
 		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/api/health", nil)

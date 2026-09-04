@@ -217,7 +217,9 @@ func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
 
 	rec := installRecordingLogger(t)
 
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	// Handlers log through b.Log; route it to the recorder as well.
+	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+	handler := b.newRESTMux(8080, token)
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader("{"))
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -2407,7 +2409,7 @@ func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
 // handler returns 400 when recipient or message_id is absent.
 func TestReactHandler_MissingFields_Returns400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	cases := []struct {
 		name string
@@ -2435,7 +2437,7 @@ func TestReactHandler_MissingFields_Returns400(t *testing.T) {
 
 func TestReactHandler_GroupReactionMissingSenderJID_Returns400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	body := `{"recipient":"120363012345678901@g.us","message_id":"3AABCDEF01234567","emoji":"👍","from_me":false}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(body))
@@ -2452,7 +2454,7 @@ func TestReactHandler_GroupReactionMissingSenderJID_Returns400(t *testing.T) {
 
 func TestReactHandler_GroupReactionInvalidSenderJID_Returns400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	body := `{"recipient":"120363012345678901@g.us","message_id":"3AABCDEF01234567","emoji":"👍","from_me":false,"sender_jid":"@s.whatsapp.net"}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(body))
@@ -2471,7 +2473,7 @@ func TestReactHandler_GroupReactionInvalidSenderJID_Returns400(t *testing.T) {
 // rejects requests that do not carry a valid bearer token.
 func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react",
 		strings.NewReader(`{"recipient":"15551234567@s.whatsapp.net","message_id":"3AABCDEF01234567","emoji":"👍"}`))
@@ -2487,7 +2489,7 @@ func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 
 func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	cases := []struct {
 		name string
@@ -2532,7 +2534,7 @@ func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed message: %v", err)
 	}
-	handler := testBridge(newTestClient(&mockLIDStore{}), ms, testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), ms, testLogger()).newRESTMux(8080, token)
 
 	body := `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us","sender_jid":"15551234567","timestamp":"2026-08-11T18:30:00Z"}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(body))
@@ -2549,7 +2551,7 @@ func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 
 func TestMarkReadHandler_NoAuth_Returns401(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read",
 		strings.NewReader(`{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net"}`))
@@ -2794,7 +2796,7 @@ func TestHandleMessage_PlainMessage_QuotedIDIsNull(t *testing.T) {
 // path when recipient is empty — complements the quoted-reply handler path.
 func TestSendHandler_QuotedReplyFields_PassedThrough(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	// POST with quoted_message_id but no recipient — should 400 before
 	// any send attempt, proving the new fields are parsed.
@@ -3019,7 +3021,7 @@ func TestResolveMentionJIDs(t *testing.T) {
 // is parsed by /api/send — mirrors the quoted-reply field test above.
 func TestSendHandler_MentionsField_PassedThrough(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token, nil)
+	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	// POST with mentions but no recipient — should 400 before any send
 	// attempt, proving the new field parses without error.

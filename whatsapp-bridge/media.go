@@ -139,7 +139,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	// Check if file already exists
 	if _, err := os.Stat(localPath); err == nil {
 		// File exists, return it
-		bridgeLog.Debugf("📁 File already exists: %s", absPath)
+		b.Log.Debugf("📁 File already exists: %s", absPath)
 		return true, mediaType, filename, absPath, nil
 	}
 
@@ -148,7 +148,7 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
-	bridgeLog.Debugf("Attempting to download media for message %s in chat %s...", messageID, chatJID)
+	b.Log.Debugf("Attempting to download media for message %s in chat %s...", messageID, chatJID)
 
 	// Extract direct path from URL
 	directPath := extractDirectPathFromURL(url)
@@ -190,14 +190,14 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 		// The CDN token in the stored URL has expired (old history, forwards).
 		// Ask the sender's phone to re-upload and download from the fresh path.
 		// See media_retry.go.
-		bridgeLog.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
+		b.Log.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
 		written, err = downloadViaMediaRetry(context.Background(), client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
 	}
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
 
-	bridgeLog.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
+	b.Log.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
 	return true, mediaType, filename, absPath, nil
 }
 
@@ -275,7 +275,7 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 		}
 
 		// Log download request for debugging
-		bridgeLog.Debugf("📥 Download request: message_id=%s chat_jid=%s", req.MessageID, req.ChatJID)
+		b.Log.Debugf("📥 Download request: message_id=%s chat_jid=%s", req.MessageID, req.ChatJID)
 
 		// Download the media
 		success, mediaType, filename, path, err := b.DownloadMedia(req.MessageID, req.ChatJID)

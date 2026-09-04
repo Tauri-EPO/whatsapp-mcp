@@ -56,6 +56,10 @@ type Bridge struct {
 	RESTBind string
 	// RESTAllowedHosts is the raw WHATSAPP_BRIDGE_ALLOWED_HOSTS value (see rest_bind.go).
 	RESTAllowedHosts string
+	// MediaRoots are the directories /api/send may read outbound files from (WHATSAPP_MEDIA_ROOTS).
+	MediaRoots []string
+	// MediaRetention is the age after which cached media is swept (0 = keep forever).
+	MediaRetention time.Duration
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps

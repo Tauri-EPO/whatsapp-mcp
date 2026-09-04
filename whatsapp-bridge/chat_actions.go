@@ -117,7 +117,7 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 		}
 		if err := messageStore.MarkChatRead(req.ChatJID, localReadAt); err != nil {
 			// Receipt already sent; log but still report success to the caller.
-			bridgeLog.Warnf("failed to persist local read marker for %s: %v", req.ChatJID, err)
+			b.Log.Warnf("failed to persist local read marker for %s: %v", req.ChatJID, err)
 		}
 
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
