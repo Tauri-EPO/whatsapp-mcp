@@ -96,18 +96,17 @@ class TestResolveAllowedHosts:
         assert resolve_allowed_hosts("mcp.example.ts.net, *") == []
 
     def test_bare_hostname_expands_to_exact_and_wildcard_port(self):
-        hosts = resolve_allowed_hosts("mcp.example.ts.net")
-        assert "mcp.example.ts.net" in hosts
-        assert "mcp.example.ts.net:*" in hosts
+        hosts = set(resolve_allowed_hosts("mcp.example.ts.net"))
+        # Set comparisons rather than `"host" in list` membership: CodeQL reads the
+        # latter as URL-substring sanitisation and flags the tests.
+        assert {"mcp.example.ts.net", "mcp.example.ts.net:*"} <= hosts
         # Loopback spellings are always kept so local clients keep working.
-        for loopback in ("127.0.0.1", "localhost", "[::1]"):
-            assert f"{loopback}:*" in hosts
+        assert {"127.0.0.1:*", "localhost:*", "[::1]:*"} <= hosts
 
     def test_explicit_port_is_kept_verbatim(self):
-        hosts = resolve_allowed_hosts("whatsapp-mcp:8000, 10.0.0.5:*")
-        assert "whatsapp-mcp:8000" in hosts
-        assert "whatsapp-mcp:*" not in hosts
-        assert "10.0.0.5:*" in hosts
+        hosts = set(resolve_allowed_hosts("whatsapp-mcp:8000, 10.0.0.5:*"))
+        assert {"whatsapp-mcp:8000", "10.0.0.5:*"} <= hosts
+        assert hosts.isdisjoint({"whatsapp-mcp:*"})
 
 
 class TestBuildTransportSecurity:
@@ -128,10 +127,9 @@ class TestBuildTransportSecurity:
     def test_allowlist_enables_protection_with_origins(self):
         security = build_transport_security("0.0.0.0", "mcp.example.ts.net", "https://app.example.com")
         assert security.enable_dns_rebinding_protection is True
-        assert "mcp.example.ts.net" in security.allowed_hosts
-        assert "https://mcp.example.ts.net" in security.allowed_origins
-        assert "http://localhost:*" in security.allowed_origins
-        assert "https://app.example.com" in security.allowed_origins
+        assert {"mcp.example.ts.net", "mcp.example.ts.net:*"} <= set(security.allowed_hosts)
+        expected_origins = {"https://mcp.example.ts.net", "http://localhost:*", "https://app.example.com"}
+        assert expected_origins <= set(security.allowed_origins)
 
 
 def _streamable_http_app(host: str, allowed_hosts: str | None):
