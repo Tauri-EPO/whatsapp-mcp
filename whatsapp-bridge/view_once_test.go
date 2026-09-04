@@ -56,16 +56,15 @@ func TestHandleMessage_ViewOnceImageIsStored(t *testing.T) {
 	logger := testLogger()
 
 	// Never download in this test: replace the async downloader.
-	orig := downloadMediaForMessage
-	downloadMediaForMessage = func(_ *whatsmeow.Client, _ *MessageStore, _ string, _ string) (bool, string, string, string, error) {
+	b := testBridge(client, ms, logger)
+	b.DownloadMedia = func(_ *whatsmeow.Client, _ *MessageStore, _ string, _ string) (bool, string, string, string, error) {
 		return false, "", "", "", nil
 	}
-	t.Cleanup(func() { downloadMediaForMessage = orig })
 
 	evt := buildImageMessage(phonePN, phonePN, false, "")
 	evt.Info.ID = "VO1"
 	evt.Message = viewOnceImage("só uma vez")
-	handleMessage(client, ms, evt, logger)
+	b.handleMessage(evt)
 
 	var content, mediaType, url string
 	var viewOnce bool

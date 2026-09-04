@@ -68,12 +68,10 @@ func TestRejectByChatPolicy(t *testing.T) {
 // policy and a nil client, a blocked /api/send returns 403 instead of
 // touching the (absent) connection.
 func TestRESTSendRejectedByChatPolicy(t *testing.T) {
-	orig := outboundChatPolicy
-	outboundChatPolicy = parseChatPolicy("5511999999999")
-	t.Cleanup(func() { outboundChatPolicy = orig })
-
 	ms := newTestMessageStore(t)
-	mux := newRESTMux(nil, ms, 8080, "test-token-0123456789", []string{t.TempDir()})
+	b := testBridge(nil, ms, testLogger())
+	b.Policy = parseChatPolicy("5511999999999")
+	mux := b.newRESTMux(8080, "test-token-0123456789", []string{t.TempDir()})
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send",
 		strings.NewReader(`{"recipient":"5511888888888","message":"hi"}`))

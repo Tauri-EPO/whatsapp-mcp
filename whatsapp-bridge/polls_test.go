@@ -126,7 +126,7 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 	creation := buildImageMessage(phonePN, phonePN, false, "")
 	creation.Message = pollCreationMsg("Almoço?", "Pizza", "Sushi")
 	creation.Info.ID = "POLL1"
-	handleMessage(client, ms, creation, logger)
+	testBridge(client, ms, logger).handleMessage(creation)
 
 	var content, mediaType string
 	if err := ms.db.QueryRow(`SELECT content, media_type FROM messages WHERE id = 'POLL1'`).Scan(&content, &mediaType); err != nil {
@@ -140,9 +140,8 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 	}
 
 	// Vote with a fake decrypter (real one needs the message-secret store).
-	orig := pollVoteDecrypt
-	pollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) { return [][]byte{hashOf("Sushi")}, nil }
-	t.Cleanup(func() { pollVoteDecrypt = orig })
+	b := testBridge(client, ms, logger)
+	b.PollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) { return [][]byte{hashOf("Sushi")}, nil }
 
 	vote := buildImageMessage(phonePN, phonePN, false, "")
 	vote.Info.ID = "VOTE1"
@@ -150,7 +149,7 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 		PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String("POLL1"), RemoteJID: proto.String(phonePN.String())},
 		Vote:                   &waProto.PollEncValue{EncPayload: []byte("x"), EncIV: []byte("y")},
 	}}
-	handleMessage(client, ms, vote, logger)
+	b.handleMessage(vote)
 
 	var voteContent, voteType, target string
 	if err := ms.db.QueryRow(`SELECT content, media_type, filename FROM messages WHERE id = 'VOTE1'`).Scan(&voteContent, &voteType, &target); err != nil {
@@ -165,9 +164,9 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 	}
 
 	// Decrypt failure: no row, no crash.
-	pollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) { return nil, errors.New("no secret") }
+	b.PollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) { return nil, errors.New("no secret") }
 	vote.Info.ID = "VOTE2"
-	handleMessage(client, ms, vote, logger)
+	b.handleMessage(vote)
 	var n int
 	_ = ms.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = 'VOTE2'`).Scan(&n)
 	if n != 0 {

@@ -115,9 +115,9 @@ func TestHandleHistorySync_NeverFetchesGroupInfo(t *testing.T) {
 			}},
 		})
 	}
-	handleHistorySync(client, ms, &events.HistorySync{Data: &waProto.HistorySync{
+	testBridge(client, ms, logger).handleHistorySync(&events.HistorySync{Data: &waProto.HistorySync{
 		SyncType: waProto.HistorySync_RECENT.Enum(), Conversations: conversations,
-	}}, logger)
+	}})
 
 	var n int
 	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM chats WHERE name LIKE 'Group %'`).Scan(&n); err != nil || n != 3 {
