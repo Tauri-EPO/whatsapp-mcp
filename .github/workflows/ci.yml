@@ -107,9 +107,9 @@ jobs:
         # the operator's post-deploy check. Exit 2 = up but waiting for a QR
         # scan, which is the only outcome possible in CI.
         run: |
-          docker tag whatsapp-mcp-bridge:ci whatsapp-mcp-bridge:local
-          docker tag whatsapp-mcp-server:ci whatsapp-mcp-server:local
-          echo 'WHATSAPP_BRIDGE_TOKEN=ci-smoke-token-0123456789abcdef' > .env
+          docker tag whatsapp-mcp-bridge:ci ghcr.io/tauri-epo/whatsapp-mcp-bridge:ci
+          docker tag whatsapp-mcp-server:ci ghcr.io/tauri-epo/whatsapp-mcp-server:ci
+          printf 'WHATSAPP_BRIDGE_TOKEN=ci-smoke-token-0123456789abcdef\nWHATSAPP_IMAGE_TAG=ci\n' > .env
           docker compose up -d --no-build bridge mcp
           set +e
           scripts/smoke.sh --wait 90
