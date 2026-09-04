@@ -658,6 +658,7 @@ def list_messages(
     context_after: int = 1,
     sort_by: str = "newest",
     include_deleted: bool = True,
+    unread_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Get messages matching the specified criteria with optional context.
 
@@ -679,6 +680,9 @@ def list_messages(
             "relevance" (best match first; only meaningful with query and the FTS index)
         include_deleted: Keep revoked messages in the result (default True; they carry
             deleted_at and their original content). False hides them.
+        unread_only: Only inbound messages newer than their chat's read marker
+            (chats.last_read_time, as reported by any linked device). Chats with no
+            marker count as entirely unread.
 
     Returns:
         List of message dictionaries with id, timestamp, sender, content, etc.
@@ -733,6 +737,12 @@ def list_messages(
 
         if not include_deleted:
             where_clauses.append("messages.deleted_at IS NULL")
+
+        if unread_only:
+            read_marker = _last_read_time_select(cursor, "chats")
+            where_clauses.append(
+                f"messages.is_from_me = 0 AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})"
+            )
 
         match_param_index = None
         if query and use_fts:
