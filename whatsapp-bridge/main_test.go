@@ -106,6 +106,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
 			deleted_at TIMESTAMP,
+			view_once BOOLEAN NOT NULL DEFAULT 0,
 			quoted_message_id TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
