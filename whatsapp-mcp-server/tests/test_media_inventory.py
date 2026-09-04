@@ -154,6 +154,7 @@ def test_scan_chat_cache_parses_bridge_filenames(tmp_path, monkeypatch):
     for name in (
         "image_20260904_150405_ABC.jpg",
         "document_20260904_150405_DEF",
+        "document_20260904_150405_PDF.pdf",
         "audio_20260904_150405_GHI.ogg",
         "sticker_20260904_150405_JKL.webp",
         "notes.txt",
@@ -162,8 +163,9 @@ def test_scan_chat_cache_parses_bridge_filenames(tmp_path, monkeypatch):
         open(os.path.join(d, name), "wb").write(b"1")
     os.makedirs(os.path.join(d, "image_20260904_150405_DIR.jpg"))
     found = media_inventory.scan_chat_cache("5511999999999:12@s.whatsapp.net")
-    assert sorted(found) == ["ABC", "DEF", "GHI", "JKL"]
-    assert found["DEF"].name == "document_20260904_150405_DEF"
+    assert sorted(found) == ["ABC", "DEF", "GHI", "JKL", "PDF"]
+    assert found["DEF"].name == "document_20260904_150405_DEF"  # legacy: no extension
+    assert found["PDF"].name == "document_20260904_150405_PDF.pdf"
     assert media_inventory.scan_chat_cache("nobody@s.whatsapp.net") == {}
 
 

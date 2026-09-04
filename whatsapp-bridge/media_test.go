@@ -199,3 +199,81 @@ func TestMediaDownloader_ImplementsDownloadableMessage(t *testing.T) {
 		t.Errorf("accessors do not return the stored fields: %+v", d)
 	}
 }
+
+func TestMediaFileName_DocumentExtension(t *testing.T) {
+	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.UTC)
+	cases := map[string]string{
+		"Report Q3.pdf":          ".pdf",
+		"contract.DOCX":          ".docx",
+		"archive.tar.gz":         ".gz",
+		"noext":                  "",
+		"":                       "",
+		"evil.p/df":              "", // separators never reach the disk
+		"x.abcdefghijklm":        "", // longer than 10 chars: not an extension
+		"weird.ex\u00e9":         "", // non-ASCII
+		"trailing space.pdf   ":  ".pdf",
+		"../../../../etc/passwd": "",
+		"photo.jpg":              ".jpg", // a document can carry any type
+	}
+	for name, ext := range cases {
+		got := mediaFileName("document", ts, "ABC", name)
+		if got != "document_20260904_150405_ABC"+ext {
+			t.Errorf("%q: got %q, want ext %q", name, got, ext)
+		}
+	}
+	// Other types ignore the original name.
+	if got := mediaFileName("image", ts, "ABC", "photo.png"); got != "image_20260904_150405_ABC.jpg" {
+		t.Errorf("image: %q", got)
+	}
+	if got := legacyMediaFileName("document", ts, "ABC"); got != "document_20260904_150405_ABC" {
+		t.Errorf("legacy: %q", got)
+	}
+}
+
+func TestDownloadMedia_DocumentsUseAndFallBackOnLegacyName(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms := newTestMessageStore(t)
+	b := testBridge(nil, ms, installRecordingLogger(t))
+	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.UTC)
+	if err := ms.StoreChat(mediaTestChat, "Test", ts); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(id string) {
+		if err := ms.StoreMessage(id, mediaTestChat, "x", "", ts, false, "document", "Report Q3.pdf", "", nil, nil, nil, 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := storePath(mediaTestChat)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// New shape: the cached file carries the sender's extension.
+	seed("NEW")
+	if err := os.WriteFile(filepath.Join(dir, "document_20260904_150405_NEW.pdf"), []byte("pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, _, name, path, err := b.downloadMedia(context.Background(), "NEW", mediaTestChat)
+	if err != nil || !ok || name != "document_20260904_150405_NEW.pdf" || filepath.Base(path) != name {
+		t.Errorf("new name: ok=%v name=%q path=%q err=%v", ok, name, path, err)
+	}
+
+	// Legacy shape: cached before documents kept an extension; still served.
+	seed("OLD")
+	if err := os.WriteFile(filepath.Join(dir, "document_20260904_150405_OLD"), []byte("pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, _, name, path, err = b.downloadMedia(context.Background(), "OLD", mediaTestChat)
+	if err != nil || !ok || name != "document_20260904_150405_OLD" || filepath.Base(path) != name {
+		t.Errorf("legacy name: ok=%v name=%q path=%q err=%v", ok, name, path, err)
+	}
+
+	// Purge finds the legacy file too.
+	res := purgeOne(mediaRow{ID: "OLD", ChatJID: mediaTestChat, MediaType: "document", Timestamp: ts, Filename: "Report Q3.pdf"}, false)
+	if !res.Purged || res.File != "document_20260904_150405_OLD" {
+		t.Errorf("purge legacy: %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "document_20260904_150405_OLD")); !os.IsNotExist(err) {
+		t.Errorf("legacy file still there")
+	}
+}
