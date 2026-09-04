@@ -98,11 +98,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_contact(
-    identifier: str | None = None,
-    phone_number: str | None = None,
-    phone: str | None = None,
-) -> dict[str, Any]:
+def get_contact(identifier: str) -> dict[str, Any]:
     """Look up a WhatsApp contact by phone number, LID, or full JID.
 
     Automatically detects the identifier type and queries appropriately.
@@ -113,20 +109,11 @@ def get_contact(
                     - "35047067385985" (LID - numeric)
                     - "12025551234@s.whatsapp.net" (phone JID)
                     - "184125298348272@lid" (LID JID)
-        phone_number: Backward-compatible alias for `identifier`.
-        phone: Backward-compatible alias for `identifier` (matches README parameter name).
 
     Returns:
         Dictionary with jid, name, display_name, is_lid, and resolved status
     """
-    if identifier is None:
-        identifier = phone_number
-    if identifier is None:
-        identifier = phone
-    if identifier is None:
-        raise ValueError("Missing required argument: identifier (or phone_number / phone)")
-
-    identifier = identifier.strip()
+    identifier = (identifier or "").strip()
     if not identifier:
         raise ValueError("identifier must be non-empty")
 
@@ -224,7 +211,7 @@ def _cap_context(limit: int, include_context: bool, before: int, after: int) -> 
 def list_messages(
     after: str | None = None,
     before: str | None = None,
-    sender_phone_number: str | None = None,
+    sender_jid: str | None = None,
     chat_jid: str | None = None,
     query: str | None = None,
     limit: int = 50,
@@ -246,7 +233,8 @@ def list_messages(
     Args:
         after: ISO-8601 date string (e.g., "2026-01-01" or "2026-01-01T09:00:00")
         before: ISO-8601 date string (e.g., "2026-01-09" or "2026-01-09T18:00:00")
-        sender_phone_number: Phone number to filter by sender (e.g., "12025551234")
+        sender_jid: Only messages from this sender: phone number with country code
+               ("12025551234") or JID ("12025551234@s.whatsapp.net")
         chat_jid: Chat JID to filter by (e.g., "12025551234@s.whatsapp.net" or group JID)
         query: Search term to filter messages by content. Accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
@@ -276,7 +264,7 @@ def list_messages(
     messages = whatsapp_list_messages(
         after=after,
         before=before,
-        sender_phone_number=sender_phone_number,
+        sender_phone_number=sender_jid,
         chat_jid=chat_jid,
         query=query,
         limit=limit,
@@ -339,57 +327,57 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
 
 @mcp.tool()
-def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
+def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
 
     Args:
-        sender_phone_number: The phone number to search for
+        contact_jid: The contact's phone number with country code ("12025551234")
+                     or JID ("12025551234@s.whatsapp.net")
     """
-    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
+    chat = whatsapp_get_direct_chat_by_contact(contact_jid)
     return chat
 
 
 @mcp.tool()
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
+def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
 
     Args:
-        jid: The contact's JID to search for
+        contact_jid: The contact's JID or phone number
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    chats = whatsapp_get_contact_chats(jid, limit, page)
+    chats = whatsapp_get_contact_chats(contact_jid, limit, page)
     return chats
 
 
 @mcp.tool()
-def get_last_interaction(jid: str) -> dict[str, Any]:
+def get_last_interaction(contact_jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
     Args:
-        jid: The JID of the contact to search for
+        contact_jid: The contact's JID or phone number
 
     Returns:
         Message dictionary with id, timestamp, sender, content, etc. or empty dict if not found.
     """
-    message = whatsapp_get_last_interaction(jid)
+    message = whatsapp_get_last_interaction(contact_jid)
     return message if message else {}
 
 
 @mcp.tool()
-def get_message_context(message_id: str, before: int = 5, after: int = 5, chat_jid: str = "") -> dict[str, Any]:
+def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
     Messages use the same shape as list_messages (including media_type and filename
     for media messages).
 
     Args:
+        chat_jid: JID of the chat containing the message (message IDs are only
+                  unique per chat; both come from list_messages rows)
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
-        chat_jid: JID of the chat containing the message. Recommended: message IDs
-                  are only unique per chat, and the lookup becomes an indexed
-                  primary-key hit. Without it the most recent match is used.
     """
     context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
     return {
@@ -401,7 +389,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5, chat_j
 
 @mcp.tool()
 def send_message(
-    recipient: str,
+    chat_jid: str,
     message: str,
     quoted_message_id: str = "",
     quoted_sender_jid: str = "",
@@ -411,8 +399,9 @@ def send_message(
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
     Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+        chat_jid: Where to send: a phone number with country code and no symbols
+                  ("123456789"), a direct-chat JID ("123456789@s.whatsapp.net") or
+                  a group JID ("123456789@g.us")
         message: The message text to send
         quoted_message_id: ID of the message to reply to (optional). When set, the sent
                            message will appear as a quoted reply in WhatsApp.
@@ -429,19 +418,18 @@ def send_message(
         A dictionary containing success status and a status message
     """
     # Validate input
-    if not recipient:
-        return {"success": False, "message": "Recipient must be provided"}
+    if not chat_jid:
+        return {"success": False, "message": "chat_jid must be provided"}
 
-    # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(
-        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
+        chat_jid, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
     )
     return {"success": success, "message": status_message}
 
 
 @mcp.tool()
 def send_reaction(
-    recipient: str,
+    chat_jid: str,
     message_id: str,
     emoji: str,
     from_me: bool = False,
@@ -450,8 +438,8 @@ def send_reaction(
     """Send (or remove) a reaction to a WhatsApp message.
 
     Args:
-        recipient: The chat JID the message belongs to (e.g., "12025551234@s.whatsapp.net"
-                   or a group JID like "123456789@g.us")
+        chat_jid: The chat the message belongs to ("12025551234@s.whatsapp.net" or
+                  a group JID like "123456789@g.us")
         message_id: The ID of the message to react to
         emoji: The reaction emoji (e.g., "👍"). Pass an empty string to remove the reaction.
         from_me: Whether the original message was sent by the current user (default False)
@@ -461,12 +449,12 @@ def send_reaction(
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
+    success, status_message = whatsapp_send_reaction(chat_jid, message_id, emoji, from_me, sender_jid)
     return {"success": success, "message": status_message}
 
 
 @mcp.tool()
-def list_group_members(group_jid: str) -> dict[str, Any]:
+def list_group_members(chat_jid: str) -> dict[str, Any]:
     """List the participants of a WhatsApp group with names and admin flags.
 
     Queries WhatsApp live through the bridge, so the bridge must be connected. Each
@@ -475,13 +463,13 @@ def list_group_members(group_jid: str) -> dict[str, Any]:
     is_super_admin. Also returns the group's name, topic and owner.
 
     Args:
-        group_jid: The group JID (e.g. "120363000000000001@g.us")
+        chat_jid: The group JID (e.g. "120363000000000001@g.us")
     """
-    return whatsapp_get_group_members(group_jid)
+    return whatsapp_get_group_members(chat_jid)
 
 
 @mcp.tool()
-def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
+def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Get the current tally of a native WhatsApp poll.
 
     Polls appear in list_messages as messages with media_type "poll" (content shows
@@ -525,8 +513,8 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
 
 @mcp.tool()
 def mark_messages_read(
-    message_ids: list[str],
     chat_jid: str,
+    message_ids: list[str],
     sender_jid: str = "",
     timestamp: str | None = None,
 ) -> dict[str, Any]:
@@ -538,8 +526,8 @@ def mark_messages_read(
     (that needs a separate view receipt the bridge never sends).
 
     Args:
-        message_ids: IDs of the messages to mark as read
         chat_jid: JID of the chat containing the messages
+        message_ids: IDs of the messages to mark as read
         sender_jid: JID or bare phone number of the original sender; required for groups
         timestamp: Optional RFC 3339 read timestamp; defaults to the current time
 
@@ -551,7 +539,7 @@ def mark_messages_read(
 
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, Any]:
+def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
     When `caption` is provided, the file and text arrive as a single
@@ -559,8 +547,8 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, A
     needing a separate follow-up send_message call. For group chats use the JID.
 
     Args:
-        recipient: Either a phone number with country code (no + or symbols),
-                 or a JID (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+        chat_jid: Phone number with country code (no symbols), direct-chat JID or
+                  group JID
         media_path: Absolute path to the media file (image, video, document)
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
@@ -570,33 +558,33 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, A
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path, caption)
+    success, status_message = whatsapp_send_file(chat_jid, media_path, caption)
     return {"success": success, "message": status_message}
 
 
 @mcp.tool()
-def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
-    """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
+def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
+    """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
 
     Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+        chat_jid: Phone number with country code (no symbols), direct-chat JID or
+                  group JID
         media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
 
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+    success, status_message = whatsapp_audio_voice_message(chat_jid, media_path)
     return {"success": success, "message": status_message}
 
 
 @mcp.tool()
-def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
+def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
     Args:
-        message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
+        message_id: The ID of the message containing the media
 
     Returns:
         A dictionary containing success status, a status message, and the file path if successful
@@ -611,8 +599,8 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
 
 @mcp.tool()
 def transcribe_audio(
-    message_id: str = "",
     chat_jid: str = "",
+    message_id: str = "",
     file_path: str = "",
     language: str = "",
 ) -> dict[str, Any]:
@@ -624,8 +612,8 @@ def transcribe_audio(
     nothing is sent to a cloud API.
 
     Args:
-        message_id: ID of the audio/voice message to transcribe
         chat_jid: JID of the chat containing the message
+        message_id: ID of the audio/voice message to transcribe
         file_path: Alternative to message_id/chat_jid: path of an audio file on disk
         language: ISO-639-1 language code (default WHISPER_LANGUAGE, "pt"); "auto" to detect
 

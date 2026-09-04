@@ -2,7 +2,7 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
-Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
+Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
 
 ## Contact Operations
 
@@ -26,7 +26,7 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 **Parameters:**
 
-- `identifier` (required): Phone number, LID, or full JID (aliases: `phone_number`, `phone`)
+- `identifier` (required): Phone number, LID, or full JID
   - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
 
 **Natural Language Examples:**
@@ -47,7 +47,7 @@ Get messages with filters, date ranges, and sorting.
 - `limit` (optional): Number of messages (default 50, max 500)
 - `page` (optional): Page number (default 0)
 - `before` / `after` (optional): ISO-8601 bounds (`2026-01-09` or `2026-01-09T18:00:00`)
-- `sender_phone_number` (optional): Only messages from this number
+- `sender_jid` (optional): Only messages from this sender (phone number or JID)
 - `include_context` (optional, default `true`), `context_before` / `context_after` (default 1, max 50 each): surrounding messages for every match. The whole result is capped at 2000 rows; with large `limit` values the windows shrink to fit, so prefer `include_context=false` when paging through many matches
 - `query` (optional): Search term. With the bridge's FTS5 index (default in the Docker image and in builds with `-tags sqlite_fts5`) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use a plain substring match
 - `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
@@ -81,7 +81,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
-- `recipient` (required): Phone number or group JID
+- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
@@ -102,8 +102,8 @@ Tally of a native WhatsApp poll.
 
 **Parameters:**
 
-- `message_id` (required): ID of the poll message
 - `chat_jid` (required): JID of the chat
+- `message_id` (required): ID of the poll message
 
 The bridge stores poll creations as messages with `media_type = "poll"` (content
 `📊 <question> — options: a | b | c`) and each vote as `media_type = "poll_vote"`
@@ -141,8 +141,8 @@ automatically.
 
 **Parameters:**
 
-- `message_ids` (required): IDs of messages from the same chat and sender
 - `chat_jid` (required): JID of the chat containing the messages
+- `message_ids` (required): IDs of messages from the same chat and sender
 - `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
 - `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
 
@@ -157,7 +157,7 @@ Send (or remove) an emoji reaction to a message.
 
 **Parameters:**
 
-- `recipient` (required): Chat JID the message belongs to (phone JID or group JID)
+- `chat_jid` (required): Chat the message belongs to (direct-chat JID or group JID)
 - `message_id` (required): ID of the message to react to
 - `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
 - `from_me` (optional, default `false`): Whether the original message was sent by the current user
@@ -193,7 +193,7 @@ Send a media file (image, video, document).
 
 **Parameters:**
 
-- `recipient` (required): Phone number or group JID
+- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
 
@@ -207,7 +207,7 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 **Parameters:**
 
-- `recipient` (required): Phone number or group JID
+- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
 - `file_path` (required): Path to audio file
 
 Converted audio is sent through the same media-path confinement as
@@ -238,8 +238,8 @@ Download media from a received message.
 
 **Parameters:**
 
-- `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
+- `message_id` (required): ID of the message with media
 
 By default the bridge caches every inbound file as it arrives, so this tool
 usually returns immediately. On a server you can turn that off
@@ -307,7 +307,7 @@ Get specific chat metadata by JID.
 
 **Parameters:**
 
-- `jid` (required): Chat JID
+- `chat_jid` (required): Chat JID
 
 ### `get_direct_chat_by_contact`
 
@@ -315,7 +315,7 @@ Find a direct message chat with a contact.
 
 **Parameters:**
 
-- `phone` (required): Phone number of the contact
+- `contact_jid` (required): The contact's phone number or JID
 
 ### `get_contact_chats`
 
@@ -323,7 +323,7 @@ List all chats involving a specific contact.
 
 **Parameters:**
 
-- `phone` (required): Phone number of the contact
+- `contact_jid` (required): The contact's JID or phone number
 
 ### `get_last_interaction`
 
@@ -331,7 +331,7 @@ Get the last message exchanged with a contact.
 
 **Parameters:**
 
-- `phone` (required): Phone number of the contact
+- `contact_jid` (required): The contact's JID or phone number
 
 ### `list_group_members`
 
@@ -339,7 +339,7 @@ List the participants of a group (live query through the bridge).
 
 **Parameters:**
 
-- `group_jid` (required): The group JID (`...@g.us`)
+- `chat_jid` (required): The group JID (`...@g.us`)
 
 Returns the group's `name`, `topic`, `owner_jid` and a `members` list with
 `jid`, `phone_number`, `lid`, `name` (from your contacts when known),
@@ -351,8 +351,8 @@ Get messages around a specific message for context.
 
 **Parameters:**
 
+- `chat_jid` (required): JID of the chat (message IDs are only unique per chat)
 - `message_id` (required): ID of the target message
-- `chat_jid` (recommended): JID of the chat. Message IDs are only unique per chat; with it the lookup is an indexed primary-key hit, without it the most recent match is used
 - `before` (optional): Number of messages before (default 5)
 - `after` (optional): Number of messages after (default 5)
 
