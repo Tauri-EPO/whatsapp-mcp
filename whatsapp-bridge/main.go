@@ -40,7 +40,6 @@ import (
 
 // Whether to forward messages sent by self via webhook.
 // Defaults to true. Override with env FORWARD_SELF=false.
-var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 
 // CLI flag: request a full history sync at pair time.
 // Only meaningful on a fresh pair (whatsapp.db deleted). See the usage block
@@ -1425,10 +1424,6 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	return resolved
 }
 
-// outboundChatPolicy is the WHATSAPP_ALLOWED_CHATS allow-list applied to every
-// REST endpoint with a side effect (see chat_policy.go). Loaded in main().
-var outboundChatPolicy = chatPolicy{}
-
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
@@ -1917,7 +1912,8 @@ func takeOriginalTimestamp(id string) (time.Time, bool) {
 	return ts, ok
 }
 
-func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+func (b *Bridge) handleMessage(msg *events.Message) {
+	client, messageStore, logger := b.Client, b.Store, b.Log
 	// View-once envelopes hide the real media one level down; unwrap so every
 	// extractor below sees it. See view_once.go for the policy.
 	viewOnce := false
@@ -1982,7 +1978,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Poll votes arrive as PollUpdateMessage stanzas: decrypt, map to option
 	// names, keep a structured copy for /api/poll and a message row with the
 	// poll's ID in `filename` (same convention as reactions). See polls.go.
-	if handled, pollID, voteContent := handlePollVote(context.Background(), pollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
+	if handled, pollID, voteContent := handlePollVote(context.Background(), b.PollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
 		if voteContent != "" {
 			if err := messageStore.StoreMessage(
 				msg.Info.ID, chatJID, sender, voteContent,
@@ -2015,7 +2011,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
 			}
-			if forwardSelfMessages || !msg.Info.IsFromMe {
+			if b.ForwardSelf || !msg.Info.IsFromMe {
 				SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
 			}
 		}
@@ -2094,7 +2090,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	shouldForward := webhooksEnabled() && (forwardSelfMessages || !msg.Info.IsFromMe)
+	shouldForward := webhooksEnabled() && (b.ForwardSelf || !msg.Info.IsFromMe)
 
 	// For image messages that will be forwarded, download media synchronously so we
 	// can include the base64 payload in the webhook. Other media types (and images
@@ -2103,7 +2099,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	var imageMimeType string
 	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, _, dlPath, dlErr := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
+		success, _, _, dlPath, dlErr := b.DownloadMedia(client, messageStore, msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			imageDownloadPath = dlPath
 			// Detect MIME type by sniffing the actual file bytes rather than
@@ -2123,14 +2119,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to async download so media is cached for future MCP tool calls
 			go func() {
-				_, _, _, _, _ = downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
+				_, _, _, _, _ = b.DownloadMedia(client, messageStore, msg.Info.ID, chatJID)
 			}()
 		}
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
-			success, _, _, downloadPath, err := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
+			success, _, _, downloadPath, err := b.DownloadMedia(client, messageStore, msg.Info.ID, chatJID)
 			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
@@ -2386,10 +2382,6 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	return true, mediaType, filename, absPath, nil
 }
 
-// downloadMediaForMessage allows message-handling tests to verify whether a
-// download blocks event processing without changing production behavior.
-var downloadMediaForMessage = downloadMedia
-
 // Extract direct path from a WhatsApp media URL
 func extractDirectPathFromURL(url string) string {
 	// The direct path is typically in the URL, we need to extract it
@@ -2416,7 +2408,8 @@ func extractDirectPathFromURL(url string) string {
 // Outbound media: req.MediaPath in /api/send is validated against
 // allowedMediaRoots before sendWhatsAppMessage ever sees it. See
 // media_path.go.
-func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) *http.ServeMux {
+func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) *http.ServeMux {
+	client, messageStore := b.Client, b.Store
 	allowedHosts := buildAllowedHosts(port)
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
@@ -2450,7 +2443,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			return client.GetGroupInfo(ctx, jid)
 		},
 		storeContactName(client),
-		outboundChatPolicy,
+		b.Policy,
 	)))
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
@@ -2463,11 +2456,11 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			_, err := client.RevokeMessage(ctx, chat, id)
 			return err
 		},
-		outboundChatPolicy,
+		b.Policy,
 	)))
 
 	// Poll results (see polls.go).
-	mux.HandleFunc("/api/poll", auth(handlePollResults(messageStore, outboundChatPolicy)))
+	mux.HandleFunc("/api/poll", auth(handlePollResults(messageStore, b.Policy)))
 
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -2491,7 +2484,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			http.Error(w, "Recipient is required", http.StatusBadRequest)
 			return
 		}
-		if rejectByChatPolicy(w, outboundChatPolicy, req.Recipient) {
+		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
 			return
 		}
 
@@ -2557,7 +2550,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			http.Error(w, "chat_jid and message_ids are required", http.StatusBadRequest)
 			return
 		}
-		if rejectByChatPolicy(w, outboundChatPolicy, req.ChatJID) {
+		if rejectByChatPolicy(w, b.Policy, req.ChatJID) {
 			return
 		}
 
@@ -2665,7 +2658,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			http.Error(w, "recipient, message_id, and emoji are required", http.StatusBadRequest)
 			return
 		}
-		if rejectByChatPolicy(w, outboundChatPolicy, req.Recipient) {
+		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
 			return
 		}
 		chatJID, err := types.ParseJID(req.Recipient)
@@ -2795,7 +2788,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			http.Error(w, "Recipient is required", http.StatusBadRequest)
 			return
 		}
-		if rejectByChatPolicy(w, outboundChatPolicy, req.Recipient) {
+		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
 			return
 		}
 
@@ -2854,8 +2847,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	return mux
 }
 
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
-	handler := newRESTMux(client, messageStore, port, token, allowedMediaRoots)
+func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []string) {
+
+	handler := b.newRESTMux(port, token, allowedMediaRoots)
 
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
@@ -2910,7 +2904,7 @@ func main() {
 	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
 
-	logger.Infof("%s", webhookStartupMessage(forwardSelfMessages))
+	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
@@ -3046,9 +3040,8 @@ func main() {
 	}
 	webhookAuthToken = bridgeToken
 
-	outboundChatPolicy = loadChatPolicy()
-	pollVoteDecrypt = whatsmeowPollVoteDecrypter(client)
-	logger.Infof("%s", outboundChatPolicy.Summary())
+	bridge := newBridge(client, messageStore, logger)
+	logger.Infof("%s", bridge.Policy.Summary())
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
@@ -3069,7 +3062,7 @@ func main() {
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
-			handleMessage(client, messageStore, v, logger)
+			bridge.handleMessage(v)
 
 		case *events.UndecryptableMessage:
 			// The first (failed) delivery carries the original send-time. WhatsApp
@@ -3079,7 +3072,7 @@ func main() {
 
 		case *events.HistorySync:
 			// Process history sync events
-			handleHistorySync(client, messageStore, v, logger)
+			bridge.handleHistorySync(v)
 
 		case *events.MediaRetry:
 			// The sender's phone answered a media-retry request issued by
@@ -3325,7 +3318,7 @@ connectionSuccess:
 	}
 	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
 
-	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+	bridge.startRESTServer(port, bridgeToken, allowedMediaRoots)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
@@ -3471,7 +3464,8 @@ func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta 
 		kind, direction, meta.CallID, callType, fromJID, chatJID)
 }
 
-func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
+func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
+	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
 	// to reason about what arrived from WhatsApp when debugging.

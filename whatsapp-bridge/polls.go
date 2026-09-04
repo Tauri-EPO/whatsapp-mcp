@@ -158,10 +158,6 @@ func optionNamesForHashes(options []string, hashes [][]byte) []string {
 	return out
 }
 
-// pollVoteDecrypt is the decrypter used by handleMessage; main() sets it from
-// the live client. Nil (tests, or before startup) means votes are logged and skipped.
-var pollVoteDecrypt pollVoteDecrypter
-
 // pollVoteDecrypter abstracts whatsmeow's DecryptPollVote for tests.
 type pollVoteDecrypter func(ctx context.Context, evt *events.Message) ([][]byte, error)
 
