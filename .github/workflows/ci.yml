@@ -27,11 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - name: Install dependencies
+        with:
+          enable-cache: true
+      - name: Install dependencies (locked)
         run: |
           cd whatsapp-mcp-server
-          uv venv
-          uv pip install ruff
+          uv sync --frozen --extra dev
       - name: Run ruff check
         run: |
           cd whatsapp-mcp-server
@@ -83,11 +84,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - name: Install dependencies
+        with:
+          enable-cache: true
+      - name: Install dependencies (locked)
         run: |
           cd whatsapp-mcp-server
-          uv venv
-          uv pip install -e ".[dev]"
+          uv sync --frozen --extra dev
       - name: Run tests
         run: |
           cd whatsapp-mcp-server

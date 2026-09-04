@@ -16,11 +16,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    # cryptography 49+ dropped Intel macOS wheels; this fork targets Linux
-    # servers and Windows/ARM laptops, so it follows current releases.
-    "cryptography>=50.0.0,<51",
-    "httpx>=0.28.1",
     # MCP Python SDK v2 (FastMCP renamed to MCPServer, transport config on run()).
+    # httpx and cryptography come in through mcp; nothing here imports them directly.
     "mcp[cli]>=2.1.1,<3",
     "requests>=2.34.2",
 ]
