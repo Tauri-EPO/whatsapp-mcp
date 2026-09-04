@@ -104,8 +104,14 @@ func NewMessageStore() (*MessageStore, error) {
 
 		CREATE INDEX IF NOT EXISTS idx_calls_chat ON calls(chat_jid);
 		CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(timestamp);
-		CREATE INDEX IF NOT EXISTS idx_messages_chat_jid ON messages(chat_jid);
 		CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_jid, timestamp);
+		-- The MCP server filters/sorts on these without a chat (list_messages
+		-- across chats, get_last_interaction, get_contact_chats, list_chats);
+		-- idx_messages_chat_jid was a redundant prefix of the composite index.
+		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_chats_last_message ON chats(last_message_time);
+		DROP INDEX IF EXISTS idx_messages_chat_jid;
 	`)
 	if err != nil {
 		_ = db.Close()
