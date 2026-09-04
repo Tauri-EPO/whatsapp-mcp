@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,5 +40,24 @@ func TestHealthAndReadyEndpoints(t *testing.T) {
 	rec, body = get("/api/ready")
 	if rec.Code != http.StatusServiceUnavailable || body["connected"] != false {
 		t.Fatalf("/api/ready = %d %v, want 503 while disconnected", rec.Code, body)
+	}
+}
+
+func TestVersionEndpointIsUnauthenticated(t *testing.T) {
+	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	mux := b.newRESTMux(8080, "test-token-0123456789", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/version", nil)
+	req.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/version = %d, want 200 without a token", rec.Code)
+	}
+	var info VersionInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil || info.Version == "" || info.Go == "" {
+		t.Fatalf("bad body %s (err %v)", rec.Body.String(), err)
+	}
+	if !strings.Contains(buildInfo(true).String(), "fts5=on") {
+		t.Fatal("String() should mention the FTS state")
 	}
 }

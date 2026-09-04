@@ -164,7 +164,11 @@ works as before.
   itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
 - Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`.
-- Update: `git pull && docker compose up -d --build`.
+- Update: `git pull && GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build`.
+  Check what is running with
+  `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`
+  (version, commit, Go and whatsmeow versions, FTS5 state); the MCP server
+  reports its version in the `initialize` response and its startup log.
 - Backup: the `whatsapp-store` volume holds the session, `messages.db`,
   `whatsapp.db`, downloaded media and `.bridge-token`. Stop the stack before
   copying it (`docker compose stop`), or snapshot the volume with your usual
