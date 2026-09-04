@@ -1082,6 +1082,55 @@ func TestHandleHistorySync_LIDParticipant_ResolvedViaStore(t *testing.T) {
 	}
 }
 
+func TestHandleHistorySync_TopLevelParticipant_IsStoredAsSender(t *testing.T) {
+	// Modern history syncs put the group sender in WebMessageInfo.participant
+	// and leave Key.participant empty. Before the fix the fallback attributed
+	// every such message to the group JID itself (see #12 / upstream #171).
+	groupJID := types.JID{User: "120363000000000001", Server: types.GroupServer}
+	participant := types.JID{User: "5511888888888", Server: types.DefaultUserServer}
+
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	historySync := &events.HistorySync{
+		Data: &waProto.HistorySync{
+			SyncType: waProto.HistorySync_RECENT.Enum(),
+			Conversations: []*waProto.Conversation{
+				{
+					ID: proto.String(groupJID.String()),
+					// A name keeps GetChatName off the network (no GetGroupInfo call).
+					Name: proto.String("Test Group"),
+					Messages: []*waProto.HistorySyncMsg{
+						{
+							Message: &waProto.WebMessageInfo{
+								Key: &waCommon.MessageKey{
+									ID:        proto.String("hist-group-001"),
+									FromMe:    proto.Bool(false),
+									RemoteJID: proto.String(groupJID.String()),
+								},
+								Participant:      proto.String(participant.String()),
+								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
+								Message: &waProto.Message{
+									Conversation: proto.String("who said this?"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	handleHistorySync(client, ms, historySync, logger)
+
+	got := querySender(ms, groupJID.String())
+	if got != participant.User {
+		t.Errorf("history-sync group sender = %q, want participant %q (group JID user is %q)",
+			got, participant.User, groupJID.User)
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
