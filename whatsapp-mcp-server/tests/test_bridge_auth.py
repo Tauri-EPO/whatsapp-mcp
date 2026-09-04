@@ -229,7 +229,7 @@ def test_send_message_with_quoted_reply_includes_quote_fields(monkeypatch):
 
     monkeypatch.setattr(whatsapp.requests, "post", fake_post)
 
-    success, _ = whatsapp.send_message(
+    success, _, _ = whatsapp.send_message(
         "12025551234@s.whatsapp.net",
         "Great point!",
         quoted_message_id="3AORIGINAL0000001",
@@ -277,7 +277,7 @@ def test_send_message_with_mentions_includes_mentions_field(monkeypatch):
 
     monkeypatch.setattr(whatsapp.requests, "post", fake_post)
 
-    success, _ = whatsapp.send_message(
+    success, _, _ = whatsapp.send_message(
         "123456789@g.us",
         "thanks @12025551234!",
         mentions=["12025551234"],

@@ -562,6 +562,9 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.Connect = func() error { return nil }
+	b.Send = func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+		return sendWhatsAppMessage(b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+	}
 	b.Exit = func(reason string, code int) { panic(fmt.Sprintf("unexpected Exit(%d): %s", code, reason)) }
 	return b
 }

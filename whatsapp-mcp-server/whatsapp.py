@@ -1615,6 +1615,11 @@ def _bridge_json(response) -> dict[str, Any]:
     return payload
 
 
+def _sent_info(result: dict[str, Any]) -> dict[str, Any]:
+    """message_id / chat_jid / timestamp of a message the bridge just sent (when reported)."""
+    return {k: result[k] for k in ("message_id", "chat_jid", "timestamp") if result.get(k)}
+
+
 def _require_allowed(jid: str | None) -> None:
     if denied := _policy_denied(jid):
         raise ToolError("denied", denied)
@@ -1627,8 +1632,8 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
-) -> tuple[bool, str]:
-    """Send a text message. Returns (True, status) or raises ToolError."""
+) -> tuple[bool, str, dict[str, Any]]:
+    """Send a text message. Returns (True, status, {message_id, chat_jid, timestamp}) or raises ToolError."""
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(recipient)
@@ -1640,10 +1645,10 @@ def send_message(
     if mentions:
         payload["mentions"] = mentions
     result = _bridge_json(_bridge_request("POST", "/send", json=payload))
-    return True, result.get("message", "Message sent")
+    return True, result.get("message", "Message sent"), _sent_info(result)
 
 
-def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
+def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str, dict[str, Any]]:
     """Send a media file (image, video, document) with an optional caption.
 
     The bridge populates the WA media-message Caption field from `message`, so
@@ -1661,10 +1666,10 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
     if caption:
         payload["message"] = caption
     result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
-    return True, result.get("message", "File sent")
+    return True, result.get("message", "File sent"), _sent_info(result)
 
 
-def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
+def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str, dict[str, Any]]:
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     if not media_path:
@@ -1679,7 +1684,7 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
             raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
     payload = {"recipient": recipient, "media_path": media_path}
     result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
-    return True, result.get("message", "Audio sent")
+    return True, result.get("message", "Audio sent"), _sent_info(result)
 
 
 def send_reaction(
