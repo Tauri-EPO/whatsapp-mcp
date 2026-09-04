@@ -548,6 +548,8 @@ func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []str
 		Handler:      handler,
 	}
 
+	b.httpServer = server
+
 	// Run server in a goroutine so it doesn't block
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

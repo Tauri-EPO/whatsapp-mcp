@@ -26,6 +26,8 @@ services:
         VERSION: ${VERSION:-dev}
     image: whatsapp-mcp-bridge:local
     restart: unless-stopped
+    # Drain REST, stop loops and close SQLite cleanly before SIGKILL.
+    stop_grace_period: 30s
     environment:
       WHATSAPP_BRIDGE_PORT: "8080"
       WHATSAPP_BRIDGE_BIND: ${WHATSAPP_BRIDGE_BIND:-127.0.0.1}

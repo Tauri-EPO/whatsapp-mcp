@@ -152,8 +152,8 @@ func (s *storeStats) invalidate() {
 }
 
 // runMediaRetention sweeps once now and then every mediaSweepInterval until
-// stop is closed. maxAge <= 0 disables it.
-func (b *Bridge) runMediaRetention(maxAge time.Duration, stop <-chan struct{}) {
+// b.ctx is cancelled (Shutdown). maxAge <= 0 disables it.
+func (b *Bridge) runMediaRetention(maxAge time.Duration) {
 	if maxAge <= 0 {
 		return
 	}
@@ -173,7 +173,7 @@ func (b *Bridge) runMediaRetention(maxAge time.Duration, stop <-chan struct{}) {
 		select {
 		case <-ticker.C:
 			sweep()
-		case <-stop:
+		case <-b.ctx.Done():
 			return
 		}
 	}

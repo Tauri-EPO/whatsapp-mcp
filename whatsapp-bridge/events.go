@@ -617,7 +617,11 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// with the other b.Client, then reconnect.
 		b.Log.Warnf("⚠️  Stream replaced by another session — will reconnect after 30s")
 		go func() {
-			time.Sleep(30 * time.Second)
+			select {
+			case <-time.After(streamReplacedDelay):
+			case <-b.ctx.Done():
+				return
+			}
 			select {
 			case reconnectChan <- true:
 			default:
@@ -629,9 +633,14 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 	}
 }
 
+// streamReplacedDelay is how long to wait before reconnecting after another
+// session took our slot (avoids ping-ponging with it). Tests shorten it.
+var streamReplacedDelay = 30 * time.Second
+
 // reconnectLoop redials with exponential backoff whenever handleEvent
-// reports a lost connection, until stop fires.
-func (b *Bridge) reconnectLoop(reconnectChan chan bool, stop <-chan os.Signal) {
+// reports a lost connection, until Shutdown cancels b.ctx. The backoff wait
+// is interruptible so shutdown never waits out a five-minute sleep.
+func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 	reconnectBackoff := time.Second * 5
 	maxBackoff := time.Minute * 5
 
@@ -640,12 +649,16 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool, stop <-chan os.Signal) {
 		case <-reconnectChan:
 			b.Log.Infof("🔄 Attempting to reconnect...")
 
-			// Wait before reconnecting
-			time.Sleep(reconnectBackoff)
+			// Wait before reconnecting, unless we are shutting down
+			select {
+			case <-time.After(reconnectBackoff):
+			case <-b.ctx.Done():
+				return
+			}
 
 			// Try to reconnect
 			if !b.Client.IsConnected() {
-				err := b.Client.Connect()
+				err := b.Connect()
 				if err != nil {
 					b.Log.Errorf("❌ Reconnection failed: %v", err)
 					// Increase backoff for next attempt
@@ -668,7 +681,7 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool, stop <-chan os.Signal) {
 				reconnectBackoff = time.Second * 5
 			}
 
-		case <-stop:
+		case <-b.ctx.Done():
 			return
 		}
 	}

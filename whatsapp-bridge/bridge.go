@@ -11,6 +11,8 @@ package main
 // timestamp registry) is tracked separately in issue #47.
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -39,6 +41,8 @@ type Bridge struct {
 	MediaAutoDownload bool
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
+	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.
+	Connect func() error
 	// Exit terminates the process for conditions the bridge cannot recover from in-place
 	// (device logged out, client outdated); main() wires it to a clean os.Exit so the
 	// supervisor restarts into the pairing path. Tests inject a recorder.
@@ -56,6 +60,12 @@ type Bridge struct {
 	startedAt time.Time
 	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
 	historyVotes sync.WaitGroup
+	// httpServer is the REST listener, kept so Shutdown can drain it (rest.go).
+	httpServer *http.Server
+	// ctx is cancelled by Shutdown; long-lived goroutines (reconnect loop, retention
+	// sweep, StreamReplaced timer) select on it instead of sleeping blindly.
+	ctx    context.Context
+	cancel context.CancelFunc
 	// storeStats caches store/media sizes for /api/health (see media_retention.go).
 	storeStats *storeStats
 }
@@ -78,10 +88,38 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		startedAt:         time.Now(),
 		storeStats:        newStoreStats(storeDir()),
 	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
+	b.Connect = client.Connect
 	b.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
 		os.Exit(code)
 	}
 	return b
+}
+
+// Shutdown stops accepting REST requests, cancels background goroutines and
+// waits (bounded by timeout) for in-flight work. Order matters: drain HTTP
+// first so no handler touches the store after main closes it, then cancel
+// the loops, then wait for history-vote decoding. Disconnecting the WhatsApp
+// client and closing the store stay in main(), after this returns.
+func (b *Bridge) Shutdown(timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if b.httpServer != nil {
+		if err := b.httpServer.Shutdown(ctx); err != nil {
+			b.Log.Warnf("REST server did not drain cleanly: %v", err)
+		}
+	}
+	b.cancel()
+	done := make(chan struct{})
+	go func() {
+		b.historyVotes.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		b.Log.Warnf("Timed out waiting for history poll votes; exiting anyway")
+	}
 }

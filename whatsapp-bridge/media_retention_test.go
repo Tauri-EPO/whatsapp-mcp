@@ -190,10 +190,9 @@ func TestRunMediaRetentionSweepsOnStart(t *testing.T) {
 
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.storeStats = newStoreStats(root)
-	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		b.runMediaRetention(30*24*time.Hour, stop)
+		b.runMediaRetention(30 * 24 * time.Hour)
 		close(done)
 	}()
 	deadline := time.Now().Add(2 * time.Second)
@@ -206,7 +205,7 @@ func TestRunMediaRetentionSweepsOnStart(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	close(stop)
+	b.cancel()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
