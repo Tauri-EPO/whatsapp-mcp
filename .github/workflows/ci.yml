@@ -104,6 +104,9 @@ jobs:
         with:
           context: whatsapp-bridge
           push: false
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=ci
           load: true
           tags: whatsapp-mcp-bridge:ci
           cache-from: type=gha,scope=bridge
@@ -113,6 +116,9 @@ jobs:
         with:
           context: whatsapp-mcp-server
           push: false
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=ci
           load: true
           tags: whatsapp-mcp-server:ci
           cache-from: type=gha,scope=mcp
@@ -120,6 +126,6 @@ jobs:
       - name: Smoke test images
         run: |
           # Bridge: the binary starts, prints its banner and creates the store (no pairing needed for this).
-          docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index|SQLite built without FTS5" /tmp/out'
+          docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
           # MCP: every module imports inside the image (catches a missing COPY like the transcribe.py incident).
           docker run --rm whatsapp-mcp-server:ci python -c "import main, whatsapp, transcribe, http_auth, chat_policy, mcp_config, parent_watchdog, audio; print('imports ok')"

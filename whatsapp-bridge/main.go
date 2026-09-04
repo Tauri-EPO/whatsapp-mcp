@@ -88,6 +88,7 @@ type MessageStore struct {
 
 	names     *chatNameCache  // resolved chat names + failed group lookups (chat_names.go)
 	groupInfo groupInfoLookup // live group metadata fetch; nil = no network
+	fts       bool            // messages_fts active (fts.go)
 }
 
 type ChatEphemeralSettings struct {
@@ -182,7 +183,8 @@ func NewMessageStore() (*MessageStore, error) {
 
 	// Full-text index (see fts.go). Never fatal: search degrades to the
 	// substring scan when the index is unavailable.
-	switch ftsOn, ftsErr := ensureMessagesFTS(db); {
+	ftsOn, ftsErr := ensureMessagesFTS(db)
+	switch {
 	case ftsErr != nil:
 		fmt.Printf("Warning: full-text search index unavailable: %v\n", ftsErr)
 	case ftsOn:
@@ -191,7 +193,7 @@ func NewMessageStore() (*MessageStore, error) {
 		fmt.Println("SQLite built without FTS5: message search uses the substring scan (build with -tags sqlite_fts5 to enable)")
 	}
 
-	return &MessageStore{db: db, waDB: waDB, names: newChatNameCache()}, nil
+	return &MessageStore{db: db, waDB: waDB, names: newChatNameCache(), fts: ftsOn}, nil
 }
 
 func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
@@ -2457,6 +2459,9 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		writeJSON(w, http.StatusOK, healthStatus(client, b.startedAt))
 	}))
 
+	// Build identity; unauthenticated on purpose (see version.go).
+	mux.HandleFunc("/api/version", handleVersion(buildInfo(messageStore != nil && messageStore.fts)))
+
 	// Readiness: 200 only while paired AND connected. whatsmeow reports
 	// IsConnected() as soon as the websocket is up, which includes the QR
 	// pairing phase, so "connected" alone is not "usable".
@@ -2964,6 +2969,7 @@ func main() {
 	// Set up logger with DEBUG level for more detailed logging
 	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
+	logger.Infof("%s", buildInfo(false).String())
 
 	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
 

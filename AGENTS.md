@@ -223,6 +223,7 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 | Change inbound event handling | `handleMessage` / `handleHistorySync` in `main.go` (moving to `events/`, #48) |
 | Change the messages schema | `ensureMessageStoreSchema` in `main.go`; migrations idempotent (`ensureColumn`); FTS in `fts.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
+| Change build identity (`/api/version`, MCP `version`) | `whatsapp-bridge/version.go`, `ARG GIT_SHA/VERSION` in both Dockerfiles, compose build args |
 | Change containers | `whatsapp-bridge/Dockerfile`, `whatsapp-mcp-server/Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md` |
 | Change CI | `.github/workflows/ci.yml`, `security.yml` |
 

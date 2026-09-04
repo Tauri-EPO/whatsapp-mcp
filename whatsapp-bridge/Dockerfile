@@ -19,7 +19,12 @@ RUN go mod download
 COPY . .
 # sqlite_fts5: compiles the FTS5 module into go-sqlite3 so the bridge can keep
 # the full-text index over messages.content (see fts.go).
-RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath -ldflags="-s -w" -o /out/whatsapp-bridge .
+# Build identity for /api/version: `docker compose build` passes GIT_SHA/VERSION
+# from .env (see docs/DOCKER.md); CI passes the commit SHA.
+ARG GIT_SHA=unknown
+ARG VERSION=dev
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GIT_SHA}" -o /out/whatsapp-bridge .
 
 FROM alpine:3.21
 

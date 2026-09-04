@@ -14,7 +14,11 @@
 
 services:
   bridge:
-    build: ./whatsapp-bridge
+    build:
+      context: ./whatsapp-bridge
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        VERSION: ${VERSION:-dev}
     image: whatsapp-mcp-bridge:local
     restart: unless-stopped
     environment:
@@ -45,7 +49,11 @@ services:
       - "${WHATSAPP_MCP_BIND:-127.0.0.1}:${WHATSAPP_MCP_PORT:-8000}:8000"
 
   mcp:
-    build: ./whatsapp-mcp-server
+    build:
+      context: ./whatsapp-mcp-server
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        VERSION: ${VERSION:-dev}
     image: whatsapp-mcp-server:local
     restart: unless-stopped
     network_mode: "service:bridge"

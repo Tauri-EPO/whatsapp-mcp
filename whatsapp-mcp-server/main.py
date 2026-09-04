@@ -82,7 +82,8 @@ from whatsapp import (
 # so importing this module never parses env vars or exits the process. With SDK
 # v2, host/port/transport security are passed to run() rather than stored on the
 # server, so nothing network-related is decided at import time either.
-mcp = MCPServer("whatsapp")
+MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
+mcp = MCPServer("whatsapp", version=MCP_VERSION)
 
 
 @mcp.tool()
@@ -640,6 +641,7 @@ if __name__ == "__main__":
         level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("whatsapp_mcp").info("whatsapp-mcp-server %s", MCP_VERSION)
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()
     # Register signal handlers for clean shutdown

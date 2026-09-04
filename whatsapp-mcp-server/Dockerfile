@@ -26,6 +26,10 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 COPY *.py ./
+# Build identity reported in the MCP initialize response and startup log.
+ARG GIT_SHA=unknown
+ARG VERSION=dev
+ENV WHATSAPP_MCP_VERSION=${VERSION}+${GIT_SHA}
 RUN mkdir -p /app/store /app/outbox && chown -R app:app /app
 
 USER app
