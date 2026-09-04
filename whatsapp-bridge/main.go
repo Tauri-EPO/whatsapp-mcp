@@ -2449,18 +2449,24 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 	registerHistoryEndpoint(mux, auth, client, messageStore)
 
 	// Health check endpoint
+	// Liveness: the process serves requests. Always 200 once the listener is up,
+	// with the connection state in the body — so a container awaiting its QR
+	// scan is "healthy" (alive) rather than "unhealthy" (broken). Readiness
+	// (/api/ready) is what to poll before sending.
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		status := map[string]interface{}{
-			"status":    "ok",
-			"connected": client.IsConnected(),
-			"timestamp": time.Now().Unix(),
+		writeJSON(w, http.StatusOK, healthStatus(client, b.startedAt))
+	}))
+
+	// Readiness: 200 only while paired AND connected. whatsmeow reports
+	// IsConnected() as soon as the websocket is up, which includes the QR
+	// pairing phase, so "connected" alone is not "usable".
+	mux.HandleFunc("/api/ready", auth(func(w http.ResponseWriter, r *http.Request) {
+		status := healthStatus(client, b.startedAt)
+		code := http.StatusOK
+		if status["status"] != "ok" {
+			code = http.StatusServiceUnavailable
 		}
-		if !client.IsConnected() {
-			status["status"] = "disconnected"
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_ = json.NewEncoder(w).Encode(status)
+		writeJSON(w, code, status)
 	}))
 
 	// Group participants (see group_members.go). Needs a live connection.
@@ -2876,6 +2882,32 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 	return mux
 }
 
+// healthStatus is the body of /api/health and /api/ready.
+func healthStatus(client *whatsmeow.Client, startedAt time.Time) map[string]interface{} {
+	connected := client != nil && client.IsConnected()
+	paired := client != nil && client.Store != nil && client.Store.ID != nil
+	status := "ok"
+	switch {
+	case !paired:
+		status = "awaiting_pairing"
+	case !connected:
+		status = "disconnected"
+	}
+	return map[string]interface{}{
+		"status":         status,
+		"connected":      connected,
+		"paired":         paired,
+		"uptime_seconds": int(time.Since(startedAt).Seconds()),
+		"timestamp":      time.Now().Unix(),
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, body interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 func (b *Bridge) startRESTServer(port int, token string, allowedMediaRoots []string) {
 
 	handler := b.newRESTMux(port, token, allowedMediaRoots)
@@ -3066,6 +3098,21 @@ func main() {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken)
+
+	// Resolve the allow-listed roots that media_path values in /api/send must
+	// live under. See media_path.go for the rationale.
+	allowedMediaRoots, mrErr := resolveMediaRoots()
+	if mrErr != nil {
+		logger.Errorf("Failed to resolve media roots: %v", mrErr)
+		return
+	}
+	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
+
+	// Serve the REST API before pairing/connecting: /api/health answers as soon
+	// as the process is up (a container waiting for its QR scan is alive, not
+	// broken), /api/ready reports the WhatsApp connection, and endpoints that
+	// need WhatsApp check client.IsConnected() themselves.
+	bridge.startRESTServer(port, bridgeToken, allowedMediaRoots)
 	logger.Infof("%s", bridge.Policy.Summary())
 
 	// Print the one-time setup banner immediately, before attempting to
@@ -3330,20 +3377,6 @@ connectionSuccess:
 	}
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
-
-	// port and bridgeToken were already resolved above, before the connect/
-	// pairing loop, so the setup banner could print immediately.
-
-	// Resolve the allow-listed roots that media_path values in /api/send must
-	// live under. See media_path.go for the rationale.
-	allowedMediaRoots, mrErr := resolveMediaRoots()
-	if mrErr != nil {
-		logger.Errorf("Failed to resolve media roots: %v", mrErr)
-		return
-	}
-	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
-
-	bridge.startRESTServer(port, bridgeToken, allowedMediaRoots)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

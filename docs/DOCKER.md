@@ -157,11 +157,11 @@ works as before.
 
 ## Health and operations
 
-- `bridge` is healthy only while the WhatsApp connection is up (`GET
-  /api/health` returns `200`; `503` while disconnected or awaiting pairing).
-  During first-run pairing the container shows `unhealthy` until you scan the
-  code. This is deliberate: on an unattended box "unhealthy" should mean "go
-  look at it".
+- `bridge` is healthy as soon as its REST API answers (`GET /api/health` →
+  `200` with `status` = `ok` | `awaiting_pairing` | `disconnected`,
+  `connected`, `paired`, `uptime_seconds`). The API starts before pairing, so
+  a first run shows `healthy` while you scan the QR. To wait for WhatsApp
+  itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
 - Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`.
 - Update: `git pull && docker compose up -d --build`.

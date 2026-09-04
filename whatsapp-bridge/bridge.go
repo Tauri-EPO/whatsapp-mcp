@@ -11,6 +11,8 @@ package main
 // timestamp registry) is tracked separately in issue #47.
 
 import (
+	"time"
+
 	"go.mau.fi/whatsmeow"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
@@ -38,6 +40,8 @@ type Bridge struct {
 	origTimes *originalTimestamps
 	// mediaRetry routes MediaRetry events to waiting downloads (see mediaRetryHub).
 	mediaRetry *mediaRetryHub
+	// startedAt feeds uptime_seconds in /api/health.
+	startedAt time.Time
 }
 
 // newBridge wires the production dependencies from a live client and store.
@@ -53,6 +57,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		Webhook:         newWebhookSender(bridgeToken),
 		origTimes:       newOriginalTimestamps(),
 		mediaRetry:      newMediaRetryHub(),
+		startedAt:       time.Now(),
 	}
 	b.DownloadMedia = b.downloadMedia
 	return b

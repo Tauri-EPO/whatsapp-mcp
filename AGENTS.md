@@ -207,7 +207,7 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 9. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`); a second bridge exits naming the holder's PID. Tests that need concurrent bridge processes must use separate working directories.
 10. **Package-level globals in the bridge** (`outboundChatPolicy`, `pollVoteDecrypt`, `webhookAuthToken`, …) are set in `main()`; tests swap them with `t.Cleanup`. Do not add new ones; issue #47 replaces them with a `Bridge` struct.
 11. **stdout is the protocol on stdio.** Anything the MCP server prints to stdout can corrupt a stdio session; log to stderr (issue #43 removes the remaining `print()` calls).
-12. **The REST server starts only after pairing**, so `/api/health` and the container healthcheck are unhealthy during the first-run QR window. Split in issue #55.
+12. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.
 13. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 
 ## 9. Where to make changes
