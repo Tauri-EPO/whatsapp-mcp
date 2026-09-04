@@ -241,7 +241,7 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		return false, err.Error(), sentMessage{}
 	}
 
-	msg := &waE2E.Message{}
+	var msg *waE2E.Message
 
 	// Check if we have media to send
 	if mediaPath != "" {
@@ -258,115 +258,22 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		if err != nil {
 			return false, fmt.Sprintf("Error uploading media: %v", err), sentMessage{}
 		}
-
 		bridgeLog.Debugf("Media uploaded (%d bytes)", resp.FileLength)
 
-		// Create the appropriate message type based on media type
-		switch mediaType {
-		case whatsmeow.MediaImage:
-			msg.ImageMessage = &waE2E.ImageMessage{
-				Caption:       proto.String(message),
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-			}
-		case whatsmeow.MediaAudio:
-			// Handle ogg audio files
-			var seconds uint32 = 30 // Default fallback
-			var waveform []byte = nil
-
-			// Try to analyze the ogg file
-			if strings.Contains(mimeType, "ogg") {
-				analyzedSeconds, analyzedWaveform, err := analyzeOggOpus(mediaData)
-				if err == nil {
-					seconds = analyzedSeconds
-					waveform = analyzedWaveform
-				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), sentMessage{}
-				}
-			} else {
-				bridgeLog.Warnf("Not an Ogg Opus file: %s", mimeType)
-			}
-
-			msg.AudioMessage = &waE2E.AudioMessage{
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-				Seconds:       proto.Uint32(seconds),
-				PTT:           proto.Bool(true),
-				Waveform:      waveform,
-			}
-		case whatsmeow.MediaVideo:
-			msg.VideoMessage = &waE2E.VideoMessage{
-				Caption:       proto.String(message),
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-			}
-		case whatsmeow.MediaDocument:
-			msg.DocumentMessage = &waE2E.DocumentMessage{
-				// outboundFileName, not a manual split on "/": the document
-				// filename travels to the recipient, and on Windows the path
-				// is already backslash-normalised, so the naive split leaks
-				// the whole absolute path. See media_path.go.
-				Title:         proto.String(outboundFileName(mediaPath)),
-				FileName:      proto.String(outboundFileName(mediaPath)),
-				Caption:       proto.String(message),
-				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
-			}
-		}
-	} else if quotedMsgID != "" || len(mentionedJIDs) > 0 {
-		// Quoted reply and/or mentions: use ExtendedTextMessage so we can
-		// attach ContextInfo. Only text quoting is supported; quoting media
-		// messages is not exposed because the quoted preview on the
-		// recipient's device requires the original media's key/URL, which is
-		// not available to the API caller.
-		ctx := &waE2E.ContextInfo{}
-		if quotedMsgID != "" {
-			ctx.StanzaID = proto.String(quotedMsgID)
-			// Normalise to a JID recipients can match (bare numbers, LID upgrade);
-			// otherwise the quoted bubble shows "You" for everyone. See #13.
-			ctx.Participant = proto.String(resolveQuotedParticipantJID(client, quotedSenderJID))
-			ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quotedContent)}
-		}
-		ctx.MentionedJID = mentionedJIDs
-		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{
-			Text:        proto.String(message),
-			ContextInfo: ctx,
+		msg, err = buildMediaMessage(mediaType, mimeType, mediaPath, mediaData, resp, message)
+		if err != nil {
+			return false, err.Error(), sentMessage{}
 		}
 	} else {
-		msg.Conversation = proto.String(message)
-	}
-
-	// Mentions in media captions live on the media message's own ContextInfo.
-	if len(mentionedJIDs) > 0 {
-		switch {
-		case msg.ImageMessage != nil:
-			msg.ImageMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
-		case msg.VideoMessage != nil:
-			msg.VideoMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
-		case msg.DocumentMessage != nil:
-			msg.DocumentMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+		quotedParticipant := ""
+		if quotedMsgID != "" {
+			// Normalise to a JID recipients can match (bare numbers, LID upgrade);
+			// otherwise the quoted bubble shows "You" for everyone. See #13.
+			quotedParticipant = resolveQuotedParticipantJID(client, quotedSenderJID)
 		}
+		msg = buildOutboundText(message, quotedMsgID, quotedParticipant, quotedContent, mentionedJIDs)
 	}
+	attachCaptionMentions(msg, mentionedJIDs)
 
 	// Normalize @lid recipients to phone JID before the lookup. Chats are
 	// persisted under @s.whatsapp.net (handleMessage normalizes via
@@ -409,17 +316,7 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		var mediaType, filename string
 		if mediaPath != "" {
 			filename = filepath.Base(mediaPath)
-			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
-			switch ext {
-			case "jpg", "jpeg", "png", "gif", "webp":
-				mediaType = "image"
-			case "ogg":
-				mediaType = "audio"
-			case "mp4", "avi", "mov":
-				mediaType = "video"
-			default:
-				mediaType = "document"
-			}
+			_, _, mediaType = classifyMediaPath(mediaPath)
 		}
 
 		// Pass empty name so StoreChat preserves any existing resolved
@@ -437,6 +334,114 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient), sent
+}
+
+// buildMediaMessage wraps an upload result in the waE2E message for its
+// media type. Voice notes (audio/ogg) are analysed for duration and waveform;
+// an unparsable Ogg file is an error because WhatsApp would show a broken
+// player. Documents carry the base filename only (see media_path.go).
+func buildMediaMessage(mediaType whatsmeow.MediaType, mimeType, mediaPath string, mediaData []byte, resp whatsmeow.UploadResponse, caption string) (*waE2E.Message, error) {
+	msg := &waE2E.Message{}
+	switch mediaType {
+	case whatsmeow.MediaImage:
+		msg.ImageMessage = &waE2E.ImageMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+	case whatsmeow.MediaAudio:
+		var seconds uint32 = 30 // Default fallback
+		var waveform []byte
+		if strings.Contains(mimeType, "ogg") {
+			analyzedSeconds, analyzedWaveform, err := analyzeOggOpus(mediaData)
+			if err != nil {
+				return nil, fmt.Errorf("failed to analyze Ogg Opus file: %v", err)
+			}
+			seconds = analyzedSeconds
+			waveform = analyzedWaveform
+		} else {
+			bridgeLog.Warnf("Not an Ogg Opus file: %s", mimeType)
+		}
+		msg.AudioMessage = &waE2E.AudioMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+			Seconds:       proto.Uint32(seconds),
+			PTT:           proto.Bool(true),
+			Waveform:      waveform,
+		}
+	case whatsmeow.MediaVideo:
+		msg.VideoMessage = &waE2E.VideoMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+	default: // whatsmeow.MediaDocument
+		msg.DocumentMessage = &waE2E.DocumentMessage{
+			// outboundFileName, not a manual split on "/": the document
+			// filename travels to the recipient, and on Windows the path
+			// is already backslash-normalised, so the naive split leaks
+			// the whole absolute path. See media_path.go.
+			Title:         proto.String(outboundFileName(mediaPath)),
+			FileName:      proto.String(outboundFileName(mediaPath)),
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+	}
+	return msg, nil
+}
+
+// buildOutboundText returns a plain Conversation for bare text, or an
+// ExtendedTextMessage carrying ContextInfo when the text quotes a message or
+// mentions someone. Only text quoting is supported: the quoted preview on
+// the recipient's device would need the original media's key/URL.
+func buildOutboundText(text, quotedMsgID, quotedParticipant, quotedContent string, mentionedJIDs []string) *waE2E.Message {
+	if quotedMsgID == "" && len(mentionedJIDs) == 0 {
+		return &waE2E.Message{Conversation: proto.String(text)}
+	}
+	ctx := &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+	if quotedMsgID != "" {
+		ctx.StanzaID = proto.String(quotedMsgID)
+		ctx.Participant = proto.String(quotedParticipant)
+		ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quotedContent)}
+	}
+	return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: ctx}}
+}
+
+// attachCaptionMentions puts mentions in media captions on the media
+// message's own ContextInfo (text messages carry them already).
+func attachCaptionMentions(msg *waE2E.Message, mentionedJIDs []string) {
+	if len(mentionedJIDs) == 0 {
+		return
+	}
+	switch {
+	case msg.ImageMessage != nil:
+		msg.ImageMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+	case msg.VideoMessage != nil:
+		msg.VideoMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+	case msg.DocumentMessage != nil:
+		msg.DocumentMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+	}
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
@@ -489,17 +494,17 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 			// Look for "OpusHead" marker in this page
 			pageData := data[i : i+pageSize]
 			headPos := bytes.Index(pageData, []byte("OpusHead"))
-			if headPos >= 0 && headPos+12 < len(pageData) {
-				// Found OpusHead, extract sample rate and pre-skip
-				// OpusHead format: Magic(8) + Version(1) + Channels(1) + PreSkip(2) + SampleRate(4) + ...
-				headPos += 8 // Skip "OpusHead" marker
-				// PreSkip is 2 bytes at offset 10
-				if headPos+12 <= len(pageData) {
-					preSkip = binary.LittleEndian.Uint16(pageData[headPos+10 : headPos+12])
-					sampleRate = binary.LittleEndian.Uint32(pageData[headPos+12 : headPos+16])
-					foundOpusHead = true
-					bridgeLog.Debugf("Found OpusHead: sampleRate=%d, preSkip=%d", sampleRate, preSkip)
-				}
+			// OpusHead body (RFC 7845 §5.1) after the 8-byte magic: Version(1),
+			// Channels(1), PreSkip(2), SampleRate(4), Gain(2), Mapping(1). The
+			// packet is 19 bytes and a real first page exactly 47, so bound on
+			// the 8 body bytes we read, not on the old +12/+16 offsets that
+			// pointed past the packet and skipped every real header.
+			if headPos >= 0 && headPos+8+8 <= len(pageData) {
+				body := pageData[headPos+8:]
+				preSkip = binary.LittleEndian.Uint16(body[2:4])
+				sampleRate = binary.LittleEndian.Uint32(body[4:8])
+				foundOpusHead = true
+				bridgeLog.Debugf("Found OpusHead: sampleRate=%d, preSkip=%d", sampleRate, preSkip)
 			}
 		}
 
