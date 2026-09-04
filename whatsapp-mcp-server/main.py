@@ -1,3 +1,4 @@
+import logging
 import os
 import signal
 import sys
@@ -605,6 +606,13 @@ def build_http_app(server: MCPServer, transport: str, token: str | None, **app_k
 
 
 if __name__ == "__main__":
+    # Diagnostics go to stderr only: on the stdio transport stdout is the MCP
+    # protocol channel. WHATSAPP_MCP_LOG_LEVEL controls verbosity (default INFO).
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()
     # Register signal handlers for clean shutdown
