@@ -540,6 +540,74 @@ def format_messages_list(messages: list[Message], show_chat_info: bool = True) -
     return output
 
 
+# SQLite's default parameter limit is 999 on older builds; 3 params per hit.
+_CONTEXT_HITS_PER_QUERY = 200
+
+
+def _fetch_context_windows(
+    cursor: sqlite3.Cursor,
+    hits: list[Message],
+    before: int,
+    after: int,
+    include_deleted: bool = True,
+) -> dict[tuple[str, str], tuple[list[Message], list[Message]]]:
+    """Fetch the before/after window for many hits in one query per batch.
+
+    Returns {(id, chat_jid): (before_msgs newest-first, after_msgs oldest-first)}.
+    Window membership is per chat and ranked with ROW_NUMBER(), so the cost is one
+    statement per _CONTEXT_HITS_PER_QUERY hits instead of two per hit.
+    """
+    windows: dict[tuple[str, str], tuple[list[Message], list[Message]]] = {
+        (hit.id, hit.chat_jid): ([], []) for hit in hits
+    }
+    if not hits or (before <= 0 and after <= 0):
+        return windows
+    deleted_filter = "" if include_deleted else "AND messages.deleted_at IS NULL"
+    for start in range(0, len(hits), _CONTEXT_HITS_PER_QUERY):
+        batch = hits[start : start + _CONTEXT_HITS_PER_QUERY]
+        values = ",".join("(?, ?, ?)" for _ in batch)
+        hit_params: list[Any] = []
+        for hit in batch:
+            hit_params.extend([hit.id, hit.chat_jid, hit.timestamp.isoformat()])
+        sql = f"""
+            WITH hits(id, chat_jid, ts) AS (VALUES {values})
+            SELECT * FROM (
+                SELECT {MESSAGE_COLUMNS}, hits.id AS hit_id, 'before' AS side,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY hits.id, hits.chat_jid
+                           ORDER BY messages.timestamp DESC, messages.id DESC
+                       ) AS rn
+                FROM hits
+                JOIN messages ON messages.chat_jid = hits.chat_jid AND messages.timestamp < hits.ts
+                JOIN chats ON messages.chat_jid = chats.jid
+                WHERE 1=1 {deleted_filter}
+            ) WHERE rn <= ?
+            UNION ALL
+            SELECT * FROM (
+                SELECT {MESSAGE_COLUMNS}, hits.id AS hit_id, 'after' AS side,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY hits.id, hits.chat_jid
+                           ORDER BY messages.timestamp ASC, messages.id ASC
+                       ) AS rn
+                FROM hits
+                JOIN messages ON messages.chat_jid = hits.chat_jid AND messages.timestamp > hits.ts
+                JOIN chats ON messages.chat_jid = chats.jid
+                WHERE 1=1 {deleted_filter}
+            ) WHERE rn <= ?
+            ORDER BY hit_id, side, rn
+        """
+        cursor.execute(sql, (*hit_params, before, after))
+        width = len(MESSAGE_COLUMNS.split(","))
+        for row in cursor.fetchall():
+            message = _row_to_message(row[:width])
+            hit_id, side = row[width], row[width + 1]
+            key = (hit_id, message.chat_jid)
+            if key not in windows:
+                continue
+            windows[key][0 if side == "before" else 1].append(message)
+    return windows
+
+
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -668,24 +736,26 @@ def list_messages(
         result = [_row_to_message(msg) for msg in messages]
 
         if include_context and result:
-            # Add context for each message, deduplicated by message ID
-            seen_ids = set()
-            messages_with_context = []
+            # One query per batch of hits (not two per hit); dedupe on (id, chat_jid)
+            # because message IDs repeat across chats (forwards, broadcasts).
+            windows = _fetch_context_windows(cursor, result, context_before, context_after, include_deleted)
+            seen: set[tuple[str, str]] = set()
+            messages_with_context: list[Message] = []
+
+            def _add(message: Message) -> None:
+                key = (message.id, message.chat_jid)
+                if key not in seen:
+                    seen.add(key)
+                    messages_with_context.append(message)
+
             for msg in result:
-                context = get_message_context(
-                    msg.id, context_before, context_after, msg.chat_jid, include_deleted=include_deleted
-                )
-                for ctx_msg in context.before:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
-                        messages_with_context.append(ctx_msg)
-                if context.message.id not in seen_ids:
-                    seen_ids.add(context.message.id)
-                    messages_with_context.append(context.message)
-                for ctx_msg in context.after:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
-                        messages_with_context.append(ctx_msg)
+                before_msgs, after_msgs = windows[(msg.id, msg.chat_jid)]
+                # Windows are fetched nearest-first; emit them in reading order.
+                for ctx_msg in reversed(before_msgs):
+                    _add(ctx_msg)
+                _add(msg)
+                for ctx_msg in after_msgs:
+                    _add(ctx_msg)
 
             return [msg_to_dict(msg) for msg in messages_with_context]
 
