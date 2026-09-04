@@ -192,6 +192,14 @@ revokes received from another device. Local-only deletion removes the row (the
 FTS index follows); downloaded media is left in `store/`. Respects
 `WHATSAPP_ALLOWED_CHATS`.
 
+### `edit_message`
+
+Edit the text of a message this account sent (WhatsApp accepts edits for about 15 minutes). Recipients see the new text with an "edited" marker; the archive is updated. **Parameters:** `chat_jid`, `message_id` (from `send_message`), `text`.
+
+### `forward_message`
+
+Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
+
 ### `mark_messages_read`
 
 Mark one or more messages from the same chat and sender as read. This explicitly

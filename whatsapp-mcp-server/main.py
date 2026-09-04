@@ -31,6 +31,12 @@ from whatsapp import (
     download_media as whatsapp_download_media,
 )
 from whatsapp import (
+    edit_message as whatsapp_edit_message,
+)
+from whatsapp import (
+    forward_message as whatsapp_forward_message,
+)
+from whatsapp import (
     get_chat as whatsapp_get_chat,
 )
 from whatsapp import (
@@ -676,6 +682,43 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     """
     success, status_message = whatsapp_delete_message(chat_jid, message_id, for_everyone)
     return {"success": success, "message": status_message, "for_everyone": for_everyone}
+
+
+@mcp.tool()
+@tool_errors
+def edit_message(chat_jid: str, message_id: str, text: str) -> dict[str, Any]:
+    """Edit the text of a message this account sent (WhatsApp allows it for about 15 minutes).
+
+    Only own messages can be edited; recipients see the new text with an
+    "edited" marker. The local archive is updated too. Use the message_id
+    returned by send_message.
+
+    Args:
+        chat_jid: Chat containing the message
+        message_id: ID of the message to edit
+        text: The new text
+    """
+    return whatsapp_edit_message(chat_jid, message_id, text)
+
+
+@mcp.tool()
+@tool_errors
+def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[str, Any]:
+    """Re-send a message from the archive to another chat.
+
+    Text is re-sent as is; media is re-uploaded from the local cache (fetched first
+    if needed) together with its caption. The copy arrives as a fresh message
+    (no "Forwarded" label). Both chats must pass WHATSAPP_ALLOWED_CHATS.
+
+    Args:
+        chat_jid: Chat containing the original message
+        message_id: ID of the message to forward
+        to_chat_jid: Destination: phone number, direct-chat JID or group JID
+
+    Returns:
+        {"success": true, "message_id": ..., "chat_jid": ..., "timestamp": ...} of the new message
+    """
+    return whatsapp_forward_message(chat_jid, message_id, to_chat_jid)
 
 
 @mcp.tool()
