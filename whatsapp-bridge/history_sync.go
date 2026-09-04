@@ -104,48 +104,21 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						continue
 					}
 
-					// Extract text content via the shared extractor — the same
-					// one the live path uses — so contact cards, media captions
-					// and hydrated templates are surfaced on the history-sync
-					// path too. This inline block previously handled only
-					// Conversation/ExtendedText and silently dropped everything
-					// else arriving through history sync.
-					histViewOnce := false
-					if inner, wrapped := unwrapViewOnce(msg.Message.Message); wrapped {
-						msg.Message.Message = inner
-						histViewOnce = true
-					}
-					content := extractTextContent(msg.Message.Message)
-					histPoll := extractPollCreation(msg.Message.Message)
-					if histPoll != nil {
-						content = pollContent(histPoll)
-					}
-
-					// Extract media info - pass message timestamp + ID for unique filenames
-					var mediaType, filename, url string
-					var mediaKey, fileSHA256, fileEncSHA256 []byte
-					var fileLength uint64
-
 					histMsgID := ""
 					if msg.Message != nil && msg.Message.Key != nil && msg.Message.Key.ID != nil {
 						histMsgID = *msg.Message.Key.ID
 					}
-
-					if msg.Message.Message != nil {
-						mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp, histMsgID)
-					}
-					if histPoll != nil {
-						mediaType = "poll"
-					}
-					if histViewOnce {
-						content = viewOnceContent(content, mediaType)
-					}
+					// Same extraction as the live path (persist.go): view-once
+					// unwrap, text, media, poll. Works on a local view; the
+					// whatsmeow payload is not mutated.
+					ex := extractMessage(msg.Message.Message, timestamp, histMsgID)
+					content, mediaType, filename := ex.content, ex.mediaType, ex.filename
 
 					// Log the message content for debugging
 					logger.Debugf("Message content: %v, Media Type: %v", content, mediaType)
 
 					// Skip messages with no content and no media
-					if content == "" && mediaType == "" {
+					if ex.empty() {
 						continue
 					}
 
@@ -201,35 +174,12 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 					}
 					msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 
-					err = batch.StoreMessage(
-						msgID,
-						chatJID,
-						sender,
-						content,
-						msgTimestamp,
-						isFromMe,
-						mediaType,
-						filename,
-						url,
-						mediaKey,
-						fileSHA256,
-						fileEncSHA256,
-						fileLength,
-						"", // quoted_message_id: history sync does not carry ContextInfo
-					)
+					// quoted_message_id is not persisted: history sync does not
+					// carry a usable ContextInfo.
+					err = persistMessage(batch, msgID, chatJID, sender, msgTimestamp, isFromMe, ex, false, logger)
 					if err != nil {
 						logger.Warnf("Failed to store history message: %v", err)
 					} else {
-						if histViewOnce {
-							if verr := batch.MarkViewOnce(msgID, chatJID); verr != nil {
-								logger.Warnf("Failed to flag view-once history message: %v", verr)
-							}
-						}
-						if histPoll != nil {
-							if perr := batch.StorePoll(msgID, chatJID, histPoll, msgTimestamp); perr != nil {
-								logger.Warnf("Failed to store history poll: %v", perr)
-							}
-						}
 						syncedCount++
 						storedInChat++
 						// Per-message echo stays at DEBUG: user content out of INFO,

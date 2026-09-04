@@ -132,12 +132,14 @@ func (o *originalTimestamps) take(id string) (time.Time, bool) {
 
 func (b *Bridge) handleMessage(msg *events.Message) {
 	client, messageStore, logger := b.Client, b.Store, b.Log
-	// View-once envelopes hide the real media one level down; unwrap so every
-	// extractor below sees it. See view_once.go for the policy.
-	viewOnce := false
+	// View-once envelopes hide the real media one level down. Work on a local
+	// copy of the event with the envelope removed so every extractor below
+	// sees the real message and other handlers keep the original untouched.
+	original := msg.Message
 	if inner, wrapped := unwrapViewOnce(msg.Message); wrapped {
-		msg.Message = inner
-		viewOnce = true
+		unwrapped := *msg
+		unwrapped.Message = inner
+		msg = &unwrapped
 	}
 	// Resolve LID-based chats to phone-based JIDs so that incoming
 	// and outgoing messages land in the same chat entry.
@@ -233,63 +235,23 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	}
 
 	// Extract text content
-	content := extractTextContent(msg.Message)
-
-	// Extract media info - pass message timestamp + ID for unique filenames.
-	// Must be the same (retry-corrected) timestamp we store below: downloadMedia
-	// rebuilds the on-disk filename from the stored timestamp.
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msgTimestamp, msg.Info.ID)
-
-	// Native polls: the creation carries no text, so render question + options
-	// as content and remember the option list for vote decoding (polls.go).
-	poll := extractPollCreation(msg.Message)
-	if poll != nil {
-		content = pollContent(poll)
-		mediaType = "poll"
-	}
-	if viewOnce {
-		content = viewOnceContent(content, mediaType)
-	}
-
-	// Extract quoted message info
-	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
-	mentionedJIDs := extractMentionedJIDs(msg.Message)
+	// Text, media, poll, quote and mentions in one pass (persist.go). The
+	// timestamp must be the retry-corrected one stored below: downloadMedia
+	// rebuilds the on-disk filename from the stored row.
+	ex := extractMessage(original, msgTimestamp, msg.Info.ID)
+	content, mediaType, filename, url, mediaKey, fileLength := ex.content, ex.mediaType, ex.filename, ex.url, ex.mediaKey, ex.fileLen
+	quotedMessageId, quotedSender, quotedContent := ex.quotedID, ex.quotedSender, ex.quotedContent
+	mentionedJIDs := ex.mentions
 
 	// Skip if there's no content and no media
-	if content == "" && mediaType == "" {
+	if ex.empty() {
 		return
 	}
 
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
-	err = messageStore.StoreMessage(
-		msg.Info.ID,
-		chatJID,
-		sender,
-		content,
-		msgTimestamp,
-		msg.Info.IsFromMe,
-		mediaType,
-		filename,
-		url,
-		mediaKey,
-		fileSHA256,
-		fileEncSHA256,
-		fileLength,
-		quotedMessageId,
-	)
-	if err != nil {
+	if err := persistMessage(messageStore, msg.Info.ID, chatJID, sender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
 		logger.Warnf("Failed to store message: %v", err)
-	}
-	if poll != nil {
-		if err := messageStore.StorePoll(msg.Info.ID, chatJID, poll, msgTimestamp); err != nil {
-			logger.Warnf("Failed to store poll: %v", err)
-		}
-	}
-	if viewOnce {
-		if err := messageStore.MarkViewOnce(msg.Info.ID, chatJID); err != nil {
-			logger.Warnf("Failed to flag view-once message: %v", err)
-		}
 	}
 
 	var quotedIsFromMe *bool
