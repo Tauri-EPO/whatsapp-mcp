@@ -208,6 +208,7 @@ Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` 
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
+| `FFMPEG_TIMEOUT_S` | `120` | Timeout for each ffmpeg conversion (voice-note encode in `audio.py`, 16 kHz WAV prep in `transcribe.py`) |
 
 Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`, `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `COMPOSE_PROFILES`) are documented in `.env.example` and `docs/DOCKER.md`.
 

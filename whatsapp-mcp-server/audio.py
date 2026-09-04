@@ -2,6 +2,18 @@ import os
 import subprocess
 import tempfile
 
+DEFAULT_FFMPEG_TIMEOUT_S = 120
+
+
+def ffmpeg_timeout_s() -> int:
+    """Seconds an ffmpeg conversion may take (FFMPEG_TIMEOUT_S, default 120)."""
+    raw = os.getenv("FFMPEG_TIMEOUT_S", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_FFMPEG_TIMEOUT_S
+    except ValueError:
+        return DEFAULT_FFMPEG_TIMEOUT_S
+    return value if value > 0 else DEFAULT_FFMPEG_TIMEOUT_S
+
 
 def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate=24000):
     """
@@ -56,10 +68,13 @@ def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate
         output_file,
     ]
 
+    timeout = ffmpeg_timeout_s()
     try:
         # Run the ffmpeg command and capture output
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
         return output_file
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg timed out after {timeout}s converting {input_file}") from None
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to convert audio. You likely need to install ffmpeg {e.stderr}")
 
