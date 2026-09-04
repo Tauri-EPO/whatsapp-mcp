@@ -286,6 +286,10 @@ class Message:
     # True for WhatsApp "view once" media. The archive keeps a copy; the phone's
     # single viewing is unaffected because the bridge never sends the view receipt.
     view_once: bool = False
+    # Media size and WhatsApp content hash (hex). The hash identifies the same
+    # file across forwards and keys the agent's media notes (see media_inventory).
+    bytes: int | None = None
+    sha256: str | None = None
 
 
 # One column list and one mapper for every query that yields Message rows.
@@ -294,7 +298,8 @@ class Message:
 MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
-    "messages.deleted_at, messages.view_once, messages.target_message_id"
+    "messages.deleted_at, messages.view_once, messages.target_message_id, "
+    "messages.file_length, lower(hex(messages.file_sha256))"
 )
 
 
@@ -314,6 +319,8 @@ def _row_to_message(row: tuple) -> Message:
         deleted,
         view_once,
         target,
+        file_length,
+        sha256,
     ) = row
     return Message(
         timestamp=datetime.fromisoformat(timestamp),
@@ -329,6 +336,8 @@ def _row_to_message(row: tuple) -> Message:
         deleted_at=datetime.fromisoformat(deleted) if deleted else None,
         view_once=bool(view_once),
         target_message_id=target,
+        bytes=int(file_length) if file_length else None,
+        sha256=sha256 or None,
     )
 
 
@@ -438,6 +447,8 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
         "view_once": message.view_once,
+        "bytes": message.bytes if message.media_type and not _is_pointer_row(message) else None,
+        "sha256": message.sha256 if message.media_type and not _is_pointer_row(message) else None,
     }
 
 

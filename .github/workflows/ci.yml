@@ -101,7 +101,7 @@ jobs:
           # Bridge: the binary starts, prints its banner and creates the store (no pairing needed for this).
           docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
           # MCP: every module imports inside the image (catches a missing COPY like the transcribe.py incident).
-          docker run --rm whatsapp-mcp-server:ci python -c "import main, whatsapp, transcribe, http_auth, chat_policy, mcp_config, parent_watchdog, audio, errors; print('imports ok')"
+          docker run --rm whatsapp-mcp-server:ci python -c "import main, whatsapp, transcribe, http_auth, chat_policy, mcp_config, parent_watchdog, audio, errors, observability, media_inventory; print('imports ok')"
       - name: Build bridge image for arm64
         # Raspberry Pi / ARM VPS users build this themselves; make sure the pure-Go
         # build keeps cross-compiling. Not loaded or smoke-tested (QEMU is slow).

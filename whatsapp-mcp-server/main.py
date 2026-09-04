@@ -15,6 +15,7 @@ from http_auth import (
     resolve_rate_limit,
 )
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
+from media_inventory import list_media_page, media_stats
 from observability import JSON_FORMAT_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
@@ -790,6 +791,82 @@ def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
     """
     success, status_message, sent = whatsapp_audio_voice_message(chat_jid, media_path)
     return {"success": success, "message": status_message, **sent}
+
+
+@mcp.tool()
+@tool_errors
+def list_media(
+    chat_jid: str = "",
+    media_type: str = "",
+    after: str = "",
+    before: str = "",
+    min_bytes: int = 0,
+    sort: str = "size",
+    limit: int = 50,
+    page: int = 0,
+    cursor: str = "",
+) -> dict[str, Any]:
+    """Inventory of media files known to the archive: size, content hash, copies, cache state.
+
+    Read-only. Use it to find what is heavy (sort="size"), what was forwarded
+    into many chats (sort="copies": rows sharing the same sha256), or what a
+    chat received lately (sort="date"). `cached` tells whether the bytes are on
+    disk right now; a false entry can still be fetched with download_media.
+    Pointer rows (reactions, poll votes) and plain text never appear.
+
+    Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
+    next_cursor back as `cursor` for the following page.
+
+    Args:
+        chat_jid: Restrict to one chat (default: every allowed chat)
+        media_type: image | video | audio | document | sticker (default: all)
+        after: Only media at or after this ISO-8601 timestamp
+        before: Only media at or before this ISO-8601 timestamp
+        min_bytes: Only media at least this large (from the WhatsApp file length)
+        sort: "size" (largest first, default), "date" (newest first) or "copies" (most forwarded first)
+        limit: Max entries per page (default 50, max 200)
+        page: Page number (default 0); ignored when cursor is set
+        cursor: next_cursor from the previous page
+
+    Returns:
+        Each item: message_id, chat_jid, chat_name, sender_jid, is_from_me, timestamp,
+        media_type, filename (documents keep the sender's name), bytes, sha256 (hex;
+        null for rows without a hash), cached, cached_bytes, cached_file, copies (rows
+        with the same sha256 across allowed chats), copies_in (distinct chats) and
+        deleted_at.
+    """
+    return list_media_page(
+        chat_jid=chat_jid or None,
+        media_type=media_type or None,
+        after=after or None,
+        before=before or None,
+        min_bytes=min_bytes or None,
+        sort=sort,
+        limit=limit,
+        page=page,
+        cursor=cursor or None,
+    ).to_dict()
+
+
+@mcp.tool()
+@tool_errors
+def get_media_stats(chat_jid: str = "") -> dict[str, Any]:
+    """Media totals by chat and by type, so the agent can decide where to look first.
+
+    Read-only. `bytes` comes from the message rows (what WhatsApp reported),
+    `cached_bytes` from the files actually on disk under the store directory.
+    `duplicate_bytes` is how much the copies beyond the first of each sha256 add up
+    to. Compare with bridge_status() store_bytes / media_bytes for the operator view.
+
+    Args:
+        chat_jid: Restrict to one chat (default: every allowed chat)
+
+    Returns:
+        {"total": {files, bytes, cached_files, cached_bytes, duplicate_groups, duplicate_bytes},
+         "by_chat": [{chat_jid, chat_name, files, distinct_files, bytes, cached_files, cached_bytes}],
+         "by_type": [{media_type, files, bytes}], "media_root": path}
+    """
+    return media_stats(chat_jid or None)
 
 
 @mcp.tool()

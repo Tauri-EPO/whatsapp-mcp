@@ -84,6 +84,7 @@ whatsapp-mcp/
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
+│   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
