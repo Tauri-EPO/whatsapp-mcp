@@ -22,6 +22,9 @@ from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
 )
 from whatsapp import (
+    bridge_status as whatsapp_bridge_status,
+)
+from whatsapp import (
     delete_message as whatsapp_delete_message,
 )
 from whatsapp import (
@@ -85,6 +88,21 @@ from whatsapp import (
 # server, so nothing network-related is decided at import time either.
 MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
 mcp = MCPServer("whatsapp", version=MCP_VERSION)
+
+
+@mcp.tool()
+@tool_errors
+def bridge_status() -> dict[str, Any]:
+    """Health of the WhatsApp bridge: is it reachable, paired and connected, and which build runs.
+
+    Call this first when a tool returns nothing you expected or reports
+    bridge_unavailable. Returns ok=true when the bridge is paired and connected;
+    otherwise ok=false with a human-readable reason (unreachable, awaiting QR
+    pairing, disconnected). Also reports uptime_seconds, store_bytes / media_bytes /
+    media_files (cache size) and the build (version, commit, go, whatsmeow, fts5).
+    Read-only; never fails, so it is safe to call before anything else.
+    """
+    return whatsapp_bridge_status()
 
 
 @mcp.tool()

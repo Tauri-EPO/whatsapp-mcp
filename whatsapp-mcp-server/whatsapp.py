@@ -1798,3 +1798,51 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     if path:
         logger.info("Media downloaded successfully: %s", path)
     return path
+
+
+def bridge_status() -> dict[str, Any]:
+    """Health, readiness and build identity of the bridge in one call.
+
+    Never raises for a bridge that is down: returns ok=false with the reason,
+    so the agent can tell "bridge unreachable" from "nothing matched".
+    """
+    status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL}
+    try:
+        health = _bridge_request("GET", "/health", timeout=10)
+    except ToolError as exc:
+        status["reason"] = exc.message
+        return status
+    try:
+        body = health.json() if health.status_code == 200 else {}
+    except (json.JSONDecodeError, ValueError):
+        body = {}
+    if health.status_code != 200 or not isinstance(body, dict):
+        status["reason"] = f"/api/health answered HTTP {health.status_code}"
+        return status
+    status.update(
+        {
+            "status": body.get("status"),
+            "connected": bool(body.get("connected")),
+            "paired": bool(body.get("paired")),
+            "uptime_seconds": body.get("uptime_seconds"),
+            "store_bytes": body.get("store_bytes"),
+            "media_bytes": body.get("media_bytes"),
+            "media_files": body.get("media_files"),
+        }
+    )
+    status["ok"] = status["connected"] and status["paired"]
+    if not status["ok"]:
+        status["reason"] = (
+            "bridge is up but not paired: scan the QR code in its log"
+            if not status["paired"]
+            else "bridge is paired but disconnected from WhatsApp; it reconnects automatically"
+        )
+    try:
+        version = _bridge_request("GET", "/version", timeout=10)
+        if version.status_code == 200:
+            info = version.json()
+            if isinstance(info, dict):
+                status["version"] = {k: info.get(k) for k in ("version", "commit", "go", "whatsmeow", "fts5")}
+    except (ToolError, json.JSONDecodeError, ValueError):
+        pass
+    return status

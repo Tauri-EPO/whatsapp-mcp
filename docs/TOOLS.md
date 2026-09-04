@@ -32,6 +32,12 @@ An unreadable database is reported as `internal`, never as an empty result, so a
 
 Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
 
+## Bridge
+
+### `bridge_status`
+
+Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
+
 ## Contact Operations
 
 ### `search_contacts`

@@ -31,6 +31,7 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language) |
 | **Groups and polls** | group members, native poll results with every voter's choice |
 | **Memory** | deleted messages keep their content, view-once media is archived without consuming the phone's view, calls are logged |
+| **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result |
 
 The full list with parameters is in [docs/TOOLS.md](docs/TOOLS.md).
 
