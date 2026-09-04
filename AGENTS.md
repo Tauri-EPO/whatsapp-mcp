@@ -97,7 +97,7 @@ whatsapp-mcp/
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
-└── .github/workflows/          # ci.yml, security.yml (release workflows are manual-only)
+└── .github/workflows/          # ci.yml, security.yml, publish.yml (GHCR images on push to main)
 ```
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
@@ -120,7 +120,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
 9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks.
 10. **After merge:** `git fetch origin`; rebase any open stacked branch; confirm the issue closed (`Closes #N` does it when the PR targets `main`).
-11. **Deploy** is a manual step on the server: `git pull && docker compose up -d --build`.
+11. **Deploy** is a manual step on the server: `git pull && docker compose up -d --build` (build mode) or `git pull && docker compose pull && docker compose up -d` (pull mode: images published to GHCR by `publish.yml` on every push to `main`, tags `main` and `sha-<7>`; `WHATSAPP_IMAGE_TAG` pins one). Then `scripts/smoke.sh`.
 
 Rules that stay true across all steps:
 
@@ -176,7 +176,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |
 
-There are no release workflows. Dependabot auto-merge was removed; merge its PRs through the normal routine.
+`publish.yml` pushes both images to GHCR on every merge to `main` (not a release: `main` stays the deployable state). Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
 ## 7. Environment variables
 

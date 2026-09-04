@@ -50,7 +50,7 @@ scripts/smoke.sh                          # health, readiness, token and MCP han
 
 That is the whole install. The bridge pairs as a linked device (like WhatsApp Web), stores messages in SQLite inside a Docker volume, and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`. Restarts and updates never need a new QR.
 
-Prefer a laptop process launched by your editor instead of containers? See [docs/LAPTOP.md](docs/LAPTOP.md).
+Prefer a laptop process launched by your editor instead of containers? See [docs/LAPTOP.md](docs/LAPTOP.md). Prefer not to compile on the server? Every merge publishes ready-made images to GHCR; `docker compose pull && docker compose up -d` uses them ([docs/DOCKER.md](docs/DOCKER.md#published-images)).
 
 ## Connect your agent
 

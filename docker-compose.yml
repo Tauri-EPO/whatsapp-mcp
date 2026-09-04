@@ -29,6 +29,11 @@ x-logging: &default-logging
 # the whisper sidecar gets one because a model plus 4 threads can starve the
 # rest of a small box. Override in .env: WHISPER_MEM_LIMIT, WHISPER_CPUS.
 
+# Images: published to GHCR on every push to main (.github/workflows/publish.yml)
+# and also buildable here. `docker compose pull && docker compose up -d` runs the
+# published build; `docker compose up -d --build` compiles from this checkout
+# under the same name. WHATSAPP_IMAGE_TAG pins a version (main, sha-<7 chars>).
+
 services:
   bridge:
     build:
@@ -36,7 +41,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         VERSION: ${VERSION:-dev}
-    image: whatsapp-mcp-bridge:local
+    image: ${WHATSAPP_IMAGE_REGISTRY:-ghcr.io/tauri-epo}/whatsapp-mcp-bridge:${WHATSAPP_IMAGE_TAG:-main}
     restart: unless-stopped
     logging: *default-logging
     security_opt: ["no-new-privileges:true"]
@@ -84,7 +89,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         VERSION: ${VERSION:-dev}
-    image: whatsapp-mcp-server:local
+    image: ${WHATSAPP_IMAGE_REGISTRY:-ghcr.io/tauri-epo}/whatsapp-mcp-server:${WHATSAPP_IMAGE_TAG:-main}
     restart: unless-stopped
     logging: *default-logging
     security_opt: ["no-new-privileges:true"]

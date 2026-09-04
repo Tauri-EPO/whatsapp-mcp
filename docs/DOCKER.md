@@ -233,8 +233,9 @@ works as before.
   `WHATSAPP_METRICS=false` / `WHATSAPP_MCP_METRICS=false` remove the endpoints;
   `WHATSAPP_MCP_METRICS_TOKEN` puts a bearer token in front of the MCP one
   (needed when the port is reachable beyond the tailnet, see Funnel).
-- Update: `git pull && GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build`.
-  Check what is running with
+- Update, build mode: `git pull && GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build`.
+  Update, pull mode: `git pull && docker compose pull && docker compose up -d`
+  (see [Published images](#published-images)). Check what is running with
   `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`
   (version, commit, Go and whatsmeow versions, FTS5 state); the MCP server
   reports its version in the `initialize` response and its startup log.
@@ -246,6 +247,32 @@ works as before.
 - Only one bridge may use a session at a time. Do not run the compose stack
   and a laptop bridge against the same store, and do not pair the same phone
   twice with two different stores: WhatsApp will keep replacing the stream.
+
+## Published images
+
+Every push to `main` publishes both images to GHCR for `linux/amd64` and
+`linux/arm64` (`.github/workflows/publish.yml`):
+
+```
+ghcr.io/tauri-epo/whatsapp-mcp-bridge:main    ghcr.io/tauri-epo/whatsapp-mcp-bridge:sha-<7 chars>
+ghcr.io/tauri-epo/whatsapp-mcp-server:main    ghcr.io/tauri-epo/whatsapp-mcp-server:sha-<7 chars>
+```
+
+The compose file names those images, so you choose per host:
+
+- **Pull mode** (no Go or Python build on the server):
+  `docker compose pull && docker compose up -d`. `WHATSAPP_IMAGE_TAG=main`
+  (default) follows the default branch; pin `WHATSAPP_IMAGE_TAG=sha-abc1234`
+  in `.env` to roll back to a known commit. `git pull` is still needed for
+  `docker-compose.yml` and the scripts.
+- **Build mode**: `docker compose up -d --build` compiles from the checkout and
+  tags the result under the same name, so local changes win until the next
+  `docker compose pull`. This is what the README quick start does.
+
+`/api/version` and the MCP `initialize` response report the commit either
+way. A packages page must be public for anonymous pulls; that is a one-time
+switch in GitHub (Packages > package > Package settings > Change visibility),
+otherwise `docker login ghcr.io` with a read-only token first.
 
 ## Backup and restore
 
