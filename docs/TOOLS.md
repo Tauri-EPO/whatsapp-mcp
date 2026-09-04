@@ -334,6 +334,18 @@ Caveats:
 - **`unread` is a chat-level flag, not an unread count.** WhatsApp's unread
   counter is not persisted.
 
+### `list_unread`
+
+One call for "what is waiting for me": chats with unread inbound messages, each with its newest unread rows (oldest first within the chat), most recently active chat first. Unread = inbound and newer than the chat's read marker on any device; never-read chats count entirely. Reactions, poll votes and deleted messages are excluded.
+
+**Parameters:**
+
+- `limit_chats` (optional, default 20, max 100)
+- `limit_per_chat` (optional, default 5, max 50)
+- `since` (optional): ISO-8601 lower bound
+
+Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled.
+
 ### `list_chats`
 
 List all chats with metadata.

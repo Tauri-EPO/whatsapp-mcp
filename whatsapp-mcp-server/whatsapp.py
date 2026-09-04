@@ -1851,3 +1851,88 @@ def bridge_status() -> dict[str, Any]:
     except (ToolError, json.JSONDecodeError, ValueError):
         pass
     return status
+
+
+def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | None = None) -> dict[str, Any]:
+    """Chats with unread inbound messages, each with its newest unread rows.
+
+    "Unread" means inbound (is_from_me = 0) and newer than the chat's read
+    marker (chats.last_read_time, as reported by any linked device); chats
+    with no marker count as entirely unread. Ordered by most recent unread
+    message. Honours WHATSAPP_ALLOWED_CHATS.
+    """
+    limit_chats = max(1, min(int(limit_chats), 100))
+    limit_per_chat = max(1, min(int(limit_per_chat), 50))
+    since_ts: datetime | None = None
+    if since:
+        try:
+            since_ts = datetime.fromisoformat(since)
+        except ValueError as exc:
+            raise ToolError("invalid_argument", f"since must be ISO-8601, got {since!r}") from exc
+    try:
+        conn = _connect_messages_db()
+        cursor = conn.cursor()
+        read_marker = _last_read_time_select(cursor, "chats")
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
+        pointer_filter = "(messages.media_type IS NULL OR messages.media_type NOT IN ('reaction', 'poll_vote'))"
+        params: list[Any] = list(policy_params)
+        since_clause = ""
+        if since_ts is not None:
+            since_clause = "AND messages.timestamp > ?"
+            params.append(since_ts)
+        params.append(limit_chats)
+        cursor.execute(
+            f"""
+            SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
+                   COUNT(*) AS unread_count, MAX(messages.timestamp) AS latest_unread
+            FROM messages
+            JOIN chats ON chats.jid = messages.chat_jid
+            WHERE messages.is_from_me = 0
+              AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
+              AND messages.deleted_at IS NULL
+              AND {pointer_filter}
+              AND {policy_clause}
+              {since_clause}
+            GROUP BY chats.jid
+            ORDER BY latest_unread DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        groups = cursor.fetchall()
+        chats: list[dict[str, Any]] = []
+        total = 0
+        for jid, name, last_read, count, latest in groups:
+            cursor.execute(
+                f"""
+                SELECT {MESSAGE_COLUMNS}
+                FROM messages JOIN chats ON messages.chat_jid = chats.jid
+                WHERE messages.chat_jid = ? AND messages.is_from_me = 0
+                  AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
+                  AND messages.deleted_at IS NULL
+                  AND {pointer_filter}
+                ORDER BY messages.timestamp DESC, messages.id DESC
+                LIMIT ?
+                """,
+                (jid, limit_per_chat),
+            )
+            rows = cursor.fetchall()
+            total += int(count)
+            chats.append(
+                {
+                    "chat_jid": jid,
+                    "chat_name": name,
+                    "is_group": jid.endswith("@g.us"),
+                    "unread_count": int(count),
+                    "latest_unread": latest,
+                    "last_read_time": last_read,
+                    "messages": [msg_to_dict(_row_to_message(row)) for row in reversed(rows)],
+                }
+            )
+        return {"chats": chats, "total_unread": total, "chats_with_unread": len(chats)}
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if "conn" in locals():
+            conn.close()
