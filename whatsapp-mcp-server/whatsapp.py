@@ -4,6 +4,7 @@ import os
 import os.path
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -416,7 +417,47 @@ def _last_message_join(chat_alias: str, msg_alias: str) -> str:
     """
 
 
+# Sender-name and alias resolution is called once per returned message and used
+# to open one to three SQLite connections each time (messages.db, then
+# whatsapp.db for the LID map and again for contacts). Names change rarely, so
+# results are cached per process for NAME_CACHE_TTL_S; tests reset the cache.
+NAME_CACHE_TTL_S = 300.0
+_name_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+_name_cache_lock = threading.Lock()
+
+
+def _cache_get(kind: str, key: str) -> tuple[bool, Any]:
+    with _name_cache_lock:
+        hit = _name_cache.get((kind, key))
+        if hit is None:
+            return False, None
+        value, expires = hit
+        if expires < time.monotonic():
+            del _name_cache[(kind, key)]
+            return False, None
+        return True, value
+
+
+def _cache_put(kind: str, key: str, value: Any) -> Any:
+    with _name_cache_lock:
+        _name_cache[(kind, key)] = (value, time.monotonic() + NAME_CACHE_TTL_S)
+    return value
+
+
+def _reset_name_cache() -> None:
+    """Drop cached sender names and aliases (tests, or after a contact sync)."""
+    with _name_cache_lock:
+        _name_cache.clear()
+
+
 def _sender_aliases(value: str) -> list[str]:
+    hit, cached = _cache_get("aliases", value)
+    if hit:
+        return list(cached)
+    return list(_cache_put("aliases", value, _sender_aliases_uncached(value)))
+
+
+def _sender_aliases_uncached(value: str) -> list[str]:
     # messages.sender is written inconsistently: the same contact may appear as
     # bare phone ("13232432100"), full phone JID ("13232432100@s.whatsapp.net"),
     # bare LID ("231241139937355"), or full LID JID ("231241139937355@lid").
@@ -498,17 +539,17 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
     # If this is a LID (@lid suffix) or a raw number, try LID map first.
     # LIDs overlap in length with phone numbers (12-15 digits) so we always
     # attempt LID resolution and fall through to direct contact lookup if not found.
-    if jid_suffix in ("lid", ""):
-        phone = _resolve_lid_to_phone(jid_prefix)
-        if phone:
-            lookup_jid = phone + "@s.whatsapp.net"
-        elif jid_suffix == "lid":
-            # Definitely a LID but not in the map — can't resolve
-            return None
-
     try:
         conn = _connect_whatsmeow_db()
         cursor = conn.cursor()
+        if jid_suffix in ("lid", ""):
+            cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (jid_prefix,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                lookup_jid = row[0] + "@s.whatsapp.net"
+            elif jid_suffix == "lid":
+                # Definitely a LID but not in the map — can't resolve
+                return None
         # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
         cursor.execute(
             "SELECT full_name, push_name, first_name, business_name FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1",
@@ -527,42 +568,34 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
 
 
 def get_sender_name(sender_jid: str) -> str:
+    hit, cached = _cache_get("name", sender_jid)
+    if hit:
+        return cached
+    return _cache_put("name", sender_jid, _get_sender_name_uncached(sender_jid))
+
+
+def _get_sender_name_uncached(sender_jid: str) -> str:
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
-        # First try matching by exact JID
+        # Exact match on the JID as stored, then on the other spellings of the
+        # same number (bare, phone JID, LID JID). No LIKE '%number%': it scanned
+        # the table and could match an unrelated JID containing the digits.
+        bare = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
+        candidates = [sender_jid, bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
         cursor.execute(
-            """
+            f"""
             SELECT name
             FROM chats
-            WHERE jid = ?
+            WHERE jid IN ({",".join("?" for _ in candidates)})
+              AND name IS NOT NULL AND name != ''
+            ORDER BY CASE WHEN jid = ? THEN 0 ELSE 1 END
             LIMIT 1
         """,
-            (sender_jid,),
+            (*candidates, sender_jid),
         )
-
         result = cursor.fetchone()
-
-        # If no result, try looking for the number within JIDs
-        if not result:
-            # Extract the phone number part if it's a JID
-            if "@" in sender_jid:
-                phone_part = sender_jid.split("@")[0]
-            else:
-                phone_part = sender_jid
-
-            cursor.execute(
-                """
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """,
-                (f"%{phone_part}%",),
-            )
-
-            result = cursor.fetchone()
 
         if result and result[0] and not result[0].replace("+", "").isdigit():
             return result[0]
