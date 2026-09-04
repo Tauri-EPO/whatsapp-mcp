@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"go.mau.fi/whatsmeow/types"
@@ -103,7 +102,9 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 			}
 		}
 
-		if err := client.MarkRead(context.Background(), messageIDs, readAt, chatJID, senderJID); err != nil {
+		ctx, cancel := requestContext(r, actionDeadline)
+		defer cancel()
+		if err := client.MarkRead(ctx, messageIDs, readAt, chatJID, senderJID); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
 			return
@@ -167,7 +168,9 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 		}
 		msg := client.BuildReaction(chatJID, senderJID, req.MessageID, *req.Emoji)
 		w.Header().Set("Content-Type", "application/json")
-		if _, err := client.SendMessage(context.Background(), chatJID, msg); err != nil {
+		ctx, cancel := requestContext(r, actionDeadline)
+		defer cancel()
+		if _, err := client.SendMessage(ctx, chatJID, msg); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
@@ -231,7 +234,9 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 		}
 
 		// Send the chat presence update
-		err = client.SendChatPresence(context.Background(), recipientJID, state, types.ChatPresenceMediaText)
+		ctx, cancel := requestContext(r, actionDeadline)
+		defer cancel()
+		err = client.SendChatPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

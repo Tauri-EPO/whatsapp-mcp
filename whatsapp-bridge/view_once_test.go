@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -56,7 +57,7 @@ func TestHandleMessage_ViewOnceImageIsStored(t *testing.T) {
 
 	// Never download in this test: replace the async downloader.
 	b := testBridge(client, ms, logger)
-	b.DownloadMedia = func(_ string, _ string) (bool, string, string, string, error) {
+	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		return false, "", "", "", nil
 	}
 

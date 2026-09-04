@@ -275,7 +275,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	var imageMimeType string
 	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, _, dlPath, dlErr := b.DownloadMedia(msg.Info.ID, chatJID)
+		success, _, _, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			imageDownloadPath = dlPath
 			// Detect MIME type by sniffing the actual file bytes rather than
@@ -296,7 +296,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			// Fall back to async download so media is cached for future MCP tool calls
 			if b.MediaAutoDownload {
 				go func() {
-					_, _, _, _, _ = b.DownloadMedia(msg.Info.ID, chatJID)
+					_, _, _, _, _ = b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 				}()
 			}
 		}
@@ -306,7 +306,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
-			success, _, _, downloadPath, err := b.DownloadMedia(msg.Info.ID, chatJID)
+			success, _, _, downloadPath, err := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {

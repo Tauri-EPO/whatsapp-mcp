@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,7 @@ import (
 func TestSendHandlerReturnsMessageID(t *testing.T) {
 	const token = "test-token-0123456789"
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
-	b.Send = func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+	b.Send = func(_ context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return true, "Message sent to " + recipient, sentMessage{
 			ID: "3EB0ABCDEF", ChatJID: "5511999999999@s.whatsapp.net",
 			Timestamp: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
@@ -38,7 +39,7 @@ func TestSendHandlerReturnsMessageID(t *testing.T) {
 	}
 
 	// Failure: no id fields leak into the body.
-	b.Send = func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+	b.Send = func(_ context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return false, "Error sending message: offline", sentMessage{}
 	}
 	rec = httptest.NewRecorder()

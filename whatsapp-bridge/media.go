@@ -76,7 +76,7 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 }
 
 // Function to download media from a message
-func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string, string, error) {
+func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	client, messageStore := b.Client, b.Store
 	// Query the database for the message including timestamp
 	var mediaType, url string
@@ -185,13 +185,13 @@ func (b *Bridge) downloadMedia(messageID, chatJID string) (bool, string, string,
 	// Stream straight to a temp file next to the target (whatsmeow decrypts
 	// and verifies in place), then rename: no full copy of the media in RAM
 	// and no half-written file ever appears under the final name.
-	written, err := downloadToPath(context.Background(), client, downloader, localPath)
+	written, err := downloadToPath(ctx, client, downloader, localPath)
 	if isExpiredMediaError(err) {
 		// The CDN token in the stored URL has expired (old history, forwards).
 		// Ask the sender's phone to re-upload and download from the fresh path.
 		// See media_retry.go.
 		b.Log.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
-		written, err = downloadViaMediaRetry(context.Background(), client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
+		written, err = downloadViaMediaRetry(ctx, client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
 	}
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
@@ -278,7 +278,9 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 		b.Log.Debugf("📥 Download request: message_id=%s chat_jid=%s", req.MessageID, req.ChatJID)
 
 		// Download the media
-		success, mediaType, filename, path, err := b.DownloadMedia(req.MessageID, req.ChatJID)
+		ctx, cancel := requestContext(r, downloadDeadline)
+		defer cancel()
+		success, mediaType, filename, path, err := b.DownloadMedia(ctx, req.MessageID, req.ChatJID)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

@@ -22,7 +22,7 @@ import (
 )
 
 // mediaDownloader is downloadMedia's signature; tests substitute a fake.
-type mediaDownloader func(messageID, chatJID string) (bool, string, string, string, error)
+type mediaDownloader func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error)
 
 type Bridge struct {
 	Client *whatsmeow.Client
@@ -101,8 +101,8 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.Connect = client.Connect
-	b.Send = func(recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
-		return sendWhatsAppMessage(b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
 	b.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
