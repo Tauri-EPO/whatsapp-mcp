@@ -72,7 +72,7 @@ func TestSQLiteOptionsCoverEveryHandle(t *testing.T) {
 	if !strings.HasPrefix(sqliteReadOnlyOptions, "mode=ro") {
 		t.Error("the contacts handle must stay read-only")
 	}
-	if got := sqliteURI(`C:\x\a.db`, sqliteReadOnlyOptions); got != "file:C:/x/a.db?mode=ro&_busy_timeout=5000" {
+	if got := sqliteURI("/x/a.db", sqliteReadOnlyOptions); got != "file:/x/a.db?mode=ro&_busy_timeout=5000" {
 		t.Errorf("uri = %q", got)
 	}
 }
