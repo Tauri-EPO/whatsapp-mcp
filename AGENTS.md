@@ -51,7 +51,19 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
 ```
 whatsapp-mcp/
 ├── whatsapp-bridge/            # Go — WhatsApp Web via whatsmeow, REST API, messages.db owner
-│   ├── main.go                 # startup, event loop, REST mux, MessageStore (being split: issue #48)
+│   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
+│   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
+│   ├── events.go               # whatsmeow event dispatch, handleMessage, calls, reconnect loop
+│   ├── history_sync.go         # handleHistorySync (phone replays at pair time / on demand)
+│   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
+│   ├── jid.go                  # phone <-> LID resolution helpers
+│   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
+│   ├── media.go                # inbound media download into store/<chat>/
+│   ├── rest.go                 # newRESTMux route table, health/ready, HTTP server
+│   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
+│   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
+│   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS
+│   ├── media_retention.go      # WHATSAPP_MEDIA_AUTODOWNLOAD / _RETENTION_DAYS, store size
 │   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
 │   ├── fts.go                  # FTS5 index over messages.content (needs -tags sqlite_fts5)
@@ -226,11 +238,12 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 | Change HTTP transport, auth, allowed hosts | `whatsapp-mcp-server/main.py` (`__main__`), `mcp_config.py`, `http_auth.py` |
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
 | Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
-| Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`main.go`), tests with fakes |
-| Change inbound event handling | `handleMessage` / `handleHistorySync` in `main.go` (moving to `events/`, #48) |
-| Change the messages schema | `ensureMessageStoreSchema` in `main.go`; migrations idempotent (`ensureColumn`); FTS in `fts.go` |
+| Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`), tests with fakes |
+| Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
+| Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`); FTS in `fts.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
 | Change build identity (`/api/version`, MCP `version`) | `whatsapp-bridge/version.go`, `ARG GIT_SHA/VERSION` in both Dockerfiles, compose build args |
+| Change startup / wiring (env parsing, pairing, shutdown) | `whatsapp-bridge/main.go` (keep it under ~400 lines; logic goes in a feature file) |
 | Change containers | `whatsapp-bridge/Dockerfile`, `whatsapp-mcp-server/Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md` |
 | Change CI | `.github/workflows/ci.yml`, `security.yml` |
 

@@ -853,7 +853,7 @@ dedicated `calls` table in `messages.db`. When a 1:1 call arrives
 inserted with `result='in_progress'`. Subsequent `CallAccept` /
 `CallReject` / `CallTerminate` events update the row — final result becomes
 `answered`, `rejected`, `missed`, or `ended` depending on the event
-sequence. See the state-machine comment above `StoreCallOffer` in `main.go`
+sequence. See the state-machine comment above `StoreCallOffer` in `store.go`
 for the exact transitions.
 
 ### Schema
