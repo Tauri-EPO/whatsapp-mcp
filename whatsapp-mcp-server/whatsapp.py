@@ -238,8 +238,11 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "chat_jid": message.chat_jid,
         "chat_name": message.chat_name,
         "media_type": message.media_type,
-        "filename": (message.filename or None) if message.media_type and message.media_type != "reaction" else None,
+        "filename": (message.filename or None)
+        if message.media_type and message.media_type not in ("reaction", "poll_vote")
+        else None,
         "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
+        "poll_message_id": (message.filename if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
     }
 
@@ -1384,6 +1387,31 @@ def get_group_members(group_jid: str) -> dict[str, Any]:
         payload.setdefault("members", [])
         for member in payload["members"]:
             member["display"] = member.get("name") or member.get("phone_number") or member.get("jid")
+        return payload
+    except requests.RequestException as exc:
+        return {"success": False, "message": f"Bridge request failed: {exc}"}
+
+
+def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
+    """Tally of a native WhatsApp poll seen by the bridge (question, options, votes)."""
+    message_id, chat_jid = (message_id or "").strip(), (chat_jid or "").strip()
+    if not message_id or not chat_jid:
+        return {"success": False, "message": "message_id and chat_jid are required"}
+    if denied := _policy_denied(chat_jid):
+        return {"success": False, "message": denied}
+    try:
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/poll",
+            params={"message_id": message_id, "chat_jid": chat_jid},
+            headers=_bridge_headers(),
+            timeout=30,
+        )
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+        if response.status_code != 200 or not payload.get("success"):
+            return {"success": False, "message": payload.get("message") or f"HTTP {response.status_code}"}
         return payload
     except requests.RequestException as exc:
         return {"success": False, "message": f"Bridge request failed: {exc}"}

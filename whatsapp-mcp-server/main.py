@@ -35,6 +35,9 @@ from whatsapp import (
     get_message_context as whatsapp_get_message_context,
 )
 from whatsapp import (
+    get_poll_results as whatsapp_get_poll_results,
+)
+from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
@@ -417,6 +420,24 @@ def list_group_members(group_jid: str) -> dict[str, Any]:
         group_jid: The group JID (e.g. "120363000000000001@g.us")
     """
     return whatsapp_get_group_members(group_jid)
+
+
+@mcp.tool()
+def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
+    """Get the current tally of a native WhatsApp poll.
+
+    Polls appear in list_messages as messages with media_type "poll" (content shows
+    the question and options); votes appear as media_type "poll_vote" rows whose
+    poll_message_id points at the poll. This tool returns the structured tally the
+    bridge keeps: question, selectable_count, per-option count and voters, every
+    voter's latest selection, and total_voters. Only votes received while the bridge
+    was running are counted.
+
+    Args:
+        message_id: ID of the poll message
+        chat_jid: JID of the chat containing the poll
+    """
+    return whatsapp_get_poll_results(message_id, chat_jid)
 
 
 @mcp.tool()
