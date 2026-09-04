@@ -23,6 +23,9 @@ from whatsapp import (
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
 )
 from whatsapp import (
+    get_group_members as whatsapp_get_group_members,
+)
+from whatsapp import (
     get_last_interaction as whatsapp_get_last_interaction,
 )
 from whatsapp import (
@@ -396,6 +399,21 @@ def send_reaction(
     """
     success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
     return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def list_group_members(group_jid: str) -> dict[str, Any]:
+    """List the participants of a WhatsApp group with names and admin flags.
+
+    Queries WhatsApp live through the bridge, so the bridge must be connected. Each
+    member has jid (address to use when mentioning or messaging them), phone_number
+    (when known), lid, name (from your contacts, when known), display, is_admin and
+    is_super_admin. Also returns the group's name, topic and owner.
+
+    Args:
+        group_jid: The group JID (e.g. "120363000000000001@g.us")
+    """
+    return whatsapp_get_group_members(group_jid)
 
 
 @mcp.tool()

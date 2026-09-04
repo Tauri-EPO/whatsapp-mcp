@@ -1359,6 +1359,36 @@ def send_reaction(
         return False, f"Unexpected error: {str(e)}"
 
 
+def get_group_members(group_jid: str) -> dict[str, Any]:
+    """List the participants of a group via the bridge (live query to WhatsApp).
+
+    Returns {"success": bool, "message": str, ...} with group metadata and a
+    "members" list of {jid, phone_number, lid, name, is_admin, is_super_admin}.
+    """
+    group_jid = (group_jid or "").strip()
+    if not group_jid.endswith("@g.us"):
+        return {"success": False, "message": f"Not a group JID: {group_jid!r} (expected ...@g.us)"}
+    if denied := _policy_denied(group_jid):
+        return {"success": False, "message": denied}
+    try:
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/group/members", params={"jid": group_jid}, headers=_bridge_headers(), timeout=30
+        )
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+        if response.status_code != 200 or not payload.get("success"):
+            message = payload.get("message") or f"HTTP {response.status_code}: {response.text[:200]}"
+            return {"success": False, "message": message}
+        payload.setdefault("members", [])
+        for member in payload["members"]:
+            member["display"] = member.get("name") or member.get("phone_number") or member.get("jid")
+        return payload
+    except requests.RequestException as exc:
+        return {"success": False, "message": f"Bridge request failed: {exc}"}
+
+
 def mark_messages_read(
     message_ids: list[str],
     chat_jid: str,
