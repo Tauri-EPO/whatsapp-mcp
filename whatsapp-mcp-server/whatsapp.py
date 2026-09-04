@@ -81,8 +81,44 @@ _UNSEGMENTED_SCRIPT_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u
 _FTS_TOKEN_RE = re.compile(r"\S+")
 
 
+# Schema probes (does chats.last_read_time exist? is messages_fts usable?) ran
+# on every call. The answer only changes when the bridge migrates the file, so
+# cache it per database path and invalidate when the file's mtime/size move.
+_schema_cache: dict[tuple[str, str], tuple[tuple[float, int], Any]] = {}
+_schema_cache_lock = threading.Lock()
+
+
+def _db_signature(path: str) -> tuple[float, int]:
+    try:
+        st = os.stat(path)
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return (0.0, 0)
+
+
+def _schema_memo(kind: str, path: str, compute):
+    sig = _db_signature(path)
+    with _schema_cache_lock:
+        hit = _schema_cache.get((kind, path))
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    value = compute()
+    with _schema_cache_lock:
+        _schema_cache[(kind, path)] = (sig, value)
+    return value
+
+
+def _reset_schema_cache() -> None:
+    with _schema_cache_lock:
+        _schema_cache.clear()
+
+
 def _fts_available(conn: sqlite3.Connection) -> bool:
-    """True when messages_fts exists and this SQLite build can read it."""
+    """True when messages_fts exists and this SQLite build can read it (memoised per file)."""
+    return _schema_memo("fts", MESSAGES_DB_PATH, lambda: _fts_available_uncached(conn))
+
+
+def _fts_available_uncached(conn: sqlite3.Connection) -> bool:
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (MESSAGES_FTS_TABLE,)
@@ -394,8 +430,12 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
     written by an older bridge doesn't have it yet. Reads must keep working
     against such a store — those chats simply report last_read_time = None.
     """
-    columns = {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()}
-    return f"{table_alias}.last_read_time" if "last_read_time" in columns else "NULL"
+    has_column = _schema_memo(
+        "chats.last_read_time",
+        MESSAGES_DB_PATH,
+        lambda: "last_read_time" in {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()},
+    )
+    return f"{table_alias}.last_read_time" if has_column else "NULL"
 
 
 def _last_message_join(chat_alias: str, msg_alias: str) -> str:
@@ -1292,8 +1332,19 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             conn.close()
 
 
+def _direct_chat_candidates(value: str) -> tuple[str, str, str]:
+    """Exact JID spellings for a contact: the input as given, phone JID, LID JID.
+
+    The old lookup used ``jid LIKE '%number%'`` with no ORDER BY: a full scan
+    that could return an unrelated chat whose JID merely contains the digits.
+    """
+    raw = (value or "").strip()
+    bare = raw.split("@", 1)[0].lstrip("+").replace(" ", "").replace("-", "")
+    return raw, f"{bare}@s.whatsapp.net", f"{bare}@lid"
+
+
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
-    """Get chat metadata by sender phone number."""
+    """Get chat metadata by sender phone number (exact match on the number's JID forms)."""
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
@@ -1311,10 +1362,11 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "m")}
-            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us' AND {policy_clause}
+            WHERE c.jid IN (?, ?, ?) AND {policy_clause}
+            ORDER BY CASE WHEN c.jid = ? THEN 0 WHEN c.jid LIKE '%@s.whatsapp.net' THEN 1 ELSE 2 END
             LIMIT 1
         """,
-            (f"%{sender_phone_number}%", *policy_params),
+            (*_direct_chat_candidates(sender_phone_number), sender_phone_number, *policy_params),
         )
 
         chat_data = cursor.fetchone()
