@@ -1,174 +1,237 @@
 # AGENTS.md
 
-Guidance for AI coding agents (Claude Code, Cursor, Codex, etc.) and for human contributors using them in this repository.
+Single source of truth for working in **Tauri-EPO/whatsapp-mcp** — for AI coding agents (Claude Code, Codex, Cursor…) and for humans using them. `CLAUDE.md` only points here.
 
-This file is the single source of truth for "how to contribute here". `CLAUDE.md` exists for tooling that looks for that filename and points to this file.
+Read top to bottom once; afterwards jump to the section you need.
 
-## Repository
+1. [What this repo is](#1-what-this-repo-is)
+2. [Fork policy: hard fork, upstream as an idea source](#2-fork-policy)
+3. [Architecture](#3-architecture)
+4. [The routine: from issue to merged PR](#4-the-routine-from-issue-to-merged-pr)
+5. [Local commands and tooling](#5-local-commands-and-tooling)
+6. [CI gates](#6-ci-gates)
+7. [Environment variables](#7-environment-variables)
+8. [Gotchas](#8-gotchas-read-before-editing)
+9. [Where to make changes](#9-where-to-make-changes)
+10. [Persona](#10-persona-for-ai-agents)
+11. [Issues](#11-issues)
 
-- **Repo:** [`Tauri-EPO/whatsapp-mcp`](https://github.com/Tauri-EPO/whatsapp-mcp), a soft fork of [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp) (remote `upstream`). Read "About this fork" in `README.md` first.
-- **Origin remote:** always `origin` (this fork). PRs, issues, and `gh` commands target this fork. Generic fixes may additionally be offered upstream.
-- **Default branch:** `main`. All PRs target `main`. `main` is the deployable state (Docker Compose on the home server); there are no releases here.
-- **Fork rules:**
-  - The fork comes first: dependency updates and features land here when they fit the deployment, even ahead of upstream. Dependabot PRs are merged once CI is green. On upstream sync, keep this fork's `pyproject.toml` pins and run `uv lock`.
-  - Keep generic changes upstream-shaped (no fork-only env names, stdio path untouched, tests included). Keep opinionated pieces in files upstream does not own: `docker-compose.yml`, Dockerfiles, `docs/DOCKER.md`, `transcribe.py`.
-  - whatsmeow only. Fail-safe network defaults (MCP port on loopback, `tailscale serve`, no Funnel without auth).
-- **Releases:** release-please is kept manual-only (`workflow_dispatch`). Still do **not** hand-edit `CHANGELOG.md` or version numbers; upstream owns those.
+---
 
-## Architecture (read first)
+## 1. What this repo is
 
-Two components, one repo:
+A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **Tailscale** by remote MCP clients (an AI bot on another machine, an IDE on a laptop), sharing one WhatsApp account. Two components: a Go bridge (whatsmeow) and a Python MCP server (MCP SDK v2, streamable HTTP or stdio). Deployed with Docker Compose. `README.md` → "About this fork" has the user-facing version of this story and a table of what differs from upstream.
+
+- **Repo:** https://github.com/Tauri-EPO/whatsapp-mcp — remote `origin`. All PRs, issues and `gh` commands target this repo.
+- **Default branch:** `main`. `main` is the deployable state; there are no releases or tags here.
+- **Lineage (for ideas, not for merging — see §2):**
+  - https://github.com/verygoodplugins/whatsapp-mcp — remote `upstream` (also `vgp`). Maintained fork we started from at v0.6.0 (Sept 2026).
+  - https://github.com/lharries/whatsapp-mcp — the original project (remote `lharries`; add with `git remote add lharries https://github.com/lharries/whatsapp-mcp.git` if missing).
+
+## 2. Fork policy
+
+**This is a hard fork.** Decided 2026-09-04: the fork is ahead of upstream (SDK v2, auth, allow-list, FTS5, polls, Docker…) and no longer merges `upstream/main`. Consequences:
+
+- **Dependencies move here first.** Dependabot stays on; its PRs are merged once CI is green. Never pin a dependency just because upstream did (`mcp<2` and `cryptography<49` were both dropped).
+- **Refactors are allowed.** The current plan is the "fork hardening" epic (issue #64). Keep each PR small (§4) even when the overall change is large.
+- **Upstream is a source of ideas and cherry-picks, never a merge target.** When asked to "look upstream", "get ideas from the original", "check what VGP/lharries did", do this:
+  1. `git fetch upstream lharries` and `git log --oneline main..upstream/main -- whatsapp-bridge/` (protocol/whatsmeow changes are the most valuable to harvest).
+  2. `gh pr list --repo verygoodplugins/whatsapp-mcp --state all --search "<topic>"` and the same on `lharries/whatsapp-mcp`; read the PR description first — it usually explains the WhatsApp behaviour better than the diff.
+  3. Reimplement the delta against our code (`git cherry-pick -x <sha>` only when the patch applies cleanly to files we have not diverged in). Credit the source in the commit body ("Reimplements upstream VGP #NNN"), as every PR in this repo has done so far.
+  4. Do not bring upstream's release-please, CHANGELOG or version bumps.
+- **whatsmeow protocol drift** is the one thing upstream will keep fixing before us. Routine in issue #63: monthly `go get go.mau.fi/whatsmeow@latest`, tests, image rebuild, one real send/receive on a test pairing.
+- `ROADMAP.md` is upstream's. Its "out of scope" list no longer binds this fork; use it only to understand why upstream will not take something.
+
+## 3. Architecture
 
 ```
 whatsapp-mcp/
-├── whatsapp-bridge/        # Go bridge — talks to WhatsApp Web via whatsmeow
-│   ├── main.go             # REST API + event loop
-│   ├── webhook.go          # Outgoing webhook for incoming messages
-│   ├── Dockerfile          # Bridge image (alpine, cgo sqlite)
-│   └── store/              # SQLite (whatsapp.db, messages.db) + media — gitignored
-├── whatsapp-mcp-server/    # Python MCP server — exposes tools to AI clients
-│   ├── main.py             # MCPServer (MCP SDK v2) tool definitions
-│   ├── whatsapp.py         # DB queries + bridge HTTP client
-│   ├── audio.py            # FFmpeg helpers
-│   └── Dockerfile          # MCP image (http transport by default)
-├── docker-compose.yml      # bridge + mcp for an always-on server — see docs/DOCKER.md
-└── .github/                # CI, release, security workflows
+├── whatsapp-bridge/            # Go — WhatsApp Web via whatsmeow, REST API, messages.db owner
+│   ├── main.go                 # startup, event loop, REST mux, MessageStore (being split: issue #48)
+│   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
+│   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
+│   ├── fts.go                  # FTS5 index over messages.content (needs -tags sqlite_fts5)
+│   ├── media_retry.go          # re-download expired CDN media via the sender's phone
+│   ├── instance_lock.go        # one bridge per store (flock / LockFileEx)
+│   ├── polls.go                # native polls: creation, votes, /api/poll
+│   ├── group_members.go        # /api/group/members
+│   ├── delete_message.go       # /api/delete (revoke / local delete)
+│   ├── history_ondemand.go     # POST /api/history
+│   ├── webhook.go              # outbound webhook for inbound messages
+│   ├── Dockerfile              # alpine, cgo sqlite, -tags sqlite_fts5
+│   └── store/                  # whatsapp.db, messages.db, media, .bridge-token, .bridge.lock (gitignored)
+├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
+│   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
+│   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
+│   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
+│   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
+│   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
+│   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
+│   ├── audio.py                # ffmpeg helpers
+│   └── Dockerfile              # python:3.11-slim + ffmpeg + uv, http transport
+├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
+├── docs/DOCKER.md              # pairing, Tailscale, tokens, health, backups
+└── .github/workflows/          # ci.yml, security.yml (release workflows are manual-only)
 ```
 
-Data flow: AI client → MCP server (Python) → reads SQLite directly **or** calls bridge REST (`http://localhost:8080/api/*` by default; configurable via `WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_PORT`) → bridge (Go) → WhatsApp Web.
+Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
 
-Two SQLite databases:
+Two SQLite databases: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `messages_fts`). The bridge owns the schema; the MCP server only reads.
 
-- `whatsapp.db` — owned by whatsmeow (sessions, contacts, LID map). Treat as opaque.
-- `messages.db` — owned by the bridge (chats, messages). Schema is ours.
+Compose topology: the `mcp` container joins the bridge's network namespace (`network_mode: service:bridge`), so the bridge keeps its loopback bind and loopback-only Host allow-list; the MCP port is published on the bridge service. An alternative topology is issue #58.
 
-## Scope rules
+## 4. The routine: from issue to merged PR
 
-Before writing code, check [`ROADMAP.md`](./ROADMAP.md). Anything in "out of scope" should be turned into a polite "won't ship" reply, not a PR.
+This is how every change in this repo has been shipped; follow it unless the user says otherwise.
 
-If unsure whether something is in scope, **open an issue first**. Do not open a PR larger than ~300 LOC without prior discussion.
+1. **Start from an issue.** Bugs and features have one. If none exists, open it (§11): one problem per issue, with a "Fix" sketch and acceptance boxes. The epic #64 lists the current plan.
+2. **Branch from current `main`:** `git fetch origin && git checkout -b <type>/<slug> origin/main`. Types: `fix`, `feat`, `perf`, `refactor`, `docs`, `ci`, `chore`, `test`.
+3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
+4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
+5. **Docs in the same PR.** New env var → this file §7, `README.md` config table, `.env.example`, and `docker-compose.yml` passthrough if containers need it. New tool → README "Tools" section + tool docstring (that docstring is what the model reads).
+6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test -tags sqlite_fts5`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and the curl smoke test in `docs/DOCKER.md`.
+7. **Commit message = the PR description.** Conventional-commit title; body says the problem, the fix, what was verified and `Closes #N`. Co-author trailer for agents.
+8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
+9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks.
+10. **After merge:** `git fetch origin`; rebase any open stacked branch; confirm the issue closed (`Closes #N` does it when the PR targets `main`).
+11. **Deploy** is a manual step on the server: `git pull && docker compose up -d --build`.
 
-## PR rules
+Rules that stay true across all steps:
 
-1. **One concern per PR.** A PR titled "feat: X and also fix Y and refactor Z" gets sent back. Split it.
-2. **Conventional commits in the title.** `feat:`, `fix:`, `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `perf:`. Use `!` (`feat!:`) or `BREAKING CHANGE:` in the body for breaking changes.
-3. **Reference an issue** for any `feat:` PR (`Closes #N`). Bug fixes don't strictly require an issue but are easier to review with one.
-4. **Update docs in the same PR.** README, `CLAUDE.md`/`AGENTS.md`, or inline tool descriptions if you changed user-visible behavior.
-5. **Tests.** Add or update tests for any code you touch in `whatsapp-mcp-server/`. The Go bridge has fewer tests today; matching the existing bar is fine, but don't *remove* coverage.
-6. **No drive-by formatting.** Don't reformat files you didn't otherwise change. Keep diffs reviewable.
-7. **No new top-level dependencies** without justification in the PR description.
-8. **Security-sensitive changes** (auth, file paths, network bind, command exec) get extra scrutiny — call them out in the PR body.
+- **Conventional commits** in titles: `feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `ci:`, `chore:`, `test:`. `!` for breaking changes.
+- **No drive-by formatting** and no unrelated cleanups in a PR.
+- **No new top-level dependencies** without a sentence of justification in the PR.
+- **Security-sensitive changes** (auth, file paths, network bind, command exec, allow-lists) must be called out in the PR body and get tests for the deny path.
+- **Never** hand-edit `CHANGELOG.md`, versions in `pyproject.toml`/`server.json`, or `.release-please-manifest.json`; they are upstream artefacts kept only so files stay comparable.
 
-## Local commands
+## 5. Local commands and tooling
 
 ```bash
-# Go bridge (-tags sqlite_fts5 compiles the FTS5 module for message search;
-# without it the bridge still runs and search falls back to a substring scan)
-cd whatsapp-bridge
-go run -tags sqlite_fts5 .                    # dev
-go build -tags sqlite_fts5 -o whatsapp-bridge && ./whatsapp-bridge   # release-ish
-golangci-lint run           # lint (build tag set in .golangci.yml)
-go test -tags sqlite_fts5 ./...               # tests
-
 # Python MCP server
 cd whatsapp-mcp-server
 uv sync --extra dev
-uv run main.py              # dev
-uv run pytest -v            # tests
-uv run ruff check .         # lint
-uv run ruff format .        # format
+uv run ruff format . && uv run ruff check .
+uv run pytest -q
+uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT=http for HTTP
+
+# Go bridge — -tags sqlite_fts5 compiles FTS5 in (search index); without it the bridge
+# still runs and search falls back to a substring scan
+cd whatsapp-bridge
+go run -tags sqlite_fts5 .
+go vet -tags sqlite_fts5 ./... && go test -tags sqlite_fts5 ./...
+golangci-lint run                                # build tag is set in .golangci.yml
 
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
 docker compose up -d --build
-docker compose logs -f bridge   # QR code on first run
+docker compose logs -f bridge                    # QR code on first run
+docker compose --profile whisper up -d           # + local whisper.cpp for transcribe_audio
 ```
 
-## CI gates
+**Windows without a Go toolchain** (the primary dev box): build, test and lint the bridge inside Docker, mounting the module cache. From Git Bash with `MSYS_NO_PATHCONV=1`:
 
-Every PR runs (see `.github/workflows/`). Not every job is blocking today:
+```bash
+docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
+  -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.25-alpine \
+  sh -c 'apk add --no-cache gcc musl-dev >/dev/null; go vet -tags sqlite_fts5 ./... && go test -tags sqlite_fts5 ./...'
+docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
+  -w /src golangci/golangci-lint:v2.7.1 golangci-lint run
+```
 
-**Blocking — must be green to merge:**
+Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `Dockerfile` are forced LF by `.gitattributes`. When editing files programmatically, read with universal newlines and write `\n`. Prefer writing whole files or line-anchored edits over shell heredocs containing backslash escapes.
 
-- `Python Lint` (`ruff check` + `ruff format --check`)
-- `Python Tests` (`pytest`)
-- `Go Lint` (`golangci-lint`)
-- `Go Build`
-- `Version Consistency` (Python pkg version vs `.release-please-manifest.json`)
-- `CodeQL Analysis (Python | Go)`
+## 6. CI gates
 
-**Informational — runs on every PR but won't fail the build today (`continue-on-error: true`):**
+Every PR runs `.github/workflows/ci.yml` and `security.yml`. All of these must be green before merging (the informational ones too: investigate, do not ignore):
 
-- `Bandit Security Scan`
-- `Python Dependency Audit` (`pip-audit`)
-- `Go Vulnerability Check` (`govulncheck`)
+| Job | What |
+|---|---|
+| Python Lint | `ruff check` + `ruff format --check` |
+| Python Tests | `pytest` |
+| Go Lint | golangci-lint v2.7.1 (`errcheck`, `govet`, `ineffassign`, `unused`; more in issue #53) |
+| Go Build | `go build -tags sqlite_fts5`, `go vet`, `go test` |
+| Version Consistency | `pyproject.toml` vs `server.json` (kept for file parity with upstream) |
+| CodeQL (Python, Go) | security scanning; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
+| Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
 
-A failing blocking job is a hard block — fix it or explain in the PR why it's unrelated. For informational scans, investigate findings and either fix them or note in the PR why they're acceptable.
+Missing today and tracked: Docker image build job (#52). Release workflows (`release.yml`, `release-please.yml`) are `workflow_dispatch` only and not used by this fork. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
-## Environment variables
+## 7. Environment variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | SQLite path used by the MCP server |
 | `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow SQLite (LID ↔ phone resolution via `whatsmeow_lid_map`) |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
-| `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
-| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to (loopback only) |
+| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls; also signed onto outbound webhooks |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
-| `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only (`store.DeviceProps.Os`); re-pair to change |
-| `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport to serve clients: `stdio`, `http`, or `sse` |
+| `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |
+| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)* | Conversation allow-list (JIDs, bare numbers, `*@g.us` / `*@s.whatsapp.net`). MCP server filters reads and refuses writes (`chat_policy.py`); bridge returns 403 on send/react/mark-read/typing/delete/group/poll (`chat_policy.go`). Set for both processes |
+| `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only | Extra `Host` header values accepted by the `http`/`sse` transports (comma-separated; bare hostnames match any port; `*` disables the check). Unset + non-loopback bind disables the check with a warning |
-| `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients (comma-separated) |
-| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)* | Conversation allow-list (JIDs, bare numbers, `*@g.us` / `*@s.whatsapp.net`). MCP server filters reads and refuses writes (`chat_policy.py`, `whatsapp.CHAT_POLICY`); bridge returns 403 on send/react/mark-read/typing (`chat_policy.go`). Set for both processes |
-| `WHATSAPP_MCP_TOKEN` | *(unset = no auth)* | Static bearer token enforced on the `http`/`sse` transports by `http_auth.BearerTokenMiddleware` (min 16 chars). Non-loopback bind without it logs a warning. stdio unaffected |
+| `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
+| `WHATSAPP_MCP_TOKEN` | *(unset = no auth)* | Static bearer token enforced on the `http`/`sse` transports (`http_auth.py`, min 16 chars). Mandatory before any Funnel exposure. stdio unaffected |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty falls back to this default) |
-| `WEBHOOK_ENABLED` | `true` | Set to `false` to disable outbound webhooks entirely |
-| `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded (`getEnvBool` default; set `FORWARD_SELF=false` to disable) |
-| `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds). Exits when the original parent is gone (POSIX reparent). Soft stdin EOF alone does not exit. |
-| `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint used by `transcribe_audio` (fork feature; `transcribe.py`). Wins over `WHISPER_BIN` |
-| `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend for `transcribe_audio` |
+| `WEBHOOK_ENABLED` | `true` (compose: `false`) | Set to `false` to disable outbound webhooks entirely |
+| `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded to the webhook |
+| `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds) |
+| `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`transcribe.py`). Wins over `WHISPER_BIN` |
+| `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
 
-When adding a new env var: document it here, in `README.md`, and in `.env.example`.
+Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`, `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `COMPOSE_PROFILES`) are documented in `.env.example` and `docs/DOCKER.md`.
 
-## Gotchas (read before editing)
+When adding a new env var: document it here, in `README.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it.
 
-1. **JIDs.** WhatsApp identifies users as `1234567890@s.whatsapp.net` (DM), `123456@g.us` (group), and `<random>@lid` (link-ID, anonymous). The bridge maintains a phone↔LID map in `whatsapp.db.whatsmeow_lid_map`. Many "user is missing" / "messages don't show" bugs trace back to JID-form mismatches. Always think about both forms.
-2. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Don't hand-construct these paths in client code; use the bridge's `/api/download` endpoint. CDN URLs expire (403/404/410 after a few days); `downloadMedia` then runs one media-retry round trip against the sender's phone (`media_retry.go`) before failing.
-3. **Audio.** WhatsApp voice messages must be Opus `.ogg`. The MCP server's `send_audio_message` tool auto-converts via FFmpeg if installed.
-4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more at pair time (see the `--full-history-pair` flag) or for a single chat at runtime (`POST /api/history`, see `history_ondemand.go`), but the phone has the final word.
-5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
-6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
-7. **Message search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; it creates them when built with `-tags sqlite_fts5` and *drops* them when the build lacks FTS5, so `messages` writes can never fail on a missing module. The MCP server uses `MATCH` only if the table exists (`_fts_available`) and falls back to `instr()` otherwise. Never create FTS triggers from the Python side.
-8. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`) before opening the session; a second bridge on the same store exits with a message naming the holder's PID. Tests that need a bridge process running concurrently must use separate working directories.
+## 8. Gotchas (read before editing)
 
-## Where to make changes
+1. **JIDs.** WhatsApp identifies users as `1234567890@s.whatsapp.net` (DM), `123456@g.us` (group), and `<random>@lid` (link-ID, anonymous). The bridge maintains a phone↔LID map in `whatsapp.db.whatsmeow_lid_map`. Many "user is missing" / "messages don't show" bugs trace back to JID-form mismatches. Always think about both forms (`resolveUserJID`, `resolveQuotedParticipantJID`, `resolveMentionJIDs`).
+2. **Message IDs are unique per chat, not globally.** The `messages` primary key is `(id, chat_jid)`. Always pass `chat_jid` alongside an ID; forwards reuse IDs across chats.
+3. **`messages.filename` is overloaded:** media filename, or the target message ID for `reaction` and `poll_vote` rows. Being replaced by `target_message_id` (issue #49); until then keep the `msg_to_dict` special cases in sync.
+4. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Use `/api/download`, never hand-built paths. CDN URLs expire (403/404/410 after days); `downloadMedia` runs one media-retry round trip against the sender's phone (`media_retry.go`) before failing.
+5. **Audio.** Voice notes must be Opus `.ogg`; `send_audio_message` converts via ffmpeg. `transcribe_audio` converts to 16 kHz WAV before whisper.
+6. **History sync** is controlled by the phone. Modern syncs put the group sender in top-level `WebMessageInfo.participant`; read it before `Key.participant`. Poll votes in history cannot be decrypted (issue #59).
+7. **`messages.db` is the source of truth for reads.** The MCP server must never need the bridge for read-only tools. The bridge opens the DB in WAL mode with a busy timeout; the MCP side uses a 5 s timeout via `_connect_messages_db()`.
+8. **Search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; it creates them when built with `-tags sqlite_fts5` and *drops* them otherwise so writes never fail. The MCP server uses `MATCH` only when the table exists and falls back to `instr()`. Never create FTS triggers from Python.
+9. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`); a second bridge exits naming the holder's PID. Tests that need concurrent bridge processes must use separate working directories.
+10. **Package-level globals in the bridge** (`outboundChatPolicy`, `pollVoteDecrypt`, `webhookAuthToken`, …) are set in `main()`; tests swap them with `t.Cleanup`. Do not add new ones; issue #47 replaces them with a `Bridge` struct.
+11. **stdout is the protocol on stdio.** Anything the MCP server prints to stdout can corrupt a stdio session; log to stderr (issue #43 removes the remaining `print()` calls).
+12. **The REST server starts only after pairing**, so `/api/health` and the container healthcheck are unhealthy during the first-run QR window. Split in issue #55.
+13. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 
-| You want to… | Touch this file |
+## 9. Where to make changes
+
+| You want to… | Touch |
 |---|---|
-| Change how the containers are built or wired | `whatsapp-bridge/Dockerfile`, `whatsapp-mcp-server/Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md` |
-| Add or modify an MCP tool | `whatsapp-mcp-server/main.py` |
-| Change voice-note transcription (whisper backends) | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
-| Change DB queries / data conversion | `whatsapp-mcp-server/whatsapp.py` |
-| Change bridge REST API or event handling | `whatsapp-bridge/main.go` |
+| Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ README "Tools", tests) |
+| Change DB queries / dict conversion | `whatsapp-mcp-server/whatsapp.py` |
+| Change HTTP transport, auth, allowed hosts | `whatsapp-mcp-server/main.py` (`__main__`), `mcp_config.py`, `http_auth.py` |
+| Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
+| Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
+| Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`main.go`), tests with fakes |
+| Change inbound event handling | `handleMessage` / `handleHistorySync` in `main.go` (moving to `events/`, #48) |
+| Change the messages schema | `ensureMessageStoreSchema` in `main.go`; migrations idempotent (`ensureColumn`); FTS in `fts.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
-| Change CI behavior | `.github/workflows/*.yml` |
-| Change release behavior | `release-please-config.json`, `.release-please-manifest.json` |
+| Change containers | `whatsapp-bridge/Dockerfile`, `whatsapp-mcp-server/Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md` |
+| Change CI | `.github/workflows/ci.yml`, `security.yml` |
 
-## Persona for AI agents working in this repo
+## 10. Persona for AI agents
 
 - **Be terse.** Don't restate the question.
-- **Be decisive.** Pick the smallest change that fixes the problem.
+- **Be decisive.** Pick the smallest change that fixes the problem and ship it through §4.
 - **Bias to action** for low-risk improvements (lint, tests, error messages, comments that explain *why*).
-- **Ask** before architectural changes, dependency additions, or anything in `ROADMAP.md`'s "out of scope".
+- **Ask** before changing the compose topology, adding a dependency, or loosening auth semantics.
 - **Cite files with `path:line`** when discussing code.
-- **Never** edit `CHANGELOG.md`, version constants in `pyproject.toml`/`go.mod`, or `.release-please-manifest.json` directly.
+- **Report honestly.** If a test could not run (needs a paired phone, network), say so in the PR instead of implying coverage.
 
-## Reporting bugs / requesting features
+## 11. Issues
 
-- Bugs: use the **Bug report** issue template. Include bridge + MCP server versions, OS, exact reproduction.
-- Features: use the **Feature request** template. State the problem, not the solution. Confirm it fits `ROADMAP.md`.
+- One problem per issue. Title prefixed with priority (`P0:`, `P1:`, `P2:`); body with **Problem**, **Fix** (sketch sized for one PR) and **Acceptance** checkboxes. Labels: priority + `area:*` (+ `type:refactor`, `type:security`, `bug`, `documentation`, `upstream` when it mirrors an upstream item).
+- Larger efforts get an `epic` issue holding the checklist (current one: #64).
+- Bugs from operation: include bridge log lines, `docker compose ps`, the tool call and its result; redact phone numbers.
+- "Won't do" is a valid outcome; close with a sentence explaining why.
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the human-facing contribution guide.
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the human-facing contribution guide and [`docs/DOCKER.md`](./docs/DOCKER.md) for operations.
