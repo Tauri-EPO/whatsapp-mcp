@@ -82,6 +82,23 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 4. **Restart Claude Desktop**
 
+### Docker Compose (always-on server)
+
+To run both components as containers on a home server or VPS and expose the MCP
+server over streamable HTTP:
+
+```bash
+cp .env.example .env            # optional: WHATSAPP_MCP_ALLOWED_HOSTS, token, webhook
+docker compose up -d --build
+docker compose logs -f bridge   # scan the QR code on first run
+```
+
+The MCP endpoint is published on `127.0.0.1:8000/mcp`; front it with
+`tailscale serve` or an authenticating reverse proxy. Session, `messages.db`,
+media and the bridge token live in the `whatsapp-store` volume. Pairing,
+Tailscale setup, health semantics and backups are covered in
+[`docs/DOCKER.md`](docs/DOCKER.md).
+
 ### Updating
 
 Pull the latest changes, then refresh whichever components moved:
@@ -757,6 +774,9 @@ go build -o whatsapp-bridge
 
 # During development (avoids stale binaries)
 go run .
+
+# Container images (see docs/DOCKER.md)
+docker compose build
 ```
 
 ### Releasing (Maintainers)

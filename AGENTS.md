@@ -20,11 +20,14 @@ whatsapp-mcp/
 ├── whatsapp-bridge/        # Go bridge — talks to WhatsApp Web via whatsmeow
 │   ├── main.go             # REST API + event loop
 │   ├── webhook.go          # Outgoing webhook for incoming messages
+│   ├── Dockerfile          # Bridge image (alpine, cgo sqlite)
 │   └── store/              # SQLite (whatsapp.db, messages.db) + media — gitignored
 ├── whatsapp-mcp-server/    # Python MCP server — exposes tools to AI clients
 │   ├── main.py             # FastMCP tool definitions
 │   ├── whatsapp.py         # DB queries + bridge HTTP client
-│   └── audio.py            # FFmpeg helpers
+│   ├── audio.py            # FFmpeg helpers
+│   └── Dockerfile          # MCP image (http transport by default)
+├── docker-compose.yml      # bridge + mcp for an always-on server — see docs/DOCKER.md
 └── .github/                # CI, release, security workflows
 ```
 
@@ -69,6 +72,10 @@ uv run main.py              # dev
 uv run pytest -v            # tests
 uv run ruff check .         # lint
 uv run ruff format .        # format
+
+# Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
+docker compose up -d --build
+docker compose logs -f bridge   # QR code on first run
 ```
 
 ## CI gates
@@ -126,6 +133,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 
 | You want to… | Touch this file |
 |---|---|
+| Change how the containers are built or wired | `whatsapp-bridge/Dockerfile`, `whatsapp-mcp-server/Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md` |
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` |
 | Change DB queries / data conversion | `whatsapp-mcp-server/whatsapp.py` |
 | Change bridge REST API or event handling | `whatsapp-bridge/main.go` |
