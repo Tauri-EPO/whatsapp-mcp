@@ -53,12 +53,47 @@ services:
       WHATSAPP_MCP_ALLOWED_HOSTS: ${WHATSAPP_MCP_ALLOWED_HOSTS:-}
       WHATSAPP_MCP_ALLOWED_ORIGINS: ${WHATSAPP_MCP_ALLOWED_ORIGINS:-}
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
+      # Voice-note transcription (transcribe_audio tool). With the `whisper`
+      # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
+      WHISPER_URL: ${WHISPER_URL:-}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
     volumes:
       - whatsapp-store:/app/store
       # Same path as in the bridge so send_file(media_path=/app/outbox/x) works.
       - ${WHATSAPP_OUTBOX:-./outbox}:/app/outbox
 
+  # Optional: local whisper.cpp server for the transcribe_audio tool.
+  #   docker compose --profile whisper up -d
+  # Downloads the ggml model on first start into the whisper-models volume and
+  # serves it on 127.0.0.1:8178 inside the shared network namespace (CPU only).
+  whisper:
+    profiles: ["whisper"]
+    image: ghcr.io/ggml-org/whisper.cpp:main
+    restart: unless-stopped
+    network_mode: "service:bridge"
+    depends_on:
+      - bridge
+    environment:
+      # tiny | base | small | medium | large-v3 | large-v3-turbo (+ ".en" variants, "-q5_1" quantised...)
+      WHISPER_MODEL_NAME: ${WHISPER_MODEL_NAME:-small}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+    volumes:
+      - whisper-models:/models
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        model="/models/ggml-$${WHISPER_MODEL_NAME}.bin"
+        if [ ! -f "$$model" ]; then
+          echo "Downloading whisper model $${WHISPER_MODEL_NAME} to /models ..."
+          /app/models/download-ggml-model.sh "$${WHISPER_MODEL_NAME}" /models
+        fi
+        exec /app/build/bin/whisper-server -m "$$model" -l "$${WHISPER_LANGUAGE}" -t "$${WHISPER_THREADS}" --host 127.0.0.1 --port 8178 --inference-path /inference
+
 volumes:
   # WhatsApp session, messages.db, downloaded media and .bridge-token.
   # Back this up; losing it means re-pairing and losing local history.
   whatsapp-store:
+  # ggml whisper models (whisper profile only).
+  whisper-models:

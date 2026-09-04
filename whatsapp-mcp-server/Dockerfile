@@ -25,7 +25,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-COPY main.py whatsapp.py audio.py mcp_config.py parent_watchdog.py ./
+COPY *.py ./
 RUN mkdir -p /app/store /app/outbox && chown -R app:app /app
 
 USER app

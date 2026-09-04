@@ -303,6 +303,25 @@ Send a voice message (automatically converts to Opus .ogg format).
 Converted audio is sent through the same media-path confinement as
 `send_file`.
 
+#### `transcribe_audio`
+
+Transcribe a voice note (or any audio file) to text with local
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp). Nothing leaves the
+machine; there is no cloud fallback.
+
+**Parameters:**
+
+- `message_id` + `chat_jid`: the audio message (downloaded via the bridge first), **or**
+- `file_path`: absolute path of an audio file already on disk
+- `language` (optional): ISO-639-1 code, default `WHISPER_LANGUAGE` (`pt`); `auto` to detect
+
+Requires a whisper backend, configured with either `WHISPER_URL` (a running
+whisper.cpp `whisper-server`, see the `whisper` profile in
+[`docs/DOCKER.md`](docs/DOCKER.md)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
+`whisper-cli` binary and a `ggml-*.bin` model). Audio is normalised to 16 kHz WAV
+with ffmpeg before transcription. Returns `text`, `language`, `backend` and the
+local `file_path`.
+
 #### `download_media`
 
 Download media from a received message.
@@ -430,6 +449,10 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
+| `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
+| `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
+| `WHISPER_LANGUAGE`     | `pt`                                     | Default transcription language (`auto` to detect) |
+| `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
 
 ### MCP transport (stdio vs http/sse)
 

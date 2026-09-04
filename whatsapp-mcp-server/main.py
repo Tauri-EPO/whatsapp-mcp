@@ -7,6 +7,8 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
+from transcribe import TranscriptionError, transcribe_file
+from transcribe import load_config as load_whisper_config
 from whatsapp import (
     download_media as whatsapp_download_media,
 )
@@ -468,6 +470,44 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
     else:
         return {"success": False, "message": "Failed to download media"}
+
+
+@mcp.tool()
+def transcribe_audio(
+    message_id: str = "",
+    chat_jid: str = "",
+    file_path: str = "",
+    language: str = "",
+) -> dict[str, Any]:
+    """Transcribe a WhatsApp voice note (or any audio file) to text with local whisper.cpp.
+
+    Pass either message_id + chat_jid (the audio is downloaded via the bridge first)
+    or an absolute file_path that is already on disk. Requires a whisper backend
+    configured through WHISPER_URL (whisper.cpp server) or WHISPER_BIN + WHISPER_MODEL;
+    nothing is sent to a cloud API.
+
+    Args:
+        message_id: ID of the audio/voice message to transcribe
+        chat_jid: JID of the chat containing the message
+        file_path: Alternative to message_id/chat_jid: path of an audio file on disk
+        language: ISO-639-1 language code (default WHISPER_LANGUAGE, "pt"); "auto" to detect
+
+    Returns:
+        A dictionary with success, text, language, backend and file_path (or an error message)
+    """
+    if not file_path:
+        if not message_id or not chat_jid:
+            return {"success": False, "message": "Provide message_id and chat_jid, or file_path"}
+        file_path = whatsapp_download_media(message_id, chat_jid)
+        if not file_path:
+            return {"success": False, "message": "Failed to download media for transcription"}
+    try:
+        result = transcribe_file(file_path, language=language or None, config=load_whisper_config())
+    except FileNotFoundError as exc:
+        return {"success": False, "message": str(exc), "file_path": file_path}
+    except TranscriptionError as exc:
+        return {"success": False, "message": str(exc), "file_path": file_path}
+    return {"success": True, "file_path": file_path, **result}
 
 
 def shutdown_handler(signum, frame):

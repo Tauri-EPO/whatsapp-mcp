@@ -113,6 +113,34 @@ If a client outside your tailnet genuinely needs access, put an authenticating
 reverse proxy between Funnel and the container, and keep
 `WHATSAPP_MCP_ALLOWED_HOSTS` set to the public hostname.
 
+## Voice-note transcription (optional `whisper` profile)
+
+The MCP server ships a `transcribe_audio` tool backed by
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp), fully local. The
+`whisper` profile runs the official `ghcr.io/ggml-org/whisper.cpp` image as a
+`whisper-server` next to the bridge and MCP containers (same network
+namespace), downloading the chosen ggml model into the `whisper-models` volume
+on first start:
+
+```dotenv
+# .env
+WHISPER_URL=http://127.0.0.1:8178/inference
+WHISPER_MODEL_NAME=small     # tiny | base | small | medium | large-v3-turbo ...
+WHISPER_LANGUAGE=pt          # default language for transcripts; "auto" to detect
+```
+
+```bash
+docker compose --profile whisper up -d
+docker compose logs -f whisper      # first start: model download progress
+```
+
+`small` (~470 MB) is a good CPU default for Portuguese voice notes;
+`medium`/`large-v3-turbo` are more accurate and several times slower. The
+server is CPU-only in this image; set `WHISPER_THREADS` to the cores you can
+spare. Without the profile (or without `WHISPER_URL`), `transcribe_audio`
+returns a clear "no whisper backend configured" error and everything else
+works as before.
+
 ## Health and operations
 
 - `bridge` is healthy only while the WhatsApp connection is up (`GET
