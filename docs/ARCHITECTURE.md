@@ -71,7 +71,7 @@ sequenceDiagram
     participant WA as WhatsApp
 
     User->>Claude: "Send 'Hello' to Mom"
-    Claude->>MCP: send_message(recipient, message)
+    Claude->>MCP: send_message(chat_jid, message)
     MCP->>Bridge: POST /api/send
     Bridge->>WA: Send via WebSocket
     WA-->>Bridge: Delivery confirmation

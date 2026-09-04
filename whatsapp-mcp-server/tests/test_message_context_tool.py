@@ -43,7 +43,7 @@ def test_get_message_context_serializes_dataclass(monkeypatch):
         ),
     )
 
-    result = main.get_message_context("target", before=1, after=1)
+    result = main.get_message_context("chat@s.whatsapp.net", "target", before=1, after=1)
 
     assert result["message"]["id"] == "target"
     assert result["before"][0]["id"] == "before"

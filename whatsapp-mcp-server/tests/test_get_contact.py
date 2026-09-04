@@ -76,13 +76,3 @@ def test_get_contact_unresolved_falls_back_to_jid_user(monkeypatch):
     assert result["is_lid"] is True
     assert result["resolved"] is False
     assert result["name"] == "184125298348272"
-
-
-def test_get_contact_backward_compatible_phone_number_param(monkeypatch):
-    monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: {"name": "John Doe"})
-    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
-
-    result = mcp_main.get_contact(phone_number="12025551234")
-
-    assert result["jid"] == "12025551234@s.whatsapp.net"
-    assert result["name"] == "John Doe"
