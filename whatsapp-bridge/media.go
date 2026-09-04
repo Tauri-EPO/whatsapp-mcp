@@ -5,13 +5,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"go.mau.fi/whatsmeow"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"go.mau.fi/whatsmeow"
 )
 
 // DownloadMediaRequest represents the request body for the download media API
@@ -243,4 +244,66 @@ func extractDirectPathFromURL(url string) string {
 	// whatsmeow's Download rebuilds the URL as host + directPath + "&hash=..."
 	// and the CDN returns 403 if the auth params are missing.
 	return "/" + parts[1]
+}
+
+// handleDownload serves POST /api/download.
+func (b *Bridge) handleDownload() http.HandlerFunc {
+	client := b.Client
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Check if connected
+		if !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(DownloadMediaResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+
+		// Parse the request body
+		var req DownloadMediaRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request format")
+			return
+		}
+
+		// Validate request
+		if req.MessageID == "" || req.ChatJID == "" {
+			writeError(w, http.StatusBadRequest, "Message ID and Chat JID are required")
+			return
+		}
+
+		// Log download request for debugging
+		bridgeLog.Debugf("📥 Download request: message_id=%s chat_jid=%s", req.MessageID, req.ChatJID)
+
+		// Download the media
+		success, mediaType, filename, path, err := b.DownloadMedia(req.MessageID, req.ChatJID)
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Handle download result
+		if !success || err != nil {
+			errMsg := "Unknown error"
+			if err != nil {
+				errMsg = err.Error()
+			}
+
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(DownloadMediaResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to download media: %s", errMsg),
+			})
+			return
+		}
+
+		// Send successful response
+		_ = json.NewEncoder(w).Encode(DownloadMediaResponse{
+			Success:  true,
+			Message:  fmt.Sprintf("Successfully downloaded %s media", mediaType),
+			Filename: filename,
+			Path:     path,
+		})
+	}
 }

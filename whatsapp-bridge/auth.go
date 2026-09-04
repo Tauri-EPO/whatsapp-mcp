@@ -118,12 +118,12 @@ func withAuth(token string, allowedHosts hostAllowList, h http.HandlerFunc) http
 		if !allowedHosts.allows(r.Host) {
 			// 403 — request reached us with a Host we don't recognise.
 			// Likely a DNS-rebinding attempt or misconfigured proxy.
-			http.Error(w, "Forbidden: host not allowed", http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "Forbidden: host not allowed")
 			return
 		}
 		if !checkBearerToken(r.Header.Get("Authorization"), token) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="whatsapp-bridge"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 		h(w, r)

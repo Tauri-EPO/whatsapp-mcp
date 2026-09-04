@@ -9,19 +9,20 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	"math"
-	"math/rand"
-	"mime"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
+	"math"
+	"math/rand"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 // SendMessageResponse represents the response for the send message API
@@ -601,4 +602,76 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// handleSend serves POST /api/send.
+func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		bridgeLog.Debugf("→ /api/send from=%q user_agent=%q", r.RemoteAddr, r.UserAgent())
+
+		// Parse the request body
+		var req SendMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request format")
+			return
+		}
+
+		// Validate request
+		if req.Recipient == "" {
+			writeError(w, http.StatusBadRequest, "Recipient is required")
+			return
+		}
+		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
+			return
+		}
+
+		if req.Message == "" && req.MediaPath == "" {
+			writeError(w, http.StatusBadRequest, "Message or media path is required")
+			return
+		}
+
+		// Validate and canonicalize media_path against the configured roots
+		// before reading. This prevents the bridge from being used as a
+		// generic file-read primitive (e.g. media_path=/Users/x/.ssh/id_rsa).
+		// Only the canonical path ever reaches sendWhatsAppMessage; the raw
+		// request value is never used as a file path.
+		resolvedMediaPath := ""
+		if req.MediaPath != "" {
+			canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
+			if mpErr != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(SendMessageResponse{
+					Success: false,
+					Message: fmt.Sprintf("media_path rejected: %v", mpErr),
+				})
+				return
+			}
+			resolvedMediaPath = canonical
+		}
+
+		// Avoid logging req.Message verbatim — it's user content and may
+		// contain secrets the user pasted into a chat.
+		bridgeLog.Debugf("→ /api/send recipient=%q message_len=%d has_media=%v",
+			req.Recipient, len(req.Message), resolvedMediaPath != "")
+
+		// Send the message
+		success, message, sent := b.Send(req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
+		bridgeLog.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		resp := SendMessageResponse{Success: success, Message: message}
+		if success {
+			resp.MessageID, resp.ChatJID = sent.ID, sent.ChatJID
+			resp.Timestamp = sent.Timestamp.UTC().Format(time.RFC3339)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}
 }

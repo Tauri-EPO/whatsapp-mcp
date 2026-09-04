@@ -131,7 +131,7 @@ func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe
 func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, messageStore *MessageStore) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
 
@@ -139,11 +139,11 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 
 		var req HistoryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "Invalid request format")
 			return
 		}
 		if req.ChatJID == "" {
-			http.Error(w, "chat_jid is required", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "chat_jid is required")
 			return
 		}
 		count := clampHistoryCount(req.Count)
