@@ -131,6 +131,30 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 - "Message the team group saying 'Meeting at 3pm'"
 - "Reply to that message saying 'Sounds good'"
 
+### `manage_group_participants`
+
+Add, remove, promote or demote members of a group you administer. Outbound; `remove` is irreversible.
+
+**Parameters:** `chat_jid` (group JID), `action` (`add` | `remove` | `promote` | `demote`), `participants` (phone numbers with country code or user JIDs). Returns the affected participants with their admin flags.
+
+### `update_group`
+
+Rename a group and/or set its description (admin only). **Parameters:** `chat_jid`, `name` (optional), `description` (optional; empty string clears).
+
+### `get_group_invite_link`
+
+The group's invite link (admin only). **Parameters:** `chat_jid`, `reset` (optional, default false: revoke the old link and mint a new one). Returns `link`.
+
+### `leave_group`
+
+Leave a group. Irreversible without a new invite; the local archive keeps the history. **Parameters:** `chat_jid`.
+
+### `send_typing`
+
+Show the "typing…" indicator (`is_typing=true`, default) or clear it. WhatsApp clears it on its own after a few seconds or when a message is sent. **Parameters:** `chat_jid`, `is_typing` (optional).
+
+All five honour `WHATSAPP_ALLOWED_CHATS` in the MCP server and again in the bridge (403).
+
 ### `get_poll_results`
 
 Tally of a native WhatsApp poll.

@@ -26,10 +26,10 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | | |
 | --- | --- |
 | **Read** | list chats, list and page through messages, unread summary across chats, full-text search across everything, message context around a hit, contacts by name or number |
-| **Write** | send text, reply with quote, mention people, react, mark as read, delete for everyone or locally |
+| **Write** | send text, reply with quote, mention people, react, mark as read, show "typing", delete for everyone or locally |
 | **Media** | send files and voice notes (auto-converted to Opus), download images/video/audio/documents, recover expired attachments by asking the sender's phone |
 | **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language) |
-| **Groups and polls** | group members, native poll results with every voter's choice |
+| **Groups and polls** | group members, add/remove/promote members, rename, invite link, leave, native poll results with every voter's choice |
 | **Memory** | deleted messages keep their content, view-once media is archived without consuming the phone's view, calls are logged |
 | **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result |
 
