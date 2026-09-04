@@ -25,7 +25,7 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 
 | | |
 | --- | --- |
-| **Read** | list chats, list and page through messages, unread only, full-text search across everything, message context around a hit, contacts by name or number |
+| **Read** | list chats, list and page through messages, unread summary across chats, full-text search across everything, message context around a hit, contacts by name or number |
 | **Write** | send text, reply with quote, mention people, react, mark as read, delete for everyone or locally |
 | **Media** | send files and voice notes (auto-converted to Opus), download images/video/audio/documents, recover expired attachments by asking the sender's phone |
 | **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language) |
