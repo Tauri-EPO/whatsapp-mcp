@@ -1,4 +1,7 @@
+import pytest
+
 import whatsapp
+from errors import ToolError
 
 
 class DummyResponse:
@@ -68,8 +71,8 @@ def test_send_file_missing_file_does_not_call_bridge(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **kw: calls.append(1))
 
-    success, message = whatsapp.send_file("12025551234@s.whatsapp.net", str(tmp_path / "absent.pdf"), "hi")
+    with pytest.raises(ToolError, match="not found") as exc:
+        whatsapp.send_file("12025551234@s.whatsapp.net", str(tmp_path / "absent.pdf"), "hi")
 
-    assert success is False
-    assert "not found" in message
+    assert exc.value.code == "not_found"
     assert calls == []

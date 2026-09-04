@@ -2,6 +2,7 @@ import pytest
 
 import whatsapp
 from chat_policy import ChatPolicy
+from errors import ToolError
 
 GROUP = "120363000000000001@g.us"
 
@@ -55,26 +56,30 @@ def test_get_group_members_happy_path(monkeypatch):
 
 def test_get_group_members_rejects_non_group(monkeypatch):
     monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: pytest.fail("bridge called"))
-    result = whatsapp.get_group_members("5511999999999@s.whatsapp.net")
-    assert result["success"] is False and "Not a group JID" in result["message"]
+    with pytest.raises(ToolError, match="Not a group JID") as exc:
+        whatsapp.get_group_members("5511999999999@s.whatsapp.net")
+    assert exc.value.code == "invalid_argument"
 
 
 def test_get_group_members_respects_policy(monkeypatch):
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
     monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: pytest.fail("bridge called"))
-    result = whatsapp.get_group_members(GROUP)
-    assert result["success"] is False and "WHATSAPP_ALLOWED_CHATS" in result["message"]
+    with pytest.raises(ToolError, match="WHATSAPP_ALLOWED_CHATS") as exc:
+        whatsapp.get_group_members(GROUP)
+    assert exc.value.code == "denied"
 
 
 def test_get_group_members_bridge_error(monkeypatch):
     monkeypatch.setattr(
         whatsapp.requests, "get", lambda *a, **k: Resp(502, {"success": False, "message": "not connected"})
     )
-    result = whatsapp.get_group_members(GROUP)
-    assert result == {"success": False, "message": "not connected"}
+    with pytest.raises(ToolError, match="not connected") as exc:
+        whatsapp.get_group_members(GROUP)
+    assert exc.value.code == "bridge_unavailable"
 
 
 def test_get_group_members_non_json_error(monkeypatch):
     monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: Resp(500, None, "boom"))
-    result = whatsapp.get_group_members(GROUP)
-    assert result["success"] is False and "HTTP 500" in result["message"]
+    with pytest.raises(ToolError, match="boom") as exc:
+        whatsapp.get_group_members(GROUP)
+    assert exc.value.code == "bridge_unavailable"

@@ -6,6 +6,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from errors import ToolError, tool_errors
 from http_auth import (
     BearerTokenMiddleware,
     RateLimitMiddleware,
@@ -87,6 +88,7 @@ mcp = MCPServer("whatsapp", version=MCP_VERSION)
 
 
 @mcp.tool()
+@tool_errors
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
 
@@ -98,6 +100,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+@tool_errors
 def get_contact(identifier: str) -> dict[str, Any]:
     """Look up a WhatsApp contact by phone number, LID, or full JID.
 
@@ -208,6 +211,7 @@ def _cap_context(limit: int, include_context: bool, before: int, after: int) -> 
 
 
 @mcp.tool()
+@tool_errors
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -280,6 +284,7 @@ def list_messages(
 
 
 @mcp.tool()
+@tool_errors
 def list_chats(
     query: str | None = None,
     limit: int = 50,
@@ -312,6 +317,7 @@ def list_chats(
 
 
 @mcp.tool()
+@tool_errors
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
 
@@ -323,10 +329,13 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary — same shape as list_chats, including last_read_time and unread.
     """
     chat = whatsapp_get_chat(chat_jid, include_last_message)
+    if chat is None:
+        raise ToolError("not_found", f"No chat {chat_jid} in the archive")
     return chat
 
 
 @mcp.tool()
+@tool_errors
 def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
 
@@ -335,10 +344,13 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
                      or JID ("12025551234@s.whatsapp.net")
     """
     chat = whatsapp_get_direct_chat_by_contact(contact_jid)
+    if chat is None:
+        raise ToolError("not_found", f"No direct chat with {contact_jid} in the archive")
     return chat
 
 
 @mcp.tool()
+@tool_errors
 def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
 
@@ -352,6 +364,7 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0) -> list[
 
 
 @mcp.tool()
+@tool_errors
 def get_last_interaction(contact_jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
@@ -362,10 +375,13 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
         Message dictionary with id, timestamp, sender, content, etc. or empty dict if not found.
     """
     message = whatsapp_get_last_interaction(contact_jid)
-    return message if message else {}
+    if not message:
+        raise ToolError("not_found", f"No messages exchanged with {contact_jid}")
+    return message
 
 
 @mcp.tool()
+@tool_errors
 def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
@@ -388,6 +404,7 @@ def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: 
 
 
 @mcp.tool()
+@tool_errors
 def send_message(
     chat_jid: str,
     message: str,
@@ -419,7 +436,7 @@ def send_message(
     """
     # Validate input
     if not chat_jid:
-        return {"success": False, "message": "chat_jid must be provided"}
+        raise ToolError("invalid_argument", "chat_jid must be provided")
 
     success, status_message = whatsapp_send_message(
         chat_jid, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
@@ -428,6 +445,7 @@ def send_message(
 
 
 @mcp.tool()
+@tool_errors
 def send_reaction(
     chat_jid: str,
     message_id: str,
@@ -454,6 +472,7 @@ def send_reaction(
 
 
 @mcp.tool()
+@tool_errors
 def list_group_members(chat_jid: str) -> dict[str, Any]:
     """List the participants of a WhatsApp group with names and admin flags.
 
@@ -469,6 +488,7 @@ def list_group_members(chat_jid: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@tool_errors
 def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Get the current tally of a native WhatsApp poll.
 
@@ -490,6 +510,7 @@ def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@tool_errors
 def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -> dict[str, Any]:
     """Delete a WhatsApp message: revoke it for everyone, or only forget it locally.
 
@@ -512,6 +533,7 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
 
 
 @mcp.tool()
+@tool_errors
 def mark_messages_read(
     chat_jid: str,
     message_ids: list[str],
@@ -539,6 +561,7 @@ def mark_messages_read(
 
 
 @mcp.tool()
+@tool_errors
 def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
@@ -563,6 +586,7 @@ def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, An
 
 
 @mcp.tool()
+@tool_errors
 def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
     """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
 
@@ -579,6 +603,7 @@ def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@tool_errors
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
@@ -593,11 +618,11 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
 
     if file_path:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
-    else:
-        return {"success": False, "message": "Failed to download media"}
+    raise ToolError("internal", "Bridge reported success without a file path")
 
 
 @mcp.tool()
+@tool_errors
 def transcribe_audio(
     chat_jid: str = "",
     message_id: str = "",
@@ -622,16 +647,16 @@ def transcribe_audio(
     """
     if not file_path:
         if not message_id or not chat_jid:
-            return {"success": False, "message": "Provide message_id and chat_jid, or file_path"}
+            raise ToolError("invalid_argument", "Provide chat_jid and message_id, or file_path")
         file_path = whatsapp_download_media(message_id, chat_jid)
         if not file_path:
-            return {"success": False, "message": "Failed to download media for transcription"}
+            raise ToolError("internal", "Failed to download media for transcription")
     try:
         result = transcribe_file(file_path, language=language or None, config=load_whisper_config())
     except FileNotFoundError as exc:
-        return {"success": False, "message": str(exc), "file_path": file_path}
+        raise ToolError("not_found", str(exc), file_path=file_path) from exc
     except TranscriptionError as exc:
-        return {"success": False, "message": str(exc), "file_path": file_path}
+        raise ToolError("internal", str(exc), file_path=file_path) from exc
     return {"success": True, "file_path": file_path, **result}
 
 

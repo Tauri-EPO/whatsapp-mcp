@@ -14,6 +14,7 @@ import requests
 
 import audio
 from chat_policy import load_chat_policy
+from errors import ToolError
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
 # transport stdout is the MCP protocol channel and stray output breaks it.
@@ -214,10 +215,12 @@ def _bridge_request(method: str, path: str, *, timeout: float | None = None, **k
             return fn(url, **kwargs)
         except (requests.ConnectionError, requests.exceptions.ConnectTimeout) as exc:
             if attempt >= BRIDGE_CONNECT_RETRIES:
-                raise
+                raise ToolError("bridge_unavailable", f"bridge unreachable at {WHATSAPP_API_BASE_URL}: {exc}") from exc
             delay = BRIDGE_RETRY_BACKOFF_S * (2**attempt)
             logger.warning("Bridge unreachable (%s), retrying in %.1fs: %s", path, delay, exc)
             time.sleep(delay)
+        except requests.RequestException as exc:
+            raise ToolError("bridge_unavailable", f"bridge request failed ({path}): {exc}") from exc
     raise AssertionError("unreachable")
 
 
@@ -927,7 +930,7 @@ def list_messages(
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
-        return []
+        raise ToolError("internal", f"database error: {e}") from e
     finally:
         if "conn" in locals():
             conn.close()
@@ -957,10 +960,10 @@ def get_message_context(
 
         if not msg_data:
             where = f" in chat {chat_jid}" if chat_jid else ""
-            raise ValueError(f"Message with ID {message_id}{where} not found")
+            raise ToolError("not_found", f"Message with ID {message_id}{where} not found")
         target_message = _row_to_message(msg_data)
         if denied := _policy_denied(target_message.chat_jid):
-            raise ValueError(denied)
+            raise ToolError("denied", denied)
         deleted_filter = "" if include_deleted else "AND messages.deleted_at IS NULL"
 
         # Get messages before
@@ -1089,7 +1092,7 @@ def list_chats(
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
-        return []
+        raise ToolError("internal", f"database error: {e}") from e
     finally:
         if "conn" in locals():
             conn.close()
@@ -1226,7 +1229,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
-        return []
+        raise ToolError("internal", f"database error: {e}") from e
     finally:
         if "conn" in locals():
             conn.close()
@@ -1263,13 +1266,14 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         msg_data = cursor.fetchone()
 
         if not msg_data:
+            _require_allowed(jid)
             return None
 
         return msg_to_dict(_row_to_message(msg_data))
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
-        return None
+        raise ToolError("internal", f"database error: {e}") from e
     finally:
         if "conn" in locals():
             conn.close()
@@ -1282,8 +1286,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary or None if not found
     """
     try:
-        if not CHAT_POLICY.allows(chat_jid):
-            return None
+        _require_allowed(chat_jid)
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
@@ -1326,7 +1329,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
-        return None
+        raise ToolError("internal", f"database error: {e}") from e
     finally:
         if "conn" in locals():
             conn.close()
@@ -1372,6 +1375,8 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         chat_data = cursor.fetchone()
 
         if not chat_data:
+            for candidate in _direct_chat_candidates(sender_phone_number):
+                _require_allowed(candidate)
             return None
 
         chat = Chat(
@@ -1387,10 +1392,55 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
-        return None
+        raise ToolError("internal", f"database error: {e}") from e
     finally:
         if "conn" in locals():
             conn.close()
+
+
+def _bridge_error_code(status: int) -> str:
+    """Map a bridge HTTP status to an error code."""
+    if status == 400:
+        return "invalid_argument"
+    if status == 403:
+        return "denied"
+    if status == 404:
+        return "not_found"
+    if status == 401:
+        return "internal"  # our own token was rejected: configuration, not the caller's fault
+    if status >= 500:
+        return "bridge_unavailable"
+    return "internal"
+
+
+def _bridge_json(response) -> dict[str, Any]:
+    """Decode a bridge response; raise ToolError for HTTP or application failures.
+
+    The bridge answers 200 + {"success": true, ...} on success, 200 +
+    {"success": false, "message"} or {"ok": false, "error"} for application
+    failures, and 4xx/5xx (JSON or plain text) otherwise.
+    """
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    message = payload.get("message") or payload.get("error") or (getattr(response, "text", "") or "").strip()[:300]
+    if response.status_code != 200:
+        raise ToolError(
+            _bridge_error_code(response.status_code), message or f"bridge answered HTTP {response.status_code}"
+        )
+    if "success" in payload and not payload.get("success"):
+        raise ToolError("internal", message or "bridge reported failure")
+    if "ok" in payload and not payload.get("ok"):
+        raise ToolError("internal", message or "bridge reported failure")
+    return payload
+
+
+def _require_allowed(jid: str | None) -> None:
+    if denied := _policy_denied(jid):
+        raise ToolError("denied", denied)
 
 
 def send_message(
@@ -1401,39 +1451,19 @@ def send_message(
     quoted_content: str = "",
     mentions: list[str] | None = None,
 ) -> tuple[bool, str]:
-    if denied := _policy_denied(recipient):
-        return False, denied
-    try:
-        # Validate input
-        if not recipient:
-            return False, "Recipient must be provided"
-
-        payload: dict[str, Any] = {
-            "recipient": recipient,
-            "message": message,
-        }
-        if quoted_message_id:
-            payload["quoted_message_id"] = quoted_message_id
-            payload["quoted_sender_jid"] = quoted_sender_jid
-            payload["quoted_content"] = quoted_content
-        if mentions:
-            payload["mentions"] = mentions
-
-        response = _bridge_request("POST", "/send", json=payload)
-
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+    """Send a text message. Returns (True, status) or raises ToolError."""
+    if not recipient:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    _require_allowed(recipient)
+    payload: dict[str, Any] = {"recipient": recipient, "message": message}
+    if quoted_message_id:
+        payload["quoted_message_id"] = quoted_message_id
+        payload["quoted_sender_jid"] = quoted_sender_jid
+        payload["quoted_content"] = quoted_content
+    if mentions:
+        payload["mentions"] = mentions
+    result = _bridge_json(_bridge_request("POST", "/send", json=payload))
+    return True, result.get("message", "Message sent")
 
 
 def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
@@ -1443,77 +1473,36 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
     passing both in one /api/send call produces a single attachment-with-caption
     message instead of two separate messages.
     """
-    if denied := _policy_denied(recipient):
-        return False, denied
-    try:
-        # Validate input
-        if not recipient:
-            return False, "Recipient must be provided"
-
-        if not media_path:
-            return False, "Media path must be provided"
-
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-
-        payload = {"recipient": recipient, "media_path": media_path}
-        if caption:
-            payload["message"] = caption
-
-        response = _bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S)
-
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+    if not recipient:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    if not media_path:
+        raise ToolError("invalid_argument", "media_path must be provided")
+    _require_allowed(recipient)
+    if not os.path.isfile(media_path):
+        raise ToolError("not_found", f"Media file not found: {media_path}")
+    payload = {"recipient": recipient, "media_path": media_path}
+    if caption:
+        payload["message"] = caption
+    result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    return True, result.get("message", "File sent")
 
 
 def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
-    if denied := _policy_denied(recipient):
-        return False, denied
-    try:
-        # Validate input
-        if not recipient:
-            return False, "Recipient must be provided"
-
-        if not media_path:
-            return False, "Media path must be provided"
-
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-
-        if not media_path.endswith(".ogg"):
-            try:
-                media_path = audio.convert_to_opus_ogg_temp(media_path)
-            except Exception as e:
-                return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
-
-        payload = {"recipient": recipient, "media_path": media_path}
-
-        response = _bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S)
-
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+    if not recipient:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    if not media_path:
+        raise ToolError("invalid_argument", "media_path must be provided")
+    _require_allowed(recipient)
+    if not os.path.isfile(media_path):
+        raise ToolError("not_found", f"Media file not found: {media_path}")
+    if not media_path.endswith(".ogg"):
+        try:
+            media_path = audio.convert_to_opus_ogg_temp(media_path)
+        except Exception as e:
+            raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
+    payload = {"recipient": recipient, "media_path": media_path}
+    result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    return True, result.get("message", "Audio sent")
 
 
 def send_reaction(
@@ -1534,111 +1523,64 @@ def send_reaction(
                     when from_me is False so the bridge can build the correct key).
 
     Returns:
-        Tuple of (success, status_message).
+        (True, status) or raises ToolError.
     """
-    if denied := _policy_denied(recipient):
-        return False, denied
-    try:
-        if not recipient:
-            return False, "Recipient must be provided"
-        if not message_id:
-            return False, "Message ID must be provided"
-
-        payload: dict[str, Any] = {
-            "recipient": recipient,
-            "message_id": message_id,
-            "emoji": emoji,
-            "from_me": from_me,
-            "sender_jid": sender_jid,
-        }
-
-        response = _bridge_request("POST", "/react", json=payload)
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("ok"):
-                return True, "Reaction sent"
-            return False, result.get("error", "Unknown error")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+    if not recipient:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    if not message_id:
+        raise ToolError("invalid_argument", "message_id must be provided")
+    _require_allowed(recipient)
+    payload: dict[str, Any] = {
+        "recipient": recipient,
+        "message_id": message_id,
+        "emoji": emoji,
+        "from_me": from_me,
+        "sender_jid": sender_jid,
+    }
+    _bridge_json(_bridge_request("POST", "/react", json=payload))
+    return True, "Reaction sent" if emoji else "Reaction removed"
 
 
 def get_group_members(group_jid: str) -> dict[str, Any]:
     """List the participants of a group via the bridge (live query to WhatsApp).
 
-    Returns {"success": bool, "message": str, ...} with group metadata and a
-    "members" list of {jid, phone_number, lid, name, is_admin, is_super_admin}.
+    Returns {"success": true, ...} with group metadata and a "members" list of
+    {jid, phone_number, lid, name, is_admin, is_super_admin}; raises ToolError.
     """
     group_jid = (group_jid or "").strip()
     if not group_jid.endswith("@g.us"):
-        return {"success": False, "message": f"Not a group JID: {group_jid!r} (expected ...@g.us)"}
-    if denied := _policy_denied(group_jid):
-        return {"success": False, "message": denied}
-    try:
-        response = _bridge_request("GET", "/group/members", params={"jid": group_jid})
-        try:
-            payload = response.json()
-        except (json.JSONDecodeError, ValueError):
-            payload = {}
-        if response.status_code != 200 or not payload.get("success"):
-            message = payload.get("message") or f"HTTP {response.status_code}: {response.text[:200]}"
-            return {"success": False, "message": message}
-        payload.setdefault("members", [])
-        for member in payload["members"]:
-            member["display"] = member.get("name") or member.get("phone_number") or member.get("jid")
-        return payload
-    except requests.RequestException as exc:
-        return {"success": False, "message": f"Bridge request failed: {exc}"}
+        raise ToolError("invalid_argument", f"Not a group JID: {group_jid!r} (expected ...@g.us)")
+    _require_allowed(group_jid)
+    payload = _bridge_json(_bridge_request("GET", "/group/members", params={"jid": group_jid}))
+    payload.setdefault("members", [])
+    for member in payload["members"]:
+        member["display"] = member.get("name") or member.get("phone_number") or member.get("jid")
+    return payload
 
 
 def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Tally of a native WhatsApp poll seen by the bridge (question, options, votes)."""
     message_id, chat_jid = (message_id or "").strip(), (chat_jid or "").strip()
     if not message_id or not chat_jid:
-        return {"success": False, "message": "message_id and chat_jid are required"}
-    if denied := _policy_denied(chat_jid):
-        return {"success": False, "message": denied}
-    try:
-        response = _bridge_request("GET", "/poll", params={"message_id": message_id, "chat_jid": chat_jid})
-        try:
-            payload = response.json()
-        except (json.JSONDecodeError, ValueError):
-            payload = {}
-        if response.status_code != 200 or not payload.get("success"):
-            return {"success": False, "message": payload.get("message") or f"HTTP {response.status_code}"}
-        return payload
-    except requests.RequestException as exc:
-        return {"success": False, "message": f"Bridge request failed: {exc}"}
+        raise ToolError("invalid_argument", "chat_jid and message_id are required")
+    _require_allowed(chat_jid)
+    return _bridge_json(_bridge_request("GET", "/poll", params={"message_id": message_id, "chat_jid": chat_jid}))
 
 
 def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -> tuple[bool, str]:
     """Revoke a sent message for everyone, or remove it from the local archive only."""
     chat_jid, message_id = (chat_jid or "").strip(), (message_id or "").strip()
     if not chat_jid or not message_id:
-        return False, "chat_jid and message_id are required"
-    if denied := _policy_denied(chat_jid):
-        return False, denied
-    try:
-        response = _bridge_request(
+        raise ToolError("invalid_argument", "chat_jid and message_id are required")
+    _require_allowed(chat_jid)
+    payload = _bridge_json(
+        _bridge_request(
             "POST",
             "/delete",
             json={"chat_jid": chat_jid, "message_id": message_id, "for_everyone": bool(for_everyone)},
         )
-        try:
-            payload = response.json()
-        except (json.JSONDecodeError, ValueError):
-            payload = {}
-        message = payload.get("message") or f"HTTP {response.status_code}: {response.text[:200]}"
-        return bool(payload.get("success")) and response.status_code == 200, message
-    except requests.RequestException as exc:
-        return False, f"Bridge request failed: {exc}"
+    )
+    return True, payload.get("message") or "Deleted"
 
 
 def mark_messages_read(
@@ -1648,78 +1590,34 @@ def mark_messages_read(
     timestamp: str | None = None,
 ) -> tuple[bool, str]:
     """Mark selected messages as read through the WhatsApp bridge."""
-    if denied := _policy_denied(chat_jid):
-        return False, denied
-    try:
-        normalized_ids = [message_id.strip() for message_id in message_ids]
-        if not normalized_ids or any(not message_id for message_id in normalized_ids):
-            return False, "At least one non-empty message ID must be provided"
-        if not chat_jid:
-            return False, "Chat JID must be provided"
-        if chat_jid.endswith("@g.us") and not sender_jid:
-            return False, "Sender JID must be provided for group read receipts"
-
-        payload: dict[str, Any] = {
-            "message_ids": normalized_ids,
-            "chat_jid": chat_jid,
-        }
-        if sender_jid:
-            payload["sender_jid"] = sender_jid
-        if timestamp:
-            payload["timestamp"] = timestamp
-
-        response = _bridge_request("POST", "/mark-read", json=payload)
-
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        return False, f"Error: HTTP {response.status_code} - {response.text}"
-
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+    normalized_ids = [message_id.strip() for message_id in (message_ids or [])]
+    if not normalized_ids or any(not message_id for message_id in normalized_ids):
+        raise ToolError("invalid_argument", "At least one non-empty message ID must be provided")
+    if not chat_jid:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    _require_allowed(chat_jid)
+    if chat_jid.endswith("@g.us") and not sender_jid:
+        raise ToolError("invalid_argument", "sender_jid must be provided for group read receipts")
+    payload: dict[str, Any] = {"message_ids": normalized_ids, "chat_jid": chat_jid}
+    if sender_jid:
+        payload["sender_jid"] = sender_jid
+    if timestamp:
+        payload["timestamp"] = timestamp
+    result = _bridge_json(_bridge_request("POST", "/mark-read", json=payload))
+    return True, result.get("message", "Marked as read")
 
 
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 
-    Args:
-        message_id: The ID of the message containing the media
-        chat_jid: The JID of the chat containing the message
-
-    Returns:
-        The local file path if download was successful, None otherwise
+    Raises ToolError when the chat is denied, the bridge is unreachable or the
+    bridge reports a failure; returns None only when the bridge answered
+    success without a path.
     """
-    if denied := _policy_denied(chat_jid):
-        logger.warning("Download refused: %s", denied)
-        return None
-    try:
-        payload = {"message_id": message_id, "chat_jid": chat_jid}
-
-        response = _bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S)
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success", False):
-                path = result.get("path")
-                logger.info("Media downloaded successfully: %s", path)
-                return path
-            else:
-                logger.warning("Download failed: %s", result.get("message", "Unknown error"))
-                return None
-        else:
-            logger.warning("Download error: HTTP %s - %s", response.status_code, response.text)
-            return None
-
-    except requests.RequestException as e:
-        logger.error("Request error: %s", e)
-        return None
-    except json.JSONDecodeError:
-        logger.error("Error parsing response: %s", response.text)
-        return None
-    except Exception as e:
-        logger.exception("Unexpected error during download: %s", e)
-        return None
+    _require_allowed(chat_jid)
+    payload = {"message_id": message_id, "chat_jid": chat_jid}
+    result = _bridge_json(_bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    path = result.get("path")
+    if path:
+        logger.info("Media downloaded successfully: %s", path)
+    return path

@@ -2,6 +2,7 @@ import pytest
 
 import whatsapp
 from chat_policy import ChatPolicy
+from errors import ToolError
 
 CHAT = "5511888888888@s.whatsapp.net"
 
@@ -55,17 +56,21 @@ def test_delete_message_bridge_refusal_is_surfaced(monkeypatch):
             403, {"success": False, "message": "Only messages sent by this account can be deleted for everyone"}
         ),
     )
-    ok, msg = whatsapp.delete_message(CHAT, "theirs", for_everyone=True)
-    assert ok is False and "Only messages sent by this account" in msg
+    with pytest.raises(ToolError) as exc:
+        whatsapp.delete_message(CHAT, "theirs", for_everyone=True)
+    assert exc.value.code == "denied" and "Only messages sent by this account" in exc.value.message
 
 
 def test_delete_message_validation_and_policy(monkeypatch):
     monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge called"))
-    assert whatsapp.delete_message("", "m1")[0] is False
-    assert whatsapp.delete_message(CHAT, "  ")[0] is False
+    for chat, mid in (("", "m1"), (CHAT, "  ")):
+        with pytest.raises(ToolError) as exc:
+            whatsapp.delete_message(chat, mid)
+        assert exc.value.code == "invalid_argument"
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
-    ok, msg = whatsapp.delete_message(CHAT, "m1")
-    assert ok is False and "WHATSAPP_ALLOWED_CHATS" in msg
+    with pytest.raises(ToolError, match="WHATSAPP_ALLOWED_CHATS") as exc:
+        whatsapp.delete_message(CHAT, "m1")
+    assert exc.value.code == "denied"
 
 
 def test_delete_message_tool_shape(monkeypatch):
