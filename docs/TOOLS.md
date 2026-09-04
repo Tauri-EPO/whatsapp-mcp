@@ -101,8 +101,10 @@ your own account's archive; treat it accordingly.
 
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
-`<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers). Pass the
-message `id` and `chat_jid` to `download_media` to fetch the file.
+`<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers), `bytes`
+(the size WhatsApp reported) and `sha256` (the content hash, identical for the
+same file forwarded into several chats). Pass the message `id` and `chat_jid`
+to `download_media` to fetch the file; see `list_media` for an inventory.
 
 **Natural Language Examples:**
 
@@ -327,6 +329,50 @@ the **sender's phone** to re-upload the file via WhatsApp's media-retry protocol
 downloads it from the refreshed path, and persists that path for next time. The
 sender's phone must be online; the bridge waits up to 30 seconds before giving
 up with a clear error. Media the phone no longer has cannot be recovered.
+
+### `list_media`
+
+Inventory of the media the archive knows about, read-only. Rows with
+`media_type` image, video, audio, document or sticker; reactions, poll votes
+and text never appear.
+
+**Parameters:**
+
+- `chat_jid` (optional): one chat; default every allowed chat
+- `media_type` (optional): `image` | `video` | `audio` | `document` | `sticker`
+- `after` / `before` (optional): ISO-8601 bounds
+- `min_bytes` (optional): only files at least this large
+- `sort` (optional): `size` (largest first, default), `date` (newest first) or `copies` (most forwarded first)
+- `limit` (default 50, max 200), `page`, `cursor`: pagination as in every list tool
+
+Each item carries `message_id`, `chat_jid`, `chat_name`, `sender_jid`,
+`is_from_me`, `timestamp`, `media_type`, `filename`, `bytes` (reported by
+WhatsApp), `sha256` (hex content hash; `null` for rows without one), `cached`
+(the file is on disk under the store right now), `cached_bytes` / `cached_file`
+(actual size and name on disk), `copies` (rows sharing the hash across allowed
+chats), `copies_in` (distinct chats) and `deleted_at`. A `cached: false` entry
+is still one `download_media` call away, expired CDN links included.
+
+**Natural Language Examples:**
+
+- "What are the ten largest files in the family group?"
+- "Which attachments were forwarded into the most chats this month?"
+- "List the documents from Ana that are not cached locally"
+
+### `get_media_stats`
+
+Totals per chat and per media type so the agent knows where the bytes are.
+
+**Parameters:**
+
+- `chat_jid` (optional): one chat; default every allowed chat
+
+Returns `total` (`files`, `bytes`, `cached_files`, `cached_bytes`,
+`duplicate_groups`, `duplicate_bytes`: what the copies beyond the first of each
+hash add up to), `by_chat` (with `distinct_files`, `cached_files`,
+`cached_bytes` from the directory on disk) and `by_type`. `bridge_status()`
+shows the same cache from the operator's side (`store_bytes`, `media_bytes`,
+`media_files`).
 
 ## Chat Operations
 

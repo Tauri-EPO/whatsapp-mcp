@@ -38,7 +38,7 @@ Repository = "https://github.com/Tauri-EPO/whatsapp-mcp"
 Issues = "https://github.com/Tauri-EPO/whatsapp-mcp/issues"
 
 [tool.setuptools]
-py-modules = ["main", "whatsapp", "audio", "mcp_config", "parent_watchdog", "transcribe", "http_auth", "chat_policy", "errors", "observability"]
+py-modules = ["main", "whatsapp", "audio", "mcp_config", "parent_watchdog", "transcribe", "http_auth", "chat_policy", "errors", "observability", "media_inventory"]
 
 [tool.mcp]
 name = "io.github.tauri-epo/whatsapp-mcp"
