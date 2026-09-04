@@ -56,3 +56,6 @@ htmlcov/
 
 # Docker Compose outbox bind mount (local files handed to send_file)
 /outbox/
+
+# scripts/backup.sh default destination (contains session keys and tokens)
+backups/

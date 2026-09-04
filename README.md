@@ -142,7 +142,7 @@ Everything is an environment variable in `.env`. The ones that matter on day one
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | Cap disk use on a small server; files are re-fetched on demand |
 | `WHATSAPP_LOG_LEVEL` | `INFO` by default. `DEBUG` echoes message content into the logs |
 
-The complete reference (every variable, transports, auth semantics, history backfill, CLI flags) is [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Container operations (pairing, health, updates, backups, split topologies) are [docs/DOCKER.md](docs/DOCKER.md).
+The complete reference (every variable, transports, auth semantics, history backfill, CLI flags) is [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Container operations (pairing, health, updates, hot backups with `scripts/backup.sh`, split topologies) are [docs/DOCKER.md](docs/DOCKER.md).
 
 ## How it works
 
