@@ -3539,11 +3539,19 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					switch {
 					case isFromMe && client.Store.ID != nil:
 						rawSender = client.Store.ID.ToNonAD()
-					case msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "":
-						if parsed, perr := types.ParseJID(*msg.Message.Key.Participant); perr == nil {
+					case msg.Message.GetParticipant() != "" || msg.Message.Key.GetParticipant() != "":
+						// Modern history syncs carry the group sender in the top-level
+						// WebMessageInfo.participant, older ones in Key.participant;
+						// whatsmeow's ParseWebMessage checks them in this order too.
+						// Without this every group message was attributed to the group JID.
+						participant := msg.Message.GetParticipant()
+						if participant == "" {
+							participant = msg.Message.Key.GetParticipant()
+						}
+						if parsed, perr := types.ParseJID(participant); perr == nil {
 							rawSender = parsed
 						} else {
-							rawSender = types.JID{User: *msg.Message.Key.Participant}
+							rawSender = types.JID{User: participant}
 						}
 					default:
 						rawSender = jid
