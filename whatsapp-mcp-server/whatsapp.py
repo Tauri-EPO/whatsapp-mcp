@@ -699,38 +699,6 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
             conn.close()
 
 
-def format_message(message: Message, show_chat_info: bool = True) -> None:
-    """Print a single message with consistent formatting."""
-    output = ""
-
-    if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
-    else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-
-    content_prefix = ""
-    if hasattr(message, "media_type") and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-
-    try:
-        sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
-    except Exception as e:
-        logger.warning("Error formatting message: %s", e)
-    return output
-
-
-def format_messages_list(messages: list[Message], show_chat_info: bool = True) -> None:
-    output = ""
-    if not messages:
-        output += "No messages to display."
-        return output
-
-    for message in messages:
-        output += format_message(message, show_chat_info)
-    return output
-
-
 # SQLite's default parameter limit is 999 on older builds; 3 params per hit.
 _CONTEXT_HITS_PER_QUERY = 200
 
@@ -1375,11 +1343,11 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                 FROM messages contact_msg
                 WHERE contact_msg.chat_jid = c.jid
                     AND contact_msg.sender IN ({placeholders})
-            ) OR c.jid = ?) AND {policy_clause} {keyset_clause}
+            ) OR c.jid IN ({placeholders})) AND {policy_clause} {keyset_clause}
             ORDER BY c.last_message_time DESC, c.jid ASC
             LIMIT ? OFFSET ?
         """,
-            (*aliases, jid, *policy_params, *keyset_params, limit + 1, offset),
+            (*aliases, *aliases, *policy_params, *keyset_params, limit + 1, offset),
         )
 
         chats = cursor.fetchall()

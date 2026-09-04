@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 import whatsapp
-from tests.test_sender_name_cache import MESSAGES_SCHEMA
+from tests.conftest import MESSAGES_SCHEMA
 
 
 @pytest.fixture
