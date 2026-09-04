@@ -74,6 +74,30 @@ def test_metrics_endpoint_and_status_counting():
     assert sent[0]["status"] == 405 and sent[1]["body"] == b""
 
 
+def test_metrics_token_gates_the_endpoint_only():
+    reg = Metrics()
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    app = MetricsMiddleware(inner, reg, token="s3cret-metrics-token")
+    # Other paths are untouched by the metrics token.
+    assert _run(app, {"type": "http", "method": "POST", "path": "/mcp", "headers": []})[0]["status"] == 200
+    sent = _run(app, {"type": "http", "method": "GET", "path": "/metrics", "headers": []})
+    assert sent[0]["status"] == 401 and sent[1]["body"] == b""
+    assert dict(sent[0]["headers"])[b"www-authenticate"].startswith(b"Bearer")
+    wrong = [(b"authorization", b"Bearer nope")]
+    assert _run(app, {"type": "http", "method": "GET", "path": "/metrics", "headers": wrong})[0]["status"] == 401
+    good = [(b"Authorization", b"bearer s3cret-metrics-token")]
+    sent = _run(app, {"type": "http", "method": "GET", "path": "/metrics", "headers": good})
+    assert sent[0]["status"] == 200 and b"whatsapp_mcp_http_requests_total" in sent[1]["body"]
+    # 401s on /metrics itself are not counted as MCP traffic.
+    assert reg.http_requests == {"2xx": 1}
+    # Blank token means open, as before.
+    assert MetricsMiddleware(inner, reg, token="  ").token is None
+
+
 def test_metrics_toggle_and_app_wiring(monkeypatch):
     assert metrics_enabled(None) and metrics_enabled("1") and not metrics_enabled("off") and not metrics_enabled("0")
 
@@ -86,7 +110,10 @@ def test_metrics_toggle_and_app_wiring(monkeypatch):
             return app
 
     monkeypatch.delenv("WHATSAPP_MCP_METRICS", raising=False)
+    monkeypatch.delenv("WHATSAPP_MCP_METRICS_TOKEN", raising=False)
     app = main.build_http_app(FakeServer(), "http", None)
-    assert isinstance(app, MetricsMiddleware)
+    assert isinstance(app, MetricsMiddleware) and app.token is None
+    monkeypatch.setenv("WHATSAPP_MCP_METRICS_TOKEN", "scrape-me")
+    assert main.build_http_app(FakeServer(), "http", None).token == "scrape-me"
     monkeypatch.setenv("WHATSAPP_MCP_METRICS", "off")
     assert not isinstance(main.build_http_app(FakeServer(), "http", None), MetricsMiddleware)

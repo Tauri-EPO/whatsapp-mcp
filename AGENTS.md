@@ -203,6 +203,7 @@ There are no release workflows. Dependabot auto-merge was removed; merge its PRs
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO` | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text` | `json` switches the MCP server stderr log to one JSON object per line (`observability.py`) |
 | `WHATSAPP_MCP_METRICS` | `true` | Serve `GET /metrics` on the `http`/`sse` transports (tool calls/errors/seconds per tool, HTTP requests by status class); `false` disables it |
+| `WHATSAPP_MCP_METRICS_TOKEN` | *(unset = open)* | Bearer token required on the MCP `/metrics` only (401 otherwise); set it when the MCP port is reachable beyond the tailnet (Funnel). Independent of `WHATSAPP_MCP_TOKEN` |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |

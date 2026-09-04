@@ -31,6 +31,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO`                                 | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text`                                | `json` writes MCP server log lines as JSON objects (`ts`, `level`, `logger`, `msg`) |
 | `WHATSAPP_MCP_METRICS` | `true`                                   | `GET /metrics` on the `http`/`sse` transports: tool calls, errors by code and seconds per tool, HTTP requests by status class; `false` disables it |
+| `WHATSAPP_MCP_METRICS_TOKEN` | *(unset = open)*                   | Bearer token required on the MCP `/metrics` (401 without it). Use it when the port is exposed beyond the tailnet, e.g. Tailscale Funnel; Prometheus reads it from `bearer_token_file` |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |

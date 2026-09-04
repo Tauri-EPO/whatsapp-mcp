@@ -142,7 +142,12 @@ access, the minimum bar is:
    shows it), or set your own `WHATSAPP_MCP_TOKEN` (e.g. `openssl rand -hex 32`).
    Every request then needs `Authorization: Bearer <token>`; anything else gets `401`.
 2. Keep `WHATSAPP_MCP_ALLOWED_HOSTS` set to the public hostname.
-3. `sudo tailscale funnel --bg --https=443 http://127.0.0.1:8000`
+3. Decide about `/metrics`: it is served on the same port without the MCP
+   token (counts only, never content, see Health and operations). On Funnel that
+   means the internet can read tool-call counts. Either set
+   `WHATSAPP_MCP_METRICS_TOKEN` (Prometheus: `bearer_token_file`) or
+   `WHATSAPP_MCP_METRICS=false`.
+4. `sudo tailscale funnel --bg --https=443 http://127.0.0.1:8000`
 
 Then configure the remote client with the URL and the bearer header. Rotate the
 token by changing `.env` and `docker compose up -d mcp`. An authenticating
@@ -216,7 +221,9 @@ works as before.
         - targets: ["home-server:8080"]   # only if the bridge port is published
   ```
 
-  `WHATSAPP_METRICS=false` / `WHATSAPP_MCP_METRICS=false` remove the endpoints.
+  `WHATSAPP_METRICS=false` / `WHATSAPP_MCP_METRICS=false` remove the endpoints;
+  `WHATSAPP_MCP_METRICS_TOKEN` puts a bearer token in front of the MCP one
+  (needed when the port is reachable beyond the tailnet, see Funnel).
 - Update: `git pull && GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build`.
   Check what is running with
   `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`

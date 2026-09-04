@@ -19,7 +19,7 @@ from media_inventory import list_media_page, media_stats
 from media_notes import annotate_media as notes_annotate_media
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
-from observability import JSON_FORMAT_ENV, MetricsMiddleware, log_formatter, metrics_enabled
+from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
@@ -1059,9 +1059,11 @@ def build_http_app(
     if rate_limit_per_minute > 0:
         app = RateLimitMiddleware(app, rate_limit_per_minute)
     if metrics_enabled(os.getenv("WHATSAPP_MCP_METRICS")):
-        # Outermost so /metrics answers without a token and counts every
-        # response, including 401/429 from the layers below.
-        app = MetricsMiddleware(app)
+        # Outermost so /metrics answers without the MCP token and counts every
+        # response, including 401/429 from the layers below. Its own optional
+        # token (WHATSAPP_MCP_METRICS_TOKEN) is for endpoints exposed past the
+        # tailnet (Funnel).
+        app = MetricsMiddleware(app, token=os.getenv(METRICS_TOKEN_ENV))
     return app
 
 
