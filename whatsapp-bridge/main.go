@@ -2537,7 +2537,9 @@ func (b *Bridge) newRESTMux(port int, token string, allowedMediaRoots []string) 
 		// Validate and canonicalize media_path against the configured roots
 		// before reading. This prevents the bridge from being used as a
 		// generic file-read primitive (e.g. media_path=/Users/x/.ssh/id_rsa).
-		resolvedMediaPath := req.MediaPath
+		// Only the canonical path ever reaches sendWhatsAppMessage; the raw
+		// request value is never used as a file path.
+		resolvedMediaPath := ""
 		if req.MediaPath != "" {
 			canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
 			if mpErr != nil {
