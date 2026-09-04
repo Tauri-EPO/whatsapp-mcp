@@ -114,7 +114,7 @@ func main() {
 	}
 	defer lock.Release()
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", sqliteURI(whatsmeowDBPath(), "_foreign_keys=on"), dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
