@@ -31,7 +31,7 @@ from whatsapp import (
     get_chat as whatsapp_get_chat,
 )
 from whatsapp import (
-    get_contact_chats as whatsapp_get_contact_chats,
+    get_contact_chats_page as whatsapp_get_contact_chats,
 )
 from whatsapp import (
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
@@ -52,10 +52,10 @@ from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
-    list_chats as whatsapp_list_chats,
+    list_chats_page as whatsapp_list_chats,
 )
 from whatsapp import (
-    list_messages as whatsapp_list_messages,
+    list_messages_page as whatsapp_list_messages,
 )
 from whatsapp import (
     mark_messages_read as whatsapp_mark_messages_read,
@@ -226,8 +226,14 @@ def list_messages(
     sort_by: str = "newest",
     include_deleted: bool = True,
     unread_only: bool = False,
-) -> list[dict[str, Any]]:
+    cursor: str | None = None,
+) -> dict[str, Any]:
     """Get WhatsApp messages matching specified criteria with optional context.
+
+    Returns {"items": [...], "next_cursor": str|null, "has_more": bool}. To page,
+    pass next_cursor back as `cursor` (same filters and sort_by); stop when
+    has_more is false. `page` still works but cursors are cheaper and stable
+    while new messages arrive.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
     Media messages carry media_type and filename (the sender's original document name,
@@ -245,7 +251,7 @@ def list_messages(
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
                (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*')
         limit: Max messages to return (default 50, max 500)
-        page: Page number for pagination (default 0)
+        page: Page number for pagination (default 0); ignored when cursor is set
         include_context: Include surrounding messages for context (default True)
         context_before: Messages to include before each match (default 1, max 50)
         context_after: Messages to include after each match (default 1, max 50)
@@ -261,6 +267,7 @@ def list_messages(
                  newer than the chat's read marker). Combine with sort_by="oldest"
                  to process unread messages in order; with include_context=False
                  to get just the unread ones.
+        cursor: next_cursor from the previous page
     """
     # Cap limit at 500 to prevent excessive queries
     limit = max(0, min(limit, MAX_LIST_LIMIT))
@@ -279,8 +286,9 @@ def list_messages(
         sort_by=sort_by,
         include_deleted=include_deleted,
         unread_only=unread_only,
+        cursor=cursor,
     )
-    return messages
+    return messages.to_dict()
 
 
 @mcp.tool()
@@ -291,13 +299,18 @@ def list_chats(
     page: int = 0,
     include_last_message: bool = True,
     sort_by: str = "last_active",
-) -> list[dict[str, Any]]:
+    cursor: str | None = None,
+) -> dict[str, Any]:
     """Get WhatsApp chats matching specified criteria.
+
+    Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
+    next_cursor back as `cursor` to fetch the following page.
 
     Args:
         query: Search term to filter chats by name or JID
         limit: Max chats to return (default 50, max 200)
-        page: Page number for pagination (default 0)
+        page: Page number for pagination (default 0); ignored when cursor is set
+        cursor: next_cursor from the previous page
         include_last_message: Include the last message in each chat (default True)
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
 
@@ -311,9 +324,9 @@ def list_chats(
     # Cap limit at 200 to prevent excessive queries
     limit = min(limit, 200)
     chats = whatsapp_list_chats(
-        query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
+        query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by, cursor=cursor
     )
-    return chats
+    return chats.to_dict()
 
 
 @mcp.tool()
@@ -351,7 +364,7 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
-def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
+def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
     """Get all WhatsApp chats involving the contact.
 
     Args:
@@ -359,8 +372,8 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0) -> list[
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    chats = whatsapp_get_contact_chats(contact_jid, limit, page)
-    return chats
+    chats = whatsapp_get_contact_chats(contact_jid, limit, page, cursor=cursor)
+    return chats.to_dict()
 
 
 @mcp.tool()

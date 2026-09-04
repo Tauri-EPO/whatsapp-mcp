@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -54,6 +55,40 @@ def _policy_denied(jid: str | None) -> str | None:
     if CHAT_POLICY.allows(jid):
         return None
     return CHAT_POLICY.denial_message(jid)
+
+
+@dataclass
+class PageResult:
+    """One page of a list tool: items plus how to fetch the next page."""
+
+    items: list[dict[str, Any]]
+    next_cursor: str | None
+    has_more: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"items": self.items, "next_cursor": self.next_cursor, "has_more": self.has_more}
+
+
+def encode_cursor(payload: dict[str, Any]) -> str:
+    """Opaque, URL-safe cursor. Callers pass it back verbatim."""
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor(cursor: str | None, expected_kind: str) -> dict[str, Any] | None:
+    """Decode a cursor produced by encode_cursor; None when absent."""
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ToolError("invalid_argument", "cursor is not valid; pass next_cursor from the previous page") from exc
+    if not isinstance(payload, dict) or payload.get("k") != expected_kind:
+        raise ToolError(
+            "invalid_argument", f"cursor does not belong to {expected_kind}; pass next_cursor from the previous page"
+        )
+    return payload
 
 
 def _connect_messages_db() -> sqlite3.Connection:
@@ -779,6 +814,40 @@ def list_messages(
     include_deleted: bool = True,
     unread_only: bool = False,
 ) -> list[dict[str, Any]]:
+    """Items of one page of list_messages_page (kept for callers that want a plain list)."""
+    return list_messages_page(
+        after=after,
+        before=before,
+        sender_phone_number=sender_phone_number,
+        chat_jid=chat_jid,
+        query=query,
+        limit=limit,
+        page=page,
+        include_context=include_context,
+        context_before=context_before,
+        context_after=context_after,
+        sort_by=sort_by,
+        include_deleted=include_deleted,
+        unread_only=unread_only,
+    ).items
+
+
+def list_messages_page(
+    after: str | None = None,
+    before: str | None = None,
+    sender_phone_number: str | None = None,
+    chat_jid: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+    page: int = 0,
+    include_context: bool = True,
+    context_before: int = 1,
+    context_after: int = 1,
+    sort_by: str = "newest",
+    include_deleted: bool = True,
+    unread_only: bool = False,
+    cursor: str | None = None,
+) -> PageResult:
     """Get messages matching the specified criteria with optional context.
 
     Args:
@@ -803,9 +872,16 @@ def list_messages(
             (chats.last_read_time, as reported by any linked device). Chats with no
             marker count as entirely unread.
 
+        cursor: Opaque next_cursor from the previous page (keyset pagination).
+            When given, page is ignored. Relevance sort falls back to an offset
+            carried inside the cursor.
+
     Returns:
-        List of message dictionaries with id, timestamp, sender, content, etc.
+        PageResult: items (hits plus context rows), next_cursor, has_more.
     """
+    cursor_state = decode_cursor(cursor, "messages")
+    if cursor_state is not None and cursor_state.get("s") != sort_by:
+        raise ToolError("invalid_argument", "cursor was created with a different sort_by")
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
@@ -877,15 +953,31 @@ def list_messages(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
-        # Add sorting and pagination
+        # Sorting and pagination. Keyset on (timestamp, id) for the time orders;
+        # relevance (bm25) has no stable key, so its cursor carries an offset.
+        keyset = sort_by != "relevance" or not use_fts
         offset = page * limit
+        if cursor_state is not None:
+            if keyset and "t" in cursor_state:
+                cmp = ">" if sort_by == "oldest" else "<"
+                where_clauses.append(
+                    f"(messages.timestamp {cmp} ? OR (messages.timestamp = ? AND messages.id {cmp} ?))"
+                )
+                params.extend([cursor_state["t"], cursor_state["t"], cursor_state["i"]])
+                offset = 0
+            else:
+                offset = int(cursor_state.get("o", 0))
+            # where_clauses may have been closed already; rebuild the WHERE part
+            query_parts = [part for part in query_parts if not part.startswith("WHERE ")]
+            if where_clauses:
+                query_parts.append("WHERE " + " AND ".join(where_clauses))
         if sort_by == "relevance" and use_fts:
             query_parts.append(f"ORDER BY bm25({MESSAGES_FTS_TABLE}), messages.timestamp DESC")
         else:
             order = "ASC" if sort_by == "oldest" else "DESC"
-            query_parts.append(f"ORDER BY messages.timestamp {order}")
+            query_parts.append(f"ORDER BY messages.timestamp {order}, messages.id {order}")
         query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
+        params.extend([limit + 1, offset])
 
         sql = " ".join(query_parts)
         try:
@@ -898,6 +990,16 @@ def list_messages(
             params[match_param_index] = _fts_quote_tokens(query)
             cursor.execute(sql, tuple(params))
         messages = cursor.fetchall()
+        has_more = len(messages) > limit
+        messages = messages[:limit]
+
+        next_cursor = None
+        if has_more and messages:
+            last = messages[-1]
+            if keyset:
+                next_cursor = encode_cursor({"k": "messages", "s": sort_by, "t": last[0], "i": last[6]})
+            else:
+                next_cursor = encode_cursor({"k": "messages", "s": sort_by, "o": offset + limit})
 
         result = [_row_to_message(msg) for msg in messages]
 
@@ -923,10 +1025,10 @@ def list_messages(
                 for ctx_msg in after_msgs:
                     _add(ctx_msg)
 
-            return [msg_to_dict(msg) for msg in messages_with_context]
+            return PageResult([msg_to_dict(msg) for msg in messages_with_context], next_cursor, has_more)
 
         # Return messages without context
-        return [msg_to_dict(msg) for msg in result]
+        return PageResult([msg_to_dict(msg) for msg in result], next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -1013,11 +1115,26 @@ def list_chats(
     include_last_message: bool = True,
     sort_by: str = "last_active",
 ) -> list[dict[str, Any]]:
+    """Items of one page of list_chats_page."""
+    return list_chats_page(
+        query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
+    ).items
+
+
+def list_chats_page(
+    query: str | None = None,
+    limit: int = 20,
+    page: int = 0,
+    include_last_message: bool = True,
+    sort_by: str = "last_active",
+    cursor: str | None = None,
+) -> PageResult:
     """Get chats matching the specified criteria.
 
     Returns:
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
+    cursor_state = decode_cursor(cursor, "chats")
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
@@ -1063,17 +1180,56 @@ def list_chats(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
-        # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
+        if cursor_state is not None and cursor_state.get("s") != sort_by:
+            raise ToolError("invalid_argument", "cursor was created with a different sort_by")
+        offset = page * limit
+        if cursor_state is not None:
+            offset = 0
+            if sort_by == "last_active":
+                # NULL last_message_time sorts last in DESC order; keyset skips
+                # past the (time, jid) of the previous page's last row.
+                # Rows with a NULL time sort after every dated row, so after a
+                # dated cursor they are still ahead of us.
+                where_clauses.append(
+                    "(chats.last_message_time < ? OR (chats.last_message_time = ? AND chats.jid > ?) OR chats.last_message_time IS NULL)"
+                    if cursor_state.get("t") is not None
+                    else "(chats.last_message_time IS NULL AND chats.jid > ?)"
+                )
+                params.extend(
+                    [cursor_state["t"], cursor_state["t"], cursor_state["j"]]
+                    if cursor_state.get("t") is not None
+                    else [cursor_state["j"]]
+                )
+            else:
+                where_clauses.append("(chats.name > ? OR (chats.name = ? AND chats.jid > ?))")
+                params.extend([cursor_state["n"], cursor_state["n"], cursor_state["j"]])
+            query_parts = [part for part in query_parts if not part.startswith("WHERE ")]
+            query_parts.append("WHERE " + " AND ".join(where_clauses))
+
+        # Add sorting (jid as the tie-breaker so the keyset is total)
+        order_by = (
+            "chats.last_message_time DESC, chats.jid ASC"
+            if sort_by == "last_active"
+            else "chats.name ASC, chats.jid ASC"
+        )
         query_parts.append(f"ORDER BY {order_by}")
 
-        # Add pagination
-        offset = (page) * limit
         query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
+        params.extend([limit + 1, offset])
 
         cursor.execute(" ".join(query_parts), tuple(params))
         chats = cursor.fetchall()
+        has_more = len(chats) > limit
+        chats = chats[:limit]
+        next_cursor = None
+        if has_more and chats:
+            last = chats[-1]
+            state = {"k": "chats", "s": sort_by, "j": last[0]}
+            if sort_by == "last_active":
+                state["t"] = last[2]
+            else:
+                state["n"] = last[1]
+            next_cursor = encode_cursor(state)
 
         result = []
         for chat_data in chats:
@@ -1088,7 +1244,7 @@ def list_chats(
             )
             result.append(chat_to_dict(chat))
 
-        return result
+        return PageResult(result, next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -1172,6 +1328,11 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
+    """Items of one page of get_contact_chats_page."""
+    return get_contact_chats_page(jid, limit=limit, page=page).items
+
+
+def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str | None = None) -> PageResult:
     """Get all chats involving the contact.
 
     Args:
@@ -1179,7 +1340,18 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    cursor_state = decode_cursor(cursor, "contact_chats")
     try:
+        offset = page * limit
+        keyset_clause, keyset_params = "", []
+        if cursor_state is not None:
+            offset = 0
+            if cursor_state.get("t") is not None:
+                keyset_clause = "AND (c.last_message_time < ? OR (c.last_message_time = ? AND c.jid > ?) OR c.last_message_time IS NULL)"
+                keyset_params = [cursor_state["t"], cursor_state["t"], cursor_state["j"]]
+            else:
+                keyset_clause = "AND (c.last_message_time IS NULL AND c.jid > ?)"
+                keyset_params = [cursor_state["j"]]
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
@@ -1203,14 +1375,19 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 FROM messages contact_msg
                 WHERE contact_msg.chat_jid = c.jid
                     AND contact_msg.sender IN ({placeholders})
-            ) OR c.jid = ?) AND {policy_clause}
-            ORDER BY c.last_message_time DESC
+            ) OR c.jid = ?) AND {policy_clause} {keyset_clause}
+            ORDER BY c.last_message_time DESC, c.jid ASC
             LIMIT ? OFFSET ?
         """,
-            (*aliases, jid, *policy_params, limit, page * limit),
+            (*aliases, jid, *policy_params, *keyset_params, limit + 1, offset),
         )
 
         chats = cursor.fetchall()
+        has_more = len(chats) > limit
+        chats = chats[:limit]
+        next_cursor = None
+        if has_more and chats:
+            next_cursor = encode_cursor({"k": "contact_chats", "t": chats[-1][2], "j": chats[-1][0]})
 
         result = []
         for chat_data in chats:
@@ -1225,7 +1402,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
             )
             result.append(chat_to_dict(chat))
 
-        return result
+        return PageResult(result, next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
