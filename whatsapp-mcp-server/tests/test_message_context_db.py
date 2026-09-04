@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 import whatsapp
+from errors import ToolError
 
 SCHEMA = """
 CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP);
@@ -62,8 +63,9 @@ def test_lookup_without_chat_uses_most_recent_match(db):
 
 
 def test_missing_message_names_the_chat(db):
-    with pytest.raises(ValueError, match="in chat 111@s.whatsapp.net"):
+    with pytest.raises(ToolError, match="in chat 111@s.whatsapp.net") as exc:
         whatsapp.get_message_context("NOPE", chat_jid=CHAT_A)
+    assert exc.value.code == "not_found"
 
 
 def test_connections_use_busy_timeout(db, monkeypatch):

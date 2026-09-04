@@ -6,6 +6,7 @@ import pytest
 
 import whatsapp
 from chat_policy import ChatPolicy, load_chat_policy, normalize_chat_entry
+from errors import ToolError
 
 DM_A = "5511999999999@s.whatsapp.net"
 DM_B = "5511888888888@s.whatsapp.net"
@@ -105,9 +106,17 @@ class TestReadsAreFiltered:
 
     def test_get_chat_and_direct_chat(self, restricted_db):
         assert whatsapp.get_chat(DM_A) is not None
-        assert whatsapp.get_chat(DM_B) is None
         assert whatsapp.get_direct_chat_by_contact("5511999999999") is not None
-        assert whatsapp.get_direct_chat_by_contact("5511888888888") is None
+        # A blocked chat is "denied", distinguishable from "not found".
+        with pytest.raises(ToolError) as exc:
+            whatsapp.get_chat(DM_B)
+        assert exc.value.code == "denied"
+        with pytest.raises(ToolError) as exc:
+            whatsapp.get_direct_chat_by_contact("5511888888888")
+        assert exc.value.code == "denied"
+        with pytest.raises(ToolError) as exc:
+            whatsapp.get_direct_chat_by_contact("5511777777777")
+        assert exc.value.code == "denied"  # unknown number, still outside the allow-list
 
     def test_contact_chats_and_last_interaction(self, restricted_db):
         # The blocked contact also posted in the allowed group: only that shows.
@@ -117,8 +126,9 @@ class TestReadsAreFiltered:
         assert last is not None and last["chat_jid"] == GROUP
 
     def test_message_context_refuses_blocked_chat(self, restricted_db):
-        with pytest.raises(ValueError, match="not in WHATSAPP_ALLOWED_CHATS"):
+        with pytest.raises(ToolError, match="not in WHATSAPP_ALLOWED_CHATS") as exc:
             whatsapp.get_message_context("b1", chat_jid=DM_B)
+        assert exc.value.code == "denied"
         assert whatsapp.get_message_context("a1", chat_jid=DM_A).message.id == "a1"
 
 
@@ -130,18 +140,29 @@ class TestWritesAreRefused:
         monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: pytest.fail("bridge was called"))
 
     def test_send_message(self):
-        ok, msg = whatsapp.send_message(DM_B, "hi")
-        assert ok is False and "WHATSAPP_ALLOWED_CHATS" in msg
-        ok, msg = whatsapp.send_message("5511888888888", "hi")
-        assert ok is False
+        with pytest.raises(ToolError, match="WHATSAPP_ALLOWED_CHATS") as exc:
+            whatsapp.send_message(DM_B, "hi")
+        assert exc.value.code == "denied"
+        with pytest.raises(ToolError):
+            whatsapp.send_message("5511888888888", "hi")
 
     def test_send_file_and_audio(self, tmp_path):
         media = tmp_path / "f.pdf"
         media.write_bytes(b"%PDF")
-        assert whatsapp.send_file(DM_B, str(media))[0] is False
-        assert whatsapp.send_audio_message(DM_B, str(media))[0] is False
+        with pytest.raises(ToolError) as exc:
+            whatsapp.send_file(DM_B, str(media))
+        assert exc.value.code == "denied"
+        with pytest.raises(ToolError) as exc:
+            whatsapp.send_audio_message(DM_B, str(media))
+        assert exc.value.code == "denied"
 
     def test_reaction_mark_read_download(self):
-        assert whatsapp.send_reaction(DM_B, "m1", "👍")[0] is False
-        assert whatsapp.mark_messages_read(["m1"], DM_B)[0] is False
-        assert whatsapp.download_media("m1", DM_B) is None
+        with pytest.raises(ToolError) as exc:
+            whatsapp.send_reaction(DM_B, "m1", "👍")
+        assert exc.value.code == "denied"
+        with pytest.raises(ToolError) as exc:
+            whatsapp.mark_messages_read(["m1"], DM_B)
+        assert exc.value.code == "denied"
+        with pytest.raises(ToolError) as exc:
+            whatsapp.download_media("m1", DM_B)
+        assert exc.value.code == "denied"

@@ -4,6 +4,7 @@ import pytest
 
 import whatsapp
 from chat_policy import ChatPolicy
+from errors import ToolError
 from whatsapp import Message, msg_to_dict
 
 CHAT = "120363000000000001@g.us"
@@ -60,11 +61,17 @@ def test_get_poll_results_calls_bridge(monkeypatch):
 
 def test_get_poll_results_errors(monkeypatch):
     monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: Resp(404, {"success": False, "message": "no poll"}))
-    assert whatsapp.get_poll_results("X", CHAT) == {"success": False, "message": "no poll"}
+    with pytest.raises(ToolError, match="no poll") as exc:
+        whatsapp.get_poll_results("X", CHAT)
+    assert exc.value.code == "not_found"
     monkeypatch.setattr(whatsapp.requests, "get", lambda *a, **k: pytest.fail("bridge called"))
-    assert whatsapp.get_poll_results("", CHAT)["success"] is False
+    with pytest.raises(ToolError) as exc:
+        whatsapp.get_poll_results("", CHAT)
+    assert exc.value.code == "invalid_argument"
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
-    assert "WHATSAPP_ALLOWED_CHATS" in whatsapp.get_poll_results("POLL1", CHAT)["message"]
+    with pytest.raises(ToolError, match="WHATSAPP_ALLOWED_CHATS") as exc:
+        whatsapp.get_poll_results("POLL1", CHAT)
+    assert exc.value.code == "denied"
 
 
 def test_target_message_id_preferred_over_legacy_filename():

@@ -3,6 +3,7 @@ import importlib
 import pytest
 
 import whatsapp
+from errors import ToolError
 
 
 class DummyResponse:
@@ -67,10 +68,11 @@ def test_send_message_without_token_surfaces_bridge_401(monkeypatch, tmp_path):
 
     monkeypatch.setattr(whatsapp.requests, "post", fake_post)
 
-    success, message = whatsapp.send_message("12025551234", "hello")
+    with pytest.raises(ToolError) as exc:
+        whatsapp.send_message("12025551234", "hello")
 
-    assert success is False
-    assert "HTTP 401" in message
+    assert exc.value.code == "internal"  # our own token rejected: configuration
+    assert "Unauthorized" in exc.value.message
     assert calls[0]["headers"] == {}
 
 
@@ -154,16 +156,16 @@ def test_send_reaction_empty_emoji_sends_removal(monkeypatch):
 
 def test_send_reaction_missing_recipient_returns_error():
     """send_reaction returns failure without calling the bridge when recipient is empty."""
-    success, msg = whatsapp.send_reaction("", "3AABCDEF01234567", "👍")
-    assert success is False
-    assert "Recipient" in msg
+    with pytest.raises(ToolError) as exc:
+        whatsapp.send_reaction("", "3AABCDEF01234567", "👍")
+    assert exc.value.code == "invalid_argument" and "chat_jid" in exc.value.message
 
 
 def test_send_reaction_missing_message_id_returns_error():
     """send_reaction returns failure without calling the bridge when message_id is empty."""
-    success, msg = whatsapp.send_reaction("12025551234@s.whatsapp.net", "", "👍")
-    assert success is False
-    assert "Message ID" in msg
+    with pytest.raises(ToolError) as exc:
+        whatsapp.send_reaction("12025551234@s.whatsapp.net", "", "👍")
+    assert exc.value.code == "invalid_argument" and "message_id" in exc.value.message
 
 
 def test_mark_messages_read_posts_correct_payload(monkeypatch):
@@ -204,15 +206,16 @@ def test_mark_messages_read_posts_correct_payload(monkeypatch):
     [
         ([], "12025551234@s.whatsapp.net", "", "message ID"),
         ([""], "12025551234@s.whatsapp.net", "", "message ID"),
-        (["3AABCDEF01234567"], "", "", "Chat JID"),
-        (["3AABCDEF01234567"], "120363012345678901@g.us", "", "Sender JID"),
+        (["3AABCDEF01234567"], "", "", "chat_jid"),
+        (["3AABCDEF01234567"], "120363012345678901@g.us", "", "sender_jid"),
     ],
 )
 def test_mark_messages_read_validates_input(message_ids, chat_jid, sender_jid, expected_message):
-    success, message = whatsapp.mark_messages_read(message_ids, chat_jid, sender_jid)
+    with pytest.raises(ToolError) as exc:
+        whatsapp.mark_messages_read(message_ids, chat_jid, sender_jid)
 
-    assert success is False
-    assert expected_message in message
+    assert exc.value.code == "invalid_argument"
+    assert expected_message in exc.value.message
 
 
 def test_send_message_with_quoted_reply_includes_quote_fields(monkeypatch):

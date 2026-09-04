@@ -1,8 +1,10 @@
 """_bridge_request: every bridge call carries a timeout; connection errors retry, read timeouts do not."""
 
+import pytest
 import requests
 
 import whatsapp
+from errors import ToolError
 
 
 class _Resp:
@@ -59,12 +61,9 @@ def test_connection_errors_retry_then_raise(monkeypatch):
         raise requests.ConnectionError("refused")
 
     monkeypatch.setattr(whatsapp.requests, "post", refused)
-    try:
+    with pytest.raises(ToolError) as exc:
         whatsapp._bridge_request("POST", "/send", json={})
-    except requests.ConnectionError:
-        pass
-    else:
-        raise AssertionError("should raise after retries")
+    assert exc.value.code == "bridge_unavailable"
     posts = [c for c in calls if c[0] == "post"]
     sleeps = [c for c in calls if c[0] == "sleep"]
     assert len(posts) == whatsapp.BRIDGE_CONNECT_RETRIES + 1
@@ -80,10 +79,9 @@ def test_read_timeout_is_not_retried(monkeypatch):
 
     monkeypatch.setattr(whatsapp.requests, "post", slow)
     monkeypatch.setattr(whatsapp.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
-    try:
+    with pytest.raises(ToolError) as exc:
         whatsapp._bridge_request("POST", "/send", json={})
-    except requests.exceptions.ReadTimeout:
-        pass
+    assert exc.value.code == "bridge_unavailable"
     assert len(calls) == 1, "a POST that may have reached the bridge must not be re-sent"
 
 

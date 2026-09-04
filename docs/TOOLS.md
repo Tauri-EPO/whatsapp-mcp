@@ -2,6 +2,24 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
+## Errors
+
+Every tool returns its documented payload on success. On failure it returns one shape:
+
+```json
+{"error": {"code": "not_found", "message": "No chat 123@s.whatsapp.net in the archive"}}
+```
+
+| `code` | Meaning | What to do |
+| --- | --- | --- |
+| `not_found` | The chat, message, contact or file is not in the archive | Check the JID/ID (both come from `list_messages` / `list_chats` rows) |
+| `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
+| `invalid_argument` | Missing or malformed input | Fix the call |
+| `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
+| `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
+
+An unreadable database is reported as `internal`, never as an empty result, so an empty list really means "nothing matched".
+
 Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
 
 ## Contact Operations

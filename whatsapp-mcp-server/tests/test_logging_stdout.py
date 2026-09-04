@@ -7,6 +7,7 @@ import pathlib
 import pytest
 
 import whatsapp
+from errors import ToolError
 
 SERVER_DIR = pathlib.Path(__file__).resolve().parent.parent
 MODULES = [
@@ -61,7 +62,10 @@ def test_db_error_goes_to_logger_not_stdout(tmp_path, monkeypatch, capsys, caplo
     # A path inside a directory that does not exist makes sqlite3.connect fail.
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "missing" / "messages.db"))
     with caplog.at_level(logging.ERROR, logger="whatsapp_mcp"):
-        assert whatsapp.list_chats() == []
+        # An unreadable database is an error, never an empty account.
+        with pytest.raises(ToolError) as exc:
+            whatsapp.list_chats()
+        assert exc.value.code == "internal"
     out, _ = capsys.readouterr()
     assert out == ""
     assert any("Database error" in record.getMessage() for record in caplog.records)
@@ -72,6 +76,7 @@ def test_download_refusal_goes_to_logger(monkeypatch, capsys, caplog):
 
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
     with caplog.at_level(logging.WARNING, logger="whatsapp_mcp"):
-        assert whatsapp.download_media("m1", "5511888888888@s.whatsapp.net") is None
+        with pytest.raises(ToolError) as exc:
+            whatsapp.download_media("m1", "5511888888888@s.whatsapp.net")
+        assert exc.value.code == "denied"
     assert capsys.readouterr().out == ""
-    assert any("Download refused" in r.getMessage() for r in caplog.records)
