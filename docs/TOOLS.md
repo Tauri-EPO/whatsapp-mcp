@@ -45,8 +45,10 @@ Get messages with filters, date ranges, and sorting.
 
 - `chat_jid` (optional): Filter by specific chat JID
 - `limit` (optional): Number of messages (default 50, max 500)
-- `before_date` (optional): Messages before this date (YYYY-MM-DD)
-- `after_date` (optional): Messages after this date (YYYY-MM-DD)
+- `page` (optional): Page number (default 0)
+- `before` / `after` (optional): ISO-8601 bounds (`2026-01-09` or `2026-01-09T18:00:00`)
+- `sender_phone_number` (optional): Only messages from this number
+- `include_context` (optional, default `true`), `context_before` / `context_after` (default 1, max 50 each): surrounding messages for every match. The whole result is capped at 2000 rows; with large `limit` values the windows shrink to fit, so prefer `include_context=false` when paging through many matches
 - `query` (optional): Search term. With the bridge's FTS5 index (default in the Docker image and in builds with `-tags sqlite_fts5`) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use a plain substring match
 - `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
 - `include_deleted` (optional, default `true`): keep messages that were "deleted for everyone". They are returned with their original text/media and a `deleted_at` timestamp; `false` hides them

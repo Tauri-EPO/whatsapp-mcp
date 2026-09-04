@@ -188,6 +188,38 @@ def get_contact(
     }
 
 
+MAX_LIST_LIMIT = 500
+MAX_CONTEXT_EACH_SIDE = 50
+MAX_RESULT_ROWS = 2000
+
+
+def _cap_context(limit: int, include_context: bool, before: int, after: int) -> tuple[int, int]:
+    """Bound the context windows so limit * (1 + before + after) stays under MAX_RESULT_ROWS.
+
+    Uncapped windows multiplied the result set: limit=500 with context_before=200
+    meant ~200k rows through one tool call. Each side is capped at
+    MAX_CONTEXT_EACH_SIDE, then both are shrunk proportionally to fit the row budget.
+    """
+    if not include_context:
+        return 0, 0
+    before = max(0, min(int(before), MAX_CONTEXT_EACH_SIDE))
+    after = max(0, min(int(after), MAX_CONTEXT_EACH_SIDE))
+    if limit <= 0:
+        return before, after
+    budget = max(0, MAX_RESULT_ROWS // limit - 1)  # context rows allowed per hit
+    total = before + after
+    if total > budget:
+        logging.getLogger("whatsapp_mcp").warning(
+            "list_messages: shrinking context windows (%d+%d) to fit %d rows at limit=%d",
+            before,
+            after,
+            MAX_RESULT_ROWS,
+            limit,
+        )
+        before, after = (before * budget) // total, (after * budget) // total
+    return before, after
+
+
 @mcp.tool()
 def list_messages(
     after: str | None = None,
@@ -223,8 +255,11 @@ def list_messages(
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0)
         include_context: Include surrounding messages for context (default True)
-        context_before: Messages to include before each match (default 1)
-        context_after: Messages to include after each match (default 1)
+        context_before: Messages to include before each match (default 1, max 50)
+        context_after: Messages to include after each match (default 1, max 50)
+               The whole result is capped at 2000 rows: with large limits the
+               context windows are shrunk to fit, so prefer include_context=False
+               (or small windows) when paging through many matches.
         sort_by: "newest" (default, most recent first), "oldest" (chronological) or
                  "relevance" (best match for query first)
         include_deleted: Revoked ("deleted for everyone") messages are kept in this
@@ -236,7 +271,8 @@ def list_messages(
                  to get just the unread ones.
     """
     # Cap limit at 500 to prevent excessive queries
-    limit = min(limit, 500)
+    limit = max(0, min(limit, MAX_LIST_LIMIT))
+    context_before, context_after = _cap_context(limit, include_context, context_before, context_after)
     messages = whatsapp_list_messages(
         after=after,
         before=before,
