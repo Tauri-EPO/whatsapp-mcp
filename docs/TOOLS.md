@@ -403,6 +403,38 @@ notes of each entry inline (`notes: {key: value}`), so a cleanup pass can see
 - "Tag the contract from Ana as keep"
 - "Which files did I note as disposable?"
 
+### `purge_media`
+
+Free disk space by dropping cached media bytes. Message rows, hashes and
+notes stay, nothing is sent to WhatsApp, and `download_media` can fetch a
+purged file again later (expired CDN links are recovered through the sender's
+phone). To remove a message itself use `delete_message`.
+
+**`dry_run` defaults to `true`.** The first call only reports what would be
+removed; call again with `dry_run=false` to delete. Check the `notes` field of
+`list_media` (or `get_media_notes`) before purging anything marked `keep`.
+
+**Parameters** (name the files, or describe them):
+
+- `items`: explicit `[{"message_id", "chat_jid"}]` from `list_media`
+- `chat_jid`, `older_than_days`, `min_bytes`, `media_type`: criteria resolved
+  by the bridge from `messages.db`; the bridge caps one call at 500 files and
+  reports `truncated` when more matched
+- `dry_run` (default `true`)
+
+Returns `dry_run`, `message`, `matched`, `purged_files`, `purged_bytes`,
+`truncated` and `items` (`purged`, `bytes`, `file`, `reason` such as
+`not cached`, `not a media message`, `message not found`, denied chat).
+Every deleted path is built by the bridge from a message row (`chat_jid`,
+`media_type`, `timestamp`, `id`), never from a client-supplied path, and is
+confined to the store directory. `WHATSAPP_ALLOWED_CHATS` applies (the MCP
+server refuses denied chats, the bridge answers 403 and skips denied rows).
+
+**Natural Language Examples:**
+
+- "How much space would I get back by dropping videos older than 90 days?"
+- "Purge the cached files from the marketing group, but keep everything I tagged keep"
+
 ## Chat Operations
 
 All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,

@@ -90,6 +90,9 @@ from whatsapp import (
     msg_to_dict,
 )
 from whatsapp import (
+    purge_media as whatsapp_purge_media,
+)
+from whatsapp import (
     search_contacts as whatsapp_search_contacts,
 )
 from whatsapp import (
@@ -926,6 +929,53 @@ def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[
         pass a sha256 to get_media_notes or list_media(...) to find the messages
     """
     return notes_search_media_notes(query, key or None, limit)
+
+
+@mcp.tool()
+@tool_errors
+def purge_media(
+    items: list[dict[str, str]] | None = None,
+    chat_jid: str = "",
+    older_than_days: int = 0,
+    min_bytes: int = 0,
+    media_type: str = "",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Free disk space by dropping cached media bytes; message rows, hashes and notes stay.
+
+    **dry_run defaults to true**: the first call only reports what would be
+    removed (files and bytes). Call again with dry_run=false to actually delete.
+    Nothing is sent to WhatsApp and no row is touched, so download_media can
+    fetch a purged file again later (expired CDN links are recovered through the
+    sender's phone). Check get_media_notes / the `notes` field of list_media
+    before purging anything marked keep. To remove a message itself use
+    delete_message.
+
+    Either name the files (`items`) or describe them (any of chat_jid,
+    older_than_days, min_bytes, media_type); the bridge caps one call at 500
+    files and reports `truncated` when more matched.
+
+    Args:
+        items: Explicit list of {"message_id", "chat_jid"} (from list_media)
+        chat_jid: Criteria form: only this chat
+        older_than_days: Criteria form: only media older than N days
+        min_bytes: Criteria form: only files at least this large
+        media_type: Criteria form: image | video | audio | document | sticker
+        dry_run: true (default) reports without deleting; false deletes
+
+    Returns:
+        {"dry_run", "message", "matched", "purged_files", "purged_bytes", "truncated",
+         "items": [{message_id, chat_jid, purged, bytes, file, reason}]} where reason explains
+        skipped entries (not cached, not a media message, message not found, denied chat)
+    """
+    return whatsapp_purge_media(
+        items=items,
+        chat_jid=chat_jid,
+        older_than_days=older_than_days,
+        min_bytes=min_bytes,
+        media_type=media_type,
+        dry_run=dry_run,
+    )
 
 
 @mcp.tool()

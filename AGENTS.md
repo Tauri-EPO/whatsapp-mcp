@@ -73,6 +73,7 @@ whatsapp-mcp/
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
 │   ├── fts.go                  # FTS5 index over messages.content
 │   ├── media_retry.go          # re-download expired CDN media via the sender's phone
+│   ├── media_purge.go          # POST /api/media/purge: drop cached files by (id, chat) or criteria, rows untouched
 │   ├── instance_lock.go        # one bridge per store (flock / LockFileEx)
 │   ├── polls.go                # native polls: creation, votes, /api/poll
 │   ├── group_members.go        # /api/group/members

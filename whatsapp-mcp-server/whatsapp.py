@@ -1744,6 +1744,65 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     return True, payload.get("message") or "Deleted"
 
 
+PURGE_MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+
+
+def purge_media(
+    items: list[dict[str, str]] | None = None,
+    chat_jid: str = "",
+    older_than_days: int = 0,
+    min_bytes: int = 0,
+    media_type: str = "",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Ask the bridge to drop cached media bytes (rows untouched); dry run unless told otherwise."""
+    chat_jid = (chat_jid or "").strip()
+    media_type = (media_type or "").strip()
+    normalized: list[dict[str, str]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise ToolError("invalid_argument", "items must be a list of {message_id, chat_jid}")
+        message_id = str(item.get("message_id") or "").strip()
+        item_chat = str(item.get("chat_jid") or "").strip()
+        if not message_id or not item_chat:
+            raise ToolError("invalid_argument", "each item needs message_id and chat_jid")
+        _require_allowed(item_chat)
+        normalized.append({"message_id": message_id, "chat_jid": item_chat})
+    if not normalized and not chat_jid and not older_than_days and not min_bytes and not media_type:
+        raise ToolError(
+            "invalid_argument", "Provide items, or at least one of chat_jid / older_than_days / min_bytes / media_type"
+        )
+    if media_type and media_type not in PURGE_MEDIA_TYPES:
+        raise ToolError("invalid_argument", f"media_type must be one of {', '.join(PURGE_MEDIA_TYPES)}")
+    if older_than_days < 0 or min_bytes < 0:
+        raise ToolError("invalid_argument", "older_than_days and min_bytes must not be negative")
+    if chat_jid:
+        _require_allowed(chat_jid)
+    body: dict[str, Any] = {"dry_run": bool(dry_run)}
+    if normalized:
+        body["items"] = normalized
+    else:
+        if chat_jid:
+            body["chat_jid"] = chat_jid
+        if older_than_days:
+            body["older_than_days"] = int(older_than_days)
+        if min_bytes:
+            body["min_bytes"] = int(min_bytes)
+        if media_type:
+            body["media_type"] = media_type
+    payload = _bridge_json(_bridge_request("POST", "/media/purge", json=body))
+    return {
+        "success": True,
+        "dry_run": bool(payload.get("dry_run", dry_run)),
+        "message": payload.get("message") or "",
+        "matched": int(payload.get("matched") or 0),
+        "purged_files": int(payload.get("purged_files") or 0),
+        "purged_bytes": int(payload.get("purged_bytes") or 0),
+        "truncated": bool(payload.get("truncated", False)),
+        "items": payload.get("items") or [],
+    }
+
+
 def mark_messages_read(
     message_ids: list[str],
     chat_jid: str,
