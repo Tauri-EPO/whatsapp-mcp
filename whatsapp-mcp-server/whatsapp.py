@@ -159,6 +159,9 @@ class Message:
     # the account owner's copy. Only delete_message(for_everyone=False) removes
     # a row.
     deleted_at: datetime | None = None
+    # True for WhatsApp "view once" media. The archive keeps a copy; the phone's
+    # single viewing is unaffected because the bridge never sends the view receipt.
+    view_once: bool = False
 
 
 # One column list and one mapper for every query that yields Message rows.
@@ -167,13 +170,26 @@ class Message:
 MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
-    "messages.deleted_at"
+    "messages.deleted_at, messages.view_once"
 )
 
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
-    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, quoted_id, filename, deleted = row
+    (
+        timestamp,
+        sender,
+        chat_name,
+        content,
+        is_from_me,
+        chat_jid,
+        msg_id,
+        media_type,
+        quoted_id,
+        filename,
+        deleted,
+        view_once,
+    ) = row
     return Message(
         timestamp=datetime.fromisoformat(timestamp),
         sender=sender,
@@ -186,6 +202,7 @@ def _row_to_message(row: tuple) -> Message:
         quoted_message_id=quoted_id,
         filename=filename,
         deleted_at=datetime.fromisoformat(deleted) if deleted else None,
+        view_once=bool(view_once),
     )
 
 
@@ -283,6 +300,7 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "poll_message_id": (message.filename if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
+        "view_once": message.view_once,
     }
 
 

@@ -229,6 +229,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
 		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
+	if err := ensureColumn(db, "messages", "view_once", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("failed to ensure messages.view_once column: %w", err)
+	}
 	if _, err := db.Exec(pollsSchema); err != nil {
 		return fmt.Errorf("failed to ensure poll tables: %w", err)
 	}
@@ -1915,6 +1918,13 @@ func takeOriginalTimestamp(id string) (time.Time, bool) {
 }
 
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+	// View-once envelopes hide the real media one level down; unwrap so every
+	// extractor below sees it. See view_once.go for the policy.
+	viewOnce := false
+	if inner, wrapped := unwrapViewOnce(msg.Message); wrapped {
+		msg.Message = inner
+		viewOnce = true
+	}
 	// Resolve LID-based chats to phone-based JIDs so that incoming
 	// and outgoing messages land in the same chat entry.
 	resolvedChat := resolveLIDChat(client, msg.Info.Chat, msg.Info.SenderAlt, msg.Info.RecipientAlt, msg.Info.IsFromMe)
@@ -2027,6 +2037,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		content = pollContent(poll)
 		mediaType = "poll"
 	}
+	if viewOnce {
+		content = viewOnceContent(content, mediaType)
+	}
 
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
@@ -2061,6 +2074,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	if poll != nil {
 		if err := messageStore.StorePoll(msg.Info.ID, chatJID, poll, msgTimestamp); err != nil {
 			logger.Warnf("Failed to store poll: %v", err)
+		}
+	}
+	if viewOnce {
+		if err := messageStore.MarkViewOnce(msg.Info.ID, chatJID); err != nil {
+			logger.Warnf("Failed to flag view-once message: %v", err)
 		}
 	}
 
@@ -3538,6 +3556,11 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				// path too. This inline block previously handled only
 				// Conversation/ExtendedText and silently dropped everything
 				// else arriving through history sync.
+				histViewOnce := false
+				if inner, wrapped := unwrapViewOnce(msg.Message.Message); wrapped {
+					msg.Message.Message = inner
+					histViewOnce = true
+				}
 				content := extractTextContent(msg.Message.Message)
 				histPoll := extractPollCreation(msg.Message.Message)
 				if histPoll != nil {
@@ -3559,6 +3582,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 				if histPoll != nil {
 					mediaType = "poll"
+				}
+				if histViewOnce {
+					content = viewOnceContent(content, mediaType)
 				}
 
 				// Log the message content for debugging
@@ -3640,6 +3666,11 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)
 				} else {
+					if histViewOnce {
+						if verr := messageStore.MarkViewOnce(msgID, chatJID); verr != nil {
+							logger.Warnf("Failed to flag view-once history message: %v", verr)
+						}
+					}
 					syncedCount++
 					// Log successful message storage
 					if mediaType != "" {

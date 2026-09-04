@@ -246,6 +246,11 @@ archive with their content, media and `filename`; only `deleted_at` is set.
 This is deliberate: the archive is the account owner's copy. To really forget a
 message locally use `delete_message` with `for_everyone=false`.
 
+View-once photos, videos and voice notes are archived like any other media,
+with `view_once: true` and a `🔒` prefix on the content; the phone's single
+viewing is unaffected because the bridge never sends the view receipt. This is
+your own account's archive; treat it accordingly.
+
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
 `<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers). Pass the

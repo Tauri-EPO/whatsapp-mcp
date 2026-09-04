@@ -12,7 +12,7 @@ CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP
 CREATE TABLE messages (
     id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP, is_from_me BOOLEAN,
     media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB,
-    file_length INTEGER, deleted_at TIMESTAMP, quoted_message_id TEXT,
+    file_length INTEGER, deleted_at TIMESTAMP, view_once BOOLEAN NOT NULL DEFAULT 0, quoted_message_id TEXT,
     PRIMARY KEY (id, chat_jid)
 );
 """
@@ -70,3 +70,17 @@ def test_tool_passes_flag_through(monkeypatch):
     monkeypatch.setattr(main, "whatsapp_list_messages", lambda **kw: seen.update(kw) or [])
     main.list_messages(include_deleted=False)
     assert seen["include_deleted"] is False
+
+
+def test_view_once_flag_is_exposed(db):
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, view_once)"
+        " VALUES ('vo', ?, '111', '🔒 view-once image', '2024-01-04T10:00:00', 0, 'image', 1)",
+        (CHAT,),
+    )
+    conn.commit()
+    conn.close()
+    rows = {m["id"]: m for m in whatsapp.list_messages(chat_jid=CHAT, include_context=False)}
+    assert rows["vo"]["view_once"] is True
+    assert rows["m1"]["view_once"] is False

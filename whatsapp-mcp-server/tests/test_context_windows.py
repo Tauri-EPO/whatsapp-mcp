@@ -13,7 +13,7 @@ CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP
 CREATE TABLE messages (
     id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP, is_from_me BOOLEAN,
     media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB,
-    file_length INTEGER, deleted_at TIMESTAMP, quoted_message_id TEXT,
+    file_length INTEGER, deleted_at TIMESTAMP, view_once BOOLEAN NOT NULL DEFAULT 0, quoted_message_id TEXT,
     PRIMARY KEY (id, chat_jid)
 );
 """

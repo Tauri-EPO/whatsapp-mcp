@@ -479,6 +479,8 @@ def mark_messages_read(
 
     This is an explicit external side effect. All message IDs must belong to the
     same chat and sender.
+    Read receipts are the ordinary "blue ticks"; they do not consume view-once media
+    (that needs a separate view receipt the bridge never sends).
 
     Args:
         message_ids: IDs of the messages to mark as read
