@@ -10,6 +10,7 @@ from typing import Any
 import requests
 
 import audio
+from chat_policy import load_chat_policy
 
 # Configuration via environment variables with sensible defaults
 _DEFAULT_BRIDGE_STORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store")
@@ -29,6 +30,18 @@ _BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-t
 # the timeout covers the brief exclusive locks WAL still needs (checkpoints,
 # schema changes) instead of surfacing "database is locked" to the agent.
 SQLITE_BUSY_TIMEOUT_S = 5.0
+
+
+# Conversation allow-list (WHATSAPP_ALLOWED_CHATS). Read tools filter to these
+# chats, write tools refuse anything else. Unrestricted when unset.
+CHAT_POLICY = load_chat_policy()
+
+
+def _policy_denied(jid: str | None) -> str | None:
+    """Denial message when the policy blocks jid, else None."""
+    if CHAT_POLICY.allows(jid):
+        return None
+    return CHAT_POLICY.denial_message(jid)
 
 
 def _connect_messages_db() -> sqlite3.Connection:
@@ -565,6 +578,11 @@ def list_messages(
             where_clauses.append("messages.chat_jid = ?")
             params.append(chat_jid)
 
+        if CHAT_POLICY.restricted:
+            clause, clause_params = CHAT_POLICY.sql_clause("messages.chat_jid")
+            where_clauses.append(clause)
+            params.extend(clause_params)
+
         match_param_index = None
         if query and use_fts:
             where_clauses.append(f"{MESSAGES_FTS_TABLE} MATCH ?")
@@ -677,6 +695,8 @@ def get_message_context(
         if not msg_data:
             where = f" in chat {chat_jid}" if chat_jid else ""
             raise ValueError(f"Message with ID {message_id}{where} not found")
+        if denied := _policy_denied(msg_data[7]):
+            raise ValueError(denied)
 
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
@@ -810,6 +830,11 @@ def list_chats(
             )
             params.extend([query, query, f"%{query}%"])
 
+        if CHAT_POLICY.restricted:
+            clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
+            where_clauses.append(clause)
+            params.extend(clause_params)
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
@@ -930,6 +955,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         page: Page number for pagination (default 0)
     """
     try:
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
@@ -947,16 +973,16 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "last_msg")}
-            WHERE EXISTS (
+            WHERE (EXISTS (
                 SELECT 1
                 FROM messages contact_msg
                 WHERE contact_msg.chat_jid = c.jid
                     AND contact_msg.sender IN ({placeholders})
-            ) OR c.jid = ?
+            ) OR c.jid = ?) AND {policy_clause}
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """,
-            (*aliases, jid, limit, page * limit),
+            (*aliases, jid, *policy_params, limit, page * limit),
         )
 
         chats = cursor.fetchall()
@@ -994,6 +1020,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         Message dictionary or None if no messages found
     """
     try:
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
@@ -1012,11 +1039,11 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender IN ({placeholders}) OR c.jid = ?
+            WHERE (m.sender IN ({placeholders}) OR c.jid = ?) AND {policy_clause}
             ORDER BY m.timestamp DESC
             LIMIT 1
         """,
-            (*aliases, jid),
+            (*aliases, jid, *policy_params),
         )
 
         msg_data = cursor.fetchone()
@@ -1052,6 +1079,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary or None if not found
     """
     try:
+        if not CHAT_POLICY.allows(chat_jid):
+            return None
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
@@ -1103,6 +1132,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number."""
     try:
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
@@ -1118,10 +1148,10 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "m")}
-            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
+            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us' AND {policy_clause}
             LIMIT 1
         """,
-            (f"%{sender_phone_number}%",),
+            (f"%{sender_phone_number}%", *policy_params),
         )
 
         chat_data = cursor.fetchone()
@@ -1156,6 +1186,8 @@ def send_message(
     quoted_content: str = "",
     mentions: list[str] | None = None,
 ) -> tuple[bool, str]:
+    if denied := _policy_denied(recipient):
+        return False, denied
     try:
         # Validate input
         if not recipient:
@@ -1197,6 +1229,8 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
     passing both in one /api/send call produces a single attachment-with-caption
     message instead of two separate messages.
     """
+    if denied := _policy_denied(recipient):
+        return False, denied
     try:
         # Validate input
         if not recipient:
@@ -1231,6 +1265,8 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
 
 
 def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
+    if denied := _policy_denied(recipient):
+        return False, denied
     try:
         # Validate input
         if not recipient:
@@ -1288,6 +1324,8 @@ def send_reaction(
     Returns:
         Tuple of (success, status_message).
     """
+    if denied := _policy_denied(recipient):
+        return False, denied
     try:
         if not recipient:
             return False, "Recipient must be provided"
@@ -1328,6 +1366,8 @@ def mark_messages_read(
     timestamp: str | None = None,
 ) -> tuple[bool, str]:
     """Mark selected messages as read through the WhatsApp bridge."""
+    if denied := _policy_denied(chat_jid):
+        return False, denied
     try:
         normalized_ids = [message_id.strip() for message_id in message_ids]
         if not normalized_ids or any(not message_id for message_id in normalized_ids):
@@ -1375,6 +1415,9 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     Returns:
         The local file path if download was successful, None otherwise
     """
+    if denied := _policy_denied(chat_jid):
+        print(f"Download refused: {denied}")
+        return None
     try:
         url = f"{WHATSAPP_API_BASE_URL}/download"
         payload = {"message_id": message_id, "chat_jid": chat_jid}
