@@ -79,7 +79,7 @@ func querySender(ms *MessageStore, chatJID string) string {
 	return s
 }
 
-func newTestMessageStore(t *testing.T) *MessageStore {
+func newTestMessageStore(t testing.TB) *MessageStore {
 	t.Helper()
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
