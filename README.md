@@ -88,13 +88,13 @@ bearer_token_env_var = "WHATSAPP_MCP_TOKEN"   # export WHATSAPP_MCP_TOKEN=TOKEN
 **Your own bot** (Grok, OpenAI Agents SDK, LangChain, a Python script): any MCP client that supports streamable HTTP. With the `mcp` Python SDK (v2):
 
 ```python
-import httpx
+import httpx2  # the SDK v2's HTTP client (pip install "mcp[cli]" brings it)
 from mcp.client import Client
 from mcp.client.streamable_http import streamable_http_client
 
 transport = streamable_http_client(
     "https://box.tailnet.ts.net/mcp",
-    http_client=httpx.AsyncClient(headers={"Authorization": "Bearer TOKEN"}),
+    http_client=httpx2.AsyncClient(headers={"Authorization": "Bearer TOKEN"}),
 )
 async with Client(transport) as client:
     chats = await client.call_tool("list_chats", {"limit": 5})

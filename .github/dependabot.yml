@@ -1,6 +1,8 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  # "uv" updates pyproject.toml *and* uv.lock together; "pip" only touched
+  # pyproject.toml and left the lockfile (which CI and the image use) behind.
+  - package-ecosystem: "uv"
     directory: "/whatsapp-mcp-server"
     schedule:
       interval: "weekly"
