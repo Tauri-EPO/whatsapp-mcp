@@ -90,152 +90,165 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			// first (history chunks are newest-first). See polls.go.
 			var pendingVotes []*waWeb.WebMessageInfo
 
-			// Store messages
-			for _, msg := range messages {
-				if msg == nil || msg.Message == nil {
-					continue
-				}
-				if msg.Message.Message.GetPollUpdateMessage() != nil {
-					pendingVotes = append(pendingVotes, msg.Message)
-					continue
-				}
-
-				// Extract text content via the shared extractor — the same
-				// one the live path uses — so contact cards, media captions
-				// and hydrated templates are surfaced on the history-sync
-				// path too. This inline block previously handled only
-				// Conversation/ExtendedText and silently dropped everything
-				// else arriving through history sync.
-				histViewOnce := false
-				if inner, wrapped := unwrapViewOnce(msg.Message.Message); wrapped {
-					msg.Message.Message = inner
-					histViewOnce = true
-				}
-				content := extractTextContent(msg.Message.Message)
-				histPoll := extractPollCreation(msg.Message.Message)
-				if histPoll != nil {
-					content = pollContent(histPoll)
-				}
-
-				// Extract media info - pass message timestamp + ID for unique filenames
-				var mediaType, filename, url string
-				var mediaKey, fileSHA256, fileEncSHA256 []byte
-				var fileLength uint64
-
-				histMsgID := ""
-				if msg.Message != nil && msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					histMsgID = *msg.Message.Key.ID
-				}
-
-				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp, histMsgID)
-				}
-				if histPoll != nil {
-					mediaType = "poll"
-				}
-				if histViewOnce {
-					content = viewOnceContent(content, mediaType)
-				}
-
-				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
-
-				// Skip messages with no content and no media
-				if content == "" && mediaType == "" {
-					continue
-				}
-
-				// Determine sender. History-sync rows do not carry SenderAlt,
-				// so any LID-based participant is resolved through the
-				// whatsmeow LID store (populated during live message handling).
-				var sender string
-				isFromMe := false
-				if msg.Message.Key != nil {
-					if msg.Message.Key.FromMe != nil {
-						isFromMe = *msg.Message.Key.FromMe
+			// Store messages. One transaction per conversation: a pair-time
+			// backfill is tens of thousands of rows and per-row implicit
+			// transactions cost one fsync each (store_batch.go).
+			storedInChat := 0
+			batchErr := messageStore.Batch(func(batch *messageBatch) error {
+				for _, msg := range messages {
+					if msg == nil || msg.Message == nil {
+						continue
 					}
-					var rawSender types.JID
-					switch {
-					case isFromMe && client.Store.ID != nil:
-						rawSender = client.Store.ID.ToNonAD()
-					case msg.Message.GetParticipant() != "" || msg.Message.Key.GetParticipant() != "":
-						// Modern history syncs carry the group sender in the top-level
-						// WebMessageInfo.participant, older ones in Key.participant;
-						// whatsmeow's ParseWebMessage checks them in this order too.
-						// Without this every group message was attributed to the group JID.
-						participant := msg.Message.GetParticipant()
-						if participant == "" {
-							participant = msg.Message.Key.GetParticipant()
-						}
-						if parsed, perr := types.ParseJID(participant); perr == nil {
-							rawSender = parsed
-						} else {
-							rawSender = types.JID{User: participant}
-						}
-					default:
-						rawSender = jid
+					if msg.Message.Message.GetPollUpdateMessage() != nil {
+						pendingVotes = append(pendingVotes, msg.Message)
+						continue
 					}
-					var alt types.JID
-					if isFromMe && client.Store.ID != nil {
-						alt = client.Store.ID.ToNonAD()
+
+					// Extract text content via the shared extractor — the same
+					// one the live path uses — so contact cards, media captions
+					// and hydrated templates are surfaced on the history-sync
+					// path too. This inline block previously handled only
+					// Conversation/ExtendedText and silently dropped everything
+					// else arriving through history sync.
+					histViewOnce := false
+					if inner, wrapped := unwrapViewOnce(msg.Message.Message); wrapped {
+						msg.Message.Message = inner
+						histViewOnce = true
 					}
-					sender = resolveUserJID(client, rawSender, alt).User
-				} else {
-					sender = jid.User
-				}
+					content := extractTextContent(msg.Message.Message)
+					histPoll := extractPollCreation(msg.Message.Message)
+					if histPoll != nil {
+						content = pollContent(histPoll)
+					}
 
-				// Store message
-				msgID := ""
-				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					msgID = *msg.Message.Key.ID
-				}
+					// Extract media info - pass message timestamp + ID for unique filenames
+					var mediaType, filename, url string
+					var mediaKey, fileSHA256, fileEncSHA256 []byte
+					var fileLength uint64
 
-				// Get message timestamp
-				ts := msg.Message.GetMessageTimestamp()
-				if ts == 0 {
-					continue
-				}
-				msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
+					histMsgID := ""
+					if msg.Message != nil && msg.Message.Key != nil && msg.Message.Key.ID != nil {
+						histMsgID = *msg.Message.Key.ID
+					}
 
-				err = messageStore.StoreMessage(
-					msgID,
-					chatJID,
-					sender,
-					content,
-					msgTimestamp,
-					isFromMe,
-					mediaType,
-					filename,
-					url,
-					mediaKey,
-					fileSHA256,
-					fileEncSHA256,
-					fileLength,
-					"", // quoted_message_id: history sync does not carry ContextInfo
-				)
-				if err != nil {
-					logger.Warnf("Failed to store history message: %v", err)
-				} else {
-					if histViewOnce {
-						if verr := messageStore.MarkViewOnce(msgID, chatJID); verr != nil {
-							logger.Warnf("Failed to flag view-once history message: %v", verr)
-						}
+					if msg.Message.Message != nil {
+						mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp, histMsgID)
 					}
 					if histPoll != nil {
-						if perr := messageStore.StorePoll(msgID, chatJID, histPoll, msgTimestamp); perr != nil {
-							logger.Warnf("Failed to store history poll: %v", perr)
+						mediaType = "poll"
+					}
+					if histViewOnce {
+						content = viewOnceContent(content, mediaType)
+					}
+
+					// Log the message content for debugging
+					logger.Debugf("Message content: %v, Media Type: %v", content, mediaType)
+
+					// Skip messages with no content and no media
+					if content == "" && mediaType == "" {
+						continue
+					}
+
+					// Determine sender. History-sync rows do not carry SenderAlt,
+					// so any LID-based participant is resolved through the
+					// whatsmeow LID store (populated during live message handling).
+					var sender string
+					isFromMe := false
+					if msg.Message.Key != nil {
+						if msg.Message.Key.FromMe != nil {
+							isFromMe = *msg.Message.Key.FromMe
+						}
+						var rawSender types.JID
+						switch {
+						case isFromMe && client.Store.ID != nil:
+							rawSender = client.Store.ID.ToNonAD()
+						case msg.Message.GetParticipant() != "" || msg.Message.Key.GetParticipant() != "":
+							// Modern history syncs carry the group sender in the top-level
+							// WebMessageInfo.participant, older ones in Key.participant;
+							// whatsmeow's ParseWebMessage checks them in this order too.
+							// Without this every group message was attributed to the group JID.
+							participant := msg.Message.GetParticipant()
+							if participant == "" {
+								participant = msg.Message.Key.GetParticipant()
+							}
+							if parsed, perr := types.ParseJID(participant); perr == nil {
+								rawSender = parsed
+							} else {
+								rawSender = types.JID{User: participant}
+							}
+						default:
+							rawSender = jid
+						}
+						var alt types.JID
+						if isFromMe && client.Store.ID != nil {
+							alt = client.Store.ID.ToNonAD()
+						}
+						sender = resolveUserJID(client, rawSender, alt).User
+					} else {
+						sender = jid.User
+					}
+
+					// Store message
+					msgID := ""
+					if msg.Message.Key != nil && msg.Message.Key.ID != nil {
+						msgID = *msg.Message.Key.ID
+					}
+
+					// Get message timestamp
+					ts := msg.Message.GetMessageTimestamp()
+					if ts == 0 {
+						continue
+					}
+					msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
+
+					err = batch.StoreMessage(
+						msgID,
+						chatJID,
+						sender,
+						content,
+						msgTimestamp,
+						isFromMe,
+						mediaType,
+						filename,
+						url,
+						mediaKey,
+						fileSHA256,
+						fileEncSHA256,
+						fileLength,
+						"", // quoted_message_id: history sync does not carry ContextInfo
+					)
+					if err != nil {
+						logger.Warnf("Failed to store history message: %v", err)
+					} else {
+						if histViewOnce {
+							if verr := batch.MarkViewOnce(msgID, chatJID); verr != nil {
+								logger.Warnf("Failed to flag view-once history message: %v", verr)
+							}
+						}
+						if histPoll != nil {
+							if perr := batch.StorePoll(msgID, chatJID, histPoll, msgTimestamp); perr != nil {
+								logger.Warnf("Failed to store history poll: %v", perr)
+							}
+						}
+						syncedCount++
+						storedInChat++
+						// Per-message echo stays at DEBUG: user content out of INFO,
+						// and two lines per row would swamp a full sync.
+						if mediaType != "" {
+							logger.Debugf("Stored message: [%s] %s -> %s: [%s: %s] %s",
+								msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
+						} else {
+							logger.Debugf("Stored message: [%s] %s -> %s: %s",
+								msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
 						}
 					}
-					syncedCount++
-					// Log successful message storage
-					if mediaType != "" {
-						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
-							msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
-					} else {
-						logger.Infof("Stored message: [%s] %s -> %s: %s",
-							msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
-					}
 				}
+				return nil
+			})
+			if batchErr != nil {
+				logger.Errorf("History sync: failed to commit %s: %v", chatJID, batchErr)
+			} else {
+				logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
 			}
 			if len(pendingVotes) > 0 {
 				b.historyVotes.Add(1)

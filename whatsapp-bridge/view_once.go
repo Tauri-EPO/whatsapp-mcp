@@ -51,6 +51,10 @@ func viewOnceContent(caption, mediaType string) string {
 
 // MarkViewOnce flags a stored message as view-once.
 func (store *MessageStore) MarkViewOnce(messageID, chatJID string) error {
-	_, err := store.db.Exec(`UPDATE messages SET view_once = 1 WHERE id = ? AND chat_jid = ?`, messageID, chatJID)
+	return markViewOnceWith(store.db, messageID, chatJID)
+}
+
+func markViewOnceWith(ex sqlExecer, messageID, chatJID string) error {
+	_, err := ex.Exec(`UPDATE messages SET view_once = 1 WHERE id = ? AND chat_jid = ?`, messageID, chatJID)
 	return err
 }

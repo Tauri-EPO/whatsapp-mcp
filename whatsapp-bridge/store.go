@@ -802,35 +802,10 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 		return nil
 	}
 
-	// Store empty quoted_message_id as SQL NULL so the column is null for
-	// plain messages (no ContextInfo). This makes the ON CONFLICT merge
-	// straightforward: COALESCE prefers the new non-null value over a
-	// kept null, and ignores an incoming null so it cannot clobber a
-	// previously-stored ID.
-	var qmid interface{}
-	if quotedMessageId != "" {
-		qmid = quotedMessageId
-	}
-
-	_, err := store.db.Exec(
-		`INSERT INTO messages
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id, chat_jid) DO UPDATE SET
-			sender = excluded.sender,
-			content = excluded.content,
-			timestamp = excluded.timestamp,
-			is_from_me = excluded.is_from_me,
-			media_type = excluded.media_type,
-			filename = excluded.filename,
-			url = excluded.url,
-			media_key = excluded.media_key,
-			file_sha256 = excluded.file_sha256,
-			file_enc_sha256 = excluded.file_enc_sha256,
-			file_length = excluded.file_length,
-			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid,
-	)
+	// Single-row path; history sync uses Batch (store_batch.go) for the same
+	// statement inside one transaction.
+	_, err := store.db.Exec(insertMessageSQL, messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId)...)
 	return err
 }
 

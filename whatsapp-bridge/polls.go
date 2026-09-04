@@ -109,11 +109,15 @@ func pollContent(p *pollCreation) string {
 }
 
 func (store *MessageStore) StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error {
+	return storePollWith(store.db, messageID, chatJID, p, createdAt)
+}
+
+func storePollWith(ex sqlExecer, messageID, chatJID string, p *pollCreation, createdAt time.Time) error {
 	opts, err := json.Marshal(p.Options)
 	if err != nil {
 		return err
 	}
-	_, err = store.db.Exec(`INSERT INTO polls (message_id, chat_jid, question, options_json, selectable_count, created_at)
+	_, err = ex.Exec(`INSERT INTO polls (message_id, chat_jid, question, options_json, selectable_count, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(message_id, chat_jid) DO UPDATE SET question = excluded.question, options_json = excluded.options_json,
 			selectable_count = excluded.selectable_count`,
