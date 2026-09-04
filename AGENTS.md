@@ -33,7 +33,7 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
 **This is a hard fork.** Decided 2026-09-04: the fork is ahead of upstream (SDK v2, auth, allow-list, FTS5, polls, Docker…) and no longer merges `upstream/main`. Consequences:
 
 - **Dependencies move here first.** Dependabot stays on; its PRs are merged once CI is green. Never pin a dependency just because upstream did (`mcp<2` and `cryptography<49` were both dropped).
-- **Refactors are allowed.** The current plan is the "fork hardening" epic (issue #64). Keep each PR small (§4) even when the overall change is large.
+- **Refactors are allowed.** The current plan is the second hardening epic (#138: production bugs, performance, agent-facing API, cleanup), followed by media management (#99); the first hardening epic (#64) is closed. Keep each PR small (§4) even when the overall change is large.
 - **Upstream is a source of ideas and cherry-picks, never a merge target.** When asked to "look upstream", "get ideas from the original", "check what VGP/lharries did", do this:
   1. `scripts/upstream-harvest.sh` — fetches both remotes and prints the bridge/server commits since the last harvest (`.upstream-harvest`) plus their open PRs and issues; `--all` ignores the marks. After reviewing, `scripts/upstream-harvest.sh --mark` records the new heads. (Manual equivalent: `git log --oneline main..upstream/main -- whatsapp-bridge/`; protocol/whatsmeow changes are the most valuable to harvest.)
   2. `gh pr list --repo verygoodplugins/whatsapp-mcp --state all --search "<topic>"` and the same on `lharries/whatsapp-mcp`; read the PR description first — it usually explains the WhatsApp behaviour better than the diff.
@@ -100,7 +100,7 @@ Compose topology: the `mcp` container joins the bridge's network namespace (`net
 
 This is how every change in this repo has been shipped; follow it unless the user says otherwise.
 
-1. **Start from an issue.** Bugs and features have one. If none exists, open it (§11): one problem per issue, with a "Fix" sketch and acceptance boxes. The epic #64 lists the current plan.
+1. **Start from an issue.** Bugs and features have one. If none exists, open it (§11): one problem per issue, with a "Fix" sketch and acceptance boxes. The epics #138 and #99 list the current plan.
 2. **Branch from current `main`:** `git fetch origin && git checkout -b <type>/<slug> origin/main`. Types: `fix`, `feat`, `perf`, `refactor`, `docs`, `ci`, `chore`, `test`.
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
@@ -259,7 +259,7 @@ When adding a new env var: document it here, in `README.md`, in `.env.example`, 
 ## 11. Issues
 
 - One problem per issue. Title prefixed with priority (`P0:`, `P1:`, `P2:`); body with **Problem**, **Fix** (sketch sized for one PR) and **Acceptance** checkboxes. Labels: priority + `area:*` (+ `type:refactor`, `type:security`, `bug`, `documentation`, `upstream` when it mirrors an upstream item).
-- Larger efforts get an `epic` issue holding the checklist (current one: #64).
+- Larger efforts get an `epic` issue holding the checklist (current ones: #138, then #99; #64 is done).
 - Bugs from operation: include bridge log lines, `docker compose ps`, the tool call and its result; redact phone numbers.
 - "Won't do" is a valid outcome; close with a sentence explaining why.
 
