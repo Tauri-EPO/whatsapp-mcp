@@ -528,6 +528,13 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.GroupInfo:
+		if v.Name != nil && strings.TrimSpace(v.Name.Name) != "" {
+			if err := b.Store.RenameChat(v.JID.String(), v.Name.Name); err != nil {
+				b.Log.Warnf("Failed to store group rename for %s: %v", v.JID, err)
+			} else {
+				b.Log.Infof("Group %s renamed to %q", v.JID, v.Name.Name)
+			}
+		}
 		if v.Ephemeral != nil {
 			expiration := uint32(0)
 			if v.Ephemeral.IsEphemeral {
