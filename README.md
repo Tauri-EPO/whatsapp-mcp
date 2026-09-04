@@ -1,13 +1,13 @@
 # WhatsApp MCP Server
 
-[![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/Tauri-EPO/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Tauri-EPO/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
 
-A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
+A Model Context Protocol (MCP) server for WhatsApp, enabling AI clients to read and send WhatsApp messages.
 
-> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
+> **This is the Tauri-EPO fork**, tuned for an always-on home server reached over Tailscale by remote MCP clients. It tracks [verygoodplugins/whatsapp-mcp](https://github.com/verygoodplugins/whatsapp-mcp) (maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github)), which in turn descends from [Luke Harries](https://github.com/lharries/whatsapp-mcp)' original. See [About this fork](#about-this-fork) for what is different and why.
 
 <p align="center">
   <a href="https://github.com/user-attachments/assets/9475af1d-2369-4315-9ccc-823dba2c5c32"><strong>Watch the WhatsApp MCP demo video</strong></a>
@@ -16,6 +16,51 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 <p align="center">
   <sub>Product demo generated with Remotion using simulated data.</sub>
 </p>
+
+## About this fork
+
+**Goal.** Run WhatsApp MCP 24/7 on a small home server, expose it over
+**streamable HTTP** through Tailscale, and let remote MCP clients (an AI bot on
+another machine, an IDE on a laptop) use one WhatsApp account. Upstream is
+tuned for a developer laptop talking to Claude Desktop over stdio; this fork is
+tuned for that server.
+
+**What is different here**
+
+| Area | Upstream (VGP) | This fork |
+| --- | --- | --- |
+| Deployment | `go run` + `uv run` on a laptop; no container story | `docker-compose.yml` with bridge + MCP images, shared store volume, healthchecks. [`docs/DOCKER.md`](docs/DOCKER.md) |
+| Remote access | `WHATSAPP_MCP_HOST=0.0.0.0` answered 421 to every non-loopback `Host` | `WHATSAPP_MCP_ALLOWED_HOSTS` allow-list for Tailscale / Docker / proxy hostnames, loopback always kept |
+| Expired media | 403/404/410 from the CDN was a hard failure | Bridge asks the sender's phone to re-upload (WhatsApp media-retry) and persists the fresh path |
+| Voice notes | Out of scope upstream | `transcribe_audio` tool with local whisper.cpp; optional `whisper` compose profile. No cloud API |
+| Concurrency safety | Two bridges on one store flap forever (`StreamReplaced`) | Single-instance lock on `store/.bridge.lock`; the second bridge refuses to start |
+| Message metadata | `filename` stored but not exposed | `filename` returned on `list_messages` / `get_message_context` |
+| Python SDK | `mcp<2` (FastMCP) | MCP SDK v2 (`MCPServer`), current `cryptography`, `pytest`, `ruff` |
+| Releases | release-please cuts tags and `CHANGELOG.md` | No releases here; `main` is the deployable state. release-please kept manual-only |
+
+**How we think about it**
+
+- **The fork comes first.** When a dependency update or a feature is right for
+  this deployment, it lands here even if upstream has not moved yet. Dependabot
+  stays on and its PRs are merged once CI is green. `pyproject.toml` and
+  `uv.lock` will conflict with upstream at sync time; the rule is to keep this
+  fork's pins and run `uv lock`.
+- **Still a soft fork.** Generic fixes are written so they can be offered
+  upstream unchanged: no fork-specific env names, no behaviour changes for the
+  laptop/stdio path, tests included. Opinionated parts stay in files upstream
+  does not own: `docker-compose.yml`, the Dockerfiles, `docs/DOCKER.md`,
+  `transcribe.py`.
+- **whatsmeow only.** No Baileys, no alternative WhatsApp Web stacks.
+- **Fail-safe network defaults.** The MCP port is published on `127.0.0.1` and
+  fronted by `tailscale serve`; Funnel (public internet) is not enabled by
+  default because the MCP server has no auth of its own yet (tracked in #26).
+- **Sync cadence.** `git fetch upstream && git merge upstream/main` whenever
+  upstream ships something useful; everything above is designed to keep those
+  merges small.
+
+Issues and PRs for this fork live at
+[Tauri-EPO/whatsapp-mcp](https://github.com/Tauri-EPO/whatsapp-mcp). Bugs in
+shared code are reported upstream as well.
 
 ## Features
 
@@ -26,7 +71,11 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - **Media Support**: Send and download images, videos, documents, and voice messages
 - **Call History**: Capture incoming voice/video calls into a local SQLite table (live, 1:1 and group)
 - **Webhook Integration**: Forward incoming messages to external services
-- **Local Storage**: All messages stored locally in SQLite - only sent to Claude when you allow it
+- **Local Storage**: All messages stored locally in SQLite - only sent to the AI client when you allow it
+- **Remote MCP over HTTP** *(fork)*: streamable-HTTP transport with a `Host` allow-list for Tailscale / Docker hostnames
+- **Docker Compose** *(fork)*: bridge + MCP containers for an always-on server, optional whisper.cpp sidecar
+- **Voice-note transcription** *(fork)*: `transcribe_audio` with local whisper.cpp, Portuguese by default
+- **Expired-media recovery** *(fork)*: automatic WhatsApp media-retry when CDN links have expired
 
 ## Installation
 
@@ -935,7 +984,9 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Credits & History
 
-This project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp), originally created by [Luke Harries](https://github.com/lharries).
+This repository is the **Tauri-EPO fork** of [verygoodplugins/whatsapp-mcp](https://github.com/verygoodplugins/whatsapp-mcp) (see [About this fork](#about-this-fork)). The text below is upstream's own history and is kept as-is.
+
+Very Good Plugins' project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp), originally created by [Luke Harries](https://github.com/lharries).
 
 **Why we forked:** The original repository hasn't been updated since April 2025. We needed continued maintenance, bug fixes, and new features for production use.
 

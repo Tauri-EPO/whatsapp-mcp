@@ -6,10 +6,14 @@ This file is the single source of truth for "how to contribute here". `CLAUDE.md
 
 ## Repository
 
-- **Repo:** [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp)
-- **Origin remote:** always `origin` (this fork). PRs, issues, and `gh` commands target this fork, not the upstream `lharries/whatsapp-mcp`.
-- **Default branch:** `main`. All PRs target `main`.
-- **Releases:** automated via [release-please](https://github.com/googleapis/release-please) — do **not** hand-edit `CHANGELOG.md` or version numbers.
+- **Repo:** [`Tauri-EPO/whatsapp-mcp`](https://github.com/Tauri-EPO/whatsapp-mcp), a soft fork of [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp) (remote `upstream`). Read "About this fork" in `README.md` first.
+- **Origin remote:** always `origin` (this fork). PRs, issues, and `gh` commands target this fork. Generic fixes may additionally be offered upstream.
+- **Default branch:** `main`. All PRs target `main`. `main` is the deployable state (Docker Compose on the home server); there are no releases here.
+- **Fork rules:**
+  - The fork comes first: dependency updates and features land here when they fit the deployment, even ahead of upstream. Dependabot PRs are merged once CI is green. On upstream sync, keep this fork's `pyproject.toml` pins and run `uv lock`.
+  - Keep generic changes upstream-shaped (no fork-only env names, stdio path untouched, tests included). Keep opinionated pieces in files upstream does not own: `docker-compose.yml`, Dockerfiles, `docs/DOCKER.md`, `transcribe.py`.
+  - whatsmeow only. Fail-safe network defaults (MCP port on loopback, `tailscale serve`, no Funnel without auth).
+- **Releases:** release-please is kept manual-only (`workflow_dispatch`). Still do **not** hand-edit `CHANGELOG.md` or version numbers; upstream owns those.
 
 ## Architecture (read first)
 
