@@ -36,31 +36,30 @@ tuned for that server.
 | Concurrency safety | Two bridges on one store flap forever (`StreamReplaced`) | Single-instance lock on `store/.bridge.lock`; the second bridge refuses to start |
 | Message metadata | `filename` stored but not exposed | `filename` returned on `list_messages` / `get_message_context` |
 | Python SDK | `mcp<2` (FastMCP) | MCP SDK v2 (`MCPServer`), current `cryptography`, `pytest`, `ruff` |
-| Releases | release-please cuts tags and `CHANGELOG.md` | No releases here; `main` is the deployable state. release-please kept manual-only |
+| Releases | release-please cuts tags and `CHANGELOG.md` | No releases here; `main` is the deployable state |
 
 **How we think about it**
 
-- **The fork comes first.** When a dependency update or a feature is right for
-  this deployment, it lands here even if upstream has not moved yet. Dependabot
-  stays on and its PRs are merged once CI is green. `pyproject.toml` and
-  `uv.lock` will conflict with upstream at sync time; the rule is to keep this
-  fork's pins and run `uv lock`.
-- **Still a soft fork.** Generic fixes are written so they can be offered
-  upstream unchanged: no fork-specific env names, no behaviour changes for the
-  laptop/stdio path, tests included. Opinionated parts stay in files upstream
-  does not own: `docker-compose.yml`, the Dockerfiles, `docs/DOCKER.md`,
-  `transcribe.py`.
+- **Hard fork (since 2026-09-04).** The fork is ahead of upstream and no
+  longer merges `upstream/main`. Dependencies move here first (Dependabot
+  stays on, PRs merged once CI is green); refactors are welcome; there are no
+  releases, `main` is the deployable state.
+- **Upstream is an idea source, not a merge target.** Fixes in
+  [verygoodplugins/whatsapp-mcp](https://github.com/verygoodplugins/whatsapp-mcp)
+  and [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) are
+  harvested by reading their PRs and reimplementing the delta here, credited
+  in the commit. whatsmeow is bumped on a schedule because WhatsApp's protocol
+  drifts. The routine is written down in [`AGENTS.md`](AGENTS.md) §2.
 - **whatsmeow only.** No Baileys, no alternative WhatsApp Web stacks.
-- **Fail-safe network defaults.** The MCP port is published on `127.0.0.1` and
-  fronted by `tailscale serve`; Funnel (public internet) is not enabled by
-  default because the MCP server has no auth of its own yet (tracked in #26).
-- **Sync cadence.** `git fetch upstream && git merge upstream/main` whenever
-  upstream ships something useful; everything above is designed to keep those
-  merges small.
+- **Fail-safe network defaults.** The MCP port is published on `127.0.0.1`
+  and fronted by `tailscale serve`; Funnel requires `WHATSAPP_MCP_TOKEN` and,
+  ideally, `WHATSAPP_ALLOWED_CHATS`.
+- **Small PRs, always green.** One concern per PR, tests and docs in the same
+  PR, squash-merged only with every CI check passing. Open work is tracked in
+  the [fork hardening epic](https://github.com/Tauri-EPO/whatsapp-mcp/issues/64).
 
 Issues and PRs for this fork live at
-[Tauri-EPO/whatsapp-mcp](https://github.com/Tauri-EPO/whatsapp-mcp). Bugs in
-shared code are reported upstream as well.
+[Tauri-EPO/whatsapp-mcp](https://github.com/Tauri-EPO/whatsapp-mcp).
 
 ## Features
 
