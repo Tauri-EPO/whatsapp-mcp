@@ -18,6 +18,7 @@ mark-read, typing) as a second line of defence; see whatsapp-bridge/chat_policy.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 ENV_VAR = "WHATSAPP_ALLOWED_CHATS"
@@ -95,7 +96,7 @@ class ChatPolicy:
         return f"Chat {jid!r} is not in {ENV_VAR}; this server is restricted to an allow-list of conversations"
 
 
-def load_chat_policy(env: dict[str, str] | None = None) -> ChatPolicy:
-    env = os.environ if env is None else env
-    raw = env.get(ENV_VAR, "")
+def load_chat_policy(env: Mapping[str, str] | None = None) -> ChatPolicy:
+    source: Mapping[str, str] = os.environ if env is None else env
+    raw = source.get(ENV_VAR, "")
     return ChatPolicy.from_entries([item for item in raw.split(",") if item.strip()])

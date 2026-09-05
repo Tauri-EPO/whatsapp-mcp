@@ -29,6 +29,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.0.0",
+    "pyright>=1.1.400",
     "ruff>=0.15.15",
 ]
 
@@ -68,3 +69,16 @@ indent-style = "space"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+
+[tool.pyright]
+# Basic mode: catches Optional misuse, wrong call shapes and missing attributes
+# without demanding annotations everywhere. Tests are checked too.
+include = ["."]
+# tests/ use duck-typed fakes (Resp classes, FakeServer, monkeypatched modules)
+# on purpose; checking them in basic mode reports the fakes, not bugs.
+exclude = [".venv", "**/__pycache__", "tests"]
+typeCheckingMode = "basic"
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
+reportMissingModuleSource = false

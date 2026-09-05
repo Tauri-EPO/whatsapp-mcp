@@ -16,7 +16,7 @@ import json
 import logging
 import threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from typing import Any
 
@@ -55,7 +55,7 @@ class Metrics:
         self.started_at = clock()
         self.tool_calls: Counter[str] = Counter()
         self.tool_errors: Counter[tuple[str, str]] = Counter()
-        self.tool_seconds: Counter[str] = Counter()
+        self.tool_seconds: dict[str, float] = defaultdict(float)
         self.http_requests: Counter[str] = Counter()  # by status class: 2xx, 4xx, 5xx
 
     def record_tool(self, name: str, seconds: float, error_code: str | None) -> None:

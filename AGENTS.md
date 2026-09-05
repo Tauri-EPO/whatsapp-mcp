@@ -115,7 +115,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
 5. **Docs in the same PR.** New env var → this file §7, `docs/CONFIGURATION.md`, `.env.example`, and `docker-compose.yml` passthrough if containers need it. `tests/test_env_docs.py` fails the Python job when the four disagree with what the code reads (compose-only knobs live in its allow-list). New tool → `docs/TOOLS.md` + the README "What your agent can do" table if it adds a capability + tool docstring (that docstring is what the model reads). `README.md` is the landing page for people arriving from search (Claude Code / Codex / Cursor / bots wanting WhatsApp): keep it short and outcome-oriented; technical detail goes in `docs/`.
-6. **Run the gates locally** (§5) before pushing: ruff format + check, pytest, `go vet`/`go test`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and `scripts/smoke.sh` (CI runs it on the unpaired stack too).
+6. **Run the gates locally** (§5) before pushing: ruff format + check, pyright, pytest, `go vet`/`go test`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and `scripts/smoke.sh` (CI runs it on the unpaired stack too).
 7. **Commit message = the PR description.** Conventional-commit title; body says the problem, the fix, what was verified and `Closes #N`. Co-author trailer for agents.
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
 9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks.
@@ -136,7 +136,7 @@ Rules that stay true across all steps:
 # Python MCP server
 cd whatsapp-mcp-server
 uv sync --extra dev
-uv run ruff format . && uv run ruff check .
+uv run ruff format . && uv run ruff check . && uv run pyright   # pyright: basic mode, tests excluded
 uv run pytest -q
 uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT=http for HTTP
 
@@ -170,7 +170,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 
 | Job | What |
 |---|---|
-| Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pytest` (one job, one toolchain setup) |
+| Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pyright` (basic mode, `tests/` excluded: they use duck-typed fakes), `pytest` (one job, one toolchain setup) |
 | Go Build | `go build`, `go vet`, `go test`, then golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |

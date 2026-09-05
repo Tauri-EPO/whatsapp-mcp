@@ -1024,9 +1024,10 @@ def transcribe_audio(
     if not file_path:
         if not message_id or not chat_jid:
             raise ToolError("invalid_argument", "Provide chat_jid and message_id, or file_path")
-        file_path = whatsapp_download_media(message_id, chat_jid)
-        if not file_path:
+        downloaded = whatsapp_download_media(message_id, chat_jid)
+        if not downloaded:
             raise ToolError("internal", "Failed to download media for transcription")
+        file_path = downloaded
     try:
         result = transcribe_file(file_path, language=language or None, config=load_whisper_config())
     except FileNotFoundError as exc:
