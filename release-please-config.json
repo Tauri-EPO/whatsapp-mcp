@@ -17,7 +17,6 @@
   ],
   "packages": {
     ".": {
-      "release-as": "1.0.0",
       "extra-label": "release"
     }
   }
