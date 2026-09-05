@@ -173,7 +173,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pytest` (one job, one toolchain setup) |
 | Go Build | `go build`, `go vet`, `go test`, then golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
-| Bandit, pip-audit, govulncheck | `continue-on-error`; read the output anyway |
+| Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |
 
 `publish.yml` pushes both images to GHCR on every merge to `main` (not a release: `main` stays the deployable state). Dependabot auto-merge was removed; merge its PRs through the normal routine.
