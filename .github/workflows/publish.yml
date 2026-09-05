@@ -49,6 +49,8 @@ jobs:
           context: whatsapp-bridge
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-bridge:main
             ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-bridge:sha-${{ steps.meta.outputs.short }}
@@ -66,6 +68,8 @@ jobs:
           context: whatsapp-mcp-server
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-server:main
             ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-server:sha-${{ steps.meta.outputs.short }}

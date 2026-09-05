@@ -269,7 +269,10 @@ The compose file names those images, so you choose per host:
   tags the result under the same name, so local changes win until the next
   `docker compose pull`. This is what the README quick start does.
 
-`/api/version` and the MCP `initialize` response report the commit either
+Each push carries a SLSA provenance attestation and an SBOM
+(`docker buildx imagetools inspect ghcr.io/tauri-epo/whatsapp-mcp-bridge:main`
+lists them), and the weekly security workflow scans the published images
+with Trivy. `/api/version` and the MCP `initialize` response report the commit either
 way. A packages page must be public for anonymous pulls; that is a one-time
 switch in GitHub (Packages > package > Package settings > Change visibility),
 otherwise `docker login ghcr.io` with a read-only token first.

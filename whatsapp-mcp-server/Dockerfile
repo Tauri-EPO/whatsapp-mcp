@@ -32,7 +32,18 @@ FROM python:3.11-slim
 
 RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin app \
     && mkdir -p /app/store /app/outbox \
-    && chown app:app /app/store /app/outbox
+    && chown app:app /app/store /app/outbox \
+    # The runtime only needs the interpreter: the app lives in /app/.venv (built
+    # by uv) and nothing installs packages here. Dropping the base image's pip,
+    # setuptools (with its vendored wheel/jaraco.*) and ensurepip removes code
+    # Trivy keeps flagging and that an attacker could use to fetch more.
+    && rm -rf /usr/local/lib/python3.11/site-packages/pip* \
+              /usr/local/lib/python3.11/site-packages/setuptools* \
+              /usr/local/lib/python3.11/site-packages/wheel* \
+              /usr/local/lib/python3.11/site-packages/_distutils_hack \
+              /usr/local/lib/python3.11/site-packages/distutils-precedence.pth \
+              /usr/local/lib/python3.11/ensurepip \
+              /usr/local/bin/pip*
 
 # ffmpeg: send_audio_message converts arbitrary audio to Opus/OGG voice notes,
 # transcribe_audio resamples to 16 kHz WAV. Static build, linux/amd64 + arm64.

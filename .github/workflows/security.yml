@@ -116,3 +116,63 @@ jobs:
           cd whatsapp-bridge
           govulncheck ./...
         continue-on-error: true
+
+  image-scan:
+    name: Image Vulnerability Scan
+    # Trivy over the two images: on PRs the freshly built ones (base image or
+    # Dockerfile changes), on the weekly run the published GHCR tags (new
+    # advisories against the unchanged image). Informational like the other
+    # audits: read the summary, do not ignore it.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [bridge, server]
+        include:
+          - component: bridge
+            context: whatsapp-bridge
+          - component: server
+            context: whatsapp-mcp-server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build image (pull request)
+        if: github.event_name != 'schedule'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          load: true
+          tags: whatsapp-mcp-${{ matrix.component }}:scan
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=scan
+          cache-from: type=gha,scope=${{ matrix.component == 'bridge' && 'bridge' || 'mcp' }}
+      - name: Pick the image to scan
+        id: image
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "ref=ghcr.io/tauri-epo/whatsapp-mcp-${{ matrix.component }}:main" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=whatsapp-mcp-${{ matrix.component }}:scan" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          output: trivy-${{ matrix.component }}.txt
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Trivy: ${{ steps.image.outputs.ref }}"
+            echo
+            echo '```'
+            cat trivy-${{ matrix.component }}.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
