@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.0.0...v1.0.1) (2026-09-05)
+
+
+### Documentation
+
+* **agents:** release routine needs the Actions PR permission; note on the v1.0.0 changelog ([#213](https://github.com/Tauri-EPO/whatsapp-mcp/issues/213)) ([992abe5](https://github.com/Tauri-EPO/whatsapp-mcp/commit/992abe56d822a1da22a0954bde313466568658e5))
+
 ## [1.0.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v0.6.0...v1.0.0) (2026-09-05)
 
 
