@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import httpx
@@ -57,12 +58,12 @@ class WhisperConfig:
         return None
 
 
-def load_config(env: dict[str, str] | None = None) -> WhisperConfig:
+def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
     """Read the WHISPER_* variables (from ``env`` or ``os.environ``)."""
-    env = os.environ if env is None else env
+    source: Mapping[str, str] = os.environ if env is None else env
 
     def get(name: str) -> str | None:
-        value = (env.get(name) or "").strip()
+        value = (source.get(name) or "").strip()
         return value or None
 
     timeout_raw = get("WHISPER_TIMEOUT_S")
@@ -127,6 +128,8 @@ def _transcribe_via_server(wav_path: str, config: WhisperConfig, language: str) 
     data = {"response_format": "json", "temperature": "0.0"}
     if language and language != "auto":
         data["language"] = language
+    if not config.url:
+        raise TranscriptionError("WHISPER_URL is not set")
     try:
         with open(wav_path, "rb") as fh:
             response = httpx.post(
@@ -155,10 +158,10 @@ def _transcribe_via_server(wav_path: str, config: WhisperConfig, language: str) 
 def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> str:
     if not config.model:
         raise TranscriptionError("WHISPER_MODEL must point to a ggml model file when using WHISPER_BIN")
-    if not os.path.isfile(config.model):
+    if not config.model or not os.path.isfile(config.model):
         raise TranscriptionError(f"WHISPER_MODEL not found: {config.model}")
-    binary = config.binary
-    if not (os.path.isfile(binary) or shutil.which(binary)):
+    binary = config.binary or ""
+    if not binary or not (os.path.isfile(binary) or shutil.which(binary)):
         raise TranscriptionError(f"WHISPER_BIN not found or not executable: {binary}")
 
     out_prefix = os.path.splitext(wav_path)[0]

@@ -892,7 +892,7 @@ def list_messages_page(
         raise ToolError("invalid_argument", "cursor was created with a different sort_by")
     try:
         conn = _connect_messages_db()
-        cursor = conn.cursor()
+        cur = conn.cursor()
 
         use_fts = bool(query) and _fts_query_kind(query) == "fts" and _fts_available(conn)
 
@@ -907,21 +907,21 @@ def list_messages_page(
         # Add filters
         if after:
             try:
-                after = datetime.fromisoformat(after)
+                after_dt = datetime.fromisoformat(after)
             except ValueError:
                 raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
 
             where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+            params.append(after_dt)
 
         if before:
             try:
-                before = datetime.fromisoformat(before)
+                before_dt = datetime.fromisoformat(before)
             except ValueError:
                 raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
 
             where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+            params.append(before_dt)
 
         if sender_phone_number:
             aliases = _sender_aliases(sender_phone_number)
@@ -942,7 +942,7 @@ def list_messages_page(
             where_clauses.append("messages.deleted_at IS NULL")
 
         if unread_only:
-            read_marker = _last_read_time_select(cursor, "chats")
+            read_marker = _last_read_time_select(cur, "chats")
             where_clauses.append(
                 f"messages.is_from_me = 0 AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})"
             )
@@ -989,15 +989,15 @@ def list_messages_page(
 
         sql = " ".join(query_parts)
         try:
-            cursor.execute(sql, tuple(params))
+            cur.execute(sql, tuple(params))
         except sqlite3.OperationalError:
             if match_param_index is None:
                 raise
             # Raw text was not valid FTS5 syntax (operator characters, unbalanced
             # quotes...). Retry with every token quoted so it is matched literally.
-            params[match_param_index] = _fts_quote_tokens(query)
-            cursor.execute(sql, tuple(params))
-        messages = cursor.fetchall()
+            params[match_param_index] = _fts_quote_tokens(query or "")
+            cur.execute(sql, tuple(params))
+        messages = cur.fetchall()
         has_more = len(messages) > limit
         messages = messages[:limit]
 
@@ -1014,7 +1014,7 @@ def list_messages_page(
         if include_context and result:
             # One query per batch of hits (not two per hit); dedupe on (id, chat_jid)
             # because message IDs repeat across chats (forwards, broadcasts).
-            windows = _fetch_context_windows(cursor, result, context_before, context_after, include_deleted)
+            windows = _fetch_context_windows(cur, result, context_before, context_after, include_deleted)
             seen: set[tuple[str, str]] = set()
             messages_with_context: list[Message] = []
 
@@ -1145,7 +1145,7 @@ def list_chats_page(
     cursor_state = decode_cursor(cursor, "chats")
     try:
         conn = _connect_messages_db()
-        cursor = conn.cursor()
+        cur = conn.cursor()
 
         # The last message is always joined — is_from_me feeds the unread
         # flag — but its content is only selected when asked for. The columns
@@ -1164,7 +1164,7 @@ def list_chats_page(
                 chats.last_message_time,
                 {last_message_select},
                 messages.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "chats")}
+                {_last_read_time_select(cur, "chats")}
             FROM chats
             {_last_message_join("chats", "messages")}
         """
@@ -1225,8 +1225,8 @@ def list_chats_page(
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit + 1, offset])
 
-        cursor.execute(" ".join(query_parts), tuple(params))
-        chats = cursor.fetchall()
+        cur.execute(" ".join(query_parts), tuple(params))
+        chats = cur.fetchall()
         has_more = len(chats) > limit
         chats = chats[:limit]
         next_cursor = None
@@ -1362,11 +1362,11 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                 keyset_params = [cursor_state["j"]]
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
-        cursor = conn.cursor()
+        cur = conn.cursor()
 
         aliases = _sender_aliases(jid)
         placeholders = ",".join("?" * len(aliases))
-        cursor.execute(
+        cur.execute(
             f"""
             SELECT DISTINCT
                 c.jid,
@@ -1375,7 +1375,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                 last_msg.content as last_message,
                 last_msg.sender as last_sender,
                 last_msg.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
+                {_last_read_time_select(cur, "c")}
             FROM chats c
             {_last_message_join("c", "last_msg")}
             WHERE (EXISTS (
@@ -1390,7 +1390,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
             (*aliases, *aliases, *policy_params, *keyset_params, limit + 1, offset),
         )
 
-        chats = cursor.fetchall()
+        chats = cur.fetchall()
         has_more = len(chats) > limit
         chats = chats[:limit]
         next_cursor = None
