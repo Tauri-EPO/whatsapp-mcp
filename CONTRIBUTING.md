@@ -31,13 +31,13 @@ uv run main.py
 2. **Branch** — fork or push to a branch named `<type>/<short-slug>`, e.g. `fix/lid-sender-filter`, `feat/typing-indicator`.
 3. **Commit** — use [Conventional Commits](https://www.conventionalcommits.org/):
    - `feat:` user-visible feature → minor bump
-   - `fix:` user-visible bug fix → patch bump
-   - `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `perf:` → no version bump
+   - `fix:` / `perf:` user-visible bug fix or speed-up → patch bump
+   - `chore:`, `docs:`, `ci:`, `refactor:`, `test:` → no version bump (still listed in the release notes, except `chore:`)
    - `feat!:` / `fix!:` / `BREAKING CHANGE:` in body → major bump
 4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go test ./...`, `go build ./...`.
 5. **Open a PR** to `main` against `Tauri-EPO/whatsapp-mcp`. Use the PR template.
 6. **Iterate** — address review comments. Squash isn't required; meaningful commit history is fine.
-7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please cuts the next release automatically.
+7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please keeps a release PR up to date; a maintainer merges it to cut the release (tag, GitHub Release, `latest` images).
 
 ## What gets merged quickly
 

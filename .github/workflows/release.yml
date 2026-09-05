@@ -1,0 +1,53 @@
+name: Release
+
+# Automatic semantic releases. On every push to main, release-please computes
+# the next version from the Conventional Commit titles since the last tag
+# (feat: minor, fix:/perf: patch, "!" major), opens or updates a release PR
+# with grouped notes, and, when that PR is merged, creates the tag vX.Y.Z and
+# the GitHub Release and updates CHANGELOG.md. A release then publishes the
+# images as vX.Y.Z, X.Y and latest through build-push.yml (a tag pushed by
+# GITHUB_TOKEN would not trigger an `on: push: tags` workflow). Config:
+# release-please-config.json and .release-please-manifest.json.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      major: ${{ steps.rp.outputs.major }}
+      minor: ${{ steps.rp.outputs.minor }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish-release:
+    name: Publish release images
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/build-push.yml
+    with:
+      ref: ${{ needs.release-please.outputs.tag_name }}
+      version: ${{ needs.release-please.outputs.tag_name }}
+      tags: ${{ needs.release-please.outputs.tag_name }} ${{ needs.release-please.outputs.major }}.${{ needs.release-please.outputs.minor }} latest
+    permissions:
+      contents: read
+      packages: write

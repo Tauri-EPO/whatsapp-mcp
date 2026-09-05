@@ -250,30 +250,38 @@ works as before.
 
 ## Published images
 
-Every push to `main` publishes both images to GHCR for `linux/amd64` and
-`linux/arm64` (`.github/workflows/publish.yml`):
+Both images (`ghcr.io/tauri-epo/whatsapp-mcp-bridge`,
+`ghcr.io/tauri-epo/whatsapp-mcp-server`) are published for `linux/amd64` and
+`linux/arm64` with these tags:
 
-```
-ghcr.io/tauri-epo/whatsapp-mcp-bridge:main    ghcr.io/tauri-epo/whatsapp-mcp-bridge:sha-<7 chars>
-ghcr.io/tauri-epo/whatsapp-mcp-server:main    ghcr.io/tauri-epo/whatsapp-mcp-server:sha-<7 chars>
-```
+| Tag | Meaning | Published by |
+| --- | --- | --- |
+| `latest` | the last release; what `docker compose pull` gets by default | `release.yml`, when a release PR is merged |
+| `vX.Y.Z`, `X.Y` | that release, fixed | `release.yml` |
+| `main` | edge: every merge to `main`, before it is released | `publish.yml` |
+| `sha-<7 chars>` | one exact commit | `publish.yml` |
+
+Versions are computed automatically from the commit titles (release-please:
+`feat:` bumps minor, `fix:`/`perf:` patch, breaking changes major); the
+[Releases page](https://github.com/Tauri-EPO/whatsapp-mcp/releases) and
+`CHANGELOG.md` list what changed. `/api/version` reports `v1.2.3+<sha>` for a
+release image and `main+<sha>` for an edge one.
 
 The compose file names those images, so you choose per host:
 
 - **Pull mode** (no Go or Python build on the server):
-  `docker compose pull && docker compose up -d`. `WHATSAPP_IMAGE_TAG=main`
-  (default) follows the default branch; pin `WHATSAPP_IMAGE_TAG=sha-abc1234`
-  in `.env` to roll back to a known commit. `git pull` is still needed for
-  `docker-compose.yml` and the scripts.
+  `docker compose pull && docker compose up -d`. `WHATSAPP_IMAGE_TAG=latest`
+  (default) follows releases; `main` follows every merge; pin
+  `WHATSAPP_IMAGE_TAG=v1.2.3` or `sha-abc1234` in `.env` to roll back.
+  `git pull` is still needed for `docker-compose.yml` and the scripts.
 - **Build mode**: `docker compose up -d --build` compiles from the checkout and
   tags the result under the same name, so local changes win until the next
   `docker compose pull`. This is what the README quick start does.
 
 Each push carries a SLSA provenance attestation and an SBOM
-(`docker buildx imagetools inspect ghcr.io/tauri-epo/whatsapp-mcp-bridge:main`
+(`docker buildx imagetools inspect ghcr.io/tauri-epo/whatsapp-mcp-bridge:latest`
 lists them), and the weekly security workflow scans the published images
-with Trivy. `/api/version` and the MCP `initialize` response report the commit either
-way. A packages page must be public for anonymous pulls; that is a one-time
+with Trivy. A packages page must be public for anonymous pulls; that is a one-time
 switch in GitHub (Packages > package > Package settings > Change visibility),
 otherwise `docker login ghcr.io` with a read-only token first.
 
