@@ -14,7 +14,7 @@
 # binary (multi-arch) instead of Debian's ffmpeg package and its ~450 MB of
 # codec and X11 libraries.
 
-FROM python:3.11-slim AS build
+FROM python:3.14-slim AS build
 
 COPY --from=ghcr.io/astral-sh/uv:0.10.10 /uv /bin/uv
 
@@ -28,7 +28,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin app \
     && mkdir -p /app/store /app/outbox \
