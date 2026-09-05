@@ -14,7 +14,7 @@
 # binary (multi-arch) instead of Debian's ffmpeg package and its ~450 MB of
 # codec and X11 libraries.
 
-FROM python:3.11-slim AS build
+FROM python:3.13-slim AS build
 
 COPY --from=ghcr.io/astral-sh/uv:0.10.10 /uv /bin/uv
 
@@ -28,7 +28,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin app \
     && mkdir -p /app/store /app/outbox \
@@ -37,13 +37,16 @@ RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin a
     # by uv) and nothing installs packages here. Dropping the base image's pip,
     # setuptools (with its vendored wheel/jaraco.*) and ensurepip removes code
     # Trivy keeps flagging and that an attacker could use to fetch more.
-    && rm -rf /usr/local/lib/python3.11/site-packages/pip* \
-              /usr/local/lib/python3.11/site-packages/setuptools* \
-              /usr/local/lib/python3.11/site-packages/wheel* \
-              /usr/local/lib/python3.11/site-packages/_distutils_hack \
-              /usr/local/lib/python3.11/site-packages/distutils-precedence.pth \
-              /usr/local/lib/python3.11/ensurepip \
-              /usr/local/bin/pip*
+    && rm -rf /usr/local/lib/python3.*/site-packages/pip* \
+              /usr/local/lib/python3.*/site-packages/setuptools* \
+              /usr/local/lib/python3.*/site-packages/wheel* \
+              /usr/local/lib/python3.*/site-packages/_distutils_hack \
+              /usr/local/lib/python3.*/site-packages/distutils-precedence.pth \
+              /usr/local/lib/python3.*/ensurepip \
+              /usr/local/bin/pip* \
+    # Fail the build if the glob stopped matching (a future layout change
+    # would otherwise silently keep setuptools and its Trivy findings).
+    && test -z "$(ls -d /usr/local/lib/python3.*/site-packages/setuptools* 2>/dev/null)"
 
 # ffmpeg: send_audio_message converts arbitrary audio to Opus/OGG voice notes,
 # transcribe_audio resamples to 16 kHz WAV. Static build, linux/amd64 + arm64.

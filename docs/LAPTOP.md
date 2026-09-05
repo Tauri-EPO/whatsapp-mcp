@@ -5,7 +5,7 @@ The server can run as a local process launched by Claude Desktop, Cursor or Clau
 ## Prerequisites
 
 - Go 1.27+
-- Python 3.11+
+- Python 3.11+ (the image and the CI run 3.13)
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor
 - FFmpeg (optional, for voice message conversion)

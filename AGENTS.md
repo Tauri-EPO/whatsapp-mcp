@@ -92,7 +92,7 @@ whatsapp-mcp/
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
 │   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
 │   ├── audio.py                # ffmpeg helpers
-│   └── Dockerfile              # python:3.11-slim + ffmpeg + uv, http transport
+│   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
