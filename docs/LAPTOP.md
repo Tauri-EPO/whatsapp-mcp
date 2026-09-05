@@ -4,7 +4,7 @@ The server can run as a local process launched by Claude Desktop, Cursor or Clau
 
 ## Prerequisites
 
-- Go 1.26+
+- Go 1.27+
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor

@@ -1,6 +1,6 @@
 module whatsapp-client
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/mdp/qrterminal v1.0.1
