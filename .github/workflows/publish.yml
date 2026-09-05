@@ -1,13 +1,10 @@
 name: Publish images
 
-# Builds the bridge and MCP images for linux/amd64 and linux/arm64 on every
-# push to main and publishes them to GHCR as
-#   ghcr.io/<owner>/whatsapp-mcp-bridge:{main,sha-<7>}
-#   ghcr.io/<owner>/whatsapp-mcp-server:{main,sha-<7>}
-# so a server can `docker compose pull` instead of building. The packages must
-# be made public once in the GitHub UI (Packages > package > Settings); the
-# GITHUB_TOKEN cannot change visibility. docs/DOCKER.md describes both deploy
-# modes; the CI workflow keeps building (never pushing) on pull requests.
+# Every push to main publishes the edge images to GHCR:
+#   ghcr.io/<owner>/whatsapp-mcp-{bridge,server}:main and :sha-<7>
+# Releases (release.yml) publish vX.Y.Z, X.Y and latest. The build itself
+# lives in build-push.yml. Packages must be public once (GitHub UI); docs in
+# docs/DOCKER.md "Published images".
 
 on:
   push:
@@ -23,61 +20,21 @@ permissions:
   packages: write
 
 jobs:
-  publish:
-    name: Build and push
+  meta:
+    name: Tags
     runs-on: ubuntu-latest
+    outputs:
+      short: ${{ steps.short.outputs.short }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image names and tags
-        id: meta
-        run: |
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          short=$(echo "${{ github.sha }}" | cut -c1-7)
-          echo "owner=$owner" >> "$GITHUB_OUTPUT"
-          echo "short=$short" >> "$GITHUB_OUTPUT"
-      - name: Build and push bridge
-        uses: docker/build-push-action@v7
-        with:
-          context: whatsapp-bridge
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: mode=max
-          sbom: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-bridge:main
-            ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-bridge:sha-${{ steps.meta.outputs.short }}
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-            VERSION=main
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=bridge
-          cache-to: type=gha,scope=bridge,mode=max
-      - name: Build and push MCP server
-        uses: docker/build-push-action@v7
-        with:
-          context: whatsapp-mcp-server
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: mode=max
-          sbom: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-server:main
-            ghcr.io/${{ steps.meta.outputs.owner }}/whatsapp-mcp-server:sha-${{ steps.meta.outputs.short }}
-          build-args: |
-            GIT_SHA=${{ github.sha }}
-            VERSION=main
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=mcp
-          cache-to: type=gha,scope=mcp,mode=max
+      - id: short
+        run: echo "short=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+  publish:
+    needs: meta
+    uses: ./.github/workflows/build-push.yml
+    with:
+      ref: ${{ github.sha }}
+      version: main
+      tags: main sha-${{ needs.meta.outputs.short }}
+    permissions:
+      contents: read
+      packages: write

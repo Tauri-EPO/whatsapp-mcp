@@ -1,0 +1,95 @@
+name: Build and push images
+
+# Reusable: builds the bridge and MCP images for linux/amd64 + linux/arm64 and
+# pushes them to GHCR under the given tags. Called by publish.yml (every push
+# to main: `main` + `sha-<7>`) and by release.yml (a release: `vX.Y.Z`, `X.Y`,
+# `latest`). Kept as a workflow_call because tags and releases created with
+# GITHUB_TOKEN do not trigger `on: push` workflows.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build (branch, tag or SHA)
+        required: true
+        type: string
+      version:
+        description: VERSION build arg (what /api/version and the MCP initialize report)
+        required: true
+        type: string
+      tags:
+        description: Whitespace-separated image tags (without the image name)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve names
+        id: meta
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          sha=$(git rev-parse HEAD)
+          bridge=""; server=""
+          for t in ${{ inputs.tags }}; do
+            bridge="$bridge"$'\n'"ghcr.io/$owner/whatsapp-mcp-bridge:$t"
+            server="$server"$'\n'"ghcr.io/$owner/whatsapp-mcp-server:$t"
+          done
+          {
+            echo "sha=$sha"
+            echo "bridge<<EOF"; echo "$bridge" | sed '/^$/d'; echo "EOF"
+            echo "server<<EOF"; echo "$server" | sed '/^$/d'; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build and push bridge
+        uses: docker/build-push-action@v7
+        with:
+          context: whatsapp-bridge
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.bridge }}
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
+            VERSION=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha,scope=bridge
+          cache-to: type=gha,scope=bridge,mode=max
+      - name: Build and push MCP server
+        uses: docker/build-push-action@v7
+        with:
+          context: whatsapp-mcp-server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.server }}
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
+            VERSION=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha,scope=mcp
+          cache-to: type=gha,scope=mcp,mode=max

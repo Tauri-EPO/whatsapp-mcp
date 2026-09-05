@@ -23,7 +23,7 @@ Read top to bottom once; afterwards jump to the section you need.
 A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **Tailscale** by remote MCP clients (an AI bot on another machine, an IDE on a laptop), sharing one WhatsApp account. Two components: a Go bridge (whatsmeow) and a Python MCP server (MCP SDK v2, streamable HTTP or stdio). Deployed with Docker Compose. `README.md` → "About this fork" has the user-facing version of this story and a table of what differs from upstream.
 
 - **Repo:** https://github.com/Tauri-EPO/whatsapp-mcp — remote `origin`. All PRs, issues and `gh` commands target this repo.
-- **Default branch:** `main`. `main` is the deployable state; there are no releases or tags here.
+- **Default branch:** `main`. `main` is the deployable state. Releases are automatic (`release.yml`, see §4 "Versions"): every merge updates a release PR; merging that PR tags `vX.Y.Z`, publishes the GitHub Release and the `latest` images.
 - **Lineage (for ideas, not for merging — see §2):**
   - https://github.com/verygoodplugins/whatsapp-mcp — remote `upstream` (also `vgp`). Maintained fork we started from at v0.6.0 (Sept 2026).
   - https://github.com/lharries/whatsapp-mcp — the original project (remote `lharries`; add with `git remote add lharries https://github.com/lharries/whatsapp-mcp.git` if missing).
@@ -38,7 +38,7 @@ A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **
   1. `scripts/upstream-harvest.sh` — fetches both remotes and prints the bridge/server commits since the last harvest (`.upstream-harvest`) plus their open PRs and issues; `--all` ignores the marks. After reviewing, `scripts/upstream-harvest.sh --mark` records the new heads. (Manual equivalent: `git log --oneline main..upstream/main -- whatsapp-bridge/`; protocol/whatsmeow changes are the most valuable to harvest.)
   2. `gh pr list --repo verygoodplugins/whatsapp-mcp --state all --search "<topic>"` and the same on `lharries/whatsapp-mcp`; read the PR description first — it usually explains the WhatsApp behaviour better than the diff.
   3. Reimplement the delta against our code (`git cherry-pick -x <sha>` only when the patch applies cleanly to files we have not diverged in). Credit the source in the commit body ("Reimplements upstream VGP #NNN"), as every PR in this repo has done so far.
-  4. Do not bring upstream's release-please, CHANGELOG or version bumps; this repo has no releases and no changelog file.
+  4. Do not bring upstream's release commits, CHANGELOG entries or version bumps: this repo computes its own versions with release-please and `CHANGELOG.md` is generated, never hand-edited.
 - **whatsmeow protocol drift** is the one thing upstream will keep fixing before us. Monthly routine (first done 2026-09-04):
   1. In `whatsapp-bridge/`: `go get go.mau.fi/whatsmeow@latest && go mod tidy` (inside the `golang:<version>-alpine` container on Windows). If the new version needs a newer Go, bump `go.mod`, the Dockerfile base image, `go-version` in every workflow and the golangci-lint version together — they must agree.
   2. `go vet`/`go test ./...`, `golangci-lint run`, `docker compose build`.
@@ -97,7 +97,8 @@ whatsapp-mcp/
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
-└── .github/workflows/          # ci.yml, security.yml, publish.yml (GHCR images on push to main)
+├── release-please-config.json  # release-please (simple, release-as for the first tag); .release-please-manifest.json holds the current version
+└── .github/workflows/          # ci.yml, security.yml, publish.yml (main/sha images), release.yml (release PR, tags, latest images), build-push.yml (reusable)
 ```
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
@@ -120,7 +121,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
 9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks.
 10. **After merge:** `git fetch origin`; rebase any open stacked branch; confirm the issue closed (`Closes #N` does it when the PR targets `main`).
-11. **Deploy** is a manual step on the server: `git pull && docker compose up -d --build` (build mode) or `git pull && docker compose pull && docker compose up -d` (pull mode: images published to GHCR by `publish.yml` on every push to `main`, tags `main` and `sha-<7>`; `WHATSAPP_IMAGE_TAG` pins one). Then `scripts/smoke.sh`.
+11. **Deploy** is a manual step on the server: `git pull && docker compose up -d --build` (build mode) or `git pull && docker compose pull && docker compose up -d` (pull mode: `latest` is the last release, `main` the edge, `sha-<7>` / `vX.Y.Z` pins; `WHATSAPP_IMAGE_TAG` selects, default `latest`). Then `scripts/smoke.sh`.
 
 Rules that stay true across all steps:
 
@@ -128,7 +129,7 @@ Rules that stay true across all steps:
 - **No drive-by formatting** and no unrelated cleanups in a PR.
 - **No new top-level dependencies** without a sentence of justification in the PR.
 - **Security-sensitive changes** (auth, file paths, network bind, command exec, allow-lists) must be called out in the PR body and get tests for the deny path.
-- **Versions.** `pyproject.toml` keeps a nominal version; there are no tags, releases or changelog. `/api/version` and the MCP `version` report the git SHA baked at build time.
+- **Versions.** Automatic. `release.yml` runs release-please on every push to `main`: the next version comes from the Conventional Commit titles since the last tag (`feat:` minor, `fix:`/`perf:` patch, `!` major); it opens or updates a PR labelled `release` with the grouped notes and `CHANGELOG.md`. Merge that PR when you want to cut a release (`gh pr merge --squash` is fine; CI does not run on it because the bot's PR carries only the changelog and the manifest). Merging creates tag `vX.Y.Z`, the GitHub Release and publishes the images as `vX.Y.Z`, `X.Y` and `latest`. Never tag by hand, never edit `CHANGELOG.md` or `.release-please-manifest.json` by hand; the commit title decides the bump, so a `!` or `BREAKING CHANGE:` footer belongs on the squash commit. `pyproject.toml` keeps a nominal version. `/api/version` and the MCP `version` report `VERSION+sha` (`main+sha` for edge images, `vX.Y.Z+sha` for releases).
 
 ## 5. Local commands and tooling
 
@@ -176,7 +177,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |
 
-`publish.yml` pushes both images to GHCR on every merge to `main` (not a release: `main` stays the deployable state). Dependabot auto-merge was removed; merge its PRs through the normal routine.
+`publish.yml` pushes the `main` and `sha-<7>` images to GHCR on every merge to `main`; `release.yml` (release-please) maintains the release PR and, when it merges, tags and pushes `vX.Y.Z` / `X.Y` / `latest` through the reusable `build-push.yml`. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
 ## 7. Environment variables
 

@@ -50,7 +50,7 @@ scripts/smoke.sh                          # health, readiness, token and MCP han
 
 That is the whole install. The bridge pairs as a linked device (like WhatsApp Web), stores messages in SQLite inside a Docker volume, and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`. Restarts and updates never need a new QR.
 
-Prefer a laptop process launched by your editor instead of containers? See [docs/LAPTOP.md](docs/LAPTOP.md). Prefer not to compile on the server? Every merge publishes ready-made images to GHCR; `docker compose pull && docker compose up -d` uses them ([docs/DOCKER.md](docs/DOCKER.md#published-images)).
+Prefer a laptop process launched by your editor instead of containers? See [docs/LAPTOP.md](docs/LAPTOP.md). Prefer not to compile on the server? Ready-made images are on GHCR: `latest` is the last [release](https://github.com/Tauri-EPO/whatsapp-mcp/releases), `main` the edge; `docker compose pull && docker compose up -d` uses them ([docs/DOCKER.md](docs/DOCKER.md#published-images)).
 
 ## Connect your agent
 
@@ -183,7 +183,7 @@ This repository descends from [lharries/whatsapp-mcp](https://github.com/lharrie
 | Search and data | `LIKE` scan | SQLite FTS5, polls, deleted and view-once content kept, `unread_only`, on-demand history backfill |
 | Audio | out of scope | `transcribe_audio` with local whisper.cpp |
 | Code | one 4k-line `main.go`, globals | `Bridge` struct, one file per responsibility, staticcheck/gosec/CodeQL, image build in CI |
-| Releases | release-please | none; `main` is the deployable state |
+| Releases | release-please, tags + CHANGELOG | release-please too: automatic semantic versions, GitHub Releases, `latest` / `vX.Y.Z` images on GHCR; `main` stays deployable between releases |
 
 The full comparison and the reasoning are in [AGENTS.md](AGENTS.md) section 2.
 
