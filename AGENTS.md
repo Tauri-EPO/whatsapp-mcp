@@ -157,10 +157,10 @@ docker compose --profile whisper up -d           # + local whisper.cpp for trans
 
 ```bash
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
-  -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.26-alpine \
+  -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
   sh -c 'go vet ./... && go test ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
-  -w /src golangci/golangci-lint:v2.11.0 golangci-lint run
+  -w /src golangci/golangci-lint:v2.13.2 golangci-lint run
 ```
 
 Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `Dockerfile` are forced LF by `.gitattributes`. When editing files programmatically, read with universal newlines and write `\n`. Prefer writing whole files or line-anchored edits over shell heredocs containing backslash escapes.
@@ -172,7 +172,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Job | What |
 |---|---|
 | Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pyright` (basic mode, `tests/` excluded: they use duck-typed fakes), `pytest` (one job, one toolchain setup) |
-| Go Build | `go build`, `go vet`, `go test`, then golangci-lint v2.11.0 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
+| Go Build | `go build`, `go vet`, `go test`, then golangci-lint v2.13.2 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |
