@@ -1,0 +1,85 @@
+name: Release cut
+
+# Cuts at most one release a day. release.yml keeps a "chore(main): release
+# X.Y.Z" PR open whenever main carries releasable commits since the last tag;
+# this job merges that PR on a schedule and then dispatches release.yml, which
+# creates the tag, the GitHub Release and the vX.Y.Z / X.Y / latest images.
+#
+# The explicit dispatch is required: a merge made with GITHUB_TOKEN does not
+# fire `on: push` workflows, and workflow_dispatch is the documented exception.
+#
+# Merging the release PR by hand earlier still works; the job then finds no PR
+# and exits. It also refuses to merge while CI on main is running (the PR is
+# not up to date yet) and fails loudly when CI on main is red.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 03:00 America/Sao_Paulo (UTC-3, no DST)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release-cut
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: Merge the release PR and dispatch release.yml
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Find the release PR
+        id: pr
+        run: |
+          number=$(gh pr list --state open --head release-please--branches--main \
+            --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            echo "No open release PR: nothing releasable since the last tag."
+            echo "number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Release PR: #$number"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Require green CI on the current main
+        id: ci
+        if: steps.pr.outputs.number != ''
+        run: |
+          head=$(gh api "repos/$GH_REPO/branches/main" --jq .commit.sha)
+          run=$(gh run list --workflow ci.yml --branch main --limit 10 \
+            --json headSha,status,conclusion \
+            --jq "[.[] | select(.headSha == \"$head\")][0]")
+          if [ -z "$run" ] || [ "$run" = "null" ]; then
+            echo "::notice::No CI run for main@$head yet; skipping this cut."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          status=$(echo "$run" | jq -r .status)
+          conclusion=$(echo "$run" | jq -r .conclusion)
+          if [ "$status" != "completed" ]; then
+            echo "::notice::CI on main@$head is still $status; skipping this cut."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::CI on main@$head finished with '$conclusion'; not cutting a release."
+            exit 1
+          fi
+          echo "CI on main@$head is green."
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge the release PR
+        if: steps.ci.outputs.ready == 'true'
+        run: gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
+
+      - name: Dispatch release.yml to tag and publish
+        if: steps.ci.outputs.ready == 'true'
+        run: |
+          gh workflow run release.yml --ref main
+          echo "release.yml dispatched; it creates the tag and publishes the images."

@@ -37,7 +37,7 @@ uv run main.py
 4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go test ./...`, `go build ./...`.
 5. **Open a PR** to `main` against `Tauri-EPO/whatsapp-mcp`. Use the PR template.
 6. **Iterate** — address review comments. Squash isn't required; meaningful commit history is fine.
-7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please keeps a release PR up to date; a maintainer merges it to cut the release (tag, GitHub Release, `latest` images).
+7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please keeps a release PR up to date; `release-cut.yml` merges it once a day (a maintainer can merge it earlier) to cut the release (tag, GitHub Release, `latest` images).
 
 ## What gets merged quickly
 
