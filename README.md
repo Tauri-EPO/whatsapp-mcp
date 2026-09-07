@@ -29,9 +29,9 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | **Count** | `message_stats` aggregates messages per chat, day, month or sender, so the agent can size a job or answer "who talks most" without reading the archive; the bulk reads also take `count_only` |
 | **Compact** | those reads take `fields`, `omit_nulls` and `max_content_chars`: a 500-message page goes from 270 KB to 155 KB by dropping the null columns, to 65 KB with three fields — the same conversation, a fraction of the context |
 | **Export** | `export_messages` streams a whole archive to NDJSON on disk and hands back a path, not the rows — bulk analysis without paying for it in context |
-| **Write** | send text, reply with quote, mention people, react, edit, forward, mark as read, show "typing", delete for everyone or locally |
+| **Write** | send text, reply with quote, mention people, react, edit, forward, mark as read, show "typing", delete for everyone or locally; `dry_run` on the send tools returns the exact payload without sending, for an assistant that drafts while you approve |
 | **Media** | send files and voice notes (auto-converted to Opus), download images/video/audio/documents, recover expired attachments by asking the sender's phone, inventory of what is stored (size, duplicates across chats, cached or not), free space on request with a dry run first |
-| **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language) |
+| **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language); transcripts are cached in the agent's notes, surfaced inline in message lists, and matched by full-text search; `TRANSCRIBE_ON_INGEST=1` transcribes inbound voice notes in the background as they arrive |
 | **Groups and polls** | group members, add/remove/promote members, rename, invite link, leave, native poll results with every voter's choice |
 | **Memory** | deleted messages keep their content, view-once media is archived without consuming the phone's view, calls are logged, the agent keeps its own notes about files (summaries, tags, keep/disposable) across sessions |
 | **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result; `coverage` shows what the archive really holds and which periods are missing; `request_history` asks the phone to backfill a chat whose archive starts too late |
@@ -131,7 +131,8 @@ What protects your account:
 - **Loopback and Host checks by default**, rate limit and body cap on the HTTP endpoint, media sends confined to an outbox directory.
 - **Nothing leaves the box.** Messages, media and transcripts stay in a Docker volume. Transcription is local whisper.cpp; there is no cloud fallback on purpose.
 - **Read-only mode.** `WHATSAPP_READ_ONLY=1` removes every mutating tool from `tools/list` (and 403s the matching bridge endpoints), so an assistant that reads and drafts has nothing to send with. Recommended default; see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
-- **Prompt injection is real.** An agent that reads untrusted messages and can send messages is [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Keep the allow-list narrow and review what your agent is allowed to do.
+- **Per-tool allow and deny lists.** `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` grant exactly the operations you want ("read everything, react, never delete"), enforced by the MCP server on `tools/list` and by the bridge on the endpoints those tools call. Deny wins over allow, read-only wins over both.
+- **Prompt injection is real.** An agent that reads untrusted messages and can send messages is [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Every tool that returns message content tells the model that it is third-party data, never instructions, and `WHATSAPP_WRAP_UNTRUSTED=1` adds explicit delimiters around it. Those are hints; the controls are the allow-list, read-only mode and the tool lists above. See [SECURITY.md](SECURITY.md).
 
 ## Configuration essentials
 
@@ -144,7 +145,7 @@ Everything is an environment variable in `.env`. The ones that matter on day one
 | `WHATSAPP_READ_ONLY` | `1` hides and refuses every mutating tool (read-and-draft assistant). Set it for both services |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | The hostname clients use (your MagicDNS name) so DNS-rebinding protection stays on |
 | `WHATSAPP_DEVICE_NAME` | Label under Linked Devices. Pair-time only |
-| `WHISPER_URL` + `COMPOSE_PROFILES=whisper` | Turn on local voice-note transcription (`WHISPER_MODEL_NAME=small` is a good CPU default) |
+| `WHISPER_URL` + `COMPOSE_PROFILES=whisper` | Turn on local voice-note transcription (`WHISPER_MODEL_NAME=small` is a good CPU default); add `TRANSCRIBE_ON_INGEST=1` to transcribe voice notes as they arrive |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | Cap disk use on a small server; files are re-fetched on demand |
 | `WHATSAPP_LOG_LEVEL` | `INFO` by default. `DEBUG` echoes message content into the logs |
 
@@ -184,11 +185,11 @@ This repository descends from [lharries/whatsapp-mcp](https://github.com/lharrie
 | --- | --- | --- |
 | Deployment | `go run` + `uv run` on a laptop | Docker Compose, health/readiness endpoints, build identity, media retention |
 | Remote access | loopback only; non-loopback answered 421 | streamable HTTP with Host allow-list, bearer token, rate limit; Tailscale-first |
-| Safety | bridge token | one shared token, `WHATSAPP_ALLOWED_CHATS` enforced in both processes, single-instance lock |
-| Search and data | `LIKE` scan | SQLite FTS5, polls, deleted and view-once content kept, `unread_only`, on-demand history backfill |
-| Audio | out of scope | `transcribe_audio` with local whisper.cpp |
+| Safety | bridge token | one shared token, `WHATSAPP_ALLOWED_CHATS`, read-only mode and per-tool allow/deny enforced in both processes, `dry_run` sends, untrusted-content marking, single-instance lock |
+| Search and data | `LIKE` scan | SQLite FTS5 (transcripts included), polls, deleted and view-once content kept, unread and unanswered views, direction/media filters, compact and count-only reads, `message_stats`, NDJSON export, archive coverage report, on-demand history backfill |
+| Audio | out of scope | `transcribe_audio` with local whisper.cpp, cached transcripts, optional background transcription on arrival |
 | Code | one 4k-line `main.go`, globals | `Bridge` struct, one file per responsibility, staticcheck/gosec/CodeQL, image build in CI |
-| Releases | release-please, tags + CHANGELOG | release-please too: automatic semantic versions, GitHub Releases, `latest` / `vX.Y.Z` images on GHCR; `main` stays deployable between releases |
+| Releases | release-please, tags + CHANGELOG | release-please too: automatic semantic versions, a release cut once a day when there is something to ship, GitHub Releases, `latest` / `vX.Y.Z` images on GHCR; `main` stays deployable between releases |
 
 The full comparison and the reasoning are in [AGENTS.md](AGENTS.md) section 2.
 
@@ -205,7 +206,7 @@ The full comparison and the reasoning are in [AGENTS.md](AGENTS.md) section 2.
 
 ## Contributing
 
-Issues and PRs live at [Tauri-EPO/whatsapp-mcp](https://github.com/Tauri-EPO/whatsapp-mcp). One problem per issue, one concern per PR, tests and docs in the same PR, CI green before merge. The current plan is tracked in the [hardening epic](https://github.com/Tauri-EPO/whatsapp-mcp/issues/138) and the [media management epic](https://github.com/Tauri-EPO/whatsapp-mcp/issues/99). Read [AGENTS.md](AGENTS.md) first; it is written for AI coding agents as much as for people.
+Issues and PRs live at [Tauri-EPO/whatsapp-mcp](https://github.com/Tauri-EPO/whatsapp-mcp). One problem per issue, one concern per PR, tests and docs in the same PR, CI green before merge. The hardening epics ([#138](https://github.com/Tauri-EPO/whatsapp-mcp/issues/138), [#99](https://github.com/Tauri-EPO/whatsapp-mcp/issues/99)) and the agent-facing API round of September 2026 are done; what is next is the [open issue list](https://github.com/Tauri-EPO/whatsapp-mcp/issues). Read [AGENTS.md](AGENTS.md) first; it is written for AI coding agents as much as for people.
 
 ## License and credits
 
