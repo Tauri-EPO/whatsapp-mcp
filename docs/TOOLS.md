@@ -322,11 +322,17 @@ notes with their text. What is searchable is exactly what has been transcribed:
 by an agent calling [`transcribe_audio`](#transcribe_audio), or by the
 `TRANSCRIBE_ON_INGEST` worker doing it in the background as messages arrive
 (see [Transcribing voice notes as they arrive](CONFIGURATION.md#transcribing-voice-notes-as-they-arrive)).
-Audio nobody transcribed stays invisible to `query`. Two details worth knowing:
-the transcript side is a plain **substring** match (the FTS operators and accent
-folding apply to message text only), and it is bounded at 400 matching files per
-query, most recently transcribed first — a term that occurs in every voice note
-you own is better answered with `search_media_notes(key="transcript")`.
+Audio nobody transcribed stays invisible to `query`. Transcripts have their own
+FTS5 index in `notes.db`, built with the same tokenizer as the message one, so
+the operators and the accent folding work the same on both sides. With
+`sort_by="relevance"` written and spoken hits are ranked together by `bm25`; the
+two scores come from two indexes over different corpora, so ordering *across*
+them is a good approximation, not a measurement — and on the paths that cannot
+rank (a query in a script without word spacing, or a SQLite build without FTS5)
+the transcript hits are unranked and sort behind every message hit. One query
+takes the 5000 best-matching voice notes, which is a bound on the work, not a
+truncation you are likely to meet: a term that occurs in more voice notes than
+that is a listing, better answered with `search_media_notes(key="transcript")`.
 
 Revoked messages ("delete for everyone", by the sender or by you) stay in this
 archive with their content, media and `filename`; only `deleted_at` is set.

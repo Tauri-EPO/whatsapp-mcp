@@ -16,6 +16,7 @@ exists somewhere the agent may not look.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
@@ -25,6 +26,8 @@ from typing import Any
 import whatsapp
 from errors import ToolError
 from whatsapp import CHAT_POLICY
+
+logger = logging.getLogger(__name__)
 
 NOTES_DB_NAME = "notes.db"
 # Keys the tools write themselves; everything else (summary, tags, keep, ...) is
@@ -38,9 +41,12 @@ TRANSCRIPT_ERROR_KEY = "transcript_error"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
-# Transcript hits a message query may union in (see transcript_hashes): one SQL
-# parameter each, well under SQLite's 999-parameter default.
-MAX_TRANSCRIPT_MATCHES = 400
+# Transcript hits one message query may union in. This is a workload bound, not
+# the old parameter bound (the hits are staged in a temp table now, see
+# whatsapp._stage_transcript_hits): the index ranks them, so the cap keeps the
+# best few thousand instead of truncating an arbitrary set. A word that occurs
+# in more voice notes than this is a listing, not a search — search_media_notes.
+MAX_TRANSCRIPT_MATCHES = 5000
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 SCHEMA = """
@@ -51,7 +57,39 @@ CREATE TABLE IF NOT EXISTS media_notes (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (sha256, key)
 );
+CREATE TABLE IF NOT EXISTS notes_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+# --- Transcript index -------------------------------------------------------
+#
+# list_messages(query=...) has to reach what was *said* in a voice note, and the
+# text only exists here: messages.content is empty for audio, so the bridge's
+# messages_fts never sees it. A substring scan of every transcript note answered
+# that at first, but it read the whole table per query, could not rank its hits
+# and had to be capped so the matching hashes still fit in one SQL statement.
+#
+# transcripts_fts is the same idea as messages_fts, one database down: an FTS5
+# index the MCP server owns end to end (the bridge never opens notes.db, so the
+# "no FTS triggers from Python" rule of messages.db does not apply). Same
+# tokenizer as whatsapp-bridge/fts.go, so "orcamento" finds "orçamento" and
+# "ana" does not match "semana" whether the word was written or spoken, and
+# bm25 gives audio hits a score that can be compared with the message ones.
+#
+# It is a plain (not external-content) table: media_notes rows are tiny and the
+# write path is one voice note at a time, so keeping the text twice is cheaper
+# than the trigger machinery — and a build without FTS5 then degrades to the
+# substring scan instead of breaking every write.
+TRANSCRIPTS_FTS_TABLE = "transcripts_fts"
+# One statement on purpose: executescript() would commit the note write this
+# runs inside, so the note and its index entry would stop being atomic.
+_FTS_SCHEMA = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts "
+    "USING fts5(sha256 UNINDEXED, text, tokenize='unicode61 remove_diacritics 2')"
+)
+# Bumping this rebuilds the index from the notes on the next use.
+_FTS_VERSION_KEY = "transcripts_fts_version"
+_FTS_VERSION = "1"
+_fts_warned = False
 
 
 def notes_db_path() -> str:
@@ -68,6 +106,71 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     return conn
+
+
+def _rebuild_transcripts_fts(conn: sqlite3.Connection) -> None:
+    """Fill the index from the transcript notes and mark it current.
+
+    Runs once on a store whose notes predate the index, and again whenever
+    _FTS_VERSION moves. The marker is written in the same transaction, so a
+    rebuild that dies halfway is simply repeated on the next use.
+    """
+    conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE}")
+    conn.execute(
+        f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) SELECT sha256, value FROM media_notes WHERE key = ?",
+        (TRANSCRIPT_KEY,),
+    )
+    conn.execute(
+        "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_FTS_VERSION_KEY, _FTS_VERSION),
+    )
+
+
+def _ensure_transcripts_fts(conn: sqlite3.Connection) -> bool:
+    """True when the transcript index is present and current on this connection.
+
+    False means this SQLite build has no fts5 (or the index could not be
+    created): every caller then falls back to the substring scan, so search
+    keeps working, unranked.
+    """
+    global _fts_warned
+    try:
+        conn.execute(_FTS_SCHEMA)
+        row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (_FTS_VERSION_KEY,)).fetchone()
+        if row is None or row[0] != _FTS_VERSION:
+            _rebuild_transcripts_fts(conn)
+    except sqlite3.Error as exc:
+        # First time loudly, then quietly: a locked database repeats, and the
+        # fallback is correct, only slower and unranked.
+        logger.log(
+            logging.DEBUG if _fts_warned else logging.WARNING,
+            "transcript index unavailable, falling back to substring search: %s",
+            exc,
+        )
+        _fts_warned = True
+        return False
+    return True
+
+
+def _index_transcript(conn: sqlite3.Connection, sha256: str, value: str) -> None:
+    """Mirror one transcript note into the index (an empty value removes it).
+
+    Runs inside the caller's write transaction, so the note and its index entry
+    commit together. When the index cannot be touched at all (no fts5, or a
+    database busy long enough to time out) the version marker goes with it: the
+    index is then stale, and dropping the marker is what makes the next use
+    rebuild it instead of answering from it. If even that fails, the exception
+    leaves annotate_media's transaction unfinished and the note is not written.
+    """
+    if not _ensure_transcripts_fts(conn):
+        conn.execute("DELETE FROM notes_meta WHERE key = ?", (_FTS_VERSION_KEY,))
+        return
+    # sha256 is UNINDEXED, so this scans the index; transcripts are written one
+    # voice note at a time, and the alternative (a rowid map) is a second table
+    # to keep in sync.
+    conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE sha256 = ?", (sha256,))
+    if value:
+        conn.execute(f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) VALUES (?, ?)", (sha256, value))
 
 
 def normalize_sha256(value: str) -> str:
@@ -189,6 +292,8 @@ def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     try:
         if value.strip() == "":
             deleted = conn.execute("DELETE FROM media_notes WHERE sha256 = ? AND key = ?", (sha, key)).rowcount
+            if key == TRANSCRIPT_KEY:
+                _index_transcript(conn, sha, "")
             conn.commit()
             return {"success": True, "sha256": sha, "key": key, "deleted": deleted > 0}
         conn.execute(
@@ -198,6 +303,11 @@ def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
             """,
             (sha, key, value, now),
         )
+        # Every transcript write lands here (transcribe_audio, the ingest worker
+        # and an agent writing the key by hand), so this is the one hook the
+        # index needs.
+        if key == TRANSCRIPT_KEY:
+            _index_transcript(conn, sha, value)
         conn.commit()
     finally:
         conn.close()
@@ -235,16 +345,45 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
     return {"sha256": sha, "notes": notes, "messages": messages}
 
 
-def transcript_hashes(query: str, limit: int = MAX_TRANSCRIPT_MATCHES) -> list[str]:
-    """Hashes whose stored transcript contains ``query`` (case-insensitive substring).
+def _match_transcripts(conn: sqlite3.Connection, needle: str, limit: int) -> list[tuple[str, float]]:
+    """Index hits for ``needle`` as (sha256, bm25 score), best match first."""
+    sql = (
+        f"SELECT sha256, bm25({TRANSCRIPTS_FTS_TABLE}) AS score FROM {TRANSCRIPTS_FTS_TABLE} "
+        f"WHERE {TRANSCRIPTS_FTS_TABLE} MATCH ? ORDER BY score LIMIT ?"
+    )
+    bound = max(1, int(limit))
+    try:
+        rows = conn.execute(sql, (needle, bound)).fetchall()
+    except sqlite3.OperationalError:
+        # Raw text was not valid FTS5 syntax (operator characters, unbalanced
+        # quotes...); retry with every token quoted, as the message side does.
+        rows = conn.execute(sql, (whatsapp._fts_quote_tokens(needle), bound)).fetchall()
+    return [(sha, float(score)) for sha, score in rows if _SHA256_RE.match(sha or "")]
+
+
+def _substring_transcripts(conn: sqlite3.Connection, needle: str, limit: int) -> list[tuple[str, float]]:
+    """Fallback for what the index cannot serve; unranked, hence a score of 0.0."""
+    rows = conn.execute(
+        "SELECT sha256 FROM media_notes WHERE key = ? "
+        "AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0) "
+        "ORDER BY updated_at DESC LIMIT ?",
+        (TRANSCRIPT_KEY, needle, needle, max(1, int(limit))),
+    ).fetchall()
+    return [(row[0], 0.0) for row in rows if _SHA256_RE.match(row[0] or "")]
+
+
+def transcript_matches(query: str, limit: int = MAX_TRANSCRIPT_MATCHES) -> list[tuple[str, float]]:
+    """Hashes whose stored transcript matches ``query``, as (sha256, score) pairs.
 
     This is how ``list_messages(query=...)`` reaches spoken words: ``messages_fts``
     is the bridge's index over ``messages.content`` and knows nothing about
     notes.db, so the message query unions in the rows carrying one of these
-    hashes. Bounded on purpose — the result becomes SQL parameters, and a query
-    matching the whole archive must not hit SQLite's parameter limit. A missing
-    notes.db, an unreadable one, or an empty query all mean "no transcript
-    matched": search degrades to content-only, it never fails.
+    hashes. The score is the FTS5 bm25 value (negative, lower is a better match)
+    so the caller can rank audio hits together with the message ones; the
+    substring fallback cannot rank and reports 0.0, which puts its hits after
+    every ranked one. A missing notes.db, an unreadable one, or an empty query
+    all mean "no transcript matched": search degrades to content-only, it never
+    fails.
     """
     needle = (query or "").strip()
     if not needle:
@@ -253,17 +392,16 @@ def transcript_hashes(query: str, limit: int = MAX_TRANSCRIPT_MATCHES) -> list[s
     if conn is None:
         return []
     try:
-        rows = conn.execute(
-            "SELECT sha256 FROM media_notes WHERE key = ? "
-            "AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0) "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (TRANSCRIPT_KEY, needle, needle, max(1, int(limit))),
-        ).fetchall()
+        if whatsapp._fts_query_kind(needle) == "fts" and _ensure_transcripts_fts(conn):
+            # A rebuild may have happened; nothing else on this connection will
+            # commit it.
+            conn.commit()
+            return _match_transcripts(conn, needle, limit)
+        return _substring_transcripts(conn, needle, limit)
     except sqlite3.Error:
         return []
     finally:
         conn.close()
-    return [row[0] for row in rows if _SHA256_RE.match(row[0] or "")]
 
 
 def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
