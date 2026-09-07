@@ -268,7 +268,7 @@ Both images (`ghcr.io/tauri-epo/whatsapp-mcp-bridge`,
 | `sha-<7 chars>` | one exact commit | `publish.yml` |
 
 Versions are computed automatically from the commit titles (release-please:
-`feat:` bumps minor, `fix:`/`perf:` patch, breaking changes major); the
+`feat:` bumps minor, `fix:`/`perf:`/`deps:` patch, breaking changes major); the
 [Releases page](https://github.com/Tauri-EPO/whatsapp-mcp/releases) and
 `CHANGELOG.md` list what changed. `/api/version` reports `v1.2.3+<sha>` for a
 release image and `main+<sha>` for an edge one.
