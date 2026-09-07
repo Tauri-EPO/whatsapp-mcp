@@ -277,6 +277,10 @@ def list_messages(
     include_deleted: bool = True,
     unread_only: bool = False,
     cursor: str | None = None,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
 ) -> dict[str, Any]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -318,6 +322,15 @@ def list_messages(
                  to process unread messages in order; with include_context=False
                  to get just the unread ones.
         cursor: next_cursor from the previous page
+        from_me: True for what you sent ("what did I reply?"), False for inbound
+                 only, None (default) for both. unread_only already implies
+                 inbound; unread_only=True with from_me=True is an error, not an
+                 empty page.
+        has_media: True for messages carrying a file, False for text-only messages,
+                 None (default) for both. Reactions and poll votes never count as media.
+        media_type: Restrict to one kind of file: "image", "video", "audio",
+                 "document" or "sticker". Implies has_media=True.
+        exclude_groups: True drops group chats (@g.us) and keeps direct conversations
     """
     # Cap limit at 500 to prevent excessive queries
     limit = max(0, min(limit, MAX_LIST_LIMIT))
@@ -337,6 +350,10 @@ def list_messages(
         include_deleted=include_deleted,
         unread_only=unread_only,
         cursor=cursor,
+        from_me=from_me,
+        has_media=has_media,
+        media_type=media_type,
+        exclude_groups=exclude_groups,
     )
     return messages.to_dict()
 

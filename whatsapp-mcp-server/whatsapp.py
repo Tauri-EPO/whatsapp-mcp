@@ -807,6 +807,114 @@ def _fetch_context_windows(
     return windows
 
 
+# Media rows the archive actually stores a file for. `reaction` and `poll_vote`
+# also live in messages.media_type but are pointer rows (gotcha 3), never media.
+MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+POINTER_MEDIA_TYPES = ("reaction", "poll_vote")
+
+
+@dataclass(frozen=True)
+class MessageFilters:
+    """The WHERE predicates every messages query shares.
+
+    One place to build them so list_messages, message_stats and any future
+    aggregate answer the same question for the same arguments. `build()`
+    validates the combination and returns (clauses, params) in matching order.
+    """
+
+    after: str | None = None
+    before: str | None = None
+    sender_phone_number: str | None = None
+    chat_jid: str | None = None
+    from_me: bool | None = None
+    has_media: bool | None = None
+    media_type: str | None = None
+    exclude_groups: bool = False
+    include_deleted: bool = True
+    unread_only: bool = False
+
+    def build(self, cur: sqlite3.Cursor) -> tuple[list[str], list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if self.after:
+            clauses.append("messages.timestamp > ?")
+            params.append(_parse_filter_date(self.after, "after"))
+
+        if self.before:
+            clauses.append("messages.timestamp < ?")
+            params.append(_parse_filter_date(self.before, "before"))
+
+        if self.sender_phone_number:
+            aliases = _sender_aliases(self.sender_phone_number)
+            clauses.append(f"messages.sender IN ({','.join('?' * len(aliases))})")
+            params.extend(aliases)
+
+        if self.chat_jid:
+            clauses.append("messages.chat_jid = ?")
+            params.append(self.chat_jid)
+
+        if self.exclude_groups:
+            clauses.append("messages.chat_jid NOT LIKE '%@g.us'")
+
+        if CHAT_POLICY.restricted:
+            clause, clause_params = CHAT_POLICY.sql_clause("messages.chat_jid")
+            clauses.append(clause)
+            params.extend(clause_params)
+
+        if not self.include_deleted:
+            clauses.append("messages.deleted_at IS NULL")
+
+        from_me = self._resolve_direction()
+        if from_me is not None:
+            clauses.append("messages.is_from_me = ?")
+            params.append(1 if from_me else 0)
+
+        if self.unread_only:
+            read_marker = _last_read_time_select(cur, "chats")
+            clauses.append(f"({read_marker} IS NULL OR messages.timestamp > {read_marker})")
+
+        media_clause, media_params = self._media_predicate()
+        if media_clause:
+            clauses.append(media_clause)
+            params.extend(media_params)
+
+        return clauses, params
+
+    def _resolve_direction(self) -> bool | None:
+        """from_me as a tri-state, with unread_only implying inbound only."""
+        if self.unread_only:
+            if self.from_me:
+                raise ToolError(
+                    "invalid_argument",
+                    "unread_only only ever matches inbound messages; from_me=True cannot match. Drop one of the two.",
+                )
+            return False
+        return self.from_me
+
+    def _media_predicate(self) -> tuple[str | None, list[Any]]:
+        media_type = (self.media_type or "").strip() or None
+        if media_type is not None and media_type not in MEDIA_TYPES:
+            raise ToolError("invalid_argument", f"media_type must be one of {', '.join(MEDIA_TYPES)}")
+        if media_type is not None:
+            if self.has_media is False:
+                raise ToolError("invalid_argument", "has_media=False cannot be combined with a media_type")
+            return "messages.media_type = ?", [media_type]
+        if self.has_media is None:
+            return None, []
+        placeholders = ",".join("?" * len(MEDIA_TYPES))
+        if self.has_media:
+            return f"messages.media_type IN ({placeholders})", list(MEDIA_TYPES)
+        return f"(messages.media_type IS NULL OR messages.media_type NOT IN ({placeholders}))", list(MEDIA_TYPES)
+
+
+def _parse_filter_date(value: str, field: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"Invalid date format for '{field}': {value}. Please use ISO-8601 format.") from None
+
+
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -821,6 +929,10 @@ def list_messages(
     sort_by: str = "newest",
     include_deleted: bool = True,
     unread_only: bool = False,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
 ) -> list[dict[str, Any]]:
     """Items of one page of list_messages_page (kept for callers that want a plain list)."""
     return list_messages_page(
@@ -837,6 +949,10 @@ def list_messages(
         sort_by=sort_by,
         include_deleted=include_deleted,
         unread_only=unread_only,
+        from_me=from_me,
+        has_media=has_media,
+        media_type=media_type,
+        exclude_groups=exclude_groups,
     ).items
 
 
@@ -855,6 +971,10 @@ def list_messages_page(
     include_deleted: bool = True,
     unread_only: bool = False,
     cursor: str | None = None,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
 ) -> PageResult:
     """Get messages matching the specified criteria with optional context.
 
@@ -879,6 +999,10 @@ def list_messages_page(
         unread_only: Only inbound messages newer than their chat's read marker
             (chats.last_read_time, as reported by any linked device). Chats with no
             marker count as entirely unread.
+        from_me: True for messages you sent, False for inbound only, None for both
+        has_media: True for messages carrying a file, False for text-only
+        media_type: One of image/video/audio/document/sticker (implies has_media=True)
+        exclude_groups: Drop group chats (@g.us), keeping direct conversations
 
         cursor: Opaque next_cursor from the previous page (keyset pagination).
             When given, page is ignored. Relevance sort falls back to an offset
@@ -901,51 +1025,18 @@ def list_messages_page(
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         if use_fts:
             query_parts.append(f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid")
-        where_clauses = []
-        params = []
-
-        # Add filters
-        if after:
-            try:
-                after_dt = datetime.fromisoformat(after)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after_dt)
-
-        if before:
-            try:
-                before_dt = datetime.fromisoformat(before)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before_dt)
-
-        if sender_phone_number:
-            aliases = _sender_aliases(sender_phone_number)
-            placeholders = ",".join("?" * len(aliases))
-            where_clauses.append(f"messages.sender IN ({placeholders})")
-            params.extend(aliases)
-
-        if chat_jid:
-            where_clauses.append("messages.chat_jid = ?")
-            params.append(chat_jid)
-
-        if CHAT_POLICY.restricted:
-            clause, clause_params = CHAT_POLICY.sql_clause("messages.chat_jid")
-            where_clauses.append(clause)
-            params.extend(clause_params)
-
-        if not include_deleted:
-            where_clauses.append("messages.deleted_at IS NULL")
-
-        if unread_only:
-            read_marker = _last_read_time_select(cur, "chats")
-            where_clauses.append(
-                f"messages.is_from_me = 0 AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})"
-            )
+        where_clauses, params = MessageFilters(
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            from_me=from_me,
+            has_media=has_media,
+            media_type=media_type,
+            exclude_groups=exclude_groups,
+            include_deleted=include_deleted,
+            unread_only=unread_only,
+        ).build(cur)
 
         match_param_index = None
         if query and use_fts:
@@ -1773,7 +1864,7 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     return True, payload.get("message") or "Deleted"
 
 
-PURGE_MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+PURGE_MEDIA_TYPES = MEDIA_TYPES
 
 
 def purge_media(

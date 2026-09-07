@@ -88,6 +88,14 @@ Get messages with filters, date ranges, and sorting.
 - `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
 - `include_deleted` (optional, default `true`): keep messages that were "deleted for everyone". They are returned with their original text/media and a `deleted_at` timestamp; `false` hides them
 - `unread_only` (optional, default `false`): only inbound messages newer than their chat's read marker (`last_read_time`, as read on any linked device). `unread_only=true, sort_by="oldest", include_context=false` lists what still needs attention, oldest first
+- `from_me` (optional, default unset): `true` for messages you sent, `false` for inbound only, unset for both. `unread_only` already implies inbound, so `unread_only=true, from_me=true` is refused with `invalid_argument` instead of returning an empty page
+- `has_media` (optional, default unset): `true` for messages carrying a file, `false` for text-only. Reactions and poll votes are pointer rows and never count as media
+- `media_type` (optional): one of `image`, `video`, `audio`, `document`, `sticker`. Implies `has_media=true`; combining it with `has_media=false` is refused
+- `exclude_groups` (optional, default `false`): `true` drops group chats (`@g.us`) and keeps direct conversations
+
+All four are plain WHERE predicates, so they combine with each other and with
+every filter above: `from_me=false, media_type="document", exclude_groups=true`
+is "documents people sent me in a direct chat".
 
 Revoked messages ("delete for everyone", by the sender or by you) stay in this
 archive with their content, media and `filename`; only `deleted_at` is set.
@@ -111,6 +119,8 @@ to `download_media` to fetch the file; see `list_media` for an inventory.
 - "Show me the last 100 messages from today"
 - "Get messages from the family group chat"
 - "Find messages from last week"
+- "What did I reply in this chat last month?" (`from_me=true`)
+- "Every document anyone sent me outside groups" (`media_type="document"`, `exclude_groups=true`)
 
 ### `send_message`
 
