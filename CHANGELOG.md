@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.1.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.0.0...v1.1.0) (2026-09-07)
+
+
+### Features
+
+* cache voice-note transcripts in notes.db and expose them in list_messages ([#246](https://github.com/Tauri-EPO/whatsapp-mcp/issues/246)) ([4511df7](https://github.com/Tauri-EPO/whatsapp-mcp/commit/4511df74feef674de05a6af9748630b07520173f)), closes [#221](https://github.com/Tauri-EPO/whatsapp-mcp/issues/221)
+* compact responses for bulk reads (fields, omit_nulls, max_content_chars, count_only) ([#252](https://github.com/Tauri-EPO/whatsapp-mcp/issues/252)) ([159de8e](https://github.com/Tauri-EPO/whatsapp-mcp/commit/159de8efdc453e6a9fa91000f3c707a05fca730f)), closes [#223](https://github.com/Tauri-EPO/whatsapp-mcp/issues/223)
+* coverage tool reporting archive extent and sync gaps ([#244](https://github.com/Tauri-EPO/whatsapp-mcp/issues/244)) ([fec27af](https://github.com/Tauri-EPO/whatsapp-mcp/commit/fec27afd22fcffaf778ee5cf61c547b254de742a)), closes [#229](https://github.com/Tauri-EPO/whatsapp-mcp/issues/229)
+* dry_run on send_message, send_file, edit_message ([#250](https://github.com/Tauri-EPO/whatsapp-mcp/issues/250)) ([3c43cda](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3c43cda5818f0720a7c403812d37050429908df0)), closes [#232](https://github.com/Tauri-EPO/whatsapp-mcp/issues/232)
+* export_messages streams the archive to NDJSON on disk ([#249](https://github.com/Tauri-EPO/whatsapp-mcp/issues/249)) ([372c649](https://github.com/Tauri-EPO/whatsapp-mcp/commit/372c649d3ac44463ad7c93968e3d8606609d10ce)), closes [#227](https://github.com/Tauri-EPO/whatsapp-mcp/issues/227)
+* list_messages filters from_me, has_media, media_type, exclude_groups ([#235](https://github.com/Tauri-EPO/whatsapp-mcp/issues/235)) ([602628d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/602628ddb2ad6cc4baeec0c9c6fb3a5eefee5ac6)), closes [#224](https://github.com/Tauri-EPO/whatsapp-mcp/issues/224)
+* list_unanswered — chats where the other side spoke last ([#248](https://github.com/Tauri-EPO/whatsapp-mcp/issues/248)) ([9bd28e8](https://github.com/Tauri-EPO/whatsapp-mcp/commit/9bd28e84a6bcf8cd44c0540a45534ec56e1093da)), closes [#219](https://github.com/Tauri-EPO/whatsapp-mcp/issues/219)
+* list_unread exclude_groups and max_age_days ([#241](https://github.com/Tauri-EPO/whatsapp-mcp/issues/241)) ([82f3aa7](https://github.com/Tauri-EPO/whatsapp-mcp/commit/82f3aa730c92b8b76578cefbb2251820249b5506)), closes [#225](https://github.com/Tauri-EPO/whatsapp-mcp/issues/225)
+* mark message content as untrusted in tool descriptions and responses ([#251](https://github.com/Tauri-EPO/whatsapp-mcp/issues/251)) ([54edbf1](https://github.com/Tauri-EPO/whatsapp-mcp/commit/54edbf12e32c23b682ad0d4ba765068791467a0d)), closes [#231](https://github.com/Tauri-EPO/whatsapp-mcp/issues/231)
+* message_stats tool for counts by chat, day, month or sender ([#243](https://github.com/Tauri-EPO/whatsapp-mcp/issues/243)) ([1cd6972](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1cd6972b897e28ac88e3193508a87f10091eaaef)), closes [#228](https://github.com/Tauri-EPO/whatsapp-mcp/issues/228)
+* paginate list_group_members ([#236](https://github.com/Tauri-EPO/whatsapp-mcp/issues/236)) ([284bddb](https://github.com/Tauri-EPO/whatsapp-mcp/commit/284bddb3effe843684ecc9c20a6142dda731bcde)), closes [#226](https://github.com/Tauri-EPO/whatsapp-mcp/issues/226)
+* request_history tool for on-demand history sync ([#239](https://github.com/Tauri-EPO/whatsapp-mcp/issues/239)) ([f1f6797](https://github.com/Tauri-EPO/whatsapp-mcp/commit/f1f67975407a0a592b12eb97d6af401b1a6c49ad)), closes [#220](https://github.com/Tauri-EPO/whatsapp-mcp/issues/220)
+* return media notes wherever media is surfaced, and prompt the agent to annotate ([#238](https://github.com/Tauri-EPO/whatsapp-mcp/issues/238)) ([1d7abf6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1d7abf658b2150b58b51ef3362cc6c46809cf674)), closes [#222](https://github.com/Tauri-EPO/whatsapp-mcp/issues/222)
+* WHATSAPP_ALLOW_TOOLS / WHATSAPP_DENY_TOOLS per-tool allow/deny ([#247](https://github.com/Tauri-EPO/whatsapp-mcp/issues/247)) ([4109b6e](https://github.com/Tauri-EPO/whatsapp-mcp/commit/4109b6ec5d2baf30fbd7f1d07121c34e1076218e))
+* WHATSAPP_READ_ONLY hides and refuses mutating tools (server + bridge) ([#242](https://github.com/Tauri-EPO/whatsapp-mcp/issues/242)) ([23176b7](https://github.com/Tauri-EPO/whatsapp-mcp/commit/23176b772d91112a176e65cf004055c4da55cb0d))
+
+
+### Bug fixes
+
+* fall back to the phone book for chats stored without a name ([#245](https://github.com/Tauri-EPO/whatsapp-mcp/issues/245)) ([a185f63](https://github.com/Tauri-EPO/whatsapp-mcp/commit/a185f631e7288686c1acbc3235eaa505c47a1635)), closes [#230](https://github.com/Tauri-EPO/whatsapp-mcp/issues/230)
+* resolve list_chats' last message by ordering, not timestamp equality ([#237](https://github.com/Tauri-EPO/whatsapp-mcp/issues/237)) ([b2b813d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/b2b813db281193e37d68eebfd9d24e46ee2d14f0)), closes [#218](https://github.com/Tauri-EPO/whatsapp-mcp/issues/218)
+
 ## [1.0.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v0.6.0...v1.0.0) (2026-09-05)
 
 
