@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -1957,34 +1957,69 @@ def bridge_status() -> dict[str, Any]:
     return status
 
 
-def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | None = None) -> dict[str, Any]:
-    """Chats with unread inbound messages, each with its newest unread rows.
+def unread_filters(
+    since: str | None = None, max_age_days: int | None = None, exclude_groups: bool = False
+) -> tuple[str, list[Any]]:
+    """Optional predicates shared by the unread queries.
 
-    "Unread" means inbound (is_from_me = 0) and newer than the chat's read
-    marker (chats.last_read_time, as reported by any linked device); chats
-    with no marker count as entirely unread. Ordered by most recent unread
-    message. Honours WHATSAPP_ALLOWED_CHATS.
+    Returns an AND-prefixed SQL fragment (empty when nothing is filtered) and
+    its parameters, for a query that has both `messages` and `chats` in scope.
+    `since` and `max_age_days` are two spellings of the same lower bound, so
+    passing both is an error rather than a silent winner.
     """
-    limit_chats = max(1, min(int(limit_chats), 100))
-    limit_per_chat = max(1, min(int(limit_per_chat), 50))
+    if since and max_age_days is not None:
+        raise ToolError("invalid_argument", "pass either since or max_age_days, not both")
     since_ts: datetime | None = None
     if since:
         try:
             since_ts = datetime.fromisoformat(since)
         except ValueError as exc:
             raise ToolError("invalid_argument", f"since must be ISO-8601, got {since!r}") from exc
+    elif max_age_days is not None:
+        days = int(max_age_days)
+        if days < 1:
+            raise ToolError("invalid_argument", f"max_age_days must be 1 or more, got {max_age_days!r}")
+        since_ts = datetime.now() - timedelta(days=days)
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if since_ts is not None:
+        clauses.append("AND messages.timestamp > ?")
+        params.append(since_ts)
+    if exclude_groups:
+        # same definition as the is_group field of each returned chat
+        clauses.append("AND chats.jid NOT LIKE '%@g.us'")
+    return (" ".join(clauses), params)
+
+
+def list_unread(
+    limit_chats: int = 20,
+    limit_per_chat: int = 5,
+    since: str | None = None,
+    exclude_groups: bool = False,
+    max_age_days: int | None = None,
+) -> dict[str, Any]:
+    """Chats with unread inbound messages, each with its newest unread rows.
+
+    "Unread" means inbound (is_from_me = 0) and newer than the chat's read
+    marker (chats.last_read_time, as reported by any linked device); chats
+    with no marker count as entirely unread. Ordered by most recent unread
+    message. Honours WHATSAPP_ALLOWED_CHATS.
+
+    exclude_groups drops `...@g.us` conversations; max_age_days is the relative
+    form of since (both are rejected together). Both bound the counted rows and
+    the returned messages alike.
+    """
+    limit_chats = max(1, min(int(limit_chats), 100))
+    limit_per_chat = max(1, min(int(limit_per_chat), 50))
+    filter_clause, filter_params = unread_filters(since, max_age_days, exclude_groups)
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
         read_marker = _last_read_time_select(cursor, "chats")
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         pointer_filter = "(messages.media_type IS NULL OR messages.media_type NOT IN ('reaction', 'poll_vote'))"
-        params: list[Any] = list(policy_params)
-        since_clause = ""
-        if since_ts is not None:
-            since_clause = "AND messages.timestamp > ?"
-            params.append(since_ts)
-        params.append(limit_chats)
+        params: list[Any] = [*policy_params, *filter_params, limit_chats]
         cursor.execute(
             f"""
             SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
@@ -1996,7 +2031,7 @@ def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | Non
               AND messages.deleted_at IS NULL
               AND {pointer_filter}
               AND {policy_clause}
-              {since_clause}
+              {filter_clause}
             GROUP BY chats.jid
             ORDER BY latest_unread DESC
             LIMIT ?
@@ -2015,10 +2050,11 @@ def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | Non
                   AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
                   AND messages.deleted_at IS NULL
                   AND {pointer_filter}
+                  {filter_clause}
                 ORDER BY messages.timestamp DESC, messages.id DESC
                 LIMIT ?
                 """,
-                (jid, limit_per_chat),
+                (jid, *filter_params, limit_per_chat),
             )
             rows = cursor.fetchall()
             total += int(count)

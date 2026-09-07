@@ -1,6 +1,7 @@
 """list_unread: chats with unread inbound rows, newest first, honouring read markers and the allow-list."""
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -57,6 +58,8 @@ def test_limits_and_since(db):
     assert out["chats_with_unread"] == 1 and out["chats"][0]["chat_jid"] == B
     out = main.list_unread(since="2026-09-04T10:03:00")
     assert {c["chat_jid"]: c["unread_count"] for c in out["chats"]} == {B: 1, A: 1}
+    # the listed rows obey the same bound as the counts
+    assert {c["chat_jid"]: [m["id"] for m in c["messages"]] for c in out["chats"]} == {B: ["b2"], A: ["a2"]}
     assert main.list_unread(since="yesterday")["error"]["code"] == "invalid_argument"
 
 
@@ -64,6 +67,68 @@ def test_respects_allow_list(db, monkeypatch):
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511111111111"]))
     out = whatsapp.list_unread()
     assert [c["chat_jid"] for c in out["chats"]] == [A]
+
+
+@pytest.fixture
+def mixed(tmp_path, monkeypatch):
+    """One direct chat and one group, each with a fresh and a week-old unread row."""
+    path = tmp_path / "mixed.db"
+
+    def stamp(**delta):
+        return (datetime.now() - timedelta(**delta)).strftime("%Y-%m-%d %H:%M:%S")
+
+    with sqlite3.connect(path) as c:
+        c.executescript(MESSAGES_SCHEMA)
+        c.execute("ALTER TABLE chats ADD COLUMN last_read_time TIMESTAMP")
+        c.execute("INSERT INTO chats VALUES (?, 'Alice', ?, NULL)", (A, stamp(hours=1)))
+        c.execute("INSERT INTO chats VALUES (?, 'Neighbourhood', ?, NULL)", (G, stamp(hours=2)))
+        rows = [
+            ("a_old", A, stamp(days=10)),
+            ("a_new", A, stamp(hours=1)),
+            ("g_old", G, stamp(days=10)),
+            ("g_new", G, stamp(hours=2)),
+        ]
+        for mid, chat, ts in rows:
+            c.execute(
+                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES (?,?,?,?,?,0)",
+                (mid, chat, chat.split("@")[0], mid, ts),
+            )
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+    whatsapp._reset_schema_cache()
+    whatsapp._reset_name_cache()
+    return path
+
+
+def test_exclude_groups_keeps_direct_chats_only(mixed):
+    everything = main.list_unread()
+    assert {c["chat_jid"] for c in everything["chats"]} == {A, G} and everything["total_unread"] == 4
+
+    out = main.list_unread(exclude_groups=True)
+    assert [c["chat_jid"] for c in out["chats"]] == [A]
+    assert all(c["chat_jid"].endswith("@s.whatsapp.net") and not c["is_group"] for c in out["chats"])
+    assert out["total_unread"] == 2 and out["chats_with_unread"] == 1
+
+
+def test_max_age_days_bounds_counts_and_rows(mixed):
+    out = main.list_unread(max_age_days=3)
+    assert out["total_unread"] == 2 and out["chats_with_unread"] == 2
+    assert {c["chat_jid"]: [m["id"] for m in c["messages"]] for c in out["chats"]} == {A: ["a_new"], G: ["g_new"]}
+
+    both = main.list_unread(exclude_groups=True, max_age_days=3)
+    assert [c["chat_jid"] for c in both["chats"]] == [A] and both["total_unread"] == 1
+
+    wide = main.list_unread(max_age_days=30)
+    assert wide["total_unread"] == 4
+
+
+def test_since_and_max_age_days_are_mutually_exclusive(mixed):
+    err = main.list_unread(since="2026-09-04T10:00:00", max_age_days=3)["error"]
+    assert err["code"] == "invalid_argument" and "not both" in err["message"]
+
+
+@pytest.mark.parametrize("days", [0, -1])
+def test_max_age_days_must_be_positive(mixed, days):
+    assert main.list_unread(max_age_days=days)["error"]["code"] == "invalid_argument"
 
 
 def test_db_error_is_internal(db, monkeypatch):

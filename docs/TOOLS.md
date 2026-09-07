@@ -486,8 +486,12 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 - `limit_chats` (optional, default 20, max 100)
 - `limit_per_chat` (optional, default 5, max 50)
 - `since` (optional): ISO-8601 lower bound
+- `exclude_groups` (optional, default false): skip `...@g.us` chats, keeping direct conversations only
+- `max_age_days` (optional): count only the last N days — the relative spelling of `since`. Giving both is an `invalid_argument` error
 
 Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled.
+
+`since` / `max_age_days` bound the counts and the returned rows alike. On a busy account the totals are dominated by group chatter nobody reads: `list_unread(exclude_groups=True, max_age_days=3)` is the "what actually needs an answer" call. Per-call and independent of `WHATSAPP_ALLOWED_CHATS`, which stays a process-wide setting.
 
 ### `list_chats`
 
