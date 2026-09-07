@@ -32,6 +32,7 @@ from tool_policy import (
 )
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
+from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
 )
@@ -229,6 +230,7 @@ def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
 
@@ -241,6 +243,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_contact(identifier: str) -> dict[str, Any]:
     """Look up a WhatsApp contact by phone number, LID, or full JID.
 
@@ -352,6 +355,7 @@ def _cap_context(limit: int, include_context: bool, before: int, after: int) -> 
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -472,6 +476,7 @@ def list_messages(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def message_stats(
     group_by: str = "chat",
     chat_jid: str | None = None,
@@ -536,6 +541,7 @@ def message_stats(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def export_messages(
     after: str | None = None,
     before: str | None = None,
@@ -609,6 +615,7 @@ def export_messages(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def list_unread(
     limit_chats: int = 20,
     limit_per_chat: int = 5,
@@ -651,6 +658,7 @@ def list_unread(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def list_unanswered(
     since: str | None = None,
     limit: int = 20,
@@ -704,6 +712,7 @@ def list_unanswered(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def list_chats(
     query: str | None = None,
     limit: int = 50,
@@ -751,6 +760,7 @@ def list_chats(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
 
@@ -769,6 +779,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
 
@@ -784,6 +795,7 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
     """Get all WhatsApp chats involving the contact.
 
@@ -798,6 +810,7 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: 
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_last_interaction(contact_jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
@@ -815,6 +828,7 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
@@ -921,6 +935,7 @@ def send_reaction(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
     """List the participants of a WhatsApp group with names and admin flags, one page at a time.
 
@@ -1025,6 +1040,7 @@ def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Get the current tally of a native WhatsApp poll.
 
@@ -1200,6 +1216,7 @@ def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def list_media(
     chat_jid: str = "",
     media_type: str = "",
@@ -1262,6 +1279,7 @@ def list_media(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_media_stats(chat_jid: str = "") -> dict[str, Any]:
     """Media totals by chat and by type, so the agent can decide where to look first.
 
@@ -1316,6 +1334,7 @@ def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def get_media_notes(sha256: str) -> dict[str, Any]:
     """Every note on a media file plus the messages that carry it.
 
@@ -1332,6 +1351,7 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[str, Any]]:
     """Find media by what was noted about it (substring match over note values).
 
@@ -1397,6 +1417,7 @@ def purge_media(
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
@@ -1455,6 +1476,7 @@ def _stored_transcript_notes(chat_jid: str, message_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@untrusted_content
 def transcribe_audio(
     chat_jid: str = "",
     message_id: str = "",
@@ -1570,11 +1592,20 @@ if __name__ == "__main__":
     try:
         _tool_policy = load_tool_policy()
         _tool_policy.validate(registered_tool_names(mcp))
+        # Read here only to reject a value we cannot parse before serving; the
+        # tools themselves consult the environment per call (untrusted.py).
+        _wrap_untrusted = parse_wrap_env(os.getenv(WRAP_ENV))
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     set_active_policy(_tool_policy)
     _removed_tools = apply_tool_policy(mcp, _tool_policy)
     logging.getLogger("whatsapp_mcp").info("%s", _tool_policy.summary(_removed_tools))
+    logging.getLogger("whatsapp_mcp").info(
+        "%s=%s: message content, names and notes %s",
+        WRAP_ENV,
+        "1" if _wrap_untrusted else "0",
+        "wrapped in <untrusted> delimiters" if _wrap_untrusted else "returned as-is (tool descriptions warn)",
+    )
 
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()

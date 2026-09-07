@@ -135,6 +135,9 @@ services:
       # (inside the whatsapp-store volume). Set it to a bind-mounted path to get
       # the files on the host; export paths never escape this directory.
       WHATSAPP_EXPORT_DIR: ${WHATSAPP_EXPORT_DIR:-}
+      # Wrap third-party text (content, last_message, transcripts, note values)
+      # in <untrusted>...</untrusted> delimiters. Off by default.
+      WHATSAPP_WRAP_UNTRUSTED: ${WHATSAPP_WRAP_UNTRUSTED:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
       # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
       WHATSAPP_STORE_DIR: /app/store
