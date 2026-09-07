@@ -6,7 +6,7 @@ With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, 
 
 ## Pagination
 
-`list_messages`, `list_chats`, `get_contact_chats` and `list_group_members` return one page:
+`list_messages`, `list_chats`, `list_unanswered`, `get_contact_chats` and `list_group_members` return one page:
 
 ```json
 {"items": [...], "next_cursor": "eyJrIjoi...", "has_more": true}
@@ -721,6 +721,42 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled.
 
 `since` / `max_age_days` bound the counts and the returned rows alike. On a busy account the totals are dominated by group chatter nobody reads: `list_unread(exclude_groups=True, max_age_days=3)` is the "what actually needs an answer" call. Per-call and independent of `WHATSAPP_ALLOWED_CHATS`, which stays a process-wide setting.
+
+### `list_unanswered`
+
+The other half of the backlog: chats whose **newest stored message is inbound**,
+i.e. where the other side spoke last. `list_unread` goes by the read marker, so
+a chat opened on the phone and then forgotten vanishes from it even though
+nobody replied; this one goes by direction, so that is exactly what it returns.
+Newest inbound message first, paged like every other list tool.
+
+Reactions, poll votes and revoked messages do not count as speaking: a
+thumbs-up from you does not hide a chat, and one from them does not create one.
+Chats with no stored messages never appear.
+
+**Parameters:**
+
+- `since` (optional): only chats whose last inbound message is newer than this ISO-8601 timestamp
+- `limit` (optional, default 20, max 200)
+- `exclude_groups` (optional, default false): skip `...@g.us` chats
+- `min_age_hours` (optional, default 0): only chats waiting at least this long — `24` skips the conversations you are in the middle of
+- `include_last_message` (optional, default true): include `last_message` / `last_sender`
+- `cursor` (optional): `next_cursor` from the previous page
+
+Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
+standard [chat shape](#chat-operations) plus:
+
+- `last_inbound_time` — when they last spoke (the timestamp the list is ordered by)
+- `age_hours` — how long the chat has been waiting
+
+`unread` tells the two backlogs apart: `false` on a `list_unanswered` row means
+you read it and never answered — the case `list_unread` cannot report.
+Respects `WHATSAPP_ALLOWED_CHATS`.
+
+**Natural Language Examples:**
+
+- "Who am I leaving hanging?"
+- "Direct chats waiting more than a day for a reply" (`exclude_groups=True, min_age_hours=24`)
 
 ### `list_chats`
 

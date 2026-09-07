@@ -587,7 +587,21 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
     return f"{table_alias}.last_read_time" if has_column else "NULL"
 
 
-def _last_message_join(chat_alias: str, msg_alias: str) -> str:
+def _spoken_filter(alias: str) -> str:
+    """Rows that count as somebody speaking in the chat.
+
+    Reactions and poll votes are pointer rows attached to another message, and
+    a revoked message is not something anyone said any more. Both would
+    otherwise decide who "spoke last" (list_unanswered) or count as unread
+    (list_unread).
+    """
+    return (
+        f"{alias}.deleted_at IS NULL "
+        f"AND ({alias}.media_type IS NULL OR {alias}.media_type NOT IN ('reaction', 'poll_vote'))"
+    )
+
+
+def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = False) -> str:
     """Deterministic single-row join to the chat's newest stored message.
 
     The row is picked by ordering the chat's messages, never by matching
@@ -601,12 +615,17 @@ def _last_message_join(chat_alias: str, msg_alias: str) -> str:
     last_is_from_me / unread non-deterministic. The correlated subquery is
     driven by idx_messages_chat_timestamp and only runs for the rows the outer
     LIMIT actually returns.
+
+    `spoken_only` skips reactions, poll votes and revoked messages, for callers
+    that ask "who spoke last" rather than "what is the last row".
     """
+    spoken = f"AND {_spoken_filter('m')}" if spoken_only else ""
     return f"""
             LEFT JOIN messages {msg_alias} ON {chat_alias}.jid = {msg_alias}.chat_jid
                 AND {msg_alias}.id = (
                     SELECT m.id FROM messages m
                     WHERE m.chat_jid = {chat_alias}.jid
+                    {spoken}
                     ORDER BY m.timestamp DESC, m.id DESC
                     LIMIT 1
                 )
@@ -2593,7 +2612,7 @@ def list_unread(
         cursor = conn.cursor()
         read_marker = _last_read_time_select(cursor, "chats")
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
-        pointer_filter = "(messages.media_type IS NULL OR messages.media_type NOT IN ('reaction', 'poll_vote'))"
+        spoken_filter = _spoken_filter("messages")
         params: list[Any] = [*policy_params, *filter_params, limit_chats]
         cursor.execute(
             f"""
@@ -2603,8 +2622,7 @@ def list_unread(
             JOIN chats ON chats.jid = messages.chat_jid
             WHERE messages.is_from_me = 0
               AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
-              AND messages.deleted_at IS NULL
-              AND {pointer_filter}
+              AND {spoken_filter}
               AND {policy_clause}
               {filter_clause}
             GROUP BY chats.jid
@@ -2623,8 +2641,7 @@ def list_unread(
                 FROM messages JOIN chats ON messages.chat_jid = chats.jid
                 WHERE messages.chat_jid = ? AND messages.is_from_me = 0
                   AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
-                  AND messages.deleted_at IS NULL
-                  AND {pointer_filter}
+                  AND {spoken_filter}
                   {filter_clause}
                 ORDER BY messages.timestamp DESC, messages.id DESC
                 LIMIT ?
@@ -2649,6 +2666,132 @@ def list_unread(
         for chat in chats:
             chat["messages"] = [msg_to_dict(message, notes=notes) for message in chat["messages"]]
         return {"chats": chats, "total_unread": total, "chats_with_unread": len(chats)}
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
+def _hours_since(timestamp: str | None) -> float | None:
+    """Hours between a stored timestamp and now, or None when unparseable."""
+    if not timestamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    now = datetime.now(moment.tzinfo) if moment.tzinfo else datetime.now()
+    return round((now - moment).total_seconds() / 3600.0, 2)
+
+
+def list_unanswered(
+    since: str | None = None,
+    limit: int = 20,
+    exclude_groups: bool = False,
+    min_age_hours: float = 0,
+    include_last_message: bool = True,
+) -> list[dict[str, Any]]:
+    """Items of one page of list_unanswered_page."""
+    return list_unanswered_page(
+        since=since,
+        limit=limit,
+        exclude_groups=exclude_groups,
+        min_age_hours=min_age_hours,
+        include_last_message=include_last_message,
+    ).items
+
+
+def list_unanswered_page(
+    since: str | None = None,
+    limit: int = 20,
+    exclude_groups: bool = False,
+    min_age_hours: float = 0,
+    include_last_message: bool = True,
+    cursor: str | None = None,
+) -> PageResult:
+    """Chats whose newest stored message is inbound: the other side spoke last.
+
+    Complements list_unread, which answers the same question through the read
+    marker and therefore misses everything already read on the phone but never
+    replied to. Reactions, poll votes and revoked messages do not count as
+    speaking, so a thumbs-up from you does not hide a chat and a thumbs-up from
+    them does not create one. Newest inbound message first. Honours
+    WHATSAPP_ALLOWED_CHATS.
+    """
+    limit = max(1, min(int(limit), 200))
+    cursor_state = decode_cursor(cursor, "unanswered")
+    filter_clause, filter_params = unread_filters(since, None, exclude_groups)
+    age_clause, age_params = "", []
+    hours = float(min_age_hours or 0)
+    if hours < 0:
+        raise ToolError("invalid_argument", f"min_age_hours must be 0 or more, got {min_age_hours!r}")
+    if hours > 0:
+        age_clause = "AND messages.timestamp <= ?"
+        age_params = [datetime.now() - timedelta(hours=hours)]
+
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+        read_marker = _last_read_time_select(cur, "chats")
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
+        # Same contract as list_chats: the last message is always joined
+        # because is_from_me is the filter, its content is optional.
+        if include_last_message:
+            last_message_select = "messages.content, messages.sender"
+        else:
+            last_message_select = "NULL, NULL"
+        keyset_clause, keyset_params = "", []
+        if cursor_state is not None:
+            keyset_clause = "AND (messages.timestamp < ? OR (messages.timestamp = ? AND chats.jid > ?))"
+            keyset_params = [cursor_state["t"], cursor_state["t"], cursor_state["j"]]
+
+        cur.execute(
+            f"""
+            SELECT chats.jid, chats.name, chats.last_message_time,
+                   {last_message_select},
+                   messages.is_from_me, {read_marker},
+                   messages.id IS NOT NULL, messages.timestamp
+            FROM chats
+            {_last_message_join("chats", "messages", spoken_only=True)}
+            WHERE messages.is_from_me = 0
+              AND {policy_clause}
+              {filter_clause} {age_clause} {keyset_clause}
+            ORDER BY messages.timestamp DESC, chats.jid ASC
+            LIMIT ?
+            """,
+            (*policy_params, *filter_params, *age_params, *keyset_params, limit + 1),
+        )
+        rows = cur.fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = None
+        if has_more and rows:
+            next_cursor = encode_cursor({"k": "unanswered", "t": rows[-1][8], "j": rows[-1][0]})
+
+        page_chats = [
+            Chat(
+                jid=row[0],
+                name=row[1],
+                last_message_time=datetime.fromisoformat(row[2]) if row[2] else None,
+                last_message=row[3],
+                last_sender=row[4],
+                last_is_from_me=row[5],
+                last_read_time=datetime.fromisoformat(row[6]) if row[6] else None,
+                has_messages=bool(row[7]),
+            )
+            for row in rows
+        ]
+        _apply_name_fallback(page_chats)
+        items = []
+        for chat, row in zip(page_chats, rows, strict=True):
+            item = chat_to_dict(chat)
+            item["last_inbound_time"] = row[8]
+            item["age_hours"] = _hours_since(row[8])
+            items.append(item)
+        return PageResult(items, next_cursor, has_more)
+
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
         raise ToolError("internal", f"database error: {e}") from e

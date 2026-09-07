@@ -87,6 +87,9 @@ from whatsapp import (
     list_messages_page as whatsapp_list_messages,
 )
 from whatsapp import (
+    list_unanswered_page as whatsapp_list_unanswered,
+)
+from whatsapp import (
     list_unread as whatsapp_list_unread,
 )
 from whatsapp import (
@@ -563,6 +566,59 @@ def list_unread(
         exclude_groups=exclude_groups,
         max_age_days=max_age_days,
     )
+
+
+@mcp.tool()
+@tool_errors
+def list_unanswered(
+    since: str | None = None,
+    limit: int = 20,
+    exclude_groups: bool = False,
+    min_age_hours: float = 0,
+    include_last_message: bool = True,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Chats where the other side spoke last: conversations waiting for a reply from you.
+
+    The complement of list_unread. list_unread goes by the read marker, so a chat
+    opened on the phone and then forgotten disappears from it even though nobody
+    answered; this tool goes by direction — the newest stored message in the chat is
+    inbound — so that backlog is exactly what it returns. Use it for "who am I
+    leaving hanging?", list_unread for "what have I not seen yet".
+
+    Reactions, poll votes and revoked messages do not count as speaking: a thumbs-up
+    from you does not hide a chat, and one from them does not create one. A chat with
+    no stored messages never appears.
+
+    Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
+    next_cursor back as `cursor` for the following page.
+
+    Args:
+        since: Only chats whose last inbound message is newer than this ISO-8601
+               timestamp (e.g. "2026-09-01T00:00:00")
+        limit: Max chats to return, most recent first (default 20, max 200)
+        exclude_groups: Skip group chats ("...@g.us"), keeping direct conversations
+        min_age_hours: Only chats waiting at least this long — use it to skip
+                       conversations you are in the middle of (24 = "waiting more
+                       than a day"). Default 0, no lower bound.
+        include_last_message: Include last_message / last_sender (default True)
+        cursor: next_cursor from the previous page
+
+    Returns:
+        Chat dictionaries in the list_chats shape (jid, name, name_source, is_group,
+        last_message, last_sender, last_read_time, unread…) plus last_inbound_time
+        (when they last spoke) and age_hours (how long they have been waiting).
+        `unread` tells the two backlogs apart: false means you read it and never
+        answered.
+    """
+    return whatsapp_list_unanswered(
+        since=since,
+        limit=limit,
+        exclude_groups=exclude_groups,
+        min_age_hours=min_age_hours,
+        include_last_message=include_last_message,
+        cursor=cursor,
+    ).to_dict()
 
 
 @mcp.tool()
