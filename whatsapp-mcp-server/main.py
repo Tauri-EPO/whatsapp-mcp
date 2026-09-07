@@ -560,18 +560,28 @@ def send_reaction(
 
 @mcp.tool()
 @tool_errors
-def list_group_members(chat_jid: str) -> dict[str, Any]:
-    """List the participants of a WhatsApp group with names and admin flags.
+def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
+    """List the participants of a WhatsApp group with names and admin flags, one page at a time.
 
     Queries WhatsApp live through the bridge, so the bridge must be connected. Each
-    member has jid (address to use when mentioning or messaging them), phone_number
+    item has jid (address to use when mentioning or messaging them), phone_number
     (when known), lid, name (from your contacts, when known), display, is_admin and
-    is_super_admin. Also returns the group's name, topic and owner.
+    is_super_admin. Also returns the group's name, topic and owner, plus
+    participant_count (the whole group, not the page).
+
+    Returns {"items": [...], "next_cursor": str|null, "has_more": bool, "participant_count": int, ...};
+    pass next_cursor back as `cursor` for the following page and stop when has_more
+    is false. Members are ordered admins first, then by JID, so pages don't overlap
+    or skip. Large groups (hundreds of members) will exceed a client's output limit
+    in one call — keep the default limit and page through.
 
     Args:
         chat_jid: The group JID (e.g. "120363000000000001@g.us")
+        limit: Max members per page (default 100, max 500)
+        page: Page number (default 0); ignored when cursor is set
+        cursor: next_cursor from the previous page
     """
-    return whatsapp_get_group_members(chat_jid)
+    return whatsapp_get_group_members(chat_jid, limit=limit, page=page, cursor=cursor)
 
 
 @mcp.tool()

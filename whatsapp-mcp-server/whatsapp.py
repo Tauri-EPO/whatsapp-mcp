@@ -1731,20 +1731,57 @@ def send_reaction(
     return True, "Reaction sent" if emoji else "Reaction removed"
 
 
-def get_group_members(group_jid: str) -> dict[str, Any]:
-    """List the participants of a group via the bridge (live query to WhatsApp).
+GROUP_MEMBERS_MAX_LIMIT = 500
 
-    Returns {"success": true, ...} with group metadata and a "members" list of
-    {jid, phone_number, lid, name, is_admin, is_super_admin}; raises ToolError.
+
+def _group_member_rank(member: dict[str, Any]) -> tuple[int, str]:
+    """Stable sort key: super admins, then admins, then everyone else, by JID."""
+    if member.get("is_super_admin"):
+        rank = 0
+    elif member.get("is_admin"):
+        rank = 1
+    else:
+        rank = 2
+    return (rank, str(member.get("jid") or ""))
+
+
+def get_group_members(group_jid: str, limit: int = 100, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
+    """One page of a group's participants via the bridge (live query to WhatsApp).
+
+    The bridge answers with the whole membership, so paging happens here: the
+    list is sorted (admins first, then JID) before slicing, which keeps pages
+    stable across calls even though each call re-queries WhatsApp.
+
+    Returns {"success": true, ...} with group metadata, "participant_count" and
+    the PageResult keys (items, next_cursor, has_more); items are
+    {jid, phone_number, lid, name, display, is_admin, is_super_admin}.
+    Raises ToolError.
     """
     group_jid = (group_jid or "").strip()
     if not group_jid.endswith("@g.us"):
         raise ToolError("invalid_argument", f"Not a group JID: {group_jid!r} (expected ...@g.us)")
     _require_allowed(group_jid)
+    limit = max(1, min(int(limit), GROUP_MEMBERS_MAX_LIMIT))
+    cursor_state = decode_cursor(cursor, "group_members")
+    offset = max(0, int(page)) * limit
+    if cursor_state is not None:
+        if cursor_state.get("g") != group_jid:
+            raise ToolError(
+                "invalid_argument", "cursor belongs to a different group; pass next_cursor from the same chat_jid"
+            )
+        offset = max(0, int(cursor_state.get("o", 0)))
+
     payload = _bridge_json(_bridge_request("GET", "/group/members", params={"jid": group_jid}))
-    payload.setdefault("members", [])
-    for member in payload["members"]:
+    members = payload.pop("members", None) or []
+    for member in members:
         member["display"] = member.get("name") or member.get("phone_number") or member.get("jid")
+    members.sort(key=_group_member_rank)
+
+    items = members[offset : offset + limit]
+    has_more = offset + len(items) < len(members)
+    next_cursor = encode_cursor({"k": "group_members", "g": group_jid, "o": offset + len(items)}) if has_more else None
+    payload["participant_count"] = len(members)
+    payload.update(PageResult(items, next_cursor, has_more).to_dict())
     return payload
 
 
