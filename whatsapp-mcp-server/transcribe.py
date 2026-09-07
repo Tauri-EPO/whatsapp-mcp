@@ -26,15 +26,23 @@ import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from audio import ffmpeg_timeout_s
+from tool_policy import parse_bool_env
 
 DEFAULT_LANGUAGE = "pt"
 DEFAULT_TIMEOUT_S = 300
+ON_INGEST_ENV = "TRANSCRIBE_ON_INGEST"
+# Budget for the liveness probe behind bridge_status: long enough for a
+# whisper-server container on the same host, short enough that a status call
+# never feels like it hung.
+STATUS_PROBE_TIMEOUT_S = 2.0
 
 
 class TranscriptionError(RuntimeError):
@@ -58,13 +66,20 @@ class WhisperConfig:
         return None
 
 
-def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
-    """Read the WHISPER_* variables (from ``env`` or ``os.environ``)."""
+def _env_reader(env: Mapping[str, str] | None) -> Callable[[str], str | None]:
+    """Reader over ``env`` (or ``os.environ``) returning None for blank values."""
     source: Mapping[str, str] = os.environ if env is None else env
 
     def get(name: str) -> str | None:
         value = (source.get(name) or "").strip()
         return value or None
+
+    return get
+
+
+def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
+    """Read the WHISPER_* variables (from ``env`` or ``os.environ``)."""
+    get = _env_reader(env)
 
     timeout_raw = get("WHISPER_TIMEOUT_S")
     try:
@@ -89,6 +104,81 @@ def describe_setup_help() -> str:
         "(e.g. http://127.0.0.1:8178/inference; `docker compose --profile whisper up -d` starts one), "
         "or WHISPER_BIN=/path/to/whisper-cli together with WHISPER_MODEL=/path/to/ggml-small.bin."
     )
+
+
+def probe_server(url: str, timeout_s: float = STATUS_PROBE_TIMEOUT_S) -> bool:
+    """Is something answering HTTP at ``WHISPER_URL``?
+
+    A HEAD on the configured URL itself, path included: whisper-server only
+    handles POST there, so any answer (404, 405, 200) proves it is routed and
+    listening, while a reverse proxy that serves an unrelated app at ``/`` no
+    longer counts as a working backend. No body is sent or read, so the probe
+    stays cheap enough for ``bridge_status``; only a transport failure or a
+    timeout counts as unreachable.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # not even a URL (unbalanced brackets in the host, …)
+        return False
+    if not parts.scheme or not parts.netloc:
+        return False
+    try:
+        httpx.head(url, timeout=timeout_s)
+    except (httpx.HTTPError, httpx.InvalidURL):
+        return False
+    return True
+
+
+def _cli_ready(binary: str, model: str | None) -> bool:
+    """Both halves of the CLI backend present: the executable and the model file."""
+    if not (os.path.isfile(binary) or shutil.which(binary)):
+        return False
+    return bool(model) and os.path.isfile(model or "")
+
+
+def _on_ingest_requested(raw: str | None) -> bool:
+    """``TRANSCRIBE_ON_INGEST`` as a status report reads it: never fatal.
+
+    The startup path parses it strictly and refuses to boot on a value it
+    cannot read, so a running server can only get here with a good one. A
+    report must not lose the whole capability block over a typo anyway.
+    """
+    try:
+        return parse_bool_env(raw, ON_INGEST_ENV)
+    except ValueError:
+        return False
+
+
+def describe_status(
+    env: Mapping[str, str] | None = None,
+    probe: Callable[[str], bool] = probe_server,
+) -> dict[str, Any]:
+    """Whether transcription is possible here, for ``bridge_status``.
+
+    ``backend`` names the variable that configures it — ``"url"`` for
+    ``WHISPER_URL``, ``"bin"`` for ``WHISPER_BIN`` (the same two backends
+    ``transcribe_audio`` reports as ``server`` / ``cli`` once it has run one).
+    ``reachable`` is a live check: the HTTP probe for the server backend, the
+    presence of the binary and the model file for the CLI one, and None when
+    nothing is configured. ``on_ingest`` says whether the background worker is
+    actually working through the backlog, which needs a backend too — without
+    one it refuses to start whatever the variable says.
+    """
+    get = _env_reader(env)
+    url, binary, model = get("WHISPER_URL"), get("WHISPER_BIN"), get("WHISPER_MODEL")
+    backend = "url" if url else ("bin" if binary else None)
+    reachable: bool | None = None
+    if backend == "url" and url:
+        reachable = bool(probe(url))
+    elif backend == "bin" and binary:
+        reachable = _cli_ready(binary, model)
+    return {
+        "configured": backend is not None,
+        "backend": backend,
+        "reachable": reachable,
+        "model": model,
+        "on_ingest": backend is not None and _on_ingest_requested(get(ON_INGEST_ENV)),
+    }
 
 
 def convert_to_wav16k(input_file: str, output_file: str) -> str:

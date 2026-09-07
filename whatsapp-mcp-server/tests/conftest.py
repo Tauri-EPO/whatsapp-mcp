@@ -48,6 +48,18 @@ DECOY = "15511999999999@s.whatsapp.net"
 CARLA = "5521777777777@s.whatsapp.net"
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_whisper(monkeypatch):
+    """No test inherits the dev box's whisper backend.
+
+    ``bridge_status`` probes it, so a machine with WHISPER_URL exported would
+    make the status tests reach the network. Tests that want a backend set
+    their own variables on top of this.
+    """
+    for var in ("WHISPER_URL", "WHISPER_BIN", "WHISPER_MODEL", "TRANSCRIBE_ON_INGEST"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @dataclass
 class PairedStore:
     messages_db: Path

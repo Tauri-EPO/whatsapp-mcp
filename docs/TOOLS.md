@@ -176,6 +176,22 @@ dropped by `exclude_groups`.
 
 Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
 
+It also answers "can this deployment transcribe voice notes?" in a `whisper`
+block, which is local to the MCP server and therefore reported even when the
+bridge is down:
+
+| Field | Meaning |
+| --- | --- |
+| `configured` | A backend is set. `false` means every [`transcribe_audio`](#transcribe_audio) call fails here — voice notes stay unreadable until the operator enables one |
+| `backend` | Which variable configures it: `"url"` (`WHISPER_URL`, the whisper.cpp server) or `"bin"` (`WHISPER_BIN` + `WHISPER_MODEL`, the CLI), `null` when neither is set. The same two backends appear as `server` / `cli` in a `transcribe_audio` result |
+| `reachable` | Live check: one `HEAD` on the configured URL (no body either way, 2 s timeout — whisper-server answers `404` there and that counts) for `url`, "binary and model file are both on disk" for `bin`, `null` when nothing is configured |
+| `model` | `WHISPER_MODEL` when set (the CLI backend needs it; the server backend loads its own) |
+| `on_ingest` | `true` when the [background worker](CONFIGURATION.md#transcribing-voice-notes-as-they-arrive) is walking the backlog, so a transcript may appear on its own. It needs a backend too, so it is never `true` while `configured` is `false` |
+
+Check it once before batching transcriptions instead of discovering the missing
+backend one failed call at a time. A backend that is `configured: true` but
+`reachable: false` is usually the `whisper` compose profile not being up.
+
 ### `coverage`
 
 What the archive actually contains, and the periods it is missing. Read-only,
@@ -632,8 +648,11 @@ machine; there is no cloud fallback.
 Requires a whisper backend, configured with either `WHISPER_URL` (a running
 whisper.cpp `whisper-server`, see the `whisper` profile in
 [`docs/DOCKER.md`](DOCKER.md)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
-`whisper-cli` binary and a `ggml-*.bin` model). Audio is normalised to 16 kHz WAV
-with ffmpeg before transcription. Returns `text`, `language`, `backend`,
+`whisper-cli` binary and a `ggml-*.bin` model). Whether this deployment has one
+is reported by [`bridge_status`](#bridge_status) under `whisper`: check it before
+walking a folder of voice notes, because without a backend every call here fails
+identically. Audio is normalised to 16 kHz WAV with ffmpeg before
+transcription. Returns `text`, `language`, `backend`,
 `file_path`, `sha256`, `cached` (the answer came from the cache) and `stored`
 (this run wrote the transcript).
 
