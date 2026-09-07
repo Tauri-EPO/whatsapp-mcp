@@ -592,6 +592,14 @@ include_transcripts=true)`: one batched lookup, no transcription. A long voice
 note is still worth an `annotate_media(sha256, "summary", ...)` on top — see
 [annotate-after-reading](#annotate-after-reading).
 
+**Filling the cache without being asked.** The server can also transcribe
+inbound voice notes in the background as they arrive, so the archive is already
+readable when an agent gets to it: set `TRANSCRIBE_ON_INGEST=1` (off by default,
+it spends CPU on the server). The worker writes the same three keys, is
+idempotent by sha256, respects `WHATSAPP_ALLOWED_CHATS`, and parks a file it
+cannot read under `transcript_error` instead of retrying it forever — see
+[Transcribing voice notes as they arrive](CONFIGURATION.md#transcribing-voice-notes-as-they-arrive).
+
 ### `download_media`
 
 Download media from a received message.
@@ -724,6 +732,10 @@ Conventional keys (use them before inventing new ones):
 - `transcript` — the spoken text of a voice note. `transcribe_audio` writes this one
   itself, together with `transcript_lang` and `transcript_backend`; you only write it
   by hand for audio you transcribed some other way
+- `transcript_error` — why a voice note has no transcript. Written by the
+  `TRANSCRIBE_ON_INGEST` worker so it stops retrying a file whisper cannot read;
+  clearing it (`annotate_media(sha256, "transcript_error", "")`) queues the file
+  again, and a transcript that succeeds later clears it as well
 - `keep` — `yes` for files a cleanup pass must not purge, `no` for disposable ones
 
 `list_media(has_notes=false)` is the backlog view (what has never been

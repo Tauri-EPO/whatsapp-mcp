@@ -148,6 +148,11 @@ services:
       WHATSAPP_STORE_DIR: /app/store
       WHISPER_URL: ${WHISPER_URL:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
+      # Background transcription of inbound voice notes as they arrive. Off by
+      # default: it spends this container's CPU on whisper. Needs WHISPER_URL.
+      TRANSCRIBE_ON_INGEST: ${TRANSCRIBE_ON_INGEST:-}
+      TRANSCRIBE_ON_INGEST_INTERVAL_S: ${TRANSCRIBE_ON_INGEST_INTERVAL_S:-}
+      TRANSCRIBE_ON_INGEST_BATCH: ${TRANSCRIBE_ON_INGEST_BATCH:-}
       FFMPEG_TIMEOUT_S: ${FFMPEG_TIMEOUT_S:-120}
     volumes:
       - whatsapp-store:/app/store

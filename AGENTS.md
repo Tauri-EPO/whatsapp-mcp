@@ -230,6 +230,9 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
+| `TRANSCRIBE_ON_INGEST` | *(unset = off)* | MCP-server-only: background thread that transcribes inbound voice notes as they arrive (`transcribe_worker.py`) instead of waiting for an agent to call `transcribe_audio`. Reads `messages.db`, writes the same `transcript` / `transcript_lang` / `transcript_backend` notes into `notes.db`, idempotent by sha256, concurrency one. Costs CPU on this machine; with no whisper backend configured it stays off with a warning. Same strict boolean parse as `WHATSAPP_READ_ONLY` |
+| `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300` | Seconds between batches (values below 5 are raised to 5) |
+| `TRANSCRIBE_ON_INGEST_BATCH` | `10` | Voice notes transcribed per batch (capped at 200). A file the backend cannot read gets a `transcript_error` note and is not tried again until that note is cleared |
 | `FFMPEG_TIMEOUT_S` | `120` | Timeout for each ffmpeg conversion (voice-note encode in `audio.py`, 16 kHz WAV prep in `transcribe.py`) |
 
 Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`, `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `COMPOSE_PROFILES`) are documented in `.env.example` and `docs/DOCKER.md`.
