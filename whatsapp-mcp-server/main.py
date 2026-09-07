@@ -718,8 +718,14 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
+
+    Use dry_run=true when the user has not approved this exact text yet: it
+    resolves and validates everything and returns the request that would be sent,
+    without contacting WhatsApp. Show that to the user, then repeat the call with
+    dry_run=false to actually send.
 
     Args:
         chat_jid: Where to send: a phone number with country code and no symbols
@@ -736,17 +742,21 @@ def send_message(
                   ["420601234567"]) or JIDs. For each entry the message text must contain
                   a matching "@<number>" token (e.g. "hi @420601234567"), otherwise the
                   mention won't render on recipients' devices. Only meaningful in groups.
+        dry_run: True previews without sending (default False)
 
     Returns:
         {"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}.
         Keep message_id + chat_jid to react to, quote, edit or delete this message later.
+        With dry_run=true: {"success": true, "dry_run": true, "endpoint", "payload" (the exact
+        JSON body), "recipient_jid" (resolved), "recipient_name"} and no message_id, because
+        nothing was sent.
     """
     # Validate input
     if not chat_jid:
         raise ToolError("invalid_argument", "chat_jid must be provided")
 
     success, status_message, sent = whatsapp_send_message(
-        chat_jid, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
+        chat_jid, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions, dry_run=dry_run
     )
     return {"success": success, "message": status_message, **sent}
 
@@ -932,19 +942,27 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
 @mcp.tool()
 @tool_errors
 @mutating_tool
-def edit_message(chat_jid: str, message_id: str, text: str) -> dict[str, Any]:
+def edit_message(chat_jid: str, message_id: str, text: str, dry_run: bool = False) -> dict[str, Any]:
     """Edit the text of a message this account sent (WhatsApp allows it for about 15 minutes).
 
     Only own messages can be edited; recipients see the new text with an
     "edited" marker. The local archive is updated too. Use the message_id
     returned by send_message.
 
+    Use dry_run=true to show the user the exact replacement text before it
+    reaches the chat; nothing is sent and the edit window keeps ticking.
+
     Args:
         chat_jid: Chat containing the message
         message_id: ID of the message to edit
         text: The new text
+        dry_run: True previews without editing (default False)
+
+    Returns:
+        The bridge's result, or with dry_run=true {"success": true, "dry_run": true,
+        "endpoint", "payload" (the exact JSON body), "recipient_jid", "recipient_name"}.
     """
-    return whatsapp_edit_message(chat_jid, message_id, text)
+    return whatsapp_edit_message(chat_jid, message_id, text, dry_run=dry_run)
 
 
 @mcp.tool()
@@ -1000,12 +1018,16 @@ def mark_messages_read(
 @mcp.tool()
 @tool_errors
 @mutating_tool
-def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, Any]:
+def send_file(chat_jid: str, media_path: str, caption: str = "", dry_run: bool = False) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
     When `caption` is provided, the file and text arrive as a single
     attachment-with-caption message (one bubble in the WA UI), instead of
     needing a separate follow-up send_message call. For group chats use the JID.
+
+    Use dry_run=true to check the recipient and the file before anything leaves
+    the machine: it resolves the recipient, verifies the file exists and returns
+    the request that would be sent, without contacting WhatsApp.
 
     Args:
         chat_jid: Phone number with country code (no symbols), direct-chat JID or
@@ -1013,13 +1035,18 @@ def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, An
         media_path: Absolute path to the media file (image, video, document)
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
+        dry_run: True previews without sending (default False)
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message. With
+        dry_run=true: {"success": true, "dry_run": true, "endpoint", "payload",
+        "recipient_jid", "recipient_name", "media": {"path", "exists", "bytes"}}. A
+        missing file is reported as not_found in both modes; the bridge additionally
+        confines media_path to WHATSAPP_MEDIA_ROOTS, which only a real send checks.
     """
 
     # Call the whatsapp_send_file function
-    success, status_message, sent = whatsapp_send_file(chat_jid, media_path, caption)
+    success, status_message, sent = whatsapp_send_file(chat_jid, media_path, caption, dry_run=dry_run)
     return {"success": success, "message": status_message, **sent}
 
 

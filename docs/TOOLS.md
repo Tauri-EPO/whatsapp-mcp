@@ -34,6 +34,26 @@ Every tool returns its documented payload on success. On failure it returns one 
 
 An unreadable database is reported as `internal`, never as an empty result, so an empty list really means "nothing matched".
 
+## Dry runs
+
+`send_message`, `send_file` and `edit_message` take `dry_run` (default `false`). With `dry_run=true` the tool validates the call — recipient present, chat allowed by `WHATSAPP_ALLOWED_CHATS`, media file exists — resolves the recipient and returns the request it *would* have posted, without contacting the bridge or WhatsApp:
+
+```json
+{
+  "success": true,
+  "dry_run": true,
+  "message": "Dry run: nothing was sent. Show this to the user and call again with dry_run=false to send.",
+  "endpoint": "POST /api/send",
+  "payload": {"recipient": "5511999999999", "message": "olá"},
+  "recipient_jid": "5511999999999@s.whatsapp.net",
+  "recipient_name": "Alice"
+}
+```
+
+`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the canonical JID the bare number resolves to and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}`; the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
+
+This is what a draft-only assistant should use: preview, show the payload, send only after the human says yes. Note that `dry_run` is *not* a way around [read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant) — with `WHATSAPP_READ_ONLY=1` these tools are not offered at all, dry run or not. Read-only is the operator's setting; `dry_run` is the agent's manners.
+
 Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
 
 ## Bridge
@@ -246,6 +266,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
 - `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
+- `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs).
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
@@ -318,7 +339,7 @@ FTS index follows); downloaded media is left in `store/`. Respects
 
 ### `edit_message`
 
-Edit the text of a message this account sent (WhatsApp accepts edits for about 15 minutes). Recipients see the new text with an "edited" marker; the archive is updated. **Parameters:** `chat_jid`, `message_id` (from `send_message`), `text`.
+Edit the text of a message this account sent (WhatsApp accepts edits for about 15 minutes). Recipients see the new text with an "edited" marker; the archive is updated. **Parameters:** `chat_jid`, `message_id` (from `send_message`), `text`, `dry_run` (optional, default `false` — see [Dry runs](#dry-runs)).
 
 ### `forward_message`
 
@@ -387,6 +408,7 @@ Send a media file (image, video, document).
 - `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
+- `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
 
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow

@@ -206,6 +206,12 @@ Two deliberate calls at the edges:
   the phone to push data and writes new rows into `messages.db`. Turn read-only
   off for the run if you need to backfill a chat.
 
+Read-only mode is the operator's decision and is not negotiable from inside a
+session: the `dry_run` flag on `send_message` / `send_file` / `edit_message`
+(see [TOOLS.md](TOOLS.md#dry-runs)) is a courtesy an agent can offer when sending
+*is* allowed, not a way in. With `WHATSAPP_READ_ONLY=1` those tools are not
+offered at all, dry run or not.
+
 The value is parsed strictly — `1/true/yes/on` and `0/false/no/off`,
 case-insensitive. Anything else stops the process at startup with an error
 instead of quietly running wide open, and both processes log the mode they are
