@@ -25,7 +25,8 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 
 | | |
 | --- | --- |
-| **Read** | list chats, list and page through messages, unread summary across chats, full-text search across everything, message context around a hit, contacts by name or number |
+| **Read** | list chats, list and page through messages (by direction, media kind, groups or not), unread summary across chats, full-text search across everything, message context around a hit, contacts by name or number |
+| **Count** | `message_stats` aggregates messages per chat, day, month or sender, so the agent can size a job or answer "who talks most" without reading the archive |
 | **Write** | send text, reply with quote, mention people, react, edit, forward, mark as read, show "typing", delete for everyone or locally |
 | **Media** | send files and voice notes (auto-converted to Opus), download images/video/audio/documents, recover expired attachments by asking the sender's phone, inventory of what is stored (size, duplicates across chats, cached or not), free space on request with a dry run first |
 | **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language) |
