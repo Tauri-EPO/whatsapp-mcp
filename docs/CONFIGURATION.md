@@ -41,6 +41,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` when a token is enforced, else `0`     | Requests per minute per client on the `http`/`sse` transports (token bucket, 429 + `Retry-After`); `0`/`off` disables |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304`                              | Maximum request body accepted by the `http`/`sse` transports |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
+| `WHATSAPP_PUBLIC_URL`  | *(unset)*                                | URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`, or a bare `host` / `host:port`). Makes `bridge_status` report the expiry of that endpoint's TLS certificate. See [Watching the published certificate](#watching-the-published-certificate) |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
 | `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
@@ -345,6 +346,63 @@ them. The mitigations that are actually enforced are
 [read-only mode](#read-only-mode-recommended-for-a-personal-assistant) and the
 [chat allow-list](#restricting-which-chats-the-agent-can-touch); see
 [SECURITY.md](../SECURITY.md).
+
+## Watching the published certificate
+
+The containers never terminate TLS. They bind loopback and something on the
+host publishes them — `tailscale serve`, a reverse proxy — so when that
+certificate expires every direct client fails at the handshake while
+`bridge_status` still reports `ok: true`: it only ever talks to the bridge over
+loopback and cannot see what the outside world is served. That is the failure
+described in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#published-https-endpoint),
+and it is invisible until a client breaks.
+
+Point `WHATSAPP_PUBLIC_URL` at the URL your clients use and `bridge_status`
+watches it for you:
+
+```bash
+WHATSAPP_PUBLIC_URL=https://myserver.tail1234.ts.net/mcp   # host or host:port also work
+```
+
+```jsonc
+"endpoint_cert_expires_at": "2026-10-07T21:52:11Z",
+"endpoint_cert_days_left": 27,
+// present instead of / alongside them when the handshake fails:
+"endpoint_cert_error": "certificate verify failed for myserver.tail1234.ts.net:443: certificate has expired"
+```
+
+What it does and does not do:
+
+- **One TLS handshake, no request.** The connection is opened, the certificate
+  read and the socket closed; nothing is sent to the endpoint, no token is
+  used, no MCP or HTTP call is made. 3 s per handshake, and the answer — error
+  included — is cached for an hour per host, so polling `bridge_status` costs
+  nothing and a certificate you have just renewed shows up within the hour.
+- **The chain is verified** with the system trust store, so an expired or
+  wrongly-issued certificate shows up as `endpoint_cert_error` instead of
+  passing silently. The expiry is still reported in that case — an unverified
+  second handshake reads the leaf — because "expired 3 days ago" is what you
+  need to see.
+- **It never breaks `bridge_status`.** An unreachable endpoint, a refused
+  connection or a URL that is not HTTPS becomes `endpoint_cert_error`; the rest
+  of the status is unchanged. Leave the variable unset and none of these fields
+  appear and no connection is made.
+- **It watches, it does not renew.** Renewal is the host's job; the fix is in
+  [TROUBLESHOOTING.md](TROUBLESHOOTING.md#published-https-endpoint).
+- **It probes from where the MCP server runs**, which under compose is the
+  bridge's network namespace, not the host. A name only the host resolves (a
+  MagicDNS `*.ts.net` record, a `/etc/hosts` entry) gives
+  `endpoint_cert_error: cannot reach …` for an endpoint your clients reach
+  perfectly well. Check once, before trusting the field:
+
+  ```bash
+  docker compose exec mcp python -c \
+    "import endpoint_cert; print(endpoint_cert.probe('myserver.tail1234.ts.net', 443))"
+  ```
+
+  If that says "cannot reach", give the container a route to the name (compose
+  `extra_hosts`, or the tailnet IP in `WHATSAPP_PUBLIC_URL`) or leave the
+  variable unset and keep the `openssl s_client` cron job on the host instead.
 
 ## Checking that transcription is possible
 

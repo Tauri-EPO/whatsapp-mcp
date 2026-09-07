@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 import audio
+import endpoint_cert
 import transcribe
 from chat_policy import load_chat_policy, normalize_chat_entry
 from errors import ToolError
@@ -2858,6 +2859,19 @@ def _whisper_status() -> dict[str, Any]:
         }
 
 
+def _endpoint_cert_status() -> dict[str, Any]:
+    """Published-endpoint certificate fields for bridge_status, never raising.
+
+    Empty when WHATSAPP_PUBLIC_URL is unset, so the status of a deployment
+    that publishes nothing is unchanged.
+    """
+    try:
+        return endpoint_cert.status()
+    except Exception as exc:  # an outbound probe cannot fail the status call
+        logger.warning("bridge_status: endpoint certificate check failed: %s", exc)
+        return {"endpoint_cert_error": str(exc)}
+
+
 def bridge_status() -> dict[str, Any]:
     """Health, readiness and build identity of the bridge in one call.
 
@@ -2865,6 +2879,7 @@ def bridge_status() -> dict[str, Any]:
     so the agent can tell "bridge unreachable" from "nothing matched".
     """
     status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL, "whisper": _whisper_status()}
+    status.update(_endpoint_cert_status())
     try:
         health = _bridge_request("GET", "/health", timeout=10)
     except ToolError as exc:

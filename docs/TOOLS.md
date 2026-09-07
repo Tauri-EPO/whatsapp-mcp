@@ -192,6 +192,23 @@ Check it once before batching transcriptions instead of discovering the missing
 backend one failed call at a time. A backend that is `configured: true` but
 `reachable: false` is usually the `whisper` compose profile not being up.
 
+**Published endpoint certificate.** With `WHATSAPP_PUBLIC_URL` set to the URL
+clients use (`https://host.tailnet.ts.net/mcp`), three more fields appear:
+
+| Field | Meaning |
+| --- | --- |
+| `endpoint_cert_expires_at` | ISO-8601 UTC expiry of the certificate that endpoint serves |
+| `endpoint_cert_days_left` | Whole days until then; negative once it has expired |
+| `endpoint_cert_error` | Present when the handshake failed (expired, untrusted, unreachable, not HTTPS). The expiry fields are still filled in whenever the certificate could be read |
+
+The containers do not terminate TLS, so this is the only way the status can see
+what the outside world is served: an expired certificate breaks every direct
+client while everything else here still reports `ok: true`. It is one TLS
+handshake, no request, cached for an hour, and it can never make `bridge_status`
+fail. The fields are absent — and no connection is made — when the variable is
+unset. See [Watching the published certificate](CONFIGURATION.md#watching-the-published-certificate)
+and the [certificate entry in TROUBLESHOOTING.md](TROUBLESHOOTING.md#published-https-endpoint).
+
 ### `coverage`
 
 What the archive actually contains, and the periods it is missing. Read-only,

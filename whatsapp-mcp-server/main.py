@@ -171,6 +171,10 @@ def bridge_status() -> dict[str, Any]:
     whisper: {configured, backend ("url" | "bin"), reachable, model, on_ingest} —
     check it before planning transcription work, because with configured=false every
     transcribe_audio call fails and voice notes stay unreadable on this deployment.
+    With WHATSAPP_PUBLIC_URL set it also reports endpoint_cert_expires_at and
+    endpoint_cert_days_left for the published HTTPS endpoint (endpoint_cert_error
+    when the handshake fails): a low or negative days_left is why other clients
+    cannot connect while this session still works.
     Read-only; never fails, so it is safe to call before anything else.
     """
     return whatsapp_bridge_status()
