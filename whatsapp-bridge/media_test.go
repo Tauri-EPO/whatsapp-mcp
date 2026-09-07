@@ -21,7 +21,9 @@ const mediaTestChat = "5511999999999@s.whatsapp.net"
 // returns the timestamp used, so tests can rebuild the expected filename.
 func seedMediaRow(t *testing.T, ms *MessageStore, id, mediaType, url string, key, sha, encSHA []byte, length uint64) time.Time {
 	t.Helper()
-	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.UTC)
+	// Local, like the timestamps whatsmeow delivers: the cached file name is
+	// the local wall clock (mediaFileName), while the row is stored in UTC.
+	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.Local)
 	if err := ms.StoreChat(mediaTestChat, "Test", ts); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +118,9 @@ func TestDownloadMedia_ChatDirSanitisesColons(t *testing.T) {
 	ms := newTestMessageStore(t)
 	b := testBridge(nil, ms, installRecordingLogger(t))
 	chat := "5511999999999:12@s.whatsapp.net" // device-suffixed JID
-	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.UTC)
+	// Local, like the timestamps whatsmeow delivers: the cached file name is
+	// the local wall clock (mediaFileName), while the row is stored in UTC.
+	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.Local)
 	if err := ms.StoreChat(chat, "", ts); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +205,9 @@ func TestMediaDownloader_ImplementsDownloadableMessage(t *testing.T) {
 }
 
 func TestMediaFileName_DocumentExtension(t *testing.T) {
-	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.UTC)
+	// Local, like the timestamps whatsmeow delivers: the cached file name is
+	// the local wall clock (mediaFileName), while the row is stored in UTC.
+	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.Local)
 	cases := map[string]string{
 		"Report Q3.pdf":          ".pdf",
 		"contract.DOCX":          ".docx",
@@ -234,7 +240,9 @@ func TestDownloadMedia_DocumentsUseAndFallBackOnLegacyName(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
 	b := testBridge(nil, ms, installRecordingLogger(t))
-	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.UTC)
+	// Local, like the timestamps whatsmeow delivers: the cached file name is
+	// the local wall clock (mediaFileName), while the row is stored in UTC.
+	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.Local)
 	if err := ms.StoreChat(mediaTestChat, "Test", ts); err != nil {
 		t.Fatal(err)
 	}
