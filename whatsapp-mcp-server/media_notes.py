@@ -25,7 +25,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
-from whatsapp import CHAT_POLICY
+from whatsapp import CHAT_POLICY, parse_db_time
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +242,7 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
             "message_id": r[0],
             "chat_jid": r[1],
             "chat_name": r[2],
-            "timestamp": datetime.fromisoformat(r[3]).isoformat() if r[3] else None,
+            "timestamp": parse_db_time(r[3]).isoformat() if r[3] else None,
             "media_type": r[4],
             "filename": r[5] or None,
             "bytes": int(r[6]) if r[6] else None,

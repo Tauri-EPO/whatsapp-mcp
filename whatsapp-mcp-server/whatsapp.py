@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -354,7 +354,7 @@ def _row_to_message(row: tuple) -> Message:
         sha256,
     ) = row
     return Message(
-        timestamp=datetime.fromisoformat(timestamp),
+        timestamp=parse_db_time(timestamp),
         sender=sender,
         chat_name=chat_name,
         content=content,
@@ -366,7 +366,7 @@ def _row_to_message(row: tuple) -> Message:
         media_type=media_type,
         quoted_message_id=quoted_id,
         filename=filename,
-        deleted_at=datetime.fromisoformat(deleted) if deleted else None,
+        deleted_at=parse_db_time(deleted) if deleted else None,
         view_once=bool(view_once),
         target_message_id=target,
         bytes=int(file_length) if file_length else None,
@@ -1028,7 +1028,10 @@ def _fetch_context_windows(
         values = ",".join("(?, ?, ?)" for _ in batch)
         hit_params: list[Any] = []
         for hit in batch:
-            hit_params.extend([hit.id, hit.chat_jid, hit.timestamp.isoformat()])
+            # The anchor is compared against the raw column, so it has to be
+            # spelled the way the column is (timestamp_bound), not re-rendered
+            # by isoformat().
+            hit_params.extend([hit.id, hit.chat_jid, timestamp_bound(hit.timestamp)])
         sql = f"""
             WITH hits(id, chat_jid, ts) AS (VALUES {values})
             SELECT * FROM (
@@ -1094,46 +1097,55 @@ def _direct_only_clause(column: str) -> str:
     return "(" + " OR ".join(f"{column} LIKE '%{suffix}'" for suffix in DIRECT_JID_SUFFIXES) + ")"
 
 
-# messages.timestamp is TEXT the bridge wrote from a Go time.Time, and its exact
-# spelling has varied by release and write path: "2026-01-09 18:00:00-03:00"
-# today, the RFC 3339 "T" form in stores written by a cgo build, the legacy Go
-# String() form ("2026-01-09 18:00:00 +0000 UTC") in older ones, with or without
-# fractional seconds. A raw string comparison against a bound therefore answers
-# differently per row, and because "T" sorts after " " the day boundary lands in
-# a different place for the two spellings (issue #253).
+# Every time column the bridge writes holds one spelling: "YYYY-MM-DD
+# HH:MM:SS+00:00" — UTC, seconds, fixed width (store_time.go, and the schema
+# note in docs/ARCHITECTURE.md). Same offset on every row is what makes a plain
+# string comparison a comparison of instants, so a bound renders the same way
+# and binds against the raw column: the timestamp indexes serve the range again
+# instead of only the ORDER BY, which the substring expression this replaced
+# could not do (issues #253, #257, #270).
 #
-# Both sides are normalised to "YYYY-MM-DD HH:MM:SS" before comparing: the first
-# 19 characters, separator forced to a space. Same cut coverage() makes — it
-# drops the UTC offset, which is constant inside one archive and so cancels out.
-#
-# The expression is not seekable, so a bound no longer starts an index seek; the
-# timestamp indexes still serve the ORDER BY the paged reads walk.
-def timestamp_expr(column: str) -> str:
-    """SQL rendering `column` in the normalised form time bounds compare against."""
-    return f"replace(substr({column}, 1, 19), 'T', ' ')"
+# Earlier releases let the SQLite driver render the value and stamped the
+# writing machine's local offset on the row (older stores also hold Go's
+# time.Time.String() form). The bridge rewrites those on startup, so they only
+# survive in a store it has not reopened yet; parse_db_time still reads them.
+_GO_STRING_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) \S+$")
 
 
 def timestamp_bound(moment: datetime) -> str:
-    """A datetime as a normalised bound, in the archive's local wall time.
+    """A datetime as a bound in the stored spelling: UTC, to the second.
 
-    An offset-aware bound is converted to the local zone first, so the same
-    instant expressed in any zone selects the same rows; a naive one is taken
-    as already local, which is what the bridge writes.
+    An offset-aware bound is converted to UTC, so the same instant expressed in
+    any zone selects the same rows; a naive one is read as UTC, which is what
+    the archive holds and what every tool result reports.
     """
-    if moment.tzinfo is not None:
-        moment = moment.astimezone().replace(tzinfo=None)
-    return moment.isoformat(sep=" ", timespec="seconds")
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
 
-def timestamp_local(stored: str) -> datetime:
-    """A stored timestamp as a naive local datetime, on the same convention.
+def parse_db_time(stored: str) -> datetime:
+    """A stored timestamp as an aware datetime, in any spelling the bridge wrote.
 
-    The Python-side mirror of `timestamp_expr`: same 19 characters, same space
-    separator, offset dropped. Ages computed with it and bounds built with
-    `timestamp_bound` therefore measure from one clock (issue #257). Raises
-    ValueError when the text is not a timestamp at all.
+    The canonical form and the ISO-8601 variants go through fromisoformat; Go's
+    time.Time.String() form ("2026-01-09 18:00:00 +0000 UTC", optionally with a
+    monotonic " m=+..." suffix) needs the regexp. A value with no offset is read
+    as UTC, the convention SQLite's own date functions use. Raises ValueError
+    when the text is not a timestamp at all.
     """
-    return datetime.fromisoformat(stored[:19].replace("T", " "))
+    text = stored.strip()
+    monotonic = text.find(" m=")
+    if monotonic > 0:
+        text = text[:monotonic].strip()
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        match = _GO_STRING_TIME.match(text)
+        if match is None:
+            raise ValueError(f"unrecognised timestamp {stored!r}") from None
+        offset = match.group(2)
+        moment = datetime.fromisoformat(f"{match.group(1)}{offset[:3]}:{offset[3:]}")
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -1161,11 +1173,11 @@ class MessageFilters:
         params: list[Any] = []
 
         if self.after:
-            clauses.append(f"{timestamp_expr('messages.timestamp')} > ?")
+            clauses.append("messages.timestamp > ?")
             params.append(_parse_filter_date(self.after, "after"))
 
         if self.before:
-            clauses.append(f"{timestamp_expr('messages.timestamp')} < ?")
+            clauses.append("messages.timestamp < ?")
             params.append(_parse_filter_date(self.before, "before"))
 
         if self.sender_phone_number:
@@ -1957,11 +1969,11 @@ def list_chats_page(
             Chat(
                 jid=chat_data[0],
                 name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
+                last_message_time=parse_db_time(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
                 last_is_from_me=chat_data[5],
-                last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+                last_read_time=parse_db_time(chat_data[6]) if chat_data[6] else None,
                 has_messages=bool(chat_data[7]),
             )
             for chat_data in chats
@@ -2118,11 +2130,11 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
             Chat(
                 jid=chat_data[0],
                 name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
+                last_message_time=parse_db_time(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
                 last_is_from_me=chat_data[5],
-                last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+                last_read_time=parse_db_time(chat_data[6]) if chat_data[6] else None,
                 has_messages=bool(chat_data[7]),
             )
             for chat_data in chats
@@ -2224,11 +2236,11 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         chat = Chat(
             jid=chat_data[0],
             name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
+            last_message_time=parse_db_time(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
-            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+            last_read_time=parse_db_time(chat_data[6]) if chat_data[6] else None,
             has_messages=bool(chat_data[7]),
         )
         _apply_name_fallback([chat])
@@ -2290,11 +2302,11 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         chat = Chat(
             jid=chat_data[0],
             name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
+            last_message_time=parse_db_time(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
-            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+            last_read_time=parse_db_time(chat_data[6]) if chat_data[6] else None,
             has_messages=bool(chat_data[7]),
         )
         _apply_name_fallback([chat])
@@ -2725,10 +2737,11 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
 COVERAGE_DEFAULT_GAP_HOURS = 24.0
 COVERAGE_DEFAULT_MAX_GAPS = 20
 
-# Timestamps are stored as the bridge wrote them ("YYYY-MM-DD HH:MM:SS..." or
-# the RFC 3339 "T" form, sometimes with fractional seconds and an offset).
-# substr(...,1,19) keeps the part SQLite's date functions understand and every
-# comparison here stays inside one archive, so a constant offset cancels out.
+# Gap detection subtracts one row's timestamp from the next, never compares
+# against a bound, so it does not need the index and can afford substr(): the
+# 19-character cut is what julianday() understands in every spelling, including
+# Go's "… -0300 -03" in a store the bridge has not migrated yet. The offset is
+# the same on every row of one archive, so it cancels out of the difference.
 _COVERAGE_TS = "julianday(substr({col}, 1, 19))"
 
 
@@ -2928,12 +2941,12 @@ def unread_filters(
         days = int(max_age_days)
         if days < 1:
             raise ToolError("invalid_argument", f"max_age_days must be 1 or more, got {max_age_days!r}")
-        since_ts = timestamp_bound(datetime.now() - timedelta(days=days))
+        since_ts = timestamp_bound(datetime.now(UTC) - timedelta(days=days))
 
     clauses: list[str] = []
     params: list[Any] = []
     if since_ts is not None:
-        clauses.append(f"AND {timestamp_expr('messages.timestamp')} > ?")
+        clauses.append("AND messages.timestamp > ?")
         params.append(since_ts)
     if exclude_groups:
         clauses.append("AND " + _direct_only_clause("chats.jid"))
@@ -3045,17 +3058,18 @@ def list_unread(
 def _hours_since(timestamp: str | None) -> float | None:
     """Hours between a stored timestamp and now, or None when unparseable.
 
-    Local wall time on both sides, the convention `min_age_hours` binds with, so
-    `age_hours >= min_age_hours` holds for every row the filter kept and the
-    stored offset never makes the two disagree (issue #257).
+    Both sides are instants: the stored value keeps its offset instead of being
+    truncated to a wall clock, and now() is taken in UTC. `age_hours >=
+    min_age_hours` therefore holds for every row `min_age_hours` kept, since
+    that bound is rendered by the same convention (issues #257, #270).
     """
     if not timestamp:
         return None
     try:
-        moment = timestamp_local(timestamp)
+        moment = parse_db_time(timestamp)
     except ValueError:
         return None
-    return round((datetime.now() - moment).total_seconds() / 3600.0, 2)
+    return round((datetime.now(UTC) - moment).total_seconds() / 3600.0, 2)
 
 
 def list_unanswered(
@@ -3083,8 +3097,8 @@ def _unanswered_from_where(since: str | None, exclude_groups: bool, min_age_hour
     if hours < 0:
         raise ToolError("invalid_argument", f"min_age_hours must be 0 or more, got {min_age_hours!r}")
     if hours > 0:
-        age_clause = f"AND {timestamp_expr('messages.timestamp')} <= ?"
-        age_params = [timestamp_bound(datetime.now() - timedelta(hours=hours))]
+        age_clause = "AND messages.timestamp <= ?"
+        age_params = [timestamp_bound(datetime.now(UTC) - timedelta(hours=hours))]
     policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
     sql = f"""
             FROM chats
@@ -3172,11 +3186,11 @@ def list_unanswered_page(
             Chat(
                 jid=row[0],
                 name=row[1],
-                last_message_time=datetime.fromisoformat(row[2]) if row[2] else None,
+                last_message_time=parse_db_time(row[2]) if row[2] else None,
                 last_message=row[3],
                 last_sender=row[4],
                 last_is_from_me=row[5],
-                last_read_time=datetime.fromisoformat(row[6]) if row[6] else None,
+                last_read_time=parse_db_time(row[6]) if row[6] else None,
                 has_messages=bool(row[7]),
             )
             for row in rows

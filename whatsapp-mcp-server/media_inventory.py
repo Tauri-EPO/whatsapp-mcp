@@ -20,7 +20,7 @@ from typing import Any
 import media_notes
 import whatsapp
 from errors import ToolError
-from whatsapp import CHAT_POLICY, PageResult, decode_cursor, encode_cursor, timestamp_bound, timestamp_expr
+from whatsapp import CHAT_POLICY, PageResult, decode_cursor, encode_cursor, parse_db_time, timestamp_bound
 
 # Rows that carry a downloadable file. Pointer rows (reaction, poll_vote) and
 # text never appear in the inventory.
@@ -105,10 +105,10 @@ def _media_filters(
         clauses.append(f"{column_prefix}media_type = ?")
         params.append(media_type)
     if after:
-        clauses.append(f"{timestamp_expr(column_prefix + 'timestamp')} >= ?")
+        clauses.append(f"{column_prefix}timestamp >= ?")
         params.append(_iso(after, "after"))
     if before:
-        clauses.append(f"{timestamp_expr(column_prefix + 'timestamp')} <= ?")
+        clauses.append(f"{column_prefix}timestamp <= ?")
         params.append(_iso(before, "before"))
     if min_bytes:
         clauses.append(f"{column_prefix}file_length >= ?")
@@ -239,7 +239,7 @@ def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]
         "chat_name": chat_name,
         "sender_jid": sender,
         "is_from_me": bool(is_from_me),
-        "timestamp": datetime.fromisoformat(timestamp).isoformat() if timestamp else None,
+        "timestamp": parse_db_time(timestamp).isoformat() if timestamp else None,
         "media_type": media_type,
         "filename": filename or None,
         "bytes": int(file_length) if file_length else None,
@@ -249,7 +249,7 @@ def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]
         "cached_file": cached.name if cached else None,
         "copies": int(copies),
         "copies_in": int(copies_in),
-        "deleted_at": datetime.fromisoformat(deleted_at).isoformat() if deleted_at else None,
+        "deleted_at": parse_db_time(deleted_at).isoformat() if deleted_at else None,
         "notes": notes.get(sha256 or "", {}),
         "has_notes": bool(notes.get(sha256 or "")),
     }

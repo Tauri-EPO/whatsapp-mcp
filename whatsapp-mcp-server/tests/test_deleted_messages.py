@@ -23,14 +23,24 @@ def db(tmp_path, monkeypatch):
     path = tmp_path / "messages.db"
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
-    conn.execute("INSERT INTO chats (jid, name, last_message_time) VALUES (?, 'Alice', '2024-01-03T10:00:00')", (CHAT,))
+    conn.execute(
+        "INSERT INTO chats (jid, name, last_message_time) VALUES (?, 'Alice', '2024-01-03 10:00:00+00:00')", (CHAT,)
+    )
     conn.executemany(
         "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, deleted_at)"
         " VALUES (?, ?, '111', ?, ?, 0, ?, ?, ?)",
         [
-            ("m1", CHAT, "first", "2024-01-01T10:00:00", None, None, None),
-            ("m2", CHAT, "oops sent by mistake", "2024-01-02T10:00:00", "image", "image_x.jpg", "2024-01-02T10:05:00"),
-            ("m3", CHAT, "third", "2024-01-03T10:00:00", None, None, None),
+            ("m1", CHAT, "first", "2024-01-01 10:00:00+00:00", None, None, None),
+            (
+                "m2",
+                CHAT,
+                "oops sent by mistake",
+                "2024-01-02 10:00:00+00:00",
+                "image",
+                "image_x.jpg",
+                "2024-01-02 10:05:00+00:00",
+            ),
+            ("m3", CHAT, "third", "2024-01-03 10:00:00+00:00", None, None, None),
         ],
     )
     conn.commit()
@@ -44,7 +54,7 @@ def test_revoked_message_returned_with_content_and_deleted_at(db):
     assert set(rows) == {"m1", "m2", "m3"}
     assert rows["m2"]["content"] == "oops sent by mistake"
     assert rows["m2"]["filename"] == "image_x.jpg"
-    assert rows["m2"]["deleted_at"] == "2024-01-02T10:05:00"
+    assert rows["m2"]["deleted_at"] == "2024-01-02T10:05:00+00:00"
     assert rows["m1"]["deleted_at"] is None
 
 
@@ -76,7 +86,7 @@ def test_view_once_flag_is_exposed(db):
     conn = sqlite3.connect(db)
     conn.execute(
         "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, view_once)"
-        " VALUES ('vo', ?, '111', '🔒 view-once image', '2024-01-04T10:00:00', 0, 'image', 1)",
+        " VALUES ('vo', ?, '111', '🔒 view-once image', '2024-01-04 10:00:00+00:00', 0, 'image', 1)",
         (CHAT,),
     )
     conn.commit()

@@ -4,7 +4,7 @@ The backlog list_unread cannot see: read on the phone, never replied to.
 """
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -22,7 +22,8 @@ FRESH = "5511444444444@s.whatsapp.net"  # they wrote minutes ago
 
 
 def _stamp(**delta):
-    return (datetime.now() - timedelta(**delta)).strftime("%Y-%m-%d %H:%M:%S")
+    """A past instant in the spelling the bridge stores: UTC, to the second."""
+    return (datetime.now(UTC) - timedelta(**delta)).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
 
 @pytest.fixture
@@ -101,7 +102,7 @@ def test_min_age_hours_skips_live_conversations(db):
 
 
 def test_since_bounds_the_last_inbound_message(db):
-    recent = (datetime.now() - timedelta(days=3)).isoformat()
+    recent = (datetime.now(UTC) - timedelta(days=3)).isoformat()
     assert _jids(main.list_unanswered(since=recent)) == [FRESH, WAITING]
     assert main.list_unanswered(since="yesterday")["error"]["code"] == "invalid_argument"
 
@@ -146,16 +147,31 @@ def test_db_error_is_internal(db, monkeypatch):
 
 
 def test_age_hours_and_min_age_hours_use_one_clock(db):
-    """A stored UTC offset must not make the reported age disagree with the filter (#257)."""
+    """The reported age and the SQL bound measure the same instants (#257, #270)."""
     odd = "5511555555555@s.whatsapp.net"
     with sqlite3.connect(db) as c:
         c.execute("INSERT INTO chats VALUES (?, 'Eve', NULL, NULL)", (odd,))
         c.execute(
             "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
             "VALUES ('e1', ?, 'eve', 'oi', ?, 0)",
-            (odd, _stamp(hours=3) + "+05:00"),
+            (odd, _stamp(hours=3)),
         )
     item = next(i for i in main.list_unanswered()["items"] if i["jid"] == odd)
-    assert 2.9 < item["age_hours"] < 3.1  # local wall time, the offset is not re-applied
+    assert 2.9 < item["age_hours"] < 3.1
     assert odd in _jids(main.list_unanswered(min_age_hours=2))  # ...and the SQL bound agrees
     assert odd not in _jids(main.list_unanswered(min_age_hours=4))
+
+
+def test_age_hours_reads_a_row_the_bridge_has_not_migrated(db):
+    """A row still carrying an older release's local offset ages by instant (#270)."""
+    legacy = "5511666666666@s.whatsapp.net"
+    written = (datetime.now(UTC) - timedelta(hours=3)).astimezone(timezone(timedelta(hours=5)))
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO chats VALUES (?, 'Frank', NULL, NULL)", (legacy,))
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
+            "VALUES ('f1', ?, 'frank', 'oi', ?, 0)",
+            (legacy, written.strftime("%Y-%m-%d %H:%M:%S+05:00")),
+        )
+    item = next(i for i in main.list_unanswered()["items"] if i["jid"] == legacy)
+    assert 2.9 < item["age_hours"] < 3.1

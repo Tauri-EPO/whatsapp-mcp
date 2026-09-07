@@ -439,8 +439,9 @@ def list_messages(
     include_transcripts=True lifts it onto the row as `transcript`.
 
     Args:
-        after: ISO-8601 date string (e.g., "2026-01-01" or "2026-01-01T09:00:00")
-        before: ISO-8601 date string (e.g., "2026-01-09" or "2026-01-09T18:00:00")
+        after: ISO-8601 lower bound, read as UTC when it carries no offset
+               (e.g., "2026-01-01" or "2026-01-01T09:00:00")
+        before: ISO-8601 upper bound, same convention (e.g., "2026-01-09T18:00:00")
         sender_jid: Only messages from this sender: phone number with country code
                ("12025551234") or JID ("12025551234@s.whatsapp.net")
         chat_jid: Chat JID to filter by (e.g., "12025551234@s.whatsapp.net" or group JID)
@@ -589,8 +590,8 @@ def message_stats(
         group_by: "chat" (default), "day", "month" or "sender". Day and month
                  buckets use the timestamp as stored (UTC).
         chat_jid: Restrict to one conversation (JID or phone number with country code)
-        after: ISO-8601 lower bound, e.g. "2026-01-01"
-        before: ISO-8601 upper bound, e.g. "2026-02-01"
+        after: ISO-8601 lower bound (UTC), e.g. "2026-01-01"
+        before: ISO-8601 upper bound (UTC), e.g. "2026-02-01"
         limit: Max buckets returned (default 100, max 500)
         sender_jid: Only messages from this sender
         from_me: True for what you sent, False for inbound only, None for both
@@ -656,8 +657,8 @@ def export_messages(
          when nothing matched), "bytes": file size}
 
     Args:
-        after: ISO-8601 lower bound, e.g. "2026-01-01"
-        before: ISO-8601 upper bound, e.g. "2026-02-01"
+        after: ISO-8601 lower bound (UTC), e.g. "2026-01-01"
+        before: ISO-8601 upper bound (UTC), e.g. "2026-02-01"
         chat_jid: Restrict to one conversation (JID or phone number with country code)
         out_path: File name (or relative path) inside the export directory.
                  Default: messages-<chat>-<timestamp>.ndjson. An existing file is
@@ -720,7 +721,7 @@ def list_unread(
     Args:
         limit_chats: Max chats to return, most recently active first (default 20, max 100)
         limit_per_chat: Newest unread messages to include per chat, oldest first (default 5, max 50)
-        since: Only count messages after this ISO-8601 timestamp (e.g. "2026-09-04T08:00:00")
+        since: Only count messages after this ISO-8601 timestamp, UTC (e.g. "2026-09-04T08:00:00")
         exclude_groups: Keep direct conversations only ("...@s.whatsapp.net" / "...@lid"),
                       skipping groups, broadcast lists, channels and bots
         max_age_days: Only count messages from the last N days; the relative form of
@@ -1380,8 +1381,8 @@ def list_media(
     Args:
         chat_jid: Restrict to one chat (default: every allowed chat)
         media_type: image | video | audio | document | sticker (default: all)
-        after: Only media at or after this ISO-8601 timestamp
-        before: Only media at or before this ISO-8601 timestamp
+        after: Only media at or after this ISO-8601 timestamp (UTC)
+        before: Only media at or before this ISO-8601 timestamp (UTC)
         min_bytes: Only media at least this large (from the WhatsApp file length)
         has_notes: true = only files you have already annotated, false = only files with
                no note yet (the backlog to read and then annotate_media), null = both

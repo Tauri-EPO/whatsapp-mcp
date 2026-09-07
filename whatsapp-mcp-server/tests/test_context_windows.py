@@ -35,11 +35,13 @@ def db(tmp_path, monkeypatch):
     conn.executemany("INSERT INTO chats (jid, name) VALUES (?, ?)", [(CHAT_A, "A"), (CHAT_B, "B")])
     rows = []
     for i in range(1, 11):  # a1..a10 in chat A, one per day
-        rows.append((f"a{i}", CHAT_A, f"A msg {i} {'hit' if i in (3, 7) else ''}", f"2024-01-{i:02d}T10:00:00", None))
+        rows.append(
+            (f"a{i}", CHAT_A, f"A msg {i} {'hit' if i in (3, 7) else ''}", f"2024-01-{i:02d} 10:00:00+00:00", None)
+        )
     # Same message ID "a3" also exists in chat B (forwarded): must be kept distinct.
-    rows.append(("a3", CHAT_B, "B forwarded hit", "2024-02-01T10:00:00", None))
-    rows.append(("b0", CHAT_B, "B before", "2024-01-31T10:00:00", None))
-    rows.append(("b2", CHAT_B, "B after revoked", "2024-02-02T10:00:00", "2024-02-02T11:00:00"))
+    rows.append(("a3", CHAT_B, "B forwarded hit", "2024-02-01 10:00:00+00:00", None))
+    rows.append(("b0", CHAT_B, "B before", "2024-01-31 10:00:00+00:00", None))
+    rows.append(("b2", CHAT_B, "B after revoked", "2024-02-02 10:00:00+00:00", "2024-02-02 11:00:00+00:00"))
     conn.executemany(
         "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, deleted_at)"
         " VALUES (?, ?, 's', ?, ?, 0, ?)",

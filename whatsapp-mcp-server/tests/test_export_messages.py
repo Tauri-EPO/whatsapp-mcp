@@ -29,11 +29,11 @@ CREATE TABLE messages (
 # Timestamps use the bridge's "YYYY-MM-DD HH:MM:SS" spelling so that the
 # text comparison against a bound datetime behaves as it does in production.
 ROWS = [
-    ("a1", A, "111", "2024-01-01 10:00:00", 0, None, "oi, tudo bem? — açaí"),
-    ("a2", A, "me", "2024-01-02 10:00:00", 1, None, "tudo"),
-    ("a3", A, "111", "2024-01-03 10:00:00", 0, "image", "foto"),
-    ("b1", B, "222", "2024-01-04 10:00:00", 0, None, "outro chat"),
-    ("g1", G, "333", "2024-01-05 10:00:00", 0, None, "grupo"),
+    ("a1", A, "111", "2024-01-01 10:00:00+00:00", 0, None, "oi, tudo bem? — açaí"),
+    ("a2", A, "me", "2024-01-02 10:00:00+00:00", 1, None, "tudo"),
+    ("a3", A, "111", "2024-01-03 10:00:00+00:00", 0, "image", "foto"),
+    ("b1", B, "222", "2024-01-04 10:00:00+00:00", 0, None, "outro chat"),
+    ("g1", G, "333", "2024-01-05 10:00:00+00:00", 0, None, "grupo"),
 ]
 
 
@@ -78,8 +78,8 @@ def test_writes_ndjson_oldest_first_and_returns_only_a_summary(store):
     result = export.export_messages(out_path="all.ndjson")
     assert set(result) == {"path", "count", "first_timestamp", "last_timestamp", "bytes"}
     assert result["count"] == 5
-    assert result["first_timestamp"] == "2024-01-01T10:00:00"
-    assert result["last_timestamp"] == "2024-01-05T10:00:00"
+    assert result["first_timestamp"] == "2024-01-01T10:00:00+00:00"
+    assert result["last_timestamp"] == "2024-01-05T10:00:00+00:00"
     assert result["bytes"] == os.path.getsize(result["path"])
 
     written = lines(result["path"])
