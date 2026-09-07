@@ -89,27 +89,49 @@ def test_resolve_lid_to_phone(paired_dbs, monkeypatch):
     assert whatsapp._resolve_lid_to_phone(BOB_LID) is None
 
 
-def test_resolve_name_from_whatsmeow_handles_every_jid_form(paired_dbs, monkeypatch):
-    assert whatsapp._resolve_name_from_whatsmeow(BOB) == "Bob Silva"
-    assert whatsapp._resolve_name_from_whatsmeow(f"{BOB_LID}@lid") == "Bob Silva"  # via the LID map
-    assert whatsapp._resolve_name_from_whatsmeow(BOB_LID) == "Bob Silva"  # bare LID
-    assert whatsapp._resolve_name_from_whatsmeow(CARLA) == "Carla Consultoria"
-    assert whatsapp._resolve_name_from_whatsmeow("999@lid") is None  # LID not in the map: stop
-    assert whatsapp._resolve_name_from_whatsmeow(BOB_PN) is None  # bare phone without contact row for the bare form
+def test_contact_names_handle_every_jid_form(paired_dbs, monkeypatch):
+    """The one phone-book lookup: senders and chat rows both go through it (#257)."""
+    assert whatsapp._contact_names([BOB, f"{BOB_LID}@lid", BOB_LID, CARLA, "999@lid", FAMILY]) == {
+        BOB: "Bob Silva",
+        f"{BOB_LID}@lid": "Bob Silva",  # via the LID map
+        BOB_LID: "Bob Silva",  # bare LID
+        CARLA: "Carla Consultoria",
+        # "999@lid" is a LID that is not in the map, FAMILY is a group: neither
+        # has a phone-book entry, and both are reported as simply absent.
+    }
+    assert whatsapp._contact_names([BOB_PN]) == {BOB_PN: "Bob Silva"}  # bare phone, tried as a phone JID
     with paired_dbs.whatsmeow() as c:
         c.execute("DROP TABLE whatsmeow_contacts")
-    assert whatsapp._resolve_name_from_whatsmeow(BOB) is None
+    whatsapp._reset_name_cache()
+    assert whatsapp._contact_names([BOB]) == {}
     monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", "/nonexistent/whatsapp.db")
-    assert whatsapp._resolve_name_from_whatsmeow(BOB) is None
+    whatsapp._reset_name_cache()
+    assert whatsapp._contact_names([BOB]) == {}
 
 
-def test_resolve_name_prefers_full_then_push_then_first(paired_dbs):
+def test_contact_names_prefer_full_then_push_then_first(paired_dbs):
     with paired_dbs.whatsmeow() as c:
         c.execute("UPDATE whatsmeow_contacts SET full_name = NULL WHERE their_jid = ?", (BOB,))
-    assert whatsapp._resolve_name_from_whatsmeow(BOB) == "bobby"
+    whatsapp._reset_name_cache()
+    assert whatsapp._contact_names([BOB]) == {BOB: "bobby"}
     with paired_dbs.whatsmeow() as c:
         c.execute("UPDATE whatsmeow_contacts SET push_name = '' WHERE their_jid = ?", (BOB,))
-    assert whatsapp._resolve_name_from_whatsmeow(BOB) == "Bob"
+    whatsapp._reset_name_cache()
+    assert whatsapp._contact_names([BOB]) == {BOB: "Bob"}
+
+
+def test_a_name_that_is_just_the_number_identifies_nobody(paired_dbs):
+    """get_sender_name and the chat-row fallback now agree on that (#257)."""
+    with paired_dbs.whatsmeow() as c:
+        c.execute("UPDATE whatsmeow_contacts SET full_name = ? WHERE their_jid = ?", ("+55 11 8888-8888", BOB))
+    whatsapp._reset_name_cache()
+    assert whatsapp._contact_names([f"{BOB_LID}@lid"]) == {}
+    assert whatsapp.get_sender_name(f"{BOB_LID}@lid") == f"{BOB_LID}@lid"
+    # Same rule on the chats.name side of the chain.
+    with paired_dbs.messages() as c:
+        c.execute("UPDATE chats SET name = '5511888888888' WHERE jid = ?", (BOB,))
+    whatsapp._reset_name_cache()
+    assert whatsapp.get_sender_name(BOB) == BOB
 
 
 def test_get_sender_name_fallback_chain(paired_dbs):
