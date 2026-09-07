@@ -264,7 +264,7 @@ Both images (`ghcr.io/tauri-epo/whatsapp-mcp-bridge`,
 | --- | --- | --- |
 | `latest` | the last release; what `docker compose pull` gets by default | `release.yml`, when the release PR is merged (`release-cut.yml` does that once a day, 03:00 America/Sao_Paulo, when there is something to release) |
 | `vX.Y.Z`, `X.Y` | that release, fixed | `release.yml` |
-| `main` | edge: every merge to `main`, before it is released | `publish.yml` |
+| `main` | edge: every merge to `main`, the release commit included | `publish.yml` (on the push; dispatched again by `release-cut.yml` after a cut) |
 | `sha-<7 chars>` | one exact commit | `publish.yml` |
 
 Versions are computed automatically from the commit titles (release-please:

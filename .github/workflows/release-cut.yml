@@ -7,6 +7,8 @@ name: Release cut
 #
 # The explicit dispatch is required: a merge made with GITHUB_TOKEN does not
 # fire `on: push` workflows, and workflow_dispatch is the documented exception.
+# For the same reason publish.yml is dispatched too, so the main / sha-<7> edge
+# images include the release commit instead of stopping at the commit before it.
 #
 # Merging the release PR by hand earlier still works; the job then finds no PR
 # and exits. It also refuses to merge while CI on main is running (the PR is
@@ -83,3 +85,11 @@ jobs:
         run: |
           gh workflow run release.yml --ref main
           echo "release.yml dispatched; it creates the tag and publishes the images."
+
+      # Runs even when the release dispatch above failed: the release commit is
+      # on main either way, so the edge images should carry it either way.
+      - name: Dispatch publish.yml for the edge images
+        if: ${{ !cancelled() && steps.ci.outputs.ready == 'true' }}
+        run: |
+          gh workflow run publish.yml --ref main
+          echo "publish.yml dispatched; it moves main / sha-<7> onto the release commit."
