@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -1233,37 +1233,88 @@ _SUBSTRING_PREDICATE = "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(m
 class QueryPredicate:
     """How one `query=` is turned into SQL.
 
-    clause/params go into the WHERE list. `fts_join` says the statement must
-    join messages_fts (which is also what makes bm25 relevance available), and
-    `match_index` points at the MATCH text inside `params` so a query that is
-    not valid FTS5 syntax can be retried quoted (`_execute_message_sql`).
+    `join` is glued into the FROM clause (its parameters come first, as SQL
+    reads them), clause/params go into the WHERE list. `relevance_order` is the
+    ORDER BY that ranks the hits, or None when this query cannot be ranked and
+    sort_by="relevance" has to fall back to newest-first. `match_index` points
+    at the MATCH text inside `join_params + params` so a query that is not valid
+    FTS5 syntax can be retried quoted (`_execute_message_sql`).
     """
 
     clause: str | None
     params: list[Any]
-    fts_join: bool = False
+    join: str = ""
+    join_params: list[Any] = field(default_factory=list)
+    relevance_order: str | None = None
     match_index: int | None = None
 
+    def bind(self, filter_params: list[Any]) -> tuple[list[Any], int | None]:
+        """The parameters in SQL order (join, filters, predicate) and where MATCH sits."""
+        params = [*self.join_params, *filter_params, *self.params]
+        if self.match_index is None:
+            return params, None
+        if self.match_index < len(self.join_params):
+            return params, self.match_index
+        return params, self.match_index + len(filter_params)
 
-def _transcript_predicate(query: str) -> tuple[str, list[Any]] | None:
-    """Predicate matching messages whose *stored transcript* contains the query.
+
+# Transcript hits are staged in a TEMP table rather than bound one parameter per
+# hash: the old form capped them at a few hundred files to stay under SQLite's
+# parameter limit, and had nowhere to put the score. What remains of the cap
+# (media_notes.MAX_TRANSCRIPT_MATCHES) is a workload bound, and the index now
+# picks the best hits rather than the most recent ones. TEMP lives in the
+# connection's own scratch database, so this never writes to the bridge-owned
+# messages.db and dies with the connection.
+_TRANSCRIPT_HITS_TABLE = "transcript_hits"
+
+
+def _stage_transcript_hits(conn: sqlite3.Connection, query: str) -> bool:
+    """Materialise the (sha256, score) transcript matches for `query`; False when there are none.
 
     Voice notes carry no `content`, so neither messages_fts nor instr() can ever
     find what was said in them; the text lives in notes.db, written by
-    `transcribe_audio` or by the TRANSCRIBE_ON_INGEST worker. notes.db is the MCP
-    server's own database, so the union happens here: the matching hashes are
-    resolved first (bounded, see media_notes.MAX_TRANSCRIPT_MATCHES) and compared
-    against the indexed `messages.file_sha256` blob.
+    `transcribe_audio` or by the TRANSCRIBE_ON_INGEST worker and indexed there
+    (media_notes.transcripts_fts). notes.db is the MCP server's own database, so
+    the union with the message hits happens here.
     """
-    from media_notes import transcript_hashes
+    from media_notes import transcript_matches
 
-    hashes = transcript_hashes(query)
-    if not hashes:
-        return None
-    return (
-        f"messages.file_sha256 IN ({','.join('?' * len(hashes))})",
-        [bytes.fromhex(sha) for sha in hashes],
-    )
+    hits = transcript_matches(query)
+    if not hits:
+        return False
+    try:
+        conn.execute(f"DROP TABLE IF EXISTS temp.{_TRANSCRIPT_HITS_TABLE}")
+        conn.execute(f"CREATE TEMP TABLE {_TRANSCRIPT_HITS_TABLE} (sha BLOB PRIMARY KEY, score REAL NOT NULL)")
+        conn.executemany(
+            f"INSERT OR REPLACE INTO {_TRANSCRIPT_HITS_TABLE} (sha, score) VALUES (?, ?)",
+            [(bytes.fromhex(sha), score) for sha, score in hits],
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        # No scratch space (a read-only temp dir...) means the audio side is
+        # dropped, not that the search fails.
+        logger.warning("could not stage transcript hits, searching message text only: %s", exc)
+        return False
+    return True
+
+
+# Message hits and audio hits as one ranked (rowid, score) set. FTS5 refuses
+# MATCH inside an OR, so the two sides are unioned in a subquery instead and
+# joined on rowid; MIN() keeps the better score when a message matches on both.
+# The scores come from two indexes, so ordering across them is an approximation
+# — the same tokenizer and the same bm25 weights, over different corpora.
+_RANKED_UNION_JOIN = (
+    "JOIN (SELECT rid, MIN(score) AS score FROM ("
+    f"SELECT rowid AS rid, bm25({MESSAGES_FTS_TABLE}) AS score FROM {MESSAGES_FTS_TABLE} "
+    f"WHERE {MESSAGES_FTS_TABLE} MATCH ? "
+    "UNION ALL "
+    f"SELECT m.rowid, t.score FROM messages m JOIN {_TRANSCRIPT_HITS_TABLE} t ON t.sha = m.file_sha256"
+    ") GROUP BY rid) hits ON hits.rid = messages.rowid"
+)
+
+# id breaks the remaining ties so the offset a relevance cursor carries keeps
+# pointing at the same row between pages.
+_RELEVANCE_TIEBREAK = "messages.timestamp DESC, messages.id DESC"
 
 
 def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredicate:
@@ -1276,21 +1327,31 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
     """
     if not query:
         return QueryPredicate(None, [])
-    transcripts = _transcript_predicate(query)
+    transcripts = _stage_transcript_hits(conn, query)
     if _fts_query_kind(query) == "fts" and _fts_available(conn):
-        if transcripts is None:
-            return QueryPredicate(f"{MESSAGES_FTS_TABLE} MATCH ?", [query], fts_join=True, match_index=0)
-        # FTS5 refuses MATCH inside an OR ("unable to use function MATCH in the
-        # requested context"), so the index is consulted as a subquery instead.
-        # That drops the bm25 ranking with the join, hence no fts_join: a
-        # relevance sort falls back to newest-first for this one query.
-        transcript_clause, transcript_params = transcripts
-        rowids = f"messages.rowid IN (SELECT rowid FROM {MESSAGES_FTS_TABLE} WHERE {MESSAGES_FTS_TABLE} MATCH ?)"
-        return QueryPredicate(f"({rowids} OR {transcript_clause})", [query, *transcript_params], match_index=0)
-    if transcripts is None:
+        if not transcripts:
+            return QueryPredicate(
+                f"{MESSAGES_FTS_TABLE} MATCH ?",
+                [query],
+                join=f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid",
+                relevance_order=f"bm25({MESSAGES_FTS_TABLE}), {_RELEVANCE_TIEBREAK}",
+                match_index=0,
+            )
+        return QueryPredicate(
+            None,
+            [],
+            join=_RANKED_UNION_JOIN,
+            join_params=[query],
+            relevance_order=f"hits.score, {_RELEVANCE_TIEBREAK}",
+            match_index=0,
+        )
+    if not transcripts:
         return QueryPredicate(_SUBSTRING_PREDICATE, [query, query])
-    transcript_clause, transcript_params = transcripts
-    return QueryPredicate(f"({_SUBSTRING_PREDICATE} OR {transcript_clause})", [query, query, *transcript_params])
+    # No index to rank with: the set is right, the order stays newest-first.
+    return QueryPredicate(
+        f"({_SUBSTRING_PREDICATE} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))",
+        [query, query],
+    )
 
 
 def _execute_message_sql(
@@ -1338,15 +1399,12 @@ def count_messages(
             include_deleted=include_deleted,
             unread_only=unread_only,
         ).build(cur)
-        match_param_index = len(params) + predicate.match_index if predicate.match_index is not None else None
         if predicate.clause:
             where_clauses.append(predicate.clause)
-            params.extend(predicate.params)
-        fts_join = (
-            f" JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid" if predicate.fts_join else ""
-        )
+        params, match_param_index = predicate.bind(params)
+        join = f" {predicate.join}" if predicate.join else ""
         where = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        sql = f"SELECT COUNT(*) FROM messages JOIN chats ON messages.chat_jid = chats.jid{fts_join}{where}"
+        sql = f"SELECT COUNT(*) FROM messages JOIN chats ON messages.chat_jid = chats.jid{join}{where}"
         _execute_message_sql(cur, sql, params, match_param_index, query)
         row = cur.fetchone()
         return int(row[0]) if row else 0
@@ -1438,15 +1496,17 @@ def list_messages_page(
             FTS5 index this is accent-insensitive and word-based, and supports
             AND / OR / NOT, "exact phrase" and prefix* operators; without it a
             plain substring match is used. Messages whose stored transcript
-            contains the term (as a substring) are unioned in, so a voice note
-            somebody transcribed is searchable by what was said in it.
+            matches are unioned in (through the MCP server's own index over
+            notes.db), so a voice note somebody transcribed is searchable by
+            what was said in it and is ranked with the written hits.
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
         sort_by: Sort order - "newest" (default), "oldest" for chronological ordering, or
-            "relevance" (best match first; only meaningful with query and the FTS index)
+            "relevance" (best match first, written and spoken hits ranked together;
+            only meaningful with query and the FTS index)
         include_deleted: Keep revoked messages in the result (default True; they carry
             deleted_at and their original content). False hides them.
         unread_only: Only inbound messages newer than their chat's read marker
@@ -1473,13 +1533,13 @@ def list_messages_page(
         cur = conn.cursor()
 
         predicate = _query_predicate(conn, query)
-        use_fts = predicate.fts_join
+        ranked = predicate.relevance_order is not None
 
         # Build base query
         query_parts = [f"SELECT {MESSAGE_COLUMNS} FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
-        if use_fts:
-            query_parts.append(f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid")
+        if predicate.join:
+            query_parts.append(predicate.join)
         where_clauses, params = MessageFilters(
             after=after,
             before=before,
@@ -1493,17 +1553,16 @@ def list_messages_page(
             unread_only=unread_only,
         ).build(cur)
 
-        match_param_index = len(params) + predicate.match_index if predicate.match_index is not None else None
         if predicate.clause:
             where_clauses.append(predicate.clause)
-            params.extend(predicate.params)
+        params, match_param_index = predicate.bind(params)
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
         # Sorting and pagination. Keyset on (timestamp, id) for the time orders;
         # relevance (bm25) has no stable key, so its cursor carries an offset.
-        keyset = sort_by != "relevance" or not use_fts
+        keyset = sort_by != "relevance" or not ranked
         offset = page * limit
         if cursor_state is not None:
             if keyset and "t" in cursor_state:
@@ -1519,8 +1578,8 @@ def list_messages_page(
             query_parts = [part for part in query_parts if not part.startswith("WHERE ")]
             if where_clauses:
                 query_parts.append("WHERE " + " AND ".join(where_clauses))
-        if sort_by == "relevance" and use_fts:
-            query_parts.append(f"ORDER BY bm25({MESSAGES_FTS_TABLE}), messages.timestamp DESC")
+        if sort_by == "relevance" and predicate.relevance_order:
+            query_parts.append(f"ORDER BY {predicate.relevance_order}")
         else:
             order = "ASC" if sort_by == "oldest" else "DESC"
             query_parts.append(f"ORDER BY messages.timestamp {order}, messages.id {order}")

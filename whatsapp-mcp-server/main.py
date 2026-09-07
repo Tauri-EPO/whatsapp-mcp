@@ -446,8 +446,8 @@ def list_messages(
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
                (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*'). Voice notes
                whose transcript was already stored (transcribe_audio, or the
-               TRANSCRIBE_ON_INGEST worker) match on what was said in them, as a
-               plain substring of the transcript
+               TRANSCRIBE_ON_INGEST worker) match on what was said in them, with
+               the same operators, and are ranked next to the written hits
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0); ignored when cursor is set
         include_context: Include surrounding messages for context (default True)

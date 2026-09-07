@@ -119,19 +119,97 @@ def test_an_invalid_fts_query_still_falls_back_with_transcripts_in_play(fts_db):
     assert ids("reforma (casa)") == ["v1"]
 
 
-def test_relevance_sort_degrades_instead_of_failing(fts_db):
-    # bm25 needs the FTS join, which the union cannot use; the answer is still
-    # the right set, ordered newest-first.
-    assert [m["id"] for m in whatsapp.list_messages(query="orcamento", sort_by="relevance", include_context=False)] == [
-        "v1",
-        "m1",
-    ]
+def relevance(query, **kwargs):
+    kwargs.setdefault("include_context", False)
+    return [m["id"] for m in whatsapp.list_messages(query=query, sort_by="relevance", **kwargs)]
 
 
-def test_transcript_matches_are_bounded(fts_db, monkeypatch):
-    monkeypatch.setattr(media_notes, "MAX_TRANSCRIPT_MATCHES", 1)
-    assert len(media_notes.transcript_hashes("o", limit=1)) == 1
-    # No notes.db at all is simply "no transcript matched", not an error.
+def test_relevance_ranks_spoken_and_written_hits_together(fts_db):
+    # Both sides are scored with bm25 (messages_fts for the text, transcripts_fts
+    # for the audio) and ordered as one set. m1 says the word in five words, v1's
+    # transcript in nine, so the text hit wins — which is also how we know the
+    # sort is not the newest-first fallback: that would put v1 (Jan 3) first.
+    assert relevance("orcamento") == ["m1", "v1"]
+    assert ids("orcamento") == ["m1", "v1"]
+
+
+def test_relevance_puts_the_better_transcript_first(fts_db):
+    # Two voice notes say the word; the shorter transcript is the better match.
+    media_notes.annotate_media(SHA_OTHER, "transcript", "chego domingo, levo o orcamento")
+    assert relevance("orcamento") == ["m1", "v2", "v1"]
+
+
+def test_the_relevance_cursor_walks_every_hit_once(fts_db):
+    seen, cursor = [], None
+    for _ in range(5):
+        page = whatsapp.list_messages_page(
+            query="orcamento", sort_by="relevance", include_context=False, limit=1, cursor=cursor
+        )
+        seen.extend(m["id"] for m in page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert seen == relevance("orcamento")
+
+
+def test_the_index_is_rebuilt_from_notes_written_before_it_existed(fts_db):
+    # A store from an older version has the transcript notes but no index.
+    conn = sqlite3.connect(media_notes.notes_db_path())
+    conn.executescript(f"DROP TABLE {media_notes.TRANSCRIPTS_FTS_TABLE}; DELETE FROM notes_meta;")
+    conn.commit()
+    conn.close()
+    # First use notices the missing marker and fills the index from the notes.
+    assert [sha for sha, _ in media_notes.transcript_matches("domingo")] == [SHA_OTHER]
+    assert ids("orcamento") == ["m1", "v1"]
+
+
+def test_transcript_hits_are_no_longer_capped_at_a_few_hundred(fts_db):
+    # More voice notes than the old 400-hit cap, and than SQLite's 999-parameter
+    # limit the cap existed for: the hits are staged in a temp table now.
+    assert media_notes.MAX_TRANSCRIPT_MATCHES > 999
+    count = 1200
+    shas = [f"{i:064x}" for i in range(count)]
+    conn = sqlite3.connect(fts_db)
+    conn.executemany(
+        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, file_sha256) "
+        "VALUES (?, ?, '111', '', ?, 0, 'audio', ?)",
+        [
+            (f"b{i}", CHAT, f"2024-02-01T10:{i // 60:02d}:{i % 60:02d}", bytes.fromhex(sha))
+            for i, sha in enumerate(shas)
+        ],
+    )
+    conn.commit()
+    conn.close()
+    whatsapp._reset_schema_cache()
+    notes = sqlite3.connect(media_notes.notes_db_path())
+    notes.executemany(
+        "INSERT INTO media_notes (sha256, key, value, updated_at) VALUES (?, 'transcript', ?, '2024-02-01T00:00:00')",
+        [(sha, "falamos de jabuticaba") for sha in shas],
+    )
+    # Written behind media_notes' back, so the index has to be rebuilt.
+    notes.execute("DELETE FROM notes_meta")
+    notes.commit()
+    notes.close()
+    assert len(media_notes.transcript_matches("jabuticaba")) == count
+    assert whatsapp.count_messages(query="jabuticaba") == count
+
+
+def test_a_missing_notes_db_is_not_an_error(fts_db, monkeypatch):
     monkeypatch.setattr(media_notes, "notes_db_path", lambda: "/nope/notes.db")
-    assert media_notes.transcript_hashes("orcamento") == []
+    assert media_notes.transcript_matches("orcamento") == []
     assert ids("orcamento") == ["m1"]
+
+
+def test_an_index_write_that_fails_invalidates_the_index(fts_db, monkeypatch):
+    # A transient failure (a busy database, a build without fts5) must not leave
+    # the note saying one thing and the index another: the marker goes with it,
+    # so the next read rebuilds instead of answering from a stale index.
+    notes_path = media_notes.notes_db_path()
+    with monkeypatch.context() as broken:
+        broken.setattr(media_notes, "_ensure_transcripts_fts", lambda conn: False)
+        media_notes.annotate_media(SHA_OTHER, "transcript", "falamos de jabuticaba")
+    notes = sqlite3.connect(notes_path)
+    assert notes.execute("SELECT COUNT(*) FROM notes_meta").fetchone()[0] == 0
+    notes.close()
+    assert ids("jabuticaba") == ["v2"]
+    assert ids("domingo") == []
