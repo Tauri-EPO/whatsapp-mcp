@@ -35,6 +35,10 @@ type Bridge struct {
 	// read_only.go). Zero value = disabled; main() parses it and refuses to
 	// start on a value it cannot read.
 	ReadOnly readOnlyPolicy
+	// Tools refuses the mutating endpoints whose MCP tools are not allowed
+	// (WHATSAPP_ALLOW_TOOLS / WHATSAPP_DENY_TOOLS, tool_policy.go). Zero value =
+	// unrestricted; main() parses it and refuses to start on an unknown name.
+	Tools toolPolicy
 	// PollVoteDecrypt decodes PollUpdateMessage payloads; nil = votes are skipped.
 	PollVoteDecrypt pollVoteDecrypter
 	// DownloadMedia fetches media for a stored message (defaults to downloadMedia).

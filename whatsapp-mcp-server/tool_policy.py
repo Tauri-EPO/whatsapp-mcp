@@ -19,9 +19,10 @@ listing the valid ones — a typo in an allow-list must not silently widen it.
 
 That is the right default whenever the agent reads attacker-controlled text
 (any group, any forwarded message): a prompt injection can then ask for a send,
-but there is nothing to call. The bridge enforces the same variable on its
-mutating REST endpoints (403, whatsapp-bridge/read_only.go) as a second line of
-defence, so a bug or a bypass on this side still cannot reach WhatsApp.
+but there is nothing to call. The bridge enforces all three variables on its
+mutating REST endpoints (403, whatsapp-bridge/read_only.go and tool_policy.go,
+which maps each tool name to the endpoint it calls) as a second line of defence,
+so a bug or a bypass on this side still cannot reach WhatsApp.
 
 Which tools count as mutating is not a list maintained by hand: the
 ``@mutating_tool`` decorator in main.py registers each one, so a new tool is
