@@ -130,6 +130,12 @@ Tailscale forwards the original `Host` header, so requests arrive as
 `Host: <host>.<tailnet>.ts.net`; a bare hostname in the allow-list matches with
 or without a port.
 
+The certificate for that name is issued and renewed on the host, never in the
+containers. Once it expires, clients fail at the TLS handshake with
+`certificate verify failed: certificate has expired` while `bridge_status` still
+reports `ok: true`; see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#published-https-endpoint).
+
 ### Funnel (public internet)
 
 Funnel is not enabled by default: it publishes the endpoint to the whole
