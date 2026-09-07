@@ -127,6 +127,7 @@ What protects your account:
 - **Allow-list of chats.** `WHATSAPP_ALLOWED_CHATS=5511999999999,*@g.us` means the agent can only see and touch those conversations. Enforced twice: by the MCP server on every tool and by the bridge on every outbound call.
 - **Loopback and Host checks by default**, rate limit and body cap on the HTTP endpoint, media sends confined to an outbox directory.
 - **Nothing leaves the box.** Messages, media and transcripts stay in a Docker volume. Transcription is local whisper.cpp; there is no cloud fallback on purpose.
+- **Read-only mode.** `WHATSAPP_READ_ONLY=1` removes every mutating tool from `tools/list` (and 403s the matching bridge endpoints), so an assistant that reads and drafts has nothing to send with. Recommended default; see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 - **Prompt injection is real.** An agent that reads untrusted messages and can send messages is [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Keep the allow-list narrow and review what your agent is allowed to do.
 
 ## Configuration essentials
@@ -137,6 +138,7 @@ Everything is an environment variable in `.env`. The ones that matter on day one
 | --- | --- |
 | `WHATSAPP_BRIDGE_TOKEN` | Set your own (32+ random chars) so bridge, MCP and clients share one known secret. Otherwise copy the generated one from the bridge log |
 | `WHATSAPP_ALLOWED_CHATS` | Which chats the agent may read and write. Start narrow |
+| `WHATSAPP_READ_ONLY` | `1` hides and refuses every mutating tool (read-and-draft assistant). Set it for both services |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | The hostname clients use (your MagicDNS name) so DNS-rebinding protection stays on |
 | `WHATSAPP_DEVICE_NAME` | Label under Linked Devices. Pair-time only |
 | `WHISPER_URL` + `COMPOSE_PROFILES=whisper` | Turn on local voice-note transcription (`WHISPER_MODEL_NAME=small` is a good CPU default) |

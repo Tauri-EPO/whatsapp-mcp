@@ -21,6 +21,7 @@ from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
+from tool_policy import apply_tool_policy, load_tool_policy, mutating_tool, set_active_policy
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
 from whatsapp import (
@@ -508,6 +509,7 @@ def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: 
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def send_message(
     chat_jid: str,
     message: str,
@@ -550,6 +552,7 @@ def send_message(
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def send_reaction(
     chat_jid: str,
     message_id: str,
@@ -603,6 +606,7 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def manage_group_participants(chat_jid: str, action: str, participants: list[str]) -> dict[str, Any]:
     """Add, remove, promote or demote members of a WhatsApp group you administer.
 
@@ -622,6 +626,7 @@ def manage_group_participants(chat_jid: str, action: str, participants: list[str
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def update_group(chat_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
     """Rename a WhatsApp group and/or change its description (admin only).
 
@@ -635,6 +640,7 @@ def update_group(chat_jid: str, name: str | None = None, description: str | None
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def get_group_invite_link(chat_jid: str, reset: bool = False) -> dict[str, Any]:
     """Get the group's invite link (admin only). reset=True revokes the previous link first.
 
@@ -650,6 +656,7 @@ def get_group_invite_link(chat_jid: str, reset: bool = False) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def leave_group(chat_jid: str) -> dict[str, Any]:
     """Leave a WhatsApp group. Irreversible without a new invite; the archive keeps the history.
 
@@ -661,6 +668,7 @@ def leave_group(chat_jid: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
     """Show the "typing…" indicator in a chat (or clear it with is_typing=False).
 
@@ -698,6 +706,7 @@ def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -> dict[str, Any]:
     """Delete a WhatsApp message: revoke it for everyone, or only forget it locally.
 
@@ -721,6 +730,7 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def edit_message(chat_jid: str, message_id: str, text: str) -> dict[str, Any]:
     """Edit the text of a message this account sent (WhatsApp allows it for about 15 minutes).
 
@@ -738,6 +748,7 @@ def edit_message(chat_jid: str, message_id: str, text: str) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[str, Any]:
     """Re-send a message from the archive to another chat.
 
@@ -758,6 +769,7 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def mark_messages_read(
     chat_jid: str,
     message_ids: list[str],
@@ -786,6 +798,7 @@ def mark_messages_read(
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
@@ -811,6 +824,7 @@ def send_file(chat_jid: str, media_path: str, caption: str = "") -> dict[str, An
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
     """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
 
@@ -960,6 +974,7 @@ def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def purge_media(
     items: list[dict[str, str]] | None = None,
     chat_jid: str = "",
@@ -1102,6 +1117,19 @@ if __name__ == "__main__":
     _handler.setFormatter(log_formatter(os.getenv(JSON_FORMAT_ENV)))
     logging.basicConfig(level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(), handlers=[_handler])
     logging.getLogger("whatsapp_mcp").info("whatsapp-mcp-server %s", MCP_VERSION)
+
+    # Operation-level access control (WHATSAPP_READ_ONLY, tool_policy.py). Blocked
+    # tools are unregistered here, before any transport starts, so they never
+    # appear in tools/list; the decorator refuses them at call time as well.
+    # A value we cannot parse stops the process rather than defaulting to "off".
+    try:
+        _tool_policy = load_tool_policy()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    set_active_policy(_tool_policy)
+    apply_tool_policy(mcp, _tool_policy)
+    logging.getLogger("whatsapp_mcp").info("%s", _tool_policy.summary())
+
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()
     # Register signal handlers for clean shutdown

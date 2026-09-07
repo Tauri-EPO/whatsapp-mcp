@@ -52,6 +52,22 @@ The threat model assumes the human user of the host is trusted, but **does not**
 - Denial of service via brute request volume
 - Issues that require the user to deliberately install untrusted code outside this project's release artifacts
 
+## Hardening your deployment
+
+Two switches decide how much damage a misbehaving or manipulated agent can do.
+Both are enforced twice — once in the MCP server, once again in the bridge — and
+both are documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md):
+
+- **`WHATSAPP_READ_ONLY=1`** — the recommended default for a personal assistant.
+  Mutating tools are omitted from `tools/list` and refused if called anyway;
+  the matching bridge endpoints answer `403`. An agent that reads
+  attacker-controlled text (any group, any forwarded message) then has no send
+  tool for a prompt injection to reach for. See
+  [Read-only mode](docs/CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+- **`WHATSAPP_ALLOWED_CHATS`** — restricts which conversations are visible and
+  writable at all. See
+  [Restricting which chats the agent can touch](docs/CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
+
 ## Disclosure Policy
 
 We follow coordinated disclosure. Once a fix is available and released, the Security Advisory is published and credit is given to the reporter. Disclosure dates are coordinated with the reporter where reasonable.

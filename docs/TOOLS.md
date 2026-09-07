@@ -2,6 +2,8 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+
 ## Pagination
 
 `list_messages`, `list_chats`, `get_contact_chats` and `list_group_members` return one page:
