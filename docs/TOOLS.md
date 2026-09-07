@@ -38,6 +38,38 @@ Conventions: `chat_jid` is always the conversation (a phone number with country 
 
 Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
 
+### `coverage`
+
+What the archive actually contains, and the periods it is missing. Read-only,
+computed from `messages.db` alone, so it answers while the bridge is down.
+
+**Parameters:**
+
+- `gap_hours` (optional, default `24`): report periods longer than this with no message at all
+- `max_gaps` (optional, default `20`, capped at 500): how many gaps to return, biggest first
+
+**Returns:**
+
+| Field | Meaning |
+| --- | --- |
+| `first_message_time`, `last_message_time` | The archive's real boundaries. Anything asked about before the first is unanswerable, not empty |
+| `total_messages` | Messages stored |
+| `chats_total`, `chats_with_messages`, `chats_without_messages` | Chats the bridge knows vs. chats it has any message for. A large `chats_without_messages` means metadata synced but history did not |
+| `messages_by_month` | `{"2026-06": 1234, …}` — where coverage thins out |
+| `gaps` | `[{"from", "to", "hours"}]`, biggest first: periods longer than `gap_hours` with no message in **any** chat |
+| `gaps_truncated` | `true` when `max_gaps` cut the list |
+| `allow_list_applied` | `true` when `WHATSAPP_ALLOWED_CHATS` restricted every number above |
+| `hint` | How to read the result and what to do next |
+
+A gap is archive-wide: the bridge stored nothing at all in that window, which
+normally means it was down or never synced that period — not that everybody went
+quiet. Use it before concluding "this chat has been quiet": `list_messages`
+returns the same empty result either way. To fill a hole, ask the phone with
+[`request_history`](#request_history) for the chat you care about.
+
+The aggregates and the gap scan run in SQL (one ordered pass over the timestamp
+index), so cost does not grow with the size of the result.
+
 ### `request_history`
 
 Ask the phone for messages **older** than the oldest one already stored for a

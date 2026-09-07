@@ -30,6 +30,9 @@ from whatsapp import (
     bridge_status as whatsapp_bridge_status,
 )
 from whatsapp import (
+    coverage as whatsapp_coverage,
+)
+from whatsapp import (
     delete_message as whatsapp_delete_message,
 )
 from whatsapp import (
@@ -142,6 +145,36 @@ def bridge_status() -> dict[str, Any]:
     Read-only; never fails, so it is safe to call before anything else.
     """
     return whatsapp_bridge_status()
+
+
+@mcp.tool()
+@tool_errors
+def coverage(gap_hours: float = 24.0, max_gaps: int = 20) -> dict[str, Any]:
+    """What the local archive actually contains, and the periods it is missing.
+
+    Call this before concluding "this chat has been quiet" or "nothing happened
+    that week". The archive only holds what the phone pushed at pair time plus
+    what arrived since, so it can start late, skip a period the bridge was down,
+    and hold chats with metadata but no messages at all. Those holes are
+    invisible in list_messages, which simply returns nothing.
+
+    Returns first_message_time and last_message_time (the archive's real
+    boundaries), total_messages, chats_total / chats_with_messages /
+    chats_without_messages, messages_by_month ({"2026-06": 1234}) to see where
+    coverage thins out, and gaps: periods longer than gap_hours with no message
+    in *any* chat, biggest first, as {"from", "to", "hours"}. A gap means the
+    bridge stored nothing at all then, not that your contacts were silent.
+
+    Read-only, computed from messages.db, so it works while the bridge is down.
+    With WHATSAPP_ALLOWED_CHATS set, every number covers the allowed chats only
+    (allow_list_applied says so). To fill a hole, ask the phone to backfill one
+    chat with request_history(chat_jid).
+
+    Args:
+        gap_hours: Report periods with no message longer than this (default 24)
+        max_gaps: Largest N gaps to return (default 20, capped at 500)
+    """
+    return whatsapp_coverage(gap_hours, max_gaps)
 
 
 @mcp.tool()

@@ -32,6 +32,30 @@ Symptoms and fixes for pairing, auth, sync and app-state problems. For container
   `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
   `WHATSAPP_MEDIA_ROOTS`.
 
+## "My agent says a chat is quiet"
+
+An empty `list_messages` result means "nothing in the archive", which is not the
+same as "nothing was said". The archive holds what the phone pushed at pair time
+plus everything that arrived since, so it can start late, miss the days the
+bridge was down, and list chats whose metadata synced while their history never
+did. An agent that does not check will state a hole as fact.
+
+Ask the archive what it actually has, with the `coverage` tool
+([TOOLS.md](TOOLS.md#coverage)) — read-only, works while the bridge is down:
+
+- `first_message_time` earlier than the period in question? If not, the answer
+  is "never synced", not "quiet".
+- `gaps`: windows with no message in **any** chat. A multi-day gap across every
+  conversation is a sync outage, not silence.
+- `chats_without_messages`: chats known by name with zero messages stored.
+
+To fill a hole, ask the phone for one chat with `request_history(chat_jid)`
+(or `POST /api/history`, see
+[CONFIGURATION.md](CONFIGURATION.md#requesting-history-for-a-single-chat-on-demand)).
+It is anchored on the oldest message already stored, arrives asynchronously, and
+the phone decides how much it returns — messages it deleted itself are gone. For
+a full backfill instead, re-pair once with `--full-history-pair`.
+
 ## Published HTTPS endpoint
 
 - **`certificate verify failed: certificate has expired`**: the certificate

@@ -2116,6 +2116,121 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     return path
 
 
+COVERAGE_DEFAULT_GAP_HOURS = 24.0
+COVERAGE_DEFAULT_MAX_GAPS = 20
+
+# Timestamps are stored as the bridge wrote them ("YYYY-MM-DD HH:MM:SS..." or
+# the RFC 3339 "T" form, sometimes with fractional seconds and an offset).
+# substr(...,1,19) keeps the part SQLite's date functions understand and every
+# comparison here stays inside one archive, so a constant offset cancels out.
+_COVERAGE_TS = "julianday(substr({col}, 1, 19))"
+
+
+def coverage(
+    gap_hours: float = COVERAGE_DEFAULT_GAP_HOURS,
+    max_gaps: int = COVERAGE_DEFAULT_MAX_GAPS,
+) -> dict[str, Any]:
+    """What the local archive actually contains, and where it is missing.
+
+    Reads messages.db only (works with the bridge down). Aggregates and the gap
+    scan run in SQL, so nothing proportional to the archive is held in memory.
+    Honours WHATSAPP_ALLOWED_CHATS: with an allow-list set, every number
+    describes the allowed chats only.
+    """
+    try:
+        gap_hours = float(gap_hours)
+    except (TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", f"gap_hours must be a number, got {gap_hours!r}") from exc
+    if gap_hours <= 0:
+        raise ToolError("invalid_argument", "gap_hours must be greater than 0")
+    try:
+        max_gaps = int(max_gaps)
+    except (TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", f"max_gaps must be an integer, got {max_gaps!r}") from exc
+    max_gaps = max(1, min(max_gaps, 500))
+
+    msg_clause, msg_params = CHAT_POLICY.sql_clause("messages.chat_jid")
+    chat_clause, chat_params = CHAT_POLICY.sql_clause("chats.jid")
+    conn = None
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+
+        cur.execute(
+            f"SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM messages WHERE {msg_clause}",
+            tuple(msg_params),
+        )
+        total_messages, first_time, last_time = cur.fetchone()
+
+        cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_clause}", tuple(chat_params))
+        chats_total = int(cur.fetchone()[0] or 0)
+        cur.execute(
+            f"""SELECT COUNT(*) FROM chats
+                 WHERE {chat_clause}
+                   AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid)""",
+            tuple(chat_params),
+        )
+        chats_without_messages = int(cur.fetchone()[0] or 0)
+
+        cur.execute(
+            f"""SELECT substr(timestamp, 1, 7) AS month, COUNT(*)
+                  FROM messages WHERE {msg_clause}
+                 GROUP BY month ORDER BY month""",
+            tuple(msg_params),
+        )
+        messages_by_month = {month: int(count) for month, count in cur.fetchall() if month}
+
+        # One ordered pass over the timestamp index: LAG gives every pair of
+        # consecutive messages, and only the pairs further apart than the
+        # threshold ever reach Python.
+        delta_hours = f"({_COVERAGE_TS.format(col='ts')} - {_COVERAGE_TS.format(col='prev_ts')}) * 24.0"
+        gaps: list[dict[str, Any]] = []
+        try:
+            cur.execute(
+                f"""WITH ordered AS (
+                        SELECT timestamp AS ts,
+                               LAG(timestamp) OVER (ORDER BY timestamp) AS prev_ts
+                          FROM messages WHERE {msg_clause}
+                    )
+                    SELECT prev_ts, ts, {delta_hours} AS hours
+                      FROM ordered
+                     WHERE prev_ts IS NOT NULL AND {delta_hours} > ?
+                     ORDER BY hours DESC LIMIT ?""",
+                (*msg_params, gap_hours, max_gaps),
+            )
+            gaps = [{"from": start, "to": end, "hours": round(float(hours), 1)} for start, end, hours in cur.fetchall()]
+        except sqlite3.OperationalError as exc:  # SQLite without window functions
+            logger.warning("coverage: gap scan unavailable (%s)", exc)
+            gaps = []
+    except sqlite3.Error as e:
+        logger.error("Database error in coverage: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return {
+        "first_message_time": first_time,
+        "last_message_time": last_time,
+        "total_messages": int(total_messages or 0),
+        "chats_total": chats_total,
+        "chats_with_messages": chats_total - chats_without_messages,
+        "chats_without_messages": chats_without_messages,
+        "messages_by_month": messages_by_month,
+        "gap_hours": gap_hours,
+        "gaps": gaps,
+        "gaps_truncated": len(gaps) >= max_gaps,
+        "allow_list_applied": CHAT_POLICY.restricted,
+        "hint": (
+            "Gaps are archive-wide: no message in any chat between 'from' and 'to', which usually means the bridge "
+            "was down or never synced that period rather than everyone going quiet. Chats in "
+            "chats_without_messages, and anything before first_message_time, were never synced either. Ask the "
+            "phone to backfill one chat with request_history(chat_jid); it cannot fill a period the phone itself "
+            "no longer has."
+        ),
+    }
+
+
 def bridge_status() -> dict[str, Any]:
     """Health, readiness and build identity of the bridge in one call.
 
