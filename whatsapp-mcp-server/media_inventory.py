@@ -127,12 +127,33 @@ def _iso(value: str, name: str) -> str:
         raise ToolError("invalid_argument", f"{name} must be an ISO-8601 timestamp") from exc
 
 
+def _notes_exists_clause(conn: sqlite3.Connection, has_notes: bool) -> str | None:
+    """SQL predicate for "the agent has annotated this file", or None when it can never match.
+
+    notes.db is a separate database, so it is attached to the read connection
+    for the call instead of pulling every annotated hash into the query as
+    parameters. No notes.db (or no table in it yet) means nothing is annotated:
+    has_notes=True then matches nothing and has_notes=False matches everything.
+    """
+    annotated = None
+    if os.path.exists(media_notes.notes_db_path()):
+        conn.execute("ATTACH DATABASE ? AS notesdb", (media_notes.notes_db_path(),))
+        annotated = conn.execute(
+            "SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'"
+        ).fetchone()
+    if not annotated:
+        return None if has_notes else "1"
+    exists = "EXISTS (SELECT 1 FROM notesdb.media_notes n WHERE n.sha256 = lower(hex(m.file_sha256)))"
+    return exists if has_notes else f"NOT {exists}"
+
+
 def list_media_page(
     chat_jid: str | None = None,
     media_type: str | None = None,
     after: str | None = None,
     before: str | None = None,
     min_bytes: int | None = None,
+    has_notes: bool | None = None,
     sort: str = "size",
     limit: int = 50,
     page: int = 0,
@@ -154,26 +175,31 @@ def list_media_page(
         "date": "m.timestamp DESC",
         "copies": "copies DESC, m.file_length DESC, m.timestamp DESC",
     }[sort]
-    sql = f"""
-        WITH copies AS (
-            SELECT file_sha256, COUNT(*) AS copies, COUNT(DISTINCT chat_jid) AS copies_in
-            FROM messages
-            WHERE file_sha256 IS NOT NULL AND {" AND ".join(copies_clauses)}
-            GROUP BY file_sha256
-        )
-        SELECT m.id, m.chat_jid, c.name, m.sender, m.timestamp, m.is_from_me, m.media_type, m.filename,
-               m.file_length, lower(hex(m.file_sha256)), m.deleted_at,
-               COALESCE(copies.copies, 1), COALESCE(copies.copies_in, 1)
-        FROM messages m
-        LEFT JOIN chats c ON c.jid = m.chat_jid
-        LEFT JOIN copies ON copies.file_sha256 = m.file_sha256
-        WHERE {" AND ".join(clauses)}
-        ORDER BY {order}, m.id
-        LIMIT ? OFFSET ?
-    """
     try:
         conn = whatsapp._connect_messages_db()
         try:
+            if has_notes is not None:
+                notes_clause = _notes_exists_clause(conn, has_notes)
+                if notes_clause is None:
+                    return PageResult([], None, False)
+                clauses.append(notes_clause)
+            sql = f"""
+                WITH copies AS (
+                    SELECT file_sha256, COUNT(*) AS copies, COUNT(DISTINCT chat_jid) AS copies_in
+                    FROM messages
+                    WHERE file_sha256 IS NOT NULL AND {" AND ".join(copies_clauses)}
+                    GROUP BY file_sha256
+                )
+                SELECT m.id, m.chat_jid, c.name, m.sender, m.timestamp, m.is_from_me, m.media_type, m.filename,
+                       m.file_length, lower(hex(m.file_sha256)), m.deleted_at,
+                       COALESCE(copies.copies, 1), COALESCE(copies.copies_in, 1)
+                FROM messages m
+                LEFT JOIN chats c ON c.jid = m.chat_jid
+                LEFT JOIN copies ON copies.file_sha256 = m.file_sha256
+                WHERE {" AND ".join(clauses)}
+                ORDER BY {order}, m.id
+                LIMIT ? OFFSET ?
+            """
             rows = conn.execute(sql, (*copies_params, *params, limit + 1, offset)).fetchall()
         finally:
             conn.close()
@@ -224,6 +250,7 @@ def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]
         "copies_in": int(copies_in),
         "deleted_at": datetime.fromisoformat(deleted_at).isoformat() if deleted_at else None,
         "notes": notes.get(sha256 or "", {}),
+        "has_notes": bool(notes.get(sha256 or "")),
     }
 
 

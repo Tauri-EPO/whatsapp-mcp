@@ -39,6 +39,10 @@ from whatsapp import (
     edit_message as whatsapp_edit_message,
 )
 from whatsapp import (
+    fetch_media_notes,
+    msg_to_dict,
+)
+from whatsapp import (
     forward_message as whatsapp_forward_message,
 )
 from whatsapp import (
@@ -87,7 +91,7 @@ from whatsapp import (
     mark_messages_read as whatsapp_mark_messages_read,
 )
 from whatsapp import (
-    msg_to_dict,
+    media_notes_for_message as whatsapp_media_notes_for_message,
 )
 from whatsapp import (
     purge_media as whatsapp_purge_media,
@@ -290,6 +294,12 @@ def list_messages(
     or the bridge's generated name for images/audio/video); pass id + chat_jid to
     download_media to fetch the file.
 
+    Media messages also carry sha256 and notes: what you previously recorded about
+    that exact file ({} when nothing was). Notes are the archive's memory of media —
+    an image, PDF or voice note you open with an empty notes field is expected to be
+    annotated once you have interpreted it, with annotate_media(sha256, "summary", ...),
+    so the next read of the same file is free instead of a re-interpretation.
+
     Args:
         after: ISO-8601 date string (e.g., "2026-01-01" or "2026-01-01T09:00:00")
         before: ISO-8601 date string (e.g., "2026-01-09" or "2026-01-09T18:00:00")
@@ -471,8 +481,8 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
 def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
-    Messages use the same shape as list_messages (including media_type and filename
-    for media messages).
+    Messages use the same shape as list_messages (including media_type, filename,
+    sha256 and the notes recorded for media messages).
 
     Args:
         chat_jid: JID of the chat containing the message (message IDs are only
@@ -482,10 +492,12 @@ def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: 
         after: Number of messages to include after the target message (default 5)
     """
     context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
+    # One notes lookup for the whole window.
+    notes = fetch_media_notes([context.message, *context.before, *context.after])
     return {
-        "message": msg_to_dict(context.message),
-        "before": [msg_to_dict(message) for message in context.before],
-        "after": [msg_to_dict(message) for message in context.after],
+        "message": msg_to_dict(context.message, notes=notes),
+        "before": [msg_to_dict(message, notes=notes) for message in context.before],
+        "after": [msg_to_dict(message, notes=notes) for message in context.after],
     }
 
 
@@ -807,18 +819,20 @@ def list_media(
     after: str = "",
     before: str = "",
     min_bytes: int = 0,
+    has_notes: bool | None = None,
     sort: str = "size",
     limit: int = 50,
     page: int = 0,
     cursor: str = "",
 ) -> dict[str, Any]:
-    """Inventory of media files known to the archive: size, content hash, copies, cache state.
+    """Inventory of media files known to the archive: size, content hash, copies, notes, cache state.
 
     Read-only. Use it to find what is heavy (sort="size"), what was forwarded
-    into many chats (sort="copies": rows sharing the same sha256), or what a
-    chat received lately (sort="date"). `cached` tells whether the bytes are on
-    disk right now; a false entry can still be fetched with download_media.
-    Pointer rows (reactions, poll votes) and plain text never appear.
+    into many chats (sort="copies": rows sharing the same sha256), what a chat
+    received lately (sort="date"), or what you have never interpreted
+    (has_notes=false). `cached` tells whether the bytes are on disk right now; a
+    false entry can still be fetched with download_media. Pointer rows
+    (reactions, poll votes) and plain text never appear.
 
     Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
     next_cursor back as `cursor` for the following page.
@@ -829,6 +843,8 @@ def list_media(
         after: Only media at or after this ISO-8601 timestamp
         before: Only media at or before this ISO-8601 timestamp
         min_bytes: Only media at least this large (from the WhatsApp file length)
+        has_notes: true = only files you have already annotated, false = only files with
+               no note yet (the backlog to read and then annotate_media), null = both
         sort: "size" (largest first, default), "date" (newest first) or "copies" (most forwarded first)
         limit: Max entries per page (default 50, max 200)
         page: Page number (default 0); ignored when cursor is set
@@ -838,8 +854,10 @@ def list_media(
         Each item: message_id, chat_jid, chat_name, sender_jid, is_from_me, timestamp,
         media_type, filename (documents keep the sender's name), bytes, sha256 (hex;
         null for rows without a hash), cached, cached_bytes, cached_file, copies (rows
-        with the same sha256 across allowed chats), copies_in (distinct chats) and
-        deleted_at.
+        with the same sha256 across allowed chats), copies_in (distinct chats),
+        deleted_at, notes ({key: value} you recorded for the hash) and has_notes.
+        After interpreting a file with has_notes=false, store what you understood with
+        annotate_media(sha256, "summary", ...) so the next pass does not redo the work.
     """
     return list_media_page(
         chat_jid=chat_jid or None,
@@ -847,6 +865,7 @@ def list_media(
         after=after or None,
         before=before or None,
         min_bytes=min_bytes or None,
+        has_notes=has_notes,
         sort=sort,
         limit=limit,
         page=page,
@@ -878,18 +897,28 @@ def get_media_stats(chat_jid: str = "") -> dict[str, Any]:
 @mcp.tool()
 @tool_errors
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
-    """Remember something about a media file: a summary, tags, keep/disposable, a transcript.
+    """Record what a media file is, after you interpreted it: summary, tags, transcript, keep.
+
+    Call this whenever you read an image, PDF, document or voice note whose `notes`
+    came back empty from list_messages / download_media / list_media: it is how this
+    archive remembers media, and it turns the next encounter with the same file into
+    a free lookup instead of another interpretation.
 
     Notes live in notes.db (owned by the MCP server) and are keyed by the file's
     sha256, so the same file forwarded into several chats has one note and the
-    note survives the cached bytes being purged. Free-form `key` (summary, tags,
-    keep, transcript, ...) and text `value` (JSON is fine, up to 64 KB); the same
-    key overwrites, an empty value deletes. Only hashes visible through
-    list_media / list_messages can be annotated.
+    note survives the cached bytes being purged. Text `value` up to 64 KB (JSON is
+    fine); the same key overwrites, an empty value deletes. Only hashes visible
+    through list_media / list_messages can be annotated.
+
+    Conventional keys — use these before inventing your own:
+        summary: one or two sentences on what the file contains (always write this one)
+        tags: comma-separated or JSON list of labels ("invoice", "contract", "receipt")
+        transcript: the spoken text of a voice note (see transcribe_audio)
+        keep: "yes" for files that must not be purged, "no" for disposable ones
 
     Args:
-        sha256: Content hash from list_media or list_messages (64 hex chars)
-        key: Note name, up to 64 characters
+        sha256: Content hash from list_media, list_messages or download_media (64 hex chars)
+        key: Note name, up to 64 characters (summary, tags, transcript, keep, ...)
         value: Note text; empty string removes the note
 
     Returns:
@@ -983,17 +1012,29 @@ def purge_media(
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
+    The response carries the file's `sha256` and the `notes` you already recorded
+    for it. When `notes` is empty, this file has never been interpreted: read it
+    (open the path, or transcribe_audio for voice notes) and then record what it
+    is with annotate_media(sha256, "summary", ...) — the next time it turns up,
+    in this chat or any other, the note comes back for free.
+
     Args:
         chat_jid: The JID of the chat containing the message
         message_id: The ID of the message containing the media
 
     Returns:
-        A dictionary containing success status, a status message, and the file path if successful
+        {"success": true, "message", "file_path", "sha256" (null when the row has no
+        hash), "notes": {key: value}}
     """
     file_path = whatsapp_download_media(message_id, chat_jid)
 
     if file_path:
-        return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
+        return {
+            "success": True,
+            "message": "Media downloaded successfully",
+            "file_path": file_path,
+            **whatsapp_media_notes_for_message(chat_jid, message_id),
+        }
     raise ToolError("internal", "Bridge reported success without a file path")
 
 
@@ -1011,6 +1052,11 @@ def transcribe_audio(
     or an absolute file_path that is already on disk. Requires a whisper backend
     configured through WHISPER_URL (whisper.cpp server) or WHISPER_BIN + WHISPER_MODEL;
     nothing is sent to a cloud API.
+
+    Transcribing is the interpretation step for a voice note: afterwards record it
+    against the file with annotate_media(sha256, "transcript", text) — and a
+    "summary" when the note is long — using the sha256 from the list_messages row.
+    A voice note whose notes field is empty has never been transcribed.
 
     Args:
         chat_jid: JID of the chat containing the message
