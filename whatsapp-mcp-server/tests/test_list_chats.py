@@ -175,3 +175,89 @@ def test_get_contact_chats_returns_each_chat_once_with_last_message(messages_db)
     assert len(group_chats) == 1
     assert group_chats[0]["last_message"] == "actual chat last message"
     assert group_chats[0]["last_sender"] == "9999999999@s.whatsapp.net"
+
+
+# --- issue #218: the last message is resolved by ordering, not by timestamp equality
+
+
+@pytest.fixture
+def drifted_db(tmp_path, monkeypatch):
+    """A store whose chats.last_message_time is 1s ahead of every message row.
+
+    That is what a protocol/unsupported event does: it advances the chat marker
+    without storing a message. The old timestamp-equality join then matched
+    nothing and reported last_message / last_sender / last_is_from_me as NULL.
+    ``empty@s.whatsapp.net`` has no message rows at all.
+    """
+    db_path = tmp_path / "drifted.db"
+    _make_messages_db(str(db_path))
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE chats SET last_message_time = ? WHERE jid = ?",
+        ("2024-01-15 10:31:01+00:00", "1234567890@s.whatsapp.net"),
+    )
+    conn.execute(
+        """INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+           VALUES ('msg2', '1234567890@s.whatsapp.net', '1234567890', 'newest inbound',
+                   '2024-01-15 10:31:00+00:00', 0)"""
+    )
+    conn.execute(
+        "INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+        ("empty@s.whatsapp.net", "Empty", "2024-01-15 09:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+    return db_path
+
+
+def test_list_chats_resolves_last_message_when_marker_drifted(drifted_db):
+    chats = {chat["jid"]: chat for chat in whatsapp.list_chats(limit=10)}
+    chat = chats["1234567890@s.whatsapp.net"]
+
+    # Newest stored row wins even though no row shares last_message_time.
+    assert chat["last_message"] == "newest inbound"
+    assert chat["last_sender"] == "1234567890"
+    assert chat["last_is_from_me"] == 0
+    assert chat["has_messages"] is True
+    assert chat["unread"] is True
+
+
+def test_list_chats_flags_chat_without_any_message(drifted_db):
+    chats = {chat["jid"]: chat for chat in whatsapp.list_chats(limit=10)}
+    chat = chats["empty@s.whatsapp.net"]
+
+    assert chat["has_messages"] is False
+    assert chat["last_is_from_me"] is None
+    assert chat["last_message"] is None
+    # False here means "no direction to judge", which has_messages spells out.
+    assert chat["unread"] is False
+
+
+def test_get_chat_resolves_last_message_when_marker_drifted(drifted_db):
+    chat = whatsapp.get_chat("1234567890@s.whatsapp.net")
+    assert chat["last_message"] == "newest inbound"
+    assert chat["last_is_from_me"] == 0
+    assert chat["has_messages"] is True
+
+    empty = whatsapp.get_chat("empty@s.whatsapp.net")
+    assert empty["has_messages"] is False
+    assert empty["last_is_from_me"] is None
+
+
+def test_get_chat_without_last_message_still_reports_has_messages(drifted_db):
+    chat = whatsapp.get_chat("1234567890@s.whatsapp.net", include_last_message=False)
+    assert chat["last_message"] is None
+    assert chat["has_messages"] is True
+    assert chat["last_is_from_me"] == 0
+
+
+def test_direct_chat_and_contact_chats_resolve_last_message(drifted_db):
+    direct = whatsapp.get_direct_chat_by_contact("1234567890")
+    assert direct["last_message"] == "newest inbound"
+    assert direct["has_messages"] is True
+
+    contact_chats = whatsapp.get_contact_chats("1234567890@s.whatsapp.net")
+    chat = next(c for c in contact_chats if c["jid"] == "1234567890@s.whatsapp.net")
+    assert chat["last_message"] == "newest inbound"
+    assert chat["has_messages"] is True

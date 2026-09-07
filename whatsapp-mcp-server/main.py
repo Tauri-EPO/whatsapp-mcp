@@ -389,10 +389,15 @@ def list_chats(
 
     Returns:
         Chat dictionaries with jid, name, is_group, last_message_time, last_message,
-        last_sender, last_is_from_me, last_read_time and unread. `last_read_time` is
-        how far the chat has been read on any device (null if never reported); `unread`
-        is true when the last message is inbound and newer than that marker, so chats
-        already read on the phone are not reported as unread.
+        last_sender, last_is_from_me, last_read_time, has_messages and unread. The
+        last_* fields describe the chat's newest stored message, which can be older
+        than last_message_time (protocol and unsupported events move that marker
+        without storing a message). `has_messages` is false only when the chat has no
+        stored messages at all: last_is_from_me is then null and `unread` is false
+        because there is no direction to judge, not because nothing is waiting.
+        `last_read_time` is how far the chat has been read on any device (null if never
+        reported); `unread` is true when the last message is inbound and newer than
+        that marker, so chats already read on the phone are not reported as unread.
     """
     # Cap limit at 200 to prevent excessive queries
     limit = min(limit, 200)
