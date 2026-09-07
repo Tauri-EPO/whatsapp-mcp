@@ -41,6 +41,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304`                              | Maximum request body accepted by the `http`/`sse` transports |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
+| `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
@@ -152,6 +153,61 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   book, not conversations.
 
 Unset keeps today's behaviour (everything allowed).
+
+## Read-only mode (recommended for a personal assistant)
+
+`WHATSAPP_ALLOWED_CHATS` restricts *which chats* an agent may touch.
+`WHATSAPP_READ_ONLY` restricts *what it may do*, and it is the right default for
+the most common deployment: an assistant that reads, searches and drafts, while
+a human sends.
+
+```dotenv
+# recommended baseline for an assistant that reads attacker-controlled text
+WHATSAPP_READ_ONLY=1
+```
+
+Set it for **both** processes (the compose file passes it to both containers):
+
+- **MCP server** — every mutating tool is removed from `tools/list` before any
+  transport starts, so the model never sees it, and refuses with
+  `{"error": {"code": "denied", ...}}` if it is called anyway.
+- **Bridge** — the matching `/api/*` endpoints answer `403` with the same error
+  shape, so an MCP-side bug or a direct REST caller still cannot send anything.
+
+Why this matters: an agent that reads any group or forwarded message is reading
+attacker-controlled text. Told "never send without approval", it is one prompt
+injection away from sending. With read-only on there is no send tool to call.
+
+**Blocked** (14 tools / 13 endpoints): `send_message`, `send_file`,
+`send_audio_message`, `send_reaction`, `send_typing`, `mark_messages_read`,
+`delete_message`, `edit_message`, `forward_message`,
+`manage_group_participants`, `update_group`, `get_group_invite_link`,
+`leave_group`, `purge_media`; on the bridge `/api/send`, `/api/react`,
+`/api/typing`, `/api/mark-read`, `/api/delete`, `/api/edit`, `/api/forward`,
+`/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
+`/api/group/leave`, `/api/media/purge`, `/api/history`.
+
+**Still available:** every read tool, plus
+
+- `download_media` and `transcribe_audio` — they fetch and read; the only write
+  is to the local media cache.
+- `annotate_media` / `get_media_notes` / `search_media_notes` — notes live in
+  `notes.db`, local state owned by the MCP server, never WhatsApp. A read-only
+  assistant still needs somewhere to keep its own working memory.
+
+Two deliberate calls at the edges:
+
+- `get_group_invite_link` is blocked even though it usually only reads:
+  `reset=True` revokes the current link, and an invite link *is* group access
+  that can be leaked into a chat.
+- `/api/history` (on-demand backfill) is blocked: it asks the phone to push
+  data and writes new rows into `messages.db`. Turn read-only off for the run
+  if you need to backfill a chat.
+
+The value is parsed strictly — `1/true/yes/on` and `0/false/no/off`,
+case-insensitive. Anything else stops the process at startup with an error
+instead of quietly running wide open, and both processes log the mode they are
+in on their first lines (`WHATSAPP_READ_ONLY=1: read-only, ...`).
 
 ## Bridge authentication and media paths
 

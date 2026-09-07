@@ -71,6 +71,7 @@ whatsapp-mcp/
 │   ├── media_retention.go      # WHATSAPP_MEDIA_AUTODOWNLOAD / _RETENTION_DAYS, store size
 │   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
+│   ├── read_only.go            # WHATSAPP_READ_ONLY: 403 on every mutating /api/* endpoint
 │   ├── fts.go                  # FTS5 index over messages.content
 │   ├── media_retry.go          # re-download expired CDN media via the sender's phone
 │   ├── media_purge.go          # POST /api/media/purge: drop cached files by (id, chat) or criteria, rows untouched
@@ -90,6 +91,7 @@ whatsapp-mcp/
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
+│   ├── tool_policy.py          # WHATSAPP_READ_ONLY: @mutating_tool, hides + refuses mutating tools
 │   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
@@ -198,6 +200,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)* | Conversation allow-list (JIDs, bare numbers, `*@g.us` / `*@s.whatsapp.net`). MCP server filters reads and refuses writes (`chat_policy.py`); bridge returns 403 on send/react/mark-read/typing/delete/group/poll (`chat_policy.go`). Set for both processes |
+| `WHATSAPP_READ_ONLY` | *(unset = everything enabled)* | Read-only deployment: the MCP server omits every mutating tool from `tools/list` and refuses it with `denied` if called anyway (`tool_policy.py`, `@mutating_tool`); the bridge answers 403 on the matching endpoints (`read_only.go`). Reads, `download_media`, `transcribe_audio` and `annotate_media` (local notes.db) stay available. `1/true/yes/on` or `0/false/no/off`; anything else stops the process. Set for both processes |
 | `WHATSAPP_LOG_LEVEL` | `INFO` | Bridge log level (`DEBUG`/`INFO`/`WARN`/`ERROR`), applied to the bridge logger and the whatsmeow client. `DEBUG` echoes each stored message |
 | `WHATSAPP_LOG_FORMAT` | `text` | `json` switches the bridge (and whatsmeow) log lines to one JSON object per line (`ts`, `level`, `module`, `msg`) (`logging_json.go`) |
 | `WHATSAPP_METRICS` | `true` | Serve `GET /metrics` on the bridge (Prometheus text, unauthenticated like `/api/version`: counters and connection state only, `metrics.go`); `false` removes the route |

@@ -52,10 +52,17 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
 	}
+	// mutate = auth + the WHATSAPP_READ_ONLY refusal (403, read_only.go). Every
+	// endpoint with a side effect registers with it; reads keep plain auth, so a
+	// new route has to be classified when it is added.
+	mutate := func(h http.HandlerFunc) http.HandlerFunc {
+		return auth(b.ReadOnly.guard(h))
+	}
 	mux := http.NewServeMux()
 
-	// On-demand history sync endpoint (see history_ondemand.go)
-	registerHistoryEndpoint(mux, auth, client, func() bool { return b.Connected() }, messageStore)
+	// On-demand history sync endpoint (see history_ondemand.go). Mutating: it
+	// asks the phone to push history and writes the rows into messages.db.
+	registerHistoryEndpoint(mux, mutate, client, func() bool { return b.Connected() }, messageStore)
 
 	// Health check endpoint
 	// Liveness: the process serves requests. Always 200 once the listener is up,
@@ -89,7 +96,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	)))
 
 	// Edit an own message / forward a message (edit_forward.go).
-	mux.HandleFunc("/api/edit", auth(handleEditMessage(messageStore,
+	mux.HandleFunc("/api/edit", mutate(handleEditMessage(messageStore,
 		func(ctx context.Context, chat types.JID, id types.MessageID, text string) error {
 			if !b.Connected() {
 				return errors.New("WhatsApp client is not connected")
@@ -99,18 +106,18 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		},
 		b.Policy,
 	)))
-	mux.HandleFunc("/api/forward", auth(handleForwardMessage(forwardDeps{
+	mux.HandleFunc("/api/forward", mutate(handleForwardMessage(forwardDeps{
 		lookup:   messageStore.messageContentLookup,
 		download: b.DownloadMedia,
 		send:     b.Send,
 	}, b.Policy)))
 
 	// Group management: participants, subject/description, invite link, leave (group_manage.go).
-	registerGroupManagement(mux, auth, liveGroupOps(client, func() bool { return b.Connected() }), b.Policy)
+	registerGroupManagement(mux, mutate, liveGroupOps(client, func() bool { return b.Connected() }), b.Policy)
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.
-	mux.HandleFunc("/api/delete", auth(handleDeleteMessage(messageStore,
+	mux.HandleFunc("/api/delete", mutate(handleDeleteMessage(messageStore,
 		func(ctx context.Context, chat types.JID, id types.MessageID) error {
 			if !b.Connected() {
 				return errors.New("WhatsApp client is not connected")
@@ -126,22 +133,22 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	mux.HandleFunc("/api/poll", auth(handlePollResults(messageStore, b.Policy)))
 
 	// Handler for sending messages
-	mux.HandleFunc("/api/send", auth(requireMethod(http.MethodPost, b.handleSend(allowedMediaRoots))))
+	mux.HandleFunc("/api/send", mutate(requireMethod(http.MethodPost, b.handleSend(allowedMediaRoots))))
 
 	// Handler for explicitly sending read receipts for selected messages.
-	mux.HandleFunc("/api/mark-read", auth(requireMethod(http.MethodPost, b.handleMarkRead())))
+	mux.HandleFunc("/api/mark-read", mutate(requireMethod(http.MethodPost, b.handleMarkRead())))
 
 	// Handler for sending (or removing) emoji reactions
-	mux.HandleFunc("/api/react", auth(requireMethod(http.MethodPost, b.handleReact())))
+	mux.HandleFunc("/api/react", mutate(requireMethod(http.MethodPost, b.handleReact())))
 
 	// Handler for downloading media
 	mux.HandleFunc("/api/download", auth(requireMethod(http.MethodPost, b.handleDownload())))
 
 	// Drop cached media bytes on request, rows untouched (media_purge.go).
-	mux.HandleFunc("/api/media/purge", auth(requireMethod(http.MethodPost, b.handleMediaPurge())))
+	mux.HandleFunc("/api/media/purge", mutate(requireMethod(http.MethodPost, b.handleMediaPurge())))
 
 	// Handler for sending typing indicator
-	mux.HandleFunc("/api/typing", auth(requireMethod(http.MethodPost, b.handleTyping())))
+	mux.HandleFunc("/api/typing", mutate(requireMethod(http.MethodPost, b.handleTyping())))
 
 	return mux
 }

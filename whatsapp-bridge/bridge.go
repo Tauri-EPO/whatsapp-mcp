@@ -31,6 +31,10 @@ type Bridge struct {
 
 	// Policy restricts which chats outbound endpoints may act on (WHATSAPP_ALLOWED_CHATS).
 	Policy chatPolicy
+	// ReadOnly refuses every endpoint with a side effect (WHATSAPP_READ_ONLY,
+	// read_only.go). Zero value = disabled; main() parses it and refuses to
+	// start on a value it cannot read.
+	ReadOnly readOnlyPolicy
 	// PollVoteDecrypt decodes PollUpdateMessage payloads; nil = votes are skipped.
 	PollVoteDecrypt pollVoteDecrypter
 	// DownloadMedia fetches media for a stored message (defaults to downloadMedia).

@@ -232,6 +232,15 @@ func main() {
 		return
 	}
 
+	// Operation-level access control (read_only.go). Parsed before the REST
+	// server starts; a value we cannot read stops the bridge instead of
+	// leaving the mutating endpoints open.
+	readOnly, roErr := loadReadOnlyPolicy()
+	if roErr != nil {
+		logger.Errorf("%v", roErr)
+		return
+	}
+
 	bridge := newBridge(client, messageStore, logger, bridgeToken)
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
@@ -243,6 +252,7 @@ func main() {
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 	bridge.MediaRetention = mediaRetention
+	bridge.ReadOnly = readOnly
 
 	// Resolve the allow-listed roots that media_path values in /api/send must
 	// live under. See media_path.go for the rationale.
@@ -260,6 +270,7 @@ func main() {
 	// need WhatsApp check client.IsConnected() themselves.
 	bridge.startRESTServer(port, bridgeToken)
 	logger.Infof("%s", bridge.Policy.Summary())
+	logger.Infof("%s", bridge.ReadOnly.Summary())
 	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(bridge.MediaRetention))
 	go bridge.runMediaRetention()
 
