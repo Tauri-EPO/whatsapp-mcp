@@ -127,6 +127,9 @@ services:
       WHATSAPP_MCP_LOG_FORMAT: ${WHATSAPP_MCP_LOG_FORMAT:-text}
       WHATSAPP_MCP_METRICS: ${WHATSAPP_MCP_METRICS:-true}
       WHATSAPP_MCP_METRICS_TOKEN: ${WHATSAPP_MCP_METRICS_TOKEN:-}
+      # URL clients use to reach /mcp. Only read to watch the certificate the
+      # host publishes: bridge_status then reports its expiry. Empty = no probe.
+      WHATSAPP_PUBLIC_URL: ${WHATSAPP_PUBLIC_URL:-}
       WHATSAPP_BRIDGE_TIMEOUT_S: ${WHATSAPP_BRIDGE_TIMEOUT_S:-30}
       WHATSAPP_BRIDGE_TOKEN: ${WHATSAPP_BRIDGE_TOKEN:-}
       WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}

@@ -86,8 +86,21 @@ a full backfill instead, re-pair once with `--full-history-pair`.
   into files for a proxy is *not* renewed by anything unless you scheduled it.
   Restarting or rebuilding the containers changes nothing.
 
-  Note that `bridge_status` still reports `ok: true` here, correctly: it checks
-  the bridge over loopback and never inspects the published endpoint.
+  Note that `bridge_status` reports `ok: true` here, correctly: it checks the
+  bridge over loopback and knows nothing about the published endpoint — unless
+  you tell it where that endpoint is. Set `WHATSAPP_PUBLIC_URL` to the URL your
+  clients use and the same call answers the question before a client does:
+
+  ```jsonc
+  "endpoint_cert_expires_at": "2026-10-07T21:52:11Z",
+  "endpoint_cert_days_left": -3,
+  "endpoint_cert_error": "certificate verify failed for myserver.tail1234.ts.net:443: certificate has expired"
+  ```
+
+  It is one TLS handshake with no request, cached for an hour, and it cannot
+  make `bridge_status` fail; see
+  [Watching the published certificate](CONFIGURATION.md#watching-the-published-certificate).
+  It only watches — renewing is still the host's job, below.
 
   **Fix**, on the host that serves the endpoint:
 
