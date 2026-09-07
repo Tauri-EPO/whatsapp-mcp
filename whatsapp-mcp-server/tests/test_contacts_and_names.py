@@ -1,9 +1,13 @@
 """search_contacts and the sender-name / LID resolution layer over both databases."""
 
 import sqlite3
+from datetime import datetime
 
 import whatsapp
 from tests.conftest import ALICE, BOB, BOB_LID, BOB_PN, CARLA, DECOY, FAMILY
+
+# A LID nobody mapped: too long to be an E.164 number, so its shape gives it away.
+UNKNOWN_LID = "1171581346817350"
 
 
 def _jids(rows):
@@ -29,6 +33,20 @@ def test_search_contacts_is_case_and_unicode_aware(paired_dbs):
     assert _jids(whatsapp.search_contacts("josé")) == ["5511666666666@s.whatsapp.net"]
     assert _jids(whatsapp.search_contacts("Ção")) == ["5511666666666@s.whatsapp.net"]
     assert set(_jids(whatsapp.search_contacts("ALICE"))) == {ALICE, DECOY}  # "Not Alice" matches too
+
+
+def test_search_contacts_keeps_lids_out_of_phone_number(paired_dbs):
+    """The same namespace split get_contact and message rows report (#281)."""
+    with paired_dbs.messages() as c:
+        c.execute("INSERT INTO chats (jid, name) VALUES (?, 'Vicky')", (f"{BOB_LID}@lid",))
+        c.execute("INSERT INTO chats (jid, name) VALUES (?, 'Vicky Two')", (f"{UNKNOWN_LID}@lid",))
+    mapped, unmapped = whatsapp.search_contacts("Vicky")
+    assert (mapped["jid"], mapped["lid"], mapped["phone_number"]) == (f"{BOB_LID}@lid", BOB_LID, BOB_PN)
+    assert (unmapped["jid"], unmapped["lid"], unmapped["phone_number"]) == (
+        f"{UNKNOWN_LID}@lid",
+        UNKNOWN_LID,
+        None,
+    )
 
 
 def test_search_contacts_whatsmeow_only_contact_uses_name_fallback_chain(paired_dbs):
@@ -78,15 +96,87 @@ def test_sender_aliases_without_whatsmeow_db(paired_dbs, monkeypatch):
     assert whatsapp._sender_aliases(BOB_PN) == [BOB_PN, BOB, f"{BOB_PN}@lid"]
 
 
-def test_resolve_lid_to_phone(paired_dbs, monkeypatch):
-    assert whatsapp._resolve_lid_to_phone(BOB_LID) == BOB_PN
-    assert whatsapp._resolve_lid_to_phone(f"{BOB_LID}@lid") == BOB_PN
-    assert whatsapp._resolve_lid_to_phone("000") is None
+def test_sender_identity_keeps_the_two_namespaces_apart(paired_dbs):
+    """A phone number is never a LID and a LID is never a phone number (#281)."""
+    assert whatsapp.sender_identity(BOB_LID) == (BOB_PN, BOB_LID)  # bare LID, resolved
+    assert whatsapp.sender_identity(f"{BOB_LID}@lid") == (BOB_PN, BOB_LID)
+    assert whatsapp.sender_identity(BOB_PN) == (BOB_PN, None)  # bare phone stays a phone
+    assert whatsapp.sender_identity(BOB) == (BOB_PN, None)
+    assert whatsapp.sender_identity(UNKNOWN_LID) == (None, UNKNOWN_LID)  # over 15 digits
+    assert whatsapp.sender_identity(f"{UNKNOWN_LID}@lid") == (None, UNKNOWN_LID)
+    assert whatsapp.sender_identity("") == ("", None)  # no identifier at all
+
+
+def test_sender_identity_without_the_lid_map(paired_dbs, monkeypatch):
+    """No map, no resolution — but a LID is still not reported as a phone number."""
     with paired_dbs.whatsmeow() as c:
         c.execute("DROP TABLE whatsmeow_lid_map")
-    assert whatsapp._resolve_lid_to_phone(BOB_LID) is None
+    whatsapp._reset_name_cache()
+    assert whatsapp.sender_identity(BOB_LID) == (BOB_LID, None)  # indistinguishable from a number
+    assert whatsapp.sender_identity(f"{BOB_LID}@lid") == (None, BOB_LID)  # the JID says it
     monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", "/nonexistent/whatsapp.db")
-    assert whatsapp._resolve_lid_to_phone(BOB_LID) is None
+    whatsapp._reset_name_cache()
+    assert whatsapp.sender_identity(UNKNOWN_LID) == (None, UNKNOWN_LID)
+
+
+def test_sender_identities_batch_one_query_and_cache(paired_dbs, monkeypatch):
+    counts = {"n": 0}
+    real = whatsapp._connect_whatsmeow_db
+
+    def counted():
+        counts["n"] += 1
+        return real()
+
+    monkeypatch.setattr(whatsapp, "_connect_whatsmeow_db", counted)
+    values = [BOB_LID, f"{BOB_LID}@lid", UNKNOWN_LID, BOB_PN, BOB] * 40
+    identities = whatsapp._sender_identities(values)
+    assert counts["n"] == 1, counts  # one connection for the whole page
+    assert identities[BOB_LID] == (BOB_PN, BOB_LID)
+    whatsapp._sender_identities(values)
+    assert counts["n"] == 1, counts  # second page served from the cache
+
+
+def _lid_message(sender: str) -> whatsapp.Message:
+    return whatsapp.Message(
+        timestamp=datetime(2026, 9, 4, 10, 0, 0),
+        sender=sender,
+        content="hi",
+        is_from_me=False,
+        chat_jid=FAMILY,
+        id="M1",
+    )
+
+
+def test_msg_to_dict_resolves_a_lid_sender_to_its_phone(paired_dbs):
+    row = whatsapp.msg_to_dict(_lid_message(BOB_LID))
+    assert row["sender_jid"] == BOB_LID  # unchanged: the value the bridge stored
+    assert row["sender_phone"] == BOB_PN
+    assert row["sender_lid"] == BOB_LID
+    assert row["sender_name"] == "Bob Silva"
+    assert row["sender_display"] == f"Bob Silva ({BOB_PN})"
+
+
+def test_msg_to_dict_never_reports_an_unresolved_lid_as_a_phone_or_a_name(paired_dbs):
+    row = whatsapp.msg_to_dict(_lid_message(UNKNOWN_LID))
+    assert row["sender_phone"] is None  # grouping by sender_phone gets no ghost contact
+    assert row["sender_lid"] == UNKNOWN_LID
+    assert row["sender_name"] is None  # nobody is called "1171581346817350"
+    assert row["sender_display"] == f"{UNKNOWN_LID}@lid"
+
+
+def test_msg_to_dict_page_shares_one_sender_lookup(paired_dbs, monkeypatch):
+    counts = {"n": 0}
+    real = whatsapp._connect_whatsmeow_db
+
+    def counted():
+        counts["n"] += 1
+        return real()
+
+    messages = [_lid_message(BOB_LID), _lid_message(UNKNOWN_LID)] * 25
+    monkeypatch.setattr(whatsapp, "_connect_whatsmeow_db", counted)
+    rows = whatsapp.msgs_to_dicts(messages, include_sender_name=False)
+    assert {row["sender_lid"] for row in rows} == {BOB_LID, UNKNOWN_LID}
+    assert counts["n"] == 1, counts
 
 
 def test_contact_names_handle_every_jid_form(paired_dbs, monkeypatch):

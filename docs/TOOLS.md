@@ -35,7 +35,7 @@ Rules worth knowing:
 
 - **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them.
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_unanswered` returns chat rows, so its names are the chat ones (`jid`, `name`, `last_message`, `last_inbound_time`, `age_hours`…) and it has no `max_content_chars` — use `include_last_message=false` to drop the text.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_unanswered` returns chat rows, so its names are the chat ones (`jid`, `name`, `last_message`, `last_inbound_time`, `age_hours`…) and it has no `max_content_chars` — use `include_last_message=false` to drop the text.
 
 **Compact read for bulk analysis** — "who wrote what in this chat last month", without spending the context on nulls:
 
@@ -172,6 +172,34 @@ exactly — a broadcast list is not a group, it is simply not direct. A chat tha
 is neither direct nor a group therefore reports `is_group: false` and is still
 dropped by `exclude_groups`.
 
+### Who sent it (`sender_phone` / `sender_lid`)
+
+The two identifier namespaces are reported in two fields, and neither ever
+holds the other:
+
+| Field | Meaning |
+| --- | --- |
+| `sender_jid` | The identifier as the bridge stored it — bare phone digits, or bare LID digits when that is all WhatsApp gave it |
+| `sender_phone` | A phone number, or `null`. A LID sender fills it only when whatsmeow's LID map knows the number behind that LID |
+| `sender_lid` | The `@lid` identifier when the message came from one, else `null` |
+| `sender_name` | `null` for a LID nobody can resolve or name. The digits are never returned as a name |
+
+Group by `sender_phone` to count people: before this split it also held bare
+LIDs, so an archive grew ghost "contacts" whose name was a 15-digit number
+(issue #281). Rows with `sender_phone: null` are the ones WhatsApp has only ever
+identified anonymously; `sender_lid` still groups them together, and
+`sender_display` shows `<id>@lid` so a LID never looks like a phone number. A
+LID is recognised when the JID says so, when whatsmeow's map knows it, or when
+it is too long to be a phone number — see the length caveat below.
+
+The same rule decides what [`get_contact`](#get_contact) does with a bare
+number: over 15 digits it cannot be E.164, so it is a LID; at 15 and below the
+two overlap, and only a hit in the LID map (or an explicit `…@lid`) makes it
+one. That is the limit of the split — a 15-digit LID the map has never seen
+looks exactly like a legal 15-digit number and is still reported as one, so an
+unfamiliar 14-16 digit "number" with no name is worth checking with
+`get_contact` before treating it as a phone number.
+
 ## Bridge
 
 ### `bridge_status`
@@ -280,6 +308,11 @@ Search contacts by name or phone number.
 
 - `query` (required): Name or phone number to search
 
+Each hit carries `jid`, `name`, `phone_number` and `lid` — the same two
+[identifier namespaces](#who-sent-it-sender_phone--sender_lid) `get_contact`
+reports, so a contact WhatsApp only knows anonymously has `phone_number: null`
+unless the LID map resolves it.
+
 **Natural Language Examples:**
 
 - "Find contacts named John"
@@ -294,6 +327,17 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 - `identifier` (required): Phone number, LID, or full JID
   - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
+
+Returns `jid`, `phone_number`, `lid`, `name`, `display_name`, `is_lid` and
+`resolved`. Which namespace a bare number belongs to is decided the way
+[sender identity](#who-sent-it-sender_phone--sender_lid) is: the LID map first,
+then the E.164 length limit. `phone_number` therefore never holds a LID — for
+one it is the mapped number, or `null` when the map has never seen that LID —
+and `lid` never holds a phone number. (An identifier that is neither, a name or
+another server's JID, is echoed back in `phone_number` as it always was.)
+`resolved` says whether a *name* was found;
+when it is `false` for a LID, `name` is `null` rather than the digits, because
+nobody named "184125298348272" exists.
 
 **Natural Language Examples:**
 
@@ -440,7 +484,7 @@ and flat memory.
 - `chat_jid` (optional): restrict to one conversation. A chat outside `WHATSAPP_ALLOWED_CHATS` returns `denied`
 - `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`. An existing file is overwritten
 - `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
-- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
+- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
 
 **Returns:**

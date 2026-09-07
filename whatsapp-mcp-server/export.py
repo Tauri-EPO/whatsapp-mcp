@@ -151,8 +151,9 @@ def export_messages(
                 while rows := cur.fetchmany(EXPORT_BATCH):
                     messages = [whatsapp._row_to_message(row) for row in rows]
                     notes = whatsapp.fetch_media_notes(messages)
+                    identities = whatsapp.fetch_sender_identities(messages)
                     for message in messages:
-                        record = whatsapp.msg_to_dict(message, notes=notes)
+                        record = whatsapp.msg_to_dict(message, notes=notes, identities=identities)
                         if fields is not None:
                             record = {k: v for k, v in record.items() if k in fields}
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")

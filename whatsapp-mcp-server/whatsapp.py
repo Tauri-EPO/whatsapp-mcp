@@ -10,7 +10,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -429,9 +429,10 @@ class Chat:
 
 @dataclass
 class Contact:
-    phone_number: str
+    phone_number: str | None
     name: str | None
     jid: str
+    lid: str | None = None
 
 
 @dataclass
@@ -439,6 +440,130 @@ class MessageContext:
     message: Message
     before: list[Message]
     after: list[Message]
+
+
+# Sender-name and alias resolution is called once per returned message and used
+# to open one to three SQLite connections each time (messages.db, then
+# whatsapp.db for the LID map and again for contacts). Names change rarely, so
+# results are cached per process for NAME_CACHE_TTL_S; tests reset the cache.
+NAME_CACHE_TTL_S = 300.0
+_name_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+_name_cache_lock = threading.Lock()
+
+
+def _cache_get(kind: str, key: str) -> tuple[bool, Any]:
+    with _name_cache_lock:
+        hit = _name_cache.get((kind, key))
+        if hit is None:
+            return False, None
+        value, expires = hit
+        if expires < time.monotonic():
+            del _name_cache[(kind, key)]
+            return False, None
+        return True, value
+
+
+def _cache_put(kind: str, key: str, value: Any) -> Any:
+    with _name_cache_lock:
+        _name_cache[(kind, key)] = (value, time.monotonic() + NAME_CACHE_TTL_S)
+    return value
+
+
+def _reset_name_cache() -> None:
+    """Drop cached sender names and aliases (tests, or after a contact sync)."""
+    with _name_cache_lock:
+        _name_cache.clear()
+
+
+class SenderIdentity(NamedTuple):
+    """Which namespace an identifier belongs to, once the LID map has spoken.
+
+    The bridge stores `messages.sender` as the bare user part: phone digits when
+    the LID resolved at write time, bare LID digits otherwise. `phone` is a real
+    phone number and never a LID; `lid` is the anonymous link-ID. A LID keeps
+    `phone` only when `whatsmeow_lid_map` knows the number behind it (#281).
+    """
+
+    phone: str | None
+    lid: str | None
+
+
+# E.164 allows 15 digits at most, so a longer bare identifier cannot be a phone
+# number and is a LID on sight. At 15 and below the two overlap, and only the
+# LID map tells them apart: a bare number it does not know stays a phone number,
+# which is the deliberate limit of this classification — an unmapped 15-digit
+# LID is indistinguishable from a (rare, but legal) 15-digit number, so it is
+# reported as one rather than guessed away.
+MAX_PHONE_DIGITS = 15
+
+
+def _sender_identities(values: Sequence[str]) -> dict[str, SenderIdentity]:
+    """Classify a batch of stored senders / identifiers in one LID-map query.
+
+    Results are cached per value for NAME_CACHE_TTL_S like sender names, so a
+    page with repeated senders — or the next page of the same chat — is free.
+    """
+    result: dict[str, SenderIdentity] = {}
+    pending: dict[str, str] = {}  # value -> bare digits still to look up
+    for value in values:
+        if value in result or value in pending:
+            continue
+        hit, cached = _cache_get("identity", value)
+        if hit:
+            result[value] = cached
+            continue
+        bare, _, server = value.partition("@")
+        if server == "lid" or (bare.isdigit() and server == ""):
+            # An @lid JID says which namespace it is even when the user part
+            # carries a device suffix ("1841...:3"); a bare number does not.
+            pending[value] = bare
+        else:
+            # A phone JID, or something we cannot classify at all (an empty
+            # sender, a group JID): it stays where it has always been.
+            result[value] = _cache_put("identity", value, SenderIdentity(bare or value, None))
+    if not pending:
+        return result
+
+    pn_by_lid: dict[str, str] = {}
+    known_lids: set[str] = set()
+    map_read = False
+    if os.path.isfile(WHATSMEOW_DB_PATH):
+        try:
+            conn = _connect_whatsmeow_db()
+            try:
+                for chunk in _in_chunks(sorted(set(pending.values()))):
+                    rows = conn.execute(
+                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})", chunk
+                    ).fetchall()
+                    for lid, pn in rows:
+                        known_lids.add(lid)
+                        if pn:
+                            pn_by_lid[lid] = pn
+                map_read = True
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            # A missing or locked contact store is not an error for the caller:
+            # the sender is classified by shape alone.
+            logger.debug("sender-identity batch failed: %s", e)
+
+    for value, bare in pending.items():
+        is_lid = value.endswith("@lid") or bare in known_lids or len(bare) > MAX_PHONE_DIGITS
+        identity = SenderIdentity(pn_by_lid.get(bare), bare) if is_lid else SenderIdentity(bare, None)
+        result[value] = identity
+        # Only an answer the map actually gave is cached. A classification made
+        # while whatsapp.db was missing, locked or broken is a guess, and
+        # caching it would report a LID as a phone number for the next five
+        # minutes — the bug this exists to prevent (#281). Guessing costs no
+        # I/O, so recomputing it on the next call is cheap.
+        if map_read:
+            _cache_put("identity", value, identity)
+    return result
+
+
+def sender_identity(value: str) -> SenderIdentity:
+    """Phone/LID namespace of one sender or identifier (see :class:`SenderIdentity`)."""
+    return _sender_identities([value])[value]
 
 
 def _is_pointer_row(message: Message) -> bool:
@@ -465,10 +590,20 @@ def fetch_media_notes(messages: Sequence[Message]) -> dict[str, dict[str, str]]:
     return fetch_notes(hashes) if hashes else {}
 
 
+def fetch_sender_identities(messages: Sequence[Message]) -> dict[str, SenderIdentity]:
+    """Sender namespaces for a batch of messages: {stored sender: SenderIdentity}.
+
+    One LID-map query for a whole page instead of one per row; pass the result
+    to msg_to_dict alongside the notes.
+    """
+    return _sender_identities([message.sender for message in messages if message.sender])
+
+
 def msgs_to_dicts(messages: Sequence[Message], include_sender_name: bool = True) -> list[dict[str, Any]]:
     """Convert a page of messages, looking their media notes up in one query."""
     notes = fetch_media_notes(messages)
-    return [msg_to_dict(message, include_sender_name, notes) for message in messages]
+    identities = fetch_sender_identities(messages)
+    return [msg_to_dict(message, include_sender_name, notes, identities) for message in messages]
 
 
 def media_notes_for_message(chat_jid: str, message_id: str) -> dict[str, Any]:
@@ -497,15 +632,22 @@ def msg_to_dict(
     message: Message,
     include_sender_name: bool = True,
     notes: dict[str, dict[str, str]] | None = None,
+    identities: dict[str, SenderIdentity] | None = None,
 ) -> dict[str, Any]:
     """Convert a Message dataclass to a dictionary for JSON serialization.
 
     Media rows carry the agent's notes for their sha256 (`{}` when the file has
-    never been annotated). Pass `notes` from fetch_media_notes to convert a whole
-    page with a single notes query; without it a media row costs one lookup.
+    never been annotated). Pass `notes` from fetch_media_notes and `identities`
+    from fetch_sender_identities to convert a whole page with a single query
+    each; without them a row costs one lookup.
     """
-    # Extract phone number from JID (e.g., "1234567890@s.whatsapp.net" -> "1234567890")
-    sender_phone = message.sender.split("@")[0] if "@" in message.sender else message.sender
+    # The two identifier namespaces stay apart: `sender_phone` is a phone number
+    # or nothing, `sender_lid` the anonymous link-ID (#281). `sender_jid` keeps
+    # the value the bridge stored, whichever form that was.
+    bare = message.sender.split("@", 1)[0]
+    identity = (identities or {}).get(message.sender) or sender_identity(message.sender)
+    sender_phone = identity.phone
+    sender_lid = identity.lid
 
     sender_name = None
     sender_display = None
@@ -514,14 +656,18 @@ def msg_to_dict(
             sender_name = "Me"
             sender_display = "Me"
         else:
+            # What to show when nobody has a name for this sender. An
+            # unresolved LID has no phone number to fall back on, and echoing
+            # its digits as a name would invent a contact called "1171581...".
+            label = sender_phone if sender_phone is not None else f"{sender_lid}@lid"
             resolved_name = get_sender_name(message.sender)
             # Check if we got an actual name (not just the JID back)
-            if resolved_name and resolved_name != message.sender and resolved_name != sender_phone:
+            if resolved_name and resolved_name not in (message.sender, bare, sender_phone):
                 sender_name = resolved_name
-                sender_display = f"{resolved_name} ({sender_phone})"
+                sender_display = f"{resolved_name} ({label})"
             else:
                 sender_name = sender_phone
-                sender_display = sender_phone
+                sender_display = label
 
     is_media = bool(message.media_type) and not _is_pointer_row(message)
     sha256 = message.sha256 if is_media else None
@@ -531,6 +677,7 @@ def msg_to_dict(
         "timestamp": message.timestamp.isoformat(),
         "sender_jid": message.sender,
         "sender_phone": sender_phone,
+        "sender_lid": sender_lid,
         "sender_name": sender_name,
         "sender_display": sender_display,  # "Name (phone)" or just phone if no name
         "content": message.content,
@@ -572,8 +719,18 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 
 
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
-    """Convert a Contact dataclass to a dictionary for JSON serialization."""
-    return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+    """Convert a Contact dataclass to a dictionary for JSON serialization.
+
+    `phone_number` and `lid` are the two identifier namespaces get_contact
+    reports, never each other (#281): a contact WhatsApp only knows
+    anonymously has `phone_number: null` unless the LID map resolves it.
+    """
+    return {
+        "phone_number": contact.phone_number,
+        "lid": contact.lid,
+        "name": contact.name,
+        "jid": contact.jid,
+    }
 
 
 # --- response shaping (compact reads) -----------------------------------------
@@ -724,39 +881,6 @@ def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = Fals
     """
 
 
-# Sender-name and alias resolution is called once per returned message and used
-# to open one to three SQLite connections each time (messages.db, then
-# whatsapp.db for the LID map and again for contacts). Names change rarely, so
-# results are cached per process for NAME_CACHE_TTL_S; tests reset the cache.
-NAME_CACHE_TTL_S = 300.0
-_name_cache: dict[tuple[str, str], tuple[Any, float]] = {}
-_name_cache_lock = threading.Lock()
-
-
-def _cache_get(kind: str, key: str) -> tuple[bool, Any]:
-    with _name_cache_lock:
-        hit = _name_cache.get((kind, key))
-        if hit is None:
-            return False, None
-        value, expires = hit
-        if expires < time.monotonic():
-            del _name_cache[(kind, key)]
-            return False, None
-        return True, value
-
-
-def _cache_put(kind: str, key: str, value: Any) -> Any:
-    with _name_cache_lock:
-        _name_cache[(kind, key)] = (value, time.monotonic() + NAME_CACHE_TTL_S)
-    return value
-
-
-def _reset_name_cache() -> None:
-    """Drop cached sender names and aliases (tests, or after a contact sync)."""
-    with _name_cache_lock:
-        _name_cache.clear()
-
-
 def _sender_aliases(value: str) -> list[str]:
     hit, cached = _cache_get("aliases", value)
     if hit:
@@ -799,32 +923,6 @@ def _sender_aliases_uncached(value: str) -> list[str]:
         # we still match whichever form the bridge happened to store.
         aliases = [bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
     return aliases
-
-
-def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
-    """Resolve a WhatsApp LID (linked device identifier) to a phone number.
-
-    WhatsApp's newer protocol uses opaque LIDs (e.g. '35047067385985') as sender
-    identifiers instead of phone numbers. The whatsmeow_lid_map table maps these
-    back to real phone numbers.
-
-    Returns the phone number if found, None otherwise.
-    """
-    if not os.path.exists(WHATSMEOW_DB_PATH):
-        return None
-    # Extract the numeric part from JID-style strings (e.g. '35047067385985@lid')
-    lid = lid_or_jid.split("@")[0] if "@" in lid_or_jid else lid_or_jid
-    try:
-        conn = _connect_whatsmeow_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (lid,))
-        row = cursor.fetchone()
-        return row[0] if row else None
-    except sqlite3.Error:
-        return None
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 # SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; page sizes stay far
@@ -1998,7 +2096,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     (whatsapp.db) to find contacts. Results are deduplicated by JID.
     """
     seen_jids: set[str] = set()
-    result: list[dict[str, Any]] = []
+    found: list[tuple[str, str | None]] = []
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
     jid_pattern = "%" + query + "%"
@@ -2022,8 +2120,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         for jid, name in cursor.fetchall():
             if jid not in seen_jids:
                 seen_jids.add(jid)
-                contact = Contact(phone_number=jid.split("@")[0], name=name, jid=jid)
-                result.append(contact_to_dict(contact))
+                found.append((jid, name))
     except sqlite3.Error as e:
         logger.error("Database error (messages.db): %s", e)
     finally:
@@ -2053,15 +2150,20 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 if their_jid not in seen_jids:
                     seen_jids.add(their_jid)
                     name = full_name or push_name or first_name or business_name or ""
-                    contact = Contact(phone_number=their_jid.split("@")[0], name=name, jid=their_jid)
-                    result.append(contact_to_dict(contact))
+                    found.append((their_jid, name))
         except sqlite3.Error as e:
             logger.error("Database error (whatsapp.db): %s", e)
         finally:
             if "conn2" in locals():
                 conn2.close()
 
-    return result
+    # One LID-map pass for the whole result, so a contact WhatsApp only knows
+    # anonymously is reported as a LID instead of as a phone number (#281).
+    identities = _sender_identities([jid for jid, _ in found])
+    return [
+        contact_to_dict(Contact(phone_number=identities[jid].phone, lid=identities[jid].lid, name=name, jid=jid))
+        for jid, name in found
+    ]
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
@@ -3058,9 +3160,13 @@ def list_unread(
                 }
             )
         # One notes query for the whole call, not one per chat or per message.
-        notes = fetch_media_notes([message for chat in chats for message in chat["messages"]])
+        every_message = [message for chat in chats for message in chat["messages"]]
+        notes = fetch_media_notes(every_message)
+        identities = fetch_sender_identities(every_message)
         for chat in chats:
-            chat["messages"] = [msg_to_dict(message, notes=notes) for message in chat["messages"]]
+            chat["messages"] = [
+                msg_to_dict(message, notes=notes, identities=identities) for message in chat["messages"]
+            ]
         return {"chats": chats, "total_unread": total, "chats_with_unread": len(chats)}
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
