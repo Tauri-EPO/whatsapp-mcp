@@ -16,6 +16,7 @@ from http_auth import (
 )
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_inventory import list_media_page, media_stats
+from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY
 from media_notes import annotate_media as notes_annotate_media
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
@@ -323,6 +324,7 @@ def list_messages(
     has_media: bool | None = None,
     media_type: str | None = None,
     exclude_groups: bool = False,
+    include_transcripts: bool = False,
 ) -> dict[str, Any]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -340,7 +342,9 @@ def list_messages(
     that exact file ({} when nothing was). Notes are the archive's memory of media —
     an image, PDF or voice note you open with an empty notes field is expected to be
     annotated once you have interpreted it, with annotate_media(sha256, "summary", ...),
-    so the next read of the same file is free instead of a re-interpretation.
+    so the next read of the same file is free instead of a re-interpretation. A voice
+    note transcribed earlier carries its text in notes.transcript;
+    include_transcripts=True lifts it onto the row as `transcript`.
 
     Args:
         after: ISO-8601 date string (e.g., "2026-01-01" or "2026-01-01T09:00:00")
@@ -379,6 +383,12 @@ def list_messages(
         media_type: Restrict to one kind of file: "image", "video", "audio",
                  "document" or "sticker". Implies has_media=True.
         exclude_groups: True drops group chats (@g.us) and keeps direct conversations
+        include_transcripts: True copies the stored transcript of each voice note onto
+                 the row as `transcript`. Read-only and free (it comes from the same
+                 batched notes lookup): it never transcribes, so rows whose audio was
+                 never passed to transcribe_audio simply have no transcript. Use
+                 media_type="audio", include_transcripts=True to read a conversation
+                 held by voice.
     """
     # Cap limit at 500 to prevent excessive queries
     limit = max(0, min(limit, MAX_LIST_LIMIT))
@@ -403,7 +413,14 @@ def list_messages(
         media_type=media_type,
         exclude_groups=exclude_groups,
     )
-    return messages.to_dict()
+    result = messages.to_dict()
+    if include_transcripts:
+        # The notes of the page are already loaded; this only lifts one key out.
+        for row in result["items"]:
+            transcript = (row.get("notes") or {}).get(TRANSCRIPT_KEY)
+            if transcript:
+                row["transcript"] = transcript
+    return result
 
 
 @mcp.tool()
@@ -1141,6 +1158,33 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     raise ToolError("internal", "Bridge reported success without a file path")
 
 
+def _store_transcript(sha256: str, result: dict[str, Any]) -> bool:
+    """Write a fresh transcript to notes.db; a refused write never fails the call."""
+    keys = ((TRANSCRIPT_LANG_KEY, result.get("language")), (TRANSCRIPT_BACKEND_KEY, result.get("backend")))
+    try:
+        notes_annotate_media(sha256, TRANSCRIPT_KEY, result["text"])
+        for key, value in keys:
+            if value:
+                notes_annotate_media(sha256, key, str(value))
+    except ToolError as exc:
+        logging.getLogger("whatsapp_mcp").warning("transcribe_audio: could not cache transcript: %s", exc)
+        return False
+    return True
+
+
+def _stored_transcript_notes(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """The message's hash and notes, or an empty answer when the archive cannot be read.
+
+    The cache is an optimisation: a database that will not open must not stop a
+    transcription that would otherwise work.
+    """
+    try:
+        return whatsapp_media_notes_for_message(chat_jid, message_id)
+    except ToolError as exc:
+        logging.getLogger("whatsapp_mcp").warning("transcribe_audio: no transcript cache for this message: %s", exc)
+        return {"sha256": None, "notes": {}}
+
+
 @mcp.tool()
 @tool_errors
 def transcribe_audio(
@@ -1148,6 +1192,7 @@ def transcribe_audio(
     message_id: str = "",
     file_path: str = "",
     language: str = "",
+    force: bool = False,
 ) -> dict[str, Any]:
     """Transcribe a WhatsApp voice note (or any audio file) to text with local whisper.cpp.
 
@@ -1156,20 +1201,42 @@ def transcribe_audio(
     configured through WHISPER_URL (whisper.cpp server) or WHISPER_BIN + WHISPER_MODEL;
     nothing is sent to a cloud API.
 
-    Transcribing is the interpretation step for a voice note: afterwards record it
-    against the file with annotate_media(sha256, "transcript", text) — and a
-    "summary" when the note is long — using the sha256 from the list_messages row.
-    A voice note whose notes field is empty has never been transcribed.
+    **The result is cached in notes.db**, keyed by the file's sha256, under the keys
+    transcript / transcript_lang / transcript_backend. Asking again for the same
+    voice note returns the stored text (`cached: true`) without downloading the file
+    or running whisper; pass force=True to transcribe again and overwrite. The cache
+    survives purge_media, re-downloads and the same audio forwarded into other chats,
+    and list_messages(include_transcripts=True) reads it back in bulk.
 
     Args:
         chat_jid: JID of the chat containing the message
         message_id: ID of the audio/voice message to transcribe
-        file_path: Alternative to message_id/chat_jid: path of an audio file on disk
+        file_path: Alternative to message_id/chat_jid: path of an audio file on disk.
+                   A file transcribed this way has no message row, so it is not cached.
         language: ISO-639-1 language code (default WHISPER_LANGUAGE, "pt"); "auto" to detect
+        force: Re-run whisper even when a transcript is stored, and replace it
 
     Returns:
-        A dictionary with success, text, language, backend and file_path (or an error message)
+        {"success", "text", "language", "backend", "file_path", "sha256", "cached" (answered
+        from notes.db), "stored" (this run wrote the transcript)}. When the note is worth
+        summarising, add your own annotate_media(sha256, "summary", ...) on top.
     """
+    sha256: str | None = None
+    if message_id and chat_jid:
+        stored_notes = _stored_transcript_notes(chat_jid, message_id)
+        sha256 = stored_notes["sha256"]
+        cached_text = stored_notes["notes"].get(TRANSCRIPT_KEY)
+        if cached_text and not force and not file_path:
+            return {
+                "success": True,
+                "cached": True,
+                "stored": False,
+                "sha256": sha256,
+                "file_path": None,
+                "text": cached_text,
+                "language": stored_notes["notes"].get(TRANSCRIPT_LANG_KEY),
+                "backend": stored_notes["notes"].get(TRANSCRIPT_BACKEND_KEY),
+            }
     if not file_path:
         if not message_id or not chat_jid:
             raise ToolError("invalid_argument", "Provide chat_jid and message_id, or file_path")
@@ -1183,7 +1250,8 @@ def transcribe_audio(
         raise ToolError("not_found", str(exc), file_path=file_path) from exc
     except TranscriptionError as exc:
         raise ToolError("internal", str(exc), file_path=file_path) from exc
-    return {"success": True, "file_path": file_path, **result}
+    stored = bool(sha256 and (result.get("text") or "").strip()) and _store_transcript(sha256 or "", result)
+    return {"success": True, "cached": False, "stored": stored, "sha256": sha256, "file_path": file_path, **result}
 
 
 def shutdown_handler(signum, frame):
