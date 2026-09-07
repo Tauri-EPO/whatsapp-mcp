@@ -388,6 +388,11 @@ class Chat:
     # (history never synced, or every row was pruned), which is why the three
     # last_* fields are null — not "the last message could not be matched".
     has_messages: bool = False
+    # Where `name` comes from: "chat" = stored in messages.db (the WhatsApp
+    # chat title or group subject), "contacts" = derived from the phone book
+    # (whatsmeow_contacts) because the stored name was missing or just the
+    # number, "jid" = nothing better than the number/JID exists.
+    name_source: str = "chat"
 
     @property
     def is_group(self) -> bool:
@@ -550,6 +555,7 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
     return {
         "jid": chat.jid,
         "name": chat.name,
+        "name_source": chat.name_source,
         "is_group": chat.is_group,
         "last_message_time": chat.last_message_time.isoformat() if chat.last_message_time else None,
         "last_message": chat.last_message,
@@ -755,6 +761,132 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
     finally:
         if "conn" in locals():
             conn.close()
+
+
+# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; page sizes stay far
+# below that, but chunking keeps a large get_contact_chats page safe.
+_SQL_IN_CHUNK = 400
+
+
+def _is_placeholder_name(name: str | None) -> bool:
+    """True when a name identifies nobody: empty, or just the phone number."""
+    if not name:
+        return True
+    return name.strip().lstrip("+").replace(" ", "").replace("-", "").isdigit()
+
+
+def _contact_names(jids: list[str]) -> dict[str, str]:
+    """Phone-book names for a batch of user JIDs — {jid: name} for known ones.
+
+    One pass for a whole page of chats instead of a lookup per chat: at most
+    two queries against whatsapp.db (the LID map, then whatsmeow_contacts),
+    with the same precedence senders use (full_name → push_name → first_name →
+    business_name). Results, including "this JID has no name", are cached for
+    NAME_CACHE_TTL_S so paging back and forth costs nothing.
+    """
+    wanted = {jid for jid in jids if jid and not jid.endswith("@g.us")}
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for jid in sorted(wanted):
+        hit, cached = _cache_get("contact_name", jid)
+        if not hit:
+            missing.append(jid)
+        elif cached:
+            resolved[jid] = cached
+    if not missing or not os.path.isfile(WHATSMEOW_DB_PATH):
+        return resolved
+
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            resolved.update(_contact_names_uncached(conn, missing))
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        # A missing/locked contact store is not an error for the caller: the
+        # chat keeps whatever name messages.db had.
+        logger.debug("contact-name batch failed: %s", e)
+    return resolved
+
+
+def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[str, str]:
+    """The two-query core of _contact_names; also fills the name cache."""
+    # whatsmeow_contacts is keyed by the phone JID, so LIDs (and bare numbers,
+    # which may be either form) go through whatsmeow_lid_map first.
+    lookup: dict[str, str] = {}
+    lid_jids = []
+    for jid in jids:
+        prefix, _, suffix = jid.partition("@")
+        if suffix in ("lid", ""):
+            lid_jids.append(jid)
+        else:
+            lookup[jid] = jid
+
+    if lid_jids:
+        pn_by_lid: dict[str, str] = {}
+        for chunk in _in_chunks([jid.partition("@")[0] for jid in lid_jids]):
+            rows = conn.execute(
+                f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})", chunk
+            ).fetchall()
+            pn_by_lid.update({lid: pn for lid, pn in rows if pn})
+        for jid in lid_jids:
+            prefix, _, suffix = jid.partition("@")
+            pn = pn_by_lid.get(prefix)
+            if pn:
+                lookup[jid] = f"{pn}@s.whatsapp.net"
+            elif suffix == "":
+                # Not in the map: a bare number may still be a phone number.
+                lookup[jid] = f"{prefix}@s.whatsapp.net"
+
+    names_by_contact: dict[str, str] = {}
+    for chunk in _in_chunks(sorted(set(lookup.values()))):
+        rows = conn.execute(
+            "SELECT their_jid, full_name, push_name, first_name, business_name "
+            f"FROM whatsmeow_contacts WHERE their_jid IN ({_placeholders(chunk)})",
+            chunk,
+        ).fetchall()
+        for their_jid, full_name, push_name, first_name, business_name in rows:
+            name = full_name or push_name or first_name or business_name
+            # A push name that is just the number is no better than the JID.
+            if name and not _is_placeholder_name(name) and their_jid not in names_by_contact:
+                names_by_contact[their_jid] = name
+
+    found: dict[str, str] = {}
+    for jid in jids:
+        name = names_by_contact.get(lookup.get(jid, ""), "")
+        _cache_put("contact_name", jid, name)
+        if name:
+            found[jid] = name
+    return found
+
+
+def _placeholders(values: list[str]) -> str:
+    return ",".join("?" for _ in values)
+
+
+def _in_chunks(values: list[str]) -> list[list[str]]:
+    return [values[i : i + _SQL_IN_CHUNK] for i in range(0, len(values), _SQL_IN_CHUNK)]
+
+
+def _apply_name_fallback(chats: list[Chat]) -> None:
+    """Fill name/name_source from the phone book for chats stored without a name.
+
+    `chats.name` is what WhatsApp pushed for the conversation; for a large share
+    of direct chats that is empty or the bare number even when the contact is in
+    the phone book (issue #230). Resolution is batched over the whole page.
+    """
+    pending = [chat for chat in chats if _is_placeholder_name(chat.name) and not chat.is_group]
+    names = _contact_names([chat.jid for chat in pending]) if pending else {}
+    for chat in chats:
+        if not _is_placeholder_name(chat.name):
+            chat.name_source = "chat"
+            continue
+        resolved = names.get(chat.jid)
+        if resolved:
+            chat.name = resolved
+            chat.name_source = "contacts"
+        else:
+            chat.name_source = "jid"
 
 
 def get_sender_name(sender_jid: str) -> str:
@@ -1403,9 +1535,8 @@ def list_chats_page(
                 state["n"] = last[1]
             next_cursor = encode_cursor(state)
 
-        result = []
-        for chat_data in chats:
-            chat = Chat(
+        page_chats = [
+            Chat(
                 jid=chat_data[0],
                 name=chat_data[1],
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
@@ -1415,9 +1546,11 @@ def list_chats_page(
                 last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
                 has_messages=bool(chat_data[7]),
             )
-            result.append(chat_to_dict(chat))
+            for chat_data in chats
+        ]
+        _apply_name_fallback(page_chats)
 
-        return PageResult(result, next_cursor, has_more)
+        return PageResult([chat_to_dict(chat) for chat in page_chats], next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -1563,9 +1696,8 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
         if has_more and chats:
             next_cursor = encode_cursor({"k": "contact_chats", "t": chats[-1][2], "j": chats[-1][0]})
 
-        result = []
-        for chat_data in chats:
-            chat = Chat(
+        page_chats = [
+            Chat(
                 jid=chat_data[0],
                 name=chat_data[1],
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
@@ -1575,9 +1707,11 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                 last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
                 has_messages=bool(chat_data[7]),
             )
-            result.append(chat_to_dict(chat))
+            for chat_data in chats
+        ]
+        _apply_name_fallback(page_chats)
 
-        return PageResult(result, next_cursor, has_more)
+        return PageResult([chat_to_dict(chat) for chat in page_chats], next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -1679,6 +1813,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
             has_messages=bool(chat_data[7]),
         )
+        _apply_name_fallback([chat])
         return chat_to_dict(chat)
 
     except sqlite3.Error as e:
@@ -1744,6 +1879,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
             has_messages=bool(chat_data[7]),
         )
+        _apply_name_fallback([chat])
         return chat_to_dict(chat)
 
     except sqlite3.Error as e:

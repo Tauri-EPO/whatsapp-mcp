@@ -472,9 +472,13 @@ def list_chats(
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
 
     Returns:
-        Chat dictionaries with jid, name, is_group, last_message_time, last_message,
-        last_sender, last_is_from_me, last_read_time, has_messages and unread. The
-        last_* fields describe the chat's newest stored message, which can be older
+        Chat dictionaries with jid, name, name_source, is_group, last_message_time,
+        last_message, last_sender, last_is_from_me, last_read_time, has_messages and
+        unread. `name` falls back to your contacts when WhatsApp stored no name for
+        the chat (or only the number); `name_source` says which: "chat" (stored with
+        the conversation), "contacts" (from your phone book) or "jid" (nobody knows a
+        name — identify the chat by its JID).
+        The last_* fields describe the chat's newest stored message, which can be older
         than last_message_time (protocol and unsupported events move that marker
         without storing a message). `has_messages` is false only when the chat has no
         stored messages at all: last_is_from_me is then null and `unread` is false
