@@ -29,9 +29,14 @@ def test_downloads_via_bridge_then_transcribes(monkeypatch):
 
     monkeypatch.setattr(main, "transcribe_file", fake_transcribe)
 
+    # No archive here, so the hash is unknown and nothing is cached (see
+    # test_transcript_cache.py for the cached path).
     out = main.transcribe_audio(chat_jid="c@s.whatsapp.net", message_id="m1", language="pt")
     assert out == {
         "success": True,
+        "cached": False,
+        "stored": False,
+        "sha256": None,
         "file_path": "/store/c/audio.ogg",
         "text": "olá",
         "language": "pt",

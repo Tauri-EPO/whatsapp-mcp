@@ -153,8 +153,9 @@ Get messages with filters, date ranges, and sorting.
 - `has_media` (optional, default unset): `true` for messages carrying a file, `false` for text-only. Reactions and poll votes are pointer rows and never count as media
 - `media_type` (optional): one of `image`, `video`, `audio`, `document`, `sticker`. Implies `has_media=true`; combining it with `has_media=false` is refused
 - `exclude_groups` (optional, default `false`): `true` drops group chats (`@g.us`) and keeps direct conversations
+- `include_transcripts` (optional, default `false`): `true` copies the stored transcript of each voice note onto its row as `transcript`. It comes from the same batched `notes.db` lookup the rows already do, costs no extra query and **never** transcribes: audio never passed to `transcribe_audio` simply has none. `media_type="audio", include_transcripts=true` reads a conversation held by voice
 
-All four are plain WHERE predicates, so they combine with each other and with
+The four filters above are plain WHERE predicates, so they combine with each other and with
 every filter above: `from_me=false, media_type="document", exclude_groups=true`
 is "documents people sent me in a direct chat".
 
@@ -374,17 +375,36 @@ machine; there is no cloud fallback.
 - `message_id` + `chat_jid`: the audio message (downloaded via the bridge first), **or**
 - `file_path`: absolute path of an audio file already on disk
 - `language` (optional): ISO-639-1 code, default `WHISPER_LANGUAGE` (`pt`); `auto` to detect
+- `force` (optional, default `false`): transcribe again and replace a stored transcript
 
 Requires a whisper backend, configured with either `WHISPER_URL` (a running
 whisper.cpp `whisper-server`, see the `whisper` profile in
 [`docs/DOCKER.md`](DOCKER.md)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
 `whisper-cli` binary and a `ggml-*.bin` model). Audio is normalised to 16 kHz WAV
-with ffmpeg before transcription. Returns `text`, `language`, `backend` and the
-local `file_path`.
+with ffmpeg before transcription. Returns `text`, `language`, `backend`,
+`file_path`, `sha256`, `cached` (the answer came from the cache) and `stored`
+(this run wrote the transcript).
 
-Transcribing is the interpretation step for a voice note: store the result with
-`annotate_media(sha256, "transcript", text)` (plus a `summary` for long notes)
-so the same audio is never transcribed twice — see
+**Transcripts are cached in `notes.db`.** A transcription of a message is stored
+against the file's sha256 under three keys:
+
+| Key | Value |
+|---|---|
+| `transcript` | the text whisper produced |
+| `transcript_lang` | the language it reports (or the one you asked for) |
+| `transcript_backend` | `server` or `cli` |
+
+Asking again for the same voice note returns the stored text with
+`cached: true`, **without downloading the file or running whisper**; `force=true`
+re-runs and overwrites. Because the key is the content hash, the cache also
+covers the same audio forwarded into other chats, and it survives `purge_media`
+and re-downloads — only the bytes are transient, the transcript is not. A file
+transcribed by bare `file_path` has no message row, so its hash is unknown and
+nothing is cached (`sha256: null`, `stored: false`).
+
+Read many transcripts at once with `list_messages(media_type="audio",
+include_transcripts=true)`: one batched lookup, no transcription. A long voice
+note is still worth an `annotate_media(sha256, "summary", ...)` on top — see
 [annotate-after-reading](#annotate-after-reading).
 
 ### `download_media`
@@ -497,8 +517,9 @@ what it already knows before spending anything on the file again:
 
 | Tool | Where the notes appear |
 |---|---|
-| `list_messages`, `get_message_context`, `list_unread` | `notes` on every media row (one batched query per page, never one per row) |
+| `list_messages`, `get_message_context`, `list_unread` | `notes` on every media row (one batched query per page, never one per row); `include_transcripts=true` also lifts `transcript` onto the row |
 | `download_media` | `sha256` + `notes` in the response |
+| `transcribe_audio` | writes `transcript` itself and answers from it on the next call |
 | `list_media` | `notes` and `has_notes` per item, `has_notes` also filters |
 | `get_media_notes`, `search_media_notes` | the notes themselves |
 
@@ -515,7 +536,9 @@ Conventional keys (use them before inventing new ones):
 
 - `summary` — one or two sentences on what the file contains; always write this one
 - `tags` — labels, comma-separated or a JSON list (`invoice`, `contract`, `receipt`)
-- `transcript` — the spoken text of a voice note (see `transcribe_audio`)
+- `transcript` — the spoken text of a voice note. `transcribe_audio` writes this one
+  itself, together with `transcript_lang` and `transcript_backend`; you only write it
+  by hand for audio you transcribed some other way
 - `keep` — `yes` for files a cleanup pass must not purge, `no` for disposable ones
 
 `list_media(has_notes=false)` is the backlog view (what has never been

@@ -27,6 +27,11 @@ from errors import ToolError
 from whatsapp import CHAT_POLICY
 
 NOTES_DB_NAME = "notes.db"
+# Keys the tools write themselves; everything else (summary, tags, keep, ...) is
+# the agent's own free-form vocabulary. See docs/TOOLS.md.
+TRANSCRIPT_KEY = "transcript"
+TRANSCRIPT_LANG_KEY = "transcript_lang"
+TRANSCRIPT_BACKEND_KEY = "transcript_backend"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
