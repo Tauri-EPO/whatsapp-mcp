@@ -464,9 +464,30 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
   "last_sender": "1234567890",         // null when include_last_message=false
   "last_is_from_me": false,
   "last_read_time": "2024-01-15T09:00:00+00:00", // how far the chat is read
+  "has_messages": true,                // false = no stored message for this chat
   "unread": true                       // last message is inbound and unread
 }
 ```
+
+### Last message (`last_message` / `last_is_from_me` / `has_messages`)
+
+The `last_*` fields describe the chat's **newest stored message**, resolved by
+ordering that chat's rows (`timestamp DESC, id DESC`). They are not matched
+against `last_message_time`: protocol and unsupported events advance that
+marker without storing a message, and history sync writes second-resolution
+timestamps, so `last_message_time` can be newer than — or simply not equal to —
+the newest stored row's timestamp.
+
+`has_messages` says whether a stored row backs those fields:
+
+- `has_messages: true` — `last_message`, `last_sender` and `last_is_from_me`
+  come from a real message. `last_message` and `last_sender` are still null
+  when you passed `include_last_message=false`; `last_is_from_me` is always
+  filled, because `unread` derives from it.
+- `has_messages: false` — the chat has no rows in `messages` at all (history
+  was never synced for it, or its messages were pruned). `last_is_from_me` is
+  `null` and `unread` is `false` because there is no direction to judge, not
+  because nothing is waiting. Treat such a chat as "unknown", not as "read".
 
 ### Read state (`last_read_time` / `unread`)
 

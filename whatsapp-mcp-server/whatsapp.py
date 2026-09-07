@@ -382,6 +382,11 @@ class Chat:
     # chat, from read receipts and history-sync backfill. NULL when the
     # bridge has never seen a read for the chat, or predates the column.
     last_read_time: datetime | None = None
+    # Whether a stored message row backs last_message / last_sender /
+    # last_is_from_me. False means the chat has no rows in `messages` at all
+    # (history never synced, or every row was pruned), which is why the three
+    # last_* fields are null — not "the last message could not be matched".
+    has_messages: bool = False
 
     @property
     def is_group(self) -> bool:
@@ -397,9 +402,11 @@ class Chat:
         or a chat WhatsApp never reported a read for) it degrades to the old
         heuristic: unread if the last message is inbound.
 
-        A missing last-message row (`last_is_from_me is None`) cannot establish
-        direction — protocol/unsupported events can advance last_message_time
-        without storing a message — so those chats are not reported as unread.
+        A chat with no stored messages (`has_messages` false, so
+        `last_is_from_me is None`) has no direction to go on — protocol and
+        unsupported events advance last_message_time without storing a row —
+        so it is not reported as unread. Read `has_messages` to tell that
+        "nothing is waiting" from "we cannot tell".
         """
         if self.last_message_time is None or self.last_is_from_me is None:
             return False
@@ -492,6 +499,7 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
         "last_sender": chat.last_sender,
         "last_is_from_me": chat.last_is_from_me,
         "last_read_time": chat.last_read_time.isoformat() if chat.last_read_time else None,
+        "has_messages": chat.has_messages,
         "unread": chat.unread,
     }
 
@@ -517,19 +525,26 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
 
 
 def _last_message_join(chat_alias: str, msg_alias: str) -> str:
-    """Deterministic single-row join to the chat's latest message.
+    """Deterministic single-row join to the chat's newest stored message.
 
-    Multiple messages can share last_message_time (history sync is second-
-    resolution). Joining solely on timestamp would duplicate chat rows and
-    make last_is_from_me / unread non-deterministic; pick one id as tie-break.
+    The row is picked by ordering the chat's messages, never by matching
+    `chats.last_message_time`: that marker is advanced by protocol and
+    unsupported events that store no message row, and history sync writes
+    second-resolution timestamps, so an equality join left the last_* fields
+    NULL for a large share of chats (issue #218).
+
+    Multiple messages can share a timestamp, so `id DESC` is the tie-break —
+    joining on the timestamp alone would duplicate chat rows and make
+    last_is_from_me / unread non-deterministic. The correlated subquery is
+    driven by idx_messages_chat_timestamp and only runs for the rows the outer
+    LIMIT actually returns.
     """
     return f"""
             LEFT JOIN messages {msg_alias} ON {chat_alias}.jid = {msg_alias}.chat_jid
                 AND {msg_alias}.id = (
                     SELECT m.id FROM messages m
                     WHERE m.chat_jid = {chat_alias}.jid
-                      AND m.timestamp = {chat_alias}.last_message_time
-                    ORDER BY m.id DESC
+                    ORDER BY m.timestamp DESC, m.id DESC
                     LIMIT 1
                 )
     """
@@ -1255,7 +1270,8 @@ def list_chats_page(
                 chats.last_message_time,
                 {last_message_select},
                 messages.is_from_me as last_is_from_me,
-                {_last_read_time_select(cur, "chats")}
+                {_last_read_time_select(cur, "chats")},
+                messages.id IS NOT NULL as has_messages
             FROM chats
             {_last_message_join("chats", "messages")}
         """
@@ -1340,6 +1356,7 @@ def list_chats_page(
                 last_sender=chat_data[4],
                 last_is_from_me=chat_data[5],
                 last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+                has_messages=bool(chat_data[7]),
             )
             result.append(chat_to_dict(chat))
 
@@ -1466,7 +1483,8 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                 last_msg.content as last_message,
                 last_msg.sender as last_sender,
                 last_msg.is_from_me as last_is_from_me,
-                {_last_read_time_select(cur, "c")}
+                {_last_read_time_select(cur, "c")},
+                last_msg.id IS NOT NULL as has_messages
             FROM chats c
             {_last_message_join("c", "last_msg")}
             WHERE (EXISTS (
@@ -1498,6 +1516,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                 last_sender=chat_data[4],
                 last_is_from_me=chat_data[5],
                 last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+                has_messages=bool(chat_data[7]),
             )
             result.append(chat_to_dict(chat))
 
@@ -1580,7 +1599,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
                 c.last_message_time,
                 {last_message_select},
                 m.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
+                {_last_read_time_select(cursor, "c")},
+                m.id IS NOT NULL as has_messages
             FROM chats c
             {_last_message_join("c", "m")}
             WHERE c.jid = ?
@@ -1600,6 +1620,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
             last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+            has_messages=bool(chat_data[7]),
         )
         return chat_to_dict(chat)
 
@@ -1638,7 +1659,8 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 m.content as last_message,
                 m.sender as last_sender,
                 m.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
+                {_last_read_time_select(cursor, "c")},
+                m.id IS NOT NULL as has_messages
             FROM chats c
             {_last_message_join("c", "m")}
             WHERE c.jid IN (?, ?, ?) AND {policy_clause}
@@ -1663,6 +1685,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
             last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
+            has_messages=bool(chat_data[7]),
         )
         return chat_to_dict(chat)
 
