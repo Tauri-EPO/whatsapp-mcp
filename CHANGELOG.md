@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.2.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.1.0...v1.2.0) (2026-09-07)
+
+
+### Features
+
+* **bridge:** enforce WHATSAPP_ALLOW_TOOLS / _DENY_TOOLS on the REST endpoints ([#264](https://github.com/Tauri-EPO/whatsapp-mcp/issues/264)) ([8c829b9](https://github.com/Tauri-EPO/whatsapp-mcp/commit/8c829b9220cd26a53bf889d73bf3b6f660c58cc2)), closes [#255](https://github.com/Tauri-EPO/whatsapp-mcp/issues/255)
+* exclude_groups keeps direct conversations only ([#263](https://github.com/Tauri-EPO/whatsapp-mcp/issues/263)) ([c1e2336](https://github.com/Tauri-EPO/whatsapp-mcp/commit/c1e2336487046ebfcd4afbdc93f717de6856b0b9)), closes [#256](https://github.com/Tauri-EPO/whatsapp-mcp/issues/256)
+* **mcp:** list_messages(query=...) also matches stored voice-note transcripts ([#267](https://github.com/Tauri-EPO/whatsapp-mcp/issues/267)) ([3ffa34e](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3ffa34ee88fefabfc1250f036dde91f63982c99c)), closes [#254](https://github.com/Tauri-EPO/whatsapp-mcp/issues/254)
+* **mcp:** transcribe inbound voice notes in the background (TRANSCRIBE_ON_INGEST) ([#265](https://github.com/Tauri-EPO/whatsapp-mcp/issues/265)) ([21f7d9d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/21f7d9d6da1ff054eb51bdf98e2691acf430eaf9))
+
+
+### Bug fixes
+
+* compare after/before against a normalised timestamp in every message query ([#266](https://github.com/Tauri-EPO/whatsapp-mcp/issues/266)) ([14841c2](https://github.com/Tauri-EPO/whatsapp-mcp/commit/14841c2a7486d5d619e29751e82b08bf7b5447c5)), closes [#253](https://github.com/Tauri-EPO/whatsapp-mcp/issues/253)
+
+
+### Refactoring
+
+* one phone-book lookup, one age clock, one message-field list ([#269](https://github.com/Tauri-EPO/whatsapp-mcp/issues/269)) ([bf17757](https://github.com/Tauri-EPO/whatsapp-mcp/commit/bf17757c774fb2ea0acfa077b3f47b502884d2fd)), closes [#257](https://github.com/Tauri-EPO/whatsapp-mcp/issues/257)
+
+
+### Dependencies
+
+* bump ggml-org/whisper.cpp from main to main ([#262](https://github.com/Tauri-EPO/whatsapp-mcp/issues/262)) ([ed4ce35](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ed4ce35648c54ec89a7e3b4743b39809994bb7a9))
+
 ## [1.1.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.0.0...v1.1.0) (2026-09-07)
 
 
