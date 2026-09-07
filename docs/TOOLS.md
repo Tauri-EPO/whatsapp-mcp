@@ -4,13 +4,13 @@ Every MCP tool the server exposes, with parameters and behaviour notes. The tool
 
 ## Pagination
 
-`list_messages`, `list_chats` and `get_contact_chats` return one page:
+`list_messages`, `list_chats`, `get_contact_chats` and `list_group_members` return one page:
 
 ```json
 {"items": [...], "next_cursor": "eyJrIjoi...", "has_more": true}
 ```
 
-Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based (`timestamp, id`), so paging stays consistent while new messages arrive and does not slow down on deep pages. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor.
+Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based (`timestamp, id`), so paging stays consistent while new messages arrive and does not slow down on deep pages. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor. `list_group_members` reads a live list from the bridge rather than the database, so its cursor is an offset into a deterministic ordering (see below).
 
 ## Errors
 
@@ -531,15 +531,24 @@ Get the last message exchanged with a contact.
 
 ### `list_group_members`
 
-List the participants of a group (live query through the bridge).
+List the participants of a group, one page at a time (live query through the bridge).
 
 **Parameters:**
 
 - `chat_jid` (required): The group JID (`...@g.us`)
+- `limit` (optional): Members per page (default 100, max 500)
+- `page` (optional): Page number (default 0); ignored when `cursor` is set
+- `cursor` (optional): `next_cursor` from the previous page
 
-Returns the group's `name`, `topic`, `owner_jid` and a `members` list with
-`jid`, `phone_number`, `lid`, `name` (from your contacts when known),
-`display`, `is_admin` and `is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
+Returns the group's `name`, `topic`, `owner_jid`, `participant_count` (the whole
+group) and the page keys `items`, `next_cursor`, `has_more`. Each item has `jid`,
+`phone_number`, `lid`, `name` (from your contacts when known), `display`,
+`is_admin` and `is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
+
+The bridge returns the whole membership; the MCP server sorts it (super admins,
+then admins, then JID ascending) and slices, so pages never overlap or skip even
+though every call re-queries WhatsApp. A cursor is only valid for the `chat_jid`
+it came from. Hundreds of members no longer overflow a client's output cap.
 
 ### `get_message_context`
 
