@@ -93,6 +93,9 @@ from whatsapp import (
     purge_media as whatsapp_purge_media,
 )
 from whatsapp import (
+    request_history as whatsapp_request_history,
+)
+from whatsapp import (
     search_contacts as whatsapp_search_contacts,
 )
 from whatsapp import (
@@ -135,6 +138,40 @@ def bridge_status() -> dict[str, Any]:
     Read-only; never fails, so it is safe to call before anything else.
     """
     return whatsapp_bridge_status()
+
+
+@mcp.tool()
+@tool_errors
+def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
+    """Ask the phone to send older messages for one chat, to fill a gap in the archive.
+
+    The archive only holds what the phone pushed at pair time plus everything
+    that arrived since, so a chat can start abruptly or miss a period. This asks
+    WhatsApp for messages *older* than the oldest one already stored for that
+    chat; call it again to page further back, since the anchor moves back as
+    older messages land.
+
+    The result is asynchronous. A successful call means "the request was sent",
+    not "the messages are here": they arrive later (usually seconds, sometimes
+    not at all) through history sync, and the phone decides how much it actually
+    returns — count is a request, not a guarantee. Messages the phone itself has
+    deleted are gone for good. To verify, note
+    list_messages(chat_jid=..., sort_by="oldest", limit=1) before the call and
+    compare that first message's timestamp a few seconds after: older means the
+    backfill landed, unchanged means the phone sent nothing.
+
+    Errors: not_found means the chat has no stored message to anchor on (send or
+    receive one message there first); bridge_unavailable means the bridge is not
+    connected to WhatsApp right now.
+
+    Args:
+        chat_jid: Chat to backfill (direct-chat JID ...@s.whatsapp.net or group JID ...@g.us)
+        count: Messages to request, 1-500 (default 50; higher values are capped at 500)
+
+    Returns:
+        {"success": true, "chat_jid", "requested_count", "message", "note"}
+    """
+    return whatsapp_request_history(chat_jid, count)
 
 
 @mcp.tool()

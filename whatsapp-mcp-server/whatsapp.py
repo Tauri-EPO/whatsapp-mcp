@@ -1856,6 +1856,42 @@ def mark_messages_read(
     return True, result.get("message", "Marked as read")
 
 
+HISTORY_DEFAULT_COUNT = 50
+HISTORY_MAX_COUNT = 500  # maxHistoryCount in whatsapp-bridge/history_ondemand.go
+
+
+def request_history(chat_jid: str, count: int = HISTORY_DEFAULT_COUNT) -> dict[str, Any]:
+    """Ask the phone for messages older than the oldest one stored for a chat.
+
+    Wraps POST /api/history. The bridge anchors the request on the oldest stored
+    message, so the chat must already have one (404 otherwise), and needs a live
+    WhatsApp connection (503 otherwise); both surface as a ToolError.
+    """
+    chat_jid = (chat_jid or "").strip()
+    if not chat_jid:
+        raise ToolError("invalid_argument", "chat_jid must be provided")
+    _require_allowed(chat_jid)
+    try:
+        count = int(count)
+    except (TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", f"count must be an integer, got {count!r}") from exc
+    if count < 1:
+        raise ToolError("invalid_argument", "count must be at least 1")
+    count = min(count, HISTORY_MAX_COUNT)
+    payload = _bridge_json(_bridge_request("POST", "/history", json={"chat_jid": chat_jid, "count": count}))
+    return {
+        "success": True,
+        "chat_jid": chat_jid,
+        "requested_count": count,
+        "message": payload.get("message") or f"Requested up to {count} older messages for {chat_jid}",
+        "note": (
+            "The phone answers asynchronously and decides how much it returns; nothing is stored yet when "
+            "this call succeeds. Verify with list_messages(chat_jid=..., sort_by='oldest', limit=1) and "
+            "compare the timestamp of that first message before and after."
+        ),
+    }
+
+
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 

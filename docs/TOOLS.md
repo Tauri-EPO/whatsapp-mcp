@@ -38,6 +38,33 @@ Conventions: `chat_jid` is always the conversation (a phone number with country 
 
 Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
 
+### `request_history`
+
+Ask the phone for messages **older** than the oldest one already stored for a
+chat, to fill a gap in the archive (`POST /api/history`, see
+[CONFIGURATION.md](CONFIGURATION.md#requesting-history-for-a-single-chat-on-demand)).
+Call it again to page further back: the anchor moves back as older messages
+land.
+
+**Parameters:**
+
+- `chat_jid` (required): chat to backfill (`…@s.whatsapp.net` or `…@g.us`)
+- `count` (optional, default `50`): messages to request, 1-500; larger values are capped at 500
+
+Returns `{"success": true, "chat_jid", "requested_count", "message", "note"}`.
+
+**The result is asynchronous.** Success means the request left the bridge, not
+that messages arrived: they land later through history sync (usually within
+seconds), and the phone decides how much it really sends — `count` is a request,
+not a guarantee. Messages the phone itself has deleted are not recoverable. To
+check whether anything landed, compare
+`list_messages(chat_jid=…, sort_by="oldest", limit=1)` before and a few seconds
+after the call: an older first message means the backfill worked.
+
+Errors: `not_found` when the chat has no stored message to anchor on (send or
+receive one there first), `bridge_unavailable` when the bridge is not connected
+to WhatsApp. Respects `WHATSAPP_ALLOWED_CHATS`.
+
 ## Contact Operations
 
 ### `search_contacts`

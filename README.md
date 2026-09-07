@@ -31,7 +31,7 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | **Audio** | transcribe voice notes with a local whisper.cpp (Portuguese by default, any language) |
 | **Groups and polls** | group members, add/remove/promote members, rename, invite link, leave, native poll results with every voter's choice |
 | **Memory** | deleted messages keep their content, view-once media is archived without consuming the phone's view, calls are logged, the agent keeps its own notes about files (summaries, tags, keep/disposable) across sessions |
-| **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result |
+| **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result; `request_history` asks the phone to backfill a chat whose archive starts too late |
 
 The full list with parameters is in [docs/TOOLS.md](docs/TOOLS.md).
 
