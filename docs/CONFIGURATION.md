@@ -24,6 +24,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_EXPORT_DIR`  | `$WHATSAPP_STORE_DIR/exports`            | Where `export_messages` writes NDJSON archives. `out_path` is always resolved under this directory; anything escaping it is refused (see [Export directory](#export-directory)) |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_LOG_LEVEL`   | `INFO`                                   | Bridge log level (`DEBUG`, `INFO`, `WARN`, `ERROR`) for bridge and whatsmeow client lines. `DEBUG` also echoes every stored message |
 | `WHATSAPP_LOG_FORMAT`  | `text`                                   | `json` writes bridge log lines as JSON objects (`ts`, `level`, `module`, `msg`) for Loki/Elastic/journald |
@@ -284,6 +285,32 @@ Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+
+### Export directory
+
+`export_messages` writes NDJSON archives to `WHATSAPP_EXPORT_DIR`, which
+defaults to `exports/` inside the store directory (`/app/store/exports` in the
+Docker image, so exports live in the `whatsapp-store` volume and survive
+`docker compose up -d --build`; copy one out with
+`docker compose cp mcp:/app/store/exports/<file> .`).
+
+The tool's `out_path` is a name — or a relative path — *inside* that directory.
+It is joined onto the export root and the resolved result must still be under
+it, so `../…`, an absolute path elsewhere and a symlink pointing out are all
+refused with `denied`. The chat allow-list applies to the exported rows exactly
+as it does to `list_messages`, and the tool returns only a summary (path,
+count, timestamp bounds, size) — never message content.
+
+Point `WHATSAPP_EXPORT_DIR` at a bind-mounted directory when you want the files
+directly on the host:
+
+```yaml
+mcp:
+  environment:
+    WHATSAPP_EXPORT_DIR: /app/exports
+  volumes:
+    - ./exports:/app/exports
+```
 
 ## CLI flags (Go bridge)
 

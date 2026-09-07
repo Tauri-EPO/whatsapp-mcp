@@ -234,6 +234,59 @@ Reactions and poll votes are pointer rows and never counted as `media`.
 - "Who posts most in the family group?"
 - "How big would exporting this chat be?"
 
+### `export_messages`
+
+Write matching messages to a file on disk as NDJSON and return only a summary.
+For bulk work — contact mapping, backlog triage, statistics — where the rows
+belong in a script rather than in the conversation. The archive is streamed
+from SQLite to the file in batches, so a 100k-message export costs no context
+and flat memory.
+
+**Parameters:**
+
+- `after` / `before` (optional): ISO-8601 bounds
+- `chat_jid` (optional): restrict to one conversation. A chat outside `WHATSAPP_ALLOWED_CHATS` returns `denied`
+- `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`. An existing file is overwritten
+- `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
+- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
+- `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
+
+**Returns:**
+
+```json
+{"path": "/app/store/exports/messages-all-20260907T101500Z.ndjson",
+ "count": 25820, "first_timestamp": "2025-03-02T14:01:11",
+ "last_timestamp": "2026-09-07T08:20:00", "bytes": 18443921}
+```
+
+Never the rows themselves — `path` is where they went. Read the file with your
+own tools, on the machine running the server. `count` is 0 and the timestamps
+are `null` when nothing matched; the (empty) file is still written.
+
+**Where the files land.** The export directory is `WHATSAPP_EXPORT_DIR`,
+defaulting to `exports/` inside the store directory. In the Docker image that
+is `/app/store/exports`, inside the `whatsapp-store` volume:
+
+```bash
+docker compose exec mcp ls /app/store/exports
+docker compose cp mcp:/app/store/exports/messages-all-20260907T101500Z.ndjson .
+```
+
+To get exports straight onto the host instead, bind-mount a directory and point
+`WHATSAPP_EXPORT_DIR` at it (see
+[CONFIGURATION.md](CONFIGURATION.md#export-directory)).
+
+**Security.** `out_path` is joined onto the export directory and the resolved
+result must still be under it, so `../…`, an absolute path elsewhere and a
+symlink pointing out are all refused with `denied`. The chat allow-list applies
+to the exported rows exactly as it does to `list_messages`.
+
+**Natural Language Examples:**
+
+- "Export the last year of this chat so I can analyse it"
+- "Dump every message to a file with just id, timestamp and content"
+- "Save all documents I received to NDJSON"
+
 ### `send_message`
 
 Send a text message to a contact or group, optionally as a quoted reply.

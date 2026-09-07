@@ -7,6 +7,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from errors import ToolError, tool_errors
+from export import export_messages as export_messages_to_disk
 from http_auth import (
     BearerTokenMiddleware,
     RateLimitMiddleware,
@@ -530,6 +531,79 @@ def message_stats(
         exclude_groups=exclude_groups,
         include_deleted=include_deleted,
         unread_only=unread_only,
+    )
+
+
+@mcp.tool()
+@tool_errors
+def export_messages(
+    after: str | None = None,
+    before: str | None = None,
+    chat_jid: str | None = None,
+    out_path: str | None = None,
+    format: str = "ndjson",  # noqa: A002 - documented tool argument name
+    fields: list[str] | None = None,
+    sender_jid: str | None = None,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
+    include_deleted: bool = True,
+) -> dict[str, Any]:
+    """Write matching messages to a file on disk as NDJSON and return only a summary.
+
+    For bulk work — contact mapping, backlog triage, statistics — where the rows
+    belong in a script, not in this conversation. The archive is streamed
+    straight from SQLite to the file, so a 100k-message export costs no context
+    and flat memory. Nothing of the content comes back: use list_messages to
+    read messages, message_stats to count them, and this to hand a corpus to
+    something else.
+
+    The file lands in the server's export directory (WHATSAPP_EXPORT_DIR,
+    `<store>/exports` by default; `/app/store/exports` in the Docker image,
+    inside the `whatsapp-store` volume). out_path is relative to that directory
+    and anything resolving outside it is refused with `denied`, so the returned
+    `path` is the only place to look for the file — read it with your own file
+    tools, on the machine running the server.
+
+    Returns:
+        {"path": absolute file path, "count": messages written,
+         "first_timestamp", "last_timestamp": bounds of what was written (null
+         when nothing matched), "bytes": file size}
+
+    Args:
+        after: ISO-8601 lower bound, e.g. "2026-01-01"
+        before: ISO-8601 upper bound, e.g. "2026-02-01"
+        chat_jid: Restrict to one conversation (JID or phone number with country code)
+        out_path: File name (or relative path) inside the export directory.
+                 Default: messages-<chat>-<timestamp>.ndjson. An existing file is
+                 overwritten
+        format: Only "ndjson" today: one JSON object per line, UTF-8, oldest first
+        fields: Subset of the message keys to write (id, timestamp, sender_jid,
+                 sender_phone, sender_name, sender_display, content, is_from_me,
+                 chat_jid, chat_name, media_type, filename, target_message_id,
+                 reaction_to_message_id, poll_message_id, quoted_message_id,
+                 deleted_at, view_once, bytes, sha256, notes). Default: all of them
+        sender_jid: Only messages from this sender
+        from_me: True for what you sent, False for inbound only, None for both
+        has_media: True for messages carrying a file, False for text-only
+        media_type: "image", "video", "audio", "document" or "sticker"
+        exclude_groups: True exports direct conversations only
+        include_deleted: False drops revoked messages (default True)
+    """
+    return export_messages_to_disk(
+        after=after,
+        before=before,
+        chat_jid=chat_jid,
+        out_path=out_path,
+        format=format,
+        fields=fields,
+        sender_phone_number=sender_jid,
+        from_me=from_me,
+        has_media=has_media,
+        media_type=media_type,
+        exclude_groups=exclude_groups,
+        include_deleted=include_deleted,
     )
 
 

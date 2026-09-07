@@ -131,6 +131,10 @@ services:
       # read-only wins over both. MCP server only (the bridge has no tools).
       WHATSAPP_ALLOW_TOOLS: ${WHATSAPP_ALLOW_TOOLS:-}
       WHATSAPP_DENY_TOOLS: ${WHATSAPP_DENY_TOOLS:-}
+      # Where export_messages writes NDJSON archives. Empty = /app/store/exports
+      # (inside the whatsapp-store volume). Set it to a bind-mounted path to get
+      # the files on the host; export paths never escape this directory.
+      WHATSAPP_EXPORT_DIR: ${WHATSAPP_EXPORT_DIR:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
       # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
       WHATSAPP_STORE_DIR: /app/store
