@@ -1098,6 +1098,68 @@ def _direct_only_clause(column: str) -> str:
     return "(" + " OR ".join(f"{column} LIKE '%{suffix}'" for suffix in DIRECT_JID_SUFFIXES) + ")"
 
 
+# What a caller writes when they meant a list: "a@s.whatsapp.net,b@g.us" (or the
+# same with a semicolon or a space). A JID holds none of these, so any of them
+# inside one entry is the mistake, not a chat that happens not to exist.
+_JID_SEPARATORS = re.compile(r"[,;\s]")
+
+
+def _chat_jid_aliases(jid: str) -> list[str]:
+    """Every spelling of one chat JID the archive may hold (gotcha 1).
+
+    A direct conversation is stored under the phone JID or under the same
+    person's `@lid`, depending on when the row was written, so filtering on the
+    form the caller happened to know would miss half the chat. Group, broadcast,
+    newsletter and bot servers have one spelling and are returned as given.
+    """
+    normalized = normalize_chat_entry(jid)
+    user, _, server = normalized.rpartition("@")
+    if f"@{server}" not in DIRECT_JID_SUFFIXES:
+        return [normalized]
+    # _sender_aliases also emits the bare user forms, which the chat_jid column
+    # never holds; keep the JIDs.
+    return [alias for alias in _sender_aliases(user) if "@" in alias]
+
+
+def chat_jid_filter(
+    value: str | Sequence[str] | None, argument: str = "chat_jid", require_allowed: bool = True
+) -> list[str]:
+    """One chat filter argument as the list of JIDs to bind, aliases expanded.
+
+    Accepts a single JID (or bare phone number) and a list of them; a string
+    holding several JIDs joined by a separator is refused rather than filtered
+    on literally, which used to answer an empty page — indistinguishable from
+    "nothing happened in those chats" (issue #289).
+    """
+    if value is None:
+        return []
+    listed = not isinstance(value, str)
+    raw = [value] if isinstance(value, str) else [str(item) for item in value]
+    entries = [item.strip() for item in raw if str(item).strip()]
+    if listed and not entries:
+        raise ToolError("invalid_argument", f"{argument} was an empty list; omit it to match every allowed chat")
+
+    aliases: list[str] = []
+    for entry in entries:
+        if _JID_SEPARATORS.search(entry):
+            raise ToolError(
+                "invalid_argument",
+                f"{argument} takes one JID or a list of JIDs, not several joined into one string: "
+                f'pass {argument}=["a@s.whatsapp.net", "b@g.us"] (got {entry!r})',
+            )
+        if require_allowed:
+            _require_allowed(entry)
+        for alias in _chat_jid_aliases(entry):
+            if alias not in aliases:
+                aliases.append(alias)
+    return aliases
+
+
+def _chat_jid_clause(column: str, jids: list[str], negated: bool = False) -> str:
+    """`column IN (?, ...)`, or its negation. SQLite seeks the index for one value too."""
+    return f"{column} {'NOT ' if negated else ''}IN ({','.join('?' * len(jids))})"
+
+
 # Every time column the bridge writes holds one spelling: "YYYY-MM-DD
 # HH:MM:SS+00:00" — UTC, seconds, fixed width (store_time.go, and the schema
 # note in docs/ARCHITECTURE.md). Same offset on every row is what makes a plain
@@ -1161,7 +1223,8 @@ class MessageFilters:
     after: str | None = None
     before: str | None = None
     sender_phone_number: str | None = None
-    chat_jid: str | None = None
+    chat_jid: str | Sequence[str] | None = None
+    exclude_chat_jid: str | Sequence[str] | None = None
     from_me: bool | None = None
     has_media: bool | None = None
     media_type: str | None = None
@@ -1186,9 +1249,16 @@ class MessageFilters:
             clauses.append(f"messages.sender IN ({','.join('?' * len(aliases))})")
             params.extend(aliases)
 
-        if self.chat_jid:
-            clauses.append("messages.chat_jid = ?")
-            params.append(self.chat_jid)
+        if chats := chat_jid_filter(self.chat_jid):
+            clauses.append(_chat_jid_clause("messages.chat_jid", chats))
+            params.extend(chats)
+
+        # An exclusion only ever removes rows the caller could already read, so
+        # it is not checked against the allow-list: naming a chat this server
+        # cannot see is a no-op, not an escalation.
+        if excluded := chat_jid_filter(self.exclude_chat_jid, "exclude_chat_jid", require_allowed=False):
+            clauses.append(_chat_jid_clause("messages.chat_jid", excluded, negated=True))
+            params.extend(excluded)
 
         if self.exclude_groups:
             clauses.append(_direct_only_clause("messages.chat_jid"))
@@ -1391,7 +1461,8 @@ def count_messages(
     after: str | None = None,
     before: str | None = None,
     sender_phone_number: str | None = None,
-    chat_jid: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
     query: str | None = None,
     include_deleted: bool = True,
     unread_only: bool = False,
@@ -1410,6 +1481,7 @@ def count_messages(
             before=before,
             sender_phone_number=sender_phone_number,
             chat_jid=chat_jid,
+            exclude_chat_jid=exclude_chat_jid,
             from_me=from_me,
             has_media=has_media,
             media_type=media_type,
@@ -1446,7 +1518,8 @@ def list_messages(
     after: str | None = None,
     before: str | None = None,
     sender_phone_number: str | None = None,
-    chat_jid: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
     query: str | None = None,
     limit: int = 20,
     page: int = 0,
@@ -1467,6 +1540,7 @@ def list_messages(
         before=before,
         sender_phone_number=sender_phone_number,
         chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
         query=query,
         limit=limit,
         page=page,
@@ -1487,7 +1561,8 @@ def list_messages_page(
     after: str | None = None,
     before: str | None = None,
     sender_phone_number: str | None = None,
-    chat_jid: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
     query: str | None = None,
     limit: int = 20,
     page: int = 0,
@@ -1509,7 +1584,8 @@ def list_messages_page(
         after: Optional ISO-8601 formatted string to only return messages after this date
         before: Optional ISO-8601 formatted string to only return messages before this date
         sender_phone_number: Optional phone number to filter messages by sender
-        chat_jid: Optional chat JID to filter messages by chat
+        chat_jid: One chat JID, or a list of them, to filter messages by chat
+        exclude_chat_jid: One chat JID, or a list of them, to drop from the result
         query: Optional search term to filter messages by content. With the bridge's
             FTS5 index this is accent-insensitive and word-based, and supports
             AND / OR / NOT, "exact phrase" and prefix* operators; without it a
@@ -1564,6 +1640,7 @@ def list_messages_page(
             before=before,
             sender_phone_number=sender_phone_number,
             chat_jid=chat_jid,
+            exclude_chat_jid=exclude_chat_jid,
             from_me=from_me,
             has_media=has_media,
             media_type=media_type,
@@ -1693,11 +1770,13 @@ def _stats_row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 def message_stats(
     group_by: str = "chat",
-    chat_jid: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
     after: str | None = None,
     before: str | None = None,
     limit: int = 100,
     sender_phone_number: str | None = None,
+    query: str | None = None,
     from_me: bool | None = None,
     has_media: bool | None = None,
     media_type: str | None = None,
@@ -1707,25 +1786,27 @@ def message_stats(
 ) -> dict[str, Any]:
     """Aggregate message counts per chat, day, month or sender.
 
-    Same predicates as list_messages (MessageFilters), so the same arguments
-    describe the same set of rows; the totals row covers every matching message,
-    while `buckets` is capped and ordered by count descending.
+    Same predicates as list_messages (MessageFilters and _query_predicate), so
+    the same arguments describe the same set of rows; the totals row covers every
+    matching message, while `buckets` is capped and ordered by count descending.
+    A `query` is counted here exactly as it would be listed there — the ranking
+    is what an aggregate drops, not the set of hits.
     """
     if group_by not in MESSAGE_STATS_GROUPINGS:
         raise ToolError("invalid_argument", f"group_by must be one of {', '.join(MESSAGE_STATS_GROUPINGS)}")
-    if chat_jid:
-        _require_allowed(chat_jid)
     limit = max(1, min(int(limit), MAX_STATS_BUCKETS))
     bucket_sql = _STATS_GROUP_SQL[group_by]
 
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        predicate = _query_predicate(conn, query)
         clauses, filter_params = MessageFilters(
             after=after,
             before=before,
             sender_phone_number=sender_phone_number,
             chat_jid=chat_jid,
+            exclude_chat_jid=exclude_chat_jid,
             from_me=from_me,
             has_media=has_media,
             media_type=media_type,
@@ -1733,19 +1814,31 @@ def message_stats(
             include_deleted=include_deleted,
             unread_only=unread_only,
         ).build(cur)
+        if predicate.clause:
+            clauses.append(predicate.clause)
+        bound, match_index = predicate.bind(filter_params)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        base = f"FROM messages JOIN chats ON messages.chat_jid = chats.jid {where}"
-        # SUM(media) placeholders come first: they sit in the SELECT list.
-        params = [*MEDIA_TYPES, *filter_params]
+        join = f" {predicate.join}" if predicate.join else ""
+        base = f"FROM messages JOIN chats ON messages.chat_jid = chats.jid{join} {where}"
+        # SUM(media) placeholders come first: they sit in the SELECT list, ahead
+        # of the search join and the WHERE.
+        params = [*MEDIA_TYPES, *bound]
+        if match_index is not None:
+            match_index += len(MEDIA_TYPES)
 
         label = "MIN(chats.name)" if group_by == "chat" else "NULL"
-        cur.execute(
+        _execute_message_sql(
+            cur,
             f"SELECT {bucket_sql}, {label}, {_STATS_AGGREGATES} {base} "
             f"GROUP BY {bucket_sql} ORDER BY COUNT(*) DESC, {bucket_sql} DESC LIMIT ?",
-            (*params, limit),
+            [*params, limit],
+            match_index,
+            query,
         )
         rows = cur.fetchall()
-        cur.execute(f"SELECT COUNT(DISTINCT {bucket_sql}), {_STATS_AGGREGATES} {base}", tuple(params))
+        _execute_message_sql(
+            cur, f"SELECT COUNT(DISTINCT {bucket_sql}), {_STATS_AGGREGATES} {base}", list(params), match_index, query
+        )
         total_row = cur.fetchone() or (0, 0, 0, 0, 0, None, None)
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -2935,7 +3028,11 @@ def bridge_status() -> dict[str, Any]:
 
 
 def unread_filters(
-    since: str | None = None, max_age_days: int | None = None, exclude_groups: bool = False
+    since: str | None = None,
+    max_age_days: int | None = None,
+    exclude_groups: bool = False,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> tuple[str, list[Any]]:
     """Optional predicates shared by the unread queries.
 
@@ -2963,6 +3060,12 @@ def unread_filters(
     if since_ts is not None:
         clauses.append("AND messages.timestamp > ?")
         params.append(since_ts)
+    if chats := chat_jid_filter(chat_jid):
+        clauses.append("AND " + _chat_jid_clause("chats.jid", chats))
+        params.extend(chats)
+    if excluded := chat_jid_filter(exclude_chat_jid, "exclude_chat_jid", require_allowed=False):
+        clauses.append("AND " + _chat_jid_clause("chats.jid", excluded, negated=True))
+        params.extend(excluded)
     if exclude_groups:
         clauses.append("AND " + _direct_only_clause("chats.jid"))
     return (" ".join(clauses), params)
@@ -2975,6 +3078,8 @@ def list_unread(
     exclude_groups: bool = False,
     max_age_days: int | None = None,
     count_only: bool = False,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Chats with unread inbound messages, each with its newest unread rows.
 
@@ -2985,15 +3090,16 @@ def list_unread(
 
     exclude_groups keeps direct conversations only (`@s.whatsapp.net` / `@lid`),
     dropping groups, broadcast lists, channels and bots; max_age_days is the relative
-    form of since (both are rejected together). Both bound the counted rows and
-    the returned messages alike.
+    form of since (both are rejected together). chat_jid / exclude_chat_jid narrow
+    the set of conversations (one JID or a list). All of them bound the counted
+    rows and the returned messages alike.
 
     count_only returns {"count", "chats_with_unread"} over *every* matching
     chat, ignoring limit_chats and limit_per_chat, and reads no message row.
     """
     limit_chats = max(1, min(int(limit_chats), 100))
     limit_per_chat = max(1, min(int(limit_per_chat), 50))
-    filter_clause, filter_params = unread_filters(since, max_age_days, exclude_groups)
+    filter_clause, filter_params = unread_filters(since, max_age_days, exclude_groups, chat_jid, exclude_chat_jid)
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
@@ -3093,6 +3199,8 @@ def list_unanswered(
     exclude_groups: bool = False,
     min_age_hours: float = 0,
     include_last_message: bool = True,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Items of one page of list_unanswered_page."""
     return list_unanswered_page(
@@ -3101,12 +3209,20 @@ def list_unanswered(
         exclude_groups=exclude_groups,
         min_age_hours=min_age_hours,
         include_last_message=include_last_message,
+        chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
     ).items
 
 
-def _unanswered_from_where(since: str | None, exclude_groups: bool, min_age_hours: float) -> tuple[str, list[Any]]:
+def _unanswered_from_where(
+    since: str | None,
+    exclude_groups: bool,
+    min_age_hours: float,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
+) -> tuple[str, list[Any]]:
     """FROM/WHERE shared by the list_unanswered page and its count."""
-    filter_clause, filter_params = unread_filters(since, None, exclude_groups)
+    filter_clause, filter_params = unread_filters(since, None, exclude_groups, chat_jid, exclude_chat_jid)
     age_clause, age_params = "", []
     hours = float(min_age_hours or 0)
     if hours < 0:
@@ -3125,9 +3241,15 @@ def _unanswered_from_where(since: str | None, exclude_groups: bool, min_age_hour
     return sql, [*policy_params, *filter_params, *age_params]
 
 
-def count_unanswered(since: str | None = None, exclude_groups: bool = False, min_age_hours: float = 0) -> int:
+def count_unanswered(
+    since: str | None = None,
+    exclude_groups: bool = False,
+    min_age_hours: float = 0,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
+) -> int:
     """How many chats are waiting for a reply, without returning any of them."""
-    from_where, params = _unanswered_from_where(since, exclude_groups, min_age_hours)
+    from_where, params = _unanswered_from_where(since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid)
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
@@ -3149,6 +3271,8 @@ def list_unanswered_page(
     min_age_hours: float = 0,
     include_last_message: bool = True,
     cursor: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> PageResult:
     """Chats whose newest stored message is inbound: the other side spoke last.
 
@@ -3161,7 +3285,7 @@ def list_unanswered_page(
     """
     limit = max(1, min(int(limit), 200))
     cursor_state = decode_cursor(cursor, "unanswered")
-    from_where, where_params = _unanswered_from_where(since, exclude_groups, min_age_hours)
+    from_where, where_params = _unanswered_from_where(since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid)
 
     try:
         conn = _connect_messages_db()

@@ -6,7 +6,7 @@ With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, 
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
-Five conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Time bounds](#time-bounds) for `after` / `before` / `since`, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
+Six conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Chat filters](#chat-filters) for `chat_jid` / `exclude_chat_jid`, [Time bounds](#time-bounds) for `after` / `before` / `since`, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
 
 ## Pagination
 
@@ -59,6 +59,26 @@ list_messages(chat_jid="…@g.us", after="2026-08-01", before="2026-09-01",
 ```
 
 Above a few thousand rows, stop paging into the conversation at all: [`export_messages`](#export_messages) writes the same rows to an NDJSON file on the server and returns only a summary, so the corpus goes to a script instead of the model. `message_stats` answers "how many / when / who" without any rows.
+
+## Chat filters
+
+`chat_jid` takes **one conversation or a list of them**, and every tool that
+takes it also takes the mirror `exclude_chat_jid`. Both are available on
+`list_messages`, `message_stats`, `export_messages`, `list_media`,
+`get_media_stats`, `list_unread` and `list_unanswered`:
+
+```jsonc
+list_unread(chat_jid=["5511999999999@s.whatsapp.net", "120363000000000001@g.us"])
+list_messages(exclude_chat_jid="120363000000000009@g.us", after="2026-09-07")
+```
+
+Rules:
+
+- **A list is an array, never a joined string.** `chat_jid="a@s.whatsapp.net,b@g.us"` is refused with `invalid_argument` naming the list form. It used to return an empty page, which reads as "nothing happened in those chats" (issue #289).
+- **Both spellings of a conversation match.** A direct chat is stored under the phone JID or under the same person's `@lid` depending on when the row was written, so either form — or the bare phone number — finds it, in `chat_jid` and in `exclude_chat_jid` alike.
+- **`WHATSAPP_ALLOWED_CHATS` applies to every entry.** One chat outside the allow-list refuses the whole call with `denied`, naming it, instead of quietly answering for the rest. Exclusions are not checked: leaving out a chat the server cannot read is a no-op. The allow-list itself matches JIDs literally — it does not expand phone ↔ `@lid` — so a restricted deployment should list both spellings of a direct chat it wants readable.
+- **An empty list is refused** (`chat_jid=[]` matches nothing); omit the argument to cover every allowed chat.
+- Exclusion wins: a JID in both lists is dropped.
 
 ## Time bounds
 
@@ -127,7 +147,7 @@ Both layers are hints. The mitigations that are actually enforced are [read-only
 
 This is what a draft-only assistant should use: preview, show the payload, send only after the human says yes. Note that `dry_run` is *not* a way around [read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant) — with `WHATSAPP_READ_ONLY=1` these tools are not offered at all, dry run or not. Read-only is the operator's setting; `dry_run` is the agent's manners.
 
-Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
+Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`; on the read tools it also takes a list — see [Chat filters](#chat-filters)); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
 
 ## Direct conversations
 
@@ -309,7 +329,8 @@ Get messages with filters, date ranges, and sorting.
 
 **Parameters:**
 
-- `chat_jid` (optional): Filter by specific chat JID
+- `chat_jid` (optional): one conversation, or a list of them — see [Chat filters](#chat-filters)
+- `exclude_chat_jid` (optional): one conversation, or a list of them, to leave out
 - `limit` (optional): Number of messages (default 50, max 500)
 - `page` (optional): Page number (default 0); ignored when `cursor` is set
 - `cursor` (optional): `next_cursor` from the previous page
@@ -392,9 +413,10 @@ archive through its context.
 **Parameters:**
 
 - `group_by` (optional, default `"chat"`): `chat`, `day`, `month` or `sender`. Day and month buckets are cut from the stored timestamp (UTC)
-- `chat_jid` (optional): restrict to one conversation. A chat outside `WHATSAPP_ALLOWED_CHATS` returns `denied`
+- `chat_jid` / `exclude_chat_jid` (optional): one conversation or a list of them — see [Chat filters](#chat-filters)
 - `before` / `after` (optional): ISO-8601 bounds
 - `limit` (optional): max buckets returned (default 100, max 500)
+- `query` (optional): count only the messages matching this search, with the same syntax and the same hits as `list_messages` (FTS operators, stored voice-note transcripts included). `group_by="month", query="orçamento"` plots a topic over time; `group_by="chat"` says where it is discussed. Ranking has no meaning in an aggregate, so `sort_by` has no counterpart here
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`, `unread_only`: the same predicates as `list_messages`, so the same arguments describe the same rows
 
 **Returns:**
@@ -422,6 +444,7 @@ Reactions and poll votes are pointer rows and never counted as `media`.
 **Natural Language Examples:**
 
 - "Which chats have the most messages?"
+- "How many times was the budget mentioned, by month?" (`group_by="month", query="orçamento"`)
 - "How many messages a month did we exchange last year?"
 - "Who posts most in the family group?"
 - "How big would exporting this chat be?"
@@ -437,8 +460,8 @@ and flat memory.
 **Parameters:**
 
 - `after` / `before` (optional): ISO-8601 bounds
-- `chat_jid` (optional): restrict to one conversation. A chat outside `WHATSAPP_ALLOWED_CHATS` returns `denied`
-- `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`. An existing file is overwritten
+- `chat_jid` / `exclude_chat_jid` (optional): one conversation or a list of them — see [Chat filters](#chat-filters)
+- `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`, or `messages-all-<timestamp>.ndjson` for anything but a single chat. An existing file is overwritten
 - `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
 - `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
@@ -751,7 +774,7 @@ and text never appear.
 
 **Parameters:**
 
-- `chat_jid` (optional): one chat; default every allowed chat
+- `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them (see [Chat filters](#chat-filters)); default every allowed chat
 - `media_type` (optional): `image` | `video` | `audio` | `document` | `sticker`
 - `after` / `before` (optional): ISO-8601 bounds
 - `min_bytes` (optional): only files at least this large
@@ -782,7 +805,7 @@ Totals per chat and per media type so the agent knows where the bytes are.
 
 **Parameters:**
 
-- `chat_jid` (optional): one chat; default every allowed chat
+- `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them (see [Chat filters](#chat-filters)); default every allowed chat
 
 Returns `total` (`files`, `bytes`, `cached_files`, `cached_bytes`,
 `duplicate_groups`, `duplicate_bytes`: what the copies beyond the first of each
@@ -981,6 +1004,7 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 - `since` (optional): ISO-8601 lower bound
 - `exclude_groups` (optional, default false): keep [direct conversations](#direct-conversations) only, skipping groups, broadcast lists, channels and bots
 - `max_age_days` (optional): count only the last N days — the relative spelling of `since`. Giving both is an `invalid_argument` error
+- `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them — see [Chat filters](#chat-filters). A digest over a hand-picked set of conversations, or the same read minus the known noise
 - `fields`, `omit_nulls`, `max_content_chars`: shape the message rows inside each chat — see [Compact reads](#compact-reads)
 - `count_only` (optional, default false): return `{"count", "chats_with_unread"}` over every matching chat and read no message row
 
@@ -1007,6 +1031,7 @@ Chats with no stored messages never appear.
 - `exclude_groups` (optional, default false): keep [direct conversations](#direct-conversations) only, skipping groups, broadcast lists, channels and bots
 - `min_age_hours` (optional, default 0): only chats waiting at least this long — `24` skips the conversations you are in the middle of
 - `include_last_message` (optional, default true): include `last_message` / `last_sender`
+- `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them — see [Chat filters](#chat-filters)
 - `cursor` (optional): `next_cursor` from the previous page
 - `fields`, `omit_nulls`, `count_only`: shape the response — see [Compact reads](#compact-reads). These are chat rows, so `fields` takes chat names and there is no `max_content_chars`
 

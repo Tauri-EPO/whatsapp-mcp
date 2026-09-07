@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -87,18 +88,22 @@ class _CacheIndex:
 
 
 def _media_filters(
-    chat_jid: str | None,
+    chat_jid: str | Sequence[str] | None,
     media_type: str | None,
     after: str | None,
     before: str | None,
     min_bytes: int | None,
     column_prefix: str,
+    exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = [f"{column_prefix}media_type IN ({','.join('?' * len(MEDIA_TYPES))})"]
     params: list[Any] = list(MEDIA_TYPES)
-    if chat_jid:
-        clauses.append(f"{column_prefix}chat_jid = ?")
-        params.append(chat_jid)
+    if chats := whatsapp.chat_jid_filter(chat_jid):
+        clauses.append(whatsapp._chat_jid_clause(f"{column_prefix}chat_jid", chats))
+        params.extend(chats)
+    if excluded := whatsapp.chat_jid_filter(exclude_chat_jid, "exclude_chat_jid", require_allowed=False):
+        clauses.append(whatsapp._chat_jid_clause(f"{column_prefix}chat_jid", excluded, negated=True))
+        params.extend(excluded)
     if media_type:
         if media_type not in MEDIA_TYPES:
             raise ToolError("invalid_argument", f"media_type must be one of {', '.join(MEDIA_TYPES)}")
@@ -149,7 +154,7 @@ def _notes_exists_clause(conn: sqlite3.Connection, has_notes: bool) -> str | Non
 
 
 def list_media_page(
-    chat_jid: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
     media_type: str | None = None,
     after: str | None = None,
     before: str | None = None,
@@ -159,17 +164,16 @@ def list_media_page(
     limit: int = 50,
     page: int = 0,
     cursor: str | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> PageResult:
     """One page of media rows with size, hash, copy counts and cache state."""
     if sort not in SORTS:
         raise ToolError("invalid_argument", f"sort must be one of {', '.join(SORTS)}")
-    if chat_jid:
-        whatsapp._require_allowed(chat_jid)
     limit = max(1, min(int(limit), MAX_LIMIT))
     state = decode_cursor(cursor, "media")
     offset = int(state["o"]) if state else max(0, int(page)) * limit
 
-    clauses, params = _media_filters(chat_jid, media_type, after, before, min_bytes, "m.")
+    clauses, params = _media_filters(chat_jid, media_type, after, before, min_bytes, "m.", exclude_chat_jid)
     copies_clauses, copies_params = _media_filters(None, None, None, None, None, "")
     order = {
         "size": "m.file_length DESC, m.timestamp DESC",
@@ -255,11 +259,11 @@ def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]
     }
 
 
-def media_stats(chat_jid: str | None = None) -> dict[str, Any]:
+def media_stats(
+    chat_jid: str | Sequence[str] | None = None, exclude_chat_jid: str | Sequence[str] | None = None
+) -> dict[str, Any]:
     """Totals by chat and by media type, from the rows and from the cache directories."""
-    if chat_jid:
-        whatsapp._require_allowed(chat_jid)
-    clauses, params = _media_filters(chat_jid, None, None, None, None, "m.")
+    clauses, params = _media_filters(chat_jid, None, None, None, None, "m.", exclude_chat_jid)
     where = " AND ".join(clauses)
     try:
         conn = whatsapp._connect_messages_db()
