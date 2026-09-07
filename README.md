@@ -26,7 +26,8 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | | |
 | --- | --- |
 | **Read** | list chats, list and page through messages (by direction, media kind, groups or not), unread summary across chats, the conversations still waiting for your reply, full-text search across everything, message context around a hit, contacts by name or number |
-| **Count** | `message_stats` aggregates messages per chat, day, month or sender, so the agent can size a job or answer "who talks most" without reading the archive |
+| **Count** | `message_stats` aggregates messages per chat, day, month or sender, so the agent can size a job or answer "who talks most" without reading the archive; the bulk reads also take `count_only` |
+| **Compact** | those reads take `fields`, `omit_nulls` and `max_content_chars`: a 500-message page goes from 270 KB to 155 KB by dropping the null columns, to 65 KB with three fields — the same conversation, a fraction of the context |
 | **Export** | `export_messages` streams a whole archive to NDJSON on disk and hands back a path, not the rows — bulk analysis without paying for it in context |
 | **Write** | send text, reply with quote, mention people, react, edit, forward, mark as read, show "typing", delete for everyone or locally |
 | **Media** | send files and voice notes (auto-converted to Opus), download images/video/audio/documents, recover expired attachments by asking the sender's phone, inventory of what is stored (size, duplicates across chats, cached or not), free space on request with a dry run first |
