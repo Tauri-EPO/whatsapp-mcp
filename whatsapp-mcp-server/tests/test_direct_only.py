@@ -1,8 +1,10 @@
 """exclude_groups keeps direct conversations only (issue #256).
 
 One fixture with every server WhatsApp puts in a chat list — a phone JID, a LID
-alias, a group, a broadcast list and a newsletter channel — asserted through all
-five tools that take the flag, so they cannot drift apart.
+alias, a group, a broadcast list, a status feed, a newsletter channel and a bot
+chat — asserted through all five tools that take the flag, so they cannot drift
+apart. `@bot` is a fan-out surface for this purpose: Meta AI answers on its own
+and nobody is waiting there for a reply (issue #274).
 """
 
 import json
@@ -21,9 +23,11 @@ LID = "231241139937355@lid"  # direct, anonymous alias
 GROUP = "120363000000000001@g.us"
 BROADCAST = "120363000000000002@broadcast"
 NEWSLETTER = "120363000000000003@newsletter"
+STATUS = "status@broadcast"
+BOT = "867051314767696@bot"  # Meta AI and friends: not a person, not direct
 
 DIRECT = [PHONE, LID]
-FANOUT = [GROUP, BROADCAST, NEWSLETTER]
+FANOUT = [GROUP, BROADCAST, NEWSLETTER, STATUS, BOT]
 ALL_CHATS = DIRECT + FANOUT
 
 
@@ -89,8 +93,16 @@ def test_list_unanswered(db):
     assert {item["jid"] for item in main.list_unanswered(exclude_groups=True)["items"]} == set(DIRECT)
 
 
+def test_bot_chats_are_not_direct(db):
+    """Decision on #274: a @bot chat is a chat, but never a direct one."""
+    assert not any(BOT.endswith(suffix) for suffix in whatsapp.DIRECT_JID_SUFFIXES)
+    assert BOT in {c["chat_jid"] for c in main.list_unread()["chats"]}
+    assert BOT not in {c["chat_jid"] for c in main.list_unread(exclude_groups=True)["chats"]}
+
+
 def test_is_group_still_means_g_us_only(db):
     """The flag widened; the field did not. A channel is not a group."""
     by_jid = {c["chat_jid"]: c for c in main.list_unread()["chats"]}
     assert by_jid[GROUP]["is_group"] is True
-    assert [by_jid[jid]["is_group"] for jid in (PHONE, LID, BROADCAST, NEWSLETTER)] == [False] * 4
+    others = (PHONE, LID, BROADCAST, NEWSLETTER, STATUS, BOT)
+    assert [by_jid[jid]["is_group"] for jid in others] == [False] * len(others)
