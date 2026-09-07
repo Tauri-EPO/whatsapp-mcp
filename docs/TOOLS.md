@@ -946,7 +946,7 @@ Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
 
 - `last_inbound_time` — when they last spoke (the timestamp the list is ordered by)
-- `age_hours` — how long the chat has been waiting
+- `age_hours` — how long the chat has been waiting, on the same clock `min_age_hours` filters with ([Time bounds](#time-bounds)), so every returned row satisfies `age_hours >= min_age_hours`
 
 `unread` tells the two backlogs apart: `false` on a `list_unanswered` row means
 you read it and never answered — the case `list_unread` cannot report.

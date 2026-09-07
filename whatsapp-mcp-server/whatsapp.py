@@ -825,53 +825,6 @@ def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
             conn.close()
 
 
-def _resolve_name_from_whatsmeow(jid: str) -> str | None:
-    """Look up a contact name from whatsmeow's contact store (whatsapp.db).
-
-    Handles both standard JIDs (12345@s.whatsapp.net) and LIDs (opaque numeric
-    identifiers used by WhatsApp's linked device protocol). LIDs are first
-    resolved to phone numbers via whatsmeow_lid_map, then looked up in contacts.
-
-    Falls back gracefully if the DB or table doesn't exist.
-    """
-    if not os.path.exists(WHATSMEOW_DB_PATH):
-        return None
-
-    lookup_jid = jid
-    jid_prefix = jid.split("@")[0] if "@" in jid else jid
-    jid_suffix = jid.split("@")[1] if "@" in jid else ""
-
-    # If this is a LID (@lid suffix) or a raw number, try LID map first.
-    # LIDs overlap in length with phone numbers (12-15 digits) so we always
-    # attempt LID resolution and fall through to direct contact lookup if not found.
-    try:
-        conn = _connect_whatsmeow_db()
-        cursor = conn.cursor()
-        if jid_suffix in ("lid", ""):
-            cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (jid_prefix,))
-            row = cursor.fetchone()
-            if row and row[0]:
-                lookup_jid = row[0] + "@s.whatsapp.net"
-            elif jid_suffix == "lid":
-                # Definitely a LID but not in the map — can't resolve
-                return None
-        # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
-        cursor.execute(
-            "SELECT full_name, push_name, first_name, business_name FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1",
-            (lookup_jid,),
-        )
-        row = cursor.fetchone()
-        if row:
-            # Prefer full_name, then push_name, then first_name, then business_name
-            return row[0] or row[1] or row[2] or row[3] or None
-        return None
-    except sqlite3.Error:
-        return None
-    finally:
-        if "conn" in locals():
-            conn.close()
-
-
 # SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; page sizes stay far
 # below that, but chunking keeps a large get_contact_chats page safe.
 _SQL_IN_CHUNK = 400
@@ -1006,6 +959,7 @@ def get_sender_name(sender_jid: str) -> str:
 
 
 def _get_sender_name_uncached(sender_jid: str) -> str:
+    """chats.name for the sender, else the phone book, else the JID back."""
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
@@ -1028,21 +982,8 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
         )
         result = cursor.fetchone()
 
-        if result and result[0] and not result[0].replace("+", "").isdigit():
+        if result and not _is_placeholder_name(result[0]):
             return result[0]
-
-        # Fall back to whatsmeow contact store
-        whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid)
-        if whatsmeow_name:
-            return whatsmeow_name
-
-        # Try with @s.whatsapp.net suffix if bare number
-        if "@" not in sender_jid:
-            whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid + "@s.whatsapp.net")
-            if whatsmeow_name:
-                return whatsmeow_name
-
-        return sender_jid
 
     except sqlite3.Error as e:
         logger.error("Database error while getting sender name: %s", e)
@@ -1050,6 +991,12 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
     finally:
         if "conn" in locals():
             conn.close()
+
+    # The phone book, through the same batched lookup a page of chats uses
+    # (_contact_names, #245): one code path for LID resolution and name
+    # precedence, and one cache, so a sender already resolved for a chat row
+    # costs nothing here (issue #257).
+    return _contact_names([sender_jid]).get(sender_jid) or sender_jid
 
 
 # SQLite's default parameter limit is 999 on older builds; 3 params per hit.
@@ -1171,6 +1118,17 @@ def timestamp_bound(moment: datetime) -> str:
     if moment.tzinfo is not None:
         moment = moment.astimezone().replace(tzinfo=None)
     return moment.isoformat(sep=" ", timespec="seconds")
+
+
+def timestamp_local(stored: str) -> datetime:
+    """A stored timestamp as a naive local datetime, on the same convention.
+
+    The Python-side mirror of `timestamp_expr`: same 19 characters, same space
+    separator, offset dropped. Ages computed with it and bounds built with
+    `timestamp_bound` therefore measure from one clock (issue #257). Raises
+    ValueError when the text is not a timestamp at all.
+    """
+    return datetime.fromisoformat(stored[:19].replace("T", " "))
 
 
 @dataclass(frozen=True)
@@ -2999,15 +2957,19 @@ def list_unread(
 
 
 def _hours_since(timestamp: str | None) -> float | None:
-    """Hours between a stored timestamp and now, or None when unparseable."""
+    """Hours between a stored timestamp and now, or None when unparseable.
+
+    Local wall time on both sides, the convention `min_age_hours` binds with, so
+    `age_hours >= min_age_hours` holds for every row the filter kept and the
+    stored offset never makes the two disagree (issue #257).
+    """
     if not timestamp:
         return None
     try:
-        moment = datetime.fromisoformat(timestamp)
+        moment = timestamp_local(timestamp)
     except ValueError:
         return None
-    now = datetime.now(moment.tzinfo) if moment.tzinfo else datetime.now()
-    return round((now - moment).total_seconds() / 3600.0, 2)
+    return round((datetime.now() - moment).total_seconds() / 3600.0, 2)
 
 
 def list_unanswered(

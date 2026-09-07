@@ -32,31 +32,14 @@ EXPORT_FORMATS = ("ndjson",)
 # many messages match; the batch also lets one notes query cover 1000 rows.
 EXPORT_BATCH = 1000
 
-# Every key msg_to_dict can produce. tests/test_export_messages.py asserts this
-# stays in sync with the real conversion, so `fields` cannot silently rot.
-EXPORT_FIELDS = (
-    "id",
-    "timestamp",
-    "sender_jid",
-    "sender_phone",
-    "sender_name",
-    "sender_display",
-    "content",
-    "is_from_me",
-    "chat_jid",
-    "chat_name",
-    "media_type",
-    "filename",
-    "target_message_id",
-    "reaction_to_message_id",
-    "poll_message_id",
-    "quoted_message_id",
-    "deleted_at",
-    "view_once",
-    "bytes",
-    "sha256",
-    "notes",
-)
+# Every key msg_to_dict can produce for an exported row, derived from the one
+# list the conversion itself defines (whatsapp.MESSAGE_FIELDS, #252) instead of
+# hand-copied, so a new message key cannot be forgotten here (#257). The two
+# names left out are added by the page shaping, never by the export: it writes
+# whole rows straight from msg_to_dict, so nothing is truncated and no
+# transcript is attached.
+PAGE_ONLY_FIELDS = ("transcript", "content_truncated")
+EXPORT_FIELDS = tuple(name for name in whatsapp.MESSAGE_FIELDS if name not in PAGE_ONLY_FIELDS)
 
 
 def export_dir() -> str:

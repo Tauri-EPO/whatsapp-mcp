@@ -9,6 +9,7 @@ import pytest
 import export
 import whatsapp
 from chat_policy import load_chat_policy
+from errors import ToolError
 
 A = "111@s.whatsapp.net"
 B = "222@s.whatsapp.net"
@@ -199,6 +200,19 @@ def test_export_fields_match_the_real_conversion(store):
     message.sha256 = "deadbeef"  # force the notes key, which only media rows carry
     assert set(whatsapp.msg_to_dict(message, notes={})) <= set(export.EXPORT_FIELDS)
     assert set(export.EXPORT_FIELDS) - set(whatsapp.msg_to_dict(message, notes={})) == set()
+
+
+def test_export_fields_derive_from_the_message_field_list(store):
+    """A new msg_to_dict key reaches exports with no second list to hand-edit (#257)."""
+    assert list(export.EXPORT_FIELDS) == [f for f in whatsapp.MESSAGE_FIELDS if f not in export.PAGE_ONLY_FIELDS]
+    # Every derived name is a valid projection...
+    result = export.export_messages(fields=list(export.EXPORT_FIELDS), out_path="all-fields.ndjson")
+    assert result["count"] == 5
+    # ...and the page-only ones are not, because an export never writes them.
+    for name in export.PAGE_ONLY_FIELDS:
+        with pytest.raises(ToolError) as exc:
+            export.export_messages(fields=[name], out_path="page-only.ndjson")
+        assert exc.value.code == "invalid_argument"
 
 
 def test_tool_forwards_arguments(monkeypatch):

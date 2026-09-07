@@ -104,3 +104,12 @@ def test_msg_to_dict_list_resolves_each_sender_once(dbs, monkeypatch):
     out = [whatsapp.msg_to_dict(m) for m in msgs]
     assert all(d["sender_name"] == "Alice" for d in out)
     assert counts["messages"] == 1, counts
+
+
+def test_get_sender_name_reuses_the_batched_contact_lookup(dbs, monkeypatch):
+    """One phone-book cache for chat pages and senders alike (#257)."""
+    whatsapp._contact_names(["231241139937355@lid"])  # as a page of chats would
+    counts = _count_connections(monkeypatch)
+    assert whatsapp.get_sender_name("231241139937355@lid") == "Bob Silva"
+    assert counts["whatsmeow"] == 0, counts  # already resolved, no second lookup
+    assert counts["messages"] == 1, counts  # chats.name is still tried first

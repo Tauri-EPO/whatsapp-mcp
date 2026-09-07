@@ -143,3 +143,19 @@ def test_db_error_is_internal(db, monkeypatch):
     with pytest.raises(ToolError) as exc:
         whatsapp.list_unanswered()
     assert exc.value.code == "internal"
+
+
+def test_age_hours_and_min_age_hours_use_one_clock(db):
+    """A stored UTC offset must not make the reported age disagree with the filter (#257)."""
+    odd = "5511555555555@s.whatsapp.net"
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO chats VALUES (?, 'Eve', NULL, NULL)", (odd,))
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
+            "VALUES ('e1', ?, 'eve', 'oi', ?, 0)",
+            (odd, _stamp(hours=3) + "+05:00"),
+        )
+    item = next(i for i in main.list_unanswered()["items"] if i["jid"] == odd)
+    assert 2.9 < item["age_hours"] < 3.1  # local wall time, the offset is not re-applied
+    assert odd in _jids(main.list_unanswered(min_age_hours=2))  # ...and the SQL bound agrees
+    assert odd not in _jids(main.list_unanswered(min_age_hours=4))
