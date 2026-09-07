@@ -202,6 +202,10 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
+	// Last: every table and column it rewrites must already exist.
+	if err := migrateCanonicalTimestamps(db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -632,7 +636,7 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 				WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
 				ELSE chats.last_message_time
 			END`,
-		jid, name, lastMessageTime,
+		jid, name, dbTime(lastMessageTime),
 	)
 	return err
 }
@@ -683,7 +687,7 @@ func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
 				WHEN excluded.last_read_time > chats.last_read_time THEN excluded.last_read_time
 				ELSE chats.last_read_time
 			END`,
-		jid, readAt,
+		jid, dbTime(readAt),
 	)
 	return err
 }
@@ -824,7 +828,7 @@ func (store *MessageStore) MarkMessageDeleted(messageID, chatJID string, deleted
 	_, err := store.db.Exec(
 		`UPDATE messages SET deleted_at = ?
 		 WHERE id = ? AND chat_jid = ? AND deleted_at IS NULL`,
-		deletedAt, messageID, chatJID,
+		dbTime(deletedAt), messageID, chatJID,
 	)
 	return err
 }
@@ -878,7 +882,7 @@ func (store *MessageStore) StoreCallOffer(callID, chatJID, fromJID string, times
 		`INSERT OR IGNORE INTO calls
 		 (call_id, chat_jid, from_jid, timestamp, is_from_me, call_type, is_group, result)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress')`,
-		callID, chatJID, fromJID, timestamp, isFromMe, callType, isGroup,
+		callID, chatJID, fromJID, dbTime(timestamp), isFromMe, callType, isGroup,
 	)
 	return err
 }
@@ -908,7 +912,10 @@ func (store *MessageStore) MarkCallRejected(callID, chatJID string) error {
 // (meaning no accept was seen → the call was missed).
 func (store *MessageStore) MarkCallTerminated(callID, chatJID, reason string, endedAt time.Time) error {
 	// ROUND before CAST: julianday() arithmetic produces a float and CAST truncates
-	// toward zero, so a 90-second call would otherwise record as 89.
+	// toward zero, so a 90-second call would otherwise record as 89. julianday()
+	// reads the offset in both spellings, so the duration stays right for a row
+	// stored before the canonical-timestamp migration.
+	ended := dbTime(endedAt)
 	_, err := store.db.Exec(
 		`UPDATE calls SET
 			ended_at = ?,
@@ -920,7 +927,7 @@ func (store *MessageStore) MarkCallTerminated(callID, chatJID, reason string, en
 				ELSE result
 			END
 		 WHERE call_id = ? AND chat_jid = ?`,
-		endedAt, endedAt, reason, callID, chatJID,
+		ended, ended, reason, callID, chatJID,
 	)
 	return err
 }

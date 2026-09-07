@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 	_ "time/tzdata" // zone database for the container images without tzdata
@@ -55,8 +56,9 @@ func TestMediaFileName_AgreesWithArrivalNameAcrossTimezones(t *testing.T) {
 			}
 			// Guard against a vacuous pass: outside UTC the wall-clock digits must
 			// really differ from the UTC rendering, so the comparison above means
-			// something.
-			utcName := mediaFileName("image", time.Unix(sec, 0).UTC(), id, "")
+			// something. The UTC name is spelled out here rather than taken from
+			// mediaFileName, which normalises to the local zone on purpose.
+			utcName := fmt.Sprintf("image_%s_%s.jpg", time.Unix(sec, 0).UTC().Format("20060102_150405"), id)
 			if zone != "UTC" && utcName == arrivalName {
 				t.Errorf("%s: expected a non-UTC wall clock in the name, got %q", id, arrivalName)
 			}

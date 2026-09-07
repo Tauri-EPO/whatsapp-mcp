@@ -121,7 +121,7 @@ func storePollWith(ex sqlExecer, messageID, chatJID string, p *pollCreation, cre
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(message_id, chat_jid) DO UPDATE SET question = excluded.question, options_json = excluded.options_json,
 			selectable_count = excluded.selectable_count`,
-		messageID, chatJID, p.Question, string(opts), p.SelectableCount, createdAt)
+		messageID, chatJID, p.Question, string(opts), p.SelectableCount, dbTime(createdAt))
 	return err
 }
 
@@ -160,7 +160,7 @@ func (store *MessageStore) upsertPollVote(pollMessageID, chatJID, voter string, 
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(poll_message_id, chat_jid, voter) DO UPDATE SET selected_json = excluded.selected_json, voted_at = excluded.voted_at
 		WHERE excluded.voted_at >= poll_votes.voted_at`,
-		pollMessageID, chatJID, voter, selected, votedAt)
+		pollMessageID, chatJID, voter, selected, dbTime(votedAt))
 	return err
 }
 

@@ -57,38 +57,6 @@ func clampHistoryCount(n int) int {
 	}
 }
 
-// anchorTime converts the stored timestamp column into a time.Time. The type
-// depends on the SQLite driver: the driver parses a column declared
-// TIMESTAMP into a time.Time on scan (the production path, handled by the first
-// case), while a pure-Go driver hands back the raw string.
-//
-// The string layouts must cover every format a driver might have *written*. We
-// list them literally rather than importing the driver's exported
-// SQLiteTimestampFormats, because that identifier lives in a cgo file and
-// is an implementation detail — importing it would tie us to one driver's
-// compiler.
-func anchorTime(v any) time.Time {
-	switch t := v.(type) {
-	case time.Time:
-		return t
-	case []byte:
-		return anchorTime(string(t))
-	case string:
-		for _, layout := range []string{
-			"2006-01-02 15:04:05 -0700 MST",           // Go's time.Time.String() (e.g. modernc default)
-			"2006-01-02 15:04:05.999999999 -0700 MST", // same, with fractional seconds
-			"2006-01-02 15:04:05.999999999-07:00",     // write format (cgo driver and modernc with _time_format=sqlite)
-			"2006-01-02T15:04:05.999999999-07:00",     // write format (cgo driver and modernc with _time_format=sqlite), RFC3339-ish T
-			time.RFC3339,
-		} {
-			if parsed, err := time.Parse(layout, t); err == nil {
-				return parsed
-			}
-		}
-	}
-	return time.Time{}
-}
-
 // historyAnchorInfo builds the anchor MessageInfo for an on-demand history
 // request. The phone returns messages from *before* this message, so callers
 // pass the oldest message already stored for the chat.

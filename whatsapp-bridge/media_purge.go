@@ -98,8 +98,10 @@ func (store *MessageStore) MediaRowsMatching(chatJID string, before time.Time, m
 		args = append(args, chatJID)
 	}
 	if !before.IsZero() {
+		// dbTime: the bound value has to use the same spelling as the column
+		// for the plain string comparison (and the index) to mean anything.
 		clauses = append(clauses, "timestamp < ?")
-		args = append(args, before)
+		args = append(args, dbTime(before))
 	}
 	if minBytes > 0 {
 		clauses = append(clauses, "file_length >= ?")

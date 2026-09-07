@@ -64,6 +64,7 @@ whatsapp-mcp/
 │   ├── health.go               # /api/health (liveness), /api/ready (readiness)
 │   ├── chat_actions.go         # /api/mark-read, /api/react, /api/typing
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
+│   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
@@ -257,6 +258,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 13. **Bridge logs go through `bridgeLog`, not `fmt.Print*`.** Levels: `Errorf` for failures that lose data, `Warnf` for degraded-but-continuing, `Infof` for lifecycle, `Debugf` for per-request traces and message echoes (user content stays out of `INFO`). The only `fmt.Print*` left are the first-run token banner and the pairing QR code, which are meant for a human.
 14. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.
 15. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
+16. **One timestamp spelling.** Every TIMESTAMP column the bridge writes holds `YYYY-MM-DD HH:MM:SS+00:00` (UTC, seconds, fixed width) — `dbTime()` in `store_time.go`, never a bound `time.Time`, or the driver stamps the machine's local offset and `ORDER BY timestamp` starts sorting by wall clock. Read with `parseDBTime` / `anchorTime`, which also accept the legacy spellings. A new time column goes in `canonicalTimeColumns` (and bumps `messagesDBUserVersion` so the rewrite runs again). Bounds compared against such a column must be rendered the same way on both sides.
 
 ## 9. Where to make changes
 

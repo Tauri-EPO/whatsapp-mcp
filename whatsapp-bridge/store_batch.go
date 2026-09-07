@@ -91,7 +91,8 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 
 // messageArgs builds the bound parameters for insertMessageSQL. An empty
 // quoted_message_id is stored as NULL so the COALESCE in the upsert keeps a
-// previously stored ID.
+// previously stored ID; the timestamp goes in through dbTime (store_time.go)
+// so every row carries the same UTC spelling.
 func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
 	quotedMessageId string) []any {
@@ -99,6 +100,6 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	if quotedMessageId != "" {
 		qmid = quotedMessageId
 	}
-	return []any{id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
+	return []any{id, chatJID, sender, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
 		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid}
 }

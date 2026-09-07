@@ -195,6 +195,11 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 // two messages that arrive in the same second. Documents take a sanitised
 // extension from the sender's filename (messages.filename) so the cached file
 // opens with the right application; anything else is fixed per type.
+//
+// The wall clock is the local one. On arrival the timestamp is a Local
+// time.Time from whatsmeow; read back out of SQLite it is UTC (store_time.go),
+// and the same instant has to yield the same name or a re-download misses the
+// cache and a purge never finds the file.
 func mediaFileName(mediaType string, timestamp time.Time, messageID, originalName string) string {
 	var ext string
 	switch mediaType {
@@ -209,7 +214,7 @@ func mediaFileName(mediaType string, timestamp time.Time, messageID, originalNam
 	case "document":
 		ext = documentExt(originalName)
 	}
-	return fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
+	return fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Local().Format("20060102_150405"), messageID, ext)
 }
 
 // legacyMediaFileName is the name used before documents kept an extension;
