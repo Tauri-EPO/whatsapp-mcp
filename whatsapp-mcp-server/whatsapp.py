@@ -1072,11 +1072,15 @@ def _fetch_context_windows(
 MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
 POINTER_MEDIA_TYPES = ("reaction", "poll_vote")
 
-# A direct conversation is one-to-one: a phone JID or the same person's LID
-# alias (gotcha 1). Every other server is a fan-out surface — `@g.us` groups,
-# `@broadcast` lists, `@newsletter` channels — so `exclude_groups` keeps this
-# allow-list instead of denying `@g.us` alone (issue #256). The `is_group` field
-# of a chat is unaffected: it still means `@g.us` and nothing else.
+# A direct conversation is one-to-one with another person: a phone JID or the
+# same person's LID alias (gotcha 1). Every other server is either a fan-out
+# surface — `@g.us` groups, `@broadcast` lists, `@newsletter` channels — or not
+# a person at all: `@bot` chats (Meta AI and friends) answer on their own and
+# nobody is waiting there for a reply, which is what `exclude_groups` is asked
+# for (issue #274). So the flag keeps this allow-list instead of denying `@g.us`
+# alone (issue #256), and a server WhatsApp adds later is dropped until someone
+# decides it is direct. The `is_group` field of a chat is unaffected: it still
+# means `@g.us` and nothing else.
 DIRECT_JID_SUFFIXES = ("@s.whatsapp.net", "@lid")
 
 
@@ -1456,7 +1460,8 @@ def list_messages_page(
         has_media: True for messages carrying a file, False for text-only
         media_type: One of image/video/audio/document/sticker (implies has_media=True)
         exclude_groups: Keep direct conversations only (@s.whatsapp.net / @lid),
-            dropping @g.us groups, @broadcast lists and @newsletter channels
+            dropping @g.us groups, @broadcast lists, @newsletter channels and
+            @bot chats
 
         cursor: Opaque next_cursor from the previous page (keyset pagination).
             When given, page is ignored. Relevance sort falls back to an offset
@@ -2870,7 +2875,7 @@ def list_unread(
     message. Honours WHATSAPP_ALLOWED_CHATS.
 
     exclude_groups keeps direct conversations only (`@s.whatsapp.net` / `@lid`),
-    dropping groups, broadcast lists and channels; max_age_days is the relative
+    dropping groups, broadcast lists, channels and bots; max_age_days is the relative
     form of since (both are rejected together). Both bound the counted rows and
     the returned messages alike.
 

@@ -475,7 +475,8 @@ def list_messages(
         media_type: Restrict to one kind of file: "image", "video", "audio",
                  "document" or "sticker". Implies has_media=True.
         exclude_groups: True keeps direct conversations only (@s.whatsapp.net / @lid),
-                 dropping @g.us groups, @broadcast lists and @newsletter channels
+                 dropping @g.us groups, @broadcast lists, @newsletter channels
+                 and @bot chats
         include_transcripts: True copies the stored transcript of each voice note onto
                  the row as `transcript`. Read-only and free (it comes from the same
                  batched notes lookup): it never transcribes, so rows whose audio was
@@ -593,7 +594,7 @@ def message_stats(
         has_media: True for messages carrying a file, False for text-only
         media_type: "image", "video", "audio", "document" or "sticker"
         exclude_groups: True counts direct conversations only (@s.whatsapp.net / @lid),
-                 dropping groups, broadcast lists and channels
+                 dropping groups, broadcast lists, channels and bots
         include_deleted: False drops revoked messages from the counts (default True)
         unread_only: Only unread inbound messages (implies from_me=False)
     """
@@ -669,7 +670,7 @@ def export_messages(
         has_media: True for messages carrying a file, False for text-only
         media_type: "image", "video", "audio", "document" or "sticker"
         exclude_groups: True exports direct conversations only (@s.whatsapp.net / @lid),
-                 dropping groups, broadcast lists and channels
+                 dropping groups, broadcast lists, channels and bots
         include_deleted: False drops revoked messages (default True)
     """
     return export_messages_to_disk(
@@ -718,7 +719,7 @@ def list_unread(
         limit_per_chat: Newest unread messages to include per chat, oldest first (default 5, max 50)
         since: Only count messages after this ISO-8601 timestamp (e.g. "2026-09-04T08:00:00")
         exclude_groups: Keep direct conversations only ("...@s.whatsapp.net" / "...@lid"),
-                      skipping groups, broadcast lists and channels
+                      skipping groups, broadcast lists, channels and bots
         max_age_days: Only count messages from the last N days; the relative form of
                       since. Passing both since and max_age_days is an error.
         fields: Keep only these keys on each message row (same names as list_messages);
@@ -784,7 +785,7 @@ def list_unanswered(
                timestamp (e.g. "2026-09-01T00:00:00")
         limit: Max chats to return, most recent first (default 20, max 200)
         exclude_groups: Keep direct conversations only ("...@s.whatsapp.net" / "...@lid"),
-                       skipping groups, broadcast lists and channels
+                       skipping groups, broadcast lists, channels and bots
         min_age_hours: Only chats waiting at least this long — use it to skip
                        conversations you are in the middle of (24 = "waiting more
                        than a day"). Default 0, no lower bound.
