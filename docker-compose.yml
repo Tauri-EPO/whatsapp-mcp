@@ -153,6 +153,10 @@ services:
       TRANSCRIBE_ON_INGEST: ${TRANSCRIBE_ON_INGEST:-}
       TRANSCRIBE_ON_INGEST_INTERVAL_S: ${TRANSCRIBE_ON_INGEST_INTERVAL_S:-}
       TRANSCRIBE_ON_INGEST_BATCH: ${TRANSCRIBE_ON_INGEST_BATCH:-}
+      # Let that worker download uncached audio from the bridge (auto-download
+      # off, or the bytes purged) instead of skipping it. Off by default; the
+      # fetched voice notes stay in the store volume.
+      TRANSCRIBE_ON_INGEST_FETCH: ${TRANSCRIBE_ON_INGEST_FETCH:-}
       FFMPEG_TIMEOUT_S: ${FFMPEG_TIMEOUT_S:-120}
     volumes:
       - whatsapp-store:/app/store
