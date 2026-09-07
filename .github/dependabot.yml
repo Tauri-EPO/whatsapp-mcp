@@ -2,20 +2,66 @@ version: 2
 updates:
   # "uv" updates pyproject.toml *and* uv.lock together; "pip" only touched
   # pyproject.toml and left the lockfile (which CI and the image use) behind.
+  #
+  # Runtime and dev-tooling bumps are split into separate PRs (#278). The
+  # commit prefix is per entry, not per group, and Dependabot's "uv" ecosystem
+  # classifies every dependency as production (dependabot-core#13202) while
+  # [project.optional-dependencies] is not a development group either
+  # (dependabot-core#10606), so "prefix-development" and "dependency-type"
+  # grouping both do nothing here. The split is what makes the difference
+  # actionable: a dev-tooling PR is retitled to "chore(deps): ..." at merge so
+  # it does not cut a release. See AGENTS.md section 2.
+  #
+  # The runtime group is "everything except the dev tooling", so a new
+  # dependency defaults to runtime: it releases when it should not rather than
+  # silently shipping in an image without a release.
   - package-ecosystem: "uv"
     directory: "/whatsapp-mcp-server"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 2
+    # One slot per version-update group, plus headroom: the limit silently
+    # suppresses a group's PR for the week once it is reached.
+    open-pull-requests-limit: 4
     groups:
+      # The four dev-tooling lists below (twice as exclude-patterns, twice as
+      # patterns) are one list written out four times: Dependabot does not
+      # document YAML anchors as supported, and a config file it rejects stops
+      # every ecosystem, not just this one. Adding a dev tool to
+      # [project.optional-dependencies].dev in whatsapp-mcp-server/pyproject.toml
+      # means adding it to all four, or the catch-all "*" claims it first and it
+      # ships as a runtime bump.
       pip-version-updates:
         applies-to: version-updates
         patterns:
           - "*"
+        exclude-patterns:
+          - "pyright"
+          - "pytest"
+          - "pytest-*"
+          - "ruff"
       pip-security-updates:
         applies-to: security-updates
         patterns:
           - "*"
+        exclude-patterns:
+          - "pyright"
+          - "pytest"
+          - "pytest-*"
+          - "ruff"
+      pip-dev-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "pyright"
+          - "pytest"
+          - "pytest-*"
+          - "ruff"
+      pip-dev-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "pyright"
+          - "pytest"
+          - "pytest-*"
+          - "ruff"
     commit-message:
       prefix: "deps"
 
