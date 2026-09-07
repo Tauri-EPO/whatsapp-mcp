@@ -163,3 +163,93 @@ def test_hash_lookups_use_the_bridge_index(notes_store, monkeypatch):
         for q in hash_queries:
             plan = "\n".join(row[3] for row in c.execute("EXPLAIN QUERY PLAN " + q))
             assert "idx_messages_file_sha256" in plan, (q, plan)
+
+
+# --- notes wherever media is surfaced (issue #222) -----------------------------
+
+
+def _count_note_lookups(monkeypatch) -> list[list[str]]:
+    """Record every fetch_notes call so a page can be shown to cost exactly one."""
+    calls: list[list[str]] = []
+    real = media_notes.fetch_notes
+
+    def counting(hashes):
+        calls.append(list(hashes))
+        return real(hashes)
+
+    monkeypatch.setattr(media_notes, "fetch_notes", counting)
+    return calls
+
+
+def _add_text_message(store, msg_id: str = "TXT1") -> None:
+    with store.messages() as c:
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
+            "VALUES (?, ?, 'x', 'hello', '2026-09-04 10:00:00', 0)",
+            (msg_id, ALICE),
+        )
+
+
+def test_list_messages_returns_notes_for_media_rows_in_one_query(notes_store, monkeypatch):
+    _add_text_message(notes_store)
+    main.annotate_media(SHA_A, "summary", "Family photo from the beach")
+
+    calls = _count_note_lookups(monkeypatch)
+    rows = {r["id"]: r for r in main.list_messages(include_context=False, limit=50)["items"]}
+
+    assert len(calls) == 1  # one batched lookup per page, never one per row
+    assert set(calls[0]) == {SHA_A, SHA_B}
+    assert rows["IMG1"]["notes"] == rows["IMG1F"]["notes"] == {"summary": "Family photo from the beach"}
+    assert rows["VID1"]["notes"] == {}  # media nobody has interpreted yet
+    assert "notes" not in rows["TXT1"]  # text rows stay untouched
+
+
+def test_message_context_returns_notes_in_one_query(notes_store, monkeypatch):
+    main.annotate_media(SHA_A, "summary", "Family photo")
+    calls = _count_note_lookups(monkeypatch)
+
+    context = main.get_message_context(ALICE, "IMG1", before=1, after=1)
+
+    assert len(calls) == 1
+    assert context["message"]["notes"] == {"summary": "Family photo"}
+
+
+def test_list_unread_returns_notes_in_one_query(notes_store, monkeypatch):
+    main.annotate_media(SHA_B, "summary", "Birthday video")
+    calls = _count_note_lookups(monkeypatch)
+
+    rows = {m["id"]: m for chat in main.list_unread()["chats"] for m in chat["messages"]}
+
+    assert len(calls) == 1
+    assert rows["VID1"]["notes"] == {"summary": "Birthday video"}
+    assert rows["IMG1"]["notes"] == {}
+
+
+def test_download_media_returns_the_hash_and_its_notes(notes_store, monkeypatch):
+    _add_text_message(notes_store)
+    main.annotate_media(SHA_A, "summary", "Family photo")
+    monkeypatch.setattr(main, "whatsapp_download_media", lambda mid, chat: f"/store/{chat}/{mid}.jpg")
+
+    out = main.download_media(ALICE, "IMG1")
+    assert out["success"] and out["file_path"].endswith("IMG1.jpg")
+    assert out["sha256"] == SHA_A and out["notes"] == {"summary": "Family photo"}
+
+    # A row without a hash still answers, with nothing to remember.
+    assert main.download_media(ALICE, "TXT1")["sha256"] is None
+    assert main.download_media(ALICE, "TXT1")["notes"] == {}
+
+
+def test_list_media_has_notes_flag_and_filter(notes_store):
+    # No notes.db yet: nothing is annotated, everything is backlog.
+    assert all(item["has_notes"] is False for item in main.list_media()["items"])
+    assert main.list_media(has_notes=True)["items"] == []
+    assert len(main.list_media(has_notes=False)["items"]) == 3
+
+    main.annotate_media(SHA_A, "summary", "Family photo")
+
+    annotated = main.list_media(has_notes=True)["items"]
+    assert {item["message_id"] for item in annotated} == {"IMG1", "IMG1F"}  # one note, both copies
+    assert all(item["has_notes"] is True for item in annotated)
+    backlog = main.list_media(has_notes=False)["items"]
+    assert [item["message_id"] for item in backlog] == ["VID1"]
+    assert backlog[0]["has_notes"] is False

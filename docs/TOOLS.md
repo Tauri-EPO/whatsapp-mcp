@@ -110,9 +110,13 @@ your own account's archive; treat it accordingly.
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
 `<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers), `bytes`
-(the size WhatsApp reported) and `sha256` (the content hash, identical for the
-same file forwarded into several chats). Pass the message `id` and `chat_jid`
-to `download_media` to fetch the file; see `list_media` for an inventory.
+(the size WhatsApp reported), `sha256` (the content hash, identical for the
+same file forwarded into several chats) and `notes` (what the agent recorded
+about that hash, `{}` when nothing was — see
+[annotate-after-reading](#annotate-after-reading)). The notes of a whole page
+are fetched in one query, so context windows and long pages cost the same
+single lookup. Pass the message `id` and `chat_jid` to `download_media` to
+fetch the file; see `list_media` for an inventory.
 
 **Natural Language Examples:**
 
@@ -317,6 +321,11 @@ whisper.cpp `whisper-server`, see the `whisper` profile in
 with ffmpeg before transcription. Returns `text`, `language`, `backend` and the
 local `file_path`.
 
+Transcribing is the interpretation step for a voice note: store the result with
+`annotate_media(sha256, "transcript", text)` (plus a `summary` for long notes)
+so the same audio is never transcribed twice — see
+[annotate-after-reading](#annotate-after-reading).
+
 ### `download_media`
 
 Download media from a received message.
@@ -325,6 +334,11 @@ Download media from a received message.
 
 - `chat_jid` (required): JID of the chat containing the message
 - `message_id` (required): ID of the message with media
+
+Returns `{"success": true, "message", "file_path", "sha256", "notes"}`. `notes`
+is what was already recorded about this exact file (`{}` when nothing was);
+an empty one means the file has never been interpreted, so read it and then
+call `annotate_media` — see [annotate-after-reading](#annotate-after-reading).
 
 By default the bridge caches every inbound file as it arrives, so this tool
 usually returns immediately. The file on disk is named
@@ -356,6 +370,8 @@ and text never appear.
 - `media_type` (optional): `image` | `video` | `audio` | `document` | `sticker`
 - `after` / `before` (optional): ISO-8601 bounds
 - `min_bytes` (optional): only files at least this large
+- `has_notes` (optional): `true` only files already annotated, `false` only files with no
+  note yet (the backlog to interpret); omitted returns both
 - `sort` (optional): `size` (largest first, default), `date` (newest first) or `copies` (most forwarded first)
 - `limit` (default 50, max 200), `page`, `cursor`: pagination as in every list tool
 
@@ -364,14 +380,16 @@ Each item carries `message_id`, `chat_jid`, `chat_name`, `sender_jid`,
 WhatsApp), `sha256` (hex content hash; `null` for rows without one), `cached`
 (the file is on disk under the store right now), `cached_bytes` / `cached_file`
 (actual size and name on disk), `copies` (rows sharing the hash across allowed
-chats), `copies_in` (distinct chats) and `deleted_at`. A `cached: false` entry
-is still one `download_media` call away, expired CDN links included.
+chats), `copies_in` (distinct chats), `deleted_at`, `notes` (`{key: value}` for
+the hash) and `has_notes`. A `cached: false` entry is still one
+`download_media` call away, expired CDN links included.
 
 **Natural Language Examples:**
 
 - "What are the ten largest files in the family group?"
 - "Which attachments were forwarded into the most chats this month?"
 - "List the documents from Ana that are not cached locally"
+- "Which documents have I never summarised?" (`has_notes=false`)
 
 ### `get_media_stats`
 
@@ -407,9 +425,41 @@ or the file being re-downloaded.
 
 Only hashes visible through `list_media` / `list_messages` can be annotated or
 read; a hash that exists solely in chats outside `WHATSAPP_ALLOWED_CHATS` is
-reported as `not_found`, the same as an unknown one. `list_media` shows the
-notes of each entry inline (`notes: {key: value}`), so a cleanup pass can see
-`keep: yes` before deciding anything.
+reported as `not_found`, the same as an unknown one.
+
+<a id="annotate-after-reading"></a>
+
+#### Annotate after reading
+
+Notes are returned **wherever a media message is surfaced**, so the agent sees
+what it already knows before spending anything on the file again:
+
+| Tool | Where the notes appear |
+|---|---|
+| `list_messages`, `get_message_context`, `list_unread` | `notes` on every media row (one batched query per page, never one per row) |
+| `download_media` | `sha256` + `notes` in the response |
+| `list_media` | `notes` and `has_notes` per item, `has_notes` also filters |
+| `get_media_notes`, `search_media_notes` | the notes themselves |
+
+The convention the tool descriptions state, and that the agent is expected to
+follow: **a media item that comes back with empty `notes` is a file nobody has
+interpreted yet — after reading it (opening the image or PDF, transcribing the
+voice note), write what you understood back with
+`annotate_media(sha256, "summary", ...)`.** The note is keyed by content hash,
+so it also covers every copy of that file in other chats, and it survives
+`purge_media` and re-downloads. Without this step the same archive gets
+re-interpreted from scratch on every pass.
+
+Conventional keys (use them before inventing new ones):
+
+- `summary` — one or two sentences on what the file contains; always write this one
+- `tags` — labels, comma-separated or a JSON list (`invoice`, `contract`, `receipt`)
+- `transcript` — the spoken text of a voice note (see `transcribe_audio`)
+- `keep` — `yes` for files a cleanup pass must not purge, `no` for disposable ones
+
+`list_media(has_notes=false)` is the backlog view (what has never been
+interpreted); `list_media(has_notes=true)` and `search_media_notes` are the
+memory view. A cleanup pass reads `keep: yes` before deciding anything.
 
 **Natural Language Examples:**
 

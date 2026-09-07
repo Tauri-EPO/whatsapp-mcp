@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -443,8 +444,57 @@ def _target_id(message: Message) -> str | None:
     return message.target_message_id or message.filename or None
 
 
-def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str, Any]:
-    """Convert a Message dataclass to a dictionary for JSON serialization."""
+def fetch_media_notes(messages: Sequence[Message]) -> dict[str, dict[str, str]]:
+    """Agent notes for every media hash in a batch of messages: {sha256: {key: value}}.
+
+    One query for a whole page instead of one per row. media_notes imports this
+    module, so the import lives here rather than at the top.
+    """
+    from media_notes import fetch_notes
+
+    hashes = [m.sha256 for m in messages if m.sha256 and m.media_type and not _is_pointer_row(m)]
+    return fetch_notes(hashes) if hashes else {}
+
+
+def msgs_to_dicts(messages: Sequence[Message], include_sender_name: bool = True) -> list[dict[str, Any]]:
+    """Convert a page of messages, looking their media notes up in one query."""
+    notes = fetch_media_notes(messages)
+    return [msg_to_dict(message, include_sender_name, notes) for message in messages]
+
+
+def media_notes_for_message(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """{"sha256", "notes"} for one media message; empty notes when the row has no hash."""
+    try:
+        conn = _connect_messages_db()
+        try:
+            row = conn.execute(
+                "SELECT lower(hex(file_sha256)) FROM messages WHERE id = ? AND chat_jid = ?",
+                (message_id, chat_jid),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    sha256 = (row[0] if row else None) or None
+    if not sha256:
+        return {"sha256": None, "notes": {}}
+    from media_notes import fetch_notes
+
+    return {"sha256": sha256, "notes": fetch_notes([sha256]).get(sha256, {})}
+
+
+def msg_to_dict(
+    message: Message,
+    include_sender_name: bool = True,
+    notes: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Convert a Message dataclass to a dictionary for JSON serialization.
+
+    Media rows carry the agent's notes for their sha256 (`{}` when the file has
+    never been annotated). Pass `notes` from fetch_media_notes to convert a whole
+    page with a single notes query; without it a media row costs one lookup.
+    """
     # Extract phone number from JID (e.g., "1234567890@s.whatsapp.net" -> "1234567890")
     sender_phone = message.sender.split("@")[0] if "@" in message.sender else message.sender
 
@@ -464,7 +514,10 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
                 sender_name = sender_phone
                 sender_display = sender_phone
 
-    return {
+    is_media = bool(message.media_type) and not _is_pointer_row(message)
+    sha256 = message.sha256 if is_media else None
+
+    row: dict[str, Any] = {
         "id": message.id,
         "timestamp": message.timestamp.isoformat(),
         "sender_jid": message.sender,
@@ -476,16 +529,20 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "chat_jid": message.chat_jid,
         "chat_name": message.chat_name,
         "media_type": message.media_type,
-        "filename": (message.filename or None) if message.media_type and not _is_pointer_row(message) else None,
+        "filename": (message.filename or None) if is_media else None,
         "target_message_id": _target_id(message),
         "reaction_to_message_id": (_target_id(message) if message.media_type == "reaction" else None),
         "poll_message_id": (_target_id(message) if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
         "view_once": message.view_once,
-        "bytes": message.bytes if message.media_type and not _is_pointer_row(message) else None,
-        "sha256": message.sha256 if message.media_type and not _is_pointer_row(message) else None,
+        "bytes": message.bytes if is_media else None,
+        "sha256": sha256,
     }
+    if sha256:
+        page_notes = notes if notes is not None else fetch_media_notes([message])
+        row["notes"] = page_notes.get(sha256, {})
+    return row
 
 
 def chat_to_dict(chat: "Chat") -> dict[str, Any]:
@@ -1139,10 +1196,10 @@ def list_messages_page(
                 for ctx_msg in after_msgs:
                     _add(ctx_msg)
 
-            return PageResult([msg_to_dict(msg) for msg in messages_with_context], next_cursor, has_more)
+            return PageResult(msgs_to_dicts(messages_with_context), next_cursor, has_more)
 
         # Return messages without context
-        return PageResult([msg_to_dict(msg) for msg in result], next_cursor, has_more)
+        return PageResult(msgs_to_dicts(result), next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -2144,9 +2201,13 @@ def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | Non
                     "unread_count": int(count),
                     "latest_unread": latest,
                     "last_read_time": last_read,
-                    "messages": [msg_to_dict(_row_to_message(row)) for row in reversed(rows)],
+                    "messages": [_row_to_message(row) for row in reversed(rows)],
                 }
             )
+        # One notes query for the whole call, not one per chat or per message.
+        notes = fetch_media_notes([message for chat in chats for message in chat["messages"]])
+        for chat in chats:
+            chat["messages"] = [msg_to_dict(message, notes=notes) for message in chat["messages"]]
         return {"chats": chats, "total_unread": total, "chats_with_unread": len(chats)}
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
