@@ -1125,6 +1125,22 @@ def _fetch_context_windows(
 MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
 POINTER_MEDIA_TYPES = ("reaction", "poll_vote")
 
+# A direct conversation is one-to-one: a phone JID or the same person's LID
+# alias (gotcha 1). Every other server is a fan-out surface — `@g.us` groups,
+# `@broadcast` lists, `@newsletter` channels — so `exclude_groups` keeps this
+# allow-list instead of denying `@g.us` alone (issue #256). The `is_group` field
+# of a chat is unaffected: it still means `@g.us` and nothing else.
+DIRECT_JID_SUFFIXES = ("@s.whatsapp.net", "@lid")
+
+
+def _direct_only_clause(column: str) -> str:
+    """SQL predicate keeping direct (one-to-one) conversations only.
+
+    The suffixes are module constants, never user input, so they are inlined
+    rather than bound.
+    """
+    return "(" + " OR ".join(f"{column} LIKE '%{suffix}'" for suffix in DIRECT_JID_SUFFIXES) + ")"
+
 
 @dataclass(frozen=True)
 class MessageFilters:
@@ -1168,7 +1184,7 @@ class MessageFilters:
             params.append(self.chat_jid)
 
         if self.exclude_groups:
-            clauses.append("messages.chat_jid NOT LIKE '%@g.us'")
+            clauses.append(_direct_only_clause("messages.chat_jid"))
 
         if CHAT_POLICY.restricted:
             clause, clause_params = CHAT_POLICY.sql_clause("messages.chat_jid")
@@ -1393,7 +1409,8 @@ def list_messages_page(
         from_me: True for messages you sent, False for inbound only, None for both
         has_media: True for messages carrying a file, False for text-only
         media_type: One of image/video/audio/document/sticker (implies has_media=True)
-        exclude_groups: Drop group chats (@g.us), keeping direct conversations
+        exclude_groups: Keep direct conversations only (@s.whatsapp.net / @lid),
+            dropping @g.us groups, @broadcast lists and @newsletter channels
 
         cursor: Opaque next_cursor from the previous page (keyset pagination).
             When given, page is ignored. Relevance sort falls back to an offset
@@ -2786,8 +2803,7 @@ def unread_filters(
         clauses.append("AND messages.timestamp > ?")
         params.append(since_ts)
     if exclude_groups:
-        # same definition as the is_group field of each returned chat
-        clauses.append("AND chats.jid NOT LIKE '%@g.us'")
+        clauses.append("AND " + _direct_only_clause("chats.jid"))
     return (" ".join(clauses), params)
 
 
@@ -2806,7 +2822,8 @@ def list_unread(
     with no marker count as entirely unread. Ordered by most recent unread
     message. Honours WHATSAPP_ALLOWED_CHATS.
 
-    exclude_groups drops `...@g.us` conversations; max_age_days is the relative
+    exclude_groups keeps direct conversations only (`@s.whatsapp.net` / `@lid`),
+    dropping groups, broadcast lists and channels; max_age_days is the relative
     form of since (both are rejected together). Both bound the counted rows and
     the returned messages alike.
 

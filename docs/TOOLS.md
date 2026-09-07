@@ -119,6 +119,25 @@ This is what a draft-only assistant should use: preview, show the payload, send 
 
 Conventions: `chat_jid` is always the conversation (a phone number with country code, a direct-chat JID `…@s.whatsapp.net` or a group JID `…@g.us`); `contact_jid` is a person; `message_id` always follows `chat_jid` because message IDs are only unique per chat. Messages include `sender_display` showing "Name (phone)" for easy identification by agents.
 
+## Direct conversations
+
+A **direct conversation** is one-to-one: a phone JID `…@s.whatsapp.net` or the
+same person's anonymous alias `…@lid`. Everything else WhatsApp puts in the
+chat list is a fan-out surface — `…@g.us` groups, `…@broadcast` lists (status
+included) and `…@newsletter` channels.
+
+`exclude_groups`, on `list_messages`, `message_stats`, `export_messages`,
+`list_unread` and `list_unanswered`, keeps direct conversations **only**: it is
+an allow-list of the two direct servers, not a "drop `@g.us`" rule. On an
+account that follows channels or receives broadcast lists, that is the
+difference between a triage list a human can read and one full of things nobody
+replies to. There is no separate `direct_only` flag: one predicate, one name.
+
+The `is_group` field on a chat row is unaffected and still means `…@g.us`
+exactly — a broadcast list is not a group, it is simply not direct. A chat that
+is neither direct nor a group therefore reports `is_group: false` and is still
+dropped by `exclude_groups`.
+
 ## Bridge
 
 ### `bridge_status`
@@ -237,7 +256,7 @@ Get messages with filters, date ranges, and sorting.
 - `from_me` (optional, default unset): `true` for messages you sent, `false` for inbound only, unset for both. `unread_only` already implies inbound, so `unread_only=true, from_me=true` is refused with `invalid_argument` instead of returning an empty page
 - `has_media` (optional, default unset): `true` for messages carrying a file, `false` for text-only. Reactions and poll votes are pointer rows and never count as media
 - `media_type` (optional): one of `image`, `video`, `audio`, `document`, `sticker`. Implies `has_media=true`; combining it with `has_media=false` is refused
-- `exclude_groups` (optional, default `false`): `true` drops group chats (`@g.us`) and keeps direct conversations
+- `exclude_groups` (optional, default `false`): `true` keeps [direct conversations](#direct-conversations) only — `@s.whatsapp.net` and `@lid` — dropping `@g.us` groups, `@broadcast` lists and `@newsletter` channels
 - `include_transcripts` (optional, default `false`): `true` copies the stored transcript of each voice note onto its row as `transcript`. It comes from the same batched `notes.db` lookup the rows already do, costs no extra query and **never** transcribes: audio never passed to `transcribe_audio` simply has none. `media_type="audio", include_transcripts=true` reads a conversation held by voice
 - `fields`, `omit_nulls`, `max_content_chars`, `count_only`: shape the response instead of returning every key of every row — see [Compact reads](#compact-reads). Start a bulk read with `count_only=true`
 
@@ -856,7 +875,7 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 - `limit_chats` (optional, default 20, max 100)
 - `limit_per_chat` (optional, default 5, max 50)
 - `since` (optional): ISO-8601 lower bound
-- `exclude_groups` (optional, default false): skip `...@g.us` chats, keeping direct conversations only
+- `exclude_groups` (optional, default false): keep [direct conversations](#direct-conversations) only, skipping groups, broadcast lists and channels
 - `max_age_days` (optional): count only the last N days — the relative spelling of `since`. Giving both is an `invalid_argument` error
 - `fields`, `omit_nulls`, `max_content_chars`: shape the message rows inside each chat — see [Compact reads](#compact-reads)
 - `count_only` (optional, default false): return `{"count", "chats_with_unread"}` over every matching chat and read no message row
@@ -881,7 +900,7 @@ Chats with no stored messages never appear.
 
 - `since` (optional): only chats whose last inbound message is newer than this ISO-8601 timestamp
 - `limit` (optional, default 20, max 200)
-- `exclude_groups` (optional, default false): skip `...@g.us` chats
+- `exclude_groups` (optional, default false): keep [direct conversations](#direct-conversations) only, skipping groups, broadcast lists and channels
 - `min_age_hours` (optional, default 0): only chats waiting at least this long — `24` skips the conversations you are in the middle of
 - `include_last_message` (optional, default true): include `last_message` / `last_sender`
 - `cursor` (optional): `next_cursor` from the previous page
