@@ -444,7 +444,10 @@ def list_messages(
         query: Search term to filter messages by content. Accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
-               (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*')
+               (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*'). Voice notes
+               whose transcript was already stored (transcribe_audio, or the
+               TRANSCRIBE_ON_INGEST worker) match on what was said in them, as a
+               plain substring of the transcript
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0); ignored when cursor is set
         include_context: Include surrounding messages for context (default True)

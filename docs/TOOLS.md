@@ -245,6 +245,22 @@ The four filters above are plain WHERE predicates, so they combine with each oth
 every filter above: `from_me=false, media_type="document", exclude_groups=true`
 is "documents people sent me in a direct chat".
 
+**`query` searches stored transcripts too.** A voice note has no `content`, so
+the bridge's index cannot see what was said in it — but a transcript that is
+already in `notes.db` can be searched, and `query` matches it. So
+`list_messages(query="orcamento")` returns both the messages that *wrote* the
+word and the voice notes that *said* it, and `list_messages(query="…",
+media_type="audio", include_transcripts=true)` reads back the matching voice
+notes with their text. What is searchable is exactly what has been transcribed:
+by an agent calling [`transcribe_audio`](#transcribe_audio), or by the
+`TRANSCRIBE_ON_INGEST` worker doing it in the background as messages arrive
+(see [Transcribing voice notes as they arrive](CONFIGURATION.md#transcribing-voice-notes-as-they-arrive)).
+Audio nobody transcribed stays invisible to `query`. Two details worth knowing:
+the transcript side is a plain **substring** match (the FTS operators and accent
+folding apply to message text only), and it is bounded at 400 matching files per
+query, most recently transcribed first — a term that occurs in every voice note
+you own is better answered with `search_media_notes(key="transcript")`.
+
 Revoked messages ("delete for everyone", by the sender or by you) stay in this
 archive with their content, media and `filename`; only `deleted_at` is set.
 This is deliberate: the archive is the account owner's copy. To really forget a
