@@ -67,6 +67,10 @@ EXPECTED_UNTRUSTED = {
     "get_media_stats",
     "get_media_notes",
     "search_media_notes",
+    "get_notes",
+    "search_notes",
+    # `replaced` echoes whatever the displaced note held, transcripts included.
+    "annotate",
     "download_media",
     "transcribe_audio",
     # Returns a summary, but the NDJSON file it writes is a corpus of exactly
@@ -203,7 +207,8 @@ class TestWrapPayload:
         assert flat["notes"]["summary"] == f"{OPEN_TAG}an invoice{CLOSE_TAG}"
         nested = wrapped({"notes": {"summary": {"value": "an invoice", "updated_at": "2026-09-04"}}})
         assert nested["notes"]["summary"]["value"] == f"{OPEN_TAG}an invoice{CLOSE_TAG}"
-        assert nested["notes"]["summary"]["updated_at"] == f"{OPEN_TAG}2026-09-04{CLOSE_TAG}"
+        # Not wrapped: annotate(..., if_unchanged_since=...) takes it straight back.
+        assert nested["notes"]["summary"]["updated_at"] == "2026-09-04"
 
     def test_search_media_notes_rows(self):
         rows = [{"sha256": "ab", "key": "summary", "value": "an invoice", "updated_at": "2026-09-04"}]

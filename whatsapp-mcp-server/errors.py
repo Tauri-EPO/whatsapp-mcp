@@ -7,7 +7,8 @@ Success returns the payload the tool documents. Failure returns::
 codes: ``not_found`` (the chat/message/contact does not exist in the archive),
 ``denied`` (WHATSAPP_ALLOWED_CHATS blocks the target), ``bridge_unavailable``
 (the bridge REST API could not be reached or answered 5xx), ``invalid_argument``
-(bad input), ``internal`` (unexpected failure, details in the server log).
+(bad input), ``conflict`` (the target changed since the caller read it; re-read
+and retry), ``internal`` (unexpected failure, details in the server log).
 
 An agent that sees an unexpected empty result should call ``bridge_status``;
 an unreadable database is reported as ``internal``, never as an empty account.
@@ -21,7 +22,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-ERROR_CODES = ("not_found", "denied", "bridge_unavailable", "invalid_argument", "internal")
+ERROR_CODES = ("not_found", "denied", "bridge_unavailable", "invalid_argument", "conflict", "internal")
 
 logger = logging.getLogger("whatsapp_mcp")
 

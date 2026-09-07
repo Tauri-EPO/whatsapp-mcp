@@ -200,9 +200,11 @@ injection away from sending. With read-only on there is no send tool to call.
 
 - `download_media` and `transcribe_audio` — they fetch and read; the only write
   is to the local media cache.
-- `annotate_media` / `get_media_notes` / `search_media_notes` — notes live in
+- `annotate` / `get_notes` / `search_notes` and their media-shaped aliases
+  `annotate_media` / `get_media_notes` / `search_media_notes` — notes live in
   `notes.db`, local state owned by the MCP server, never WhatsApp. A read-only
-  assistant still needs somewhere to keep its own working memory.
+  assistant still needs somewhere to keep its own working memory, and a triage
+  pass that cannot record what it concluded has to derive it again next time.
 
 Two deliberate calls at the edges:
 

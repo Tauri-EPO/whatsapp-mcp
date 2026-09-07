@@ -32,8 +32,10 @@ Deliberately *not* mutating:
 
 - ``download_media`` / ``transcribe_audio`` — fetch and read; they only write to
   the local media cache.
-- ``annotate_media`` — writes notes.db, which is local MCP-owned state, never
-  WhatsApp. A read-only assistant still needs somewhere to keep its own notes.
+- ``annotate_media`` and ``annotate`` — write notes.db, which is local MCP-owned
+  state, never WhatsApp. A read-only assistant still needs somewhere to keep its
+  own notes; a triage pass that cannot record what it concluded is the failure
+  issue #286 describes.
 
 Deliberately mutating even though it reads:
 

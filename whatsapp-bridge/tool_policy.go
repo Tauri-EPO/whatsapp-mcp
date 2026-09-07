@@ -63,6 +63,7 @@ var endpointTools = map[string][]string{
 // here just as they do in read-only mode) and writes that never leave the host.
 // Accepted in both lists, enforced by the MCP server only.
 var unenforcedTools = []string{
+	"annotate",
 	"annotate_media",
 	"bridge_status",
 	"coverage",
@@ -76,6 +77,7 @@ var unenforcedTools = []string{
 	"get_media_notes",
 	"get_media_stats",
 	"get_message_context",
+	"get_notes",
 	"get_poll_results",
 	"list_chats",
 	"list_group_members",
@@ -86,6 +88,7 @@ var unenforcedTools = []string{
 	"message_stats",
 	"search_contacts",
 	"search_media_notes",
+	"search_notes",
 	"transcribe_audio",
 }
 

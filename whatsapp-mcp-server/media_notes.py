@@ -152,7 +152,7 @@ def _ensure_transcripts_fts(conn: sqlite3.Connection) -> bool:
     return True
 
 
-def _index_transcript(conn: sqlite3.Connection, sha256: str, value: str) -> None:
+def index_transcript(conn: sqlite3.Connection, sha256: str, value: str) -> None:
     """Mirror one transcript note into the index (an empty value removes it).
 
     Runs inside the caller's write transaction, so the note and its index entry
@@ -180,7 +180,7 @@ def normalize_sha256(value: str) -> str:
     return sha
 
 
-def _normalize_key(value: str) -> str:
+def normalize_key(value: str) -> str:
     key = (value or "").strip()
     if not key or len(key) > MAX_KEY_LEN:
         raise ToolError(
@@ -251,11 +251,22 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
     ]
 
 
+# The one answer for a hash the agent may not look at: unknown and
+# invisible-here are deliberately indistinguishable.
+NOT_VISIBLE_MESSAGE = "no media with this sha256 in the chats you can see"
+
+
 def _require_visible(sha256: str) -> list[dict[str, Any]]:
     messages = _messages_for_hash(sha256)
     if not messages:
-        raise ToolError("not_found", "no media with this sha256 in the chats you can see")
+        raise ToolError("not_found", NOT_VISIBLE_MESSAGE)
     return messages
+
+
+def require_visible_hash(sha256: str) -> None:
+    """Cheap visibility check (no message list) for callers that only write."""
+    if not visible_hashes([sha256]):
+        raise ToolError("not_found", NOT_VISIBLE_MESSAGE)
 
 
 def fetch_notes(hashes: list[str]) -> dict[str, dict[str, str]]:
@@ -281,19 +292,21 @@ def fetch_notes(hashes: list[str]) -> dict[str, dict[str, str]]:
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     """Set (or, with an empty value, delete) one note on a visible hash."""
     sha = normalize_sha256(sha256)
-    key = _normalize_key(key)
+    key = normalize_key(key)
     value = value if value is not None else ""
     if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
         raise ToolError("invalid_argument", f"value exceeds {MAX_VALUE_BYTES} bytes; store a summary, not the file")
     _require_visible(sha)
-    now = datetime.now(UTC).replace(microsecond=0).isoformat()
+    # Microseconds: notes.annotate uses updated_at as its optimistic-locking
+    # token, and two writes in the same second would otherwise share one.
+    now = datetime.now(UTC).isoformat()
     conn = _connect(create=True)
     assert conn is not None
     try:
         if value.strip() == "":
             deleted = conn.execute("DELETE FROM media_notes WHERE sha256 = ? AND key = ?", (sha, key)).rowcount
             if key == TRANSCRIPT_KEY:
-                _index_transcript(conn, sha, "")
+                index_transcript(conn, sha, "")
             conn.commit()
             return {"success": True, "sha256": sha, "key": key, "deleted": deleted > 0}
         conn.execute(
@@ -307,7 +320,7 @@ def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
         # and an agent writing the key by hand), so this is the one hook the
         # index needs.
         if key == TRANSCRIPT_KEY:
-            _index_transcript(conn, sha, value)
+            index_transcript(conn, sha, value)
         conn.commit()
     finally:
         conn.close()
@@ -417,7 +430,7 @@ def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> l
     params: list[Any] = [needle, needle]
     if key:
         clauses.append("key = ?")
-        params.append(_normalize_key(key))
+        params.append(normalize_key(key))
     try:
         rows = conn.execute(
             f"SELECT sha256, key, value, updated_at FROM media_notes WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC",
