@@ -22,7 +22,13 @@ from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
-from tool_policy import apply_tool_policy, load_tool_policy, mutating_tool, set_active_policy
+from tool_policy import (
+    apply_tool_policy,
+    load_tool_policy,
+    mutating_tool,
+    registered_tool_names,
+    set_active_policy,
+)
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
 from whatsapp import (
@@ -184,6 +190,7 @@ def coverage(gap_hours: float = 24.0, max_gaps: int = 20) -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
+@mutating_tool
 def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
     """Ask the phone to send older messages for one chat, to fill a gap in the archive.
 
@@ -1397,17 +1404,20 @@ if __name__ == "__main__":
     logging.basicConfig(level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(), handlers=[_handler])
     logging.getLogger("whatsapp_mcp").info("whatsapp-mcp-server %s", MCP_VERSION)
 
-    # Operation-level access control (WHATSAPP_READ_ONLY, tool_policy.py). Blocked
-    # tools are unregistered here, before any transport starts, so they never
-    # appear in tools/list; the decorator refuses them at call time as well.
-    # A value we cannot parse stops the process rather than defaulting to "off".
+    # Operation-level access control (WHATSAPP_READ_ONLY, WHATSAPP_ALLOW_TOOLS,
+    # WHATSAPP_DENY_TOOLS; tool_policy.py). Blocked tools are unregistered here,
+    # before any transport starts, so they never appear in tools/list; mutating
+    # tools refuse at call time as well. A value we cannot parse — an unreadable
+    # boolean or a tool name that does not exist — stops the process rather than
+    # running with a policy the operator did not mean.
     try:
         _tool_policy = load_tool_policy()
+        _tool_policy.validate(registered_tool_names(mcp))
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     set_active_policy(_tool_policy)
-    apply_tool_policy(mcp, _tool_policy)
-    logging.getLogger("whatsapp_mcp").info("%s", _tool_policy.summary())
+    _removed_tools = apply_tool_policy(mcp, _tool_policy)
+    logging.getLogger("whatsapp_mcp").info("%s", _tool_policy.summary(_removed_tools))
 
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()

@@ -127,6 +127,10 @@ services:
       WHATSAPP_ALLOWED_CHATS: ${WHATSAPP_ALLOWED_CHATS:-}
       # Read-only mode: mutating tools are hidden from tools/list and refused.
       WHATSAPP_READ_ONLY: ${WHATSAPP_READ_ONLY:-}
+      # Finer than read-only: pick tools by name. Deny wins over allow, and
+      # read-only wins over both. MCP server only (the bridge has no tools).
+      WHATSAPP_ALLOW_TOOLS: ${WHATSAPP_ALLOW_TOOLS:-}
+      WHATSAPP_DENY_TOOLS: ${WHATSAPP_DENY_TOOLS:-}
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
       # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
       WHATSAPP_STORE_DIR: /app/store

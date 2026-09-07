@@ -42,6 +42,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
+| `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | MCP server only: comma-separated tool names to offer, everything else is hidden (reads included). See [Per-tool allow/deny](#per-tool-allowdeny) |
+| `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | MCP server only: comma-separated tool names never to offer. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
@@ -178,11 +180,11 @@ Why this matters: an agent that reads any group or forwarded message is reading
 attacker-controlled text. Told "never send without approval", it is one prompt
 injection away from sending. With read-only on there is no send tool to call.
 
-**Blocked** (14 tools / 13 endpoints): `send_message`, `send_file`,
+**Blocked** (15 tools / 13 endpoints): `send_message`, `send_file`,
 `send_audio_message`, `send_reaction`, `send_typing`, `mark_messages_read`,
 `delete_message`, `edit_message`, `forward_message`,
 `manage_group_participants`, `update_group`, `get_group_invite_link`,
-`leave_group`, `purge_media`; on the bridge `/api/send`, `/api/react`,
+`leave_group`, `purge_media`, `request_history`; on the bridge `/api/send`, `/api/react`,
 `/api/typing`, `/api/mark-read`, `/api/delete`, `/api/edit`, `/api/forward`,
 `/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
 `/api/group/leave`, `/api/media/purge`, `/api/history`.
@@ -200,14 +202,49 @@ Two deliberate calls at the edges:
 - `get_group_invite_link` is blocked even though it usually only reads:
   `reset=True` revokes the current link, and an invite link *is* group access
   that can be leaked into a chat.
-- `/api/history` (on-demand backfill) is blocked: it asks the phone to push
-  data and writes new rows into `messages.db`. Turn read-only off for the run
-  if you need to backfill a chat.
+- `request_history` / `/api/history` (on-demand backfill) is blocked: it asks
+  the phone to push data and writes new rows into `messages.db`. Turn read-only
+  off for the run if you need to backfill a chat.
 
 The value is parsed strictly — `1/true/yes/on` and `0/false/no/off`,
 case-insensitive. Anything else stops the process at startup with an error
 instead of quietly running wide open, and both processes log the mode they are
 in on their first lines (`WHATSAPP_READ_ONLY=1: read-only, ...`).
+
+## Per-tool allow/deny
+
+Read-only mode is one blunt line: reads yes, writes no. When you want a specific
+shape — "may react and mark read, may never delete or leave a group" — name the
+tools:
+
+```dotenv
+# an assistant that can acknowledge but not write
+WHATSAPP_ALLOW_TOOLS=list_chats,list_messages,list_unread,search_contacts,get_message_context,send_reaction,mark_messages_read
+
+# or: everything except the destructive ones
+WHATSAPP_DENY_TOOLS=delete_message,leave_group,manage_group_participants,purge_media
+```
+
+- `WHATSAPP_ALLOW_TOOLS` is **exhaustive**: when set, only the tools it names are
+  offered, read tools included. Leave it unset to start from "everything".
+- `WHATSAPP_DENY_TOOLS` removes tools from whatever is left.
+- **Deny wins over allow, and `WHATSAPP_READ_ONLY` wins over both.** The three
+  filters only ever remove capability, so `WHATSAPP_ALLOW_TOOLS=send_message`
+  cannot switch sending back on in a read-only deployment. It also cannot
+  re-open a bridge endpoint: if you want a mutating tool, do not set
+  `WHATSAPP_READ_ONLY` on either process, and use the lists instead.
+- Blocked tools are removed from `tools/list` before any transport starts, so the
+  model never sees them; a mutating tool called anyway returns
+  `{"error": {"code": "denied", ...}}` naming the list that blocked it.
+- **A name that is not a tool stops the server at startup**, with the offending
+  entry and the list of valid names — a typo in an allow-list must not silently
+  widen it. Tool names are exactly those in [TOOLS.md](TOOLS.md).
+- Both variables apply to the MCP server only; the bridge has no notion of tools.
+  Keep `WHATSAPP_ALLOWED_CHATS` and `WHATSAPP_READ_ONLY` as the layers enforced
+  in both processes.
+
+The startup log names the policy in force, e.g.
+`Tool policy — WHATSAPP_READ_ONLY unset; WHATSAPP_DENY_TOOLS: delete_message; 1 tool(s) hidden (delete_message)`.
 
 ## Bridge authentication and media paths
 
