@@ -536,6 +536,7 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
   "jid": "1234567890@s.whatsapp.net",
   "name": "Alice",
   "is_group": false,
+  "name_source": "contacts",           // "chat" | "contacts" | "jid"
   "last_message_time": "2024-01-15T10:30:00+00:00",
   "last_message": "hello world",       // null when include_last_message=false
   "last_sender": "1234567890",         // null when include_last_message=false
@@ -545,6 +546,25 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
   "unread": true                       // last message is inbound and unread
 }
 ```
+
+### Name (`name` / `name_source`)
+
+WhatsApp only pushes a name for a conversation when it has one, so a large
+share of direct chats are stored with an empty name or the bare number. The
+chat tools fall back to your phone book (whatsmeow's contact store) with the
+same precedence message senders use — full name → push name → first name →
+business name — resolving `@lid` chats through the LID map first. `name_source`
+says where the returned `name` came from:
+
+| `name_source` | Meaning |
+| --- | --- |
+| `chat` | The name WhatsApp stored for the conversation (a saved contact name or a group subject). |
+| `contacts` | The stored name was empty or just the number, and this one comes from your contacts. |
+| `jid` | Nobody knows a name: `name` is whatever was stored (`null`, or the number). Identify the chat by its JID. |
+
+Resolution is batched per page (two queries against the contact store for a
+whole page, cached for five minutes), so paging a large chat list costs the
+same as before. Groups are never looked up — they have no phone-book entry.
 
 ### Last message (`last_message` / `last_is_from_me` / `has_messages`)
 
