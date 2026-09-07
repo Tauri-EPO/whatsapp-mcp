@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 import audio
-from chat_policy import load_chat_policy
+from chat_policy import load_chat_policy, normalize_chat_entry
 from errors import ToolError
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
@@ -2076,6 +2076,41 @@ def _require_allowed(jid: str | None) -> None:
         raise ToolError("denied", denied)
 
 
+DRY_RUN_MESSAGE = "Dry run: nothing was sent. Show this to the user and call again with dry_run=false to send."
+
+
+def _chat_name(jid: str) -> str | None:
+    """Best-effort display name for a dry-run preview; never fails the preview."""
+    try:
+        chat = get_chat(jid, include_last_message=False)
+    except ToolError:
+        return None
+    return (chat or {}).get("name")
+
+
+def _dry_run(endpoint: str, payload: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """The exact request a real call would post, without posting it.
+
+    Everything a human reviewer needs to approve a send: the endpoint, the JSON
+    body verbatim, and whatever the caller resolved on the way (recipient JID,
+    chat name, media file check).
+    """
+    return {
+        "success": True,
+        "dry_run": True,
+        "message": DRY_RUN_MESSAGE,
+        "endpoint": endpoint,
+        "payload": payload,
+        **extra,
+    }
+
+
+def _recipient_preview(recipient: str) -> dict[str, Any]:
+    """Resolved recipient for a preview: canonical JID plus the chat's name."""
+    jid = normalize_chat_entry(recipient)
+    return {"recipient_jid": jid, "recipient_name": _chat_name(jid)}
+
+
 def send_message(
     recipient: str,
     message: str,
@@ -2083,8 +2118,13 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
+    dry_run: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Send a text message. Returns (True, status, {message_id, chat_jid, timestamp}) or raises ToolError."""
+    """Send a text message. Returns (True, status, {message_id, chat_jid, timestamp}) or raises ToolError.
+
+    ``dry_run=True`` validates and resolves everything, then returns the request
+    that would have been posted instead of posting it.
+    """
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(recipient)
@@ -2095,16 +2135,23 @@ def send_message(
         payload["quoted_content"] = quoted_content
     if mentions:
         payload["mentions"] = mentions
+    if dry_run:
+        return True, DRY_RUN_MESSAGE, _dry_run("POST /api/send", payload, **_recipient_preview(recipient))
     result = _bridge_json(_bridge_request("POST", "/send", json=payload))
     return True, result.get("message", "Message sent"), _sent_info(result)
 
 
-def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str, dict[str, Any]]:
+def send_file(
+    recipient: str, media_path: str, caption: str = "", dry_run: bool = False
+) -> tuple[bool, str, dict[str, Any]]:
     """Send a media file (image, video, document) with an optional caption.
 
     The bridge populates the WA media-message Caption field from `message`, so
     passing both in one /api/send call produces a single attachment-with-caption
     message instead of two separate messages.
+
+    ``dry_run=True`` runs the same validation (recipient, allow-list, the file
+    exists) and returns the request that would have been posted.
     """
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
@@ -2116,6 +2163,11 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
     payload = {"recipient": recipient, "media_path": media_path}
     if caption:
         payload["message"] = caption
+    if dry_run:
+        # The bridge additionally confines media_path to WHATSAPP_MEDIA_ROOTS,
+        # which only it knows; report what this side can check.
+        media = {"path": os.path.abspath(media_path), "exists": True, "bytes": os.path.getsize(media_path)}
+        return True, DRY_RUN_MESSAGE, _dry_run("POST /api/send", payload, media=media, **_recipient_preview(recipient))
     result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
     return True, result.get("message", "File sent"), _sent_info(result)
 
@@ -2861,17 +2913,21 @@ def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
     return _bridge_json(_bridge_request("POST", "/typing", json={"recipient": target, "is_typing": bool(is_typing)}))
 
 
-def edit_message(chat_jid: str, message_id: str, text: str) -> dict[str, Any]:
-    """Edit an own message (WhatsApp accepts edits for ~15 minutes after sending)."""
+def edit_message(chat_jid: str, message_id: str, text: str, dry_run: bool = False) -> dict[str, Any]:
+    """Edit an own message (WhatsApp accepts edits for ~15 minutes after sending).
+
+    ``dry_run=True`` returns the request that would have been posted instead.
+    """
     chat_jid, message_id = (chat_jid or "").strip(), (message_id or "").strip()
     if not chat_jid or not message_id:
         raise ToolError("invalid_argument", "chat_jid and message_id are required")
     if not (text or "").strip():
         raise ToolError("invalid_argument", "text must not be empty")
     _require_allowed(chat_jid)
-    return _bridge_json(
-        _bridge_request("POST", "/edit", json={"chat_jid": chat_jid, "message_id": message_id, "text": text})
-    )
+    payload = {"chat_jid": chat_jid, "message_id": message_id, "text": text}
+    if dry_run:
+        return _dry_run("POST /api/edit", payload, **_recipient_preview(chat_jid))
+    return _bridge_json(_bridge_request("POST", "/edit", json=payload))
 
 
 def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[str, Any]:
