@@ -228,7 +228,8 @@ Caveats:
 
 `--full-history-pair` only applies to a fresh pair, so recovering a gap in one
 chat otherwise means deleting `whatsapp.db` and re-syncing everything. To ask
-the phone for older messages in a single chat *without* re-pairing:
+the phone for older messages in a single chat *without* re-pairing (agents use
+the `request_history` tool, see [TOOLS.md](TOOLS.md#request_history)):
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/history \
