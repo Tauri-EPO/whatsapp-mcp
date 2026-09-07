@@ -32,6 +32,67 @@ Symptoms and fixes for pairing, auth, sync and app-state problems. For container
   `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
   `WHATSAPP_MEDIA_ROOTS`.
 
+## Published HTTPS endpoint
+
+- **`certificate verify failed: certificate has expired`**: the certificate
+  serving your published MCP endpoint (`https://<host>.<tailnet>.ts.net/mcp`)
+  has expired. Direct clients fail at the TLS handshake, before any MCP or HTTP
+  error, so the message names no chat, tool or container:
+
+  ```text
+  ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate has expired
+  ```
+
+  PowerShell reports the same condition as
+  `Invoke-WebRequest: The remote certificate is invalid according to the
+  validation procedure`, and `curl` as
+  `SSL certificate problem: certificate has expired`.
+
+  Expect this to be invisible at first. Clients that reuse a long-lived session
+  or their own trust store (`npx mcp-remote`, for example) can keep working
+  after the certificate expires, so the first symptom is usually a *new* direct
+  client — a bulk-export script, a monitor — failing while your agent still
+  answers.
+
+  **Cause.** The bridge and MCP containers never terminate TLS; they bind
+  loopback and something on the host publishes them (`tailscale serve`, a
+  reverse proxy). Tailscale's certificates are short-lived, and renewing them
+  is the **host's** job, not the container's. `tailscale serve` renews while
+  `tailscaled` keeps running; a certificate fetched once with `tailscale cert`
+  into files for a proxy is *not* renewed by anything unless you scheduled it.
+  Restarting or rebuilding the containers changes nothing.
+
+  Note that `bridge_status` still reports `ok: true` here, correctly: it checks
+  the bridge over loopback and never inspects the published endpoint.
+
+  **Fix**, on the host that serves the endpoint:
+
+  ```bash
+  # Serving through tailscale serve: confirm what is published, then re-apply.
+  tailscale status                                       # tailscaled up?
+  sudo tailscale serve status
+  sudo tailscale serve --bg --https=443 http://127.0.0.1:8000
+
+  # Serving through a reverse proxy from certificate files: reissue and reload.
+  sudo tailscale cert <host>.<tailnet>.ts.net            # writes .crt / .key
+  sudo systemctl reload nginx                            # or your proxy
+  ```
+
+  **Verify** the certificate the endpoint actually serves, from any machine on
+  the tailnet:
+
+  ```bash
+  echo | openssl s_client -connect <host>.<tailnet>.ts.net:443 \
+      -servername <host>.<tailnet>.ts.net 2>/dev/null \
+    | openssl x509 -noout -dates
+  # notBefore=...
+  # notAfter=...   <- must be in the future
+  ```
+
+  Then re-run the client that failed. If you front the endpoint with a proxy
+  and reissue certificates by hand, put that `openssl` line in a cron job on
+  the host: nothing in this repo watches the expiry date for you.
+
 ## App State / LTHash Conflicts
 
 Some WhatsApp account state is managed by whatsmeow in
