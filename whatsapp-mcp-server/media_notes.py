@@ -38,6 +38,9 @@ TRANSCRIPT_ERROR_KEY = "transcript_error"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
+# Transcript hits a message query may union in (see transcript_hashes): one SQL
+# parameter each, well under SQLite's 999-parameter default.
+MAX_TRANSCRIPT_MATCHES = 400
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 SCHEMA = """
@@ -230,6 +233,37 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
         finally:
             conn.close()
     return {"sha256": sha, "notes": notes, "messages": messages}
+
+
+def transcript_hashes(query: str, limit: int = MAX_TRANSCRIPT_MATCHES) -> list[str]:
+    """Hashes whose stored transcript contains ``query`` (case-insensitive substring).
+
+    This is how ``list_messages(query=...)`` reaches spoken words: ``messages_fts``
+    is the bridge's index over ``messages.content`` and knows nothing about
+    notes.db, so the message query unions in the rows carrying one of these
+    hashes. Bounded on purpose — the result becomes SQL parameters, and a query
+    matching the whole archive must not hit SQLite's parameter limit. A missing
+    notes.db, an unreadable one, or an empty query all mean "no transcript
+    matched": search degrades to content-only, it never fails.
+    """
+    needle = (query or "").strip()
+    if not needle:
+        return []
+    conn = _connect(create=False)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT sha256 FROM media_notes WHERE key = ? "
+            "AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0) "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (TRANSCRIPT_KEY, needle, needle, max(1, int(limit))),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return [row[0] for row in rows if _SHA256_RE.match(row[0] or "")]
 
 
 def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> list[dict[str, Any]]:

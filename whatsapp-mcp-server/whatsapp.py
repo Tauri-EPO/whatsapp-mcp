@@ -1268,19 +1268,71 @@ class MessageFilters:
         return f"(messages.media_type IS NULL OR messages.media_type NOT IN ({placeholders}))", list(MEDIA_TYPES)
 
 
-def _query_predicate(conn: sqlite3.Connection, query: str | None) -> tuple[bool, str | None, list[Any]]:
+_SUBSTRING_PREDICATE = "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)"
+
+
+@dataclass(frozen=True)
+class QueryPredicate:
+    """How one `query=` is turned into SQL.
+
+    clause/params go into the WHERE list. `fts_join` says the statement must
+    join messages_fts (which is also what makes bm25 relevance available), and
+    `match_index` points at the MATCH text inside `params` so a query that is
+    not valid FTS5 syntax can be retried quoted (`_execute_message_sql`).
+    """
+
+    clause: str | None
+    params: list[Any]
+    fts_join: bool = False
+    match_index: int | None = None
+
+
+def _transcript_predicate(query: str) -> tuple[str, list[Any]] | None:
+    """Predicate matching messages whose *stored transcript* contains the query.
+
+    Voice notes carry no `content`, so neither messages_fts nor instr() can ever
+    find what was said in them; the text lives in notes.db, written by
+    `transcribe_audio` or by the TRANSCRIBE_ON_INGEST worker. notes.db is the MCP
+    server's own database, so the union happens here: the matching hashes are
+    resolved first (bounded, see media_notes.MAX_TRANSCRIPT_MATCHES) and compared
+    against the indexed `messages.file_sha256` blob.
+    """
+    from media_notes import transcript_hashes
+
+    hashes = transcript_hashes(query)
+    if not hashes:
+        return None
+    return (
+        f"messages.file_sha256 IN ({','.join('?' * len(hashes))})",
+        [bytes.fromhex(sha) for sha in hashes],
+    )
+
+
+def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredicate:
     """Content-search predicate shared by the message list and count queries.
 
-    Returns (use_fts, clause, params). The FTS5 index serves the query when it
-    exists and the text is index-friendly; otherwise instr() on the raw column,
-    because SQLite's LOWER() is ASCII-only and LIKE LOWER(...) would silently
-    drop Unicode matches.
+    The FTS5 index serves the query when it exists and the text is
+    index-friendly; otherwise instr() on the raw column, because SQLite's
+    LOWER() is ASCII-only and LIKE LOWER(...) would silently drop Unicode
+    matches. Either way, messages whose transcript matches are unioned in.
     """
     if not query:
-        return False, None, []
+        return QueryPredicate(None, [])
+    transcripts = _transcript_predicate(query)
     if _fts_query_kind(query) == "fts" and _fts_available(conn):
-        return True, f"{MESSAGES_FTS_TABLE} MATCH ?", [query]
-    return False, "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)", [query, query]
+        if transcripts is None:
+            return QueryPredicate(f"{MESSAGES_FTS_TABLE} MATCH ?", [query], fts_join=True, match_index=0)
+        # FTS5 refuses MATCH inside an OR ("unable to use function MATCH in the
+        # requested context"), so the index is consulted as a subquery instead.
+        # That drops the bm25 ranking with the join, hence no fts_join: a
+        # relevance sort falls back to newest-first for this one query.
+        transcript_clause, transcript_params = transcripts
+        rowids = f"messages.rowid IN (SELECT rowid FROM {MESSAGES_FTS_TABLE} WHERE {MESSAGES_FTS_TABLE} MATCH ?)"
+        return QueryPredicate(f"({rowids} OR {transcript_clause})", [query, *transcript_params], match_index=0)
+    if transcripts is None:
+        return QueryPredicate(_SUBSTRING_PREDICATE, [query, query])
+    transcript_clause, transcript_params = transcripts
+    return QueryPredicate(f"({_SUBSTRING_PREDICATE} OR {transcript_clause})", [query, query, *transcript_params])
 
 
 def _execute_message_sql(
@@ -1315,7 +1367,7 @@ def count_messages(
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
-        use_fts, predicate, predicate_params = _query_predicate(conn, query)
+        predicate = _query_predicate(conn, query)
         where_clauses, params = MessageFilters(
             after=after,
             before=before,
@@ -1328,11 +1380,13 @@ def count_messages(
             include_deleted=include_deleted,
             unread_only=unread_only,
         ).build(cur)
-        match_param_index = len(params) if use_fts else None
-        if predicate:
-            where_clauses.append(predicate)
-            params.extend(predicate_params)
-        fts_join = f" JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid" if use_fts else ""
+        match_param_index = len(params) + predicate.match_index if predicate.match_index is not None else None
+        if predicate.clause:
+            where_clauses.append(predicate.clause)
+            params.extend(predicate.params)
+        fts_join = (
+            f" JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid" if predicate.fts_join else ""
+        )
         where = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         sql = f"SELECT COUNT(*) FROM messages JOIN chats ON messages.chat_jid = chats.jid{fts_join}{where}"
         _execute_message_sql(cur, sql, params, match_param_index, query)
@@ -1425,7 +1479,9 @@ def list_messages_page(
         query: Optional search term to filter messages by content. With the bridge's
             FTS5 index this is accent-insensitive and word-based, and supports
             AND / OR / NOT, "exact phrase" and prefix* operators; without it a
-            plain substring match is used.
+            plain substring match is used. Messages whose stored transcript
+            contains the term (as a substring) are unioned in, so a voice note
+            somebody transcribed is searchable by what was said in it.
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
         include_context: Whether to include messages before and after matches (default True)
@@ -1458,7 +1514,8 @@ def list_messages_page(
         conn = _connect_messages_db()
         cur = conn.cursor()
 
-        use_fts, predicate, predicate_params = _query_predicate(conn, query)
+        predicate = _query_predicate(conn, query)
+        use_fts = predicate.fts_join
 
         # Build base query
         query_parts = [f"SELECT {MESSAGE_COLUMNS} FROM messages"]
@@ -1478,10 +1535,10 @@ def list_messages_page(
             unread_only=unread_only,
         ).build(cur)
 
-        match_param_index = len(params) if use_fts else None
-        if predicate:
-            where_clauses.append(predicate)
-            params.extend(predicate_params)
+        match_param_index = len(params) + predicate.match_index if predicate.match_index is not None else None
+        if predicate.clause:
+            where_clauses.append(predicate.clause)
+            params.extend(predicate.params)
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
