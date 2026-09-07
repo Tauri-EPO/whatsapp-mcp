@@ -178,15 +178,15 @@ def test_mark_messages_read_posts_correct_payload(monkeypatch):
 
     monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
 
-    success, message = whatsapp.mark_messages_read(
+    result = whatsapp.mark_messages_read(
         [" 3AABCDEF01234567 ", "3AABCDEF76543210"],
         "120363012345678901@g.us",
         sender_jid="15551234567@s.whatsapp.net",
         timestamp="2026-08-11T18:30:00Z",
     )
 
-    assert success is True
-    assert message == "Messages marked as read"
+    assert result["success"] is True
+    assert result["message"] == "Messages marked as read"
     assert calls == [
         {
             "url": f"{whatsapp.WHATSAPP_API_BASE_URL}/mark-read",
@@ -213,6 +213,85 @@ def test_mark_messages_read_posts_correct_payload(monkeypatch):
 def test_mark_messages_read_validates_input(message_ids, chat_jid, sender_jid, expected_message):
     with pytest.raises(ToolError) as exc:
         whatsapp.mark_messages_read(message_ids, chat_jid, sender_jid)
+
+    assert exc.value.code == "invalid_argument"
+    assert expected_message in exc.value.message
+
+
+def test_mark_whole_chat_read_posts_up_to_without_ids(monkeypatch):
+    """message_ids=None marks the whole chat read; the counts come back to the caller."""
+    calls = []
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token")
+
+    def fake_post(url, json, headers=None, timeout=None):
+        calls.append(json)
+        return DummyResponse(
+            payload={
+                "success": True,
+                "message": "Marked 1240 message(s) from 3 sender(s) as read",
+                "messages": 1240,
+                "senders": 3,
+                "batches": 13,
+                "truncated": True,
+            }
+        )
+
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fake_post)
+
+    result = whatsapp.mark_messages_read(
+        None,
+        "120363012345678901@g.us",
+        up_to="2026-09-07T12:00:00Z",
+    )
+
+    assert calls == [{"chat_jid": "120363012345678901@g.us", "up_to": "2026-09-07T12:00:00Z"}]
+    assert result == {
+        "success": True,
+        "message": "Marked 1240 message(s) from 3 sender(s) as read",
+        "messages": 1240,
+        "senders": 3,
+        "batches": 13,
+        "truncated": True,
+    }
+
+
+def test_mark_whole_chat_read_defaults_to_now(monkeypatch):
+    """Without up_to the bridge decides the cut-off, so no bound is sent."""
+    calls = []
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token")
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "post",
+        lambda url, json, headers=None, timeout=None: (
+            calls.append(json)
+            or DummyResponse(payload={"success": True, "message": "ok", "messages": 2, "senders": 1, "batches": 1})
+        ),
+    )
+
+    result = whatsapp.mark_messages_read(None, "12025551234@s.whatsapp.net")
+
+    assert calls == [{"chat_jid": "12025551234@s.whatsapp.net"}]
+    assert result["messages"] == 2 and result["truncated"] is False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_message"),
+    [
+        ({"message_ids": None, "sender_jid": "15551234567@s.whatsapp.net"}, "sender_jid"),
+        ({"message_ids": ["3AABCDEF01234567"], "up_to": "2026-09-07T12:00:00Z"}, "up_to_timestamp"),
+        ({"message_ids": []}, "message ID"),
+    ],
+)
+def test_mark_messages_read_rejects_mixed_forms(monkeypatch, kwargs, expected_message):
+    """The two forms do not mix, and an empty list is never "the whole chat"."""
+
+    def unexpected_post(*_args, **_kwargs):
+        raise AssertionError("the bridge must not be called")
+
+    monkeypatch.setattr(whatsapp.bridge_http, "post", unexpected_post)
+
+    with pytest.raises(ToolError) as exc:
+        whatsapp.mark_messages_read(chat_jid="12025551234@s.whatsapp.net", **kwargs)
 
     assert exc.value.code == "invalid_argument"
     assert expected_message in exc.value.message

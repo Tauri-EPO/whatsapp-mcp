@@ -800,6 +800,79 @@ func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (ti
 	return ts, true, nil
 }
 
+// unreadInboundMessage is one row selected for a whole-chat read receipt.
+type unreadInboundMessage struct {
+	ID        string
+	Sender    string // bare user part, as stored in messages.sender
+	Timestamp time.Time
+}
+
+// UnreadInboundMessages returns the inbound, not-deleted messages of chatJID
+// that the local read marker (chats.last_read_time) has not covered yet and
+// that are no newer than upTo, oldest first. limit caps the rows returned
+// (0 = no limit).
+//
+// The bounds are string comparisons against the TIMESTAMP column, which is
+// chronological because every value is written in the canonical UTC spelling
+// (store_time.go) — that is also what keeps idx_messages_chat_timestamp usable
+// here. A row whose timestamp no layout can parse is skipped rather than
+// acknowledged with a made-up read time.
+//
+// Reaction and poll-vote rows are included on purpose: they advance
+// chats.last_message_time like any other row (events.go stores them as
+// messages), so a chat whose newest row is a reaction would keep reporting
+// itself unread if the marker could not reach it.
+func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time, limit int) ([]unreadInboundMessage, error) {
+	var marker sql.NullString
+	err := store.db.QueryRow(
+		`SELECT CAST(last_read_time AS TEXT) FROM chats WHERE jid = ?`, chatJID,
+	).Scan(&marker)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	query := `SELECT id, sender, timestamp FROM messages
+		WHERE chat_jid = ? AND is_from_me = 0 AND deleted_at IS NULL AND timestamp <= ?`
+	args := []any{chatJID, dbTime(upTo)}
+	if strings.TrimSpace(marker.String) != "" {
+		query += ` AND timestamp > ?`
+		args = append(args, marker.String)
+	}
+	// id breaks ties so a LIMIT always cuts the same page in the same place.
+	query += ` ORDER BY timestamp, id`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := store.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var pending []unreadInboundMessage
+	for rows.Next() {
+		var id string
+		var sender sql.NullString
+		var rawTS any
+		if err := rows.Scan(&id, &sender, &rawTS); err != nil {
+			return nil, err
+		}
+		ts := anchorTime(rawTS)
+		if ts.IsZero() {
+			bridgeLog.Warnf("skipping message %s in %s: unparseable timestamp %v", id, chatJID, rawTS)
+			continue
+		}
+		pending = append(pending, unreadInboundMessage{
+			ID:        id,
+			Sender:    bareSenderUser(sender.String),
+			Timestamp: ts,
+		})
+	}
+	return pending, rows.Err()
+}
+
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,

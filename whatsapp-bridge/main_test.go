@@ -2505,7 +2505,11 @@ func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
 		body string
 	}{
 		{"empty body", `{}`},
-		{"missing message_ids", `{"chat_jid":"15551234567@s.whatsapp.net"}`},
+		// message_ids may be omitted (that marks the whole chat read, see
+		// mark_read.go), but then sender_jid and a listed-form up_to are not.
+		{"sender_jid without message_ids", `{"chat_jid":"15551234567@s.whatsapp.net","sender_jid":"15551234567@s.whatsapp.net"}`},
+		{"up_to with message_ids", `{"chat_jid":"15551234567@s.whatsapp.net","message_ids":["3AABCDEF01234567"],"up_to":"2026-09-01T08:00:00Z"}`},
+		{"invalid up_to", `{"chat_jid":"15551234567@s.whatsapp.net","up_to":"yesterday"}`},
 		{"missing chat_jid", `{"message_ids":["3AABCDEF01234567"]}`},
 		{"empty message_id", `{"message_ids":["3AABCDEF01234567",""],"chat_jid":"15551234567@s.whatsapp.net"}`},
 		{"invalid chat_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"@s.whatsapp.net"}`},

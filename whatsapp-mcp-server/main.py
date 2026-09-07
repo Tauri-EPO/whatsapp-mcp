@@ -1278,28 +1278,44 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
 @mutating_tool
 def mark_messages_read(
     chat_jid: str,
-    message_ids: list[str],
+    message_ids: list[str] | None = None,
     sender_jid: str = "",
     timestamp: str | None = None,
+    up_to_timestamp: str | None = None,
 ) -> dict[str, Any]:
-    """Mark selected WhatsApp messages as read and send read receipts.
+    """Send WhatsApp read receipts (blue ticks) for a chat.
 
-    This is an explicit external side effect. All message IDs must belong to the
-    same chat and sender.
-    Read receipts are the ordinary "blue ticks"; they do not consume view-once media
-    (that needs a separate view receipt the bridge never sends).
+    This is a visible external side effect: the other person sees that their
+    messages were read, and it cannot be undone. It is NOT a private "I dealt
+    with this" marker — for bookkeeping that must stay invisible use the notes
+    tools (annotate_media / get_media_notes) or your own state, and leave the
+    receipts for when you really want the sender to know you read them.
+
+    Two forms:
+      - whole chat: omit message_ids. Every inbound message the read marker has
+        not covered yet, up to up_to_timestamp (default: now), is acknowledged;
+        senders in a group are resolved and batched by the bridge. Use this
+        after triaging a conversation instead of listing hundreds of IDs.
+      - specific messages: pass message_ids, all from the same chat and sender.
+
+    Read receipts do not consume view-once media (that needs a separate view
+    receipt the bridge never sends).
 
     Args:
-        chat_jid: JID of the chat containing the messages
-        message_ids: IDs of the messages to mark as read
-        sender_jid: JID or bare phone number of the original sender; required for groups
+        chat_jid: JID of the chat
+        message_ids: IDs to mark read; omit to mark the whole chat read
+        sender_jid: JID or bare phone number of the original sender; required
+            for groups with message_ids, not accepted without them
         timestamp: Optional RFC 3339 read timestamp; defaults to the current time
+        up_to_timestamp: Whole-chat form only — RFC 3339 cut-off; nothing newer
+            is marked. Defaults to now
 
     Returns:
-        A dictionary containing success status and a status message
+        {"success", "message", "messages", "senders", "batches", "truncated"} —
+        the counts describe what was acknowledged; truncated means the chat had
+        more pending than one call marks, so call again to continue
     """
-    success, status_message = whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp)
-    return {"success": success, "message": status_message}
+    return whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp, up_to_timestamp)
 
 
 @mcp.tool()

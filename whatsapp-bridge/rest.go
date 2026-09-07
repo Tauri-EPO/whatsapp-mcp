@@ -17,11 +17,27 @@ import (
 )
 
 // MarkReadRequest is the request body for the /api/mark-read endpoint.
+// Without message_ids the whole chat is marked read up to UpTo; see
+// mark_read.go for the two forms.
 type MarkReadRequest struct {
 	MessageIDs []string `json:"message_ids"`
 	ChatJID    string   `json:"chat_jid"`
 	SenderJID  string   `json:"sender_jid,omitempty"`
 	Timestamp  string   `json:"timestamp,omitempty"`
+	UpTo       string   `json:"up_to,omitempty"`
+}
+
+// MarkReadResponse is the /api/mark-read response body. The counts describe
+// what left the bridge: Messages acknowledged, distinct Senders they were
+// grouped by, receipt Batches sent. Truncated says the chat had more pending
+// than one request marks (markReadMaxMessages).
+type MarkReadResponse struct {
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	Messages  int    `json:"messages"`
+	Senders   int    `json:"senders"`
+	Batches   int    `json:"batches"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // ReactRequest is the request body for the /api/react endpoint.
