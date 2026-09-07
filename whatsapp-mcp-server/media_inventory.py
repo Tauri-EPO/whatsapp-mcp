@@ -20,7 +20,7 @@ from typing import Any
 import media_notes
 import whatsapp
 from errors import ToolError
-from whatsapp import CHAT_POLICY, PageResult, decode_cursor, encode_cursor
+from whatsapp import CHAT_POLICY, PageResult, decode_cursor, encode_cursor, timestamp_bound, timestamp_expr
 
 # Rows that carry a downloadable file. Pointer rows (reaction, poll_vote) and
 # text never appear in the inventory.
@@ -105,10 +105,10 @@ def _media_filters(
         clauses.append(f"{column_prefix}media_type = ?")
         params.append(media_type)
     if after:
-        clauses.append(f"{column_prefix}timestamp >= ?")
+        clauses.append(f"{timestamp_expr(column_prefix + 'timestamp')} >= ?")
         params.append(_iso(after, "after"))
     if before:
-        clauses.append(f"{column_prefix}timestamp <= ?")
+        clauses.append(f"{timestamp_expr(column_prefix + 'timestamp')} <= ?")
         params.append(_iso(before, "before"))
     if min_bytes:
         clauses.append(f"{column_prefix}file_length >= ?")
@@ -121,8 +121,9 @@ def _media_filters(
 
 
 def _iso(value: str, name: str) -> str:
+    """An after/before argument as a normalised timestamp bound (issue #253)."""
     try:
-        return datetime.fromisoformat(value).isoformat(sep=" ")
+        return timestamp_bound(datetime.fromisoformat(value))
     except ValueError as exc:
         raise ToolError("invalid_argument", f"{name} must be an ISO-8601 timestamp") from exc
 

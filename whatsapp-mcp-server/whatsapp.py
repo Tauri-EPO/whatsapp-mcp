@@ -1126,6 +1126,37 @@ MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
 POINTER_MEDIA_TYPES = ("reaction", "poll_vote")
 
 
+# messages.timestamp is TEXT the bridge wrote from a Go time.Time, and its exact
+# spelling has varied by release and write path: "2026-01-09 18:00:00-03:00"
+# today, the RFC 3339 "T" form in stores written by a cgo build, the legacy Go
+# String() form ("2026-01-09 18:00:00 +0000 UTC") in older ones, with or without
+# fractional seconds. A raw string comparison against a bound therefore answers
+# differently per row, and because "T" sorts after " " the day boundary lands in
+# a different place for the two spellings (issue #253).
+#
+# Both sides are normalised to "YYYY-MM-DD HH:MM:SS" before comparing: the first
+# 19 characters, separator forced to a space. Same cut coverage() makes — it
+# drops the UTC offset, which is constant inside one archive and so cancels out.
+#
+# The expression is not seekable, so a bound no longer starts an index seek; the
+# timestamp indexes still serve the ORDER BY the paged reads walk.
+def timestamp_expr(column: str) -> str:
+    """SQL rendering `column` in the normalised form time bounds compare against."""
+    return f"replace(substr({column}, 1, 19), 'T', ' ')"
+
+
+def timestamp_bound(moment: datetime) -> str:
+    """A datetime as a normalised bound, in the archive's local wall time.
+
+    An offset-aware bound is converted to the local zone first, so the same
+    instant expressed in any zone selects the same rows; a naive one is taken
+    as already local, which is what the bridge writes.
+    """
+    if moment.tzinfo is not None:
+        moment = moment.astimezone().replace(tzinfo=None)
+    return moment.isoformat(sep=" ", timespec="seconds")
+
+
 @dataclass(frozen=True)
 class MessageFilters:
     """The WHERE predicates every messages query shares.
@@ -1151,11 +1182,11 @@ class MessageFilters:
         params: list[Any] = []
 
         if self.after:
-            clauses.append("messages.timestamp > ?")
+            clauses.append(f"{timestamp_expr('messages.timestamp')} > ?")
             params.append(_parse_filter_date(self.after, "after"))
 
         if self.before:
-            clauses.append("messages.timestamp < ?")
+            clauses.append(f"{timestamp_expr('messages.timestamp')} < ?")
             params.append(_parse_filter_date(self.before, "before"))
 
         if self.sender_phone_number:
@@ -1299,9 +1330,10 @@ def count_messages(
             conn.close()
 
 
-def _parse_filter_date(value: str, field: str) -> datetime:
+def _parse_filter_date(value: str, field: str) -> str:
+    """An after/before argument as a normalised timestamp bound (`timestamp_bound`)."""
     try:
-        return datetime.fromisoformat(value)
+        return timestamp_bound(datetime.fromisoformat(value))
     except ValueError:
         raise ValueError(f"Invalid date format for '{field}': {value}. Please use ISO-8601 format.") from None
 
@@ -2768,22 +2800,22 @@ def unread_filters(
     """
     if since and max_age_days is not None:
         raise ToolError("invalid_argument", "pass either since or max_age_days, not both")
-    since_ts: datetime | None = None
+    since_ts: str | None = None
     if since:
         try:
-            since_ts = datetime.fromisoformat(since)
+            since_ts = timestamp_bound(datetime.fromisoformat(since))
         except ValueError as exc:
             raise ToolError("invalid_argument", f"since must be ISO-8601, got {since!r}") from exc
     elif max_age_days is not None:
         days = int(max_age_days)
         if days < 1:
             raise ToolError("invalid_argument", f"max_age_days must be 1 or more, got {max_age_days!r}")
-        since_ts = datetime.now() - timedelta(days=days)
+        since_ts = timestamp_bound(datetime.now() - timedelta(days=days))
 
     clauses: list[str] = []
     params: list[Any] = []
     if since_ts is not None:
-        clauses.append("AND messages.timestamp > ?")
+        clauses.append(f"AND {timestamp_expr('messages.timestamp')} > ?")
         params.append(since_ts)
     if exclude_groups:
         # same definition as the is_group field of each returned chat
@@ -2929,8 +2961,8 @@ def _unanswered_from_where(since: str | None, exclude_groups: bool, min_age_hour
     if hours < 0:
         raise ToolError("invalid_argument", f"min_age_hours must be 0 or more, got {min_age_hours!r}")
     if hours > 0:
-        age_clause = "AND messages.timestamp <= ?"
-        age_params = [datetime.now() - timedelta(hours=hours)]
+        age_clause = f"AND {timestamp_expr('messages.timestamp')} <= ?"
+        age_params = [timestamp_bound(datetime.now() - timedelta(hours=hours))]
     policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
     sql = f"""
             FROM chats
