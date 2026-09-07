@@ -43,8 +43,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
-| `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | MCP server only: comma-separated tool names to offer, everything else is hidden (reads included). See [Per-tool allow/deny](#per-tool-allowdeny) |
-| `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | MCP server only: comma-separated tool names never to offer. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
+| `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
+| `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
 | `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)*                       | MCP server only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values) in `<untrusted>…</untrusted>` delimiters. See [Marking message content as untrusted](#marking-message-content-as-untrusted) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
@@ -238,21 +238,56 @@ WHATSAPP_DENY_TOOLS=delete_message,leave_group,manage_group_participants,purge_m
 - `WHATSAPP_DENY_TOOLS` removes tools from whatever is left.
 - **Deny wins over allow, and `WHATSAPP_READ_ONLY` wins over both.** The three
   filters only ever remove capability, so `WHATSAPP_ALLOW_TOOLS=send_message`
-  cannot switch sending back on in a read-only deployment. It also cannot
-  re-open a bridge endpoint: if you want a mutating tool, do not set
-  `WHATSAPP_READ_ONLY` on either process, and use the lists instead.
+  cannot switch sending back on in a read-only deployment. If you want one
+  mutating tool, do not set `WHATSAPP_READ_ONLY` on either process and use the
+  lists instead — see the pairing below.
 - Blocked tools are removed from `tools/list` before any transport starts, so the
   model never sees them; a mutating tool called anyway returns
   `{"error": {"code": "denied", ...}}` naming the list that blocked it.
-- **A name that is not a tool stops the server at startup**, with the offending
+- **A name that is not a tool stops the process at startup**, with the offending
   entry and the list of valid names — a typo in an allow-list must not silently
   widen it. Tool names are exactly those in [TOOLS.md](TOOLS.md).
-- Both variables apply to the MCP server only; the bridge has no notion of tools.
-  Keep `WHATSAPP_ALLOWED_CHATS` and `WHATSAPP_READ_ONLY` as the layers enforced
-  in both processes.
+- **Set both variables for both processes** (the compose file passes them to both
+  containers). They are written in tool names on both sides, so one value means
+  the same thing in both places.
 
-The startup log names the policy in force, e.g.
-`Tool policy — WHATSAPP_READ_ONLY unset; WHATSAPP_DENY_TOOLS: delete_message; 1 tool(s) hidden (delete_message)`.
+### What each side enforces
+
+| | MCP server (`tool_policy.py`) | Bridge (`tool_policy.go`) |
+|---|---|---|
+| Granularity | one tool | one `/api/*` endpoint |
+| Blocked tool/endpoint | hidden from `tools/list`, `denied` if called anyway | `403` with the same JSON error shape |
+| Reads (`list_messages`, `get_poll_results`, `download_media`, …) | hidden when the lists say so | always served: `/api/poll`, `/api/group/members` and `/api/download` stay open, exactly as in read-only mode |
+| Unknown name | startup error listing the valid names | same |
+
+The bridge translates tool names with a fixed map (`endpointTools` in
+`whatsapp-bridge/tool_policy.go`; a test on each side keeps it in step with the
+MCP tools). Because it is endpoint-granular, the three sending tools share
+`/api/send`: denying `send_file` alone still leaves that endpoint open for
+`send_message`, and only the MCP server distinguishes them. Blocking the
+endpoint means blocking every tool that uses it.
+
+### Recommended pairing: read-only except reactions
+
+Read-only cannot be re-opened for one tool, so express "may read and react,
+nothing else" with the allow-list alone, on both services:
+
+```dotenv
+# .env — compose passes both variables to the bridge and to the MCP server
+WHATSAPP_ALLOW_TOOLS=list_chats,list_messages,list_unread,get_message_context,search_contacts,download_media,send_reaction
+# WHATSAPP_READ_ONLY stays unset: it would win over the allow-list and take send_reaction with it
+```
+
+The MCP server then offers those seven tools and nothing else; the bridge
+answers `403` on all thirteen mutating endpoints except `/api/react`. A direct
+REST caller that skips the MCP server — a leaked bridge token, a bug on the MCP
+side — still cannot send, delete or leave a group.
+
+Both processes log the policy in force on startup, e.g.
+`Tool policy — WHATSAPP_READ_ONLY unset; WHATSAPP_DENY_TOOLS: delete_message; 1 tool(s) hidden (delete_message)`
+on the MCP server and
+`Endpoint policy — WHATSAPP_DENY_TOOLS: delete_message; 1 endpoint(s) answer 403 (/api/delete)`
+on the bridge.
 
 ## Marking message content as untrusted
 

@@ -72,6 +72,11 @@ services:
       # Read-only mode: every /api/* endpoint with a side effect answers 403.
       # Same value for both services (the MCP server also hides the tools).
       WHATSAPP_READ_ONLY: ${WHATSAPP_READ_ONLY:-}
+      # Per-tool allow/deny, written in MCP tool names on both sides: here they
+      # select the endpoints those tools call (403 on the rest). Same values for
+      # both services.
+      WHATSAPP_ALLOW_TOOLS: ${WHATSAPP_ALLOW_TOOLS:-}
+      WHATSAPP_DENY_TOOLS: ${WHATSAPP_DENY_TOOLS:-}
       # Webhooks are off by default in the container: the upstream default URL
       # points at localhost:8769, which is nothing inside this namespace.
       WEBHOOK_ENABLED: ${WEBHOOK_ENABLED:-false}

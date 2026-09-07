@@ -241,6 +241,15 @@ func main() {
 		return
 	}
 
+	// Per-tool allow/deny (tool_policy.go), narrowing read-only further. An
+	// unknown tool name stops the bridge here rather than running with a list
+	// that silently covers less than the operator wrote.
+	tools, tpErr := loadToolPolicy()
+	if tpErr != nil {
+		logger.Errorf("%v", tpErr)
+		return
+	}
+
 	bridge := newBridge(client, messageStore, logger, bridgeToken)
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
@@ -253,6 +262,7 @@ func main() {
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 	bridge.MediaRetention = mediaRetention
 	bridge.ReadOnly = readOnly
+	bridge.Tools = tools
 
 	// Resolve the allow-listed roots that media_path values in /api/send must
 	// live under. See media_path.go for the rationale.
@@ -271,6 +281,7 @@ func main() {
 	bridge.startRESTServer(port, bridgeToken)
 	logger.Infof("%s", bridge.Policy.Summary())
 	logger.Infof("%s", bridge.ReadOnly.Summary())
+	logger.Infof("%s", bridge.Tools.Summary())
 	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(bridge.MediaRetention))
 	go bridge.runMediaRetention()
 
