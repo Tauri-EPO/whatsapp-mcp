@@ -167,7 +167,10 @@ def bridge_status() -> dict[str, Any]:
     bridge_unavailable. Returns ok=true when the bridge is paired and connected;
     otherwise ok=false with a human-readable reason (unreachable, awaiting QR
     pairing, disconnected). Also reports uptime_seconds, store_bytes / media_bytes /
-    media_files (cache size) and the build (version, commit, go, whatsmeow, fts5).
+    media_files (cache size), the build (version, commit, go, whatsmeow, fts5) and
+    whisper: {configured, backend ("url" | "bin"), reachable, model, on_ingest} —
+    check it before planning transcription work, because with configured=false every
+    transcribe_audio call fails and voice notes stay unreadable on this deployment.
     Read-only; never fails, so it is safe to call before anything else.
     """
     return whatsapp_bridge_status()
@@ -1617,7 +1620,9 @@ def transcribe_audio(
     Pass either message_id + chat_jid (the audio is downloaded via the bridge first)
     or an absolute file_path that is already on disk. Requires a whisper backend
     configured through WHISPER_URL (whisper.cpp server) or WHISPER_BIN + WHISPER_MODEL;
-    nothing is sent to a cloud API.
+    nothing is sent to a cloud API. **bridge_status().whisper says whether this
+    deployment has one**: when it reports configured=false (or reachable=false) every
+    call here fails, so check once instead of failing per file.
 
     **The result is cached in notes.db**, keyed by the file's sha256, under the keys
     transcript / transcript_lang / transcript_backend. Asking again for the same

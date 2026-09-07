@@ -345,6 +345,33 @@ them. The mitigations that are actually enforced are
 [chat allow-list](#restricting-which-chats-the-agent-can-touch); see
 [SECURITY.md](../SECURITY.md).
 
+## Checking that transcription is possible
+
+Transcription is opt-in: with neither `WHISPER_URL` nor `WHISPER_BIN` set, every
+`transcribe_audio` call fails with the same "No whisper backend configured"
+error, and a stack running without the `whisper` compose profile looks exactly
+like one where nobody has transcribed anything yet. `bridge_status` answers the
+question in one call, before an agent spends a call per file:
+
+```jsonc
+"whisper": {
+  "configured": true,     // a backend is set at all
+  "backend": "url",       // "url" = WHISPER_URL, "bin" = WHISPER_BIN + WHISPER_MODEL
+  "reachable": true,      // the server answered / the binary and model exist
+  "model": null,          // WHISPER_MODEL, when the CLI backend needs one
+  "on_ingest": false      // the background worker below is running
+}
+```
+
+`configured: false` means "not possible here, ask the operator";
+`configured: true, reachable: false` usually means the `whisper` profile is not
+up (`docker compose --profile whisper up -d`), or that `WHISPER_URL` is no
+longer routed to it. The check costs no transcription: the server backend gets
+one `HEAD` on the configured URL (2 s timeout, no body sent or read —
+whisper-server only accepts `POST` there, and its `404` is proof enough that it
+is listening), the CLI backend a look at the binary and the model file on disk.
+Nothing about it can make `bridge_status` fail.
+
 ## Transcribing voice notes as they arrive
 
 `transcribe_audio` transcribes the one message an agent asks about, so a

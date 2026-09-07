@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 import audio
+import transcribe
 from chat_policy import load_chat_policy, normalize_chat_entry
 from errors import ToolError
 
@@ -2772,13 +2773,34 @@ def coverage(
     }
 
 
+def _whisper_status() -> dict[str, Any]:
+    """Transcription capability for bridge_status, never raising.
+
+    A misconfigured backend must still leave every other field of the status
+    readable, so a failure here is logged and reported as "nothing usable"
+    with the reason attached.
+    """
+    try:
+        return transcribe.describe_status()
+    except Exception as exc:  # a capability report cannot fail the status call
+        logger.warning("bridge_status: whisper status unavailable: %s", exc)
+        return {
+            "configured": False,
+            "backend": None,
+            "reachable": None,
+            "model": None,
+            "on_ingest": False,
+            "error": str(exc),
+        }
+
+
 def bridge_status() -> dict[str, Any]:
     """Health, readiness and build identity of the bridge in one call.
 
     Never raises for a bridge that is down: returns ok=false with the reason,
     so the agent can tell "bridge unreachable" from "nothing matched".
     """
-    status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL}
+    status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL, "whisper": _whisper_status()}
     try:
         health = _bridge_request("GET", "/health", timeout=10)
     except ToolError as exc:
