@@ -188,6 +188,50 @@ fetch the file; see `list_media` for an inventory.
 - "What did I reply in this chat last month?" (`from_me=true`)
 - "Every document anyone sent me outside groups" (`media_type="document"`, `exclude_groups=true`)
 
+### `message_stats`
+
+Counts instead of content: how many messages per chat, per day, per month or
+per sender. One `GROUP BY` in SQLite, so an agent can size a job (or answer
+"who talks most", "when was this conversation active") without paging the
+archive through its context.
+
+**Parameters:**
+
+- `group_by` (optional, default `"chat"`): `chat`, `day`, `month` or `sender`. Day and month buckets are cut from the stored timestamp (UTC)
+- `chat_jid` (optional): restrict to one conversation. A chat outside `WHATSAPP_ALLOWED_CHATS` returns `denied`
+- `before` / `after` (optional): ISO-8601 bounds
+- `limit` (optional): max buckets returned (default 100, max 500)
+- `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`, `unread_only`: the same predicates as `list_messages`, so the same arguments describe the same rows
+
+**Returns:**
+
+```json
+{
+  "group_by": "chat",
+  "buckets": [
+    {"key": "5511999999999@s.whatsapp.net", "label": "Alice", "messages": 4120,
+     "from_me": 1830, "inbound": 2290, "media": 214,
+     "first_timestamp": "2025-03-02T14:01:11Z", "last_timestamp": "2026-09-07T08:20:00Z"}
+  ],
+  "total": {"buckets": 312, "messages": 25820, "from_me": 9010, "inbound": 16810,
+            "media": 1902, "first_timestamp": "...", "last_timestamp": "..."},
+  "truncated": true
+}
+```
+
+`buckets` is ordered by `messages` descending and capped at `limit`; `total`
+always covers every matching message, so it stays correct when `truncated` is
+true. `key` is the chat JID, the sender JID, `YYYY-MM-DD` or `YYYY-MM`; `label`
+carries the chat or contact name for the `chat` and `sender` groupings.
+Reactions and poll votes are pointer rows and never counted as `media`.
+
+**Natural Language Examples:**
+
+- "Which chats have the most messages?"
+- "How many messages a month did we exchange last year?"
+- "Who posts most in the family group?"
+- "How big would exporting this chat be?"
+
 ### `send_message`
 
 Send a text message to a contact or group, optionally as a quoted reply.

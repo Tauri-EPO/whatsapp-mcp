@@ -1341,6 +1341,123 @@ def list_messages_page(
             conn.close()
 
 
+MESSAGE_STATS_GROUPINGS = ("chat", "day", "month", "sender")
+MAX_STATS_BUCKETS = 500
+
+# Bucket key per grouping. Dates are cut out of the stored ISO-8601 string
+# rather than passed through strftime(): the bridge writes timestamps in the
+# form SQLite's date functions accept, but substr() also survives a trailing
+# zone offset and costs no conversion.
+_STATS_GROUP_SQL = {
+    "chat": "messages.chat_jid",
+    "day": "substr(messages.timestamp, 1, 10)",
+    "month": "substr(messages.timestamp, 1, 7)",
+    "sender": "messages.sender",
+}
+
+# messages, from_me, inbound, media, first_timestamp, last_timestamp.
+_STATS_AGGREGATES = (
+    "COUNT(*), "
+    "SUM(CASE WHEN messages.is_from_me THEN 1 ELSE 0 END), "
+    "SUM(CASE WHEN messages.is_from_me THEN 0 ELSE 1 END), "
+    f"SUM(CASE WHEN messages.media_type IN ({','.join('?' * len(MEDIA_TYPES))}) THEN 1 ELSE 0 END), "
+    "MIN(messages.timestamp), MAX(messages.timestamp)"
+)
+
+
+def _stats_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    count, from_me, inbound, media, first_ts, last_ts = row
+    return {
+        "messages": int(count or 0),
+        "from_me": int(from_me or 0),
+        "inbound": int(inbound or 0),
+        "media": int(media or 0),
+        "first_timestamp": first_ts,
+        "last_timestamp": last_ts,
+    }
+
+
+def message_stats(
+    group_by: str = "chat",
+    chat_jid: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    limit: int = 100,
+    sender_phone_number: str | None = None,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
+    include_deleted: bool = True,
+    unread_only: bool = False,
+) -> dict[str, Any]:
+    """Aggregate message counts per chat, day, month or sender.
+
+    Same predicates as list_messages (MessageFilters), so the same arguments
+    describe the same set of rows; the totals row covers every matching message,
+    while `buckets` is capped and ordered by count descending.
+    """
+    if group_by not in MESSAGE_STATS_GROUPINGS:
+        raise ToolError("invalid_argument", f"group_by must be one of {', '.join(MESSAGE_STATS_GROUPINGS)}")
+    if chat_jid:
+        _require_allowed(chat_jid)
+    limit = max(1, min(int(limit), MAX_STATS_BUCKETS))
+    bucket_sql = _STATS_GROUP_SQL[group_by]
+
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+        clauses, filter_params = MessageFilters(
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            from_me=from_me,
+            has_media=has_media,
+            media_type=media_type,
+            exclude_groups=exclude_groups,
+            include_deleted=include_deleted,
+            unread_only=unread_only,
+        ).build(cur)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        base = f"FROM messages JOIN chats ON messages.chat_jid = chats.jid {where}"
+        # SUM(media) placeholders come first: they sit in the SELECT list.
+        params = [*MEDIA_TYPES, *filter_params]
+
+        label = "MIN(chats.name)" if group_by == "chat" else "NULL"
+        cur.execute(
+            f"SELECT {bucket_sql}, {label}, {_STATS_AGGREGATES} {base} "
+            f"GROUP BY {bucket_sql} ORDER BY COUNT(*) DESC, {bucket_sql} DESC LIMIT ?",
+            (*params, limit),
+        )
+        rows = cur.fetchall()
+        cur.execute(f"SELECT COUNT(DISTINCT {bucket_sql}), {_STATS_AGGREGATES} {base}", tuple(params))
+        total_row = cur.fetchone() or (0, 0, 0, 0, 0, None, None)
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    buckets: list[dict[str, Any]] = []
+    for key, chat_name, *aggregates in rows:
+        bucket: dict[str, Any] = {"key": key, **_stats_row(tuple(aggregates))}
+        if group_by == "chat":
+            bucket["label"] = chat_name or key
+        elif group_by == "sender":
+            bucket["label"] = get_sender_name(key) if key else None
+        buckets.append(bucket)
+
+    total = {"buckets": int(total_row[0] or 0), **_stats_row(tuple(total_row[1:]))}
+    return {
+        "group_by": group_by,
+        "buckets": buckets,
+        "total": total,
+        "truncated": total["buckets"] > len(buckets),
+    }
+
+
 def get_message_context(
     message_id: str, before: int = 5, after: int = 5, chat_jid: str | None = None, include_deleted: bool = True
 ) -> MessageContext:

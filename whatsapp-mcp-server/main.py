@@ -99,6 +99,9 @@ from whatsapp import (
     media_notes_for_message as whatsapp_media_notes_for_message,
 )
 from whatsapp import (
+    message_stats as whatsapp_message_stats,
+)
+from whatsapp import (
     purge_media as whatsapp_purge_media,
 )
 from whatsapp import (
@@ -454,6 +457,70 @@ def list_messages(
             if transcript:
                 row["transcript"] = transcript
     return result
+
+
+@mcp.tool()
+@tool_errors
+def message_stats(
+    group_by: str = "chat",
+    chat_jid: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    limit: int = 100,
+    sender_jid: str | None = None,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
+    include_deleted: bool = True,
+    unread_only: bool = False,
+) -> dict[str, Any]:
+    """How many messages, grouped by chat, day, month or sender — without reading them.
+
+    Size a job before doing it: "which chats are big", "when was this
+    conversation active", "who talks most". One SQL GROUP BY instead of paging
+    the archive through the conversation.
+
+    Returns:
+        {"group_by": ..., "buckets": [{key, label?, messages, from_me, inbound,
+        media, first_timestamp, last_timestamp}, ...], "total": {buckets,
+        messages, from_me, inbound, media, first_timestamp, last_timestamp},
+        "truncated": bool}
+
+        `buckets` is ordered by message count descending and capped at `limit`;
+        `total` always covers every matching message, so it stays correct when
+        `truncated` is true. `key` is the chat JID, the sender JID, "YYYY-MM-DD"
+        or "YYYY-MM"; `label` carries the chat or contact name when known.
+
+    Args:
+        group_by: "chat" (default), "day", "month" or "sender". Day and month
+                 buckets use the timestamp as stored (UTC).
+        chat_jid: Restrict to one conversation (JID or phone number with country code)
+        after: ISO-8601 lower bound, e.g. "2026-01-01"
+        before: ISO-8601 upper bound, e.g. "2026-02-01"
+        limit: Max buckets returned (default 100, max 500)
+        sender_jid: Only messages from this sender
+        from_me: True for what you sent, False for inbound only, None for both
+        has_media: True for messages carrying a file, False for text-only
+        media_type: "image", "video", "audio", "document" or "sticker"
+        exclude_groups: True counts direct conversations only
+        include_deleted: False drops revoked messages from the counts (default True)
+        unread_only: Only unread inbound messages (implies from_me=False)
+    """
+    return whatsapp_message_stats(
+        group_by=group_by,
+        chat_jid=chat_jid,
+        after=after,
+        before=before,
+        limit=limit,
+        sender_phone_number=sender_jid,
+        from_me=from_me,
+        has_media=has_media,
+        media_type=media_type,
+        exclude_groups=exclude_groups,
+        include_deleted=include_deleted,
+        unread_only=unread_only,
+    )
 
 
 @mcp.tool()
