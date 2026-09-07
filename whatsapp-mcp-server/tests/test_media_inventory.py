@@ -27,19 +27,21 @@ def _insert(c, msg_id, chat, media_type, ts, length, sha, filename=None, sender=
 @pytest.fixture
 def media_store(paired_dbs):
     with paired_dbs.messages() as c:
-        _insert(c, "IMG1", ALICE, "image", "2026-09-01 10:00:00", 200_000, SHA_A)
-        _insert(c, "IMG1F", FAMILY, "image", "2026-09-02 10:00:00", 200_000, SHA_A)
-        _insert(c, "IMG1G", FAMILY, "image", "2026-09-02 11:00:00", 200_000, SHA_A)
-        _insert(c, "VID1", BOB, "video", "2026-09-03 10:00:00", 5_000_000, SHA_B)
-        _insert(c, "DOC1", ALICE, "document", "2026-09-04 10:00:00", 50_000, SHA_C, filename="Report Q3.pdf")
-        _insert(c, "GONE", ALICE, "audio", "2026-09-04 11:00:00", 9_000, None, deleted="2026-09-04 12:00:00")
+        _insert(c, "IMG1", ALICE, "image", "2026-09-01 10:00:00+00:00", 200_000, SHA_A)
+        _insert(c, "IMG1F", FAMILY, "image", "2026-09-02 10:00:00+00:00", 200_000, SHA_A)
+        _insert(c, "IMG1G", FAMILY, "image", "2026-09-02 11:00:00+00:00", 200_000, SHA_A)
+        _insert(c, "VID1", BOB, "video", "2026-09-03 10:00:00+00:00", 5_000_000, SHA_B)
+        _insert(c, "DOC1", ALICE, "document", "2026-09-04 10:00:00+00:00", 50_000, SHA_C, filename="Report Q3.pdf")
+        _insert(
+            c, "GONE", ALICE, "audio", "2026-09-04 11:00:00+00:00", 9_000, None, deleted="2026-09-04 12:00:00+00:00"
+        )
         # never in the inventory: text, pointer rows
         c.execute(
-            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES ('T1', ?, 'x', 'hi', '2026-09-04 09:00:00', 0)",
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES ('T1', ?, 'x', 'hi', '2026-09-04 09:00:00+00:00', 0)",
             (ALICE,),
         )
         c.execute(
-            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, target_message_id) VALUES ('R1', ?, 'x', '👍', '2026-09-04 09:30:00', 0, 'reaction', 'IMG1')",
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, target_message_id) VALUES ('R1', ?, 'x', '👍', '2026-09-04 09:30:00+00:00', 0, 'reaction', 'IMG1')",
             (ALICE,),
         )
     # Cache: the photo in Alice's chat and the video are on disk; one stray .part file.
@@ -68,7 +70,7 @@ def test_size_sort_and_fields(media_store):
     doc = next(i for i in page["items"] if i["message_id"] == "DOC1")
     assert doc["filename"] == "Report Q3.pdf" and not doc["cached"] and doc["cached_bytes"] is None
     gone = page["items"][-1]
-    assert gone["sha256"] is None and gone["deleted_at"] == "2026-09-04T12:00:00" and gone["copies"] == 1
+    assert gone["sha256"] is None and gone["deleted_at"] == "2026-09-04T12:00:00+00:00" and gone["copies"] == 1
 
 
 def test_copies_are_counted_across_chats(media_store):

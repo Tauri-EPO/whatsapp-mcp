@@ -132,6 +132,11 @@ var canonicalTimeColumns = []struct{ table, column string }{
 // can parse would otherwise stay in the store forever, sorting and filtering
 // wrong on the strength of one startup warning; leaving the store unstamped
 // costs a scan per boot and keeps saying so until the row is fixed.
+//
+// Known gap: the stamp is trusted, so rows written by an *older* binary after
+// this migration ran (an image pinned back to a previous release for a day,
+// then rolled forward) are never revisited. Re-running the rewrite means
+// clearing the stamp by hand: PRAGMA user_version = 0 with the bridge stopped.
 func migrateCanonicalTimestamps(db *sql.DB) error {
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {

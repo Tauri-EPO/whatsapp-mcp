@@ -913,8 +913,9 @@ func (store *MessageStore) MarkCallRejected(callID, chatJID string) error {
 func (store *MessageStore) MarkCallTerminated(callID, chatJID, reason string, endedAt time.Time) error {
 	// ROUND before CAST: julianday() arithmetic produces a float and CAST truncates
 	// toward zero, so a 90-second call would otherwise record as 89. julianday()
-	// reads the offset in both spellings, so the duration stays right for a row
-	// stored before the canonical-timestamp migration.
+	// reads the canonical spelling and the driver's "…-03:00" one, so the duration
+	// is right for any row the migration has seen; a row it had to skip (Go's
+	// "… -0300 -03" form, which SQLite's date functions cannot read) yields NULL.
 	ended := dbTime(endedAt)
 	_, err := store.db.Exec(
 		`UPDATE calls SET
