@@ -34,10 +34,22 @@ from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
 from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
+    CHAT_FIELDS,
+    fetch_media_notes,
+    msg_to_dict,
+    shape_rows,
+)
+from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
 )
 from whatsapp import (
     bridge_status as whatsapp_bridge_status,
+)
+from whatsapp import (
+    count_messages as whatsapp_count_messages,
+)
+from whatsapp import (
+    count_unanswered as whatsapp_count_unanswered,
 )
 from whatsapp import (
     coverage as whatsapp_coverage,
@@ -50,10 +62,6 @@ from whatsapp import (
 )
 from whatsapp import (
     edit_message as whatsapp_edit_message,
-)
-from whatsapp import (
-    fetch_media_notes,
-    msg_to_dict,
 )
 from whatsapp import (
     forward_message as whatsapp_forward_message,
@@ -353,6 +361,24 @@ def _cap_context(limit: int, include_context: bool, before: int, after: int) -> 
     return before, after
 
 
+def _reject_count_only_extras(fields: list[str] | None = None, cursor: str | None = None, page: int = 0) -> None:
+    """count_only answers "how many", so a projection or a page position is a mistake.
+
+    Row-shaping knobs (omit_nulls, max_content_chars, limit) are simply ignored:
+    they describe rows that are not returned.
+    """
+    conflicts = [
+        name
+        for name, given in (("fields", fields is not None), ("cursor", bool(cursor)), ("page", bool(page)))
+        if given
+    ]
+    if conflicts:
+        raise ToolError(
+            "invalid_argument",
+            f"count_only returns {{'count': N}} for the whole filter, not rows: drop {', '.join(conflicts)}",
+        )
+
+
 @mcp.tool()
 @tool_errors
 @untrusted_content
@@ -376,6 +402,10 @@ def list_messages(
     media_type: str | None = None,
     exclude_groups: bool = False,
     include_transcripts: bool = False,
+    fields: list[str] | None = None,
+    omit_nulls: bool = False,
+    max_content_chars: int | None = None,
+    count_only: bool = False,
 ) -> dict[str, Any]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -383,6 +413,12 @@ def list_messages(
     pass next_cursor back as `cursor` (same filters and sort_by); stop when
     has_more is false. `page` still works but cursors are cheaper and stable
     while new messages arrive.
+
+    Bulk reads are expensive: a full 500-message page is ~270 KB, most of it
+    null keys and four spellings of the same sender. Before pulling one, size it
+    with count_only=True, then shape it: omit_nulls=True alone cuts a text page
+    by ~43%, and fields=["timestamp","sender_phone","content"] by 76%.
+    Reach for those whenever you are reading to analyse rather than to display.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
     Media messages carry media_type and filename (the sender's original document name,
@@ -440,7 +476,37 @@ def list_messages(
                  never passed to transcribe_audio simply have no transcript. Use
                  media_type="audio", include_transcripts=True to read a conversation
                  held by voice.
+        fields: Keep only these keys on each row, e.g.
+                 ["timestamp","sender_phone","content"]. An unknown name is an
+                 error listing the valid ones. content_truncated is kept even
+                 when unlisted, so shortened text is never passed off as whole.
+        omit_nulls: Drop keys that carry nothing (null, false, empty text, empty
+                 notes) instead of serialising them. Combines with fields.
+        max_content_chars: Cut `content` to this many characters and mark the row
+                 content_truncated=true. Use it to skim long messages; re-read the
+                 chat without it (or with get_message_context) for the full text.
+        count_only: Return {"count": N} for exactly these filters and no rows —
+                 the cheap way to size a job before pulling it. Combining it with
+                 fields, cursor or page is an error; limit and the row-shaping
+                 arguments are ignored.
     """
+    if count_only:
+        _reject_count_only_extras(fields, cursor, page)
+        return {
+            "count": whatsapp_count_messages(
+                after=after,
+                before=before,
+                sender_phone_number=sender_jid,
+                chat_jid=chat_jid,
+                query=query,
+                include_deleted=include_deleted,
+                unread_only=unread_only,
+                from_me=from_me,
+                has_media=has_media,
+                media_type=media_type,
+                exclude_groups=exclude_groups,
+            )
+        }
     # Cap limit at 500 to prevent excessive queries
     limit = max(0, min(limit, MAX_LIST_LIMIT))
     context_before, context_after = _cap_context(limit, include_context, context_before, context_after)
@@ -471,6 +537,7 @@ def list_messages(
             transcript = (row.get("notes") or {}).get(TRANSCRIPT_KEY)
             if transcript:
                 row["transcript"] = transcript
+    result["items"] = shape_rows(result["items"], fields, omit_nulls, max_content_chars)
     return result
 
 
@@ -622,6 +689,10 @@ def list_unread(
     since: str | None = None,
     exclude_groups: bool = False,
     max_age_days: int | None = None,
+    fields: list[str] | None = None,
+    omit_nulls: bool = False,
+    max_content_chars: int | None = None,
+    count_only: bool = False,
 ) -> dict[str, Any]:
     """What is waiting for me: chats with unread inbound messages and their newest unread rows.
 
@@ -641,19 +712,33 @@ def list_unread(
         exclude_groups: Skip group chats ("...@g.us"), keeping direct conversations only
         max_age_days: Only count messages from the last N days; the relative form of
                       since. Passing both since and max_age_days is an error.
+        fields: Keep only these keys on each message row (same names as list_messages);
+                an unknown name is an error listing the valid ones
+        omit_nulls: Drop message keys that carry nothing (null, false, empty text)
+        max_content_chars: Cut each message's `content` and set content_truncated=true
+        count_only: Return {"count": N, "chats_with_unread": N} over every matching
+                chat — limit_chats/limit_per_chat and the shaping arguments do not
+                apply, and no message row is read. Combining it with fields is an error.
 
     Returns:
         {"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread,
         last_read_time, messages: [...]}], "total_unread": N, "chats_with_unread": N}.
         Use mark_messages_read(chat_jid, message_ids) once handled.
     """
-    return whatsapp_list_unread(
+    if count_only:
+        _reject_count_only_extras(fields)
+    unread = whatsapp_list_unread(
         limit_chats=limit_chats,
         limit_per_chat=limit_per_chat,
         since=since,
         exclude_groups=exclude_groups,
         max_age_days=max_age_days,
+        count_only=count_only,
     )
+    if not count_only:
+        for chat in unread["chats"]:
+            chat["messages"] = shape_rows(chat["messages"], fields, omit_nulls, max_content_chars)
+    return unread
 
 
 @mcp.tool()
@@ -666,6 +751,9 @@ def list_unanswered(
     min_age_hours: float = 0,
     include_last_message: bool = True,
     cursor: str | None = None,
+    fields: list[str] | None = None,
+    omit_nulls: bool = False,
+    count_only: bool = False,
 ) -> dict[str, Any]:
     """Chats where the other side spoke last: conversations waiting for a reply from you.
 
@@ -692,6 +780,15 @@ def list_unanswered(
                        than a day"). Default 0, no lower bound.
         include_last_message: Include last_message / last_sender (default True)
         cursor: next_cursor from the previous page
+        fields: Keep only these keys on each chat row (chat names, not message
+                names: jid, name, last_message, last_inbound_time, age_hours…);
+                an unknown name is an error listing the valid ones
+        omit_nulls: Drop chat keys that carry nothing (null, false, empty text).
+                These rows carry `last_message`, not `content`, so there is no
+                max_content_chars here — use include_last_message=False to drop it.
+        count_only: Return {"count": N}, how many chats are waiting, for exactly
+                these filters and no rows. Combining it with fields or cursor is
+                an error; limit is ignored.
 
     Returns:
         Chat dictionaries in the list_chats shape (jid, name, name_source, is_group,
@@ -700,7 +797,12 @@ def list_unanswered(
         `unread` tells the two backlogs apart: false means you read it and never
         answered.
     """
-    return whatsapp_list_unanswered(
+    if count_only:
+        _reject_count_only_extras(fields, cursor)
+        return {
+            "count": whatsapp_count_unanswered(since=since, exclude_groups=exclude_groups, min_age_hours=min_age_hours)
+        }
+    result = whatsapp_list_unanswered(
         since=since,
         limit=limit,
         exclude_groups=exclude_groups,
@@ -708,6 +810,8 @@ def list_unanswered(
         include_last_message=include_last_message,
         cursor=cursor,
     ).to_dict()
+    result["items"] = shape_rows(result["items"], fields, omit_nulls, known=CHAT_FIELDS)
+    return result
 
 
 @mcp.tool()
@@ -829,11 +933,21 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
 @mcp.tool()
 @tool_errors
 @untrusted_content
-def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
+def get_message_context(
+    chat_jid: str,
+    message_id: str,
+    before: int = 5,
+    after: int = 5,
+    fields: list[str] | None = None,
+    omit_nulls: bool = False,
+    max_content_chars: int | None = None,
+) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
     Messages use the same shape as list_messages (including media_type, filename,
-    sha256 and the notes recorded for media messages).
+    sha256 and the notes recorded for media messages), and the same compact-read
+    arguments shape them. There is no count_only here: this tool returns one
+    window, whose size you already gave as before/after.
 
     Args:
         chat_jid: JID of the chat containing the message (message IDs are only
@@ -841,14 +955,22 @@ def get_message_context(chat_jid: str, message_id: str, before: int = 5, after: 
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
+        fields: Keep only these keys on each row; an unknown name is an error
+                listing the valid ones
+        omit_nulls: Drop keys that carry nothing (null, false, empty text, empty notes)
+        max_content_chars: Cut `content` and set content_truncated=true on the row
     """
     context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
     # One notes lookup for the whole window.
     notes = fetch_media_notes([context.message, *context.before, *context.after])
+
+    def shaped(messages: list[Any]) -> list[dict[str, Any]]:
+        return shape_rows([msg_to_dict(m, notes=notes) for m in messages], fields, omit_nulls, max_content_chars)
+
     return {
-        "message": msg_to_dict(context.message, notes=notes),
-        "before": [msg_to_dict(message, notes=notes) for message in context.before],
-        "after": [msg_to_dict(message, notes=notes) for message in context.after],
+        "message": shaped([context.message])[0],
+        "before": shaped(context.before),
+        "after": shaped(context.after),
     }
 
 

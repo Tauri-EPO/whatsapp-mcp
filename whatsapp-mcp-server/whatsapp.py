@@ -357,7 +357,9 @@ def _row_to_message(row: tuple) -> Message:
         sender=sender,
         chat_name=chat_name,
         content=content,
-        is_from_me=is_from_me,
+        # SQLite hands the BOOLEAN column back as 0/1; the dataclass (and the
+        # JSON an agent reads) says bool, and omit_nulls drops `false`, not 0.
+        is_from_me=bool(is_from_me),
         chat_jid=chat_jid,
         id=msg_id,
         media_type=media_type,
@@ -570,6 +572,94 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     """Convert a Contact dataclass to a dictionary for JSON serialization."""
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+
+
+# --- response shaping (compact reads) -----------------------------------------
+
+# The valid `fields` names are the keys the converters above actually emit, read
+# off one empty row each, plus the keys added conditionally afterwards (`notes`
+# for media rows, `transcript` for include_transcripts, `content_truncated` for
+# max_content_chars). Deriving them here keeps one list instead of a hand-copied
+# one that drifts the next time a column is added.
+MESSAGE_FIELDS: tuple[str, ...] = (
+    *msg_to_dict(
+        Message(timestamp=datetime.min, sender="", content="", is_from_me=False, chat_jid="", id=""),
+        include_sender_name=False,
+    ),
+    "notes",
+    "transcript",
+    "content_truncated",
+)
+CHAT_FIELDS: tuple[str, ...] = (
+    *chat_to_dict(Chat(jid="", name=None, last_message_time=None)),
+    "last_inbound_time",
+    "age_hours",
+)
+
+
+def _is_empty(value: Any) -> bool:
+    """Values omit_nulls drops: null, false, empty text, empty notes.
+
+    `is False` rather than falsiness on purpose — `bytes: 0` and `age_hours: 0`
+    are facts, not absences.
+    """
+    return value is None or value is False or value == "" or value == {}
+
+
+def validate_fields(fields: Sequence[str] | None, known: Sequence[str] = MESSAGE_FIELDS) -> list[str] | None:
+    """Normalise a `fields` projection; unknown names raise invalid_argument."""
+    if fields is None:
+        return None
+    if isinstance(fields, str):
+        raise ToolError("invalid_argument", "fields must be a list of field names, not a string")
+    selected = [str(name).strip() for name in fields if str(name).strip()]
+    if not selected:
+        raise ToolError("invalid_argument", f"fields must name at least one of: {', '.join(sorted(known))}")
+    unknown = [name for name in selected if name not in known]
+    if unknown:
+        raise ToolError(
+            "invalid_argument",
+            f"unknown field(s) {', '.join(sorted(set(unknown)))}; valid names: {', '.join(sorted(known))}",
+        )
+    return selected
+
+
+def shape_rows(
+    rows: list[dict[str, Any]],
+    fields: Sequence[str] | None = None,
+    omit_nulls: bool = False,
+    max_content_chars: int | None = None,
+    known: Sequence[str] = MESSAGE_FIELDS,
+) -> list[dict[str, Any]]:
+    """Compact already-converted rows: truncate `content`, project, drop empties.
+
+    One helper for every bulk read, applied after msg_to_dict / chat_to_dict so
+    the shaping never has to know how a row was built. Order matters:
+    truncation runs first (so a projection on `content` still gets the shortened
+    text) and `content_truncated` survives a projection that did not ask for it,
+    because losing that flag would make the truncated text look complete.
+    """
+    selected = validate_fields(fields, known)
+    limit = int(max_content_chars) if max_content_chars is not None else None
+    if limit is not None and limit < 1:
+        raise ToolError("invalid_argument", f"max_content_chars must be 1 or more, got {max_content_chars!r}")
+    if selected is None and not omit_nulls and limit is None:
+        return rows
+
+    shaped: list[dict[str, Any]] = []
+    for row in rows:
+        out = dict(row)
+        content = out.get("content")
+        if limit is not None and isinstance(content, str) and len(content) > limit:
+            out["content"] = content[:limit]
+            out["content_truncated"] = True
+        if selected is not None:
+            keep = [*selected, "content_truncated"] if out.get("content_truncated") else selected
+            out = {name: out[name] for name in keep if name in out}
+        if omit_nulls:
+            out = {name: value for name, value in out.items() if not _is_empty(value)}
+        shaped.append(out)
+    return shaped
 
 
 def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
@@ -1131,6 +1221,84 @@ class MessageFilters:
         return f"(messages.media_type IS NULL OR messages.media_type NOT IN ({placeholders}))", list(MEDIA_TYPES)
 
 
+def _query_predicate(conn: sqlite3.Connection, query: str | None) -> tuple[bool, str | None, list[Any]]:
+    """Content-search predicate shared by the message list and count queries.
+
+    Returns (use_fts, clause, params). The FTS5 index serves the query when it
+    exists and the text is index-friendly; otherwise instr() on the raw column,
+    because SQLite's LOWER() is ASCII-only and LIKE LOWER(...) would silently
+    drop Unicode matches.
+    """
+    if not query:
+        return False, None, []
+    if _fts_query_kind(query) == "fts" and _fts_available(conn):
+        return True, f"{MESSAGES_FTS_TABLE} MATCH ?", [query]
+    return False, "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)", [query, query]
+
+
+def _execute_message_sql(
+    cur: sqlite3.Cursor, sql: str, params: list[Any], match_param_index: int | None, query: str | None
+) -> None:
+    """Execute a message query, retrying an FTS MATCH whose raw text is not FTS5 syntax."""
+    try:
+        cur.execute(sql, tuple(params))
+    except sqlite3.OperationalError:
+        if match_param_index is None:
+            raise
+        # Raw text was not valid FTS5 syntax (operator characters, unbalanced
+        # quotes...). Retry with every token quoted so it is matched literally.
+        params[match_param_index] = _fts_quote_tokens(query or "")
+        cur.execute(sql, tuple(params))
+
+
+def count_messages(
+    after: str | None = None,
+    before: str | None = None,
+    sender_phone_number: str | None = None,
+    chat_jid: str | None = None,
+    query: str | None = None,
+    include_deleted: bool = True,
+    unread_only: bool = False,
+    from_me: bool | None = None,
+    has_media: bool | None = None,
+    media_type: str | None = None,
+    exclude_groups: bool = False,
+) -> int:
+    """How many messages match the list_messages filters, without returning any row."""
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+        use_fts, predicate, predicate_params = _query_predicate(conn, query)
+        where_clauses, params = MessageFilters(
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            from_me=from_me,
+            has_media=has_media,
+            media_type=media_type,
+            exclude_groups=exclude_groups,
+            include_deleted=include_deleted,
+            unread_only=unread_only,
+        ).build(cur)
+        match_param_index = len(params) if use_fts else None
+        if predicate:
+            where_clauses.append(predicate)
+            params.extend(predicate_params)
+        fts_join = f" JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid" if use_fts else ""
+        where = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        sql = f"SELECT COUNT(*) FROM messages JOIN chats ON messages.chat_jid = chats.jid{fts_join}{where}"
+        _execute_message_sql(cur, sql, params, match_param_index, query)
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
 def _parse_filter_date(value: str, field: str) -> datetime:
     try:
         return datetime.fromisoformat(value)
@@ -1241,7 +1409,7 @@ def list_messages_page(
         conn = _connect_messages_db()
         cur = conn.cursor()
 
-        use_fts = bool(query) and _fts_query_kind(query) == "fts" and _fts_available(conn)
+        use_fts, predicate, predicate_params = _query_predicate(conn, query)
 
         # Build base query
         query_parts = [f"SELECT {MESSAGE_COLUMNS} FROM messages"]
@@ -1261,16 +1429,10 @@ def list_messages_page(
             unread_only=unread_only,
         ).build(cur)
 
-        match_param_index = None
-        if query and use_fts:
-            where_clauses.append(f"{MESSAGES_FTS_TABLE} MATCH ?")
-            match_param_index = len(params)
-            params.append(query)
-        elif query:
-            # SQLite's LOWER() only handles ASCII, so LIKE LOWER(...) silently
-            # excludes Unicode matches. instr() on the raw column preserves them.
-            where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
-            params.extend([query, query])
+        match_param_index = len(params) if use_fts else None
+        if predicate:
+            where_clauses.append(predicate)
+            params.extend(predicate_params)
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -1301,16 +1463,7 @@ def list_messages_page(
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit + 1, offset])
 
-        sql = " ".join(query_parts)
-        try:
-            cur.execute(sql, tuple(params))
-        except sqlite3.OperationalError:
-            if match_param_index is None:
-                raise
-            # Raw text was not valid FTS5 syntax (operator characters, unbalanced
-            # quotes...). Retry with every token quoted so it is matched literally.
-            params[match_param_index] = _fts_quote_tokens(query or "")
-            cur.execute(sql, tuple(params))
+        _execute_message_sql(cur, " ".join(query_parts), params, match_param_index, query)
         messages = cur.fetchall()
         has_more = len(messages) > limit
         messages = messages[:limit]
@@ -2644,6 +2797,7 @@ def list_unread(
     since: str | None = None,
     exclude_groups: bool = False,
     max_age_days: int | None = None,
+    count_only: bool = False,
 ) -> dict[str, Any]:
     """Chats with unread inbound messages, each with its newest unread rows.
 
@@ -2655,6 +2809,9 @@ def list_unread(
     exclude_groups drops `...@g.us` conversations; max_age_days is the relative
     form of since (both are rejected together). Both bound the counted rows and
     the returned messages alike.
+
+    count_only returns {"count", "chats_with_unread"} over *every* matching
+    chat, ignoring limit_chats and limit_per_chat, and reads no message row.
     """
     limit_chats = max(1, min(int(limit_chats), 100))
     limit_per_chat = max(1, min(int(limit_per_chat), 50))
@@ -2665,11 +2822,7 @@ def list_unread(
         read_marker = _last_read_time_select(cursor, "chats")
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         spoken_filter = _spoken_filter("messages")
-        params: list[Any] = [*policy_params, *filter_params, limit_chats]
-        cursor.execute(
-            f"""
-            SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
-                   COUNT(*) AS unread_count, MAX(messages.timestamp) AS latest_unread
+        unread_where = f"""
             FROM messages
             JOIN chats ON chats.jid = messages.chat_jid
             WHERE messages.is_from_me = 0
@@ -2677,6 +2830,19 @@ def list_unread(
               AND {spoken_filter}
               AND {policy_clause}
               {filter_clause}
+            """
+        if count_only:
+            cursor.execute(
+                f"SELECT COUNT(*), COUNT(DISTINCT chats.jid) {unread_where}", (*policy_params, *filter_params)
+            )
+            counted = cursor.fetchone() or (0, 0)
+            return {"count": int(counted[0] or 0), "chats_with_unread": int(counted[1] or 0)}
+        params: list[Any] = [*policy_params, *filter_params, limit_chats]
+        cursor.execute(
+            f"""
+            SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
+                   COUNT(*) AS unread_count, MAX(messages.timestamp) AS latest_unread
+            {unread_where}
             GROUP BY chats.jid
             ORDER BY latest_unread DESC
             LIMIT ?
@@ -2755,6 +2921,44 @@ def list_unanswered(
     ).items
 
 
+def _unanswered_from_where(since: str | None, exclude_groups: bool, min_age_hours: float) -> tuple[str, list[Any]]:
+    """FROM/WHERE shared by the list_unanswered page and its count."""
+    filter_clause, filter_params = unread_filters(since, None, exclude_groups)
+    age_clause, age_params = "", []
+    hours = float(min_age_hours or 0)
+    if hours < 0:
+        raise ToolError("invalid_argument", f"min_age_hours must be 0 or more, got {min_age_hours!r}")
+    if hours > 0:
+        age_clause = "AND messages.timestamp <= ?"
+        age_params = [datetime.now() - timedelta(hours=hours)]
+    policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
+    sql = f"""
+            FROM chats
+            {_last_message_join("chats", "messages", spoken_only=True)}
+            WHERE messages.is_from_me = 0
+              AND {policy_clause}
+              {filter_clause} {age_clause}
+            """
+    return sql, [*policy_params, *filter_params, *age_params]
+
+
+def count_unanswered(since: str | None = None, exclude_groups: bool = False, min_age_hours: float = 0) -> int:
+    """How many chats are waiting for a reply, without returning any of them."""
+    from_where, params = _unanswered_from_where(since, exclude_groups, min_age_hours)
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) {from_where}", tuple(params))
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
 def list_unanswered_page(
     since: str | None = None,
     limit: int = 20,
@@ -2774,20 +2978,12 @@ def list_unanswered_page(
     """
     limit = max(1, min(int(limit), 200))
     cursor_state = decode_cursor(cursor, "unanswered")
-    filter_clause, filter_params = unread_filters(since, None, exclude_groups)
-    age_clause, age_params = "", []
-    hours = float(min_age_hours or 0)
-    if hours < 0:
-        raise ToolError("invalid_argument", f"min_age_hours must be 0 or more, got {min_age_hours!r}")
-    if hours > 0:
-        age_clause = "AND messages.timestamp <= ?"
-        age_params = [datetime.now() - timedelta(hours=hours)]
+    from_where, where_params = _unanswered_from_where(since, exclude_groups, min_age_hours)
 
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
         read_marker = _last_read_time_select(cur, "chats")
-        policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         # Same contract as list_chats: the last message is always joined
         # because is_from_me is the filter, its content is optional.
         if include_last_message:
@@ -2805,15 +3001,11 @@ def list_unanswered_page(
                    {last_message_select},
                    messages.is_from_me, {read_marker},
                    messages.id IS NOT NULL, messages.timestamp
-            FROM chats
-            {_last_message_join("chats", "messages", spoken_only=True)}
-            WHERE messages.is_from_me = 0
-              AND {policy_clause}
-              {filter_clause} {age_clause} {keyset_clause}
+            {from_where} {keyset_clause}
             ORDER BY messages.timestamp DESC, chats.jid ASC
             LIMIT ?
             """,
-            (*policy_params, *filter_params, *age_params, *keyset_params, limit + 1),
+            (*where_params, *keyset_params, limit + 1),
         )
         rows = cur.fetchall()
         has_more = len(rows) > limit

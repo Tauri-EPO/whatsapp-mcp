@@ -6,7 +6,7 @@ With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, 
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
-Three conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
+Four conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
 
 ## Pagination
 
@@ -17,6 +17,48 @@ Three conventions apply to every tool below: [Pagination](#pagination) for the o
 ```
 
 Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based (`timestamp, id`), so paging stays consistent while new messages arrive and does not slow down on deep pages. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor. `list_group_members` reads a live list from the bridge rather than the database, so its cursor is an offset into a deterministic ordering (see below).
+
+## Compact reads
+
+A full page is built for a human reading a conversation: 20 keys per message, most of them `null` for plain text, and four spellings of the same sender. `list_messages(limit=500, include_context=false)` is ~270 KB of JSON, which many MCP hosts refuse to render. Four arguments shape that down, on `list_messages`, `get_message_context`, `list_unread` and `list_unanswered`:
+
+| Argument | Effect |
+| --- | --- |
+| `count_only` (default `false`) | Return `{"count": N}` for exactly the same filters and no rows. Size a job before pulling it |
+| `fields` (default unset) | Keep only these keys on each row, e.g. `["timestamp","sender_phone","content"]`. An unknown name is `invalid_argument` and the message lists the valid ones |
+| `omit_nulls` (default `false`) | Drop keys that carry nothing: `null`, `false`, empty text, empty `notes` |
+| `max_content_chars` (default unset) | Cut `content` to N characters and set `content_truncated: true` on that row |
+
+Measured on a 500-message text page (269,890 bytes as returned today): `omit_nulls` alone brings it to 154,640 bytes (**-43%**), `fields=["timestamp","sender_phone","content"]` to 64,640 bytes (**-76%**). The two combine; `max_content_chars` is on top of both.
+
+Rules worth knowing:
+
+- **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them.
+- **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_unanswered` returns chat rows, so its names are the chat ones (`jid`, `name`, `last_message`, `last_inbound_time`, `age_hours`…) and it has no `max_content_chars` — use `include_last_message=false` to drop the text.
+
+**Compact read for bulk analysis** — "who wrote what in this chat last month", without spending the context on nulls:
+
+```jsonc
+// 1. how big is it?
+list_messages(chat_jid="…@g.us", after="2026-08-01", before="2026-09-01",
+              include_context=false, count_only=true)
+// -> {"count": 1840}
+
+// 2. pull it in pages of 500, three keys per row, long messages skimmed
+list_messages(chat_jid="…@g.us", after="2026-08-01", before="2026-09-01",
+              include_context=false, limit=500, sort_by="oldest",
+              fields=["timestamp", "sender_phone", "content"],
+              omit_nulls=true, max_content_chars=300)
+```
+
+```json
+{"items": [{"timestamp": "2026-08-01T09:14:02", "sender_phone": "5511999999999",
+            "content": "bom dia, segue o orçamento…", "content_truncated": true}],
+ "next_cursor": "eyJrIjoi…", "has_more": true}
+```
+
+Above a few thousand rows, stop paging into the conversation at all: [`export_messages`](#export_messages) writes the same rows to an NDJSON file on the server and returns only a summary, so the corpus goes to a script instead of the model. `message_stats` answers "how many / when / who" without any rows.
 
 ## Errors
 
@@ -197,6 +239,7 @@ Get messages with filters, date ranges, and sorting.
 - `media_type` (optional): one of `image`, `video`, `audio`, `document`, `sticker`. Implies `has_media=true`; combining it with `has_media=false` is refused
 - `exclude_groups` (optional, default `false`): `true` drops group chats (`@g.us`) and keeps direct conversations
 - `include_transcripts` (optional, default `false`): `true` copies the stored transcript of each voice note onto its row as `transcript`. It comes from the same batched `notes.db` lookup the rows already do, costs no extra query and **never** transcribes: audio never passed to `transcribe_audio` simply has none. `media_type="audio", include_transcripts=true` reads a conversation held by voice
+- `fields`, `omit_nulls`, `max_content_chars`, `count_only`: shape the response instead of returning every key of every row — see [Compact reads](#compact-reads). Start a bulk read with `count_only=true`
 
 The four filters above are plain WHERE predicates, so they combine with each other and with
 every filter above: `from_me=false, media_type="document", exclude_groups=true`
@@ -815,6 +858,8 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 - `since` (optional): ISO-8601 lower bound
 - `exclude_groups` (optional, default false): skip `...@g.us` chats, keeping direct conversations only
 - `max_age_days` (optional): count only the last N days — the relative spelling of `since`. Giving both is an `invalid_argument` error
+- `fields`, `omit_nulls`, `max_content_chars`: shape the message rows inside each chat — see [Compact reads](#compact-reads)
+- `count_only` (optional, default false): return `{"count", "chats_with_unread"}` over every matching chat and read no message row
 
 Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled.
 
@@ -840,6 +885,7 @@ Chats with no stored messages never appear.
 - `min_age_hours` (optional, default 0): only chats waiting at least this long — `24` skips the conversations you are in the middle of
 - `include_last_message` (optional, default true): include `last_message` / `last_sender`
 - `cursor` (optional): `next_cursor` from the previous page
+- `fields`, `omit_nulls`, `count_only`: shape the response — see [Compact reads](#compact-reads). These are chat rows, so `fields` takes chat names and there is no `max_content_chars`
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
@@ -927,6 +973,7 @@ Get messages around a specific message for context.
 - `message_id` (required): ID of the target message
 - `before` (optional): Number of messages before (default 5)
 - `after` (optional): Number of messages after (default 5)
+- `fields`, `omit_nulls`, `max_content_chars`: shape every returned row — see [Compact reads](#compact-reads). No `count_only` here: the window size is what you asked for
 
 ## Call history (data reference)
 
