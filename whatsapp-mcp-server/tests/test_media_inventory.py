@@ -1,6 +1,7 @@
 """list_media / get_media_stats over a real store: sizes, copies, cache state, allow-list."""
 
 import os
+from datetime import datetime
 
 import pytest
 
@@ -88,6 +89,21 @@ def test_filters(media_store):
     assert _ids(main.list_media(before="2026-09-01T23:59:59")) == ["IMG1"]
     # copies keep counting the whole archive even when the page is filtered
     assert main.list_media(chat_jid=FAMILY)["items"][0]["copies"] == 3
+
+
+def test_time_bounds_ignore_the_stored_format(media_store):
+    """Rows rewritten in the RFC 3339 "T" spelling answer the same bound (#253).
+
+    Membership only: ORDER BY still reads the raw column, so two spellings of
+    the same day sort as "T" > " " rather than by instant.
+    """
+    with media_store.messages() as c:
+        c.execute("UPDATE messages SET timestamp = replace(timestamp, ' ', 'T') WHERE id IN ('VID1', 'DOC1')")
+    assert sorted(_ids(main.list_media(after="2026-09-03T00:00:00"))) == ["DOC1", "GONE", "VID1"]
+    assert _ids(main.list_media(before="2026-09-01T23:59:59")) == ["IMG1"]
+    # An offset-aware bound names the same instant as the local one it came from.
+    local = datetime(2026, 9, 3).astimezone().isoformat()
+    assert sorted(_ids(main.list_media(after=local))) == ["DOC1", "GONE", "VID1"]
 
 
 def test_pagination_cursor(media_store):

@@ -6,7 +6,7 @@ With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, 
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
-Four conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
+Five conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Time bounds](#time-bounds) for `after` / `before` / `since`, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
 
 ## Pagination
 
@@ -59,6 +59,14 @@ list_messages(chat_jid="…@g.us", after="2026-08-01", before="2026-09-01",
 ```
 
 Above a few thousand rows, stop paging into the conversation at all: [`export_messages`](#export_messages) writes the same rows to an NDJSON file on the server and returns only a summary, so the corpus goes to a script instead of the model. `message_stats` answers "how many / when / who" without any rows.
+
+## Time bounds
+
+`after` / `before` (`list_messages`, `message_stats`, `export_messages`, `list_media`) and `since` (`list_unread`, `list_unanswered`) all take the same thing: an ISO-8601 date or date-time, `2026-01-09` or `2026-01-09T18:00:00`. A date alone means midnight. Anything else is `invalid_argument`. On the message tools both ends are **strict** (`>` and `<`), so a bound naming the exact instant of a message excludes that message; `list_media` includes them (`>=` / `<=`).
+
+The bound is read in the **bridge's local time**, because that is the clock the archive is written in. A bound carrying a UTC offset (`2026-01-09T18:00:00-03:00`, `…Z`) is converted to that local time first, so the same instant selects the same rows however it is spelled; a bound without one is taken as already local. Seconds are the resolution — a fractional part in the bound is ignored.
+
+`max_age_days` (`list_unread`) and `min_age_hours` (`list_unanswered`) are the relative spellings of the same bound and use the same clock: `max_age_days=3` is `since` set to three days ago, `min_age_hours=2` keeps only chats whose last inbound message is at least two hours old.
 
 ## Errors
 
