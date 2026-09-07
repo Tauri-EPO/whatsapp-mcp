@@ -407,7 +407,13 @@ def list_messages(
 
 @mcp.tool()
 @tool_errors
-def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | None = None) -> dict[str, Any]:
+def list_unread(
+    limit_chats: int = 20,
+    limit_per_chat: int = 5,
+    since: str | None = None,
+    exclude_groups: bool = False,
+    max_age_days: int | None = None,
+) -> dict[str, Any]:
     """What is waiting for me: chats with unread inbound messages and their newest unread rows.
 
     One call instead of list_chats followed by list_messages(unread_only=True) per
@@ -415,17 +421,30 @@ def list_unread(limit_chats: int = 20, limit_per_chat: int = 5, since: str | Non
     marker (as read on any of your devices); chats never read count as entirely
     unread. Reactions, poll votes and deleted messages are not counted.
 
+    Busy accounts are dominated by group chatter nobody reads: pass
+    exclude_groups=True to see only direct conversations, and max_age_days to
+    ignore a backlog older than a few days.
+
     Args:
         limit_chats: Max chats to return, most recently active first (default 20, max 100)
         limit_per_chat: Newest unread messages to include per chat, oldest first (default 5, max 50)
         since: Only count messages after this ISO-8601 timestamp (e.g. "2026-09-04T08:00:00")
+        exclude_groups: Skip group chats ("...@g.us"), keeping direct conversations only
+        max_age_days: Only count messages from the last N days; the relative form of
+                      since. Passing both since and max_age_days is an error.
 
     Returns:
         {"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread,
         last_read_time, messages: [...]}], "total_unread": N, "chats_with_unread": N}.
         Use mark_messages_read(chat_jid, message_ids) once handled.
     """
-    return whatsapp_list_unread(limit_chats=limit_chats, limit_per_chat=limit_per_chat, since=since)
+    return whatsapp_list_unread(
+        limit_chats=limit_chats,
+        limit_per_chat=limit_per_chat,
+        since=since,
+        exclude_groups=exclude_groups,
+        max_age_days=max_age_days,
+    )
 
 
 @mcp.tool()
