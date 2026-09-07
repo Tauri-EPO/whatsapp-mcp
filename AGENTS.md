@@ -92,6 +92,7 @@ whatsapp-mcp/
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
 │   ├── tool_policy.py          # WHATSAPP_READ_ONLY / _ALLOW_TOOLS / _DENY_TOOLS: hides + refuses tools
+│   ├── untrusted.py            # @untrusted_content: the third-party-data sentence + WHATSAPP_WRAP_UNTRUSTED
 │   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
@@ -204,6 +205,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_READ_ONLY` | *(unset = everything enabled)* | Read-only deployment: the MCP server omits every mutating tool from `tools/list` and refuses it with `denied` if called anyway (`tool_policy.py`, `@mutating_tool`); the bridge answers 403 on the matching endpoints (`read_only.go`). Reads, `download_media`, `transcribe_audio` and `annotate_media` (local notes.db) stay available. `1/true/yes/on` or `0/false/no/off`; anything else stops the process. Set for both processes |
 | `WHATSAPP_ALLOW_TOOLS` | *(unset = every tool)* | MCP-server-only allow-list of tool names (comma-separated): only these are offered, reads included. Unknown names stop the process with the valid list (`tool_policy.py`) |
 | `WHATSAPP_DENY_TOOLS` | *(unset)* | MCP-server-only deny-list of tool names. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both (the three filters only ever remove capability). Unknown names stop the process |
+| `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)* | MCP-server-only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values) in `<untrusted>…</untrusted>` delimiters, so a model that skipped the tool description still sees a boundary (`untrusted.py`). JIDs, IDs, timestamps and cursors are untouched. Same strict boolean parse as `WHATSAPP_READ_ONLY`. A hint, not a control — the enforced mitigations are `WHATSAPP_READ_ONLY` and `WHATSAPP_ALLOWED_CHATS` |
 | `WHATSAPP_LOG_LEVEL` | `INFO` | Bridge log level (`DEBUG`/`INFO`/`WARN`/`ERROR`), applied to the bridge logger and the whatsmeow client. `DEBUG` echoes each stored message |
 | `WHATSAPP_LOG_FORMAT` | `text` | `json` switches the bridge (and whatsmeow) log lines to one JSON object per line (`ts`, `level`, `module`, `msg`) (`logging_json.go`) |
 | `WHATSAPP_METRICS` | `true` | Serve `GET /metrics` on the bridge (Prometheus text, unauthenticated like `/api/version`: counters and connection state only, `metrics.go`); `false` removes the route |
@@ -259,6 +261,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 | Change DB queries / dict conversion | `whatsapp-mcp-server/whatsapp.py` |
 | Change HTTP transport, auth, allowed hosts | `whatsapp-mcp-server/main.py` (`__main__`), `mcp_config.py`, `http_auth.py` |
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
+| Change how tool results are marked as untrusted | `whatsapp-mcp-server/untrusted.py` (+ the allow-list in `tests/test_untrusted_content.py`) |
 | Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
 | Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
