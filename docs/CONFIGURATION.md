@@ -51,6 +51,9 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
 | `WHISPER_LANGUAGE`     | `pt`                                     | Default transcription language (`auto` to detect) |
 | `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
+| `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe inbound voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
+| `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
+| `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
 | `FFMPEG_TIMEOUT_S`     | `120`                                    | Timeout for each ffmpeg conversion (`send_audio_message` encode, whisper WAV prep) |
 
 ## MCP transport (stdio vs http/sse)
@@ -306,6 +309,56 @@ them. The mitigations that are actually enforced are
 [read-only mode](#read-only-mode-recommended-for-a-personal-assistant) and the
 [chat allow-list](#restricting-which-chats-the-agent-can-touch); see
 [SECURITY.md](../SECURITY.md).
+
+## Transcribing voice notes as they arrive
+
+`transcribe_audio` transcribes the one message an agent asks about, so a
+voice-heavy account stays unsearchable until somebody walks it by hand.
+`TRANSCRIBE_ON_INGEST=1` starts a background worker inside the MCP server that
+does the walking:
+
+```bash
+TRANSCRIBE_ON_INGEST=1
+TRANSCRIBE_ON_INGEST_INTERVAL_S=300   # seconds between batches (minimum 5)
+TRANSCRIBE_ON_INGEST_BATCH=10         # voice notes per batch (maximum 200)
+```
+
+Every interval it looks for **inbound** audio messages whose bytes are cached
+under the store directory and whose content hash has no `transcript` note yet,
+transcribes up to `TRANSCRIBE_ON_INGEST_BATCH` of them one at a time through the
+configured whisper backend, and stores the text in `notes.db` under exactly the
+keys `transcribe_audio` writes (`transcript`, `transcript_lang`,
+`transcript_backend`). From there `list_messages(media_type="audio",
+include_transcripts=true)`, `get_media_notes` and `search_media_notes` read them
+back for free.
+
+What to know before turning it on:
+
+- **It costs CPU on this machine.** Whisper is the most expensive thing this
+  server does, and the worker will chew through the whole backlog of voice notes
+  at `BATCH` files per interval. Start with the defaults on a small model; the
+  `whisper` compose profile has `WHISPER_MEM_LIMIT` / `WHISPER_CPUS` to cap it.
+- **It needs a backend.** With neither `WHISPER_URL` nor `WHISPER_BIN` set, the
+  worker logs a warning at startup and stays off.
+- **It is idempotent and survives restarts.** The work list is "hashes with no
+  transcript", so nothing is transcribed twice — not even the same voice note
+  forwarded into three chats — and a restart resumes where it stopped.
+- **It never blocks a tool call.** One daemon thread, one file at a time, its own
+  database connections; `messages.db` is only ever read.
+- **Failures are parked, not retried forever.** A file the backend cannot read
+  gets a `transcript_error` note instead of a transcript, which takes it off the
+  work list. Clear it with `annotate_media(sha256, "transcript_error", "")` to
+  queue the file again; a later success clears it by itself.
+- **`WHATSAPP_ALLOWED_CHATS` bounds it** exactly like it bounds the tools: audio
+  in a chat the allow-list excludes is never transcribed.
+- Uncached audio (auto-download off, or the bytes purged) is skipped; run
+  `transcribe_audio` on it by hand, which downloads it first.
+
+One line per non-empty batch goes to the MCP server log:
+
+```
+transcribe_on_ingest: 10 pending, 9 transcribed, 1 failed in 41.2s
+```
 
 ## Bridge authentication and media paths
 

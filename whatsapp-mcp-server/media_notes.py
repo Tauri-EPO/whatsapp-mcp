@@ -32,6 +32,9 @@ NOTES_DB_NAME = "notes.db"
 TRANSCRIPT_KEY = "transcript"
 TRANSCRIPT_LANG_KEY = "transcript_lang"
 TRANSCRIPT_BACKEND_KEY = "transcript_backend"
+# Why a file has no transcript, written by the background worker
+# (transcribe_worker.py) so it stops retrying a file whisper cannot read.
+TRANSCRIPT_ERROR_KEY = "transcript_error"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
@@ -196,6 +199,20 @@ def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     finally:
         conn.close()
     return {"success": True, "sha256": sha, "key": key, "value": value, "updated_at": now}
+
+
+def store_transcript(sha256: str, result: dict[str, Any]) -> None:
+    """Write one transcription result under the transcript keys, clearing a past failure.
+
+    Shared by the transcribe_audio tool and the background worker so both spell
+    the cache the same way. Raises ToolError when the hash is not visible.
+    """
+    annotate_media(sha256, TRANSCRIPT_KEY, result["text"])
+    for key, value in ((TRANSCRIPT_LANG_KEY, result.get("language")), (TRANSCRIPT_BACKEND_KEY, result.get("backend"))):
+        if value:
+            annotate_media(sha256, key, str(value))
+    # An empty value deletes: a file that transcribes now is no longer failing.
+    annotate_media(sha256, TRANSCRIPT_ERROR_KEY, "")
 
 
 def get_media_notes(sha256: str) -> dict[str, Any]:

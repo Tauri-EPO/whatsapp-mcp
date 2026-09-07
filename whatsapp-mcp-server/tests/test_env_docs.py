@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
-PREFIXES = ("WHATSAPP_", "WHATSMEOW_", "WHISPER_", "WEBHOOK_", "FFMPEG_", "FORWARD_SELF")
+PREFIXES = ("WHATSAPP_", "WHATSMEOW_", "WHISPER_", "TRANSCRIBE_", "WEBHOOK_", "FFMPEG_", "FORWARD_SELF")
 
 # Consumed by compose / the shell only; no process reads them, so AGENTS.md
 # section 7 lists them in its footnote instead of the table.

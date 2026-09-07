@@ -21,6 +21,7 @@ from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_
 from media_notes import annotate_media as notes_annotate_media
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
+from media_notes import store_transcript as notes_store_transcript
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
 from tool_policy import (
@@ -32,6 +33,7 @@ from tool_policy import (
 )
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
+from transcribe_worker import install_ingest_worker
 from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
@@ -1571,12 +1573,8 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
 
 def _store_transcript(sha256: str, result: dict[str, Any]) -> bool:
     """Write a fresh transcript to notes.db; a refused write never fails the call."""
-    keys = ((TRANSCRIPT_LANG_KEY, result.get("language")), (TRANSCRIPT_BACKEND_KEY, result.get("backend")))
     try:
-        notes_annotate_media(sha256, TRANSCRIPT_KEY, result["text"])
-        for key, value in keys:
-            if value:
-                notes_annotate_media(sha256, key, str(value))
+        notes_store_transcript(sha256, result)
     except ToolError as exc:
         logging.getLogger("whatsapp_mcp").warning("transcribe_audio: could not cache transcript: %s", exc)
         return False
@@ -1728,6 +1726,15 @@ if __name__ == "__main__":
         "1" if _wrap_untrusted else "0",
         "wrapped in <untrusted> delimiters" if _wrap_untrusted else "returned as-is (tool descriptions warn)",
     )
+
+    # Opt-in background transcription (TRANSCRIBE_ON_INGEST). Started before any
+    # transport so it runs on stdio and http alike; it is a daemon thread that
+    # only reads messages.db and writes notes.db, so it never delays a tool call
+    # or a shutdown. Off unless asked for: whisper costs CPU on this machine.
+    try:
+        install_ingest_worker()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
     # Capture before any await — os.getppid() is dynamic.
     parent_pid = os.getppid()
