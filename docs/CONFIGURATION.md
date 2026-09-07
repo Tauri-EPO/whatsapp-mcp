@@ -54,6 +54,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe inbound voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
+| `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)*                    | Let the background worker download uncached audio from the bridge instead of skipping it. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `FFMPEG_TIMEOUT_S`     | `120`                                    | Timeout for each ffmpeg conversion (`send_audio_message` encode, whisper WAV prep) |
 
 ## MCP transport (stdio vs http/sse)
@@ -356,6 +357,7 @@ does the walking:
 TRANSCRIBE_ON_INGEST=1
 TRANSCRIBE_ON_INGEST_INTERVAL_S=300   # seconds between batches (minimum 5)
 TRANSCRIBE_ON_INGEST_BATCH=10         # voice notes per batch (maximum 200)
+TRANSCRIBE_ON_INGEST_FETCH=1          # also download uncached audio (off by default)
 ```
 
 Every interval it looks for **inbound** audio messages whose bytes are cached
@@ -386,8 +388,20 @@ What to know before turning it on:
   queue the file again; a later success clears it by itself.
 - **`WHATSAPP_ALLOWED_CHATS` bounds it** exactly like it bounds the tools: audio
   in a chat the allow-list excludes is never transcribed.
-- Uncached audio (auto-download off, or the bytes purged) is skipped; run
-  `transcribe_audio` on it by hand, which downloads it first.
+- **Uncached audio is skipped unless you ask for it.** By default a voice note
+  whose bytes are not under the store directory (`WHATSAPP_MEDIA_AUTODOWNLOAD=false`,
+  or a retention sweep took them) is left for a manual `transcribe_audio`, which
+  downloads it first. `TRANSCRIBE_ON_INGEST_FETCH=1` gives that job to the
+  worker: it asks the bridge for the file over the same `/api/download` path
+  before transcribing. `TRANSCRIBE_ON_INGEST_BATCH` bounds the downloads too
+  (failed attempts included), so the batch caps the bandwidth as well as the
+  CPU. **The fetched bytes stay in the store** like any other download — the flag
+  fills the media cache that `WHATSAPP_MEDIA_AUTODOWNLOAD=false` was avoiding,
+  for the voice notes only; set `WHATSAPP_MEDIA_RETENTION_DAYS` if that disk use
+  matters, the transcript survives the sweep. A file the bridge cannot send (down,
+  disconnected, expired media link) is skipped with a warning and gets no
+  `transcript_error` note, so the next round tries it again; three failures in a
+  row end the fetching for that round.
 
 One line per non-empty batch goes to the MCP server log:
 
