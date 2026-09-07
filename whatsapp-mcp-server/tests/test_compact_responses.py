@@ -219,3 +219,52 @@ def test_list_unanswered_omit_nulls(db):
     row = main.list_unanswered(omit_nulls=True)["items"][0]
     assert "last_read_time" not in row and "unread" in row
     assert row["name"] == "Alice" and row["jid"] == A
+
+
+def test_list_chats_shapes_chat_rows(db):
+    out = main.list_chats(fields=["jid", "name"])
+    assert out["items"] == [{"jid": A, "name": "Alice"}, {"jid": G, "name": "Group"}]
+    # Chat rows, so a message key is refused with the chat names listed.
+    error = main.list_chats(fields=["content"])["error"]
+    assert error["code"] == "invalid_argument" and "last_message" in error["message"]
+
+
+def test_list_chats_refuses_the_list_unanswered_only_names(db):
+    """A name that would always project to nothing is refused, not silently dropped."""
+    for name in ("last_inbound_time", "age_hours"):
+        error = main.list_chats(fields=[name])["error"]
+        assert error["code"] == "invalid_argument" and name in error["message"]
+        assert main.get_chat(A, fields=[name])["error"]["code"] == "invalid_argument"
+    # Still valid where the rows carry them.
+    assert "error" not in main.list_unanswered(fields=["jid", "age_hours"])
+    # And the reverse: list_unanswered never truncates, so it has no such flag.
+    assert main.list_unanswered(fields=["content_truncated"])["error"]["code"] == "invalid_argument"
+    assert "error" not in main.list_chats(fields=["content_truncated"])
+
+
+def test_list_chats_omit_nulls_and_truncation(db):
+    row = main.list_chats(limit=1, omit_nulls=True, max_content_chars=8)["items"][0]
+    assert row["last_message"] == "mensagem" and row["content_truncated"] is True
+    assert "last_read_time" not in row
+
+
+def test_list_chats_truncation_flag_survives_a_projection(db):
+    row = main.list_chats(limit=1, fields=["last_message"], max_content_chars=8)["items"][0]
+    assert row == {"last_message": "mensagem", "content_truncated": True}
+
+
+def test_list_chats_count_only(db):
+    assert main.list_chats(count_only=True) == {"count": 2}
+    assert main.list_chats(query="Alice", count_only=True) == {"count": 1}
+    assert main.list_chats(limit=1, count_only=True) == {"count": 2}
+    for kwargs in ({"fields": ["jid"]}, {"cursor": "abc"}, {"page": 2}):
+        out = main.list_chats(count_only=True, **kwargs)
+        assert out["error"]["code"] == "invalid_argument"
+        assert next(iter(kwargs)) in out["error"]["message"]
+
+
+def test_get_chat_shapes_the_single_row(db):
+    assert main.get_chat(A, fields=["jid", "name"]) == {"jid": A, "name": "Alice"}
+    row = main.get_chat(A, max_content_chars=8)
+    assert row["last_message"] == "mensagem" and row["content_truncated"] is True
+    assert main.get_chat(A, fields=["content"])["error"]["code"] == "invalid_argument"

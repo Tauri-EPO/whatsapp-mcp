@@ -749,11 +749,13 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "transcript",
     "content_truncated",
 )
-CHAT_FIELDS: tuple[str, ...] = (
-    *chat_to_dict(Chat(jid="", name=None, last_message_time=None)),
-    "last_inbound_time",
-    "age_hours",
-)
+_CHAT_ROW_FIELDS: tuple[str, ...] = tuple(chat_to_dict(Chat(jid="", name=None, last_message_time=None)))
+# Two tuples rather than one: list_chats / get_chat can truncate last_message,
+# list_unanswered cannot but reports how long the chat has been waiting. A name
+# accepted and then always absent from the row is the silent no-op `fields`
+# exists to avoid, so each tool validates against the keys its rows can carry.
+CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated")
+UNANSWERED_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "last_inbound_time", "age_hours")
 
 
 def _is_empty(value: Any) -> bool:
@@ -789,14 +791,20 @@ def shape_rows(
     omit_nulls: bool = False,
     max_content_chars: int | None = None,
     known: Sequence[str] = MESSAGE_FIELDS,
+    content_key: str = "content",
 ) -> list[dict[str, Any]]:
-    """Compact already-converted rows: truncate `content`, project, drop empties.
+    """Compact already-converted rows: truncate the long text, project, drop empties.
 
     One helper for every bulk read, applied after msg_to_dict / chat_to_dict so
-    the shaping never has to know how a row was built. Order matters:
-    truncation runs first (so a projection on `content` still gets the shortened
-    text) and `content_truncated` survives a projection that did not ask for it,
-    because losing that flag would make the truncated text look complete.
+    the shaping never has to know how a row was built. `content_key` names the
+    long text on these rows — `content` on message rows, `last_message` on chat
+    rows — while the flag it raises stays `content_truncated` either way, so a
+    caller reads one key whatever it listed.
+
+    Order matters: truncation runs first (so a projection on the text field still
+    gets the shortened text) and `content_truncated` survives a projection that
+    did not ask for it, because losing that flag would make the truncated text
+    look complete.
     """
     selected = validate_fields(fields, known)
     limit = int(max_content_chars) if max_content_chars is not None else None
@@ -808,9 +816,9 @@ def shape_rows(
     shaped: list[dict[str, Any]] = []
     for row in rows:
         out = dict(row)
-        content = out.get("content")
+        content = out.get(content_key)
         if limit is not None and isinstance(content, str) and len(content) > limit:
-            out["content"] = content[:limit]
+            out[content_key] = content[:limit]
             out["content_truncated"] = True
         if selected is not None:
             keep = [*selected, "content_truncated"] if out.get("content_truncated") else selected
@@ -2033,6 +2041,43 @@ def get_message_context(
             conn.close()
 
 
+def _chat_filter(query: str | None) -> tuple[list[str], list[Any]]:
+    """WHERE clauses selecting the chats a caller may see: name/JID search plus the allow-list.
+
+    Shared by list_chats_page and count_chats so the count is taken over exactly
+    the rows the page would return.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if query:
+        # instr() on the raw column matches Unicode; LOWER()+LIKE only covers ASCII.
+        clauses.append("(instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?)")
+        params.extend([query, query, f"%{query}%"])
+    if CHAT_POLICY.restricted:
+        clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
+        clauses.append(clause)
+        params.extend(clause_params)
+    return clauses, params
+
+
+def count_chats(query: str | None = None) -> int:
+    """How many chats match the list_chats filter, without returning any of them."""
+    clauses, params = _chat_filter(query)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM chats{where}", tuple(params))
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error as e:
+        logger.error("Database error: %s", e)
+        raise ToolError("internal", f"database error: {e}") from e
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
 def list_chats(
     query: str | None = None,
     limit: int = 20,
@@ -2088,20 +2133,7 @@ def list_chats_page(
         """
         ]
 
-        where_clauses = []
-        params = []
-
-        if query:
-            # instr() on the raw column matches Unicode; LOWER()+LIKE only covers ASCII.
-            where_clauses.append(
-                "(instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?)"
-            )
-            params.extend([query, query, f"%{query}%"])
-
-        if CHAT_POLICY.restricted:
-            clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
-            where_clauses.append(clause)
-            params.extend(clause_params)
+        where_clauses, params = _chat_filter(query)
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
