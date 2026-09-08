@@ -32,7 +32,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_METRICS`     | `true`                                   | `GET /metrics` on the bridge, Prometheus text: connection/pairing gauges, store and media sizes, messages stored/sent, download and webhook failures, reconnects, requests by status class. Unauthenticated (counts only); `false` removes it |
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO`                                 | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text`                                | `json` writes MCP server log lines as JSON objects (`ts`, `level`, `logger`, `msg`) |
-| `WHATSAPP_MCP_METRICS` | `true`                                   | `GET /metrics` on the `http`/`sse` transports: tool calls, errors by code and seconds per tool, HTTP requests by status class; `false` disables it |
+| `WHATSAPP_MCP_METRICS` | `true`                                   | `GET /metrics` on the `http`/`sse` transports: tool calls, errors by code and seconds per tool, the per-tool latency histogram `whatsapp_mcp_tool_duration_seconds` (see [Health and operations](DOCKER.md#health-and-operations) for the tail-latency query), HTTP requests by status class; `false` disables it |
 | `WHATSAPP_MCP_METRICS_TOKEN` | *(unset = open)*                   | Bearer token required on the MCP `/metrics` (401 without it). Use it when the port is exposed beyond the tailnet, e.g. Tailscale Funnel; Prometheus reads it from `bearer_token_file` |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |

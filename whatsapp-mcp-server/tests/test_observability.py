@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import threading
 
 import main
 import observability
@@ -39,6 +40,86 @@ def test_tool_decorator_records_metrics(monkeypatch):
     assert 'whatsapp_mcp_tool_calls_total{tool="denied"} 1' in text
     assert 'whatsapp_mcp_tool_errors_total{tool="denied",code="denied"} 1' in text
     assert "whatsapp_mcp_uptime_seconds" in text
+    # Every finished call lands in the histogram, the failed one included.
+    assert 'whatsapp_mcp_tool_duration_seconds_count{tool="fine"} 2' in text
+    assert 'whatsapp_mcp_tool_duration_seconds_count{tool="denied"} 1' in text
+
+
+def _series(text, metric):
+    """{labels-without-the-tool: value} for one metric name, as floats."""
+    out = {}
+    for line in text.splitlines():
+        if line.startswith("#") or not line.startswith(metric + "{"):
+            continue
+        labels, _, value = line[len(metric) + 1 :].partition("} ")
+        out[labels] = float(value)
+    return out
+
+
+def test_duration_histogram_is_cumulative():
+    reg = Metrics()
+    # One sample per interesting position: below the first bound, exactly on a
+    # bound, mid-range, on the last bound's neighbour, and past every bound.
+    for seconds in (0.001, 0.005, 0.3, 60.0, 600.0):
+        reg.record_tool("list_messages", seconds, None)
+    reg.record_tool("list_messages", 2.0, "internal")
+    text = reg.render()
+
+    buckets = _series(text, "whatsapp_mcp_tool_duration_seconds_bucket")
+    assert buckets == {
+        'tool="list_messages",le="0.005"': 2,
+        'tool="list_messages",le="0.025"': 2,
+        'tool="list_messages",le="0.1"': 2,
+        'tool="list_messages",le="0.25"': 2,
+        'tool="list_messages",le="0.5"': 3,
+        'tool="list_messages",le="1"': 3,
+        'tool="list_messages",le="2.5"': 4,
+        'tool="list_messages",le="5"': 4,
+        'tool="list_messages",le="10"': 4,
+        'tool="list_messages",le="30"': 4,
+        'tool="list_messages",le="60"': 5,
+        'tool="list_messages",le="120"': 5,
+        'tool="list_messages",le="300"': 5,
+        'tool="list_messages",le="+Inf"': 6,
+    }
+    assert _series(text, "whatsapp_mcp_tool_duration_seconds_count") == {'tool="list_messages"': 6}
+    assert _series(text, "whatsapp_mcp_tool_duration_seconds_sum") == {'tool="list_messages"': 662.306}
+    assert "# TYPE whatsapp_mcp_tool_duration_seconds histogram" in text
+
+
+def test_duration_histogram_under_concurrent_recording_and_scraping():
+    reg = Metrics()
+    tools = ("list_messages", "search_contacts")
+    stop = threading.Event()
+    scrapes = []  # sizes only: a busy scrape loop would otherwise hoard megabytes
+
+    def scrape():
+        while not stop.is_set():
+            scrapes.append(len(reg.render()))
+
+    def record(tool):
+        for i in range(200):
+            reg.record_tool(tool, (i % 5) * 0.2, None)
+
+    scraper = threading.Thread(target=scrape)
+    scraper.start()
+    workers = [threading.Thread(target=record, args=(t,)) for t in tools for _ in range(4)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    stop.set()
+    scraper.join()
+
+    text = reg.render()
+    counts = _series(text, "whatsapp_mcp_tool_duration_seconds_count")
+    assert counts == {'tool="list_messages"': 800, 'tool="search_contacts"': 800}
+    for tool in tools:
+        assert _series(text, "whatsapp_mcp_tool_duration_seconds_bucket")[f'tool="{tool}",le="+Inf"'] == 800
+    # Labels stay bounded by the tools that ran: one series set per tool, no
+    # chat JID, message ID or query text anywhere in the exposition.
+    assert {label.split('"')[1] for label in counts} == set(tools)
+    assert scrapes and all(size > 0 for size in scrapes)
 
 
 def _run(app, scope):
