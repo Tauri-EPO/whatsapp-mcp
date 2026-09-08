@@ -201,6 +201,8 @@ docker compose logs -f bridge                    # QR code on first run
 docker compose --profile whisper up -d           # + local whisper.cpp for transcribe_audio
 ```
 
+The MCP server is a real package (issue #409): `pyproject.toml` declares `[build-system]` with setuptools, so `uv sync` installs it into the local venv as an editable install and `uv build --wheel` ships exactly the `[tool.setuptools] py-modules` list (a local check; the release artifacts stay the container images, so `version` in `pyproject.toml` remains nominal) — the image is unaffected, its `uv sync --no-install-project` still skips the project and the Dockerfile copies `*.py` itself.
+
 **Windows without a Go toolchain** (the primary dev box): build, test and lint the bridge inside Docker, mounting the module cache. From Git Bash with `MSYS_NO_PATHCONV=1`:
 
 ```bash

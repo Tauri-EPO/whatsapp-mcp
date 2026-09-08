@@ -1503,7 +1503,7 @@ wheels = [
 [[package]]
 name = "whatsapp-mcp-server"
 version = "0.6.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
