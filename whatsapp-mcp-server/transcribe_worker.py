@@ -31,6 +31,11 @@ Properties that matter:
   ``transcript_error`` note, which excludes it from the work list exactly like a
   transcript does. Clearing the note
   (``annotate_media(sha256, "transcript_error", "")``) queues it again.
+- **An outage is not a failure.** A backend that cannot be reached at all — the
+  whisper container still starting, a 5xx, a model that was moved — ends the
+  round with a warning and no note, so those files are tried again next
+  interval; the notes an older build wrote for such an outage are cleared when
+  the worker starts (``clear_outage_failures``).
 
 ``messages.db`` is the bridge's; this module only ever reads it. Everything it
 writes goes to ``notes.db``, and the policies that bound the tools bound it too:
@@ -58,7 +63,7 @@ import whatsapp
 from errors import ToolError
 from media_notes import TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
 from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, DOWNLOAD_TOOL, load_tool_policy, parse_bool_env
-from transcribe import TranscriptionError, load_config, transcribe_file
+from transcribe import BackendUnavailableError, TranscriptionError, load_config, transcribe_file
 from whatsapp import CHAT_POLICY
 
 logger = logging.getLogger("whatsapp_mcp")
@@ -91,6 +96,31 @@ MAX_FETCH_FAILURES = 3
 HEAD_FETCHES = 2
 # A note value is capped at 64 KiB; a backend error message needs far less.
 MAX_ERROR_CHARS = 500
+# Consecutive files the backend refused to be asked about that end a round. A
+# backend that is down answers the same way for every file, so three in a row is
+# the deployment; one or two, with a transcription in between, is a single
+# request the server choked on, and skipping it keeps the batch moving instead
+# of letting one voice note stall the walk for ever.
+MAX_OUTAGE_SKIPS = 3
+# ``transcript_error`` values written before an outage was told apart from a file
+# whisper cannot read (#377): they name the backend, not the audio, so they are
+# cleared once per process at startup and those files queue up again. Matched
+# case-insensitively against the stored value, which is "<type>: <message>".
+OUTAGE_NOTE_MARKERS = (
+    "whisper server request failed",  # refused, reset, timed out, DNS
+    "invalidurl",  # a WHISPER_URL httpx would not build, which escaped the old catch
+    "whisper server returned http 5",  # 5xx: loading its model, or fallen over
+    # A WHISPER_URL that points at the wrong path answers these for every file.
+    "whisper server returned http 404",
+    "whisper server returned http 405",
+    "whisper server returned http 501",
+    "whisper_url is not set",
+    "whisper_bin not found",
+    "whisper_model not found",
+    "whisper_model must point",
+    "no whisper backend configured",
+    "ffmpeg is required",
+)
 
 
 @dataclass(frozen=True)
@@ -142,6 +172,9 @@ class BatchResult:
     failed: int
     examined: int = 0
     position: Position | None = None
+    # The whisper backend was unreachable: the round stopped early, wrote no
+    # notes and left the walk where it was, so the next one retries these files.
+    outage: bool = False
 
 
 def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
@@ -387,7 +420,7 @@ def _fetch_bytes(
 
 
 def _log_fetch_problem(quiet: bool, message: str) -> None:
-    """One warning per round about the bridge; the rest of the round is debug."""
+    """One warning per round about a dependency (the bridge, the backend); the rest is debug."""
     log = logger.debug if quiet else logger.warning
     log("transcribe_on_ingest: %s", message)
 
@@ -404,6 +437,27 @@ def _record_failure(sha256: str, reason: str) -> None:
         logger.warning("transcribe_on_ingest: could not record the failure of %s: %s", sha256[:12], exc)
 
 
+def clear_outage_failures() -> int:
+    """Retire the ``transcript_error`` notes a whisper outage caused; returns how many.
+
+    Runs once per process, when the worker starts. Before #377 a backend that
+    was merely down — the whisper container still starting, say — parked every
+    file of that first round for ever, because a note is what takes a file off
+    the work list. Those notes name the backend (``OUTAGE_NOTE_MARKERS``), so
+    they can be told from the ones about a file whisper genuinely cannot read,
+    which stay. A failure here is logged and dropped: the worker still has a
+    backlog to walk.
+    """
+    try:
+        cleared = media_notes.clear_notes_containing(TRANSCRIPT_ERROR_KEY, OUTAGE_NOTE_MARKERS)
+    except (ToolError, sqlite3.Error, ValueError) as exc:
+        logger.warning("transcribe_on_ingest: could not clear the failures a whisper outage left: %s", exc)
+        return 0
+    if cleared:
+        logger.info("transcribe_on_ingest: %d voice notes parked by a whisper outage are queued again", cleared)
+    return cleared
+
+
 def run_once(
     batch: int,
     *,
@@ -412,7 +466,17 @@ def run_once(
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
 ) -> BatchResult:
-    """Transcribe one batch from ``position``. Never raises: a broken batch is a logged batch."""
+    """Transcribe one batch from ``position``. Never raises: a broken batch is a logged batch.
+
+    A backend that cannot be reached at all (``BackendUnavailableError``:
+    connection refused, a 5xx, a missing binary or model) writes no note: that
+    file is tried again next interval instead of being parked for ever (issue
+    #377). ``MAX_OUTAGE_SKIPS`` of them in a row is a backend that is down, and
+    ends the round with the walk left where it started; fewer than that is one
+    request the server choked on, which is skipped so the rest of the batch is
+    still transcribed. Only an answer about *this* file writes
+    ``transcript_error``.
+    """
     transcribe = transcribe or _default_transcribe
     started = time.monotonic()
     try:
@@ -423,6 +487,8 @@ def run_once(
 
     pending = selection.candidates
     transcribed = failed = 0
+    outages = 0  # consecutive; any answer from the backend clears them
+    stopped = False  # ... and MAX_OUTAGE_SKIPS of them ended the round early
     for candidate in pending:
         try:
             result = transcribe(candidate.path)
@@ -430,13 +496,40 @@ def run_once(
             if not text:
                 raise TranscriptionError("whisper returned no text")
             store_transcript(candidate.sha256, {**result, "text": text})
+        except BackendUnavailableError as exc:
+            # Not this file's failure, so no note. One request the server choked
+            # on must not stop the batch, and a server that is down must not be
+            # asked for every file of it — the same three strikes the fetching uses.
+            outages += 1
+            _log_fetch_problem(outages > 1, f"the whisper backend is unavailable ({exc})")
+            stopped = outages >= MAX_OUTAGE_SKIPS
+            if stopped:
+                break
+            continue
+        except FileNotFoundError as exc:
+            # The bytes went between the listing and the transcription (a
+            # retention sweep, a purge): nothing whisper said, so no note — the
+            # row is picked up again, and re-fetched with TRANSCRIBE_ON_INGEST_FETCH.
+            # ``outages`` is untouched: the backend was never asked about this
+            # one, so it is neither evidence that it is up nor that it is down.
+            logger.debug("transcribe_on_ingest: %s is gone: %s", os.path.basename(candidate.path), exc)
+            continue
         except Exception as exc:  # noqa: BLE001 - one bad file must not end the batch
             failed += 1
+            outages = 0  # the backend answered about this file, so it is up
             _record_failure(candidate.sha256, f"{type(exc).__name__}: {exc}")
             logger.warning("transcribe_on_ingest: %s failed: %s", os.path.basename(candidate.path), exc)
             continue
+        outages = 0
         transcribed += 1
 
+    if stopped:
+        # The round ended on the backend, not on its work: the walk stays where
+        # it was, so the next one asks for these rows instead of striding past.
+        # Only the three strikes do this — a single skip lets the walk advance,
+        # or one file the server chokes on would pin it here for ever.
+        logger.warning("transcribe_on_ingest: %d transcribed before the backend stopped answering", transcribed)
+        return BatchResult(len(pending), transcribed, failed, selection.examined, position, outage=True)
     if pending:
         logger.info(
             "transcribe_on_ingest: %d examined, %d pending, %d transcribed, %d failed in %.1fs",
@@ -538,6 +631,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV
         )
         return None
+    clear_outage_failures()
     logger.info(
         "%s=1: transcribing up to %d inbound voice notes every %.0fs (whisper on this machine)%s",
         ENABLED_ENV,

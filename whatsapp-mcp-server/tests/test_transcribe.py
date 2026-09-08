@@ -2,10 +2,11 @@
 
 import subprocess
 
+import httpx
 import pytest
 
 import transcribe
-from transcribe import TranscriptionError, WhisperConfig, load_config, transcribe_file
+from transcribe import BackendUnavailableError, TranscriptionError, WhisperConfig, load_config, transcribe_file
 
 
 class TestLoadConfig:
@@ -47,7 +48,8 @@ def _fake_ffmpeg(monkeypatch):
 def test_no_backend_configured_is_a_clear_error(tmp_path):
     audio = tmp_path / "note.ogg"
     audio.write_bytes(b"OggS")
-    with pytest.raises(TranscriptionError, match="No whisper backend configured"):
+    # BackendUnavailableError, not a plain failure: nothing about this file is wrong.
+    with pytest.raises(BackendUnavailableError, match="No whisper backend configured"):
         transcribe_file(str(audio), config=load_config({}))
 
 
@@ -122,8 +124,105 @@ class TestServerBackend:
 
         monkeypatch.setattr(transcribe.httpx, "post", lambda *a, **kw: Resp())
         cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
-        with pytest.raises(TranscriptionError, match="HTTP 500"):
+        # A plain 500 is how whisper.cpp reports an inference it could not
+        # finish, so it stays a verdict on this file (#377).
+        with pytest.raises(TranscriptionError, match="HTTP 500") as raised:
             transcribe_file(str(audio), config=cfg)
+        assert not isinstance(raised.value, BackendUnavailableError)
+
+    def test_a_read_timeout_is_about_this_file(self, monkeypatch, tmp_path):
+        """The server had the request: a note too long for WHISPER_TIMEOUT_S is parked, not retried."""
+        _fake_ffmpeg(monkeypatch)
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+
+        def slow(*args, **kwargs):
+            raise httpx.ReadTimeout("timed out")
+
+        monkeypatch.setattr(transcribe.httpx, "post", slow)
+        cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
+        with pytest.raises(TranscriptionError, match="timed out on this file after 10s") as raised:
+            transcribe_file(str(audio), config=cfg)
+        assert not isinstance(raised.value, BackendUnavailableError)
+
+    def test_a_connect_timeout_is_an_outage(self, monkeypatch, tmp_path):
+        """Nothing accepted the connection, so nothing was said about the audio."""
+        _fake_ffmpeg(monkeypatch)
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+
+        def unreachable(*args, **kwargs):
+            raise httpx.ConnectTimeout("timed out")
+
+        monkeypatch.setattr(transcribe.httpx, "post", unreachable)
+        cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
+        with pytest.raises(BackendUnavailableError, match="request failed"):
+            transcribe_file(str(audio), config=cfg)
+
+    def test_a_refused_connection_is_an_outage_not_a_bad_file(self, monkeypatch, tmp_path):
+        _fake_ffmpeg(monkeypatch)
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+
+        def refuse(*args, **kwargs):
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+
+        monkeypatch.setattr(transcribe.httpx, "post", refuse)
+        cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
+        with pytest.raises(BackendUnavailableError, match="Connection refused"):
+            transcribe_file(str(audio), config=cfg)
+
+    def test_a_url_httpx_cannot_even_build_is_an_outage(self, monkeypatch, tmp_path):
+        """InvalidURL is not an HTTPError, so it needs naming: a typo must not park the archive."""
+        _fake_ffmpeg(monkeypatch)
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+
+        def bad_url(*args, **kwargs):
+            raise httpx.InvalidURL("Invalid port: 'port'")
+
+        monkeypatch.setattr(transcribe.httpx, "post", bad_url)
+        cfg = WhisperConfig(url="http://whisper:port/inference", binary=None, model=None, language="pt", timeout_s=10)
+        with pytest.raises(BackendUnavailableError, match="Invalid port"):
+            transcribe_file(str(audio), config=cfg)
+
+    @pytest.mark.parametrize("status", sorted(transcribe.OUTAGE_STATUSES))
+    def test_a_deployment_status_is_an_outage_not_a_bad_file(self, monkeypatch, tmp_path, status):
+        """A misrouted WHISPER_URL, or a server still loading, answers these for every file alike."""
+        _fake_ffmpeg(monkeypatch)
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+
+        class Resp:
+            status_code = status
+            text = "File Not Found"
+
+            def json(self):
+                return {}
+
+        monkeypatch.setattr(transcribe.httpx, "post", lambda *a, **kw: Resp())
+        cfg = WhisperConfig(url="http://x/", binary=None, model=None, language="pt", timeout_s=10)
+        with pytest.raises(BackendUnavailableError, match=f"HTTP {status}"):
+            transcribe_file(str(audio), config=cfg)
+
+    def test_a_4xx_is_about_this_file(self, monkeypatch, tmp_path):
+        """The server answered: whatever it says, it is this audio it refused."""
+        _fake_ffmpeg(monkeypatch)
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+
+        class Resp:
+            status_code = 400
+            text = "unsupported audio"
+
+            def json(self):
+                return {}
+
+        monkeypatch.setattr(transcribe.httpx, "post", lambda *a, **kw: Resp())
+        cfg = WhisperConfig(url="http://x/inference", binary=None, model=None, language="pt", timeout_s=10)
+        with pytest.raises(TranscriptionError, match="HTTP 400") as raised:
+            transcribe_file(str(audio), config=cfg)
+        assert not isinstance(raised.value, BackendUnavailableError)
 
 
 class TestCliBackend:
@@ -164,5 +263,27 @@ class TestCliBackend:
         audio = tmp_path / "note.ogg"
         audio.write_bytes(b"OggS")
         cfg = WhisperConfig(url=None, binary="/usr/bin/whisper-cli", model=None, language="pt", timeout_s=10)
-        with pytest.raises(TranscriptionError, match="WHISPER_MODEL"):
+        # Half a backend is an outage: the audio is fine, the deployment is not.
+        with pytest.raises(BackendUnavailableError, match="WHISPER_MODEL"):
             transcribe_file(str(audio), config=cfg)
+
+    def test_whisper_exiting_non_zero_is_about_this_file(self, monkeypatch, tmp_path):
+        audio = tmp_path / "note.ogg"
+        audio.write_bytes(b"OggS")
+        model = tmp_path / "ggml-small.bin"
+        model.write_bytes(b"ggml")
+        binary = tmp_path / "whisper-cli"
+        binary.write_bytes(b"#!/bin/sh\n")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ffmpeg":
+                with open(cmd[-1], "wb") as fh:
+                    fh.write(b"RIFF")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            raise subprocess.CalledProcessError(1, cmd, stderr="failed to decode audio")
+
+        monkeypatch.setattr(transcribe.subprocess, "run", fake_run)
+        cfg = WhisperConfig(url=None, binary=str(binary), model=str(model), language="pt", timeout_s=10)
+        with pytest.raises(TranscriptionError, match="failed to decode audio") as raised:
+            transcribe_file(str(audio), config=cfg)
+        assert not isinstance(raised.value, BackendUnavailableError)

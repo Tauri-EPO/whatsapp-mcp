@@ -349,3 +349,21 @@ def test_the_batch_size_only_changes_how_many_rounds_it_takes(notes_store, monke
 
     assert [hit["sha256"] for hit in main.search_media_notes("common note", limit=1)] == [hashes[0]]
     assert sizes == [2, 2, 1]
+
+
+def test_clear_notes_containing_matches_literally_and_spares_transcripts(notes_store):
+    """The bulk delete the ingest worker's startup repair uses (#377)."""
+    media_notes.annotate_media(SHA_A, "transcript_error", "TranscriptionError: WHISPER_URL is not set")
+    media_notes.annotate_media(SHA_B, "transcript_error", "TranscriptionError: whisper-cli failed (exit 1)")
+
+    # `_` in a marker is a literal underscore, not the LIKE wildcard: a note
+    # about "whisper url" must not be swept by a marker for "whisper_url".
+    assert media_notes.clear_notes_containing("transcript_error", ["whisper url is not set"]) == 0
+    assert media_notes.clear_notes_containing("transcript_error", ["whisper_url is not set"]) == 1
+    assert media_notes.fetch_notes([SHA_A]) == {}
+    assert "whisper-cli failed" in media_notes.fetch_notes([SHA_B])[SHA_B]["transcript_error"]
+
+    assert media_notes.clear_notes_containing("transcript_error", []) == 0
+    # Transcripts carry an index entry only annotate_media keeps in step.
+    with pytest.raises(ValueError):
+        media_notes.clear_notes_containing(media_notes.TRANSCRIPT_KEY, ["anything"])

@@ -529,6 +529,21 @@ What to know before turning it on:
   gets a `transcript_error` note instead of a transcript, which takes it off the
   work list. Clear it with `annotate_media(sha256, "transcript_error", "")` to
   queue the file again; a later success clears it by itself.
+- **A backend that is down is not a failure.** Only an answer about *this file*
+  parks it: it could not be decoded, whisper exited non-zero or returned 500 on
+  it, it timed out, no text came back. A backend that could not be asked at all
+  — connection refused because the whisper container is still starting, a
+  502/503/504, a `WHISPER_URL` pointing at the wrong path (404/405/501) or one
+  that is not a URL, a `WHISPER_BIN` or model that is not there, no ffmpeg —
+  writes no note, so those voice notes are tried again next interval. Three of
+  them in a row is a backend that is down: the round ends with a warning and the
+  walk stays where it was. Fewer than three is one request the server choked on:
+  it is skipped, the rest of the batch is still transcribed and the walk moves
+  on, so a single file can never stall it. Notes that an older build wrote for
+  such an outage (their text names the backend: `whisper server request failed`,
+  `whisper server returned HTTP 503`, `WHISPER_MODEL not found`…) are cleared
+  once when the worker starts and those files queue up again; one log line says
+  how many.
 - **`WHATSAPP_ALLOWED_CHATS` bounds it** exactly like it bounds the tools: audio
   in a chat the allow-list excludes is never transcribed.
 - **The tool policy bounds it too.** The worker is `transcribe_audio` on a timer

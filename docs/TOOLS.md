@@ -406,7 +406,7 @@ allow-list as the numbers above:
 | `messages` | Inbound voice notes stored in scope. Outbound, deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it |
 | `cached` | Of those, the ones whose bytes are on disk under the store directory |
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
-| `errors` | Rows whose hash carries a `transcript_error` note: the backend could not read the file, and the worker will not retry until the note is cleared |
+| `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |
 | `backlog` | `messages - transcribed - errors` — what is actually left to do |
 | `backlog_cached` | How many of the backlog have their bytes on disk. `backlog - backlog_cached` is what a batch would download first (`TRANSCRIBE_ON_INGEST_FETCH=1`, or `transcribe_audio`, which fetches on demand) |
 | `cached_examined` | How many rows the two cached counts looked at |
@@ -1441,7 +1441,8 @@ Conventional keys (use them before inventing new ones):
 - `transcript_error` — why a voice note has no transcript. Written by the
   `TRANSCRIBE_ON_INGEST` worker so it stops retrying a file whisper cannot read;
   clearing it (`annotate_media(sha256, "transcript_error", "")`) queues the file
-  again, and a transcript that succeeds later clears it as well
+  again, and a transcript that succeeds later clears it as well. A backend that
+  was merely unreachable never writes one: that round is retried instead
 - `keep` — `yes` for files a cleanup pass must not purge, `no` for disposable ones
 
 `list_media(has_notes=false)` is the backlog view (what has never been
