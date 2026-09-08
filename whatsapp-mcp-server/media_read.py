@@ -40,7 +40,7 @@ import mimetypes
 import os
 import sqlite3
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 from mcp_types import (
@@ -50,6 +50,7 @@ from mcp_types import (
     ContentBlock,
     EmbeddedResource,
     ImageContent,
+    ResourceLink,
     TextContent,
 )
 
@@ -193,6 +194,24 @@ def media_uri(chat_jid: str, message_id: str) -> str:
     the half of the URI a human recognises.
     """
     return f"{MEDIA_URI_PREFIX}{quote(chat_jid, safe='@')}/{quote(message_id, safe='')}"
+
+
+def resource_link(chat_jid: str, message_id: str, name: str, mime: str, size: int | None) -> dict[str, Any]:
+    """The link a client follows to fetch these bytes when *it* decides to.
+
+    The wire form of ``mcp_types.ResourceLink`` (``type``, ``uri``, ``name``,
+    ``mimeType``, ``size``) rather than the model itself, because it travels
+    inside JSON — a ``list_media`` row, the metadata block of ``read_media`` —
+    and not as a content block of its own. Dumped from the model so the keys
+    stay the protocol's if the SDK renames one.
+    """
+    return ResourceLink(
+        type="resource_link",
+        uri=media_uri(chat_jid, message_id),
+        name=name,
+        mime_type=mime,
+        size=size,
+    ).model_dump(by_alias=True, exclude_none=True, mode="json")
 
 
 def _media_row(chat_jid: str, message_id: str) -> tuple[str, str | None, int | None, str | None]:
@@ -393,7 +412,7 @@ def check_size(size: int, limit: int, mime: str) -> None:
     )
 
 
-def _read(path: str, size: int) -> bytes:
+def read_capped(path: str, size: int) -> bytes:
     """Read the file, at most the size the cap was checked against."""
     try:
         with open(path, "rb") as handle:
@@ -469,14 +488,28 @@ def _extracted_blocks(path: str, mime: str, max_pages: int) -> tuple[list[Conten
     return blocks, {"pages_total": result.units_total, "truncated": result.truncated}
 
 
-def read_media(
-    chat_jid: str,
-    message_id: str,
-    max_bytes: int = 0,
-    as_text: bool = False,
-    max_pages: int = 0,
-) -> list[ContentBlock]:
-    """The media of one message as content blocks. See the module docstring."""
+class ResolvedMedia(NamedTuple):
+    """What :func:`resolve_media` proved about one message's media."""
+
+    path: str
+    mime: str
+    size: int
+    sha256: str | None
+    filename: str | None
+
+
+def resolve_media(
+    chat_jid: str, message_id: str, caller: str = "read_media", max_bytes: int = 0, as_text: bool = False
+) -> ResolvedMedia:
+    """The file behind one message, proven readable, or the refusal.
+
+    Every gate a read passes, in the order it has to pass them, so a resource
+    read (media_resource.py) is the same read as ``read_media``: the chat
+    allow-list, the row, the implicit-download policy of issue #350, the proof
+    that the path resolves inside this chat's directory (inside
+    ``cached_path`` / ``download_path``), and the cap for the resolved type.
+    ``caller`` only names the tool in the refusal an agent reads.
+    """
     whatsapp._require_allowed(chat_jid)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
     path = cached_path(chat_jid, message_id)
@@ -485,7 +518,7 @@ def read_media(
         # happen at all comes first: "too_large, and download_media returns a
         # path instead" would recommend a tool this very policy took away.
         if not offers_download():
-            raise download_denied("read_media")
+            raise download_denied(caller)
         # Refuse a file the row already says is too big instead of paying for
         # it first. The authority is still the size on disk below; this only
         # skips the obvious no.
@@ -516,6 +549,19 @@ def read_media(
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
     check_size(size, cap(max_bytes, hard_limit(mime, as_text)), mime)
+    return ResolvedMedia(path, mime, size, sha256, filename)
+
+
+def read_media(
+    chat_jid: str,
+    message_id: str,
+    max_bytes: int = 0,
+    as_text: bool = False,
+    max_pages: int = 0,
+) -> list[ContentBlock]:
+    """The media of one message as content blocks. See the module docstring."""
+    found = resolve_media(chat_jid, message_id, max_bytes=max_bytes, as_text=as_text)
+    path, mime, size, sha256 = found.path, found.mime, found.size, found.sha256
 
     blocks: list[ContentBlock]
     extra: dict[str, Any] = {}
@@ -525,14 +571,14 @@ def read_media(
         # silently answered with its bytes.
         blocks, extra = _extracted_blocks(path, mime, max_pages)
     elif mime in RENDERABLE_IMAGE_MIMES:
-        data = _read(path, size)
+        data = read_capped(path, size)
         blocks = [ImageContent(type="image", data=base64.b64encode(data).decode("ascii"), mime_type=mime)]
     elif is_text_mime(mime):
         # replace, not strict: a mislabelled .txt must degrade to readable text
         # rather than fail the whole read.
-        blocks = [text_block(_read(path, size).decode("utf-8", errors="replace"))]
+        blocks = [text_block(read_capped(path, size).decode("utf-8", errors="replace"))]
     elif mime in PLAYABLE_AUDIO_MIMES:
-        data = base64.b64encode(_read(path, size)).decode("ascii")
+        data = base64.b64encode(read_capped(path, size)).decode("ascii")
         blocks = [AudioContent(type="audio", data=data, mime_type=mime)]
     else:
         # A resource, not a text block: the bytes keep their real type, so a
@@ -544,7 +590,7 @@ def read_media(
                 resource=BlobResourceContents(
                     uri=media_uri(chat_jid, message_id),
                     mime_type=mime,
-                    blob=base64.b64encode(_read(path, size)).decode("ascii"),
+                    blob=base64.b64encode(read_capped(path, size)).decode("ascii"),
                 ),
             )
         ]
@@ -563,4 +609,8 @@ def read_media(
                     ),
                 )
             )
-    return [*blocks, meta_block(sha256, mime, size, **extra)]
+    # The link is redundant with the bytes above and cheap; it is what lets a
+    # client (or the agent, on a second pass) come back for the same file
+    # through resources/read instead of paying for another tool call.
+    link = resource_link(chat_jid, message_id, found.filename or os.path.basename(path), mime, size)
+    return [*blocks, meta_block(sha256, mime, size, **extra, resource_link=link)]

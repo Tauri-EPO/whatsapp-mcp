@@ -1113,8 +1113,10 @@ attached, and `messages` has no MIME column to contradict it. Bytes that match
 no signature come back as a resource (`application/octet-stream` when the name
 promised an image or playable audio), never as a block a client would refuse.
 
-The last block is always JSON with `{"sha256", "mime", "bytes", "truncated", "notes"}`.
-That is what closes the loop below: `list_media(has_notes=false)` finds a file
+The last block is always JSON with `{"sha256", "mime", "bytes", "truncated", "notes",
+"resource_link"}` (`resource_link` being the same
+[`whatsapp://media/...`](#reading-media-whatsappmedia) URI the file has as an MCP
+resource). That is what closes the loop below: `list_media(has_notes=false)` finds a file
 nobody has interpreted, `read_media` shows it, `annotate_media(sha256, "summary", ...)`
 records what it was — no extra call to learn the hash.
 
@@ -1187,8 +1189,8 @@ chat's directory for a few seconds, so a file that arrived inside that window ca
 read as `false`, never the other way round), `cached_bytes` / `cached_file`
 (actual size and name on disk), `copies` (rows sharing the hash across allowed
 chats), `copies_in` (distinct chats), `deleted_at`, `notes` (`{key: value}` for
-the hash) and `has_notes`. A `cached: false` entry is still one
-`download_media` call away, expired CDN links included.
+the hash), `has_notes` and `resource_link` (below). A `cached: false` entry is
+still one `download_media` call away, expired CDN links included.
 
 **Natural Language Examples:**
 
@@ -1196,6 +1198,46 @@ the hash) and `has_notes`. A `cached: false` entry is still one
 - "Which attachments were forwarded into the most chats this month?"
 - "List the documents from Ana that are not cached locally"
 - "Which documents have I never summarised?" (`has_notes=false`)
+
+### Reading media: `whatsapp://media/...`
+
+Every media message is also an MCP **resource**, under the URI template
+
+```
+whatsapp://media/{chat_jid}/{message_id}
+```
+
+(both halves percent-encoded), which `resources/templates/list` advertises. Each
+`list_media` row carries it already built, as `resource_link`:
+
+```json
+{"type": "resource_link", "uri": "whatsapp://media/5511999999999@s.whatsapp.net/3EB0C4",
+ "name": "laudo.pdf", "mimeType": "application/pdf", "size": 244138}
+```
+
+so the loop is: **`list_media`** to see what is there and what it costs →
+**`resources/read`** (or `read_media`) for the files worth opening →
+**`annotate_media(sha256, "summary", ...)`** so the next pass does not read them
+again. `read_media` puts the same link in its trailing JSON block.
+
+`resources/read` returns the file with its real MIME type — bytes as
+`BlobResourceContents`, text as `TextResourceContents` — and nothing else: no
+metadata block, no `<untrusted>` delimiters, no notes. It is the file; the tool
+result is what the model reads. Use `read_media` when you want the bytes *and*
+the hash, the notes or the extracted text of a document, or when the client does
+not fetch resources at all; use the resource when the client would rather decide
+for itself which rows of a 200-row page it pulls down.
+
+Both paths pass the same gates in the same order, so a link is never a way
+around a rule: `WHATSAPP_ALLOWED_CHATS`, the message row (a text message has no
+resource), the per-type size cap, the proof that the path resolves inside that
+chat's own media directory, and the implicit-download policy — a file the store
+does not hold has to be fetched from WhatsApp, which is `download_media` under
+another name, so `resources/read` answers `denied` where that tool is disabled
+(see [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)). Reads are
+allowed in read-only mode. A failure comes back as a JSON-RPC error whose
+message starts with the same code the tools use (`denied:`, `too_large:`,
+`not_found:`), because `resources/read` has no envelope to put one in.
 
 ### `get_media_stats`
 

@@ -60,6 +60,8 @@ flowchart LR
     MCPTools -->|HTTP Requests| GoAPI
 ```
 
+The MCP server also serves one **resource** template, `whatsapp://media/{chat_jid}/{message_id}` (both halves percent-encoded): the bytes of one attachment, so a client can fetch a file it saw in a `list_media` row without spending a tool call on it. `resources/read` passes the same gates as `read_media` — chat allow-list, message row, size cap, path proven inside that chat's own media directory, implicit-download policy — see [TOOLS.md](TOOLS.md#reading-media-whatsappmedia).
+
 ## Data Flow
 
 ```mermaid

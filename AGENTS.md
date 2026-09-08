@@ -97,6 +97,7 @@ whatsapp-mcp/
 │   ├── strict_args.py          # StrictArgumentServer: call_tool refuses arguments no tool declares
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
 │   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
+│   ├── media_resource.py       # MediaResourceServer: the whatsapp://media/<chat>/<id> resource, and the resource_link on list_media rows
 │   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes; transcripts_fts
 │   ├── notes.py                # notes.db: versioned notes on chats/contacts/messages (media via media_notes)
 │   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
@@ -294,6 +295,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 | You want to… | Touch |
 |---|---|
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ `docs/TOOLS.md`, tests) |
+| Change what `resources/read` serves, or add a resource scheme | `whatsapp-mcp-server/media_resource.py` (the `mcp` instance is a `MediaResourceServer`) |
 | Change agent notes (chats, contacts, messages, media) | `whatsapp-mcp-server/notes.py`, `media_notes.py` |
 | Change what `list_unanswered` hides (handled, snoozed, muted, closing messages) | `whatsapp-mcp-server/triage.py` + `_closing_message_clause` in `whatsapp.py` |
 | Change DB queries / dict conversion | `whatsapp-mcp-server/whatsapp.py` |

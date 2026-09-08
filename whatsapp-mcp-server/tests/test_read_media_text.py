@@ -137,7 +137,9 @@ class TestPdf:
         assert len(_texts(blocks)) == 3
         assert _texts(blocks)[0].startswith("--- page 1 of 3 ---")
         assert "Laudo do paciente" in _texts(blocks)[0]
-        assert _meta(blocks) | {"notes": {}} == {
+        meta = _meta(blocks)
+        assert meta["resource_link"]["uri"] == f"whatsapp://media/{ALICE}/PDF1"
+        assert {key: value for key, value in meta.items() if key != "resource_link"} | {"notes": {}} == {
             "sha256": None,
             "mime": "application/pdf",
             "bytes": _meta(blocks)["bytes"],
