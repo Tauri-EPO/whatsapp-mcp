@@ -238,8 +238,8 @@ func (store *MessageStore) DropGroupRoster(groupJID string) error {
 // number from the group IQ while the event and message feeds learn it from
 // whatsmeow's LID store, and the two can disagree about a member for as long
 // as the store has no mapping — so a departure addressed by phone must still
-// find a row that was cached under a LID. The `<> ''` guards make an address
-// form we do not have match nothing rather than everything.
+// find a row that was cached under a LID. The guards against the empty string
+// make an address form we do not have match nothing rather than everything.
 const memberMatchSQL = `(user = ? OR (phone <> '' AND phone = ?) OR (lid <> '' AND lid = ?))`
 
 // groupLeaveClockSkew is how far a row's last_seen may run ahead of a

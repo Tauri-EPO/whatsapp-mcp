@@ -173,7 +173,7 @@ cd whatsapp-bridge
 go run .
 go vet ./... && go test ./...
 go test -race ./...                              # CI runs it too (§6); needs cgo, ~10 s
-golangci-lint run                                # build tag is set in .golangci.yml
+golangci-lint run                                # config in whatsapp-bridge/.golangci.yml; fails on unformatted files
 
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
 docker compose up -d --build
@@ -197,6 +197,23 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/p
   -w /src golangci/golangci-lint:v2.13.2 golangci-lint run
 ```
 
+**gofmt on Windows.** `golangci-lint run` fails on a file `gofmt` would rewrite (the `gofmt` formatter in `.golangci.yml`), and `gofmt` also rewrites line endings — so running it on this CRLF working copy reports every file and would commit whole-file churn. Check it on an LF copy of the tree instead, and apply what it reports with an editor, not with `gofmt -w` on the working copy:
+
+```bash
+# LF export of HEAD into a directory Docker Desktop can mount (not /tmp)
+LF=../lf-check && mkdir -p "$LF"
+git -c core.autocrlf=false -c core.eol=lf archive --format=tar HEAD whatsapp-bridge | tar -x -C "$LF"
+# with uncommitted work, copy the tracked files and strip the CRs instead:
+# git ls-files -z whatsapp-bridge | while IFS= read -r -d '' f; do
+#   mkdir -p "$LF/$(dirname "$f")" && tr -d '\r' < "$f" > "$LF/$f"; done
+MSYS_NO_PATHCONV=1 docker run --rm -v "$(cd "$LF" && pwd -W)/whatsapp-bridge:/src" \
+  -w /src golang:1.27-alpine gofmt -s -l .
+```
+
+`-s` matters: golangci-lint's `gofmt` formatter simplifies by default, so a plain `gofmt -l` can be silent on a file the Go Build job rejects.
+
+`git diff --stat` after the edit must show only the hunks gofmt asked for. Note that gofmt reformats doc comments too, and turns a `''` in one into a typographic `”`: reword the comment rather than commit the curly quote.
+
 Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `Dockerfile` are forced LF by `.gitattributes`. When editing files programmatically, read with universal newlines and write `\n`. Prefer writing whole files or line-anchored edits over shell heredocs containing backslash escapes.
 
 ## 6. CI gates
@@ -206,7 +223,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Job | What |
 |---|---|
 | Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pyright` (basic mode, `tests/` excluded: they use duck-typed fakes), `pytest` (one job, one toolchain setup) |
-| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.13.2 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
+| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.13.2 with `whatsapp-bridge/.golangci.yml`: linters `errcheck`, `govet`, `ineffassign`, `unused` and the `gofmt` formatter (an unformatted file fails the job — see §5 for checking it from a CRLF checkout). Suppress a finding only with `//nolint:<linter> // <why>` on the line |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |

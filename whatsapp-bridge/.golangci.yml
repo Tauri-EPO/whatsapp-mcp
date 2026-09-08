@@ -8,5 +8,12 @@ linters:
     - ineffassign
     - unused
 
+# `golangci-lint run` reports formatting drift; `golangci-lint fmt` fixes it.
+# Windows checkouts are CRLF (core.autocrlf=true) and gofmt rewrites line
+# endings, so run it on an LF view of the tree (AGENTS.md §5).
+formatters:
+  enable:
+    - gofmt
+
 run:
   timeout: 5m
