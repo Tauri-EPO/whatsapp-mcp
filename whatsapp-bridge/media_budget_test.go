@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,7 +47,7 @@ func TestMediaJobQueueBoundsActiveAndPendingWork(t *testing.T) {
 	})
 
 	submit := func(i int) bool {
-		return q.submit(mediaJob{messageID: string(rune('a' + i)), chatJID: mediaTestChat, mediaType: "image"})
+		return q.submit(mediaJob{messageID: fmt.Sprintf("job-%d", i), chatJID: mediaTestChat, mediaType: "image"})
 	}
 	// Two workers, two queue slots. Occupy the workers first, so the counts
 	// below do not depend on how fast they dequeue.

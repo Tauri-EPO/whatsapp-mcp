@@ -124,7 +124,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData)) //nolint:gosec // WEBHOOK_URL is operator configuration, not request input
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		bridgeLog.Errorf("building webhook request: %v", err)
 		return
@@ -141,7 +141,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 		req.Header.Set("X-Bridge-Token", w.token)
 	}
 
-	resp, err := w.client.Do(req) //nolint:gosec // operator-configured destination, redirects disabled
+	resp, err := w.client.Do(req)
 	if err != nil {
 		w.countFailure()
 		bridgeLog.Errorf("sending webhook: %v", err)

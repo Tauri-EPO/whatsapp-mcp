@@ -353,7 +353,7 @@ func TestTransferContext(t *testing.T) {
 	deadline := time.Now().Add(time.Hour)
 	withDeadline, cancelDeadline := context.WithDeadline(context.Background(), deadline)
 	defer cancelDeadline()
-	ctx, cancel = transferContext(nil, withDeadline)
+	ctx, cancel = transferContext(nil, withDeadline) //nolint:staticcheck // SA1012: the nil lifecycle is exactly what this case asserts transferContext tolerates
 	defer cancel()
 	if got, has := ctx.Deadline(); !has || !got.Equal(deadline) {
 		t.Fatalf("deadline = %v (has %v), want %v", got, has, deadline)

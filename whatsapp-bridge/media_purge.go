@@ -112,7 +112,7 @@ func (store *MessageStore) MediaRowsMatching(chatJID string, before time.Time, m
 		args = append(args, mediaType)
 	}
 	rows, err := store.db.Query(
-		`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, '') FROM messages WHERE `+strings.Join(clauses, " AND ")+
+		`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, '') FROM messages WHERE `+strings.Join(clauses, " AND ")+ //nolint:gosec // every clause is a literal written above; the values travel in args as bound parameters
 			` ORDER BY timestamp ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err

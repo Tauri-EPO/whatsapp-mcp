@@ -99,7 +99,7 @@ func sweepMedia(root string, maxAge time.Duration, now time.Time) (removed int, 
 			if statErr != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
 				return nil
 			}
-			if rmErr := os.Remove(path); rmErr != nil {
+			if rmErr := os.Remove(path); rmErr != nil { //nolint:gosec // G122: the sweep walks the bridge's own store directory, which only the bridge writes; an os.Root rewrite is a separate change
 				failed++
 				return nil
 			}

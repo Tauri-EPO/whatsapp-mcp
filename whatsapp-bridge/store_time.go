@@ -237,7 +237,7 @@ func rewriteToCanonicalTime(db *sql.DB, table, column string) (rewritten, skippe
 		`SELECT rowid, CAST(%[1]s AS TEXT) FROM %[2]s
 		  WHERE rowid > ? AND %[1]s IS NOT NULL AND CAST(%[1]s AS TEXT) NOT GLOB ?
 		  ORDER BY rowid LIMIT %[3]d`, column, table, canonicalTimeChunk)
-	updateSQL := fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, column)
+	updateSQL := fmt.Sprintf(`UPDATE %s SET %s = ? WHERE rowid = ?`, table, column) //nolint:gosec // table and column come from canonicalTimeColumns, never from input (see above)
 
 	cursor := int64(math.MinInt64) // no rowid can sort before this
 	for {
