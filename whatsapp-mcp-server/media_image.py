@@ -195,7 +195,7 @@ def _carries_metadata(image: Image.Image) -> bool:
     return any(key in image.info for key in METADATA_KEYS) or bool(image.getexif())
 
 
-def _encode(image: Image.Image, quality: int) -> tuple[bytes, str]:
+def encode(image: Image.Image, quality: int) -> tuple[bytes, str]:
     """The image as the smallest of the two formats every client renders.
 
     What the camera wrote into the file does not travel with the picture. The
@@ -263,7 +263,7 @@ def render(path: str, mime: str, max_edge: int, quality: int, passthrough: bool)
             if rotated:
                 image = ImageOps.exif_transpose(image) or image
             width, height = image.size
-            data, out_mime = _encode(image, quality)
+            data, out_mime = encode(image, quality)
     except ToolError:
         raise
     except Image.DecompressionBombError as exc:

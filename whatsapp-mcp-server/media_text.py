@@ -9,8 +9,10 @@ One small library per format, chosen for being pure Python (``lxml`` apart) and
 for doing nothing else: `pypdf` (page text), `python-docx` (paragraphs and
 tables), `openpyxl` (cells, sheet by sheet). Deliberately out of scope:
 
-* **no OCR.** A scanned PDF has no text layer, and this says so instead of
-  returning an empty block that reads like an empty document;
+* **no OCR.** A scanned PDF has no text layer, and this says so — and points at
+  ``read_media(as_images=True)`` (media_pdf.py), which renders the pages so a
+  vision model can read them — instead of returning an empty block that reads
+  like an empty document;
 * **no legacy .doc/.xls/.ppt** and no PPTX: different formats, different
   libraries, and the archive that motivated this carries PDFs and DOCX;
 * **no layout**. Reading order per page, tabs between cells; a table is rows of
@@ -55,8 +57,8 @@ MAX_CELL_CHARS = 500
 TRUNCATION_NOTE = "[truncated: the rest of this document was not read]"
 NO_TEXT_LAYER = (
     "This PDF has no extractable text: it is almost certainly a scan (photographed pages). "
-    "There is no OCR on this server, so the words cannot be recovered here — "
-    "read it as bytes with as_text=false, or ask the sender for the original file."
+    "There is no OCR on this server, so the words cannot be recovered as text — "
+    "call read_media(as_images=true) and the pages come back as pictures you can read yourself."
 )
 
 

@@ -2201,6 +2201,8 @@ def read_media(
     max_pages: int = 0,
     max_edge: int = DEFAULT_MAX_EDGE,
     quality: int = DEFAULT_QUALITY,
+    as_images: bool = False,
+    first_page: int = 1,
 ) -> list[ContentBlock]:
     """Read the media of a WhatsApp message: the bytes come back, not a path.
 
@@ -2233,8 +2235,22 @@ def read_media(
     comes back as text — a few dozen KB instead of megabytes of a blob you cannot
     decode, and the file itself may be far larger than the byte limits above. One
     block per page, table or sheet, in reading order, with `--- page 3 of 40 ---`
-    markers; `max_pages` (default 20) says how many. There is no OCR: a scanned PDF
-    says so in as many words instead of coming back empty.
+    markers; `max_pages` (default 20) says how many.
+
+    **For a scanned document, pass as_images=True**: the PDF's pages are rendered
+    here and come back as pictures, one per page behind a
+    `--- page 3 of 40 (rendered image) ---` marker, so you can read paper somebody
+    photographed. There is no OCR on this server, so this is the only way to read a
+    scan — `as_text` will tell you it found no text layer, and that is the signal to
+    call again with `as_images=True`. Only `max_pages` pages come back at a time
+    (5 by default, 20 at most, and less if they are heavy); `first_page` walks the
+    rest, and the answer tells you which page to ask for next when there is more.
+
+    **Try as_text first for any PDF.** A page of real text is a few KB as text and
+    a few hundred as a picture, the words are exact instead of read off pixels, and
+    40 pages fit in one answer where 5 images do not. Use `as_images` when `as_text`
+    came back saying the PDF is a scan, or when the layout itself is the content (a
+    form, a stamped receipt, a signature). The two cannot be combined.
 
     The last block is always JSON with {"sha256", "mime", "bytes", "truncated", "notes"}:
     if `notes` is empty nobody has interpreted this file yet, so write what you saw
@@ -2258,14 +2274,19 @@ def read_media(
         max_bytes: Refuse anything larger than this (0 = the per-type limit above,
                    which is also the ceiling: a larger value does not raise it)
         as_text: Extract the text of a PDF/DOCX/XLSX instead of returning its bytes
-        max_pages: With as_text, how many pages (or tables, or sheets) to read (default 20)
+        max_pages: How many pages to read: with as_text, pages/tables/sheets (default 20);
+                   with as_images, pages to render (default 5, at most 20)
         max_edge: Longest edge in pixels for an image (default 1568; 0 = the stored
                   bytes, unresized and unconverted)
         quality: JPEG quality when an image is re-encoded, 1-100 (default 85)
+        as_images: Render a PDF's pages as images instead of returning its bytes
+        first_page: With as_images, the page to start at, counting from 1 (default 1)
 
     Returns:
-        A list of content blocks: the file (or its text), then the JSON metadata
-        block, which carries `pages_total` and `truncated` when as_text is used.
+        A list of content blocks: the file (or its text, or its pages), then the JSON
+        metadata block, which carries `pages_total` and `truncated` with as_text, and
+        those plus `first_page`, `pages_rendered`, `image_bytes` and (for a page the
+        renderer could not draw) `pages_failed` with as_images.
     """
     return media_read_bytes(
         chat_jid,
@@ -2275,6 +2296,8 @@ def read_media(
         max_pages=max_pages,
         max_edge=max_edge,
         quality=quality,
+        as_images=as_images,
+        first_page=first_page,
     )
 
 

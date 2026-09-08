@@ -302,4 +302,6 @@ class TestScope:
             "max_pages",
             "max_edge",
             "quality",
+            "as_images",
+            "first_page",
         }
