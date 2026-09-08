@@ -60,6 +60,7 @@ func TestHandleMessage_ViewOnceImageIsStored(t *testing.T) {
 	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		return false, "", "", "", nil
 	}
+	drainBridge(t, b) // the message below queues an auto-download
 
 	evt := buildImageMessage(phonePN, phonePN, false, "")
 	evt.Info.ID = "VO1"

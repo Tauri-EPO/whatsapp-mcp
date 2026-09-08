@@ -132,7 +132,7 @@ This is how every change in this repo has been shipped; follow it unless the use
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
 5. **Docs in the same PR.** New env var → this file §7, `docs/CONFIGURATION.md`, `.env.example`, and `docker-compose.yml` passthrough if containers need it. `tests/test_env_docs.py` fails the Python job when the four disagree with what the code reads (compose-only knobs live in its allow-list). New tool → `docs/TOOLS.md` + the README "What your agent can do" table if it adds a capability + tool docstring (that docstring is what the model reads). `README.md` is the landing page for people arriving from search (Claude Code / Codex / Cursor / bots wanting WhatsApp): keep it short and outcome-oriented; technical detail goes in `docs/`.
-6. **Run the gates locally** (§5) before pushing: ruff format + check, pyright, pytest, `go vet`/`go test`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and `scripts/smoke.sh` (CI runs it on the unpaired stack too).
+6. **Run the gates locally** (§5) before pushing: ruff format + check, pyright, pytest, `go vet`/`go test`/`go test -race`, golangci-lint. For Docker-affecting changes, `docker compose up -d --build` and `scripts/smoke.sh` (CI runs it on the unpaired stack too).
 7. **Commit message = the PR description.** Conventional-commit title; body says the problem, the fix, what was verified and `Closes #N`. Co-author trailer for agents.
 8. **Open the PR with `gh pr create --repo Tauri-EPO/whatsapp-mcp --base main`.** Body: what/why, verification, security note if auth/paths/network/exec are touched.
 9. **Wait for CI, then squash-merge:** `gh pr merge N --squash --delete-branch`. All checks must be green; a `startup_failure` or network flake is re-run with `gh run rerun <id> --failed`, never bypassed. Agents automate this with a wait-then-merge loop; never merge with red checks. One exception to the plain command: a Dependabot `pip-dev-*` PR is merged with `--subject "chore(deps): …"` so the dev-tooling bump does not cut a release (§2).
@@ -170,6 +170,7 @@ uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT
 cd whatsapp-bridge
 go run .
 go vet ./... && go test ./...
+go test -race ./...                              # CI runs it too (§6); needs cgo, ~10 s
 golangci-lint run                                # build tag is set in .golangci.yml
 
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
@@ -184,6 +185,12 @@ docker compose --profile whisper up -d           # + local whisper.cpp for trans
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
   sh -c 'go vet ./... && go test ./...'
+# The race detector, which CI also runs (§6). -race needs cgo, and the alpine
+# image ships no C compiler, so install one first; -count=3 is what shakes out
+# the races that only appear when a leaked goroutine outlives its test.
+docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
+  -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
+  sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -w /src golangci/golangci-lint:v2.13.2 golangci-lint run
 ```
@@ -197,7 +204,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Job | What |
 |---|---|
 | Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pyright` (basic mode, `tests/` excluded: they use duck-typed fakes), `pytest` (one job, one toolchain setup) |
-| Go Build | `go build`, `go vet`, `go test`, then golangci-lint v2.13.2 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
+| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.13.2 (`errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`). Suppress a gosec finding only with `//nolint:gosec // <why>` on the line |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every MCP module imports inside the image; the bridge also cross-builds for `linux/arm64` |
@@ -275,7 +282,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 8. **Search index.** The bridge owns `messages_fts` (FTS5, `fts.go`) and its triggers; the driver (modernc.org/sqlite) always ships FTS5, and the startup check still *drops* the index on a build without it so writes never fail. The MCP server uses `MATCH` only when the table exists and falls back to `instr()`. Never create FTS triggers from Python.
 9. **One bridge per store.** `main()` takes an exclusive OS lock on `store/.bridge.lock` (`instance_lock.go`); a second bridge exits naming the holder's PID. Tests that need concurrent bridge processes must use separate working directories.
 10. **Configuration is read once.** `os.Getenv` belongs in `main.go` and the `resolve*` / `load*` / `new*` helpers it calls at startup; handlers and event paths read `Bridge` fields (`MediaRoots`, `MediaRetention`, `Webhook.enabled`, …). `storeDir()` is the one per-call read left, because tests point it at temp dirs.
-11. **No package-level state in the bridge.** Runtime dependencies live on the `Bridge` struct (`bridge.go`); tests build one with `testBridge(...)` and override fields. The one sanctioned global is `bridgeLog` (`logging.go`), write-once configuration set by `initLogging()`; tests swap it with `installRecordingLogger(t)`.
+11. **No package-level state in the bridge.** Runtime dependencies live on the `Bridge` struct (`bridge.go`); tests build one with `testBridge(...)` and override fields. The one sanctioned global is `bridgeLog` (`logging.go`), write-once configuration set by `initLogging()`; tests swap it with `installRecordingLogger(t)`. A knob a test reassigns and restores (`streamReplacedDelay` was one, issue #351) is also a data race the moment a goroutine reads it: put it on the `Bridge` and set it on the test's own instance. Same for what a test leaves running — a bridge that queued an auto-download outlives the test unless it is drained (`drainBridge(t, b)`), and `go test -race` is what catches both.
 12. **stdout is the protocol on stdio.** Anything the MCP server prints to stdout can corrupt a stdio session; log through `logging` (stderr), never `print()`.
 13. **Bridge logs go through `bridgeLog`, not `fmt.Print*`.** Levels: `Errorf` for failures that lose data, `Warnf` for degraded-but-continuing, `Infof` for lifecycle, `Debugf` for per-request traces and message echoes (user content stays out of `INFO`). The only `fmt.Print*` left are the first-run token banner and the pairing QR code, which are meant for a human.
 14. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.

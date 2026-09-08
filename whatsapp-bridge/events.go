@@ -587,10 +587,15 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// as a "permanent" disconnect and suppresses the Disconnected event,
 		// so we must handle it explicitly. Wait briefly to avoid ping-ponging
 		// with the other b.Client, then reconnect.
-		b.Log.Warnf("⚠️  Stream replaced by another session — will reconnect after 30s")
+		//
+		// The delay is read here, not inside the goroutine: the field is
+		// configuration, and reading it on the event path keeps the timer
+		// goroutine off a value another goroutine could still be writing.
+		delay := b.StreamReplacedDelay
+		b.Log.Warnf("⚠️  Stream replaced by another session — will reconnect after %s", delay)
 		go func() {
 			select {
-			case <-time.After(streamReplacedDelay):
+			case <-time.After(delay):
 			case <-b.ctx.Done():
 				return
 			}
@@ -605,9 +610,12 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 	}
 }
 
-// streamReplacedDelay is how long to wait before reconnecting after another
-// session took our slot (avoids ping-ponging with it). Tests shorten it.
-var streamReplacedDelay = 30 * time.Second
+// defaultStreamReplacedDelay is how long to wait before reconnecting after
+// another session took our slot (avoids ping-ponging with it). It is the
+// default of Bridge.StreamReplacedDelay, which is what the event path reads:
+// a package-level variable tests reassign is state two goroutines end up
+// sharing without a lock (gotcha 11, issue #351).
+const defaultStreamReplacedDelay = 30 * time.Second
 
 // reconnectInitialBackoff is the first wait before redialling; it doubles per
 // failure up to reconnectMaxBackoff and resets on success. Tests shorten it.

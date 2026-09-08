@@ -76,6 +76,11 @@ type Bridge struct {
 	// group_events.go). 0 disables the pass, and group_members then only grows
 	// from /api/group/members, group events and group messages.
 	GroupRosterSync time.Duration
+	// StreamReplacedDelay is how long the reconnect after a StreamReplaced event
+	// waits, so this bridge does not ping-pong with the session that took its
+	// slot (events.go). Set once at startup; tests shorten it on their own
+	// Bridge instead of on a shared variable (issue #351).
+	StreamReplacedDelay time.Duration
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps
@@ -112,23 +117,24 @@ type Bridge struct {
 // bridgeToken is the REST bearer token, also attached to outbound webhooks.
 func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string) *Bridge {
 	b := &Bridge{
-		Client:            client,
-		Store:             store,
-		Log:               logger,
-		Policy:            loadChatPolicy(),
-		PollVoteDecrypt:   whatsmeowPollVoteDecrypter(client),
-		ForwardSelf:       getEnvBool("FORWARD_SELF", true),
-		MediaAutoDownload: getEnvBool(mediaAutoDownloadEnv, true),
-		MediaMaxBytes:     resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
-		Webhook:           newWebhookSender(bridgeToken),
-		RESTBind:          defaultBridgeBind,
-		GroupRosterSync:   groupRosterSyncInterval,
-		rosterFailures:    newRosterFailures(),
-		origTimes:         newOriginalTimestamps(),
-		mediaRetry:        newMediaRetryHub(),
-		startedAt:         time.Now(),
-		storeStats:        newStoreStats(storeDir()),
-		metrics:           newMetricsRegistry(),
+		Client:              client,
+		Store:               store,
+		Log:                 logger,
+		Policy:              loadChatPolicy(),
+		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
+		ForwardSelf:         getEnvBool("FORWARD_SELF", true),
+		MediaAutoDownload:   getEnvBool(mediaAutoDownloadEnv, true),
+		MediaMaxBytes:       resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
+		Webhook:             newWebhookSender(bridgeToken),
+		RESTBind:            defaultBridgeBind,
+		GroupRosterSync:     groupRosterSyncInterval,
+		StreamReplacedDelay: defaultStreamReplacedDelay,
+		rosterFailures:      newRosterFailures(),
+		origTimes:           newOriginalTimestamps(),
+		mediaRetry:          newMediaRetryHub(),
+		startedAt:           time.Now(),
+		storeStats:          newStoreStats(storeDir()),
+		metrics:             newMetricsRegistry(),
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if b.Webhook != nil {
