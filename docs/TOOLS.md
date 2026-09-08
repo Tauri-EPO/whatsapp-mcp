@@ -1222,22 +1222,27 @@ again. `read_media` puts the same link in its trailing JSON block.
 
 `resources/read` returns the file with its real MIME type — bytes as
 `BlobResourceContents`, text as `TextResourceContents` — and nothing else: no
-metadata block, no `<untrusted>` delimiters, no notes. It is the file; the tool
-result is what the model reads. Use `read_media` when you want the bytes *and*
-the hash, the notes or the extracted text of a document, or when the client does
-not fetch resources at all; use the resource when the client would rather decide
-for itself which rows of a 200-row page it pulls down.
+metadata block, no notes, and no `<untrusted>` delimiters even with
+[`WHATSAPP_WRAP_UNTRUSTED`](CONFIGURATION.md#marking-message-content-as-untrusted)
+on — a resource is the file byte for byte, and a delimiter inserted into it
+would be an edit. Use `read_media` when you want the bytes *and* the hash, the
+notes or the extracted text of a document, when you want the envelope, or when
+the client does not fetch resources at all; use the resource when the client
+would rather decide for itself which rows of a 200-row page it pulls down.
 
 Both paths pass the same gates in the same order, so a link is never a way
 around a rule: `WHATSAPP_ALLOWED_CHATS`, the message row (a text message has no
 resource), the per-type size cap, the proof that the path resolves inside that
 chat's own media directory, and the implicit-download policy — a file the store
 does not hold has to be fetched from WhatsApp, which is `download_media` under
-another name, so `resources/read` answers `denied` where that tool is disabled
-(see [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)). Reads are
-allowed in read-only mode. A failure comes back as a JSON-RPC error whose
-message starts with the same code the tools use (`denied:`, `too_large:`,
-`not_found:`), because `resources/read` has no envelope to put one in.
+another name, so `resources/read` answers `denied` where that tool is disabled.
+The resource is `read_media` by another route, so a policy that does not offer
+**that** tool refuses here too, and then there is no template in
+`resources/templates/list` and no `resource_link` on a listing row either (see
+[Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)). Reads are allowed
+in read-only mode. A failure comes back as a JSON-RPC error whose message starts
+with the same code the tools use (`denied:`, `too_large:`, `not_found:`),
+because `resources/read` has no envelope to put one in.
 
 ### `get_media_stats`
 

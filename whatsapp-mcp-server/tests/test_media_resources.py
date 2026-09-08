@@ -1,5 +1,6 @@
 """whatsapp://media/<chat>/<id>: the same bytes as read_media, behind the same gates."""
 
+import base64
 import os
 
 import pytest
@@ -16,6 +17,10 @@ from tests.conftest import ALICE, BOB
 from tool_policy import ToolPolicy
 
 PDF = b"%PDF-1.4 not really a pdf"
+# A real one-pixel PNG, so the sniffing is tested against bytes and not a marker.
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 def _insert(conn, msg_id, chat, media_type, filename=None, length=10):
@@ -154,6 +159,35 @@ class TestDenials:
         tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
         assert list(await main.mcp.read_resource(_uri("DOC1")))[0].content == PDF
 
+    async def test_a_policy_that_does_not_offer_read_media(self, store):
+        """The URI is not a way back to bytes WHATSAPP_DENY_TOOLS took away."""
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"read_media"})))
+        with pytest.raises(ResourceError) as exc:
+            await main.mcp.read_resource(_uri("DOC1"))
+        assert str(exc.value).startswith("denied:") and "read_media" in str(exc.value)
+
+    async def test_a_denied_policy_advertises_no_template(self, store):
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"read_media"})))
+        templates = await main.mcp.list_resource_templates()
+        assert not [item for item in templates if item.uri_template.startswith("whatsapp://media/")]
+
+    def test_a_denied_policy_puts_no_link_on_a_listing(self, store):
+        """A link to bytes the server would refuse is worse than no link."""
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"read_media"})))
+        items = main.list_media(chat_jid=ALICE)["items"]
+        assert items and all("resource_link" not in item for item in items)
+
+    async def test_an_allow_list_without_read_media_refuses_the_same_way(self, store):
+        tool_policy.set_active_policy(ToolPolicy(allow=frozenset({"list_media"})))
+        with pytest.raises(ResourceError) as exc:
+            await main.mcp.read_resource(_uri("DOC1"))
+        assert "WHATSAPP_ALLOW_TOOLS" in str(exc.value)
+
+    async def test_read_only_mode_still_serves_them(self, store):
+        """Resources are reads; read-only takes mutating tools, not these."""
+        tool_policy.set_active_policy(ToolPolicy(read_only=True))
+        assert list(await main.mcp.read_resource(_uri("DOC1")))[0].content == PDF
+
     async def test_a_symlink_out_of_the_chat_directory(self, store, tmp_path):
         secret = tmp_path / ".bridge-token"
         secret.write_text("token")
@@ -183,6 +217,15 @@ class TestListMediaLinks:
         item = next(item for item in main.list_media(chat_jid=ALICE)["items"] if item["message_id"] == "DOC1")
         assert item["filename"] == "report.pdf" and item["cached"] is True
         assert item["bytes"] == len(PDF) and item["sha256"] is None
+
+    async def test_the_link_declares_what_the_resource_will_actually_serve(self, store):
+        """The bridge caches every image as .jpg; a link that says image/jpeg lies."""
+        with store.messages() as conn:
+            _insert(conn, "IMG1", ALICE, "image")
+        _cache(ALICE, "image_20260904_100000_IMG1.jpg", PNG_BYTES)
+        item = next(item for item in main.list_media(chat_jid=ALICE)["items"] if item["message_id"] == "IMG1")
+        assert item["resource_link"]["mimeType"] == "image/png"
+        assert list(await main.mcp.read_resource(_uri("IMG1")))[0].mime_type == "image/png"
 
     def test_a_row_with_nothing_cached_still_gets_a_link(self, store):
         item = next(item for item in main.list_media(chat_jid=ALICE)["items"] if item["message_id"] == "GONE")

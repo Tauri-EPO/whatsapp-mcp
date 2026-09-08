@@ -351,6 +351,14 @@ WHATSAPP_WRAP_UNTRUSTED=1
   covers them, and they are sanitised instead (below) whether this variable is
   set or not.
 - Error envelopes are never wrapped: they come from this server, not from WhatsApp.
+- **Not** wrapped either: the contents of an MCP **resource**
+  (`whatsapp://media/…`, [TOOLS.md](TOOLS.md#reading-media-whatsappmedia)). A
+  resource is the file byte for byte — delimiters inserted into it would be an
+  edit, not an annotation — so a `.txt` or `.csv` attachment that a client
+  fetches that way and inlines into the conversation reaches the model
+  undelimited even with this on. `read_media` on the same file does wrap it.
+  One more reason the enforced mitigations are `WHATSAPP_READ_ONLY` and
+  `WHATSAPP_ALLOWED_CHATS`, and this variable is a hint.
 - MCP server only; the bridge is unaffected. Same strict boolean parse as
   `WHATSAPP_READ_ONLY` (`1/true/yes/on`, `0/false/no/off`), and an unreadable
   value stops the process at startup. The MCP server logs the mode on its first

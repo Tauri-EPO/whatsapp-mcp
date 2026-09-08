@@ -369,6 +369,31 @@ def sniff_audio_mime(path: str) -> str | None:
     return None
 
 
+def declared_mime(media_type: str, filename: str | None, path: str = "") -> str:
+    """The type this file goes out as: the name's guess, corrected by the first bytes.
+
+    One answer for every caller, so a ``list_media`` link, the block
+    ``read_media`` returns and ``resources/read`` on the same URI cannot
+    disagree about what the file is — the mislabelling the sniffing exists to
+    prevent, arriving through a different door.
+
+    Only images and audio are sniffed, because those are the two the bridge
+    renames (`.jpg` and `.ogg` for everything of that kind). Without ``path``
+    — a row whose bytes are not cached — the name is all there is.
+    """
+    mime = guess_mime(media_type, filename, path)
+    if not path:
+        return mime
+    # A name that promises a type the payload does not have must not produce a
+    # typed block: the client rejects it, and a rejected block fails the whole
+    # call. An unrecognised payload behind such a name is untyped instead.
+    if mime.startswith("image/"):
+        return sniff_image_mime(path) or ("application/octet-stream" if mime in RENDERABLE_IMAGE_MIMES else mime)
+    if mime.startswith("audio/"):
+        return sniff_audio_mime(path) or ("application/octet-stream" if mime in PLAYABLE_AUDIO_MIMES else mime)
+    return mime
+
+
 def is_text_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in TEXT_MIMES
 
@@ -400,12 +425,12 @@ def cap(requested: int | None, hard: int) -> int:
     return min(value, hard)
 
 
-def check_size(size: int, limit: int, mime: str) -> None:
+def check_size(size: int, limit: int, mime: str, caller: str = "read_media") -> None:
     if size <= limit:
         return
     raise ToolError(
         "too_large",
-        f"the file is {size} bytes and read_media returns at most {limit} for {mime}. "
+        f"the file is {size} bytes and {caller} returns at most {limit} for {mime}. "
         "download_media still returns the server-side path, which only helps a client sharing this filesystem",
         bytes=size,
         limit=limit,
@@ -524,22 +549,10 @@ def resolve_media(
         # skips the obvious no.
         if reported:
             expected = guess_mime(media_type, filename)
-            check_size(reported, cap(max_bytes, hard_limit(expected, as_text)), expected)
+            check_size(reported, cap(max_bytes, hard_limit(expected, as_text)), expected, caller)
         path = download_path(chat_jid, message_id)
 
-    mime = guess_mime(media_type, filename, path)
-    if mime.startswith("image/"):
-        # The bytes decide. A name that promises a JPEG over a payload that is
-        # not one must not produce an ImageContent: the client rejects a block
-        # whose data disagrees with its type, so it goes out as an untyped
-        # resource (application/octet-stream) instead.
-        sniffed = sniff_image_mime(path)
-        mime = sniffed or ("application/octet-stream" if mime in RENDERABLE_IMAGE_MIMES else mime)
-    elif mime.startswith("audio/"):
-        # And here too, for the same reason: the bridge calls every audio
-        # message `.ogg`, so an MP3 would go out declared audio/ogg.
-        sniffed = sniff_audio_mime(path)
-        mime = sniffed or ("application/octet-stream" if mime in PLAYABLE_AUDIO_MIMES else mime)
+    mime = declared_mime(media_type, filename, path)
     if as_text and not is_text_mime(mime):
         # Before the size check: "as_text does not apply to a video" is the
         # useful answer, not "that video is over the 2 MiB cap".
@@ -548,7 +561,7 @@ def resolve_media(
         size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
-    check_size(size, cap(max_bytes, hard_limit(mime, as_text)), mime)
+    check_size(size, cap(max_bytes, hard_limit(mime, as_text)), mime, caller)
     return ResolvedMedia(path, mime, size, sha256, filename)
 
 
