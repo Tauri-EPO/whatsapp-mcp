@@ -14,13 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/mdp/qrterminal"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"google.golang.org/protobuf/proto"
+	_ "modernc.org/sqlite"
 )
 
 // Whether to forward messages sent by self via webhook.
