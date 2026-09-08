@@ -53,22 +53,32 @@ whatsapp-mcp/
 ├── whatsapp-bridge/            # Go — WhatsApp Web via whatsmeow, REST API, messages.db owner
 │   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
+│   ├── pairing.go              # QR pairing and first connection, one context per code sequence
 │   ├── events.go               # whatsmeow event dispatch, handleMessage, calls, reconnect loop
 │   ├── history_sync.go         # handleHistorySync (phone replays at pair time / on demand)
+│   ├── persist.go              # one extraction + storage path shared by live messages and history sync
 │   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
+│   ├── view_once.go            # view-once envelopes unwrapped and archived; the phone keeps its one view
 │   ├── jid.go                  # phone <-> LID resolution helpers
+│   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
+│   ├── edit_forward.go         # /api/edit (own message, edit window), /api/forward (re-send elsewhere)
 │   ├── media.go                # inbound media download into store/<chat>/
+│   ├── media_path.go           # WHATSAPP_MEDIA_ROOTS: outbound media_path confined to an allow-list
 │   ├── rest.go                 # newRESTMux route table + HTTP server; handlers live next to their features
 │   ├── rest_middleware.go      # writeError (JSON error shape), requireMethod, requestLog
 │   ├── health.go               # /api/health (liveness), /api/ready (readiness)
+│   ├── version.go              # GET /api/version: build identity injected by ldflags
 │   ├── me.go                   # GET /api/me: the account's own phone JID and LID (authenticated)
 │   ├── chat_actions.go         # /api/react, /api/typing
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
+│   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution
+│   ├── store_batch.go          # one transaction per conversation for the history-sync backfill
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text
 │   ├── sender_namespace.go     # messages.sender_server: which namespace a stored sender is in + its backfill
+│   ├── chat_names.go           # chat name resolution; history sync never calls the network for one
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
@@ -88,6 +98,7 @@ whatsapp-mcp/
 │   ├── group_members.go        # /api/group/members
 │   ├── group_members_store.go  # group_members table: rosters cached per group
 │   ├── group_events.go         # GroupInfo join/leave/promote/demote + the paced roster refresh
+│   ├── group_manage.go         # /api/group/participants, /subject, /invite, /leave
 │   ├── delete_message.go       # /api/delete (revoke / local delete)
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
@@ -96,19 +107,28 @@ whatsapp-mcp/
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
 │   ├── strict_args.py          # StrictArgumentServer: call_tool refuses arguments no tool declares
+│   ├── errors.py               # the one failure envelope: {"error": {"code", "message"}} and its codes
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
+│   ├── export.py               # export_messages: NDJSON archive under WHATSAPP_EXPORT_DIR, path not rows
 │   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
+│   ├── media_read.py           # read_media: the bytes as MCP content blocks instead of a server path
+│   ├── media_text.py           # read_media(as_text=True): PDF/DOCX/XLSX text extracted here, no OCR
+│   ├── media_image.py          # read_media images: downscaled, upright, stripped, in a format clients render
+│   ├── media_pdf.py            # read_media(as_images=True): PDF pages rendered with pypdfium2
 │   ├── media_resource.py       # MediaResourceServer: the whatsapp://media/<chat>/<id> resource, and the resource_link on list_media rows
 │   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes; transcripts_fts
 │   ├── notes.py                # notes.db: versioned notes on chats/contacts/messages (media via media_notes)
 │   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
+│   ├── observability.py        # WHATSAPP_MCP_LOG_FORMAT=json + the MCP /metrics middleware
+│   ├── parent_watchdog.py      # stdio: exit once the parent process is gone (WHATSAPP_PARENT_WATCHDOG_S)
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
 │   ├── tool_policy.py          # WHATSAPP_READ_ONLY / _ALLOW_TOOLS / _DENY_TOOLS: hides + refuses tools
 │   ├── untrusted.py            # @untrusted_content: the third-party-data sentence, name sanitisation, WHATSAPP_WRAP_UNTRUSTED
 │   ├── endpoint_cert.py        # WHATSAPP_PUBLIC_URL: TLS expiry of the published endpoint, cached
 │   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
+│   ├── transcribe_worker.py    # TRANSCRIBE_ON_INGEST: background thread transcribing inbound voice notes
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
@@ -312,6 +332,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 
 | You want to… | Touch |
 |---|---|
+| Add a module at the top level of either component | also its line in the §3 tree (`tests/test_agents_file_tree.py` fails the Python job otherwise, the way `tests/test_env_docs.py` does for a new env var) |
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ `docs/TOOLS.md`, tests) |
 | Change what `resources/read` serves, or add a resource scheme | `whatsapp-mcp-server/media_resource.py` (the `mcp` instance is a `MediaResourceServer`) |
 | Change agent notes (chats, contacts, messages, media) | `whatsapp-mcp-server/notes.py`, `media_notes.py` |
