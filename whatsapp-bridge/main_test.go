@@ -142,6 +142,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	if _, err := db.Exec(pollsSchema); err != nil {
 		t.Fatalf("failed to create poll tables: %v", err)
 	}
+	if _, err := db.Exec(groupMembersSchema); err != nil {
+		t.Fatalf("failed to create group_members table: %v", err)
+	}
 	return &MessageStore{db: db}
 }
 

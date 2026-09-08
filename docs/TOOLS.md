@@ -1655,14 +1655,24 @@ List the participants of a group, one page at a time (live query through the bri
 - `cursor` (optional): `next_cursor` from the previous page
 
 Returns the group's `name`, `topic`, `owner_jid`, `participant_count` (the whole
-group) and the page keys `items`, `next_cursor`, `has_more`. Each item has `jid`,
-`phone_number`, `lid`, `name` (from your contacts when known), `display`,
-`is_admin` and `is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
+group), `fetched_at` (when this roster came off the network, UTC) and the page
+keys `items`, `next_cursor`, `has_more`. Each item has `jid`, `phone_number`,
+`lid`, `name` (from your contacts when known), `display`, `is_admin` and
+`is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
 
 The bridge returns the whole membership; the MCP server sorts it (super admins,
 then admins, then JID ascending) and slices, so pages never overlap or skip even
 though every call re-queries WhatsApp. A cursor is only valid for the `chat_jid`
 it came from. Hundreds of members no longer overflow a client's output cap.
+
+Each call also refreshes the bridge's cached copy of that group's roster, which
+is what lets membership be answered later without a live call per group. The
+bridge keeps that cache current on its own as well: from group
+join/leave/promote/demote events, from the sender of a group message that
+arrives live, and from a background refresh of any roster older than six hours
+(one group per second, only while connected, first pass a couple of minutes
+after the bridge comes up). Calling this tool is therefore never *required* to
+keep the cache fresh — only to make one group current right now.
 
 ### `get_message_context`
 

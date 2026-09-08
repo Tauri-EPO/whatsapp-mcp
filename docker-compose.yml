@@ -58,6 +58,7 @@ services:
       WHATSAPP_MEDIA_AUTODOWNLOAD: ${WHATSAPP_MEDIA_AUTODOWNLOAD:-true}
       WHATSAPP_MEDIA_RETENTION_DAYS: ${WHATSAPP_MEDIA_RETENTION_DAYS:-}
       WHATSAPP_MEDIA_MAX_BYTES: ${WHATSAPP_MEDIA_MAX_BYTES:-}
+      WHATSAPP_GROUP_ROSTER_SYNC_HOURS: ${WHATSAPP_GROUP_ROSTER_SYNC_HOURS:-}
       # Provide a token here (or in .env) to inject it from outside; leave empty
       # to let the bridge generate one into /app/store/.bridge-token, which the
       # MCP server picks up from the shared volume.

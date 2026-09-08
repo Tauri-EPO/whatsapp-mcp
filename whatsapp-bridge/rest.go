@@ -115,6 +115,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		},
 		storeContactName(client),
 		b.Policy,
+		b.recordGroupRoster,
 	)))
 
 	// Edit an own message / forward a message (edit_forward.go).

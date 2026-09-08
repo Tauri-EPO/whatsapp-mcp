@@ -71,11 +71,18 @@ type Bridge struct {
 	MediaRoots []string
 	// MediaRetention is the age after which cached media is swept (0 = keep forever).
 	MediaRetention time.Duration
+	// GroupRosterSync is how stale a cached group roster may get before the
+	// background pass refreshes it (WHATSAPP_GROUP_ROSTER_SYNC_HOURS,
+	// group_events.go). 0 disables the pass, and group_members then only grows
+	// from /api/group/members, group events and group messages.
+	GroupRosterSync time.Duration
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps
 	// mediaRetry routes MediaRetry events to waiting downloads (see mediaRetryHub).
 	mediaRetry *mediaRetryHub
+	// rosterFailures backs off groups whose roster refresh keeps failing (group_events.go).
+	rosterFailures *rosterFailures
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
 	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
@@ -106,6 +113,8 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		MediaMaxBytes:     resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
 		Webhook:           newWebhookSender(bridgeToken),
 		RESTBind:          defaultBridgeBind,
+		GroupRosterSync:   groupRosterSyncInterval,
+		rosterFailures:    newRosterFailures(),
 		origTimes:         newOriginalTimestamps(),
 		mediaRetry:        newMediaRetryHub(),
 		startedAt:         time.Now(),
