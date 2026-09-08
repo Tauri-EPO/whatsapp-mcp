@@ -264,14 +264,17 @@ Both images (`ghcr.io/tauri-epo/whatsapp-mcp-bridge`,
 | --- | --- | --- |
 | `latest` | the last release; what `docker compose pull` gets by default | `release.yml`, when the release PR is merged (`release-cut.yml` does that once a day, 03:00 America/Sao_Paulo, when there is something to release) |
 | `vX.Y.Z`, `X.Y` | that release, fixed | `release.yml` |
-| `main` | edge: every merge to `main`, the release commit included | `publish.yml` (on the push; dispatched again by `release-cut.yml` after a cut) |
-| `sha-<7 chars>` | one exact commit | `publish.yml` |
+| `main` | edge: every merge to `main`, the release commit included | `publish.yml` on the push; on a release commit `release.yml` instead, off the same build as `latest` |
+| `sha-<7 chars>` | one exact commit | same as `main` |
 
 Versions are computed automatically from the commit titles (release-please:
 `feat:` bumps minor, `fix:`/`perf:`/`deps:` patch, breaking changes major); the
 [Releases page](https://github.com/Tauri-EPO/whatsapp-mcp/releases) and
 `CHANGELOG.md` list what changed. `/api/version` reports `v1.2.3+<sha>` for a
-release image and `main+<sha>` for an edge one.
+release image and `main+<sha>` for an edge one. A release commit is built once
+and carries every tag, so right after a release `main`, `latest` and `v1.2.3`
+are the same digest and all three report `v1.2.3+<sha>`; `main` goes back to
+`main+<sha>` on the next merge.
 
 The compose file names those images, so you choose per host:
 

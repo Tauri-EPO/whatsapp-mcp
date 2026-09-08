@@ -6,8 +6,11 @@ name: Release
 # with grouped notes, and, when that PR is merged, creates the tag vX.Y.Z and
 # the GitHub Release and updates CHANGELOG.md. A release then publishes the
 # images as vX.Y.Z, X.Y and latest through build-push.yml (a tag pushed by
-# GITHUB_TOKEN would not trigger an `on: push: tags` workflow). Config:
-# release-please-config.json and .release-please-manifest.json.
+# GITHUB_TOKEN would not trigger an `on: push: tags` workflow), and off the
+# same build also as main and sha-<7>: the release commit is the head of main,
+# so publish.yml steps aside for it instead of building the same tree twice
+# (issue #333). Config: release-please-config.json and
+# .release-please-manifest.json.
 
 on:
   push:
@@ -47,7 +50,34 @@ jobs:
     with:
       ref: ${{ needs.release-please.outputs.tag_name }}
       version: ${{ needs.release-please.outputs.tag_name }}
-      tags: ${{ needs.release-please.outputs.tag_name }} ${{ needs.release-please.outputs.major }}.${{ needs.release-please.outputs.minor }} latest
+      tags: ${{ needs.release-please.outputs.tag_name }} ${{ needs.release-please.outputs.major }}.${{ needs.release-please.outputs.minor }} latest main
+      sha_tag: true
+    permissions:
+      contents: read
+      packages: write
+
+  publish-edge:
+    # publish.yml steps aside for a release commit unconditionally, but the job
+    # above only runs when release-please actually cut a release. If it did not
+    # - the action failed, or the tag already existed because release-cut.yml
+    # had dispatched this workflow moments earlier - the commit would end up
+    # with no images at all and no red job. Cover exactly that gap: no release
+    # produced, and publish.yml is not covering this commit either (a release
+    # subject on the push path, or any dispatch, where publish.yml does not
+    # fire at all). Mutually exclusive with the job above, so a release commit
+    # is still built once. An ordinary merge takes neither branch. The one
+    # wasteful case is dispatching this workflow by hand on a non-release
+    # commit, which rebuilds images that commit already has; failing that way
+    # round beats leaving a release commit unpublished.
+    name: Publish edge images (no release was cut)
+    needs: release-please
+    if: "${{ !cancelled() && needs.release-please.outputs.release_created != 'true' && (github.event_name != 'push' || startsWith(github.event.head_commit.message, 'chore(main): release ')) }}"
+    uses: ./.github/workflows/build-push.yml
+    with:
+      ref: ${{ github.sha }}
+      version: main
+      tags: main
+      sha_tag: true
     permissions:
       contents: read
       packages: write

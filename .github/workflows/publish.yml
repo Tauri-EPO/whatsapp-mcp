@@ -2,8 +2,10 @@ name: Publish images
 
 # Every push to main publishes the edge images to GHCR:
 #   ghcr.io/<owner>/whatsapp-mcp-{bridge,server}:main and :sha-<7>
-# Releases (release.yml) publish vX.Y.Z, X.Y and latest. The build itself
-# lives in build-push.yml. Packages must be public once (GitHub UI); docs in
+# A release commit is the exception: release.yml builds it once and publishes
+# vX.Y.Z, X.Y, latest, main and sha-<7> off that single build, so this
+# workflow steps aside (see the job condition). The build itself lives in
+# build-push.yml. Packages must be public once (GitHub UI); docs in
 # docs/DOCKER.md "Published images".
 
 on:
@@ -20,21 +22,19 @@ permissions:
   packages: write
 
 jobs:
-  meta:
-    name: Tags
-    runs-on: ubuntu-latest
-    outputs:
-      short: ${{ steps.short.outputs.short }}
-    steps:
-      - id: short
-        run: echo "short=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
   publish:
-    needs: meta
+    # Skip the release-please merge commit: release.yml owns every tag for it
+    # (issue #333), and building it here too would run a second multi-arch
+    # build of the same tree against the same GHA cache scopes. `head_commit`
+    # exists only on `push`, so a manual `gh workflow run publish.yml` always
+    # publishes - the escape hatch if release.yml's build ever fails.
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore(main): release ') }}"
     uses: ./.github/workflows/build-push.yml
     with:
       ref: ${{ github.sha }}
       version: main
-      tags: main sha-${{ needs.meta.outputs.short }}
+      tags: main
+      sha_tag: true
     permissions:
       contents: read
       packages: write

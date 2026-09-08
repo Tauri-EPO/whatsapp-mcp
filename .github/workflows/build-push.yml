@@ -1,10 +1,11 @@
 name: Build and push images
 
 # Reusable: builds the bridge and MCP images for linux/amd64 + linux/arm64 and
-# pushes them to GHCR under the given tags. Called by publish.yml (every push
-# to main: `main` + `sha-<7>`) and by release.yml (a release: `vX.Y.Z`, `X.Y`,
-# `latest`). Kept as a workflow_call because tags and releases created with
-# GITHUB_TOKEN do not trigger `on: push` workflows.
+# pushes them to GHCR under the given tags. Called by publish.yml (a plain push
+# to main: `main` + `sha-<7>`) and by release.yml (a release commit: `vX.Y.Z`,
+# `X.Y`, `latest` and the same `main` + `sha-<7>` off one build). Kept as a
+# workflow_call because tags and releases created with GITHUB_TOKEN do not
+# trigger `on: push` workflows.
 
 on:
   workflow_call:
@@ -21,6 +22,11 @@ on:
         description: Whitespace-separated image tags (without the image name)
         required: true
         type: string
+      sha_tag:
+        description: Also tag `sha-<7>` from the commit the ref resolves to
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -44,11 +50,38 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve names
         id: meta
+        env:
+          TAGS: ${{ inputs.tags }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+          OWNER: ${{ github.repository_owner }}
         run: |
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
           sha=$(git rev-parse HEAD)
+          tags="$TAGS"
+          # Derived here, not by the caller: release.yml builds the tag ref, so
+          # the short sha must come from the commit that was actually checked
+          # out rather than from whatever main pointed at when it dispatched.
+          if [ "$SHA_TAG" = "true" ]; then
+            tags="$tags sha-$(echo "$sha" | cut -c1-7)"
+          fi
+          # `main` is mutable and pushed by two workflows now, so a release
+          # build that a later merge has already overtaken must not drag the
+          # tag back onto its older commit: drop `main` unless this build is
+          # still the head of the branch. A shared concurrency group would not
+          # do - queueing a run cancels the one already pending in the group,
+          # which could cancel a release publish. A ls-remote that fails leaves
+          # the tag in place, i.e. behaves as before.
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ -n "$head" ] && [ "$sha" != "$head" ]; then
+            echo "::notice::main is at $head, this build is $sha: leaving the :main tag alone."
+            kept=""
+            for t in $tags; do
+              if [ "$t" != "main" ]; then kept="$kept $t"; fi
+            done
+            tags="$kept"
+          fi
           bridge=""; server=""
-          for t in ${{ inputs.tags }}; do
+          for t in $tags; do
             bridge="$bridge"$'\n'"ghcr.io/$owner/whatsapp-mcp-bridge:$t"
             server="$server"$'\n'"ghcr.io/$owner/whatsapp-mcp-server:$t"
           done
