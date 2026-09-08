@@ -87,6 +87,7 @@ var unenforcedTools = []string{
 	"list_unanswered",
 	"list_unread",
 	"message_stats",
+	"read_media",
 	"search_contacts",
 	"search_media_notes",
 	"search_notes",

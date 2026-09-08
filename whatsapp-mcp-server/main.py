@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp_types import ContentBlock
 
 from errors import ToolError, tool_errors
 from export import export_messages as export_messages_to_disk
@@ -23,6 +24,8 @@ from media_notes import annotate_media as notes_annotate_media
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
+from media_read import content_tool
+from media_read import read_media as media_read_bytes
 from notes import annotate as notes_annotate
 from notes import attach_notes
 from notes import compact as notes_compact
@@ -1884,11 +1887,16 @@ def purge_media(
 @tool_errors
 @untrusted_content
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
-    """Download media from a WhatsApp message and get the local file path.
+    """Cache a WhatsApp message's media on the server and get its **server-side** path.
+
+    `file_path` is a path on the machine running this server, not on yours: it is
+    only useful to a client that shares that filesystem (a stdio server on your
+    laptop). Over a network transport, **call read_media instead** — it returns the
+    bytes themselves, images as image content and everything else as text or base64.
 
     The response carries the file's `sha256` and the `notes` you already recorded
     for it. When `notes` is empty, this file has never been interpreted: read it
-    (open the path, or transcribe_audio for voice notes) and then record what it
+    (read_media, or transcribe_audio for voice notes) and then record what it
     is with annotate_media(sha256, "summary", ...) — the next time it turns up,
     in this chat or any other, the note comes back for free.
 
@@ -1897,8 +1905,8 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
         message_id: The ID of the message containing the media
 
     Returns:
-        {"success": true, "message", "file_path", "sha256" (null when the row has no
-        hash), "notes": {key: value}}
+        {"success": true, "message", "file_path" (server-side), "sha256" (null when the
+        row has no hash), "notes": {key: value}}
     """
     file_path = whatsapp_download_media(message_id, chat_jid)
 
@@ -1910,6 +1918,45 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
             **whatsapp_media_notes_for_message(chat_jid, message_id),
         }
     raise ToolError("internal", "Bridge reported success without a file path")
+
+
+@mcp.tool()
+@content_tool
+@tool_errors
+@untrusted_content
+def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[ContentBlock]:
+    """Read the media of a WhatsApp message: the bytes come back, not a path.
+
+    This is how you actually look at a photo, and it works over any transport —
+    download_media only hands back a path on the server's own filesystem.
+
+    What you get back:
+      - an image (photo, sticker) as image content you can see directly, up to 16 MB;
+      - a text-ish file (.txt, .csv, .json, .md) as text, up to 1 MB;
+      - anything else (PDF, video, audio, archives) base64-encoded in a text block
+        whose first line is `base64:<mime>:<bytes>`, up to 2 MB. For a voice note
+        prefer transcribe_audio; for a big document prefer download_media.
+
+    The last block is always JSON with {"sha256", "mime", "bytes", "truncated", "notes"}:
+    if `notes` is empty nobody has interpreted this file yet, so write what you saw
+    back with annotate_media(sha256, "summary", ...) — keyed by content hash, it
+    comes back for free every time the file turns up again.
+
+    A file above the applicable limit fails with `too_large` reporting its real size;
+    lower `max_bytes` yourself when your client cannot hold that much. A file that is
+    not cached yet is fetched through the bridge first, unless the archive already
+    knows it is over the limit.
+
+    Args:
+        chat_jid: JID of the chat containing the message
+        message_id: ID of the message whose media to read
+        max_bytes: Refuse anything larger than this (0 = the per-type limit above,
+                   which is also the ceiling: a larger value does not raise it)
+
+    Returns:
+        A list of content blocks: the file, then the JSON metadata block.
+    """
+    return media_read_bytes(chat_jid, message_id, max_bytes=max_bytes)
 
 
 def _store_transcript(sha256: str, result: dict[str, Any]) -> bool:

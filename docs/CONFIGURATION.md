@@ -152,8 +152,8 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 - The MCP server filters `list_chats`, `list_messages`, `get_chat`,
   `get_message_context`, `get_direct_chat_by_contact`, `get_contact_chats` and
   `get_last_interaction`, and refuses `send_*`, `send_reaction`,
-  `mark_messages_read`, `download_media` and `transcribe_audio` for other chats
-  with a message naming the variable.
+  `mark_messages_read`, `download_media`, `read_media` and `transcribe_audio`
+  for other chats with a message naming the variable.
 - The bridge enforces the same list on `/api/send`, `/api/react`,
   `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
   reach a chat you did not enable. Set the variable for **both** processes
@@ -198,8 +198,8 @@ injection away from sending. With read-only on there is no send tool to call.
 
 **Still available:** every read tool, plus
 
-- `download_media` and `transcribe_audio` — they fetch and read; the only write
-  is to the local media cache.
+- `download_media`, `read_media` and `transcribe_audio` — they fetch and read;
+  the only write is to the local media cache.
 - `annotate` / `compact` / `get_notes` / `search_notes` and their media-shaped aliases
   `annotate_media` / `get_media_notes` / `search_media_notes` — notes live in
   `notes.db`, local state owned by the MCP server, never WhatsApp. A read-only
