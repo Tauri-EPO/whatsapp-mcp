@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.3.0...v1.4.0) (2026-09-08)
+
+
+### Features
+
+* **mcp:** every attachment is an MCP resource, and list_media links to it ([#372](https://github.com/Tauri-EPO/whatsapp-mcp/issues/372)) ([2b8bd89](https://github.com/Tauri-EPO/whatsapp-mcp/commit/2b8bd89e740782b23d3fa7793521d615c182c75e)), closes [#367](https://github.com/Tauri-EPO/whatsapp-mcp/issues/367)
+* **mcp:** read_media downscales images for the model ([#374](https://github.com/Tauri-EPO/whatsapp-mcp/issues/374)) ([3ab583d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3ab583d44e528ad33c3917e655f994f3021b0244))
+* **mcp:** read_media renders PDF pages as images ([#376](https://github.com/Tauri-EPO/whatsapp-mcp/issues/376)) ([118113f](https://github.com/Tauri-EPO/whatsapp-mcp/commit/118113fb7c3cad9c3806fb13715a1be401366ce1)), closes [#368](https://github.com/Tauri-EPO/whatsapp-mcp/issues/368)
+* **mcp:** read_media returns non-image media as typed content blocks ([#370](https://github.com/Tauri-EPO/whatsapp-mcp/issues/370)) ([9306b96](https://github.com/Tauri-EPO/whatsapp-mcp/commit/9306b96f0738e2a6a098dc742223e5c4e21920a0))
+
+
+### Bug fixes
+
+* **mcp:** one triage row for a contact known under both spellings ([#373](https://github.com/Tauri-EPO/whatsapp-mcp/issues/373)) ([9ffe1fa](https://github.com/Tauri-EPO/whatsapp-mcp/commit/9ffe1fab8838c33aef7cee7c668ca33684da0171)), closes [#366](https://github.com/Tauri-EPO/whatsapp-mcp/issues/366)
+* **mcp:** the group-mention stream obeys the triage notes too ([#369](https://github.com/Tauri-EPO/whatsapp-mcp/issues/369)) ([ded3696](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ded36968656519df9a8ce3429ee460938121ac38)), closes [#361](https://github.com/Tauri-EPO/whatsapp-mcp/issues/361)
+
 ## [1.3.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.2.0...v1.3.0) (2026-09-08)
 
 
