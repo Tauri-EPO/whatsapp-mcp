@@ -1841,19 +1841,26 @@ the full backlog back when you want to audit it.
 
 All five filters are applied in SQL before the page is cut, so `count_only`,
 `limit` and the cursor all agree with each other: a hidden chat never occupies a
-slot in a page. They bound the group-mention stream below as well, so a group
-marked handled, muted or snoozed does not come back through it. There the two
-timestamp notes are compared with the **mention**, the message such a row is
-about, so a mention that arrived after the mark still brings the group back.
+slot in a page. `count_only` covers the ordinary rule alone (see below), so the
+groups the mention stream adds are rows without being in that number. The filters
+bound that stream as well, so a group marked handled, muted or snoozed does not
+come back through it. There the two timestamp notes are compared with the
+**mention**, the message such a row is about, so a mention that arrived after the
+mark still brings the group back.
 `ignore_closing_messages` reads the same words on both sides: the chat's last
 inbound message for the ordinary rule, and the mention itself for the stream
 below, so a group whose only pending mention is "ok @me" or a sticker is not
-waiting on anything and is left out (a group the ordinary rule already dropped
-does not come back through the mention stream either). A row that survives is
-anchored on, and names, the newest mention that is not one of those words.
+added by it. What the flag hides from the ordinary rule it does not hide from the
+mention stream: when a group's newest word is somebody else's "ok" but a real
+mention of you below it is still unanswered, the group is added by that mention
+instead of dropped for the "ok" — once, since a group the ordinary rule does list
+is still left to it. A row that survives is anchored on, and names, the newest
+mention that is not one of those words.
 WhatsApp writes a mention into the text, so "ok @you" is stored as `ok @158…`:
-**your own** two spellings are removed before the words are compared, and
-nobody else's — "ok @outro @you" still names somebody and stays on the list.
+in the mention stream **your own** two spellings are removed before the words are
+compared, and nobody else's — "ok @outro @you" still names somebody and stays on
+the list. The ordinary rule compares the text as stored, so a chat whose last
+message is that same `ok @158…` is still listed by it, with `mention` false.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
