@@ -130,7 +130,7 @@ func TestStoreUsageAndStats(t *testing.T) {
 
 func TestHealthReportsStoreSize(t *testing.T) {
 	root, _ := seedStore(t, time.Now())
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.storeStats = newStoreStats(root)
 	mux := b.newRESTMux(8080, "test-token-0123456789")
 
@@ -160,7 +160,7 @@ func TestHandleMessageSkipsAutoDownloadWhenDisabled(t *testing.T) {
 	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
 
 	var calls atomic.Int32
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.MediaAutoDownload = false
 	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		calls.Add(1)
@@ -189,7 +189,7 @@ func TestRunMediaRetentionSweepsOnStart(t *testing.T) {
 	root, paths := seedStore(t, now)
 	t.Setenv("WHATSAPP_STORE_DIR", root)
 
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.storeStats = newStoreStats(root)
 	done := make(chan struct{})
 	go func() {

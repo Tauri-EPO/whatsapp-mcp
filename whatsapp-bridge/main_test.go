@@ -228,7 +228,7 @@ func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
 	rec := installRecordingLogger(t)
 
 	// Handlers log through b.Log; route it to the recorder as well.
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
 	handler := b.newRESTMux(8080, token)
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader("{"))
 	req.RemoteAddr = "127.0.0.1:54321"
@@ -510,7 +510,7 @@ func TestHandleMessage_BackfillsEphemeralFromContextInfo(t *testing.T) {
 		},
 	}
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	settings, err := ms.GetChatEphemeralSettings(phonePN.String())
 	if err != nil {
@@ -556,22 +556,21 @@ func testLogger() waLog.Logger {
 	return waLog.Stdout("Test", "WARN", true)
 }
 
-// drainBridge stops a test bridge's background workers when the test ends.
-//
-// A bridge that queued an auto-download keeps a pool goroutine running after
-// the test that started it returned, and that goroutine logs — which reads the
-// clock, which races with the test that swaps the process zone
-// (media_tz_test.go). Any test that lets a job reach the pool drains it here
-// instead of leaking it into whatever runs next (issue #351).
-func drainBridge(t *testing.T, b *Bridge) {
-	t.Helper()
-	t.Cleanup(func() { b.Shutdown(2 * time.Second) })
-}
-
 // testBridge builds a Bridge with production defaults for the pieces tests do
 // not care about; individual tests override fields (DownloadMedia, Policy,
-// PollVoteDecrypt, ForwardSelf) instead of touching package state.
-func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger) *Bridge {
+// PollVoteDecrypt, ForwardSelf, the timings below) instead of touching package
+// state.
+//
+// It shuts the bridge down when the test ends. A bridge that queued an
+// auto-download keeps a pool goroutine running after the test that started it
+// returned, and that goroutine logs — which reads the clock, which races with
+// the test that swaps the process zone (media_tz_test.go); leaking it into
+// whatever runs next is what issue #351 caught twice. The cleanup is registered
+// here, before any the test adds, so it runs *last* (t.Cleanup is LIFO): a test
+// that unblocks a fake download in its own cleanup still does so before
+// Shutdown waits for the worker.
+func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger) *Bridge {
+	t.Helper()
 	b := &Bridge{
 		Client:            client,
 		Store:             ms,
@@ -579,14 +578,18 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 		ForwardSelf:       true,
 		MediaAutoDownload: true,
 		Webhook:           newWebhookSender(""),
-		// The production default; a test that times the StreamReplaced timer
-		// shortens it on its own Bridge (issue #351).
-		StreamReplacedDelay: defaultStreamReplacedDelay,
-		origTimes:           newOriginalTimestamps(),
-		mediaRetry:          newMediaRetryHub(),
-		storeStats:          newStoreStats(storeDir()),
-		metrics:             newMetricsRegistry(),
+		// The production timings; a test that times one of them shortens it on
+		// its own Bridge (issues #351, #382).
+		StreamReplacedDelay:     defaultStreamReplacedDelay,
+		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
+		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
+		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
+		origTimes:               newOriginalTimestamps(),
+		mediaRetry:              newMediaRetryHub(),
+		storeStats:              newStoreStats(storeDir()),
+		metrics:                 newMetricsRegistry(),
 	}
+	t.Cleanup(func() { b.Shutdown(2 * time.Second) })
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.autoDownloads = newMediaJobQueue(b.ctx, autoDownloadWorkers, autoDownloadQueue, b.runAutoDownload)
@@ -725,7 +728,7 @@ func TestHandleMessage_IncomingLIDMessage_StoredUnderPhoneJID(t *testing.T) {
 		"Hola, qué tal?",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	// Message MUST be stored under the phone-based JID.
 	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
@@ -757,7 +760,7 @@ func TestHandleMessage_OutgoingLIDMessage_StoredUnderPhoneJID(t *testing.T) {
 		"Todo bien!",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
 		t.Errorf("expected 1 message under phone JID %s, got %d", phonePN, count)
@@ -786,7 +789,7 @@ func TestHandleMessage_LIDWithStoreFallback_StoredUnderPhoneJID(t *testing.T) {
 		"Message without alt JIDs",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
 		t.Errorf("expected 1 message under phone JID %s, got %d", phonePN, count)
@@ -811,7 +814,7 @@ func TestHandleMessage_PhoneJID_Unaffected(t *testing.T) {
 		"Normal message",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
 		t.Errorf("expected 1 message under phone JID %s, got %d", phonePN, count)
@@ -847,7 +850,7 @@ func TestHandleMessage_OutgoingFromSelf_SenderIsOwnPhone(t *testing.T) {
 		"hi",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	got := querySender(ms, phonePN.String())
 	if got != selfPhone.User {
@@ -873,7 +876,7 @@ func TestHandleMessage_IncomingLID_SenderResolvedFromAlt(t *testing.T) {
 		"hola",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	got := querySender(ms, phonePN.String())
 	if got != phonePN.User {
@@ -901,7 +904,7 @@ func TestHandleMessage_IncomingLID_SenderResolvedFromStore(t *testing.T) {
 		"hello",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	got := querySender(ms, phonePN.String())
 	if got != phonePN.User {
@@ -928,7 +931,7 @@ func TestHandleMessage_LIDWithoutMapping_SenderFallsBackToLID(t *testing.T) {
 		"orphan",
 	)
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	// Chat JID has no mapping either, so the message ends up under the LID chat.
 	got := querySender(ms, phoneLID.String())
@@ -1067,7 +1070,7 @@ func TestHandleMessage_GroupParticipantLID_ResolvedViaStore(t *testing.T) {
 		},
 	}
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	got := querySender(ms, groupJID.String())
 	if got != participantPhone.User {
@@ -1117,7 +1120,7 @@ func TestHandleHistorySync_LIDParticipant_ResolvedViaStore(t *testing.T) {
 		},
 	}
 
-	testBridge(client, ms, logger).handleHistorySync(historySync)
+	testBridge(t, client, ms, logger).handleHistorySync(historySync)
 
 	got := querySender(ms, chatJID)
 	if got != participantPhone.User {
@@ -1166,7 +1169,7 @@ func TestHandleHistorySync_TopLevelParticipant_IsStoredAsSender(t *testing.T) {
 		},
 	}
 
-	testBridge(client, ms, logger).handleHistorySync(historySync)
+	testBridge(t, client, ms, logger).handleHistorySync(historySync)
 
 	got := querySender(ms, groupJID.String())
 	if got != participant.User {
@@ -1685,7 +1688,7 @@ func TestHandleMessage_ImageOnly_WebhookForwarded(t *testing.T) {
 
 	msg := buildImageMessage(phonePN, phonePN, false, "") // no caption
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	// The image-only message must be stored.
 	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
@@ -1722,7 +1725,7 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 
 	msg := buildImageMessage(phonePN, phonePN, false, "look at this!")
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	select {
 	case payload := <-webhookCh:
@@ -1755,10 +1758,9 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 
 	downloadStarted := make(chan struct{})
 	releaseDownload := make(chan struct{})
-	b := testBridge(client, ms, logger)
-	// Drained first so the cleanups run the other way round (they are LIFO):
-	// the download is released, then Shutdown waits out the worker it unblocks.
-	drainBridge(t, b)
+	// testBridge registered its Shutdown first, so it runs after the cleanup
+	// below releases the download it would otherwise wait out (t.Cleanup is LIFO).
+	b := testBridge(t, client, ms, logger)
 	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		close(downloadStarted)
 		<-releaseDownload
@@ -2084,7 +2086,7 @@ func TestHandleMessage_RevokeMarksTargetDeleted(t *testing.T) {
 	}
 
 	revokedAt := time.Unix(1710000010, 0)
-	testBridge(client, ms, testLogger()).handleMessage(revokeEvent(targetID, revokedAt))
+	testBridge(t, client, ms, testLogger()).handleMessage(revokeEvent(targetID, revokedAt))
 
 	got, valid := readDeletedAt(t, ms, chatJID, targetID)
 	if !valid {
@@ -2111,7 +2113,7 @@ func TestHandleMessage_RevokeIsNoopForUnknownTarget(t *testing.T) {
 	// No seeded row — bridge was offline when the original arrived, or it
 	// was deleted before this code path shipped. The handler must not
 	// error and must not invent a row.
-	testBridge(client, ms, testLogger()).handleMessage(revokeEvent("NEVER_SEEN", time.Unix(1710000010, 0)))
+	testBridge(t, client, ms, testLogger()).handleMessage(revokeEvent("NEVER_SEEN", time.Unix(1710000010, 0)))
 
 	var rowCount int
 	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rowCount); err != nil {
@@ -2139,8 +2141,8 @@ func TestHandleMessage_DuplicateRevokeKeepsEarliestDeletedAt(t *testing.T) {
 	earlier := time.Unix(1710000010, 0)
 	later := time.Unix(1710000020, 0)
 
-	testBridge(client, ms, testLogger()).handleMessage(revokeEvent(targetID, earlier))
-	testBridge(client, ms, testLogger()).handleMessage(revokeEvent(targetID, later))
+	testBridge(t, client, ms, testLogger()).handleMessage(revokeEvent(targetID, earlier))
+	testBridge(t, client, ms, testLogger()).handleMessage(revokeEvent(targetID, later))
 
 	got, valid := readDeletedAt(t, ms, chatJID, targetID)
 	if !valid || !got.Equal(earlier) {
@@ -2163,7 +2165,7 @@ func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
 	}
 
 	revokedAt := time.Unix(1710000010, 0)
-	testBridge(client, ms, testLogger()).handleMessage(revokeEvent(targetID, revokedAt))
+	testBridge(t, client, ms, testLogger()).handleMessage(revokeEvent(targetID, revokedAt))
 
 	replayedOriginal := &events.Message{
 		Info: types.MessageInfo{
@@ -2173,7 +2175,7 @@ func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
 		},
 		Message: &waE2E.Message{Conversation: proto.String("replayed original")},
 	}
-	testBridge(client, ms, testLogger()).handleMessage(replayedOriginal)
+	testBridge(t, client, ms, testLogger()).handleMessage(replayedOriginal)
 
 	got, valid := readDeletedAt(t, ms, chatJID, targetID)
 	if !valid || !got.Equal(revokedAt) {
@@ -2231,7 +2233,7 @@ func TestHandleMessage_InboundReaction_Stored(t *testing.T) {
 	emoji := "👍"
 
 	msg := buildReactionMessage(phonePN, phonePN, false, targetID, emoji)
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
 	if !found {
@@ -2268,7 +2270,7 @@ func TestHandleMessage_EmptyEmojiReaction_Stored(t *testing.T) {
 	targetID := "3AABCDEF01234568"
 
 	msg := buildReactionMessage(phonePN, phonePN, false, targetID, "" /* empty = removal */)
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
 	if !found {
@@ -2296,7 +2298,7 @@ func TestHandleMessage_InboundReaction_WebhookForwarded(t *testing.T) {
 	emoji := "👍"
 
 	msg := buildReactionMessage(phonePN, phonePN, false, targetID, emoji)
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
 	if !found {
@@ -2349,7 +2351,7 @@ func TestHandleMessage_EmptyEmojiReaction_WebhookForwarded(t *testing.T) {
 	targetID := "3AABCDEF01234570"
 
 	msg := buildReactionMessage(phonePN, phonePN, false, targetID, "")
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	select {
 	case payload := <-webhookCh:
@@ -2382,7 +2384,7 @@ func TestHandleMessage_SelfReactionWebhook_RespectsForwardSelf(t *testing.T) {
 	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)
 	logger := testLogger()
-	b := testBridge(client, ms, logger)
+	b := testBridge(t, client, ms, logger)
 	b.ForwardSelf = false
 
 	msg := buildReactionMessage(phonePN, phonePN, true, "3AABCDEF01234571", "👍")
@@ -2426,7 +2428,7 @@ func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
 			},
 		},
 	}
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	if count := queryMessageCount(ms, phonePN.String()); count != 0 {
 		t.Errorf("expected reaction without key to be discarded, got %d stored messages", count)
@@ -2443,7 +2445,7 @@ func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
 // handler returns 400 when recipient or message_id is absent.
 func TestReactHandler_MissingFields_Returns400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	cases := []struct {
 		name string
@@ -2471,7 +2473,7 @@ func TestReactHandler_MissingFields_Returns400(t *testing.T) {
 
 func TestReactHandler_GroupReactionMissingSenderJID_Returns400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	body := `{"recipient":"120363012345678901@g.us","message_id":"3AABCDEF01234567","emoji":"👍","from_me":false}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(body))
@@ -2488,7 +2490,7 @@ func TestReactHandler_GroupReactionMissingSenderJID_Returns400(t *testing.T) {
 
 func TestReactHandler_GroupReactionInvalidSenderJID_Returns400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	body := `{"recipient":"120363012345678901@g.us","message_id":"3AABCDEF01234567","emoji":"👍","from_me":false,"sender_jid":"@s.whatsapp.net"}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(body))
@@ -2507,7 +2509,7 @@ func TestReactHandler_GroupReactionInvalidSenderJID_Returns400(t *testing.T) {
 // rejects requests that do not carry a valid bearer token.
 func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react",
 		strings.NewReader(`{"recipient":"15551234567@s.whatsapp.net","message_id":"3AABCDEF01234567","emoji":"👍"}`))
@@ -2523,7 +2525,7 @@ func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 
 func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	cases := []struct {
 		name string
@@ -2572,7 +2574,7 @@ func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed message: %v", err)
 	}
-	handler := testBridge(newTestClient(&mockLIDStore{}), ms, testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger()).newRESTMux(8080, token)
 
 	body := `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us","sender_jid":"15551234567","timestamp":"2026-08-11T18:30:00Z"}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(body))
@@ -2589,7 +2591,7 @@ func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 
 func TestMarkReadHandler_NoAuth_Returns401(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read",
 		strings.NewReader(`{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net"}`))
@@ -2728,7 +2730,7 @@ func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 		},
 		Message: &waE2E.Message{Conversation: proto.String("just a normal hello")},
 	}
-	testBridge(client, ms, testLogger()).handleMessage(regular)
+	testBridge(t, client, ms, testLogger()).handleMessage(regular)
 
 	if _, valid := readDeletedAt(t, ms, chatJID, seededID); valid {
 		t.Fatalf("regular message must not flip deleted_at on the pre-existing row")
@@ -2787,7 +2789,7 @@ func TestHandleMessage_QuotedReply_IDPersisted(t *testing.T) {
 		},
 	}
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	quotedID, valid := queryQuotedMessageID(ms, chatJID, replyID)
 	if !valid {
@@ -2822,7 +2824,7 @@ func TestHandleMessage_PlainMessage_QuotedIDIsNull(t *testing.T) {
 		},
 	}
 
-	testBridge(client, ms, logger).handleMessage(msg)
+	testBridge(t, client, ms, logger).handleMessage(msg)
 
 	_, valid := queryQuotedMessageID(ms, chatJID, msgID)
 	if valid {
@@ -2834,7 +2836,7 @@ func TestHandleMessage_PlainMessage_QuotedIDIsNull(t *testing.T) {
 // path when recipient is empty — complements the quoted-reply handler path.
 func TestSendHandler_QuotedReplyFields_PassedThrough(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	// POST with quoted_message_id but no recipient — should 400 before
 	// any send attempt, proving the new fields are parsed.
@@ -3059,7 +3061,7 @@ func TestResolveMentionJIDs(t *testing.T) {
 // is parsed by /api/send — mirrors the quoted-reply field test above.
 func TestSendHandler_MentionsField_PassedThrough(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
+	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
 	// POST with mentions but no recipient — should 400 before any send
 	// attempt, proving the new field parses without error.

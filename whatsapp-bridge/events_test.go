@@ -39,7 +39,7 @@ func TestHandleEvent_CallLifecycle(t *testing.T) {
 	peer := types.NewJID("5511888888888", types.DefaultUserServer)
 	group := types.NewJID("120363012345678901", types.GroupServer)
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClientWithSelf(&mockLIDStore{}, self), ms, installRecordingLogger(t))
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, self), ms, installRecordingLogger(t))
 	reconnect := make(chan bool, 1)
 	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 
@@ -106,7 +106,7 @@ func TestCallChatJID(t *testing.T) {
 func TestHandleEvent_GroupInfoRenameAndEphemeral(t *testing.T) {
 	group := types.NewJID("120363012345678901", types.GroupServer)
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
 	if err := ms.StoreChat(group.String(), "Old name", time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestHandleEvent_GroupInfoRenameAndEphemeral(t *testing.T) {
 func TestHandleEvent_SelfReadReceiptMarksChatRead(t *testing.T) {
 	peer := types.NewJID("5511888888888", types.DefaultUserServer)
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
 	t1 := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Minute)
 	if err := ms.StoreChat(peer.String(), "Peer", t2); err != nil {
@@ -176,7 +176,7 @@ func TestHandleEvent_SelfReadReceiptMarksChatRead(t *testing.T) {
 
 func TestHandleEvent_ConnectionEventsSignalReconnect(t *testing.T) {
 	rec := installRecordingLogger(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
 	for _, evt := range []any{
 		&events.Disconnected{},
 		&events.ConnectFailure{Reason: events.ConnectFailureServiceUnavailable},
@@ -207,7 +207,7 @@ func TestHandleEvent_ConnectionEventsSignalReconnect(t *testing.T) {
 }
 
 func TestHandleEvent_UndecryptableRemembersOriginalTime(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
 	orig := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	b.handleEvent(&events.UndecryptableMessage{Info: types.MessageInfo{ID: "u1", Timestamp: orig}}, nil)
 	if got, ok := b.origTimes.take("u1"); !ok || !got.Equal(orig) {
@@ -219,17 +219,16 @@ func TestHandleEvent_UndecryptableRemembersOriginalTime(t *testing.T) {
 }
 
 func TestHandleEvent_UnclaimedMediaRetryIsIgnored(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
 	b.handleEvent(&events.MediaRetry{MessageID: "nobody-waiting"}, nil) // must not panic or block
 }
 
 func TestReconnectLoop_BacksOffAndResetsOnSuccess(t *testing.T) {
-	prevInit, prevMax := reconnectInitialBackoff, reconnectMaxBackoff
-	reconnectInitialBackoff, reconnectMaxBackoff = 5*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() { reconnectInitialBackoff, reconnectMaxBackoff = prevInit, prevMax })
-
 	rec := installRecordingLogger(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+	// This bridge's backoff, not the package's: the loop below reads it from
+	// another goroutine (issue #382).
+	b.ReconnectInitialBackoff, b.ReconnectMaxBackoff = 5*time.Millisecond, 20*time.Millisecond
 	var dials atomic.Int32
 	b.Connect = func() error {
 		if dials.Add(1) < 3 {
@@ -267,7 +266,7 @@ func TestReconnectLoop_BacksOffAndResetsOnSuccess(t *testing.T) {
 }
 
 func TestHandleEvent_UnknownEventIsIgnored(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
 	b.handleEvent(&events.AppState{}, nil) // no case: must not panic
 	b.handleEvent("not an event", nil)
 }

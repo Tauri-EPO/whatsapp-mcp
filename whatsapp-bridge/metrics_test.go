@@ -9,7 +9,7 @@ import (
 )
 
 func TestRenderMetrics_ExposesCountersAndGauges(t *testing.T) {
-	b := testBridge(nil, nil, installRecordingLogger(t))
+	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	b.metrics.messagesStored.Add(3)
 	b.metrics.sendFailures.Add(1)
 	b.metrics.recordRequest(200)
@@ -34,7 +34,7 @@ func TestRenderMetrics_ExposesCountersAndGauges(t *testing.T) {
 
 func TestMetricsRoute_GetOnlyAndUnauthenticated(t *testing.T) {
 	t.Setenv(metricsEnv, "")
-	b := testBridge(nil, nil, installRecordingLogger(t))
+	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	mux := b.newRESTMux(8080, "secret-token")
 
 	rec := httptest.NewRecorder()
@@ -58,7 +58,7 @@ func TestMetricsRoute_GetOnlyAndUnauthenticated(t *testing.T) {
 
 func TestMetricsRoute_DisabledByEnv(t *testing.T) {
 	t.Setenv(metricsEnv, "false")
-	b := testBridge(nil, nil, installRecordingLogger(t))
+	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	mux := b.newRESTMux(8080, "secret-token")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost:8080/metrics", nil))
@@ -80,7 +80,7 @@ func TestRequestLog_CountsStatusClass(t *testing.T) {
 func TestWebhookSender_CountsFailures(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }))
 	defer srv.Close()
-	b := testBridge(nil, nil, installRecordingLogger(t))
+	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	b.Webhook = &webhookSender{client: srv.Client(), enabled: true, url: srv.URL, failures: &b.metrics.webhookFailures}
 	b.Webhook.sendPayload(WebhookPayload{Sender: "s@s.whatsapp.net", Content: "hi"})
 	if got := b.metrics.webhookFailures.Load(); got != 1 {

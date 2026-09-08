@@ -145,7 +145,7 @@ func TestMediaJobQueueDropsTheBacklogOnCancel(t *testing.T) {
 // stalled transfer would otherwise hold a worker forever.
 func TestRunAutoDownloadBoundsEachFile(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
-	b := testBridge(nil, newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, nil, newTestMessageStore(t), installRecordingLogger(t))
 	var deadline time.Time
 	var hasDeadline bool
 	b.DownloadMedia = func(ctx context.Context, _ string, _ string) (bool, string, string, string, error) {
@@ -179,7 +179,7 @@ func TestHandleMessageDropsAutoDownloadWhenQueueIsFull(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	rec := installRecordingLogger(t)
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), ms, rec)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
 
 	release := make(chan struct{})
 	started := make(chan struct{}, 8)
@@ -225,7 +225,7 @@ func TestHandleMessageDropsAutoDownloadWhenQueueIsFull(t *testing.T) {
 // The queue is wired into the bridge's shutdown path.
 func TestShutdownWaitsForAutoDownloadWorkers(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
-	b := testBridge(nil, newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, nil, newTestMessageStore(t), installRecordingLogger(t))
 	started := make(chan struct{}, 1)
 	var finished atomic.Bool
 	b.autoDownloads = newMediaJobQueue(b.ctx, 1, 1, func(ctx context.Context, _ mediaJob) {
@@ -245,7 +245,7 @@ func TestShutdownWaitsForAutoDownloadWorkers(t *testing.T) {
 // /metrics reports the backlog and the drops.
 func TestMetricsReportAutoDownloadBudget(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
-	b := testBridge(nil, newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, nil, newTestMessageStore(t), installRecordingLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	b.autoDownloads = newMediaJobQueue(ctx, 0, 1, func(context.Context, mediaJob) {})

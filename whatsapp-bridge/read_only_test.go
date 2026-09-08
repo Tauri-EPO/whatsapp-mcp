@@ -65,7 +65,7 @@ func TestReadOnlySummary(t *testing.T) {
 // bridge with the given policy.
 func readOnlyRequest(t *testing.T, enabled bool, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	b := testBridge(nil, newTestMessageStore(t), testLogger())
+	b := testBridge(t, nil, newTestMessageStore(t), testLogger())
 	b.ReadOnly = readOnlyPolicy{enabled: enabled}
 	b.MediaRoots = []string{t.TempDir()}
 	mux := b.newRESTMux(8080, readOnlyTestToken)

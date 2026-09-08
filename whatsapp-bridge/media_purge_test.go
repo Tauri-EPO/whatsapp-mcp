@@ -22,7 +22,7 @@ func purgeFixture(t *testing.T) (*Bridge, map[string]string) {
 	t.Helper()
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	old := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	recent := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	for _, chat := range []string{purgeChat, purgeGroup} {

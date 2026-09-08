@@ -24,7 +24,7 @@ func seamRequest(method, path, body, token string) *http.Request {
 func TestReadyAndHealthFollowConnected(t *testing.T) {
 	const token = "test-token-0123456789"
 	self := types.NewJID("5511999999999", types.DefaultUserServer)
-	b := testBridge(newTestClientWithSelf(&mockLIDStore{}, self), newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, self), newTestMessageStore(t), installRecordingLogger(t))
 	mux := b.newRESTMux(8080, token)
 
 	b.Connected = func() bool { return false }
@@ -51,7 +51,7 @@ func TestReadyAndHealthFollowConnected(t *testing.T) {
 
 func TestHandlersReportOfflineThroughConnected(t *testing.T) {
 	const token = "test-token-0123456789"
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
 	mux := b.newRESTMux(8080, token)
 	chat := "5511888888888@s.whatsapp.net"
 

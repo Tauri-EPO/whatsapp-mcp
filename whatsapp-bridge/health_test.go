@@ -11,7 +11,7 @@ import (
 
 func TestHealthAndReadyEndpoints(t *testing.T) {
 	// An unconnected, unpaired client: alive but not ready.
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.startedAt = time.Now().Add(-90 * time.Second)
 	mux := b.newRESTMux(8080, "test-token-0123456789")
 
@@ -44,7 +44,7 @@ func TestHealthAndReadyEndpoints(t *testing.T) {
 }
 
 func TestVersionEndpointIsUnauthenticated(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	mux := b.newRESTMux(8080, "test-token-0123456789")
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/version", nil)
 	req.Host = "127.0.0.1:8080"

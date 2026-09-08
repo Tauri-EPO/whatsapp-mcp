@@ -117,7 +117,7 @@ func TestHandleHistorySync_NeverFetchesGroupInfo(t *testing.T) {
 			}},
 		})
 	}
-	testBridge(client, ms, logger).handleHistorySync(&events.HistorySync{Data: &waHistorySync.HistorySync{
+	testBridge(t, client, ms, logger).handleHistorySync(&events.HistorySync{Data: &waHistorySync.HistorySync{
 		SyncType: waHistorySync.HistorySync_RECENT.Enum(), Conversations: conversations,
 	}})
 

@@ -620,19 +620,30 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 // sharing without a lock (gotcha 11, issue #351).
 const defaultStreamReplacedDelay = 30 * time.Second
 
-// reconnectInitialBackoff is the first wait before redialling; it doubles per
-// failure up to reconnectMaxBackoff and resets on success. Tests shorten it.
-var (
-	reconnectInitialBackoff = 5 * time.Second
-	reconnectMaxBackoff     = 5 * time.Minute
+// The defaults of Bridge.ReconnectInitialBackoff / ReconnectMaxBackoff: the
+// first wait before redialling, doubled per failure up to the maximum and reset
+// on success. Constants for the same reason as the delay above — a test that
+// shortens the wait sets it on its own Bridge, not on shared state (gotcha 11).
+const (
+	defaultReconnectInitialBackoff = 5 * time.Second
+	defaultReconnectMaxBackoff     = 5 * time.Minute
 )
 
 // reconnectLoop redials with exponential backoff whenever handleEvent
 // reports a lost connection, until Shutdown cancels b.ctx. The backoff wait
 // is interruptible so shutdown never waits out a five-minute sleep.
 func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
-	reconnectBackoff := reconnectInitialBackoff
-	maxBackoff := reconnectMaxBackoff
+	// A zero bound is a Bridge built without newBridge, not a request to redial
+	// as fast as WhatsApp can refuse: the doubling would clamp back to the zero
+	// maximum and the loop would spin. Both are floored to the production value.
+	reconnectBackoff := b.ReconnectInitialBackoff
+	if reconnectBackoff <= 0 {
+		reconnectBackoff = defaultReconnectInitialBackoff
+	}
+	maxBackoff := b.ReconnectMaxBackoff
+	if maxBackoff < reconnectBackoff {
+		maxBackoff = defaultReconnectMaxBackoff
+	}
 
 	for {
 		select {
@@ -665,11 +676,11 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 				} else {
 					b.Log.Infof("✓ Reconnected successfully")
 					// Reset backoff on successful connection
-					reconnectBackoff = reconnectInitialBackoff
+					reconnectBackoff = b.ReconnectInitialBackoff
 				}
 			} else {
 				b.Log.Infof("Already connected, skipping reconnection")
-				reconnectBackoff = reconnectInitialBackoff
+				reconnectBackoff = b.ReconnectInitialBackoff
 			}
 
 		case <-b.ctx.Done():

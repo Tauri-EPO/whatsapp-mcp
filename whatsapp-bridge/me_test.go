@@ -110,7 +110,7 @@ func TestMeRequiresAuth(t *testing.T) {
 // The route is registered, GET-only, and not on the health endpoints.
 func TestMeRouteIsRegisteredAndGETOnly(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	mux := b.newRESTMux(8080, token)
 
 	for _, method := range []string{http.MethodGet, http.MethodPost} {

@@ -126,7 +126,7 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 	creation := buildImageMessage(phonePN, phonePN, false, "")
 	creation.Message = pollCreationMsg("Almoço?", "Pizza", "Sushi")
 	creation.Info.ID = "POLL1"
-	testBridge(client, ms, logger).handleMessage(creation)
+	testBridge(t, client, ms, logger).handleMessage(creation)
 
 	var content, mediaType string
 	if err := ms.db.QueryRow(`SELECT content, media_type FROM messages WHERE id = 'POLL1'`).Scan(&content, &mediaType); err != nil {
@@ -140,7 +140,7 @@ func TestHandleMessage_PollCreationAndVote(t *testing.T) {
 	}
 
 	// Vote with a fake decrypter (real one needs the message-secret store).
-	b := testBridge(client, ms, logger)
+	b := testBridge(t, client, ms, logger)
 	b.PollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) { return [][]byte{hashOf("Sushi")}, nil }
 
 	vote := buildImageMessage(phonePN, phonePN, false, "")

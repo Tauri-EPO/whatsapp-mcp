@@ -128,7 +128,7 @@ func TestApplyGroupParticipantChanges(t *testing.T) {
 	client := newTestClient(&mockLIDStore{pnByLID: map[types.JID]types.JID{
 		{User: "777", Server: types.HiddenUserServer}: {User: "5511888888888", Server: types.DefaultUserServer},
 	}})
-	b := testBridge(client, store, testLogger())
+	b := testBridge(t, client, store, testLogger())
 	// Event rows are stamped with the local clock (see applyGroupParticipantChanges),
 	// so the event timestamps have to sit around it for the Leave ordering guard.
 	now := time.Now()
@@ -195,7 +195,7 @@ func TestApplyGroupParticipantChanges(t *testing.T) {
 // listed the member, so the delete must not fire.
 func TestReplayedLeaveDoesNotDropAConfirmedMember(t *testing.T) {
 	store := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	rosterAt := time.Now()
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
@@ -227,7 +227,7 @@ func TestReplayedLeaveDoesNotDropAConfirmedMember(t *testing.T) {
 // so no feed may cache a roster row for an excluded group.
 func TestGroupMembershipFeedsRespectTheAllowList(t *testing.T) {
 	store := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	b.Policy = parseChatPolicy("120363000000000009@g.us")
 
 	b.applyGroupParticipantChanges(&events.GroupInfo{
@@ -277,7 +277,7 @@ func TestResolveGroupRosterSync(t *testing.T) {
 // Promote had flagged.
 func TestReplayedJoinKeepsAdminFlags(t *testing.T) {
 	store := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	group := types.JID{User: "120363000000000001", Server: types.GroupServer}
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 
@@ -302,7 +302,7 @@ func TestReplayedJoinKeepsAdminFlags(t *testing.T) {
 func TestOwnDepartureDropsTheWholeRoster(t *testing.T) {
 	store := newTestMessageStore(t)
 	self := types.JID{User: "5511999999999", Server: types.DefaultUserServer}
-	b := testBridge(newTestClientWithSelf(&mockLIDStore{}, self), store, testLogger())
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, self), store, testLogger())
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
@@ -380,7 +380,7 @@ func TestStoreGroupRosterResolvesLIDOnlyMembers(t *testing.T) {
 	client := newTestClient(&mockLIDStore{pnByLID: map[types.JID]types.JID{
 		{User: "888", Server: types.HiddenUserServer}: {User: "5511777777777", Server: types.DefaultUserServer},
 	}})
-	b := testBridge(client, store, testLogger())
+	b := testBridge(t, client, store, testLogger())
 	if _, err := b.storeGroupRoster(testGroupJID, buildGroupMembers(fakeGroup(), nil).Members, time.Now()); err != nil {
 		t.Fatalf("store roster: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestNoteGroupParticipantOnlyFillsGaps(t *testing.T) {
 func TestHandleMessageNotesGroupSender(t *testing.T) {
 	store := newTestMessageStore(t)
 	client := newTestClient(&mockLIDStore{})
-	b := testBridge(client, store, testLogger())
+	b := testBridge(t, client, store, testLogger())
 
 	group := types.JID{User: "120363000000000001", Server: types.GroupServer}
 	sender := types.JID{User: "5511888888888", Server: types.DefaultUserServer}
@@ -529,7 +529,7 @@ func TestSyncGroupRosters(t *testing.T) {
 		}
 		return fakeGroup(), nil
 	}
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	b.GroupRosterSync = groupRosterSyncInterval
 	b.Connected = func() bool { return true }
 
@@ -574,7 +574,7 @@ func TestSyncGroupRostersRespectsPolicyAndConnection(t *testing.T) {
 		fetches++
 		return fakeGroup(), nil
 	}
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	b.GroupRosterSync = groupRosterSyncInterval
 	b.Connected = func() bool { return true }
 
@@ -621,7 +621,7 @@ func TestSyncGroupRostersRespectsPolicyAndConnection(t *testing.T) {
 
 func TestHandleGroupMembersCachesRoster(t *testing.T) {
 	store := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	fetch := func(_ context.Context, jid types.JID) (*types.GroupInfo, error) {
 		if jid.User == "404" {
 			return nil, errors.New("not a member")
@@ -691,7 +691,7 @@ func TestSyncGroupRostersBacksOffFailuresAndReportsLeftovers(t *testing.T) {
 		}
 		return fakeGroup(), nil
 	}
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	b.GroupRosterSync = groupRosterSyncInterval
 	b.Connected = func() bool { return true }
 	b.rosterFailures = newRosterFailures()
@@ -736,7 +736,7 @@ func TestEmptyRosterResponseCountsAsAFailure(t *testing.T) {
 		fetches++
 		return &types.GroupInfo{JID: types.JID{User: "120363000000000001", Server: types.GroupServer}}, nil
 	}
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	b.GroupRosterSync = groupRosterSyncInterval
 	b.Connected = func() bool { return true }
 	b.rosterFailures = newRosterFailures()
@@ -756,7 +756,7 @@ func TestEmptyRosterResponseCountsAsAFailure(t *testing.T) {
 // was just fetched read as never rostered.
 func TestJoinDoesNotDowngradeARosterRow(t *testing.T) {
 	store := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	at := time.Now()
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
@@ -785,7 +785,7 @@ func TestJoinDoesNotDowngradeARosterRow(t *testing.T) {
 // host's, so a host running slightly fast must not refuse a real departure.
 func TestDepartureToleratesSmallClockSkew(t *testing.T) {
 	store := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), store, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	at := time.Now()
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
@@ -808,7 +808,7 @@ func TestDepartureToleratesSmallClockSkew(t *testing.T) {
 func TestMessagesAfterOurDepartureDoNotResurrectTheRoster(t *testing.T) {
 	store := newTestMessageStore(t)
 	self := types.JID{User: "5511999999999", Server: types.DefaultUserServer}
-	b := testBridge(newTestClientWithSelf(&mockLIDStore{}, self), store, testLogger())
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, self), store, testLogger())
 	b.rosterFailures = newRosterFailures()
 	at := time.Now()
 
@@ -835,7 +835,7 @@ func TestOwnDepartureRecognisedByLID(t *testing.T) {
 	self := types.JID{User: "5511999999999", Server: types.DefaultUserServer}
 	client := newTestClientWithSelf(&mockLIDStore{}, self)
 	client.Store.LID = types.JID{User: "999", Server: types.HiddenUserServer}
-	b := testBridge(client, store, testLogger())
+	b := testBridge(t, client, store, testLogger())
 	at := time.Now()
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{

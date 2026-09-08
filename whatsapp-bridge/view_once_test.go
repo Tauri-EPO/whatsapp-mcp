@@ -56,11 +56,10 @@ func TestHandleMessage_ViewOnceImageIsStored(t *testing.T) {
 	logger := testLogger()
 
 	// Never download in this test: replace the async downloader.
-	b := testBridge(client, ms, logger)
+	b := testBridge(t, client, ms, logger)
 	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		return false, "", "", "", nil
 	}
-	drainBridge(t, b) // the message below queues an auto-download
 
 	evt := buildImageMessage(phonePN, phonePN, false, "")
 	evt.Info.ID = "VO1"

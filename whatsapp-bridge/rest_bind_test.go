@@ -104,7 +104,7 @@ func TestBuildHostAllowListWarnings(t *testing.T) {
 
 func TestRESTMuxHonoursAllowedHosts(t *testing.T) {
 	const token = "test-token-0123456789"
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.RESTBind, b.RESTAllowedHosts = "0.0.0.0", "bridge"
 	mux := b.newRESTMux(8080, token)
 

@@ -81,6 +81,18 @@ type Bridge struct {
 	// slot (events.go). Set once at startup; tests shorten it on their own
 	// Bridge instead of on a shared variable (issue #351).
 	StreamReplacedDelay time.Duration
+	// ReconnectInitialBackoff and ReconnectMaxBackoff bound the redial wait of
+	// reconnectLoop (events.go): the first wait, doubled on every failure, capped
+	// here, reset on success.
+	ReconnectInitialBackoff time.Duration
+	ReconnectMaxBackoff     time.Duration
+	// HistoryVoteRetryDelays paces the retries of a history-sync poll vote whose
+	// secret whatsmeow has not written yet, and its length is how many retries a
+	// vote gets (polls.go) — empty or nil means none, and every vote that races
+	// the secret is then recorded as undecodable. On the Bridge for the same
+	// reason as the three timings above (issue #382): a test shortening a shared
+	// variable races the goroutine reading it.
+	HistoryVoteRetryDelays []time.Duration
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps
@@ -129,12 +141,17 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		RESTBind:            defaultBridgeBind,
 		GroupRosterSync:     groupRosterSyncInterval,
 		StreamReplacedDelay: defaultStreamReplacedDelay,
-		rosterFailures:      newRosterFailures(),
-		origTimes:           newOriginalTimestamps(),
-		mediaRetry:          newMediaRetryHub(),
-		startedAt:           time.Now(),
-		storeStats:          newStoreStats(storeDir()),
-		metrics:             newMetricsRegistry(),
+
+		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
+		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
+		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
+
+		rosterFailures: newRosterFailures(),
+		origTimes:      newOriginalTimestamps(),
+		mediaRetry:     newMediaRetryHub(),
+		startedAt:      time.Now(),
+		storeStats:     newStoreStats(storeDir()),
+		metrics:        newMetricsRegistry(),
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if b.Webhook != nil {

@@ -11,7 +11,7 @@ import (
 
 func TestSendHandlerPassesRequestContextWithDeadline(t *testing.T) {
 	const token = "test-token-0123456789"
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	var seen context.Context
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, _, _, _ string, _ []string) (bool, string, sentMessage) {
 		seen = ctx
