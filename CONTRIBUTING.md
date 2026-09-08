@@ -28,7 +28,7 @@ uv run main.py
 ## Workflow
 
 1. **Discuss** — open or comment on an issue (see `AGENTS.md` §11 for the format).
-2. **Branch** — fork or push to a branch named `<type>/<short-slug>`, e.g. `fix/lid-sender-filter`, `feat/typing-indicator`.
+2. **Branch** — fork or push to a branch named `<type>/<short-slug>`, e.g. `fix/lid-sender-filter`, `feat/typing-indicator`. Running several AI agent sessions at once? Give each its own git worktree and follow "Working in parallel" in `AGENTS.md` §4.
 3. **Commit** — use [Conventional Commits](https://www.conventionalcommits.org/):
    - `feat:` user-visible feature → minor bump
    - `fix:` / `perf:` / `refactor:` bug fix, speed-up or code change → patch bump
