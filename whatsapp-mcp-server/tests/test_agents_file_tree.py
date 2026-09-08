@@ -5,11 +5,16 @@ and every line is supposed to name a file that exists. Both drifted silently
 until this test, the way environment variables drifted before
 `test_env_docs.py`: a PR adds a module, the tree is updated by hand or not at
 all, and the next agent looks for a file the map never mentions.
+
+`[tool.setuptools] py-modules` in `whatsapp-mcp-server/pyproject.toml` is the
+same list written a second time, and it drifted the same way (nine modules
+behind, issue #398). Editable installs hide it; a wheel would `ImportError`.
 """
 
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -68,6 +73,12 @@ def source_files(component: str, suffix: str) -> set[str]:
     }
 
 
+def py_modules() -> set[str]:
+    """Module names declared in `[tool.setuptools] py-modules`."""
+    pyproject = tomllib.loads((ROOT / "whatsapp-mcp-server" / "pyproject.toml").read_text(encoding="utf-8"))
+    return set(pyproject["tool"]["setuptools"]["py-modules"])
+
+
 def test_every_listed_file_exists():
     listed = tree_entries()
     assert len(listed) >= 50, listed  # sanity: the parser still reads the block
@@ -80,6 +91,17 @@ def test_every_module_is_listed():
     sources = source_files("whatsapp-bridge", ".go") | source_files("whatsapp-mcp-server", ".py")
     undocumented = sorted(sources - listed - UNLISTED)
     assert not undocumented, f"module without a line in AGENTS.md section 3: {undocumented}"
+
+
+def test_py_modules_lists_every_module():
+    modules = {Path(path).stem for path in source_files("whatsapp-mcp-server", ".py")}
+    missing = sorted(modules - py_modules())
+    assert not missing, f"module missing from pyproject.toml py-modules (wheel would not ship it): {missing}"
+
+
+def test_every_py_module_entry_is_a_file():
+    gone = sorted(name for name in py_modules() if not (ROOT / "whatsapp-mcp-server" / f"{name}.py").is_file())
+    assert not gone, f"listed in pyproject.toml py-modules but not in whatsapp-mcp-server/: {gone}"
 
 
 def test_unlisted_allowlist_has_no_stale_entries():
