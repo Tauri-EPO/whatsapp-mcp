@@ -554,13 +554,25 @@ def search_notes(
             for hit in media_notes.search_media_notes(needle, key, limit)
         ]
     if wanted != "media":
-        hits += _search_targets(needle, key, wanted)
+        hits += _search_targets(needle, key, wanted, limit)
+    # Each side already returns its own newest ``limit``, and the newest ``limit``
+    # of the union can only be made of those, so the merge stays exact.
     hits.sort(key=lambda hit: hit["updated_at"], reverse=True)
     return hits[:limit]
 
 
-def _search_targets(needle: str, key: str | None, target_type: str) -> list[dict[str, Any]]:
-    """Current notes matching ``needle``, allow-list applied. Media lives elsewhere."""
+def _search_targets(needle: str, key: str | None, target_type: str, limit: int) -> list[dict[str, Any]]:
+    """Current notes matching ``needle``, allow-list applied. Media lives elsewhere.
+
+    The matches are walked newest first in batches of ``media_notes.SEARCH_BATCH``
+    and the walk stops once ``limit`` of them survive, so the per-row work below
+    (an allow-list check and a LID-map lookup each) is paid for the rows walked
+    to reach the answer, not for every note in the archive. Rows *ahead* of the
+    survivors are still walked: an allow-list that hides the newest thousand
+    matches costs a thousand checks, because the limit is applied here and not
+    in the SQL — a page of matches the allow-list hides would otherwise come
+    back as "nothing found".
+    """
     conn = _connect(create=False)
     if conn is None:
         return []
@@ -579,34 +591,40 @@ def _search_targets(needle: str, key: str | None, target_type: str) -> list[dict
             ") WHERE value <> '' AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0)"
             " ORDER BY updated_at DESC",
             [*params, needle, needle],
-        ).fetchall()
+        )
         # One hit per identity: a row left under an older spelling of the same
         # contact is shadowed by the canonical one exactly as get_notes shadows
         # it, so search never reports a value the target no longer carries —
         # including when the current value is the reason it stopped matching.
-        best: dict[tuple[str, str, str], tuple[tuple[bool, str], dict[str, Any]]] = {}
-        for ttype, tid, hit_key, value, updated_at in rows:
-            if not _visible(ttype, tid):
-                continue
-            canonical = _canonical_target(ttype, tid)
-            if canonical != tid and _has_note(conn, ttype, canonical, hit_key):
-                continue
-            rank = (tid == canonical, updated_at)
-            slot = (ttype, canonical, hit_key)
-            if slot not in best or rank > best[slot][0]:
-                best[slot] = (
-                    rank,
-                    {
-                        "target_type": ttype,
-                        "target_id": canonical,
-                        "key": hit_key,
-                        "value": value,
-                        "updated_at": updated_at,
-                    },
-                )
+        # The first survivor takes the slot: rows arrive newest first, and a row
+        # under a non-canonical spelling only gets here when the canonical
+        # spelling holds nothing at all, so the two can never compete for one.
+        best: dict[tuple[str, str, str], dict[str, Any]] = {}
+        while len(best) < limit:
+            batch = rows.fetchmany(media_notes.SEARCH_BATCH)
+            if not batch:
+                break
+            for ttype, tid, hit_key, value, updated_at in batch:
+                if not _visible(ttype, tid):
+                    continue
+                canonical = _canonical_target(ttype, tid)
+                if canonical != tid and _has_note(conn, ttype, canonical, hit_key):
+                    continue
+                slot = (ttype, canonical, hit_key)
+                if slot in best:
+                    continue
+                best[slot] = {
+                    "target_type": ttype,
+                    "target_id": canonical,
+                    "key": hit_key,
+                    "value": value,
+                    "updated_at": updated_at,
+                }
+                if len(best) == limit:
+                    break
     finally:
         conn.close()
-    return [hit for _rank, hit in best.values()]
+    return list(best.values())
 
 
 def _has_note(conn: sqlite3.Connection, ttype: str, tid: str, key: str) -> bool:

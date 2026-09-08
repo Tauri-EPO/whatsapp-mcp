@@ -497,3 +497,89 @@ class TestInlineNotes:
         assert not os.path.exists(media_notes.notes_db_path())
         assert all(row["notes"] == {} for row in main.list_chats()["items"])
         assert not os.path.exists(media_notes.notes_db_path())
+
+
+class TestBoundedSearch:
+    """A note search reads and enriches what the limit needs, not the whole archive."""
+
+    @staticmethod
+    def _bulk_chat_notes(count):
+        """``count`` matching chat notes on distinct groups, oldest first.
+
+        Written straight into notes.db: what is under test is one search over a
+        large archive, not the write path that filled it.
+        """
+        jids = [f"1203630000000{i:05d}@g.us" for i in range(count)]
+        conn = notes._connect(create=True)
+        assert conn is not None
+        try:
+            # notes.py opens notes.db in autocommit; one transaction for the
+            # whole fixture instead of a WAL sync per row.
+            conn.execute("BEGIN")
+            conn.executemany(
+                "INSERT INTO notes (target_type, target_id, key, value, updated_at, source, version)"
+                " VALUES ('chat', ?, 'label', 'common label', ?, 'set', 1)",
+                # Zero-padded so the string order the query sorts by is the index
+                # order: group 0 holds the oldest note, examined last.
+                [(jid, f"2026-01-01T00:00:00.{i:06d}+00:00") for i, jid in enumerate(jids)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return jids
+
+    @staticmethod
+    def _visibility_spy(monkeypatch):
+        """Every row the search decided the visibility of."""
+        seen: list[str] = []
+        original = notes._visible
+
+        def spy(target_type, target_id):
+            seen.append(target_id)
+            return original(target_type, target_id)
+
+        monkeypatch.setattr(notes, "_visible", spy)
+        return seen
+
+    def test_a_small_limit_bounds_the_identity_work(self, notes_store, monkeypatch):
+        """1,000 notes on 1,000 chats, limit=1: one batch of rows enriched, not a thousand."""
+        jids = self._bulk_chat_notes(1000)
+        seen = self._visibility_spy(monkeypatch)
+
+        hits = main.search_notes("common label", target_type="chat", limit=1)
+        assert [hit["target_id"] for hit in hits] == [jids[-1]]  # newest note
+        assert len(seen) == 1  # one row enriched for one result, not a thousand
+        assert len(main.search_notes("common label", target_type="chat", limit=200)) == 200
+        # A full page costs a page: 200 more rows, still one batch.
+        assert len(seen) == 1 + media_notes.SEARCH_BATCH
+
+    def test_hidden_chats_ahead_of_the_match_are_walked_through(self, notes_store, monkeypatch):
+        """The allow-list is applied before the limit, so a buried hit is still found."""
+        monkeypatch.setattr(media_notes, "SEARCH_BATCH", 2)
+        jids = self._bulk_chat_notes(5)
+        policy = chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": jids[0]})
+        for module in (whatsapp, media_inventory, media_notes, notes):
+            monkeypatch.setattr(module, "CHAT_POLICY", policy)
+        seen = self._visibility_spy(monkeypatch)
+
+        hits = main.search_notes("common label", target_type="chat", limit=1)
+        assert [hit["target_id"] for hit in hits] == [jids[0]]
+        assert seen == jids[::-1]  # every newer, denied chat examined on the way
+
+    def test_the_media_side_is_limited_too(self, notes_store, monkeypatch):
+        """Both halves of a mixed search return their own newest ``limit`` before the merge."""
+        calls: list[int] = []
+        original = media_notes.search_media_notes
+
+        def spy(query, key=None, limit=50):
+            calls.append(limit)
+            return original(query, key, limit)
+
+        monkeypatch.setattr(media_notes, "search_media_notes", spy)
+        main.annotate("media", SHA_A, "label", "common label")
+        jids = self._bulk_chat_notes(3)
+
+        # The media note was written now; the three chat notes are dated 2026-01-01.
+        hits = main.search_notes("common label", limit=2)
+        assert calls == [2]  # the media half is asked for the limit, not for everything
+        assert [(hit["target_type"], hit["target_id"]) for hit in hits] == [("media", SHA_A), ("chat", jids[-1])]
