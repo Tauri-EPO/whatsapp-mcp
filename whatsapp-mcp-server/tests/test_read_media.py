@@ -76,6 +76,12 @@ def _meta(blocks):
     return json.loads(blocks[-1].text)
 
 
+def _blob(block):
+    """``(uri, mime, bytes)`` of an EmbeddedResource block."""
+    assert block.type == "resource"
+    return block.resource.uri, block.resource.mime_type, base64.b64decode(block.resource.blob)
+
+
 class TestBlocks:
     def test_image_comes_back_as_image_content(self, store):
         blocks = media_read.read_media(ALICE, "IMG1")
@@ -108,12 +114,50 @@ class TestBlocks:
         monkeypatch.setenv(WRAP_ENV, "1")
         assert media_read.read_media(ALICE, "TXT1")[0].text == f"{OPEN_TAG}olá, mundo\n{CLOSE_TAG}"
 
-    def test_other_types_come_back_as_base64_behind_a_header(self, store):
+    def test_a_pdf_comes_back_as_an_embedded_resource(self, store):
+        """The block a client can hand to the model as a document (#367)."""
         _cache(ALICE, "document_20260904_100000_DOC1.pdf", b"%PDF-1.4 not really")
         blocks = media_read.read_media(ALICE, "DOC1")
-        header, payload = blocks[0].text.split("\n", 1)
-        assert header == "base64:application/pdf:19"
-        assert base64.b64decode(payload) == b"%PDF-1.4 not really"
+        uri, mime, data = _blob(blocks[0])
+        assert mime == "application/pdf" and data == b"%PDF-1.4 not really"
+        assert uri == f"whatsapp://media/{ALICE}/DOC1"
+        assert _meta(blocks)["mime"] == "application/pdf"
+
+    @pytest.mark.parametrize(
+        ("name", "mime"),
+        [
+            ("contrato.docx", media_text.DOCX_MIME),
+            ("leituras.xlsx", media_text.XLSX_MIME),
+            ("clip.mp4", "video/mp4"),
+        ],
+    )
+    def test_the_resource_declares_the_real_office_or_video_type(self, store, name, mime):
+        with store.messages() as conn:
+            _insert(conn, "OFF1", ALICE, "document", None, filename=name)
+        _cache(ALICE, f"document_20260904_100000_OFF1{os.path.splitext(name)[1]}", b"payload")
+        assert _blob(media_read.read_media(ALICE, "OFF1")[0])[1] == mime
+
+    def test_a_voice_note_comes_back_as_audio_content(self, store):
+        with store.messages() as conn:
+            _insert(conn, "OGG1", ALICE, "audio", None, filename="nota.ogg")
+        _cache(ALICE, "audio_20260904_100000_OGG1.ogg", b"OggS not really opus")
+        blocks = media_read.read_media(ALICE, "OGG1")
+        assert blocks[0].type == "audio" and blocks[0].mime_type == "audio/ogg"
+        assert base64.b64decode(blocks[0].data) == b"OggS not really opus"
+
+    def test_an_audio_type_no_client_plays_stays_a_resource(self, store, monkeypatch):
+        """AudioContent is for the types a client can play; the rest keep their bytes."""
+        monkeypatch.setattr(media_read, "PLAYABLE_AUDIO_MIMES", frozenset())
+        with store.messages() as conn:
+            _insert(conn, "OGG2", ALICE, "audio", None, filename="nota.ogg")
+        _cache(ALICE, "audio_20260904_100000_OGG2.ogg", b"OggS")
+        assert _blob(media_read.read_media(ALICE, "OGG2")[0])[1] == "audio/ogg"
+
+    def test_the_uri_survives_a_device_suffix_in_the_jid(self):
+        """':' would otherwise read as the end of an authority, not part of a segment."""
+        assert media_read.media_uri("5511999999999:12@s.whatsapp.net", "A/B") == (
+            "whatsapp://media/5511999999999%3A12@s.whatsapp.net/A%2FB"
+        )
 
 
 class TestTypes:
@@ -123,10 +167,9 @@ class TestTypes:
         assert blocks[0].mime_type == "image/png"
         assert _meta(blocks)["mime"] == "image/png"
 
-    def test_an_image_type_no_client_renders_falls_back_to_base64(self, store):
+    def test_an_image_type_no_client_renders_falls_back_to_a_resource(self, store):
         """image/* is not enough: an ImageContent a client refuses fails the whole call."""
-        blocks = media_read.read_media(ALICE, "TIF1")
-        assert blocks[0].type == "text" and blocks[0].text.startswith("base64:image/tiff:")
+        assert _blob(media_read.read_media(ALICE, "TIF1")[0])[1] == "image/tiff"
 
     def test_the_types_do_not_depend_on_the_platform_s_mime_table(self, monkeypatch):
         """python:3.13-slim has no /etc/mime.types: .docx, .xlsx and .ogg are None there."""
@@ -142,14 +185,12 @@ class TestTypes:
     def test_a_name_promising_an_image_over_other_bytes_is_not_an_image_block(self, store):
         """A client rejects a block whose data disagrees with its declared type."""
         _cache(ALICE, "image_20260904_100000_IMG1.jpg", b"%PDF-1.4 not an image at all")
-        blocks = media_read.read_media(ALICE, "IMG1")
-        assert blocks[0].type == "text"
-        assert blocks[0].text.startswith("base64:application/octet-stream:")
+        _uri, mime, data = _blob(media_read.read_media(ALICE, "IMG1")[0])
+        assert mime == "application/octet-stream" and data == b"%PDF-1.4 not an image at all"
 
     def test_a_compressed_text_file_is_not_decoded_as_text(self, store):
         """notes.txt.gz guesses as text/plain *with an encoding*; the bytes are an archive."""
-        blocks = media_read.read_media(ALICE, "GZ1")
-        assert blocks[0].text.startswith("base64:application/gzip:")
+        assert _blob(media_read.read_media(ALICE, "GZ1")[0])[1] == "application/gzip"
 
 
 class TestResolution:
@@ -163,7 +204,7 @@ class TestResolution:
         monkeypatch.setattr(media_read.whatsapp, "download_media", fake_download)
         blocks = media_read.read_media(ALICE, "DOC1")
         assert calls == [("DOC1", ALICE)]
-        assert blocks[0].text.startswith("base64:application/pdf:8\n")
+        assert _blob(blocks[0])[2] == b"%PDF-1.4"
 
     def test_cached_media_never_calls_the_bridge(self, store, monkeypatch):
         def explode(*_args, **_kwargs):
@@ -252,6 +293,21 @@ class TestTool:
         assert out.structured_content["error"]["code"] == "not_found"
         assert json.loads(out.content[0].text)["error"]["code"] == "not_found"
 
+    def test_a_resource_block_survives_the_decorators_whole(self, store, monkeypatch):
+        """clean_untrusted walks dicts and lists; a content block must pass through untouched."""
+        monkeypatch.setenv(WRAP_ENV, "1")
+        _cache(ALICE, "document_20260904_100000_DOC1.pdf", b"%PDF-1.4 not really")
+        blocks = main.read_media(chat_jid=ALICE, message_id="DOC1")
+        assert [block.type for block in blocks] == ["resource", "text"]
+        assert _blob(blocks[0])[2] == b"%PDF-1.4 not really"
+
+    async def test_the_sdk_ships_the_resource_block_over_the_wire(self, store):
+        """The strict-args server still counts and converts a block-returning call."""
+        _cache(ALICE, "document_20260904_100000_DOC1.pdf", b"%PDF-1.4 not really")
+        result = await main.mcp.call_tool("read_media", {"chat_jid": ALICE, "message_id": "DOC1"})
+        assert [block.type for block in result.content] == ["resource", "text"]
+        assert result.content[0].resource.mime_type == "application/pdf"
+
     def test_the_sdk_publishes_it_as_unstructured_content(self):
         """The return annotation is what makes the SDK emit blocks instead of JSON."""
         tool = main.mcp._tool_manager.get_tool("read_media")
@@ -336,4 +392,4 @@ class TestImplicitDownloadPolicy:
             lambda mid, chat: _cache(chat, f"document_20260904_100000_{mid}.pdf", b"%PDF-1.4 not really"),
         )
         blocks = main.read_media(chat_jid=ALICE, message_id="DOC1")
-        assert blocks[0].text.split("\n", 1)[0] == "base64:application/pdf:19"
+        assert _blob(blocks[0])[2] == b"%PDF-1.4 not really"

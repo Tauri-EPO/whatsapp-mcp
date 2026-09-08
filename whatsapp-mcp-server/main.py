@@ -2172,12 +2172,14 @@ def read_media(
     What you get back:
       - an image (photo, sticker) as image content you can see directly, up to 16 MB;
       - a text-ish file (.txt, .csv, .json, .md) as text, up to 1 MB;
-      - anything else (PDF, video, audio, archives) base64-encoded in a text block
-        whose first line is `base64:<mime>:<bytes>`, up to 2 MB. For a voice note
-        prefer transcribe_audio.
+      - a voice note or audio file as audio content, up to 2 MB — but prefer
+        transcribe_audio, which gives you text you can actually read;
+      - anything else (PDF, DOCX, video, archives) as an embedded resource
+        carrying the file's real MIME type, up to 2 MB, so a client that knows
+        that type can hand it to you as a document.
 
     **For a document, pass as_text=True**: a PDF, DOCX or XLSX is then read here and
-    comes back as text — a few dozen KB instead of megabytes of base64 you cannot
+    comes back as text — a few dozen KB instead of megabytes of a blob you cannot
     decode, and the file itself may be far larger than the byte limits above. One
     block per page, table or sheet, in reading order, with `--- page 3 of 40 ---`
     markers; `max_pages` (default 20) says how many. There is no OCR: a scanned PDF
