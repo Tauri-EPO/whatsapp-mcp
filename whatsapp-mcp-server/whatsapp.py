@@ -1211,28 +1211,55 @@ def _spoken_filter(alias: str) -> str:
 CLOSING_MESSAGES: tuple[str, ...] = ("ok", "obrigado", "obrigada", "valeu", "blz", "thanks", "👍", "🙏")
 
 
-def _closing_message_clause(alias: str, content: str = "", content_params: Sequence[str] = ()) -> tuple[str, list[str]]:
+def _own_mention_stripped(alias: str) -> tuple[str, list[str]]:
+    """(SQL for the row's text without this account's own `@…`, its placeholders).
+
+    WhatsApp writes a mention into the text as `@<lid-or-phone>`, so the message
+    that reads "ok @you" is stored as "ok @158…" and matches none of the closing
+    words. This account's own two spellings are removed before the comparison —
+    only ours, so "ok @someone-else @me" keeps a word we did not write.
+
+    Only the local store is asked (`owner_identity_local`): this runs on a
+    read-only path, which must never wait on the bridge, and the answer only
+    sharpens a word list. On a store that cannot say who we are — not paired
+    yet, whatsmeow.db not mounted — the raw column is compared, as it was
+    before issue #411: fewer closing messages recognised, no error on a read
+    that was not about mentions in the first place.
+    """
+    text: str = f"{alias}.content"
+    params: list[str] = []
+    owner = owner_identity_local()
+    if owner is None:
+        logger.debug("closing messages: this account is unknown here, own mentions left in the text")
+        return text, params
+    for user in (owner.get("phone"), owner.get("lid")):
+        if user:
+            text = f"replace({text}, ?, '')"
+            params.append(f"@{user}")
+    return text, params
+
+
+def _closing_message_clause(alias: str) -> tuple[str, list[str]]:
     """Rows that acknowledge rather than ask: a sticker, or one of CLOSING_MESSAGES.
 
     Reactions and poll votes are already excluded by `_spoken_filter`. Trailing
     ".", "!" and spaces are ignored so "ok!" reads the same as "ok" (and so does
-    what is left of "ok @you!" once the mention is removed below); SQLite's
-    lower() is ASCII-only, which is all these words need and leaves the emoji
-    untouched.
+    what is left of "ok @you!" once the mention is removed); SQLite's lower() is
+    ASCII-only, which is all these words need and leaves the emoji untouched.
 
     Both columns are nullable and the caller negates this clause, so `IS` and
     COALESCE keep it two-valued: `NOT NULL` is NULL, which would drop every plain
     text message instead of keeping it.
 
-    `content` overrides the text the words are compared with, for the one caller
-    that has to read past the `@…` WhatsApp writes into it
-    (`_closing_mention_clause`); its placeholders are bound by passing them as
-    `content_params`, which come back ahead of the words, in that order.
+    The words are compared with the text this account's own `@…` has been taken
+    out of (`_own_mention_stripped`), for every caller alike: the ordinary
+    "closing last message" rule reads "ok @you" the same way the mention stream
+    does (issue #411), which is also what keeps the two streams disjoint.
     """
+    text, strip_params = _own_mention_stripped(alias)
     placeholders = ",".join("?" * len(CLOSING_MESSAGES))
-    text = content or f"{alias}.content"
     clause = f"({alias}.media_type IS 'sticker' OR rtrim(lower(trim(COALESCE({text}, ''))), '.! ') IN ({placeholders}))"
-    return clause, [*content_params, *CLOSING_MESSAGES]
+    return clause, [*strip_params, *CLOSING_MESSAGES]
 
 
 def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = False, chat_match: str = "") -> str:
@@ -4877,6 +4904,22 @@ def _owner_from_bridge() -> dict[str, str | None]:
     return {"jid": body.get("phone_jid"), "phone": body.get("phone"), "lid": body.get("lid")}
 
 
+def _cached_owner() -> dict[str, str | None] | None:
+    """The memoised answer while it is still fresh, else None."""
+    with _owner_lock:
+        if _owner_cache is not None and time.monotonic() - _owner_cache[0] < _OWNER_CACHE_TTL_S:
+            return dict(_owner_cache[1])
+    return None
+
+
+def _remember_owner(owner: dict[str, str | None]) -> dict[str, str | None]:
+    """Memoise an answer for the next minute and hand back a copy of it."""
+    global _owner_cache
+    with _owner_lock:
+        _owner_cache = (time.monotonic(), dict(owner))
+    return dict(owner)
+
+
 def owner_identity() -> dict[str, str | None]:
     """{"jid", "phone", "lid"} of the account this deployment is logged in as.
 
@@ -4884,16 +4927,26 @@ def owner_identity() -> dict[str, str | None]:
     bridge can say: "who am I" has no useful empty answer, and a mentions_me
     filter that silently matched nothing would read as "nobody mentioned you".
     """
-    global _owner_cache
-    now = time.monotonic()
-    with _owner_lock:
-        if _owner_cache is not None and now - _owner_cache[0] < _OWNER_CACHE_TTL_S:
-            return dict(_owner_cache[1])
+    cached = _cached_owner()
+    if cached is not None:
+        return cached
+    return _remember_owner(_owner_from_device_table() or _owner_from_bridge())
 
-    owner = _owner_from_device_table() or _owner_from_bridge()
-    with _owner_lock:
-        _owner_cache = (now, dict(owner))
-    return dict(owner)
+
+def owner_identity_local() -> dict[str, str | None] | None:
+    """The same answer from the local store alone, or None. Never calls the bridge.
+
+    For the callers where "who am I" only sharpens a filter and is not the
+    question being asked (`_own_mention_stripped`). Reads must not need the
+    bridge, and asking it here would make a plain `list_unanswered` wait out the
+    whole connection-retry ladder on a deployment where the bridge is down
+    (issue #411) for the sake of a word list.
+    """
+    cached = _cached_owner()
+    if cached is not None:
+        return cached
+    owner = _owner_from_device_table()
+    return _remember_owner(owner) if owner else None
 
 
 def bridge_status() -> dict[str, Any]:
@@ -5359,21 +5412,12 @@ def _closing_mention_clause(ignore_closing_messages: bool, alias: str) -> tuple[
     group whose only pending mention is "ok @me" or a sticker is acknowledging,
     not waiting, and used to come back through this door (issue #395).
 
-    The one difference from the ordinary rule is what "the words" are: WhatsApp
-    writes a mention into the text as `@<lid-or-phone>`, so the message that
-    reads "ok @me" is stored as "ok @158…" and would match nothing. This account's
-    own two spellings are removed before the comparison — only ours, so "ok
-    @someone-else @me" keeps a word we did not write and stays on the list.
+    The predicate is the ordinary rule's own, `@…` and all: since issue #411
+    both sides read past this account's own mention (`_own_mention_stripped`).
     """
     if not ignore_closing_messages:
         return "", []
-    owner = owner_identity()
-    text, strip_params = f"{alias}.content", []
-    for user in (owner.get("phone"), owner.get("lid")):
-        if user:
-            text = f"replace({text}, ?, '')"
-            strip_params.append(f"@{user}")
-    clause, params = _closing_message_clause(alias, text, strip_params)
+    clause, params = _closing_message_clause(alias)
     return f" AND NOT {clause}", params
 
 
@@ -5518,10 +5562,10 @@ def _mention_only_rows(
         covered_bounds += " AND last_spoken.timestamp <= ?"
         covered_params.append(age_params[0])
     if ignore_closing_messages:
-        # The ordinary rule's own predicate, on its row and on its raw text —
-        # nothing is stripped here, unlike on the mention above. Mirroring it
-        # exactly is what keeps the two streams disjoint: a chat it lists is
-        # covered, a chat it dropped for a closing word is not.
+        # The ordinary rule's own predicate, on its own row. Mirroring it
+        # exactly — the same words, read past the same `@…` — is what keeps the
+        # two streams disjoint: a chat it lists is covered, a chat it dropped
+        # for a closing word is not.
         covered_closing, covered_closing_params = _closing_message_clause("last_spoken")
         covered_bounds += f" AND NOT {covered_closing}"
         covered_params += covered_closing_params

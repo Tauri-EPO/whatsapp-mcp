@@ -370,6 +370,71 @@ def test_a_group_added_past_a_closing_last_message_walks_the_pages_once(store, b
     assert seen == whole
 
 
+# --- the ordinary rule reads past your own @… too (issue #411) -----------------
+
+
+def _ordinary(**kwargs):
+    """The ordinary "last inbound message" rule alone: no mention stream."""
+    return [item["jid"] for item in main.list_unanswered(**kwargs)["items"]]
+
+
+@pytest.mark.parametrize("last", ["ok @{lid}", "@{lid} 👍", "valeu @{lid}!", "Obrigado @{lid}."])
+def test_the_ordinary_rule_reads_an_ok_addressed_to_me_as_closing(store, bridge_down, last):
+    """ "ok @you" is stored as "ok @158…" and used to keep the chat waiting (#411)."""
+    _add_obra(store, mention="alguem viu?", last=last.format(lid=OWNER_LID))
+    assert OBRA in _ordinary()
+    assert OBRA not in _ordinary(ignore_closing_messages=True)
+
+
+def test_a_closing_word_aimed_at_somebody_else_still_waits(store, bridge_down):
+    """Only this account's own @… is read past, so the chat still names somebody."""
+    _add_obra(store, mention="alguem viu?", last=f"ok @5511777777777 @{OWNER_LID}")
+    assert OBRA in _ordinary(ignore_closing_messages=True)
+
+
+def test_count_only_agrees_with_the_page_about_a_closing_mention(store, bridge_down):
+    """Hidden in SQL before LIMIT, so the count and the rows tell the same story."""
+    _add_obra(store, mention="alguem viu?", last=f"ok @{OWNER_LID}")
+    page = main.list_unanswered(ignore_closing_messages=True)
+    assert OBRA not in [item["jid"] for item in page["items"]]
+    assert main.list_unanswered(ignore_closing_messages=True, count_only=True) == {"count": len(page["items"])}
+
+
+def test_a_group_kept_by_its_mention_is_still_added(store, bridge_down):
+    """The two streams stay disjoint: dropped by the ordinary rule, added by the mention."""
+    _add_obra(store, mention=f"@{OWNER_LID} manda o orçamento?", last=f"ok @{OWNER_LID}")
+    page = main.list_unanswered(include_group_mentions=True, ignore_closing_messages=True)
+    obra = [item for item in page["items"] if item["jid"] == OBRA]
+    assert len(obra) == 1
+    assert obra[0]["mention"] is True and obra[0]["mention_message_id"] == "c1"
+
+
+def test_without_an_owner_identity_the_raw_text_is_compared(tmp_path, monkeypatch, store):
+    """Unpaired store: fewer closing messages are read, never an error — and no bridge call.
+
+    Who we are is asked of the local store only: with the bridge down, asking it
+    would spend the whole connection-retry ladder on a word list, on a read that
+    must not need the bridge at all.
+    """
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(tmp_path / "absent.db"))
+    calls: list[str] = []
+
+    def refuse(url, **kwargs):
+        calls.append(url)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(whatsapp.bridge_http, "get", refuse)
+    monkeypatch.setattr(whatsapp.time, "sleep", lambda s: None)
+    _add_obra(store, mention="alguem viu?", last=f"ok @{OWNER_LID}")
+    # Nobody can say which "@158…" is mine, so the text stands as stored.
+    assert OBRA in _ordinary(ignore_closing_messages=True)
+    with sqlite3.connect(store) as c:
+        c.execute("UPDATE messages SET content = 'ok' WHERE id = 'c9'")
+    # The words themselves still work, which is what this rule was before #411.
+    assert OBRA not in _ordinary(ignore_closing_messages=True)
+    assert calls == []
+
+
 def test_exclude_groups_wins_over_group_mentions(store, bridge_down):
     """ "No groups" means no group comes back through the mention door either."""
     out = main.list_unanswered(exclude_groups=True, include_group_mentions=True, min_age_hours=24)
