@@ -347,7 +347,58 @@ Each push carries a SLSA provenance attestation and an SBOM
 lists them), and the weekly security workflow scans the published images
 with Trivy. A packages page must be public for anonymous pulls; that is a one-time
 switch in GitHub (Packages > package > Package settings > Change visibility),
-otherwise `docker login ghcr.io` with a read-only token first.
+otherwise `docker login ghcr.io` with a read-only token first. A pull that fails
+with `denied` against a package that *is* public is a stale credential on the
+host, not a permission problem — see
+[Troubleshooting](TROUBLESHOOTING.md#pulling-the-images-from-ghcr).
+
+## Managed stacks (Komodo, Portainer)
+
+Nothing here needs a stack manager, but the compose file runs happily under one,
+and the home server this fork is written for does exactly that: Komodo owns the
+checkout in `/etc/komodo/stacks/whatsapp-mcp` and redeploys it. Three habits
+change when the manager owns the stack.
+
+**The compose directory and its `.env` are root-owned.** An operator in the
+`docker` group can still drive the containers, but `docker compose` refuses the
+directory itself (`open .env: permission denied`), which used to rule out the
+post-deploy check. Give `scripts/smoke.sh` the project name instead and it works
+entirely through the container labels:
+
+```bash
+scripts/smoke.sh --project whatsapp-mcp --url https://box.tailnet.ts.net
+```
+
+It resolves the bridge and mcp containers with
+`docker ps --filter label=com.docker.compose.project=…`, reads the bridge and MCP
+tokens from the container environment, and never opens `.env`
+(see [Health and operations](#health-and-operations)).
+
+**Environment changes belong in the manager**, in the stack's Environment
+section, not in the `.env` file on disk. A redeploy rewrites that file from what
+the manager holds, so an edit made on the server works until the next deploy and
+then vanishes without a word — including `WHATSAPP_IMAGE_TAG`, which is how you
+pin or roll back an image.
+
+**`docker logs` only covers the container that is running now.** A redeploy
+replaces it, and everything the previous one printed is gone unless the manager
+keeps its own log history. That is fine for steady-state logs and expensive for
+the lines a new release prints exactly once, on its first start: the timestamp
+migration ("Timestamp migration: rewrote N messages.timestamp value(s) to UTC")
+and the mentions backfill ("Mentions migration: recovered mentions for N
+message(s) …") report what they touched and never repeat. (The related
+"Timestamp migration: repaired N …" warning does repeat, at every start, until
+the rows it names are fixed — see
+[Troubleshooting](TROUBLESHOOTING.md#messages-are-out-of-order-after-an-image-rollback).)
+Read the once-only lines in the
+manager's log view right after an upgrade, or keep a copy before the next
+deploy:
+
+```bash
+docker logs "$(docker ps --filter label=com.docker.compose.project=whatsapp-mcp \
+  --filter label=com.docker.compose.service=bridge --format '{{.Names}}')" \
+  > "deploy-$(date +%F).log" 2>&1
+```
 
 ## Backup and restore
 
