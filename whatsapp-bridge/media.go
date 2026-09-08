@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go.mau.fi/whatsmeow"
 	"net/http"
@@ -199,7 +200,9 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		b.Log.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
 		return written, nil
 	}); err != nil {
-		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
+		// %w, not %v: handleDownload asks errors.Is whether the sender's phone
+		// answered "gone" (errMediaUnavailable), and %v would cut that chain.
+		return false, "", "", "", fmt.Errorf("failed to download media: %w", err)
 	}
 	return true, mediaType, filename, absPath, nil
 }
@@ -371,12 +374,14 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			if err != nil {
 				errMsg = err.Error()
 			}
-
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(DownloadMediaResponse{
-				Success: false,
-				Message: fmt.Sprintf("Failed to download media: %s", errMsg),
-			})
+			// The phone answering "I no longer have this file" is not a failure
+			// to retry: name it so the caller records the miss once instead of
+			// asking again on every pass over the archive (issue #378).
+			code := errorCode(http.StatusInternalServerError)
+			if errors.Is(err, errMediaUnavailable) {
+				code = "media_unavailable"
+			}
+			writeErrorCode(w, http.StatusInternalServerError, code, "Failed to download media: "+errMsg)
 			return
 		}
 

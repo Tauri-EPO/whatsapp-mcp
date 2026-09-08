@@ -6,11 +6,13 @@ Success returns the payload the tool documents. Failure returns::
 
 codes: ``not_found`` (the chat/message/contact does not exist in the archive),
 ``denied`` (WHATSAPP_ALLOWED_CHATS blocks the target), ``bridge_unavailable``
-(the bridge REST API could not be reached or answered 5xx), ``invalid_argument``
-(bad input), ``conflict`` (the target changed since the caller read it; re-read
-and retry), ``too_large`` (the answer would not fit: the payload carries the
-real size and the limit that was applied), ``internal`` (unexpected failure,
-details in the server log).
+(the bridge REST API could not be reached or answered 5xx),
+``media_unavailable`` (the bytes are not cached here and the sender's phone
+answered that it no longer has them, so retrying will not help),
+``invalid_argument`` (bad input), ``conflict`` (the target changed since the
+caller read it; re-read and retry), ``too_large`` (the answer would not fit: the
+payload carries the real size and the limit that was applied), ``internal``
+(unexpected failure, details in the server log).
 
 An agent that sees an unexpected empty result should call ``bridge_status``;
 an unreadable database is reported as ``internal``, never as an empty account.
@@ -28,6 +30,7 @@ ERROR_CODES = (
     "not_found",
     "denied",
     "bridge_unavailable",
+    "media_unavailable",
     "invalid_argument",
     "conflict",
     "too_large",

@@ -122,3 +122,42 @@ def test_send_message_returns_bridge_message_id(monkeypatch):
         "chat_jid": "5511999999999@s.whatsapp.net",
         "timestamp": "2026-09-04T12:00:00Z",
     }
+
+
+class _Failed:
+    """A bridge failure body: `message` at the top, `error: {code, message}` under it."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        self.status_code = status
+        self.text = message
+        self._body = {"success": False, "message": message, "error": {"code": code, "message": message}}
+
+    def json(self):
+        return self._body
+
+
+def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch):
+    """`/api/download` answers 500 for both a CDN failure and a file the phone lost (#378)."""
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
+    monkeypatch.setattr(whatsapp, "_policy_denied", lambda *_a, **_k: None, raising=False)
+
+    gone = _Failed(500, "media_unavailable", "Failed to download media: sender's phone declined media retry: NOT_FOUND")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: gone)
+    with pytest.raises(ToolError) as exc:
+        whatsapp.download_media("MSG1", "5511999999999@s.whatsapp.net")
+    assert exc.value.code == "media_unavailable"
+    assert "NOT_FOUND" in exc.value.message
+
+    # Without a name, the status still decides.
+    cdn = _Failed(500, "internal", "Failed to download media: CDN says 410")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: cdn)
+    with pytest.raises(ToolError) as exc:
+        whatsapp.download_media("MSG1", "5511999999999@s.whatsapp.net")
+    assert exc.value.code == "bridge_unavailable"
+
+    # A code this server does not know is not passed through.
+    odd = _Failed(500, "teapot", "Failed to download media: ?")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: odd)
+    with pytest.raises(ToolError) as exc:
+        whatsapp.download_media("MSG1", "5511999999999@s.whatsapp.net")
+    assert exc.value.code == "bridge_unavailable"

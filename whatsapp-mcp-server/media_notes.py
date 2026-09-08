@@ -39,6 +39,11 @@ TRANSCRIPT_BACKEND_KEY = "transcript_backend"
 # Why a file has no transcript, written by the background worker
 # (transcribe_worker.py) so it stops retrying a file whisper cannot read.
 TRANSCRIPT_ERROR_KEY = "transcript_error"
+# The bytes are gone for good: not cached here, and the sender's phone answered
+# the bridge's media retry with "I no longer have it". Written by the ingest
+# worker (issue #378) so the walk stops asking a phone for a dead file every
+# time it comes round; clearing the note asks again.
+MEDIA_UNAVAILABLE_KEY = "media_unavailable"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
@@ -416,8 +421,11 @@ def store_transcript(sha256: str, result: dict[str, Any]) -> None:
     for key, value in ((TRANSCRIPT_LANG_KEY, result.get("language")), (TRANSCRIPT_BACKEND_KEY, result.get("backend"))):
         if value:
             annotate_media(sha256, key, str(value))
-    # An empty value deletes: a file that transcribes now is no longer failing.
+    # An empty value deletes. A file that transcribes now is no longer failing,
+    # and its bytes were clearly reachable, so a recorded miss is stale too:
+    # another copy of the same audio was here all along (issue #378).
     annotate_media(sha256, TRANSCRIPT_ERROR_KEY, "")
+    annotate_media(sha256, MEDIA_UNAVAILABLE_KEY, "")
 
 
 def get_media_notes(sha256: str) -> dict[str, Any]:

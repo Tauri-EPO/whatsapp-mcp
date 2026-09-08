@@ -1,6 +1,7 @@
 """The transcribe_audio MCP tool: argument validation, download step, error mapping."""
 
 import main
+from errors import ToolError
 from transcribe import TranscriptionError
 
 
@@ -81,3 +82,15 @@ def test_transcription_errors_map_to_codes(monkeypatch):
     monkeypatch.setattr(main, "transcribe_file", broken)
     out = main.transcribe_audio(file_path="/tmp/a.ogg")
     assert out["error"]["code"] == "internal" and "whisper backend" in out["error"]["message"]
+
+
+def test_media_the_phone_no_longer_has_keeps_its_own_code(monkeypatch):
+    """`media_unavailable` from the bridge must not read as "retry later" (issue #378)."""
+    _config(monkeypatch)
+
+    def gone(mid, chat):
+        raise ToolError("media_unavailable", "Failed to download media: sender's phone declined media retry: NOT_FOUND")
+
+    monkeypatch.setattr(main, "whatsapp_download_media", gone)
+    out = main.transcribe_audio(chat_jid="c@s.whatsapp.net", message_id="m1")
+    assert out["error"]["code"] == "media_unavailable" and "NOT_FOUND" in out["error"]["message"]

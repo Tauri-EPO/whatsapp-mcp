@@ -246,10 +246,12 @@ def coverage(
     nothing at all then, not that your contacts were silent.
 
     audio is the voice-note side of the same scope: {messages, cached,
-    transcribed, errors, backlog, backlog_cached, cached_examined} — inbound
-    voice notes stored, how many have their bytes on disk, how many already have
-    a transcript (or a recorded failure) in the notes, and backlog = the rest,
-    what transcribe_audio or TRANSCRIBE_ON_INGEST would still work through. Ask
+    transcribed, errors, unavailable, backlog, backlog_cached, cached_examined} —
+    inbound voice notes stored, how many have their bytes on disk, how many
+    already have a transcript, a recorded failure (errors) or bytes the sender's
+    phone no longer has (unavailable: nothing can ever fetch those), and
+    backlog = the rest, what transcribe_audio or TRANSCRIBE_ON_INGEST would
+    still work through. Ask
     it before starting a batch: backlog - backlog_cached is how many of those
     would have to be downloaded first. cached_examined equals messages unless an
     archive-wide call hit the scan ceiling, in which case the two cached counts
@@ -2199,6 +2201,11 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     (read_media, or transcribe_audio for voice notes) and then record what it
     is with annotate_media(sha256, "summary", ...) — the next time it turns up,
     in this chat or any other, the note comes back for free.
+
+    WhatsApp media expires from its CDN after a few days, and the bridge then asks
+    the sender's phone to re-upload it. When that phone answers that it no longer
+    has the file, this fails with `media_unavailable`: that file is gone for good,
+    so do not retry it — `bridge_unavailable` is the one worth retrying.
 
     Args:
         chat_jid: The JID of the chat containing the message

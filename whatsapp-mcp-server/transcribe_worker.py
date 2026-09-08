@@ -36,6 +36,11 @@ Properties that matter:
   round with a warning and no note, so those files are tried again next
   interval; the notes an older build wrote for such an outage are cleared when
   the worker starts (``clear_outage_failures``).
+- **Media the sender no longer has is recorded once.** When the bridge answers
+  ``media_unavailable`` — it asked the sender's phone to re-upload and the phone
+  said the file is gone — the hash gets a ``media_unavailable`` note and leaves
+  the work list, instead of being asked for again on every pass over the archive
+  (issue #378).
 
 ``messages.db`` is the bridge's; this module only ever reads it. Everything it
 writes goes to ``notes.db``, and the policies that bound the tools bound it too:
@@ -55,13 +60,14 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 import media_inventory
 import media_notes
 import whatsapp
 from errors import ToolError
-from media_notes import TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
+from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
 from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, DOWNLOAD_TOOL, load_tool_policy, parse_bool_env
 from transcribe import BackendUnavailableError, TranscriptionError, load_config, transcribe_file
 from whatsapp import CHAT_POLICY
@@ -102,6 +108,10 @@ MAX_ERROR_CHARS = 500
 # request the server choked on, and skipping it keeps the batch moving instead
 # of letting one voice note stall the walk for ever.
 MAX_OUTAGE_SKIPS = 3
+# The bridge's code for "the sender's phone no longer has this media"
+# (whatsapp-bridge/media_retry.go). Asking again cannot help, so the row is
+# noted and skipped instead of retried on every pass (issue #378).
+MEDIA_UNAVAILABLE_CODE = "media_unavailable"
 # ``transcript_error`` values written before an outage was told apart from a file
 # whisper cannot read (#377): they name the backend, not the audio, so they are
 # cleared once per process at startup and those files queue up again. Matched
@@ -139,6 +149,16 @@ class Candidate:
     chat_jid: str
     sha256: str
     path: str
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """One download attempt: the readable path, or why there will never be one."""
+
+    path: str | None = None
+    # The bridge's `media_unavailable`: the sender's phone answered that the
+    # bytes are gone. Empty for a failure worth retrying.
+    unavailable: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,7 +237,12 @@ def _parse_batch(raw: str | None) -> int:
 
 
 def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
-    """SQL predicate for "this hash has neither a transcript nor a recorded failure".
+    """SQL predicate for "this hash is done with": a transcript, or a recorded miss.
+
+    The recorded misses are ``transcript_error`` (whisper could not read the
+    file) and ``media_unavailable`` (the sender's phone answered that the bytes
+    are gone, so no download will ever bring them here — issue #378). Both take
+    the row off the work list until the note is cleared.
 
     notes.db is a separate file, so it is attached to the read connection for the
     query instead of pulling every transcribed hash into the statement as
@@ -232,8 +257,8 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
         return "1", []
     return (
         "NOT EXISTS (SELECT 1 FROM notesdb.media_notes n "
-        "WHERE n.sha256 = lower(hex(m.file_sha256)) AND n.key IN (?, ?))",
-        [TRANSCRIPT_KEY, TRANSCRIPT_ERROR_KEY],
+        "WHERE n.sha256 = lower(hex(m.file_sha256)) AND n.key IN (?, ?, ?))",
+        [TRANSCRIPT_KEY, TRANSCRIPT_ERROR_KEY, MEDIA_UNAVAILABLE_KEY],
     )
 
 
@@ -318,9 +343,13 @@ def find_pending(
     them: with the bridge refusing everything the walk still advances by the
     downloads it attempted, and the rest of the page is read anyway, so audio
     that is already cached further down is picked up in the same round. A file
-    the bridge will never send is just skipped: it is not the file whisper could
-    not read, so it gets no ``transcript_error`` note, and it is tried again
-    when the walk comes round.
+    the bridge could not send this time is just skipped: it is not the file
+    whisper could not read, so it gets no ``transcript_error`` note, and it is
+    tried again when the walk comes round. A file the bridge says is *gone* —
+    the sender's phone was asked to re-upload and answered that it no longer has
+    it — gets a ``media_unavailable`` note instead, which takes it off the work
+    list for good, and costs no strike: an archive of expired media would
+    otherwise end every round after three rows (issue #378).
     """
     batch = max(1, batch)
     page_limit = batch * CANDIDATE_FACTOR
@@ -330,6 +359,7 @@ def find_pending(
     budget = batch if fetch else 0  # fetch attempts left this round
     head_budget = min(batch - 1, HEAD_FETCHES) if fetch else 0  # ... of which the newest rows may spend these
     failures = 0  # consecutive; a success clears them
+    unavailable = 0  # rows the sender's phone answered are gone, recorded this round
     parked = False  # out of fetches: the walk stops advancing so nothing is stepped over untried
     walking = False
     caches: dict[str, dict[str, str]] = {}  # chat -> message id -> cached filename
@@ -363,8 +393,25 @@ def find_pending(
             path = os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
         elif budget > 0:
             budget -= 1
-            path = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
-            if path is None:
+            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
+            path = fetched.path
+            strike = path is None
+            if fetched.unavailable:
+                # Not the bridge failing: the phone answered, and the answer is
+                # final. Recording it is what makes the walk stop asking, and it
+                # then costs no strike — an archive full of expired media would
+                # otherwise end every round after three rows (issue #378).
+                if _cached_copy_exists(sha256, (message_id, chat_jid)):
+                    # The same audio is on disk under another row. The note is
+                    # per hash, so writing it would hide bytes this process can
+                    # already read; the walk transcribes that copy instead.
+                    strike = False
+                elif _record_unavailable(sha256, fetched.unavailable):
+                    unavailable += 1
+                    strike = False
+                # Otherwise nothing was remembered (notes.db unwritable): keep
+                # the strike, so the round still stops after three of them.
+            if strike:
                 failures += 1
                 if failures >= MAX_FETCH_FAILURES:
                     budget = 0
@@ -383,6 +430,11 @@ def find_pending(
             break
     if not full and not parked and len(page) < page_limit:
         next_position = None  # the walk reached the oldest row; start over at the newest
+    if unavailable:
+        logger.info(
+            "transcribe_on_ingest: %d voice notes the sender's phone no longer has, recorded and skipped from now on",
+            unavailable,
+        )
     return Selection(candidates=out, examined=len(looked_at), position=next_position)
 
 
@@ -393,8 +445,8 @@ def _fetch_bytes(
     caches: dict[str, dict[str, str]],
     *,
     quiet: bool,
-) -> str | None:
-    """Ask the bridge to cache one message's media and return the local path, or None.
+) -> Fetched:
+    """Ask the bridge to cache one message's media: the local path, or why there is none.
 
     The path the bridge answers with is the bridge's; this process looks the file
     up in its own view of the chat directory first, so a store mounted under two
@@ -403,20 +455,85 @@ def _fetch_bytes(
     the chat's whole map after every fetched file cost a full directory read per
     download (issue #318). The row is resolved right after this, so nothing in
     this round reads that entry back; it is written to keep the map honest.
+
+    ``media_unavailable`` is the one answer that is not a failure of the bridge:
+    the sender's phone was asked to re-upload and said it no longer has the
+    file, which no later request can change (issue #378).
     """
     try:
         path = download(message_id, chat_jid)
+    except ToolError as exc:
+        if exc.code == MEDIA_UNAVAILABLE_CODE:
+            # Expected on an old archive, and per file, so it stays at debug:
+            # the round logs how many it recorded.
+            logger.debug("transcribe_on_ingest: %s is gone for good: %s", message_id, exc.message)
+            return Fetched(unavailable=exc.message)
+        _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
+        return Fetched()
     except Exception as exc:  # noqa: BLE001 - one message must not end the round
         _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
-        return None
+        return Fetched()
     name = media_inventory.lookup_cached_name(chat_jid, message_id)
     if name is not None:
         caches.setdefault(chat_jid, {})[message_id] = name
-        return os.path.join(media_inventory.chat_media_dir(chat_jid), name)
+        return Fetched(path=os.path.join(media_inventory.chat_media_dir(chat_jid), name))
     if path and os.path.exists(path):
-        return path
+        return Fetched(path=path)
     _log_fetch_problem(quiet, f"the bytes of {message_id} are not readable here ({path or 'no path'})")
-    return None
+    return Fetched()
+
+
+def _record_unavailable(sha256: str, reason: str) -> bool:
+    """Remember that the bytes are gone for good, so the walk stops asking for them.
+
+    Keyed by content hash like every other note, so the same voice note
+    forwarded into three chats is recorded once, and dated in the value as well
+    as in ``updated_at`` — ``list_media`` shows values, not timestamps. Clearing
+    the note (``annotate_media(sha256, "media_unavailable", "")``) asks the
+    phone again, which is what to do after restoring a backup on it.
+
+    Returns whether the note was written: on a notes.db that cannot be written
+    the caller must keep counting the round's strikes, or it would spend a whole
+    batch of downloads per round on rows it cannot remember.
+    """
+    dated = f"{datetime.now(UTC).date().isoformat()}: {reason or 'the sender no longer has this media'}"
+    try:
+        media_notes.annotate_media(sha256, MEDIA_UNAVAILABLE_KEY, dated[:MAX_ERROR_CHARS])
+    except (ToolError, sqlite3.Error) as exc:
+        logger.warning("transcribe_on_ingest: could not record the missing media of %s: %s", sha256[:12], exc)
+        return False
+    return True
+
+
+def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
+    """Is the same audio cached under another message row?
+
+    A note is keyed by content hash, so recording "the sender no longer has
+    this" for one row would also take a copy of the same voice note that is
+    sitting on disk in another chat off the work list — a file this process can
+    read for free. Rare (a forward whose original is still cached) and cheap to
+    rule out: ``file_sha256`` is indexed and only a definitive miss asks.
+    """
+    clauses = ["file_sha256 = ?"]
+    params: list[Any] = [bytes.fromhex(sha256)]
+    if CHAT_POLICY.restricted:
+        clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
+        clauses.append(clause)
+        params.extend(clause_params)
+    try:
+        conn = whatsapp._connect_messages_db()
+        try:
+            rows = conn.execute(f"SELECT id, chat_jid FROM messages WHERE {' AND '.join(clauses)}", params).fetchall()
+        finally:
+            conn.close()
+    except (sqlite3.Error, ValueError) as exc:  # unreadable archive, or a hash that is not hex
+        logger.debug("transcribe_on_ingest: could not look for other copies of %s: %s", sha256[:12], exc)
+        return False
+    return any(
+        (str(message_id), str(chat_jid)) != exclude
+        and media_inventory.lookup_cached_name(str(chat_jid), str(message_id)) is not None
+        for message_id, chat_jid in rows
+    )
 
 
 def _log_fetch_problem(quiet: bool, message: str) -> None:

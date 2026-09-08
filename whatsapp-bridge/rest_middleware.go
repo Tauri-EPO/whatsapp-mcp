@@ -45,9 +45,18 @@ func errorCode(status int) string {
 
 // writeError answers a failure as JSON. Drop-in for http.Error.
 func writeError(w http.ResponseWriter, status int, message string) {
+	writeErrorCode(w, status, errorCode(status), message)
+}
+
+// writeErrorCode is writeError for a failure whose meaning is finer than its
+// HTTP status: /api/download answers 500 whether the bridge could not reach the
+// CDN or the sender's phone answered that the file is gone, and only the second
+// is worth remembering (media_unavailable, issue #378). The MCP server reads
+// error.code when it knows it and falls back to the status otherwise.
+func writeErrorCode(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(apiError{Message: message, Error: apiErrorBody{Code: errorCode(status), Message: message}})
+	_ = json.NewEncoder(w).Encode(apiError{Message: message, Error: apiErrorBody{Code: code, Message: message}})
 }
 
 // requireMethod rejects everything but m with a JSON 405.
