@@ -18,6 +18,7 @@ from http_auth import (
     resolve_rate_limit,
 )
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
+from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
 from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY
 from media_notes import annotate_media as notes_annotate_media
@@ -2193,7 +2194,13 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
 @tool_errors
 @untrusted_content
 def read_media(
-    chat_jid: str, message_id: str, max_bytes: int = 0, as_text: bool = False, max_pages: int = 0
+    chat_jid: str,
+    message_id: str,
+    max_bytes: int = 0,
+    as_text: bool = False,
+    max_pages: int = 0,
+    max_edge: int = DEFAULT_MAX_EDGE,
+    quality: int = DEFAULT_QUALITY,
 ) -> list[ContentBlock]:
     """Read the media of a WhatsApp message: the bytes come back, not a path.
 
@@ -2201,13 +2208,26 @@ def read_media(
     download_media only hands back a path on the server's own filesystem.
 
     What you get back:
-      - an image (photo, sticker) as image content you can see directly, up to 16 MB;
+      - an image (photo, sticker, and also TIFF, BMP, HEIC) as image content you
+        can see directly, from a file up to 16 MB;
       - a text-ish file (.txt, .csv, .json, .md) as text, up to 1 MB;
       - a voice note or audio file as audio content, up to 2 MB — but prefer
         transcribe_audio, which gives you text you can actually read;
       - anything else (PDF, DOCX, video, archives) as an embedded resource
         carrying the file's real MIME type, up to 2 MB, so a client that knows
         that type can hand it to you as a document.
+
+    **Images are prepared for you**: resized to fit `max_edge` (default 1568 px on
+    the long edge, never upscaled), turned upright from the camera's EXIF tag,
+    stripped of metadata (GPS, serial numbers) and re-encoded as JPEG at `quality`
+    — PNG when the image has transparency, first frame only for an animation. You
+    see the same picture for a small fraction of the payload, and a 6 MB phone
+    photo stops failing at the client. An image that needs none of that travels
+    unchanged: a sticker or an icon under 1 MB, already small enough, upright and
+    carrying no metadata. Pass `max_edge=0` when the detail matters (small print
+    on a receipt, a document photographed from far away) and the stored bytes come
+    back untouched — for a TIFF, BMP or HEIC that means a resource block instead,
+    since no client renders those. The file on the server is never modified.
 
     **For a document, pass as_text=True**: a PDF, DOCX or XLSX is then read here and
     comes back as text — a few dozen KB instead of megabytes of a blob you cannot
@@ -2222,6 +2242,9 @@ def read_media(
     comes back for free every time the file turns up again. It also carries
     `resource_link` — the same file as an MCP resource, `whatsapp://media/...`, for a
     client that fetches bytes itself — whenever a resource read of it would succeed.
+    For an image it also carries `width`, `height`, `resized`, the file's own
+    `original_bytes` / `original_mime`, and `original_frames` when an animation was
+    flattened; `mime` and `bytes` describe what you got.
 
     A file above the applicable limit fails with `too_large` reporting its real size;
     lower `max_bytes` yourself when your client cannot hold that much. A file that is
@@ -2236,12 +2259,23 @@ def read_media(
                    which is also the ceiling: a larger value does not raise it)
         as_text: Extract the text of a PDF/DOCX/XLSX instead of returning its bytes
         max_pages: With as_text, how many pages (or tables, or sheets) to read (default 20)
+        max_edge: Longest edge in pixels for an image (default 1568; 0 = the stored
+                  bytes, unresized and unconverted)
+        quality: JPEG quality when an image is re-encoded, 1-100 (default 85)
 
     Returns:
         A list of content blocks: the file (or its text), then the JSON metadata
         block, which carries `pages_total` and `truncated` when as_text is used.
     """
-    return media_read_bytes(chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_pages=max_pages)
+    return media_read_bytes(
+        chat_jid,
+        message_id,
+        max_bytes=max_bytes,
+        as_text=as_text,
+        max_pages=max_pages,
+        max_edge=max_edge,
+        quality=quality,
+    )
 
 
 def _store_transcript(sha256: str, result: dict[str, Any]) -> bool:

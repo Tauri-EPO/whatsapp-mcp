@@ -294,4 +294,12 @@ class TestScope:
 
         tool = main.mcp._tool_manager.get_tool("read_media")
         assert tool is not None
-        assert declared_arguments(tool) == {"chat_jid", "message_id", "max_bytes", "as_text", "max_pages"}
+        assert declared_arguments(tool) == {
+            "chat_jid",
+            "message_id",
+            "max_bytes",
+            "as_text",
+            "max_pages",
+            "max_edge",
+            "quality",
+        }

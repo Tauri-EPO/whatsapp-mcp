@@ -9,7 +9,11 @@ read its size and its notes, and never look at it.
 
 ``read_media`` closes that gap by returning MCP **content blocks**:
 
-* an image as ``ImageContent`` — the model sees the picture, capped at 16 MiB;
+* an image as ``ImageContent`` — the model sees the picture. The file may be up
+  to 16 MiB, but what travels is a copy downscaled to ``max_edge`` and
+  re-encoded (media_image.py), because a vision model resamples to ~1568 px
+  before it looks at anything and most clients refuse a block above ~5 MB;
+  ``max_edge=0`` sends the stored bytes instead;
 * a small text-ish file (``text/*``, JSON, CSV) as text, capped at 1 MiB;
 * a voice note as ``AudioContent``, the block the protocol has for audio;
 * anything else — a PDF, a DOCX, a video, an archive — as an
@@ -54,6 +58,7 @@ from mcp_types import (
     TextContent,
 )
 
+import media_image
 import media_inventory
 import media_text
 import whatsapp
@@ -85,10 +90,16 @@ TEXT_MIMES = frozenset(
     }
 )
 
-# The image types an MCP client can actually display. Anything else labelled
-# image/* (TIFF, HEIC, ICO...) goes out as a resource: a block a client refuses
-# to render fails the whole call, while the bytes at least arrive.
+# The image types an MCP client can actually display: the ones that may travel
+# as they are. A block a client refuses to render fails the whole call.
 RENDERABLE_IMAGE_MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+# Every type read_media treats as a picture: the four above plus the ones
+# media_image converts to JPEG/PNG on the way out (TIFF, BMP, HEIC). The
+# converted ones only earn the image size cap on the path that converts them
+# (``hard_limit``); everywhere else — ``max_edge=0``, ``resources/read`` — they
+# are still bytes in a resource and keep the blob cap they had.
+IMAGE_MIMES = RENDERABLE_IMAGE_MIMES | media_image.CONVERTIBLE_IMAGE_MIMES
 
 # The audio types that go out as ``AudioContent``. WhatsApp voice notes are all
 # Opus in an Ogg container; the other three are what a forwarded audio file
@@ -115,7 +126,23 @@ IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"GIF87a", "image/gif"),
     (b"GIF89a", "image/gif"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
 )
+
+# HEIC/HEIF is ISO base media like MP4 — `....ftyp<brand>` — so only the brand
+# tells a photo from a video. The `he*` brands are what an iPhone writes; the
+# two generic ones are what a converter writes.
+HEIF_BRANDS = {
+    b"heic": "image/heic",
+    b"heix": "image/heic",
+    b"hevc": "image/heic",
+    b"hevx": "image/heic",
+    b"heim": "image/heif",
+    b"heis": "image/heif",
+    b"mif1": "image/heif",
+    b"msf1": "image/heif",
+}
 
 # Same problem, worse: the bridge names *every* audioMessage `.ogg`
 # (whatsapp-bridge/content.go), so an MP3 a contact attached from WhatsApp's
@@ -152,6 +179,11 @@ EXTENSION_MIME = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".svg": "image/svg+xml",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".bmp": "image/bmp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
     ".ogg": "audio/ogg",
     ".opus": "audio/ogg",
     ".mp3": "audio/mpeg",
@@ -351,6 +383,19 @@ def sniff_image_mime(path: str) -> str | None:
             return mime
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "image/webp"
+    if head[4:8] == b"ftyp":
+        return HEIF_BRANDS.get(head[8:12])
+    if head.startswith(b"BM") and len(head) >= 6:
+        # "BM" is two bytes, far too weak for a table whose job is to catch
+        # payloads that do not match their name — and a false positive here is
+        # not a mislabelled block but a failed call, since an image type goes
+        # to a decoder. The header's own file-size field has to agree with the
+        # file on disk before this counts as a BMP.
+        try:
+            if int.from_bytes(head[2:6], "little") == os.path.getsize(path):
+                return "image/bmp"
+        except OSError:
+            return None
     return None
 
 
@@ -393,9 +438,11 @@ def declared_mime(media_type: str, filename: str | None, path: str = "") -> str:
         return mime
     # A name that promises a type the payload does not have must not produce a
     # typed block: the client rejects it, and a rejected block fails the whole
-    # call. An unrecognised payload behind such a name is untyped instead.
+    # call. An unrecognised payload behind such a name is untyped instead — and
+    # that is also what keeps a decoder from ever being pointed at it, since
+    # every image type media_image opens got there by matching a signature.
     if mime.startswith("image/"):
-        return sniff_image_mime(path) or ("application/octet-stream" if mime in RENDERABLE_IMAGE_MIMES else mime)
+        return sniff_image_mime(path) or ("application/octet-stream" if mime in IMAGE_MIMES else mime)
     if mime.startswith("audio/"):
         return sniff_audio_mime(path) or ("application/octet-stream" if mime in PLAYABLE_AUDIO_MIMES else mime)
     return mime
@@ -405,16 +452,23 @@ def is_text_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in TEXT_MIMES
 
 
-def hard_limit(mime: str, as_text: bool = False) -> int:
+def hard_limit(mime: str, as_text: bool = False, max_edge: int = 0) -> int:
     """The ceiling for this type — and, with the branches below, what decides the block.
 
     Extraction has its own, much higher ceiling: what bounds ``as_text`` is the
     text it produces (media_text.MAX_TEXT_CHARS), not the size of the file it
     reads, which is the whole reason to extract instead of returning base64.
+
+    ``max_edge`` matters for the same reason in the other direction. A big JPEG
+    is affordable because what travels is a downscaled copy; a TIFF is only
+    affordable on the path that makes one of it. Without ``max_edge`` — a
+    ``max_edge=0`` call, a ``resources/read``, a ``list_media`` link — those
+    types are what they were before #368: bytes in a resource, capped like any
+    other blob, rather than 12 MB of base64 in a block no client renders.
     """
     if as_text and mime in media_text.EXTRACTABLE_MIMES:
         return media_text.MAX_EXTRACT_BYTES
-    if mime in RENDERABLE_IMAGE_MIMES:
+    if mime in RENDERABLE_IMAGE_MIMES or (max_edge and mime in media_image.CONVERTIBLE_IMAGE_MIMES):
         return MAX_IMAGE_BYTES
     if is_text_mime(mime):
         return MAX_TEXT_BYTES
@@ -459,7 +513,13 @@ def text_block(text: str) -> TextContent:
 
 
 def meta_block(sha256: str | None, mime: str, size: int, **extra: Any) -> TextContent:
-    """The trailing block: what the file is, and what the agent already knows about it."""
+    """The trailing block: what the file is, and what the agent already knows about it.
+
+    ``mime`` and ``bytes`` describe what came back, so a branch that re-encoded
+    the file (the image one) overrides them through ``extra`` and adds
+    ``original_mime`` / ``original_bytes`` for the file on disk. ``sha256`` is
+    always the stored file's, because that is what ``annotate_media`` keys on.
+    """
     notes: dict[str, str] = {}
     if sha256:
         from media_notes import fetch_notes
@@ -531,7 +591,12 @@ class ResolvedMedia(NamedTuple):
 
 
 def resolve_media(
-    chat_jid: str, message_id: str, caller: str = "read_media", max_bytes: int = 0, as_text: bool = False
+    chat_jid: str,
+    message_id: str,
+    caller: str = "read_media",
+    max_bytes: int = 0,
+    as_text: bool = False,
+    max_edge: int = 0,
 ) -> ResolvedMedia:
     """The file behind one message, proven readable, or the refusal.
 
@@ -540,7 +605,9 @@ def resolve_media(
     allow-list, the row, the implicit-download policy of issue #350, the proof
     that the path resolves inside this chat's directory (inside
     ``cached_path`` / ``download_path``), and the cap for the resolved type.
-    ``caller`` only names the tool in the refusal an agent reads.
+    ``caller`` only names the tool in the refusal an agent reads; ``as_text``
+    and ``max_edge`` only tell ``hard_limit`` which ceiling applies, because a
+    file read as text or as a downscaled picture is not the size it costs.
     """
     whatsapp._require_allowed(chat_jid)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
@@ -556,7 +623,7 @@ def resolve_media(
         # skips the obvious no.
         if reported:
             expected = guess_mime(media_type, filename)
-            check_size(reported, cap(max_bytes, hard_limit(expected, as_text)), expected, caller)
+            check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge)), expected, caller)
         path = download_path(chat_jid, message_id)
 
     mime = declared_mime(media_type, filename, path)
@@ -568,8 +635,47 @@ def resolve_media(
         size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
-    check_size(size, cap(max_bytes, hard_limit(mime, as_text)), mime, caller)
+    check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge)), mime, caller)
     return ResolvedMedia(path, mime, size, sha256, filename)
+
+
+def _image_blocks(found: ResolvedMedia, max_edge: int, quality: int) -> tuple[list[ContentBlock], dict[str, Any]]:
+    """The picture, sized for a model, and what the metadata block should say about it.
+
+    The overrides matter: ``mime`` and ``bytes`` describe the payload that
+    actually travelled (JPEG, downscaled), while ``original_mime`` and
+    ``original_bytes`` describe the file in the store — what ``sha256``
+    identifies, what ``resource_link`` points at and what ``resources/read``
+    serves, none of which this re-encoding touches.
+    """
+    rendered = media_image.render(
+        found.path,
+        found.mime,
+        max_edge,
+        quality,
+        # The stored bytes may travel only when a client renders that type and
+        # the file is small enough that re-encoding it would not pay for itself.
+        passthrough=found.mime in RENDERABLE_IMAGE_MIMES and found.size <= media_image.PASSTHROUGH_MAX_BYTES,
+    )
+    data = read_capped(found.path, found.size) if rendered.data is None else rendered.data
+    blocks: list[ContentBlock] = [
+        ImageContent(type="image", data=base64.b64encode(data).decode("ascii"), mime_type=rendered.mime)
+    ]
+    extra: dict[str, Any] = {
+        "mime": rendered.mime,
+        "bytes": len(data),
+        "original_bytes": found.size,
+        "original_mime": found.mime,
+        "width": rendered.width,
+        "height": rendered.height,
+        "resized": rendered.resized,
+    }
+    if rendered.frames > 1:
+        # An animation flattened to frame 0. Said out loud, because a still
+        # frame reads exactly like a still image and the agent would never
+        # think to ask for the rest with max_edge=0.
+        extra["original_frames"] = rendered.frames
+    return blocks, extra
 
 
 def read_media(
@@ -578,9 +684,15 @@ def read_media(
     max_bytes: int = 0,
     as_text: bool = False,
     max_pages: int = 0,
+    max_edge: int = media_image.DEFAULT_MAX_EDGE,
+    quality: int = media_image.DEFAULT_QUALITY,
 ) -> list[ContentBlock]:
     """The media of one message as content blocks. See the module docstring."""
-    found = resolve_media(chat_jid, message_id, max_bytes=max_bytes, as_text=as_text)
+    # Argument validation before any I/O: "max_edge cannot be negative" must not
+    # arrive after a CDN transfer paid for it.
+    edge = media_image.edge_limit(max_edge)
+    encode_quality = media_image.quality_limit(quality)
+    found = resolve_media(chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_edge=edge)
     path, mime, size, sha256 = found.path, found.mime, found.size, found.sha256
 
     blocks: list[ContentBlock]
@@ -590,7 +702,11 @@ def read_media(
         # asking for a JPEG as text is refused inside extract() rather than
         # silently answered with its bytes.
         blocks, extra = _extracted_blocks(path, mime, max_pages)
+    elif mime in IMAGE_MIMES and edge:
+        blocks, extra = _image_blocks(found, edge, encode_quality)
     elif mime in RENDERABLE_IMAGE_MIMES:
+        # max_edge=0: the file as it is stored, which is what an agent asks for
+        # when the detail matters more than the payload.
         data = read_capped(path, size)
         blocks = [ImageContent(type="image", data=base64.b64encode(data).decode("ascii"), mime_type=mime)]
     elif is_text_mime(mime):
@@ -640,4 +756,9 @@ def read_media(
         extra["resource_link"] = resource_link(
             chat_jid, message_id, found.filename or os.path.basename(path), mime, size
         )
-    return [*blocks, meta_block(sha256, mime, size, **extra)]
+    # The stored file's type and size, except where a branch re-encoded it: the
+    # metadata block describes the payload that travelled, and puts the file's
+    # own numbers under `original_mime` / `original_bytes`.
+    payload_mime = extra.pop("mime", mime)
+    payload_bytes = extra.pop("bytes", size)
+    return [*blocks, meta_block(sha256, payload_mime, payload_bytes, **extra)]

@@ -30,6 +30,14 @@ dependencies = [
     "pypdf>=6.4",
     "python-docx>=1.2",
     "openpyxl>=3.1",
+    # read_media images: downscale a photo to the ~1568 px a vision model reads
+    # instead of shipping 6 MB of base64, apply the EXIF rotation and drop the
+    # camera metadata (media_image.py). pillow-heif adds the one format Pillow
+    # itself cannot open, which is what an iPhone attaches. Both ship
+    # self-contained manylinux wheels for amd64 and arm64, so the image gains no
+    # system packages.
+    "pillow>=12.3",
+    "pillow-heif>=1.7",
 ]
 
 [project.optional-dependencies]

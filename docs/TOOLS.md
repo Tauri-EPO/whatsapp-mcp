@@ -120,7 +120,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 | `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
 | `invalid_argument` | Missing or malformed input | Fix the call |
 | `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
-| `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit` | Read a smaller file, or `download_media` when the client shares the filesystem |
+| `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit`, or `pixels` and `limit` for an image too big to decode | Read a smaller file, or `download_media` when the client shares the filesystem |
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
 | `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
 
@@ -1091,15 +1091,25 @@ tool an agent on another machine uses to actually look at a photo;
   and return its text instead of its bytes (see below)
 - `max_pages` (optional, default 20): with `as_text`, how many pages, tables or
   sheets to read
+- `max_edge` (optional, default 1568): longest edge, in pixels, of the image that
+  comes back. `0` returns the stored bytes untouched (see below); values above
+  8192 are clamped
+- `quality` (optional, default 85): JPEG quality when an image is re-encoded,
+  1–100
 
 Returns a list of MCP **content blocks**, not a JSON object:
 
 | The file is | You get | Limit |
 |---|---|---|
-| a JPEG, PNG, GIF or WebP image | `ImageContent`: the model sees the picture | 16 MB |
+| an image: JPEG, PNG, GIF, WebP, and also TIFF, BMP, HEIC/HEIF | `ImageContent`: the model sees the picture, [downscaled](#images-are-downscaled-before-they-travel) | 16 MB **on disk** |
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
-| anything else (PDF, DOCX, XLSX, video, archives, TIFF/HEIC) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
+| anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
+
+The 16 MB in the first row is the size **of the file**, not of the answer: what
+travels is the downscaled copy. It covers TIFF, BMP and HEIC only on the path
+that converts them — with `max_edge=0`, or through `resources/read`, those three
+are bytes in a resource and keep the 2 MB cap of the last row.
 
 That last row is what makes a PDF usable at all (issue #367). It used to be a
 text block whose first line was `base64:<mime>:<bytes>` — a shape every client
@@ -1122,8 +1132,55 @@ attached, and `messages` has no MIME column to contradict it. Bytes that match
 no signature come back as a resource (`application/octet-stream` when the name
 promised an image or playable audio), never as a block a client would refuse.
 
+#### Images are downscaled before they travel
+
+A photo used to go out exactly as WhatsApp delivered it: up to 16 MB of base64
+inside the JSON response. No vision model uses that resolution — Claude resamples
+to about 1568 px on the long edge before it looks at anything — and most clients
+refuse an image block above ~5 MB, so the biggest photos were the ones that
+failed (issue #368). So `read_media` prepares the picture first:
+
+- **resized** to fit `max_edge` on the long edge, never upscaled — a 4000 px
+  photo comes back at 1568 px, a 400 px one is left alone;
+- **rotated upright** from the EXIF orientation tag a phone writes instead of
+  turning the pixels;
+- **stripped** of metadata: no GPS coordinates, camera serial or timestamps
+  travel with the image;
+- **re-encoded** as JPEG at `quality` — PNG instead when the image has
+  transparency, so a sticker does not arrive on a black square. An animation is
+  flattened to its first frame, and the metadata block says how many there were.
+
+Measured on a generated 4000×3000 photo: 10.8 MB on disk → 654 KB in the answer
+(**16x**), and 627 KB → 49 KB (**13x**) for a smoother one. The same step is what
+makes **TIFF, BMP and HEIC/HEIF** readable at all: no MCP client renders them, so
+they used to come back as a blob; converted, they are `ImageContent` like any
+photo, and only then do they get the image size cap instead of the 2 MB blob one.
+
+The file on the server is **never modified**: the cache under `store/<chat_jid>/`
+stays byte-for-byte what WhatsApp delivered, which is what `sha256` identifies
+and what a [`whatsapp://media/...`](#reading-media-whatsappmedia) resource read
+serves. `max_edge=0` asks for exactly those bytes — the right call when the
+detail matters (small print on a receipt, a document photographed from far away),
+and the only way to get a TIFF/HEIC as its own format (as an `EmbeddedResource`,
+since no client renders it, and then under the 2 MB blob cap). A small image is
+**not** re-encoded either: under 1 MB, already inside `max_edge`, already upright,
+already in a format clients render **and** carrying no metadata to strip, its own
+bytes travel — a lossy round trip through JPEG would cost quality to save a few
+dozen KB. A phone photo always carries an EXIF block, so it is always re-encoded;
+what takes the cheap path is the sticker, the icon and the screenshot.
+
+Two refusals belong to this path: an image whose pixel count is above 64
+megapixels is `too_large` before it is decoded (a decompression bomb is a file
+anyone who can message the account may send), and a file whose bytes match an
+image signature but do not decode is `invalid_argument` naming `max_edge=0` as
+the way to get them anyway. Bytes matching no signature never reach the decoder
+at all — they are a resource, as above.
+
 The last block is always JSON with `{"sha256", "mime", "bytes", "truncated", "notes",
-"resource_link"}` (`resource_link` being the same
+"resource_link"}` — and for an image also `width`, `height`, `resized`,
+`original_bytes`, `original_mime` and, for a flattened animation,
+`original_frames`; `mime`/`bytes` describe what you got
+and `original_*` the file on disk (`resource_link` being the same
 [`whatsapp://media/...`](#reading-media-whatsappmedia) URI the file has as an MCP
 resource, present whenever a resource read of it would succeed — `as_text` reads
 documents far past that ceiling). That is what closes the loop below: `list_media(has_notes=false)` finds a file
@@ -1241,10 +1298,13 @@ again. `read_media` puts the same link in its trailing JSON block.
 metadata block, no notes, and no `<untrusted>` delimiters even with
 [`WHATSAPP_WRAP_UNTRUSTED`](CONFIGURATION.md#marking-message-content-as-untrusted)
 on — a resource is the file byte for byte, and a delimiter inserted into it
-would be an edit. Use `read_media` when you want the bytes *and* the hash, the
-notes or the extracted text of a document, when you want the envelope, or when
-the client does not fetch resources at all; use the resource when the client
-would rather decide for itself which rows of a 200-row page it pulls down.
+would be an edit. An image is served at its stored size too: the
+[downscaling](#images-are-downscaled-before-they-travel) belongs to the tool
+result a model reads, not to a byte-for-byte fetch. Use `read_media` when you
+want the bytes *and* the hash, the notes, a photo sized for a model or the
+extracted text of a document, when you want the envelope, or when the client
+does not fetch resources at all; use the resource when the client would rather
+decide for itself which rows of a 200-row page it pulls down.
 
 Both paths pass the same gates in the same order, so a link is never a way
 around a rule: `WHATSAPP_ALLOWED_CHATS`, the message row (a text message has no
