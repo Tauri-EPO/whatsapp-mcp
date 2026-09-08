@@ -19,7 +19,7 @@ import httpx
 import audio
 import endpoint_cert
 import transcribe
-from chat_policy import load_chat_policy, normalize_chat_entry
+from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
 from errors import ToolError
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
@@ -451,6 +451,10 @@ class Chat:
     # The name the contact gave themselves, whatever `name` ended up being.
     # A cached snapshot of unknown age (whatsmeow_contacts has no timestamp).
     push_name: str | None = None
+    # Every spelling this row speaks for when a listing collapsed the phone JID
+    # and the `@lid` of one person into it (issue #337): [phone JID, LID JID],
+    # `jid` being the first of them. Empty on a chat WhatsApp knows one way only.
+    aliases: list[str] = field(default_factory=list)
 
     @property
     def is_group(self) -> bool:
@@ -790,8 +794,12 @@ def msg_to_dict(
 
 
 def chat_to_dict(chat: "Chat") -> dict[str, Any]:
-    """Convert a Chat dataclass to a dictionary for JSON serialization."""
-    return {
+    """Convert a Chat dataclass to a dictionary for JSON serialization.
+
+    `aliases` is only on the rows that carry one — a merged phone/LID pair
+    (issue #337) — the way `notes` is only on the rows that have notes.
+    """
+    row = {
         "jid": chat.jid,
         "name": chat.name,
         "push_name": chat.push_name,
@@ -805,6 +813,9 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
         "has_messages": chat.has_messages,
         "unread": chat.unread,
     }
+    if chat.aliases:
+        row["aliases"] = list(chat.aliases)
+    return row
 
 
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
@@ -851,7 +862,9 @@ _CHAT_ROW_FIELDS: tuple[str, ...] = (
 # list_unanswered cannot but reports how long the chat has been waiting. A name
 # accepted and then always absent from the row is the silent no-op `fields`
 # exists to avoid, so each tool validates against the keys its rows can carry.
-CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated")
+# "aliases" is on the listings that collapse a phone/LID pair (issue #337), which
+# the unanswered queue does not, so it is a valid name on one tuple only.
+CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated", "aliases")
 UNANSWERED_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "last_inbound_time", "age_hours")
 
 # The three keys include_group_mentions=True adds. They are only valid names
@@ -1280,6 +1293,298 @@ def lid_map_counterparts(users: Sequence[str]) -> dict[str, str]:
     except sqlite3.Error as e:
         logger.debug("lid-map batch failed: %s", e)
     return pairs
+
+
+def _cached_lid_counterparts(users: Sequence[str]) -> dict[str, str]:
+    """`lid_map_counterparts` behind the name cache: one query for the users not seen yet.
+
+    Every chat listing asks this (`_chat_twins`), and a pairing changes about as
+    often as a contact name, so it shares the five-minute cache the names use: a
+    warm page opens whatsapp.db no more than the name resolution already does.
+    Users the map does not pair are cached as such, or an archive full of
+    unmapped LIDs would re-ask on every call.
+    """
+    pairs: dict[str, str] = {}
+    unseen: list[str] = []
+    for user in users:
+        hit, cached = _cache_get("lid_pair", user)
+        if not hit:
+            unseen.append(user)
+        elif cached:
+            pairs[user] = cached
+    if unseen:
+        found = lid_map_counterparts(unseen)
+        for user in unseen:
+            if counterpart := _cache_put("lid_pair", user, found.get(user)):
+                pairs[user] = counterpart
+    return pairs
+
+
+@dataclass(frozen=True)
+class _Twin:
+    """The twin a listing row absorbed, seen from the row that lists."""
+
+    absorbed: str  # the chats row this one now speaks for
+    jid: str  # the spelling the merged row is reported under (the phone JID)
+    aliases: list[str]  # both spellings, phone first
+    name: str | None  # the absorbed row's name
+    last_read_time: datetime | None
+
+
+@dataclass(frozen=True)
+class ChatTwins:
+    """The phone/LID chat pairs of one store, and how a listing collapses them.
+
+    A contact WhatsApp knows both ways owns two rows in `chats` — one keyed by
+    the phone JID, one by the `@lid` — so every listing used to return that
+    person twice with their messages split between the rows (issue #337). Of a
+    pair, exactly one row *lists*: the one holding the newest message. Every
+    `last_*` field of the merged row is read off that row alone, `unread` and
+    the sort key included, so a listing stays ordered by the timestamp it
+    prints. What the hidden row still contributes is what belongs to the person
+    rather than to the row: the phone spelling `jid` is reported under, both in
+    `aliases`, its name when the listing row has none, and its read marker when
+    that one is newer (a conversation read under one spelling is read under
+    both).
+
+    Only what the LID map pairs is merged: a `@lid` chat it does not know, or
+    one whose phone twin has no row in this store, keeps listing on its own.
+    """
+
+    by_listed: dict[str, _Twin]  # listing row jid -> the twin it absorbed
+    listed_for: dict[str, str]  # hidden row jid -> the row listing instead
+
+    @property
+    def active(self) -> bool:
+        return bool(self.by_listed)
+
+    def listing_jid(self, jid: str) -> str:
+        """The row that lists for this spelling, so either spelling finds the merged chat."""
+        return self.listed_for.get(jid, jid)
+
+    def merged_row(self, jid: str) -> _Twin | None:
+        """What the row `jid` absorbed, or None when it stands for itself alone."""
+        return self.by_listed.get(jid)
+
+    def hidden_clause(self, column: str) -> tuple[str, list[str]]:
+        """`column NOT IN (…)`: the rows another row already reports.
+
+        Chunked like every other IN-list here, so the predicate stays inside
+        SQLite's variable limit however many pairs the store holds.
+        """
+        if not self.listed_for:
+            return "1=1", []
+        hidden = sorted(self.listed_for)
+        parts = [_chat_jid_clause(column, chunk, negated=True) for chunk in _in_chunks(hidden)]
+        return "(" + " AND ".join(parts) + ")", hidden
+
+    def matching(self, query: str) -> list[str]:
+        """Listing rows whose hidden twin answers a `list_chats` query.
+
+        The search runs against the `chats` row, and the twin's name and JID are
+        folded in only afterwards, so without this a merged row would be
+        unfindable by the very name and spelling it reports.
+        """
+        needle = query.casefold()
+        return sorted(
+            listed
+            for listed, twin in self.by_listed.items()
+            if (twin.name and needle in twin.name.casefold()) or needle in twin.absorbed.casefold()
+        )
+
+    def cte(self, name: str = "chat_twin") -> tuple[str, list[str]]:
+        """`name(jid, twin_jid, listed_jid)` for a WITH clause, both directions.
+
+        The empty form keeps one query shape on a store with no pairs, the way
+        get_contact_chats_page's `member_of` does for an older schema.
+        """
+        header = f"{name}(jid, twin_jid, listed_jid)"
+        rows: list[str] = []
+        params: list[str] = []
+        for listed, twin in sorted(self.by_listed.items()):
+            rows += ["(?, ?, ?)", "(?, ?, ?)"]
+            params += [listed, twin.absorbed, listed, twin.absorbed, listed, listed]
+        if not rows:
+            return f"{header} AS (SELECT NULL, NULL, NULL WHERE 0)", []
+        return f"{header} AS (VALUES {', '.join(rows)})", params
+
+    def both_rows(self, alias: str = "tw") -> tuple[str, str, str, list[str]]:
+        """(WITH prefix, join, `chat_jid` predicate, params) for the messages of both rows.
+
+        The hidden row is out of `chats`, so a query counting or probing a
+        chat's messages has to name it explicitly or it reads half the
+        conversation.
+        """
+        if not self.active:
+            return "", "", "= chats.jid", []
+        cte, params = self.cte()
+        return (
+            f"WITH {cte} ",
+            f"LEFT JOIN chat_twin {alias} ON {alias}.jid = chats.jid",
+            f"IN (chats.jid, {alias}.twin_jid)",
+            params,
+        )
+
+    def merge(self, chats: Sequence[Chat]) -> None:
+        """Relabel and fill in every row that absorbed a twin.
+
+        Runs before `_apply_name_fallback`, so the phone book is consulted for
+        the spelling the merged row is reported under.
+        """
+        for chat in chats:
+            twin = self.by_listed.get(chat.jid)
+            if twin is None:
+                continue
+            chat.jid = twin.jid
+            chat.aliases = list(twin.aliases)
+            chat.last_read_time = _later(chat.last_read_time, twin.last_read_time)
+            if _is_placeholder_name(chat.name) and not _is_placeholder_name(twin.name):
+                chat.name = twin.name
+
+
+NO_CHAT_TWINS = ChatTwins({}, {})
+
+
+def _later(left: datetime | None, right: datetime | None) -> datetime | None:
+    """The newer of two optional timestamps."""
+    if left is None or right is None:
+        return left or right
+    return max(left, right)
+
+
+def _paired_lid_chats(cur: sqlite3.Cursor) -> dict[str, str]:
+    """{`@lid` chat jid: the phone JID of the same person}, cached for the listings.
+
+    Which spellings exist and which the LID map pairs changes about as often as
+    a contact name, so the scan for `@lid` chats and the map lookup share the
+    five-minute name cache: a listing on a warm cache pays for the rows of the
+    pairs it found, not for a scan of `chats`. Nothing here reads the
+    allow-list — the caller applies that per call, so a policy change is not
+    something a cached answer can outlive.
+    """
+    hit, cached = _cache_get("lid_chats", MESSAGES_DB_PATH)
+    if hit:
+        return cached
+    lid_jids = [row[0] for row in cur.execute("SELECT jid FROM chats WHERE jid LIKE '%@lid'").fetchall()]
+    counterparts = _cached_lid_counterparts([jid.split("@", 1)[0] for jid in lid_jids]) if lid_jids else {}
+    paired = {
+        lid_jid: f"{counterparts[lid_jid.split('@', 1)[0]]}@{DEFAULT_USER_SERVER}"
+        for lid_jid in lid_jids
+        if lid_jid.split("@", 1)[0] in counterparts
+    }
+    return _cache_put("lid_chats", MESSAGES_DB_PATH, paired)
+
+
+# Far more pairs than an account ever has, and the ceiling of the runtime budget
+# below. Past the cap the quietest pairs simply stay unmerged, as they were
+# before #337, rather than a listing failing.
+CHAT_TWIN_MAX_PAIRS = 2000
+
+
+def _chat_twin_cap(cur: sqlite3.Cursor) -> int:
+    """How many pairs can be merged without crossing SQLite's parameter limit.
+
+    `cte()` binds six parameters per pair and `hidden_clause` one more; the
+    reserve covers the two dozen the statements around them bind (the filter,
+    the allow-list, the keyset, the limit). SQLite has allowed 32 766 parameters
+    since 3.32 (2020) and 999 before it; the limit is asked for rather than
+    assumed, so an interpreter carrying an old SQLite merges the busiest ~128
+    pairs instead of answering "too many SQL variables".
+    """
+    try:
+        budget = cur.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    except (AttributeError, sqlite3.Error):  # pragma: no cover - very old runtimes
+        budget = 999
+    return max(0, min(CHAT_TWIN_MAX_PAIRS, (budget - 100) // 7))
+
+
+def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatTwins:
+    """The phone/LID pairs this store holds, read through the LID map (issue #337).
+
+    Two statements on the way to a listing once the pair scan is warm: the rows
+    of the paired chats, and the newest message of each — both on indexed
+    columns, and nothing at all runs when the store has no `@lid` chat. `only`
+    narrows the work to the pairs touching those JIDs, which is all a by-JID
+    lookup needs: a listing pays for every pair because it has to hide them all.
+
+    A pair needs both spellings admitted by `WHATSAPP_ALLOWED_CHATS`: an
+    allow-list naming one of the two keeps hiding exactly what it hid before,
+    rather than having the other half of the conversation folded into it.
+    """
+    paired = _paired_lid_chats(cur)
+    wanted = set(only) if only is not None else None
+    candidates = {
+        lid_jid: phone_jid
+        for lid_jid, phone_jid in paired.items()
+        if (wanted is None or lid_jid in wanted or phone_jid in wanted)
+        and CHAT_POLICY.allows(lid_jid)
+        and CHAT_POLICY.allows(phone_jid)
+    }
+    if not candidates:
+        return NO_CHAT_TWINS
+
+    members = sorted({*candidates, *candidates.values()})
+    read_time = _last_read_time_select(cur, "chats")
+    rows: dict[str, tuple[str | None, str | None, str | None]] = {}
+    for chunk in _in_chunks(members):
+        for jid, name, last_time, last_read in cur.execute(
+            f"SELECT jid, name, last_message_time, {read_time} FROM chats WHERE jid IN ({_placeholders(chunk)})",
+            chunk,
+        ).fetchall():
+            rows[jid] = (name, last_time, last_read)
+    newest: dict[str, str] = {}
+    for chunk in _in_chunks([jid for jid in members if jid in rows]):
+        for jid, stamp in cur.execute(
+            f"SELECT chat_jid, MAX(timestamp) FROM messages WHERE chat_jid IN ({_placeholders(chunk)})"
+            " GROUP BY chat_jid",
+            chunk,
+        ).fetchall():
+            newest[jid] = stamp
+
+    def holds_more(jid: str) -> tuple[str, str]:
+        # Newest stored message first, the chat's own marker as the tie-break:
+        # every last_* field on the merged row comes from the row that wins.
+        return (newest.get(jid) or "", rows[jid][1] or "")
+
+    # Only pairs with a row on both sides, busiest first: what the cap drops is
+    # the quietest conversations, which is also what a page rarely reaches.
+    both_stored = [
+        (lid_jid, phone_jid) for lid_jid, phone_jid in candidates.items() if lid_jid in rows and phone_jid in rows
+    ]
+    both_stored.sort(key=lambda pair: max(holds_more(pair[0]), holds_more(pair[1])), reverse=True)
+    cap = _chat_twin_cap(cur)
+    if len(both_stored) > cap:
+        # Once per cache generation, not once per listing.
+        if not _cache_get("twin_cap", MESSAGES_DB_PATH)[0]:
+            _cache_put("twin_cap", MESSAGES_DB_PATH, True)
+            logger.warning(
+                "chat listings: %d phone/LID pairs, only %d of them merged; the quietest list under both spellings",
+                len(both_stored),
+                cap,
+            )
+        both_stored = both_stored[:cap]
+
+    by_listed: dict[str, _Twin] = {}
+    listed_for: dict[str, str] = {}
+    # Only `whatsmeow_lid_map.lid` is unique, so two LIDs can name one number.
+    # Merging both would report one JID on two rows, which is worse than the
+    # duplicate #337 is about: the busiest pair wins and the rest stay apart.
+    taken: set[str] = set()
+    for lid_jid, phone_jid in both_stored:
+        if taken & {lid_jid, phone_jid}:
+            continue
+        taken |= {lid_jid, phone_jid}
+        listed, hidden = (lid_jid, phone_jid) if holds_more(lid_jid) > holds_more(phone_jid) else (phone_jid, lid_jid)
+        name, _last_time, last_read = rows[hidden]
+        by_listed[listed] = _Twin(
+            absorbed=hidden,
+            jid=phone_jid,
+            aliases=[phone_jid, lid_jid],
+            name=name,
+            last_read_time=parse_db_time(last_read) if last_read else None,
+        )
+        listed_for[hidden] = listed
+    return ChatTwins(by_listed, listed_for) if by_listed else NO_CHAT_TWINS
 
 
 def _apply_name_fallback(chats: list[Chat]) -> None:
@@ -2375,18 +2680,29 @@ def get_message_context(
             conn.close()
 
 
-def _chat_filter(query: str | None) -> tuple[list[str], list[Any]]:
+def _chat_filter(query: str | None, twins: ChatTwins = NO_CHAT_TWINS) -> tuple[list[str], list[Any]]:
     """WHERE clauses selecting the chats a caller may see: name/JID search plus the allow-list.
 
     Shared by list_chats_page and count_chats so the count is taken over exactly
-    the rows the page would return.
+    the rows the page would return — the collapsed phone/LID twins (issue #337)
+    included, which is why the same `twins` has to reach both.
     """
     clauses: list[str] = []
     params: list[Any] = []
+    if twins.active:
+        clause, hidden = twins.hidden_clause("chats.jid")
+        clauses.append(clause)
+        params.extend(hidden)
     if query:
         # instr() on the raw column matches Unicode; LOWER()+LIKE only covers ASCII.
-        clauses.append("(instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?)")
+        clause = "instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?"
         params.extend([query, query, f"%{query}%"])
+        # A merged row answers to its twin's name and spelling too, and those
+        # are folded in only after this runs.
+        if matched := twins.matching(query):
+            clause = f"{clause} OR {_chat_jid_clause('chats.jid', matched)}"
+            params.extend(matched)
+        clauses.append(f"({clause})")
     if CHAT_POLICY.restricted:
         clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
         clauses.append(clause)
@@ -2396,11 +2712,11 @@ def _chat_filter(query: str | None) -> tuple[list[str], list[Any]]:
 
 def count_chats(query: str | None = None) -> int:
     """How many chats match the list_chats filter, without returning any of them."""
-    clauses, params = _chat_filter(query)
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        clauses, params = _chat_filter(query, _chat_twins(cur))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         cur.execute(f"SELECT COUNT(*) FROM chats{where}", tuple(params))
         row = cur.fetchone()
         return int(row[0]) if row else 0
@@ -2435,6 +2751,11 @@ def list_chats_page(
 ) -> PageResult:
     """Get chats matching the specified criteria.
 
+    A contact WhatsApp knows under both a phone JID and a `@lid` is one row
+    here, not two: the pair is collapsed before the page is cut, so paging is
+    over the listing rows and a merged chat cannot straddle a page boundary
+    (issue #337, `ChatTwins`).
+
     Returns:
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
@@ -2444,6 +2765,7 @@ def list_chats_page(
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        twins = _chat_twins(cur)
 
         # The last message is always joined — is_from_me feeds the unread
         # flag — but its content is only selected when asked for. The columns
@@ -2454,22 +2776,35 @@ def list_chats_page(
         else:
             last_message_select = "NULL as last_message, NULL as last_sender"
 
+        # Sorting by name reads the name the row will *show*: for a merged pair
+        # that can be the twin's, and the `@lid` row that usually lists carries
+        # none, so ordering on the raw column would file the person under "".
+        prefix, twin_join, sort_name, twin_params = "", "", "chats.name", []
+        if twins.active and sort_by != "last_active":
+            cte, twin_params = twins.cte()
+            prefix = f"WITH {cte} "
+            twin_join = "LEFT JOIN chat_twin tw ON tw.jid = chats.jid LEFT JOIN chats twin ON twin.jid = tw.twin_jid"
+            sort_name = "COALESCE(NULLIF(chats.name, ''), twin.name)"
+
         query_parts = [
             f"""
-            SELECT
+            {prefix}SELECT
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
                 {last_message_select},
                 messages.is_from_me as last_is_from_me,
                 {_last_read_time_select(cur, "chats")},
-                messages.id IS NOT NULL as has_messages
+                messages.id IS NOT NULL as has_messages,
+                {sort_name} as sort_name
             FROM chats
+            {twin_join}
             {_last_message_join("chats", "messages")}
         """
         ]
 
-        where_clauses, params = _chat_filter(query)
+        where_clauses, filter_params = _chat_filter(query, twins)
+        params = [*twin_params, *filter_params]
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -2495,7 +2830,7 @@ def list_chats_page(
                     else [cursor_state["j"]]
                 )
             else:
-                where_clauses.append("(chats.name > ? OR (chats.name = ? AND chats.jid > ?))")
+                where_clauses.append(f"({sort_name} > ? OR ({sort_name} = ? AND chats.jid > ?))")
                 params.extend([cursor_state["n"], cursor_state["n"], cursor_state["j"]])
             query_parts = [part for part in query_parts if not part.startswith("WHERE ")]
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -2504,7 +2839,7 @@ def list_chats_page(
         order_by = (
             "chats.last_message_time DESC, chats.jid ASC"
             if sort_by == "last_active"
-            else "chats.name ASC, chats.jid ASC"
+            else f"{sort_name} ASC, chats.jid ASC"
         )
         query_parts.append(f"ORDER BY {order_by}")
 
@@ -2522,7 +2857,7 @@ def list_chats_page(
             if sort_by == "last_active":
                 state["t"] = last[2]
             else:
-                state["n"] = last[1]
+                state["n"] = last[8]  # the value ORDER BY used, twin name included
             next_cursor = encode_cursor(state)
 
         page_chats = [
@@ -2538,6 +2873,7 @@ def list_chats_page(
             )
             for chat_data in chats
         ]
+        twins.merge(page_chats)
         _apply_name_fallback(page_chats)
 
         return PageResult([chat_to_dict(chat) for chat in page_chats], next_cursor, has_more)
@@ -2721,6 +3057,10 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
     memberships (most recently confirmed membership first), so the answer to
     "where do I talk to this person" stays at the top of page one.
 
+    A direct chat WhatsApp keeps under both the phone JID and the `@lid` of the
+    same person is one row, reported under the phone spelling with both in
+    `aliases` (issue #337).
+
     Args:
         jid: The contact's JID to search for
         limit: Maximum number of chats to return (default 20)
@@ -2736,6 +3076,11 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        # The candidate JIDs are mapped through the phone/LID pairs before they
+        # are unioned, so a person who spoke under both spellings is one
+        # conversation here too (issue #337).
+        twins = _chat_twins(cur)
+        twin_cte, twin_params = twins.cte()
 
         # rank 0 = a conversation (the contact has messages here, or it is
         # their own direct chat), 1 = membership only. `order_at` is the
@@ -2799,12 +3144,17 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
 
         cur.execute(
             f"""
-            WITH spoke_in AS (
-                SELECT DISTINCT chat_jid FROM messages WHERE sender IN ({placeholders})
+            WITH {twin_cte},
+            spoke_in AS (
+                SELECT DISTINCT COALESCE(tw.listed_jid, messages.chat_jid) AS chat_jid
+                  FROM messages LEFT JOIN chat_twin tw ON tw.jid = messages.chat_jid
+                 WHERE messages.sender IN ({placeholders})
             ),
             member_of AS ({member_of}),
             direct_chat AS (
-                SELECT jid FROM chats WHERE jid IN ({placeholders})
+                SELECT DISTINCT COALESCE(tw.listed_jid, chats.jid) AS jid
+                  FROM chats LEFT JOIN chat_twin tw ON tw.jid = chats.jid
+                 WHERE chats.jid IN ({placeholders})
             ),
             candidate AS (
                 SELECT chat_jid AS jid FROM spoke_in
@@ -2836,7 +3186,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
             ORDER BY {rank} ASC, {order_at} DESC, k.jid ASC
             LIMIT ? OFFSET ?
         """,
-            (*aliases, *member_params, *aliases, *policy_params, *keyset_params, limit + 1, offset),
+            (*twin_params, *aliases, *member_params, *aliases, *policy_params, *keyset_params, limit + 1, offset),
         )
 
         chats = cur.fetchall()
@@ -2860,6 +3210,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
             )
             for chat_data in chats
         ]
+        twins.merge(page_chats)
         _apply_name_fallback(page_chats)
 
         items = []
@@ -2931,6 +3282,9 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any] | None:
     """Get chat metadata by JID.
 
+    Either spelling of a merged phone/LID pair (issue #337) returns the same
+    merged row, reported under the phone JID with both in `aliases`.
+
     Returns:
         Chat dictionary or None if not found
     """
@@ -2938,6 +3292,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         _require_allowed(chat_jid)
         conn = _connect_messages_db()
         cursor = conn.cursor()
+        twins = _chat_twins(cursor, only=[chat_jid])
 
         # See list_chats: the last message is always joined for is_from_me,
         # and the result tuple shape stays stable across the branch.
@@ -2960,7 +3315,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             WHERE c.jid = ?
         """
 
-        cursor.execute(query, (chat_jid,))
+        cursor.execute(query, (twins.listing_jid(chat_jid),))
         chat_data = cursor.fetchone()
 
         if not chat_data:
@@ -2976,6 +3331,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             last_read_time=parse_db_time(chat_data[6]) if chat_data[6] else None,
             has_messages=bool(chat_data[7]),
         )
+        twins.merge([chat])
         _apply_name_fallback([chat])
         return chat_to_dict(chat)
 
@@ -2999,11 +3355,19 @@ def _direct_chat_candidates(value: str) -> tuple[str, str, str]:
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
-    """Get chat metadata by sender phone number (exact match on the number's JID forms)."""
+    """Get chat metadata by sender phone number (exact match on the number's JID forms).
+
+    A merged phone/LID pair answers as one chat here too (issue #337): each
+    candidate spelling is mapped to the row that lists for it, so the answer is
+    the row carrying the conversation whichever of the two holds it.
+    """
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
+        spellings = _direct_chat_candidates(sender_phone_number)
+        twins = _chat_twins(cursor, only=spellings)
+        candidates = [twins.listing_jid(jid) for jid in spellings]
 
         cursor.execute(
             f"""
@@ -3022,7 +3386,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             ORDER BY CASE WHEN c.jid = ? THEN 0 WHEN c.jid LIKE '%@s.whatsapp.net' THEN 1 ELSE 2 END
             LIMIT 1
         """,
-            (*_direct_chat_candidates(sender_phone_number), sender_phone_number, *policy_params),
+            (*candidates, *policy_params, sender_phone_number),
         )
 
         chat_data = cursor.fetchone()
@@ -3042,6 +3406,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             last_read_time=parse_db_time(chat_data[6]) if chat_data[6] else None,
             has_messages=bool(chat_data[7]),
         )
+        twins.merge([chat])
         _apply_name_fallback([chat])
         return chat_to_dict(chat)
 
@@ -3576,8 +3941,14 @@ def _coverage_by_chat(
     chat_params: list[Any],
     cursor: str | None,
     limit: int,
+    twins: ChatTwins = NO_CHAT_TWINS,
 ) -> dict[str, Any]:
-    """One page of the per-chat work queue for request_history."""
+    """One page of the per-chat work queue for request_history.
+
+    A phone/LID pair is one entry in the queue, and its numbers count both rows
+    (issue #337): the twin the listing row absorbed is already out of
+    `chat_where`, so the message predicates take it in explicitly.
+    """
     fingerprint = _coverage_fingerprint(scope)
     state = decode_cursor(cursor, "coverage_by_chat")
     offset = 0
@@ -3607,41 +3978,51 @@ def _coverage_by_chat(
     # The inner LIMIT 2 is what keeps `depth` cheap: it answers "none, one or
     # more" with at most two rows of the (chat_jid, timestamp) index per chat
     # instead of counting the chat's whole history.
-    depth = """(SELECT COUNT(*) FROM (
-                    SELECT 1 FROM messages AS probe WHERE probe.chat_jid = chats.jid LIMIT 2))"""
-    overall_first = "(SELECT MIN(timestamp) FROM messages AS whole WHERE whole.chat_jid = chats.jid)"
-    join_on = " AND ".join(["messages.chat_jid = chats.jid", *window])
+    prefix, twin_join, of_this_chat, twin_params = twins.both_rows()
+    depth = f"""(SELECT COUNT(*) FROM (
+                    SELECT 1 FROM messages AS probe WHERE probe.chat_jid {of_this_chat} LIMIT 2))"""
+    overall_first = f"(SELECT MIN(timestamp) FROM messages AS whole WHERE whole.chat_jid {of_this_chat})"
+    join_on = " AND ".join([f"messages.chat_jid {of_this_chat}", *window])
     cur.execute(
-        f"""SELECT chats.jid, chats.name,
+        f"""{prefix}SELECT chats.jid, chats.name,
                    MIN(messages.timestamp) AS first_time,
                    MAX(messages.timestamp) AS last_time,
                    COUNT(messages.id) AS stored,
                    {depth} AS depth,
                    {overall_first} AS overall_first
-              FROM chats LEFT JOIN messages ON {join_on}
+              FROM chats {twin_join} LEFT JOIN messages ON {join_on}
              WHERE {chat_where}
              GROUP BY chats.jid, chats.name
              ORDER BY depth, overall_first DESC, chats.jid
              LIMIT ? OFFSET ?""",
-        (*window_params, *chat_params, limit + 1, offset),
+        (*twin_params, *window_params, *chat_params, limit + 1, offset),
     )
     rows = cur.fetchall()
     has_more = len(rows) > limit
     rows = rows[:limit]
 
-    placeholders = [jid for jid, name, *_ in rows if _is_placeholder_name(name)]
+    merged = {jid: twins.merged_row(jid) for jid, *_ in rows}
+    placeholders = [
+        (twin.jid if (twin := merged[jid]) else jid) for jid, name, *_ in rows if _is_placeholder_name(name)
+    ]
     names = _contact_names(placeholders) if placeholders else {}
-    items = [
-        {
-            "chat_jid": jid,
-            "name": names.get(jid, name),
+    items = []
+    for jid, name, first_time, last_time, stored, depth_of, _overall_first in rows:
+        twin = merged[jid]
+        listed_jid = twin.jid if twin else jid
+        if twin is not None and _is_placeholder_name(name) and not _is_placeholder_name(twin.name):
+            name = twin.name
+        item = {
+            "chat_jid": listed_jid,
+            "name": names.get(listed_jid, name) if _is_placeholder_name(name) else name,
             "first_message_time": first_time,
             "last_message_time": last_time,
             "messages": int(stored or 0),
-            "stub_only": depth == 1,
+            "stub_only": depth_of == 1,
         }
-        for jid, name, first_time, last_time, stored, depth, _overall_first in rows
-    ]
+        if twin is not None:
+            item["aliases"] = list(twin.aliases)
+        items.append(item)
     next_cursor = (
         encode_cursor({"k": "coverage_by_chat", "o": offset + len(rows), "s": fingerprint}) if has_more else None
     )
@@ -3809,7 +4190,8 @@ def coverage(
     Reads messages.db only (works with the bridge down). Aggregates and the gap
     scan run in SQL, so nothing proportional to the archive is held in memory.
     Honours WHATSAPP_ALLOWED_CHATS: with an allow-list set, every number
-    describes the allowed chats only.
+    describes the allowed chats only. A contact stored under both a phone JID
+    and a `@lid` counts as one chat, with the messages of both (issue #337).
     """
     try:
         gap_hours = float(gap_hours)
@@ -3853,10 +4235,26 @@ def coverage(
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        # A phone/LID pair counts once here too: the absorbed row leaves the
+        # chat side of every query, and its messages stay on the message side,
+        # where they belong to the same conversation (issue #337).
+        twins = _chat_twins(cur)
+        if twins.active:
+            hidden_clause, hidden_params = twins.hidden_clause("chats.jid")
+            chat_clause = f"{chat_clause} AND {hidden_clause}"
+            chat_params = [*chat_params, *hidden_params]
 
         if by_chat:
             return _coverage_by_chat(
-                cur, scope, window, window_params, chat_clause, chat_params, cursor=cursor, limit=limit
+                cur,
+                scope,
+                window,
+                window_params,
+                chat_clause,
+                chat_params,
+                cursor=cursor,
+                limit=limit,
+                twins=twins,
             )
 
         cur.execute(
@@ -3867,12 +4265,15 @@ def coverage(
 
         cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_clause}", tuple(chat_params))
         chats_total = int(cur.fetchone()[0] or 0)
+        # The probe reads both rows of a merged pair: the listing row holds the
+        # newest message, but a window can name a period only the other one has.
+        prefix, twin_join, of_this_chat, twin_params = twins.both_rows()
         cur.execute(
-            f"""SELECT COUNT(*) FROM chats
+            f"""{prefix}SELECT COUNT(*) FROM chats {twin_join}
                  WHERE {chat_clause}
                    AND NOT EXISTS (
-                       SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid{window_where})""",
-            (*chat_params, *window_params),
+                       SELECT 1 FROM messages WHERE messages.chat_jid {of_this_chat}{window_where})""",
+            (*twin_params, *chat_params, *window_params),
         )
         chats_without_messages = int(cur.fetchone()[0] or 0)
 

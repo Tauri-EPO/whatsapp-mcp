@@ -1171,6 +1171,9 @@ def list_chats(
         `last_read_time` is how far the chat has been read on any device (null if never
         reported); `unread` is true when the last message is inbound and newer than
         that marker, so chats already read on the phone are not reported as unread.
+        One person is one row: when WhatsApp stored a direct chat under both a phone
+        JID and that person's `@lid`, the two are merged and `aliases` carries both
+        spellings, `jid` being the phone one. The other tools accept either.
     """
     if count_only:
         _reject_count_only_extras(fields, cursor, page)
@@ -1207,6 +1210,8 @@ def get_chat(
 
     Returns:
         Chat dictionary — same shape as list_chats, including last_read_time and unread.
+        Either spelling of a chat WhatsApp keeps under both a phone JID and a `@lid`
+        returns the same merged row, reported under the phone JID with both in `aliases`.
     """
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     if chat is None:
