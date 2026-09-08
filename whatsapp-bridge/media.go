@@ -172,22 +172,45 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	// Stream straight to a temp file next to the target (whatsmeow decrypts
 	// and verifies in place), then rename: no full copy of the media in RAM
 	// and no half-written file ever appears under the final name.
-	written, err := downloadToPath(ctx, client, downloader, localPath)
-	if isExpiredMediaError(err) {
-		// The CDN token in the stored URL has expired (old history, forwards).
-		// Ask the sender's phone to re-upload and download from the fresh path.
-		// See media_retry.go.
-		b.Log.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
-		written, err = downloadViaMediaRetry(ctx, client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
-	}
-	if err != nil {
-		b.metrics.mediaDownloadFails.Add(1)
+	//
+	// One transfer per destination file: REST, auto-download and an MCP fetch
+	// can miss the cache for the same message at once and would otherwise
+	// share (and truncate) the same "<file>.part". The first caller starts the
+	// transfer, every caller waits for its result (media_inflight.go). Counters
+	// and the success log therefore count transfers, not callers.
+	if _, err := b.mediaTransfers.do(ctx, absPath, func() (int64, error) {
+		// Deliberately shadowed: everything below runs under the detached
+		// transfer context, never under the context of one of the callers.
+		ctx, cancel := transferContext(b.ctx, ctx)
+		defer cancel()
+		written, err := b.transferMedia(ctx, downloader, localPath)
+		if isExpiredMediaError(err) {
+			// The CDN token in the stored URL has expired (old history, forwards).
+			// Ask the sender's phone to re-upload and download from the fresh path.
+			// See media_retry.go.
+			b.Log.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
+			written, err = downloadViaMediaRetry(ctx, client, messageStore, b.mediaRetry, messageID, chatJID, downloader, localPath)
+		}
+		if err != nil {
+			b.metrics.mediaDownloadFails.Add(1)
+			return 0, err
+		}
+		b.metrics.mediaDownloads.Add(1)
+		b.Log.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
+		return written, nil
+	}); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
-	b.metrics.mediaDownloads.Add(1)
-
-	b.Log.Infof("Successfully downloaded %s media to %s (%d bytes)", mediaType, absPath, written)
 	return true, mediaType, filename, absPath, nil
+}
+
+// transferMedia streams one media file into localPath through its temp file.
+// Tests override Bridge.mediaTransfer to run a fake transfer.
+func (b *Bridge) transferMedia(ctx context.Context, msg whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+	if b.mediaTransfer != nil {
+		return b.mediaTransfer(ctx, msg, localPath)
+	}
+	return downloadToPath(ctx, b.Client, msg, localPath)
 }
 
 // mediaFileName is the cached file name for a media row:
