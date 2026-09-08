@@ -338,6 +338,7 @@ computed from `messages.db` alone, so it answers while the bridge is down.
 | `total_messages` | Messages stored |
 | `chats_total`, `chats_with_messages`, `chats_without_messages` | Chats the bridge knows vs. chats it has any message for. A large `chats_without_messages` means metadata synced but history did not |
 | `messages_by_month` | `{"2026-06": 1234, …}` — where coverage thins out |
+| `audio` | The voice-note transcription backlog in the same scope (below) |
 | `gaps` | `[{"from", "to", "hours"}]`, biggest first: periods longer than `gap_hours` with no message in **any** chat in scope |
 | `gaps_truncated` | `true` when `max_gaps` cut the list |
 | `scope` | `{"after", "before", "chat_jid"}` — the narrowing that produced the numbers, normalised |
@@ -364,7 +365,47 @@ says which of the two readings applies, so an agent that reads it cannot report
 "never synced" about a period it never asked about.
 
 The aggregates and the gap scan run in SQL (one ordered pass over the timestamp
-index), so cost does not grow with the size of the result.
+index), so cost does not grow with the size of the result. The one part that
+touches the filesystem is the `audio` block below, and it is bounded.
+
+#### The `audio` block: how much is left to transcribe
+
+`bridge_status.whisper` says whether transcription is *possible*; `audio` says
+how much of it is *pending*, over exactly the same window, chat filter and
+allow-list as the numbers above:
+
+| Field | Meaning |
+| --- | --- |
+| `messages` | Inbound voice notes stored in scope. Outbound, deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it |
+| `cached` | Of those, the ones whose bytes are on disk under the store directory |
+| `transcribed` | Rows whose content hash already carries a `transcript` note |
+| `errors` | Rows whose hash carries a `transcript_error` note: the backend could not read the file, and the worker will not retry until the note is cleared |
+| `backlog` | `messages - transcribed - errors` — what is actually left to do |
+| `backlog_cached` | How many of the backlog have their bytes on disk. `backlog - backlog_cached` is what a batch would download first (`TRANSCRIBE_ON_INGEST_FETCH=1`, or `transcribe_audio`, which fetches on demand) |
+| `cached_examined` | How many rows the two cached counts looked at |
+
+Two cached counts because they answer different questions: with
+`WHATSAPP_MEDIA_RETENTION_DAYS` set, most of what is *on disk* is recent and
+already transcribed, while the backlog is old and swept — `cached` would then
+say nothing about the work.
+
+Everything but the cached counts is SQL (`notes.db` is attached for the query,
+so no list of hashes crosses the process boundary). Cached is the filesystem:
+one directory read per chat that has audio in scope, no `stat` per row, and
+nothing at all for a store with no voice notes. An archive-wide call is bounded
+— at most 20 000 voice notes and at most 200 chat directories — and
+`cached_examined` is what it actually covered: equal to `messages` unless a
+ceiling cut the scan, in which case the cached counts are floors and every other
+number is still exact. The budget goes to the **untranscribed** rows first, so
+`backlog_cached` is the last number to lose accuracy.
+
+One directory read is cheap but not free — it lists every media file that chat
+ever cached, not just its audio — so on an archive with hundreds of busy media
+directories, narrow with `chat_jid` or `after`/`before` rather than polling the
+unscoped call: that makes the counts exact and the reads fewer at the same time.
+
+`hint` names the backlog when there is one. `coverage(by_chat=True)` has no
+`audio` block: it answers "which chats to backfill", and pays for no scan.
 
 #### Find gaps, then backfill with `request_history`
 

@@ -240,6 +240,16 @@ def coverage(
     the window and chat filter that produced them. A gap means the bridge stored
     nothing at all then, not that your contacts were silent.
 
+    audio is the voice-note side of the same scope: {messages, cached,
+    transcribed, errors, backlog, backlog_cached, cached_examined} — inbound
+    voice notes stored, how many have their bytes on disk, how many already have
+    a transcript (or a recorded failure) in the notes, and backlog = the rest,
+    what transcribe_audio or TRANSCRIBE_ON_INGEST would still work through. Ask
+    it before starting a batch: backlog - backlog_cached is how many of those
+    would have to be downloaded first. cached_examined equals messages unless an
+    archive-wide call hit the scan ceiling, in which case the two cached counts
+    are floors over the newest voice notes.
+
     after/before/chat_jid narrow every number, the gap scan included: scope the
     question to the period you care about instead of reading past sync artefacts
     out of a whole-archive answer. Under a window those numbers describe the

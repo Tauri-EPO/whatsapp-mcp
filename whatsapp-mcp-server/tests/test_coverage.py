@@ -1,7 +1,12 @@
 """coverage(): archive boundaries, per-month counts and sync gaps from messages.db."""
 
+import os
+from pathlib import Path
+
 import pytest
 
+import media_inventory
+import media_notes
 import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
@@ -328,3 +333,234 @@ def test_coverage_database_error_is_internal(monkeypatch, paired_dbs):
     with pytest.raises(ToolError) as exc:
         whatsapp.coverage()
     assert exc.value.code == "internal"
+
+
+# --- the audio block (issue #334) ---------------------------------------------
+#
+# Alice has four inbound voice notes, three of them cached; Bob has one, never
+# cached. One of Alice's carries a transcript note, another a transcript_error.
+# An outbound voice note and a deleted one are in the table so the counts have
+# something to exclude.
+AUDIO = [
+    ("a1", ALICE, "2026-06-07 09:05:00", 0, None, True),
+    ("a2", ALICE, "2026-07-22 08:05:00", 0, None, True),
+    ("a3", ALICE, "2026-08-05 08:05:00", 0, None, True),
+    ("a4", ALICE, "2026-08-05 09:05:00", 0, None, False),
+    ("b1", BOB, "2026-08-05 10:05:00", 0, None, False),
+    ("o1", ALICE, "2026-08-05 11:05:00", 1, None, True),
+    ("d1", ALICE, "2026-08-05 12:05:00", 0, "2026-08-06 10:00:00", True),
+]
+AUDIO_SHA = {message_id: f"{index + 1:02x}" * 32 for index, (message_id, *_rest) in enumerate(AUDIO)}
+
+
+def _audio_filename(message_id: str) -> str:
+    """The bridge's name for a cached voice note: audio_<date>_<time>_<id>.ogg."""
+    return f"audio_20260805_0900_{message_id}.ogg"
+
+
+@pytest.fixture
+def audio_archive(archive):
+    """The text archive plus the voice notes, their bytes and two notes."""
+    with archive.messages() as conn:
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
+            "file_sha256, filename, deleted_at) VALUES (?, ?, ?, '', ?, ?, 'audio', ?, ?, ?)",
+            [
+                (
+                    message_id,
+                    chat,
+                    chat.split("@")[0],
+                    timestamp,
+                    from_me,
+                    bytes.fromhex(AUDIO_SHA[message_id]),
+                    _audio_filename(message_id),
+                    deleted_at,
+                )
+                for message_id, chat, timestamp, from_me, deleted_at, _cached in AUDIO
+            ],
+        )
+    for message_id, chat, _ts, _from_me, _deleted, cached in AUDIO:
+        if not cached:
+            continue
+        directory = media_inventory.chat_media_dir(chat)
+        os.makedirs(directory, exist_ok=True)
+        Path(directory, _audio_filename(message_id)).write_bytes(b"opus")
+    media_inventory.forget_cached_names()
+    media_notes.annotate_media(AUDIO_SHA["a1"], media_notes.TRANSCRIPT_KEY, "oi tudo bem")
+    media_notes.annotate_media(AUDIO_SHA["a2"], media_notes.TRANSCRIPT_ERROR_KEY, "ffmpeg said no")
+    return archive
+
+
+def test_coverage_audio_counts_the_backlog(audio_archive):
+    audio = whatsapp.coverage()["audio"]
+
+    # a1..a4 and b1: the outbound one and the deleted one are not work.
+    assert audio["messages"] == 5
+    assert audio["cached"] == 3  # a1, a2, a3
+    assert audio["cached_examined"] == 5  # nothing was cut, so the cached counts are exact
+    assert audio["transcribed"] == 1
+    assert audio["errors"] == 1
+    assert audio["backlog"] == 3  # a3, a4, b1
+    # Only a3: a1 and a2 are on disk but already handled, a4 and b1 are not on disk.
+    assert audio["backlog_cached"] == 1
+
+
+def test_coverage_audio_ignores_rows_without_a_content_hash(audio_archive):
+    """No hash, no transcript note ever: counting it would leave a backlog nothing can drain."""
+    with audio_archive.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type) "
+            "VALUES ('nohash', ?, ?, '', '2026-08-05 13:05:00', 0, 'audio')",
+            (ALICE, ALICE),
+        )
+    audio = whatsapp.coverage()["audio"]
+    assert audio["messages"] == 5 and audio["backlog"] == 3
+
+
+def test_coverage_audio_is_scoped_by_the_window(audio_archive):
+    audio = whatsapp.coverage(after="2026-08-01")["audio"]
+
+    assert audio["messages"] == 3  # a3, a4, b1
+    assert audio["cached"] == 1 and audio["cached_examined"] == 3
+    assert audio["transcribed"] == 0 and audio["errors"] == 0
+    assert audio["backlog"] == 3 and audio["backlog_cached"] == 1
+
+
+def test_coverage_audio_is_scoped_by_chat(audio_archive):
+    assert whatsapp.coverage(chat_jid=BOB)["audio"] == {
+        "messages": 1,
+        "cached": 0,
+        "cached_examined": 1,
+        "transcribed": 0,
+        "errors": 0,
+        "backlog": 1,
+        "backlog_cached": 0,
+    }
+
+
+def test_coverage_audio_honours_the_allow_list(audio_archive, monkeypatch):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([BOB]))
+    audio = whatsapp.coverage()["audio"]
+
+    assert audio["messages"] == 1 and audio["cached"] == 0
+    assert audio["transcribed"] == 0
+
+
+def test_coverage_audio_without_a_notes_db(archive):
+    """No transcription has ever run here: every hash is untranscribed, nothing errors."""
+    with archive.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, file_sha256) "
+            "VALUES ('a1', ?, ?, '', '2026-08-05 08:05:00', 0, 'audio', ?)",
+            (ALICE, ALICE, bytes.fromhex("aa" * 32)),
+        )
+    assert not os.path.exists(media_notes.notes_db_path())
+    assert whatsapp.coverage()["audio"] == {
+        "messages": 1,
+        "cached": 0,
+        "cached_examined": 1,
+        "transcribed": 0,
+        "errors": 0,
+        "backlog": 1,
+        "backlog_cached": 0,
+    }
+
+
+def test_coverage_audio_on_an_archive_without_voice_notes(archive):
+    assert whatsapp.coverage()["audio"]["messages"] == 0
+    assert whatsapp.coverage()["audio"]["backlog"] == 0
+
+
+def test_coverage_hint_names_the_backlog_only_when_there_is_one(audio_archive):
+    hint = whatsapp.coverage()["hint"]
+    assert "3 of the 5 voice notes" in hint and "1 of them with their bytes" in hint
+    assert "TRANSCRIBE_ON_INGEST" in hint
+    # Everything transcribed: the sentence would be noise.
+    for message_id in ("a3", "a4", "b1"):
+        media_notes.annotate_media(AUDIO_SHA[message_id], media_notes.TRANSCRIPT_KEY, "ok")
+    assert "voice notes" not in whatsapp.coverage()["hint"]
+
+
+def test_coverage_audio_bounds_the_cache_scan(audio_archive, monkeypatch):
+    """With the row ceiling at 1, the cached counts are floors over the newest row."""
+    monkeypatch.setattr(whatsapp, "COVERAGE_AUDIO_MAX_ROWS", 1)
+    audio = whatsapp.coverage()["audio"]
+
+    assert audio["messages"] == 5  # the counts stay exact
+    assert audio["cached_examined"] == 1  # b1, the newest, is not cached
+    assert audio["cached"] == 0 and audio["backlog_cached"] == 0
+    assert audio["transcribed"] == 1 and audio["errors"] == 1
+
+
+def test_coverage_audio_bounds_the_directories_it_reads(audio_archive, monkeypatch):
+    """With the chat ceiling at 1, only the busiest chat's directory is read."""
+    monkeypatch.setattr(whatsapp, "COVERAGE_AUDIO_MAX_CHATS", 1)
+    audio = whatsapp.coverage()["audio"]
+
+    assert audio["messages"] == 5
+    assert audio["cached_examined"] == 4 and audio["cached"] == 3  # Alice's four rows, Bob's dropped
+
+
+def test_coverage_audio_reads_each_chat_directory_once(audio_archive, monkeypatch):
+    """One listing per chat with audio in scope — never one per row (issue #318)."""
+    listed: list[str] = []
+    real = media_inventory.list_chat_names
+
+    def counting(chat_jid: str) -> dict[str, str]:
+        listed.append(chat_jid)
+        return real(chat_jid)
+
+    monkeypatch.setattr(media_inventory, "list_chat_names", counting)
+    monkeypatch.setattr(media_inventory, "cached_names", counting)
+    whatsapp.coverage()
+    assert sorted(listed) == sorted({ALICE, BOB})
+
+
+def test_coverage_audio_counts_a_row_with_both_notes_once(audio_archive):
+    """A hash the worker failed on and an agent then transcribed by hand carries both notes."""
+    media_notes.annotate_media(AUDIO_SHA["a3"], media_notes.TRANSCRIPT_KEY, "oi")
+    media_notes.annotate_media(AUDIO_SHA["a3"], media_notes.TRANSCRIPT_ERROR_KEY, "ffmpeg said no")
+    audio = whatsapp.coverage()["audio"]
+
+    assert audio["transcribed"] == 2 and audio["errors"] == 2  # a3 is in both
+    # ... but it is one row: a4 and b1 are what is left, not one of them.
+    assert audio["backlog"] == 2
+
+
+def test_coverage_audio_spends_the_row_ceiling_on_the_backlog(audio_archive, monkeypatch):
+    """The newest rows are the transcribed ones; the ceiling must not go on them.
+
+    The ingest worker transcribes newest-first, so on a real backlog the newest
+    voice notes are exactly the ones already done. Ordering the scan by time
+    alone would report backlog_cached: 0 on an archive whose backlog is on disk.
+    """
+    with audio_archive.messages() as conn:
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
+            "file_sha256, filename) VALUES (?, ?, ?, '', ?, 0, 'audio', ?, ?)",
+            [
+                (message_id, ALICE, ALICE, timestamp, bytes.fromhex(sha), _audio_filename(message_id))
+                for message_id, timestamp, sha in [
+                    ("n1", "2026-09-01 08:00:00", "f1" * 32),
+                    ("n2", "2026-09-01 09:00:00", "f2" * 32),
+                ]
+            ],
+        )
+    directory = media_inventory.chat_media_dir(ALICE)
+    for message_id, sha in (("n1", "f1" * 32), ("n2", "f2" * 32)):
+        Path(directory, _audio_filename(message_id)).write_bytes(b"opus")
+        media_notes.annotate_media(sha, media_notes.TRANSCRIPT_KEY, "ok")
+    media_inventory.forget_cached_names()
+
+    monkeypatch.setattr(whatsapp, "COVERAGE_AUDIO_MAX_ROWS", 3)
+    audio = whatsapp.coverage()["audio"]
+
+    assert audio["messages"] == 7 and audio["backlog"] == 3  # a3, a4, b1
+    # The three examined rows are the backlog, not n2/n1/b1: a3's bytes are here.
+    assert audio["cached_examined"] == 3
+    assert audio["backlog_cached"] == 1 and audio["cached"] == 1
+
+
+def test_coverage_by_chat_has_no_audio_block(audio_archive):
+    """The per-chat queue answers a different question and pays for no scan."""
+    assert "audio" not in whatsapp.coverage(by_chat=True)
