@@ -14,6 +14,7 @@ import transcribe_worker
 import whatsapp
 from errors import ToolError
 from tests.conftest import ALICE, BOB
+from transcribe import BackendUnavailableError
 
 SHA = {
     "AUD1": "a1" * 32,
@@ -366,6 +367,145 @@ def test_a_failure_is_recorded_once_and_never_retried(archive):
         "transcript_lang": "pt",
         "transcript_backend": "server",
     }
+
+
+class DownBackend:
+    """A whisper backend nothing can reach: every call is an outage, not a verdict."""
+
+    def __init__(self, message: str = "whisper server request failed: [Errno 111] Connection refused") -> None:
+        self.runs: list[str] = []
+        self.message = message
+
+    def __call__(self, path: str) -> dict[str, str]:
+        self.runs.append(path)
+        raise BackendUnavailableError(self.message)
+
+
+@pytest.fixture
+def four_voice_notes(paired_dbs):
+    """Four cached inbound voice notes: enough to spend MAX_OUTAGE_SKIPS on."""
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message_id, ALICE)
+    return paired_dbs
+
+
+def test_an_unreachable_backend_parks_nothing_and_is_retried_next_round(four_voice_notes, caplog):
+    """Issue #377: the whisper container was still starting; the audio is not to blame."""
+    down = DownBackend()
+    with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+        result = transcribe_worker.run_once(10, transcribe=down)
+
+    assert (result.pending, result.transcribed, result.failed, result.outage) == (4, 0, 0, True)
+    assert len(down.runs) == transcribe_worker.MAX_OUTAGE_SKIPS  # asked three times, not once per file
+    assert "unavailable" in caplog.text
+    assert media_notes.fetch_notes([SHA[m] for m in ("AUD1", "AUD2", "AUD3", "AUD4")]) == {}  # nothing parked
+
+    # The backend is up a minute later: the same files are transcribed.
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend()).transcribed == 4
+
+
+def test_a_round_the_backend_ended_leaves_the_walk_where_it_was(four_voice_notes):
+    """Nothing was done, so the next round asks for the same page, not the one after it."""
+    here = transcribe_worker.Position(timestamp="2026-09-05 09:00:00", message_id="AUD9", chat_jid=ALICE)
+    result = transcribe_worker.run_once(10, transcribe=DownBackend(), position=here)
+    assert result.position == here
+
+
+def test_an_outage_keeps_what_it_already_transcribed(four_voice_notes):
+    """The files whisper answered about are stored; the round ends at the ones it did not."""
+    calls: list[str] = []
+
+    def flaky(path: str) -> dict[str, str]:
+        calls.append(path)
+        if len(calls) > 1:
+            raise BackendUnavailableError("whisper server request failed: [Errno 111] Connection refused")
+        return {"text": "spoken words", "language": "pt", "backend": "server"}
+
+    result = transcribe_worker.run_once(10, transcribe=flaky)
+    assert (result.transcribed, result.failed, result.outage) == (1, 0, True)
+    notes = media_notes.fetch_notes([SHA[m] for m in ("AUD1", "AUD2", "AUD3", "AUD4")])
+    assert len(notes) == 1 and next(iter(notes.values()))["transcript"] == "spoken words"
+
+
+def test_one_request_the_server_choked_on_does_not_stall_the_walk(four_voice_notes):
+    """A single file that kills the backend is skipped, not allowed to park the round for ever."""
+    poison = _media_filename("AUD2")
+
+    def choking(path: str) -> dict[str, str]:
+        if os.path.basename(path) == poison:
+            raise BackendUnavailableError("whisper server returned HTTP 503: out of memory")
+        return {"text": "spoken words", "language": "pt", "backend": "server"}
+
+    result = transcribe_worker.run_once(10, transcribe=choking)
+    # The others are transcribed and the walk moves on; the file itself keeps no
+    # note, so it is asked again — one attempt per round, not a dead end.
+    assert (result.transcribed, result.failed, result.outage) == (3, 0, False)
+    assert media_notes.fetch_notes([SHA["AUD2"]]) == {}
+    assert result.position is None  # the page ended: the next round starts at the newest row
+
+
+def test_a_skip_on_the_last_row_of_a_batch_does_not_pin_the_walk(paired_dbs):
+    """Fewer than three strikes must never revert the position, or one file stalls the archive."""
+    _add_audio(paired_dbs, "AUD1", ALICE)  # oldest, and the one the backend chokes on
+    _add_audio(paired_dbs, "AUD2", ALICE)
+
+    def choking(path: str) -> dict[str, str]:
+        if os.path.basename(path) == _media_filename("AUD1"):
+            raise BackendUnavailableError("whisper server returned HTTP 503: out of memory")
+        return {"text": "spoken words", "language": "pt", "backend": "server"}
+
+    here = transcribe_worker.Position(timestamp="2026-09-05 09:05:00", message_id="AUD9", chat_jid=ALICE)
+    result = transcribe_worker.run_once(10, transcribe=choking, position=here)
+    assert (result.transcribed, result.outage) == (1, False)
+    assert result.position != here  # the walk advanced past the row it could not do
+
+
+def test_bytes_that_vanish_before_the_transcription_are_not_parked(archive, monkeypatch):
+    """A retention sweep between the listing and whisper is not the file's failure."""
+
+    def gone(path: str) -> dict[str, str]:
+        raise FileNotFoundError(f"Audio file not found: {path}")
+
+    result = transcribe_worker.run_once(10, transcribe=gone)
+    assert (result.pending, result.transcribed, result.failed, result.outage) == (2, 0, 0, False)
+    assert media_notes.fetch_notes([SHA["AUD1"], SHA["AUD2"]]) == {}
+
+
+def test_the_repair_queues_the_files_an_outage_parked_and_leaves_the_others(archive, caplog):
+    """Notes an older build wrote for a backend that was down are cleared once, at startup."""
+    media_notes.annotate_media(
+        SHA["AUD1"],
+        "transcript_error",
+        "TranscriptionError: whisper server request failed: [Errno 111] Connection refused",
+    )
+    media_notes.annotate_media(SHA["AUD2"], "transcript_error", "TranscriptionError: ffmpeg failed to convert x.ogg")
+
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        assert transcribe_worker.clear_outage_failures() == 1
+
+    assert media_notes.fetch_notes([SHA["AUD1"]]) == {}  # queued again
+    assert "ffmpeg failed" in media_notes.fetch_notes([SHA["AUD2"]])[SHA["AUD2"]]["transcript_error"]
+
+    backend = FakeBackend()
+    result = transcribe_worker.run_once(10, transcribe=backend)
+    assert (result.pending, result.transcribed) == (1, 1)
+    assert [os.path.basename(p) for p in backend.runs] == ["audio_20260905_090001_AUD1.ogg"]
+
+    # Idempotent: a second start finds nothing to clear.
+    assert transcribe_worker.clear_outage_failures() == 0
+
+
+def test_the_repair_runs_when_the_worker_is_installed(archive, monkeypatch):
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config: None)
+    media_notes.annotate_media(
+        SHA["AUD1"], "transcript_error", "TranscriptionError: whisper server returned HTTP 503: loading model"
+    )
+    transcribe_worker.install_ingest_worker(ON)
+    assert media_notes.fetch_notes([SHA["AUD1"]]) == {}
+
+
+def test_a_missing_notes_db_is_nothing_to_repair(paired_dbs):
+    assert transcribe_worker.clear_outage_failures() == 0
 
 
 def test_an_empty_transcript_is_a_failure_not_an_endless_retry(archive):

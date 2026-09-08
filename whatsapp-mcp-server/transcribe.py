@@ -43,10 +43,32 @@ ON_INGEST_ENV = "TRANSCRIBE_ON_INGEST"
 # whisper-server container on the same host, short enough that a status call
 # never feels like it hung.
 STATUS_PROBE_TIMEOUT_S = 2.0
+# Statuses that are about the deployment rather than about this audio, so the
+# caller retries instead of parking the file (issue #377): 404/405/501 are what
+# a WHISPER_URL missing its /inference path answers for every file, 502/503/504
+# what a server still loading its model (or a proxy in front of a dead one)
+# answers. A plain 500 is left out on purpose: whisper.cpp reports an inference
+# it could not finish that way, which *is* about the file it was given.
+OUTAGE_STATUSES = frozenset({404, 405, 501, 502, 503, 504})
 
 
 class TranscriptionError(RuntimeError):
     """Raised when no backend is configured or the backend fails."""
+
+
+class BackendUnavailableError(TranscriptionError):
+    """The backend could not be asked at all — nothing to do with this file.
+
+    A connection that was refused, reset or never established on ``WHISPER_URL``,
+    one of ``OUTAGE_STATUSES`` from it, a ``WHISPER_BIN`` or model that is not
+    there, no backend at all, no ffmpeg on PATH: the same call succeeds as soon
+    as the deployment is whole again. Callers that remember failures must not
+    remember these — the background worker (``transcribe_worker.py``) writes no
+    ``transcript_error`` note for one, so the file is tried again next interval
+    instead of being parked for ever (issue #377). Everything else the backend
+    says is about this file (it could not be decoded, it timed out, it produced
+    no text, whisper exited non-zero) and stays a plain ``TranscriptionError``.
+    """
 
 
 @dataclass(frozen=True)
@@ -208,7 +230,11 @@ def convert_to_wav16k(input_file: str, output_file: str) -> str:
     except subprocess.TimeoutExpired:
         raise TranscriptionError(f"ffmpeg timed out after {timeout}s preparing {input_file}") from None
     except FileNotFoundError:
-        raise TranscriptionError("ffmpeg is required to prepare audio for whisper but was not found on PATH") from None
+        # Missing ffmpeg breaks every file, not this one: an outage of the
+        # pipeline, so the caller retries instead of parking the audio.
+        raise BackendUnavailableError(
+            "ffmpeg is required to prepare audio for whisper but was not found on PATH"
+        ) from None
     except subprocess.CalledProcessError as exc:
         raise TranscriptionError(f"ffmpeg failed to convert {input_file}: {exc.stderr.strip()}") from None
     return output_file
@@ -219,7 +245,7 @@ def _transcribe_via_server(wav_path: str, config: WhisperConfig, language: str) 
     if language and language != "auto":
         data["language"] = language
     if not config.url:
-        raise TranscriptionError("WHISPER_URL is not set")
+        raise BackendUnavailableError("WHISPER_URL is not set")
     try:
         with open(wav_path, "rb") as fh:
             response = httpx.post(
@@ -228,8 +254,18 @@ def _transcribe_via_server(wav_path: str, config: WhisperConfig, language: str) 
                 data=data,
                 timeout=config.timeout_s,
             )
-    except httpx.HTTPError as exc:
-        raise TranscriptionError(f"whisper server request failed: {exc}") from None
+    # The server had the request and ran out of time on it: that is this file
+    # (a long voice note, a slow model), the same way whisper-cli timing out is,
+    # so it is parked rather than retried for WHISPER_TIMEOUT_S every round.
+    except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+        raise TranscriptionError(f"whisper server timed out on this file after {config.timeout_s}s: {exc}") from None
+    # Refused, reset, connect-timed-out, DNS, a URL httpx will not even build (a
+    # port that is not a number): the server never answered about this file.
+    # InvalidURL is not an HTTPError, which is why probe_server names it too.
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        raise BackendUnavailableError(f"whisper server request failed: {exc}") from None
+    if response.status_code in OUTAGE_STATUSES:
+        raise BackendUnavailableError(f"whisper server returned HTTP {response.status_code}: {response.text[:300]}")
     if response.status_code != 200:
         raise TranscriptionError(f"whisper server returned HTTP {response.status_code}: {response.text[:300]}")
     try:
@@ -246,13 +282,15 @@ def _transcribe_via_server(wav_path: str, config: WhisperConfig, language: str) 
 
 
 def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> str:
+    # Half a CLI backend (no model, no binary) is a broken deployment, not a
+    # file this machine cannot read: BackendUnavailableError, so nothing is parked.
     if not config.model:
-        raise TranscriptionError("WHISPER_MODEL must point to a ggml model file when using WHISPER_BIN")
+        raise BackendUnavailableError("WHISPER_MODEL must point to a ggml model file when using WHISPER_BIN")
     if not config.model or not os.path.isfile(config.model):
-        raise TranscriptionError(f"WHISPER_MODEL not found: {config.model}")
+        raise BackendUnavailableError(f"WHISPER_MODEL not found: {config.model}")
     binary = config.binary or ""
     if not binary or not (os.path.isfile(binary) or shutil.which(binary)):
-        raise TranscriptionError(f"WHISPER_BIN not found or not executable: {binary}")
+        raise BackendUnavailableError(f"WHISPER_BIN not found or not executable: {binary}")
 
     out_prefix = os.path.splitext(wav_path)[0]
     cmd = [binary, "-m", config.model, "-f", wav_path, "-otxt", "-of", out_prefix, "-np", "-nt"]
@@ -279,14 +317,14 @@ def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> 
 def transcribe_file(audio_path: str, language: str | None = None, config: WhisperConfig | None = None) -> dict:
     """Transcribe an audio file with the configured whisper backend.
 
-    Returns ``{"text", "language", "backend"}``. Raises TranscriptionError when no
-    backend is configured or the backend fails, FileNotFoundError for a missing
-    input file.
+    Returns ``{"text", "language", "backend"}``. Raises TranscriptionError when the
+    backend refuses this file, BackendUnavailableError (a TranscriptionError) when there
+    is no reachable backend at all, FileNotFoundError for a missing input file.
     """
     config = config or load_config()
     backend = config.backend
     if backend is None:
-        raise TranscriptionError(describe_setup_help())
+        raise BackendUnavailableError(describe_setup_help())
     lang = (language or "").strip() or config.language
 
     with tempfile.TemporaryDirectory(prefix="wa-whisper-") as tmp:

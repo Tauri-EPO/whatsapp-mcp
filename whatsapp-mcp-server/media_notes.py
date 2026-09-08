@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -330,6 +330,42 @@ def fetch_notes(hashes: list[str]) -> dict[str, dict[str, str]]:
     for sha, key, value in rows:
         out.setdefault(sha, {})[key] = value
     return out
+
+
+def _like_literal(value: str) -> str:
+    """``value`` as a LIKE pattern that matches it literally (with ESCAPE '\\')."""
+    for char in ("\\", "%", "_"):
+        value = value.replace(char, "\\" + char)
+    return f"%{value}%"
+
+
+def clear_notes_containing(key: str, needles: Sequence[str]) -> int:
+    """Delete the notes under ``key`` whose value contains one of ``needles``; returns how many.
+
+    Case-insensitive, and one statement rather than a read of every note: this
+    runs at startup, where the ingest worker retires the ``transcript_error``
+    notes an outage caused (#377), and notes.db holds whole transcripts. For the
+    keys this server writes itself, so visibility is not re-checked. Transcripts
+    are refused: they carry an index entry only ``annotate_media`` keeps in step.
+    """
+    if key == TRANSCRIPT_KEY:
+        raise ValueError("transcripts are indexed; delete them through annotate_media")
+    wanted = [n for n in needles if n]
+    if not wanted:
+        return 0
+    conn = _connect(create=False)
+    if conn is None:
+        return 0
+    matches = " OR ".join("lower(value) LIKE ? ESCAPE '\\'" for _ in wanted)
+    try:
+        deleted = conn.execute(
+            f"DELETE FROM media_notes WHERE key = ? AND ({matches})",
+            [key, *(_like_literal(n.lower()) for n in wanted)],
+        ).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return deleted
 
 
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
