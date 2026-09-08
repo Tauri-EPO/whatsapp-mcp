@@ -1857,10 +1857,13 @@ instead of dropped for the "ok" — once, since a group the ordinary rule does l
 is still left to it. A row that survives is anchored on, and names, the newest
 mention that is not one of those words.
 WhatsApp writes a mention into the text, so "ok @you" is stored as `ok @158…`:
-in the mention stream **your own** two spellings are removed before the words are
+on both sides **your own** two spellings are removed before the words are
 compared, and nobody else's — "ok @outro @you" still names somebody and stays on
-the list. The ordinary rule compares the text as stored, so a chat whose last
-message is that same `ok @158…` is still listed by it, with `mention` false.
+the list. A chat whose last message is that same `ok @158…` closes the
+conversation like any other "ok", and the ordinary rule drops it too. Which
+account this is comes from the local store, never from the bridge, so the read
+never waits on it: where that store cannot say (not paired yet) the text is
+compared as stored and those chats stay listed rather than the read failing.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:

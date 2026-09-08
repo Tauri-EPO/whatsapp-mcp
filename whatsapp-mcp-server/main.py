@@ -1092,6 +1092,9 @@ def list_unanswered(
         ignore_closing_messages: Also skip chats whose last inbound message only
                 closes the conversation — a sticker, or one of "ok", "obrigado",
                 "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False).
+                WhatsApp writes a mention into the text, so "ok @you" is stored
+                as "ok @158…"; your own two spellings are read past, nobody
+                else's, so "ok @outro @you" still names somebody and stays.
                 The same words are ignored when they are the mention that would
                 have added a group through include_group_mentions; a group whose
                 last word is somebody else's "ok" but which still holds an
