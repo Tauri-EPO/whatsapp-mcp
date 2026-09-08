@@ -51,6 +51,14 @@ def test_list_chats_uses_the_phone_book_for_unnamed_chats(unnamed_chats):
 
 
 def test_lid_chats_resolve_through_the_lid_map(unnamed_chats):
+    """A LID chat with no phone-JID twin here lists on its own, named through the map.
+
+    With both spellings stored the two are one row instead (issue #337), which
+    is what test_chat_twins covers; the name still comes from the same lookup.
+    """
+    with unnamed_chats.messages() as conn:
+        conn.execute("DELETE FROM chats WHERE jid = ?", (BOB,))
+    whatsapp._reset_name_cache()
     chat = _by_jid(whatsapp.list_chats(limit=50))[f"{BOB_LID}@lid"]
     assert chat["name"] == "Bob Silva"
     assert chat["name_source"] == "contacts"

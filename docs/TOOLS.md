@@ -223,6 +223,34 @@ exactly — a broadcast list is not a group, it is simply not direct. A chat tha
 is neither direct nor a group therefore reports `is_group: false` and is still
 dropped by `exclude_groups`.
 
+### One person, two spellings (`aliases`)
+
+WhatsApp may keep the same direct conversation twice: once keyed by the phone
+JID, once by that person's `@lid`. Where whatsmeow's LID map links the two, the
+chat listings return **one row** for them (issue #337):
+
+- `jid` is the phone spelling and `aliases` holds both, `["<number>@s.whatsapp.net", "<id>@lid"]`. The key is absent from a chat WhatsApp knows one way only.
+- `last_message`, `last_sender`, `last_is_from_me`, `has_messages` and `last_message_time` all come from the spelling holding the newest message, so a listing stays ordered by the timestamp it prints. `last_read_time` is the newer of the two markers: a conversation read under one spelling counts as read under both.
+- `coverage(by_chat=true)` reports the messages of both rows under one `chat_jid`, and `chats_total` counts the person once.
+- `list_chats`, `get_chat`, `get_contact_chats` and `get_direct_chat_by_contact` all answer with that merged row, whichever of the two spellings you asked with. Paging is over the merged rows, so a page never holds the same person twice.
+
+A `@lid` chat the map has not paired — and one whose phone twin has no row in
+this archive — keeps listing on its own, under its own JID. So does either half
+of a pair when [`WHATSAPP_ALLOWED_CHATS`](#chat-filters) admits one spelling and
+not the other: the allow-list hides exactly what it hid before, rather than
+folding the unlisted half into a row you can see.
+
+The message tools need nothing for this: a `chat_jid` filter already expands to
+both spellings, so the JID of a merged row reads the whole conversation. What
+does **not** merge yet is `list_unread`, `list_unanswered` and
+`message_stats(group_by="chat")` — those can still show a person twice, and
+their rows carry no `aliases` to reconnect the two.
+
+Up to 2000 pairs are collapsed per store, orders of magnitude more than an
+account has (fewer on a build of SQLite older than 3.32, which allows far fewer
+query parameters). Past that the quietest pairs list under both spellings and
+the server logs a warning, rather than a listing failing.
+
 ### Who sent it (`sender_phone` / `sender_lid`)
 
 The two identifier namespaces are reported in two fields, and neither ever
