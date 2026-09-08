@@ -83,6 +83,12 @@ type Bridge struct {
 	mediaRetry *mediaRetryHub
 	// rosterFailures backs off groups whose roster refresh keeps failing (group_events.go).
 	rosterFailures *rosterFailures
+	// mediaTransfers keeps one transfer in flight per cached file, so callers
+	// that miss the cache together share it (see media_inflight.go).
+	mediaTransfers mediaTransferGroup
+	// mediaTransfer streams one media file to disk (nil = downloadToPath);
+	// tests inject a blocking fake (see Bridge.transferMedia).
+	mediaTransfer mediaTransferFunc
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
 	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
@@ -155,11 +161,14 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
 		b.historyVotes.Wait()
+		// Media transfers outlive the request that started them, so they are
+		// waited on here too: the lifecycle context above already aborted them.
+		b.mediaTransfers.wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		b.Log.Warnf("Timed out waiting for history poll votes; exiting anyway")
+		b.Log.Warnf("Timed out waiting for history poll votes and media transfers; exiting anyway")
 	}
 }

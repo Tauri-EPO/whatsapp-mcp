@@ -78,6 +78,7 @@ whatsapp-mcp/
 │   ├── read_only.go            # WHATSAPP_READ_ONLY: 403 on every mutating /api/* endpoint
 │   ├── tool_policy.go          # WHATSAPP_ALLOW_TOOLS / _DENY_TOOLS: tool -> endpoint map, 403 on the rest
 │   ├── fts.go                  # FTS5 index over messages.content
+│   ├── media_inflight.go       # one transfer per destination file; the other callers share its result
 │   ├── media_retry.go          # re-download expired CDN media via the sender's phone
 │   ├── media_purge.go          # POST /api/media/purge: drop cached files by (id, chat) or criteria, rows untouched
 │   ├── instance_lock.go        # one bridge per store (flock / LockFileEx)
@@ -266,7 +267,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 1. **JIDs.** WhatsApp identifies users as `1234567890@s.whatsapp.net` (DM), `123456@g.us` (group), and `<random>@lid` (link-ID, anonymous). The bridge maintains a phone↔LID map in `whatsapp.db.whatsmeow_lid_map`. Many "user is missing" / "messages don't show" bugs trace back to JID-form mismatches. Always think about both forms (`resolveUserJID`, `resolveQuotedParticipantJID`, `resolveMentionJIDs`).
 2. **Message IDs are unique per chat, not globally.** The `messages` primary key is `(id, chat_jid)`. Always pass `chat_jid` alongside an ID; forwards reuse IDs across chats.
 3. **Pointer rows.** `reaction` and `poll_vote` messages refer to another message via `messages.target_message_id` (the bridge also writes it to `filename` for one release; readers use `_target_id()` which falls back to `filename` for pre-migration rows). Do not add new meanings to `filename`.
-4. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Use `/api/download`, never hand-built paths. CDN URLs expire (403/404/410 after days); `downloadMedia` runs one media-retry round trip against the sender's phone (`media_retry.go`) before failing.
+4. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Use `/api/download`, never hand-built paths. CDN URLs expire (403/404/410 after days); `downloadMedia` runs one media-retry round trip against the sender's phone (`media_retry.go`) before failing. Only one transfer per destination file ever runs (`media_inflight.go`): callers that miss the cache together share its result instead of writing the same `<file>.part`, and the transfer follows the bridge lifecycle rather than the caller that started it.
 5. **Audio.** Voice notes must be Opus `.ogg`; `send_audio_message` converts via ffmpeg. `transcribe_audio` converts to 16 kHz WAV before whisper.
 6. **History sync** is controlled by the phone. Modern syncs put the group sender in top-level `WebMessageInfo.participant`; read it before `Key.participant`. Poll votes in history cannot be decrypted (issue #59).
 7. **`messages.db` is the source of truth for reads.** The MCP server must never need the bridge for read-only tools. The bridge opens the DB in WAL mode with a busy timeout; the MCP side uses a 5 s timeout via `_connect_messages_db()`.
