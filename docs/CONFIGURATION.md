@@ -258,6 +258,19 @@ WHATSAPP_DENY_TOOLS=delete_message,leave_group,manage_group_participants,purge_m
 - **Set both variables for both processes** (the compose file passes them to both
   containers). They are written in tool names on both sides, so one value means
   the same thing in both places.
+- **Taking `download_media` off the list also stops the implicit fetches.**
+  `read_media` and `transcribe_audio` ask the bridge for a file the store does
+  not have, and the ingest worker does the same; that request is what
+  `download_media` makes, so with the tool gone the two tools answer `denied`
+  naming it and the worker stops fetching and transcribes cached audio only.
+  Media already in the store stays readable and transcribable, which is the
+  point: an archive-only deployment reads what it has without pulling new bytes
+  off WhatsApp. **An allow-list counts as taking it away**, so list
+  `download_media` next to `read_media` when the agent should still be able to
+  open media nobody has fetched yet — as the pairing below does. The bridge does
+  not repeat this one: `/api/download` is a read endpoint and stays open there,
+  like `/api/poll` and `/api/group/members`, so the MCP server is the only place
+  it is enforced.
 
 ### What each side enforces
 

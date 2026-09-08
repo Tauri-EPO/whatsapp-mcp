@@ -60,3 +60,16 @@ def test_unenforced_tools_have_no_endpoint():
 def test_send_tools_share_one_endpoint():
     """The bridge check is endpoint-granular; this is the case that shows it."""
     assert go_endpoint_tools()["/api/send"] == {"send_message", "send_file", "send_audio_message"}
+
+
+def test_the_download_endpoint_is_not_endpoint_enforced():
+    """`/api/download` is a read endpoint: it stays open however the lists are set.
+
+    Denying `download_media` removes the tool and the implicit fetches
+    `read_media` / `transcribe_audio` make (media_read.py, main.py), but the
+    bridge must keep serving `/api/download`, exactly as it keeps serving
+    `/api/poll` in read-only mode — a per-endpoint 403 there would take the
+    fetch away from tools the same list still allows (issue #350).
+    """
+    assert "/api/download" not in go_endpoint_tools()
+    assert {"download_media", "read_media", "transcribe_audio"} <= go_unenforced_tools()

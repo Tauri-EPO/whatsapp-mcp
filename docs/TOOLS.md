@@ -898,7 +898,9 @@ machine; there is no cloud fallback.
 
 **Parameters:**
 
-- `message_id` + `chat_jid`: the audio message (downloaded via the bridge first), **or**
+- `message_id` + `chat_jid`: the audio message (downloaded via the bridge first, or read
+  from the store when `download_media` is disabled — see
+  [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)), **or**
 - `file_path`: absolute path of an audio file already on disk
 - `language` (optional): ISO-639-1 code, default `WHISPER_LANGUAGE` (`pt`); `auto` to detect
 - `force` (optional, default `false`): transcribe again and replace a stored transcript
@@ -1015,7 +1017,8 @@ records what it was — no extra call to learn the hash.
 The bytes are read from the cache under `store/<chat_jid>/` and downloaded
 through the bridge first when they are not there, exactly like `transcribe_audio`;
 a file the archive already reports as over the limit is refused before that
-transfer. The resolved path is proven to be inside **that chat's** media
+transfer, and so is every uncached file when `download_media` is disabled (see
+[Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)). The resolved path is proven to be inside **that chat's** media
 directory before anything is read, so a symlink in the cache cannot turn this
 into a reader for the rest of the store (`.bridge-token`, the databases, the
 exports). A file over the applicable limit fails with [`too_large`](#errors)

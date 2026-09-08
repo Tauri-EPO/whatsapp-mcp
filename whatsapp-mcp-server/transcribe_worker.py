@@ -57,7 +57,7 @@ import media_notes
 import whatsapp
 from errors import ToolError
 from media_notes import TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
-from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, load_tool_policy, parse_bool_env
+from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, DOWNLOAD_TOOL, load_tool_policy, parse_bool_env
 from transcribe import TranscriptionError, load_config, transcribe_file
 from whatsapp import CHAT_POLICY
 
@@ -69,9 +69,9 @@ BATCH_ENV = "TRANSCRIBE_ON_INGEST_BATCH"
 FETCH_ENV = "TRANSCRIBE_ON_INGEST_FETCH"
 
 # The tools this worker is: it transcribes like `transcribe_audio` and fetches
-# like `download_media`, so the tool policy that hides either one binds it too.
+# like `download_media` (DOWNLOAD_TOOL, shared with the tools that fetch
+# implicitly), so the tool policy that hides either one binds it too.
 TRANSCRIBE_TOOL = "transcribe_audio"
-DOWNLOAD_TOOL = "download_media"
 
 DEFAULT_INTERVAL_S = 300.0
 MIN_INTERVAL_S = 5.0
