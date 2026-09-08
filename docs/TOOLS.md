@@ -18,6 +18,8 @@ Seven conventions apply to every tool below: [Pagination](#pagination) for the o
 
 Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based — `list_messages` seeks on the full store key (`timestamp, id, chat_jid`), because a forwarded message keeps its id in every chat it lands in — so paging stays consistent while new messages arrive, returns every row exactly once, and does not slow down on deep pages. A message cursor from an older server carries no `chat_jid`; it is still accepted and resumes on the old `timestamp, id` seek, so it never repeats a row but may still skip the copies of a forward sharing the boundary row's timestamp and id in other chats — one page later the cursor carries the full key and the walk is complete again. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor. `list_group_members` reads a live list from the bridge rather than the database, so its cursor is an offset into a deterministic ordering (see below); `coverage(by_chat=True)` orders by an aggregate over the whole page, so its cursor is an offset too, bound to the window and `chat_jid` that produced it.
 
+**Valid range.** `limit` is a page size of **1 or more**: asking for less is refused with `invalid_argument` naming the range, because there is no page to return — `limit=-1` used to answer with an empty page and `has_more: true`, which a walk never escapes, and anything below that read the whole table before throwing it away. Asking for *more* than a tool serves is fine — it is clamped to that tool's maximum, not refused. `page` counts from 0 and cannot be negative. The maxima: 500 for `list_messages` and `list_group_members`; 500 buckets for `message_stats`; 200 for `list_chats`, `list_unanswered`, `get_contact_chats`, `list_media`, `coverage(by_chat=True)`, `search_notes` and `search_media_notes`; `list_unread` sizes two lists, `limit_chats` (max 100) and `limit_per_chat` (max 50).
+
 ## Compact reads
 
 A full page is built for a human reading a conversation: 20 keys per message, most of them `null` for plain text, and four spellings of the same sender. `list_messages(limit=500, include_context=false)` is ~270 KB of JSON, which many MCP hosts refuse to render. Four arguments shape that down, on `list_messages`, `get_message_context`, `list_unread`, `list_unanswered`, `list_chats` and `get_chat` — not all four everywhere, see the rules below and each tool's own parameter list:
@@ -1637,7 +1639,7 @@ see whether the same conversation is also running in a group you share.
 **Parameters:**
 
 - `contact_jid` (required): The contact's JID or phone number
-- `limit` (optional): Chats per page (default 20)
+- `limit` (optional): Chats per page (default 20, max 200)
 - `page` (optional): Page number (default 0); ignored when `cursor` is set
 - `cursor` (optional): `next_cursor` from the previous page
 

@@ -222,3 +222,75 @@ def test_legacy_cursor_does_not_repeat_its_boundary_row(mdb, sort_by):
     legacy = whatsapp.encode_cursor(state)
     second = whatsapp.list_messages_page(limit=2, include_context=False, chat_jid=CHAT, sort_by=sort_by, cursor=legacy)
     assert {m["id"] for m in first.items}.isdisjoint({m["id"] for m in second.items})
+
+
+# --- Page size and page number ------------------------------------------------
+#
+# A listing binds `limit + 1` to see whether a next page exists, so
+# list_chats(limit=-1) used to run LIMIT 0 and answer with an empty page whose
+# has_more (0 > -1) was true — a walk on has_more never ended (issue #309); from
+# -2 down the bound itself goes negative, which SQLite reads as "no limit". A
+# negative page is read as offset 0, i.e. page 0 under another page's name.
+# Every listing validates the two through whatsapp.page_size / page_number.
+
+GROUP = "120363000000000001@g.us"
+
+# (tool, the arguments it needs to reach the page size, the argument that sizes
+# the page). One row per listing tool that takes one.
+LIMIT_TOOLS = [
+    ("list_messages", {}, "limit"),
+    ("list_chats", {}, "limit"),
+    ("list_unanswered", {}, "limit"),
+    ("list_unread", {}, "limit_chats"),
+    ("list_unread", {}, "limit_per_chat"),
+    ("get_contact_chats", {"contact_jid": CHAT}, "limit"),
+    ("list_group_members", {"chat_jid": GROUP}, "limit"),
+    ("list_media", {}, "limit"),
+    ("coverage", {"by_chat": True}, "limit"),
+    ("message_stats", {}, "limit"),
+    ("search_notes", {"query": "orcamento"}, "limit"),
+    ("search_media_notes", {"query": "orcamento"}, "limit"),
+]
+
+# The listings that also take a page number.
+PAGE_TOOLS = [
+    ("list_messages", {}),
+    ("list_chats", {}),
+    ("get_contact_chats", {"contact_jid": CHAT}),
+    ("list_group_members", {"chat_jid": GROUP}),
+    ("list_media", {}),
+]
+
+
+@pytest.mark.parametrize("bad", [-1, 0])
+@pytest.mark.parametrize("tool,kwargs,arg", LIMIT_TOOLS, ids=[f"{t}.{a}" for t, _, a in LIMIT_TOOLS])
+def test_page_size_below_one_is_refused(mdb, tool, kwargs, arg, bad):
+    result = getattr(main, tool)(**kwargs, **{arg: bad})
+    assert result["error"]["code"] == "invalid_argument", result
+    assert arg in result["error"]["message"] and "1" in result["error"]["message"]
+
+
+@pytest.mark.parametrize("tool,kwargs", PAGE_TOOLS, ids=[t for t, _ in PAGE_TOOLS])
+def test_negative_page_is_refused(mdb, tool, kwargs):
+    result = getattr(main, tool)(**kwargs, page=-1)
+    assert result["error"]["code"] == "invalid_argument", result
+    assert "page" in result["error"]["message"]
+
+
+def test_page_size_clamps_above_the_maximum(mdb):
+    """Asking for more rows than the tool serves is not an error, just capped."""
+    assert whatsapp.page_size(10_000, whatsapp.CHATS_MAX_LIMIT) == whatsapp.CHATS_MAX_LIMIT
+    page = main.list_chats(limit=10_000)
+    assert "error" not in page and len(page["items"]) <= whatsapp.CHATS_MAX_LIMIT
+
+
+@pytest.mark.parametrize("bad", ["all", float("inf"), None])
+def test_page_size_rejects_what_is_not_a_page_size(mdb, bad):
+    result = main.list_chats(limit=bad)  # type: ignore[arg-type]
+    assert result["error"]["code"] == "invalid_argument", result
+
+
+def test_count_only_ignores_the_list_sizes(mdb):
+    """count_only reads no row, so the sizes of the lists it does not build do not apply."""
+    counted = main.list_unread(count_only=True, limit_chats=0, limit_per_chat=0)
+    assert "error" not in counted and "count" in counted
