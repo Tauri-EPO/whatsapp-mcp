@@ -1305,8 +1305,49 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
     return _contact_names([sender_jid]).get(sender_jid) or sender_jid
 
 
-# SQLite's default parameter limit is 999 on older builds; 3 params per hit.
-_CONTEXT_HITS_PER_QUERY = 200
+# SQLite's default parameter limit is 999 on older builds; 3 params per hit
+# plus the neighbour count.
+_CONTEXT_HITS_PER_QUERY = 300
+
+
+def _context_side_sql(values: str, newest_first: bool, include_deleted: bool) -> str:
+    """One direction of the context window for a batch of hits.
+
+    The neighbours are chosen inside a correlated subquery that seeks
+    idx_messages_chat_timestamp from the hit's timestamp and stops at LIMIT ?,
+    so the work is the window, not the chat; the outer query then fetches those
+    rows by rowid (`messages` is an ordinary rowid table: its primary key is the
+    composite (id, chat_jid), not INTEGER PRIMARY KEY). Ranking the whole chat
+    history with ROW_NUMBER() and filtering afterwards read every row on that
+    side of the hit, so the cost grew with the archive (issue #312).
+
+    The joins are CROSS JOINs to pin the loop order: nothing constrains
+    `messages` to `hits` except that subquery, so on a store where ANALYZE has
+    run the planner would otherwise drive from `chats`, build an automatic index
+    on messages.chat_jid and re-run the subquery once per (chat message x hit)
+    — measured at 90 s for one 300-hit batch over 3 x 30k messages, against 5 ms
+    with the order below. CROSS JOIN is SQLite's documented way to say "keep this
+    nesting"; it changes the plan, never the result.
+    """
+    direction = "DESC" if newest_first else "ASC"
+    comparison = "<" if newest_first else ">"
+    deleted_filter = "" if include_deleted else "AND neighbour.deleted_at IS NULL"
+    return f"""
+        WITH hits(hit_idx, chat_jid, ts) AS (VALUES {values})
+        SELECT {MESSAGE_COLUMNS}, hits.hit_idx
+        FROM hits
+        CROSS JOIN messages ON messages.rowid IN (
+            SELECT neighbour.rowid
+            FROM messages AS neighbour
+            WHERE neighbour.chat_jid = hits.chat_jid
+              AND neighbour.timestamp {comparison} hits.ts
+              {deleted_filter}
+            ORDER BY neighbour.timestamp {direction}, neighbour.id {direction}
+            LIMIT ?
+        )
+        CROSS JOIN chats ON chats.jid = messages.chat_jid
+        ORDER BY hits.hit_idx, messages.timestamp {direction}, messages.id {direction}
+    """
 
 
 def _fetch_context_windows(
@@ -1316,63 +1357,40 @@ def _fetch_context_windows(
     after: int,
     include_deleted: bool = True,
 ) -> dict[tuple[str, str], tuple[list[Message], list[Message]]]:
-    """Fetch the before/after window for many hits in one query per batch.
+    """Fetch the before/after window for many hits, one query per direction and batch.
 
     Returns {(id, chat_jid): (before_msgs newest-first, after_msgs oldest-first)}.
-    Window membership is per chat and ranked with ROW_NUMBER(), so the cost is one
-    statement per _CONTEXT_HITS_PER_QUERY hits instead of two per hit.
+    A hit is identified by its position in the batch, so the same message ID in
+    two chats (forwards, gotcha 2) keeps two windows — and a hit repeated in the
+    list is asked for once, or its window would be collected twice.
     """
-    windows: dict[tuple[str, str], tuple[list[Message], list[Message]]] = {
-        (hit.id, hit.chat_jid): ([], []) for hit in hits
-    }
-    if not hits or (before <= 0 and after <= 0):
+    windows: dict[tuple[str, str], tuple[list[Message], list[Message]]] = {}
+    anchors: list[Message] = []
+    for hit in hits:
+        key = (hit.id, hit.chat_jid)
+        if key not in windows:
+            windows[key] = ([], [])
+            anchors.append(hit)
+    if not anchors or (before <= 0 and after <= 0):
         return windows
-    deleted_filter = "" if include_deleted else "AND messages.deleted_at IS NULL"
-    for start in range(0, len(hits), _CONTEXT_HITS_PER_QUERY):
-        batch = hits[start : start + _CONTEXT_HITS_PER_QUERY]
+    width = len(MESSAGE_COLUMNS.split(","))
+    for start in range(0, len(anchors), _CONTEXT_HITS_PER_QUERY):
+        batch = anchors[start : start + _CONTEXT_HITS_PER_QUERY]
         values = ",".join("(?, ?, ?)" for _ in batch)
         hit_params: list[Any] = []
-        for hit in batch:
+        for index, hit in enumerate(batch):
             # The anchor is compared against the raw column, so it has to be
             # spelled the way the column is (timestamp_bound), not re-rendered
             # by isoformat().
-            hit_params.extend([hit.id, hit.chat_jid, timestamp_bound(hit.timestamp)])
-        sql = f"""
-            WITH hits(id, chat_jid, ts) AS (VALUES {values})
-            SELECT * FROM (
-                SELECT {MESSAGE_COLUMNS}, hits.id AS hit_id, 'before' AS side,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY hits.id, hits.chat_jid
-                           ORDER BY messages.timestamp DESC, messages.id DESC
-                       ) AS rn
-                FROM hits
-                JOIN messages ON messages.chat_jid = hits.chat_jid AND messages.timestamp < hits.ts
-                JOIN chats ON messages.chat_jid = chats.jid
-                WHERE 1=1 {deleted_filter}
-            ) WHERE rn <= ?
-            UNION ALL
-            SELECT * FROM (
-                SELECT {MESSAGE_COLUMNS}, hits.id AS hit_id, 'after' AS side,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY hits.id, hits.chat_jid
-                           ORDER BY messages.timestamp ASC, messages.id ASC
-                       ) AS rn
-                FROM hits
-                JOIN messages ON messages.chat_jid = hits.chat_jid AND messages.timestamp > hits.ts
-                JOIN chats ON messages.chat_jid = chats.jid
-                WHERE 1=1 {deleted_filter}
-            ) WHERE rn <= ?
-            ORDER BY hit_id, side, rn
-        """
-        cursor.execute(sql, (*hit_params, before, after))
-        width = len(MESSAGE_COLUMNS.split(","))
-        for row in cursor.fetchall():
-            message = _row_to_message(row[:width])
-            hit_id, side = row[width], row[width + 1]
-            key = (hit_id, message.chat_jid)
-            if key not in windows:
+            hit_params.extend([index, hit.chat_jid, timestamp_bound(hit.timestamp)])
+        for newest_first, count in ((True, before), (False, after)):
+            if count <= 0:
                 continue
-            windows[key][0 if side == "before" else 1].append(message)
+            cursor.execute(_context_side_sql(values, newest_first, include_deleted), (*hit_params, count))
+            side = 0 if newest_first else 1
+            for row in cursor.fetchall():
+                hit = batch[row[width]]
+                windows[(hit.id, hit.chat_jid)][side].append(_row_to_message(row[:width]))
     return windows
 
 
