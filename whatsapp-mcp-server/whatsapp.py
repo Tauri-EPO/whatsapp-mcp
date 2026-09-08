@@ -1710,9 +1710,10 @@ _RANKED_UNION_JOIN = (
     ") GROUP BY rid) hits ON hits.rid = messages.rowid"
 )
 
-# id breaks the remaining ties so the offset a relevance cursor carries keeps
-# pointing at the same row between pages.
-_RELEVANCE_TIEBREAK = "messages.timestamp DESC, messages.id DESC"
+# The store key (id, chat_jid) breaks the remaining ties so the offset a
+# relevance cursor carries keeps pointing at the same row between pages, even
+# when the same forwarded id sits in several chats at the same second.
+_RELEVANCE_TIEBREAK = "messages.timestamp DESC, messages.id DESC, messages.chat_jid DESC"
 
 
 def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredicate:
@@ -1985,17 +1986,33 @@ def list_messages_page(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
-        # Sorting and pagination. Keyset on (timestamp, id) for the time orders;
-        # relevance (bm25) has no stable key, so its cursor carries an offset.
+        # Sorting and pagination. Keyset on the store key (timestamp, id,
+        # chat_jid) for the time orders — an id alone repeats across chats
+        # (forwards, broadcasts), so (timestamp, id) is not a total order and
+        # the tied rows would be paged over. Relevance (bm25) has no stable key,
+        # so its cursor carries an offset.
         keyset = sort_by != "relevance" or not ranked
         offset = page * limit
         if cursor_state is not None:
             if keyset and "t" in cursor_state:
                 cmp = ">" if sort_by == "oldest" else "<"
-                where_clauses.append(
-                    f"(messages.timestamp {cmp} ? OR (messages.timestamp = ? AND messages.id {cmp} ?))"
-                )
-                params.extend([cursor_state["t"], cursor_state["t"], cursor_state["i"]])
+                if "c" in cursor_state:
+                    # Row-value comparison (SQLite >= 3.15): one lexicographic
+                    # seek that still uses idx_messages_timestamp for its first
+                    # term.
+                    where_clauses.append(f"(messages.timestamp, messages.id, messages.chat_jid) {cmp} (?, ?, ?)")
+                    params.extend([cursor_state["t"], cursor_state["i"], cursor_state["c"]])
+                else:
+                    # A cursor issued before chat_jid joined the key: resume it
+                    # on the old two-part seek, which is exact in both
+                    # directions except for the rows tied on (timestamp, id) in
+                    # another chat — those stay skipped once, as they were
+                    # before this fix. The cursor this page returns carries the
+                    # full key, so the walk heals after one page.
+                    where_clauses.append(
+                        f"(messages.timestamp {cmp} ? OR (messages.timestamp = ? AND messages.id {cmp} ?))"
+                    )
+                    params.extend([cursor_state["t"], cursor_state["t"], cursor_state["i"]])
                 offset = 0
             else:
                 offset = int(cursor_state.get("o", 0))
@@ -2007,7 +2024,7 @@ def list_messages_page(
             query_parts.append(f"ORDER BY {predicate.relevance_order}")
         else:
             order = "ASC" if sort_by == "oldest" else "DESC"
-            query_parts.append(f"ORDER BY messages.timestamp {order}, messages.id {order}")
+            query_parts.append(f"ORDER BY messages.timestamp {order}, messages.id {order}, messages.chat_jid {order}")
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit + 1, offset])
 
@@ -2020,7 +2037,7 @@ def list_messages_page(
         if has_more and messages:
             last = messages[-1]
             if keyset:
-                next_cursor = encode_cursor({"k": "messages", "s": sort_by, "t": last[0], "i": last[6]})
+                next_cursor = encode_cursor({"k": "messages", "s": sort_by, "t": last[0], "i": last[6], "c": last[5]})
             else:
                 next_cursor = encode_cursor({"k": "messages", "s": sort_by, "o": offset + limit})
 

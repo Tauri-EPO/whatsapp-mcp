@@ -111,3 +111,114 @@ def test_tools_return_page_envelope(mdb):
     assert {m["id"] for m in page["items"]}.isdisjoint({m["id"] for m in page2["items"]})
     chats = main.list_chats(limit=100)
     assert chats["has_more"] is False and chats["next_cursor"] is None and len(chats["items"]) == 39
+
+
+# A forward keeps its message ID in every chat it lands in, so (timestamp, id)
+# is not a total order: the store key is (id, chat_jid). See issue #313.
+FWD_ID = "same-forwarded-id"
+FWD_TS = "2026-09-01 12:00:00"
+LATER_TS = "2026-09-01 12:00:01"
+FWD_CHATS = ("aaa@s.whatsapp.net", "bbb@g.us", "ccc@s.whatsapp.net")
+REVOKED_CHAT = "ddd@s.whatsapp.net"
+
+# Mirrors whatsapp-bridge/fts.go, enough of it to rank a query.
+FWD_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    content, content='messages', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+"""
+
+
+@pytest.fixture
+def forwarded(tmp_path, monkeypatch):
+    """The same forwarded ID and timestamp in three chats, plus a revoked copy."""
+    path = tmp_path / "messages.db"
+    insert = (
+        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, deleted_at) "
+        "VALUES (?, ?, '5511777777777', ?, ?, 0, ?)"
+    )
+    with sqlite3.connect(path) as c:
+        c.executescript(MESSAGES_SCHEMA)
+        c.executescript(FWD_FTS_SCHEMA)
+        for jid in (*FWD_CHATS, REVOKED_CHAT):
+            c.execute("INSERT INTO chats VALUES (?, ?, ?)", (jid, f"Chat {jid[:3]}", LATER_TS))
+        for jid in FWD_CHATS:
+            c.execute(insert, (FWD_ID, jid, "orcamento forwarded", FWD_TS, None))
+            c.execute(insert, ("second-forward", jid, "outro assunto", LATER_TS, None))
+        # Same ID and timestamp as the tie group, but revoked.
+        c.execute(insert, (FWD_ID, REVOKED_CHAT, "orcamento forwarded", FWD_TS, "2026-09-01 13:00:00"))
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+    whatsapp._reset_schema_cache()
+    whatsapp._reset_name_cache()
+    return path
+
+
+def keys(items):
+    return [(m["id"], m["chat_jid"]) for m in items]
+
+
+@pytest.mark.parametrize("sort_by", ["newest", "oldest"])
+def test_forwarded_copies_are_paged_exactly_once(forwarded, sort_by):
+    items, pages = walk(whatsapp.list_messages_page, limit=1, include_context=False, sort_by=sort_by)
+    assert len(keys(items)) == 7 and len(set(keys(items))) == 7
+    assert pages == 7
+    stamps = [m["timestamp"] for m in items]
+    assert stamps == sorted(stamps, reverse=(sort_by == "newest"))
+    assert (FWD_ID, REVOKED_CHAT) in set(keys(items))
+
+
+@pytest.mark.parametrize("sort_by", ["newest", "oldest"])
+def test_forwarded_copies_with_chat_filter_and_deleted_hidden(forwarded, sort_by):
+    picked = [FWD_CHATS[0], FWD_CHATS[2]]
+    items, _ = walk(
+        whatsapp.list_messages_page,
+        limit=1,
+        include_context=False,
+        sort_by=sort_by,
+        chat_jid=picked,
+        include_deleted=False,
+    )
+    assert sorted(keys(items)) == sorted([(mid, jid) for jid in picked for mid in (FWD_ID, "second-forward")])
+
+
+def test_forwarded_copies_walk_without_deleted(forwarded):
+    items, _ = walk(whatsapp.list_messages_page, limit=2, include_context=False, include_deleted=False)
+    assert len(set(keys(items))) == 6
+    assert (FWD_ID, REVOKED_CHAT) not in set(keys(items))
+
+
+def test_relevance_tie_break_is_deterministic(forwarded):
+    items, pages = walk(
+        whatsapp.list_messages_page,
+        limit=1,
+        include_context=False,
+        sort_by="relevance",
+        query="orcamento",
+        include_deleted=False,
+    )
+    assert keys(items) == sorted(keys(items), reverse=True) and len(set(keys(items))) == 3
+    assert pages == 3
+
+
+@pytest.mark.parametrize("sort_by", ["newest", "oldest"])
+def test_legacy_cursor_without_chat_jid_resumes_on_the_old_seek(forwarded, sort_by):
+    # Cursor as this server wrote it before the chat_jid became part of the key:
+    # accepted, never repeats a row, still skips the copies tied on (t, id).
+    legacy = whatsapp.encode_cursor({"k": "messages", "s": sort_by, "t": FWD_TS, "i": FWD_ID})
+    page = whatsapp.list_messages_page(limit=10, include_context=False, sort_by=sort_by, cursor=legacy)
+    expected = set() if sort_by == "newest" else {("second-forward", jid) for jid in FWD_CHATS}
+    assert set(keys(page.items)) == expected and page.has_more is False
+
+
+@pytest.mark.parametrize("sort_by", ["newest", "oldest"])
+def test_legacy_cursor_does_not_repeat_its_boundary_row(mdb, sort_by):
+    """An ordinary walk (unique IDs) that started before the upgrade stays exact."""
+    first = whatsapp.list_messages_page(limit=2, include_context=False, chat_jid=CHAT, sort_by=sort_by)
+    state = whatsapp.decode_cursor(first.next_cursor, "messages")
+    assert state is not None and state.pop("c") == CHAT
+    legacy = whatsapp.encode_cursor(state)
+    second = whatsapp.list_messages_page(limit=2, include_context=False, chat_jid=CHAT, sort_by=sort_by, cursor=legacy)
+    assert {m["id"] for m in first.items}.isdisjoint({m["id"] for m in second.items})
