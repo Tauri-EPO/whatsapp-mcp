@@ -75,15 +75,28 @@ CREATE TABLE IF NOT EXISTS notes_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL
 # than the trigger machinery — and a build without FTS5 then degrades to the
 # substring scan instead of breaking every write.
 TRANSCRIPTS_FTS_TABLE = "transcripts_fts"
-# One statement on purpose: executescript() would commit the note write this
-# runs inside, so the note and its index entry would stop being atomic.
+# The hash a row carries is UNINDEXED (fts5 indexes words, not identifiers), so
+# "replace the entry for this hash" cannot be a lookup on the index itself:
+# finding it by sha256 reads every row, and the write path pays that per voice
+# note, inside the note's transaction, growing with the archive. transcripts_map
+# is the missing index: sha256 -> the rowid of its entry, a primary-key lookup
+# followed by a rowid delete. It is written in the same transaction as the index
+# and the note, and _rebuild_transcripts_fts refills both together, so the two
+# cannot drift apart.
+TRANSCRIPTS_MAP_TABLE = "transcripts_map"
+# One statement each on purpose: executescript() would commit the note write
+# this runs inside, so the note and its index entry would stop being atomic.
 _FTS_SCHEMA = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts "
     "USING fts5(sha256 UNINDEXED, text, tokenize='unicode61 remove_diacritics 2')"
 )
-# Bumping this rebuilds the index from the notes on the next use.
+_FTS_MAP_SCHEMA = (
+    f"CREATE TABLE IF NOT EXISTS {TRANSCRIPTS_MAP_TABLE} (sha256 TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL)"
+)
+# Bumping this rebuilds the index from the notes on the next use. 2: the rowid
+# map, which an older store has no rows for.
 _FTS_VERSION_KEY = "transcripts_fts_version"
-_FTS_VERSION = "1"
+_FTS_VERSION = "2"
 _fts_warned = False
 
 
@@ -111,9 +124,14 @@ def _rebuild_transcripts_fts(conn: sqlite3.Connection) -> None:
     rebuild that dies halfway is simply repeated on the next use.
     """
     conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE}")
+    conn.execute(f"DELETE FROM {TRANSCRIPTS_MAP_TABLE}")
     conn.execute(
         f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) SELECT sha256, value FROM media_notes WHERE key = ?",
         (TRANSCRIPT_KEY,),
+    )
+    # media_notes is keyed by (sha256, key), so one row per hash lands here.
+    conn.execute(
+        f"INSERT INTO {TRANSCRIPTS_MAP_TABLE} (sha256, fts_rowid) SELECT sha256, rowid FROM {TRANSCRIPTS_FTS_TABLE}"
     )
     conn.execute(
         "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -131,6 +149,7 @@ def _ensure_transcripts_fts(conn: sqlite3.Connection) -> bool:
     global _fts_warned
     try:
         conn.execute(_FTS_SCHEMA)
+        conn.execute(_FTS_MAP_SCHEMA)
         row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (_FTS_VERSION_KEY,)).fetchone()
         if row is None or row[0] != _FTS_VERSION:
             _rebuild_transcripts_fts(conn)
@@ -156,16 +175,36 @@ def index_transcript(conn: sqlite3.Connection, sha256: str, value: str) -> None:
     index is then stale, and dropping the marker is what makes the next use
     rebuild it instead of answering from it. If even that fails, the exception
     leaves annotate_media's transaction unfinished and the note is not written.
+
+    The entry is reached through transcripts_map, never by looking for the hash
+    inside the index: the row keeps the rowid it was first given, so replacing a
+    transcript is one primary-key lookup, one rowid delete and one insert,
+    whatever the archive has grown to.
     """
     if not _ensure_transcripts_fts(conn):
         conn.execute("DELETE FROM notes_meta WHERE key = ?", (_FTS_VERSION_KEY,))
         return
-    # sha256 is UNINDEXED, so this scans the index; transcripts are written one
-    # voice note at a time, and the alternative (a rowid map) is a second table
-    # to keep in sync.
-    conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE sha256 = ?", (sha256,))
-    if value:
-        conn.execute(f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) VALUES (?, ?)", (sha256, value))
+    row = conn.execute(f"SELECT fts_rowid FROM {TRANSCRIPTS_MAP_TABLE} WHERE sha256 = ?", (sha256,)).fetchone()
+    if row is not None:
+        conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE rowid = ?", (row[0],))
+    if not value:
+        if row is not None:
+            conn.execute(f"DELETE FROM {TRANSCRIPTS_MAP_TABLE} WHERE sha256 = ?", (sha256,))
+        else:
+            # Nothing to point at: sweep by hash so a forgotten transcript can
+            # never stay searchable, whatever left the two tables disagreeing.
+            # Deleting a transcript is a rare, deliberate call — this is the one
+            # place where reading the index whole is affordable.
+            conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE sha256 = ?", (sha256,))
+        return
+    if row is not None:
+        # Same rowid as before: the map stays valid without a second write.
+        conn.execute(
+            f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (rowid, sha256, text) VALUES (?, ?, ?)", (row[0], sha256, value)
+        )
+        return
+    cur = conn.execute(f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) VALUES (?, ?)", (sha256, value))
+    conn.execute(f"INSERT INTO {TRANSCRIPTS_MAP_TABLE} (sha256, fts_rowid) VALUES (?, ?)", (sha256, cur.lastrowid))
 
 
 def normalize_sha256(value: str) -> str:
