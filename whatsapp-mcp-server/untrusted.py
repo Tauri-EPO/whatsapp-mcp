@@ -117,9 +117,11 @@ _KEPT_FORMAT_STR = "".join(sorted(KEPT_FORMAT_CHARS))
 NAME_MAX_CHARS = 200
 ELLIPSIS = "…"
 
-# Everything under this key is a {name: note} mapping the agent wrote about
-# somebody else's file, so every string leaf below it is wrapped.
-NOTES_KEY = "notes"
+# Everything under these keys is a {name: note} mapping the agent wrote about
+# somebody else's file, chat, contact or message, so every string leaf below one
+# is wrapped. Two keys because a media message carries both: `notes` about the
+# file it holds, `message_notes` about the message itself.
+NOTES_KEYS = frozenset({"notes", "message_notes"})
 
 # ...except the bookkeeping of a note record ({"value", "updated_at", ...}).
 # updated_at is what annotate(..., if_unchanged_since=...) expects back, so
@@ -211,7 +213,7 @@ def clean_untrusted(payload: Any, *, wrap: bool) -> Any:
 
     Walks dicts and lists. The keys in :data:`NAME_KEYS` are sanitised whatever
     ``wrap`` says (a list of labels item by item); the prose in
-    :data:`WRAPPED_KEYS` (and everything below :data:`NOTES_KEY`) is delimited
+    :data:`WRAPPED_KEYS` (and everything below a :data:`NOTES_KEYS` key) is delimited
     only when ``wrap`` is true. Nothing else is touched, so JIDs, timestamps,
     counts and cursors stay byte-identical and remain usable as arguments to the
     next call.
@@ -221,7 +223,7 @@ def clean_untrusted(payload: Any, *, wrap: bool) -> Any:
         for key, value in payload.items():
             if key in NAME_KEYS:
                 result[key] = _sanitize_names(value)
-            elif key == NOTES_KEY:
+            elif key in NOTES_KEYS:
                 result[key] = _wrap_notes(value) if wrap else value
             elif key in WRAPPED_KEYS and isinstance(value, str):
                 result[key] = wrap_text(value) if wrap else value

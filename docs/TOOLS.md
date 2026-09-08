@@ -1024,11 +1024,91 @@ transcript index), so `annotate_media` and `annotate(target_type="media", ...)`
 are the same note seen twice. They keep one version, so `include_history` returns
 a single entry per key and `version` is always 1.
 
+<a id="notes-inline"></a>
+
+#### Where the notes come back
+
+A note is only worth writing if it is read without being asked for, so it is
+returned wherever its target is listed — one batched query per page, never one
+per row:
+
+| Tool | Where the notes appear |
+|---|---|
+| `list_chats`, `get_chat`, `list_unanswered`, `list_unread` | `notes` on every chat row (`{}` when nobody has annotated the chat yet) |
+| `get_contact` | `notes` on the contact |
+| `list_messages`, `get_message_context` | `message_notes` on the rows that have one — most messages never do, so the key is absent rather than empty |
+| `get_notes`, `search_notes` | the notes themselves, with `updated_at` and optionally the history |
+
+`notes` on a **media** row is a different thing and stays what it was: the notes
+of the *file*, keyed by its sha256 (see the section above). A media message can
+carry both — `notes` about the file, `message_notes` about that particular
+message. `notes` is a `fields` name on chat rows and `message_notes` on message
+rows, so a compact read can project or drop them like any other column;
+`export_messages` never writes them, since an export is an archive of what other
+people wrote.
+
+#### Conventional keys
+
+Free text, so the vocabulary can grow — but start with these, the way the media
+notes have `summary` / `tags` / `keep`:
+
+| Key | On | Meaning |
+|---|---|---|
+| `label` | chat, contact | what this is: `patient`, `supplier`, `family`, `marketing`… |
+| `importance` | chat, contact | `1`-`5`, 5 being "answer today". What a triage pass sorts on |
+| `summary` | any | one or two sentences of what you know about the target |
+| `mute` | chat | `yes` to keep the conversation out of triage lists |
+| `log` | any | an **append key**: `annotate(..., mode="append")` adds `2026-09-07: called back, no answer` as a new line |
+| `handled_at` | chat, message | ISO timestamp of when you dealt with it |
+| `snooze_until` | chat | ISO timestamp before which the target should not resurface |
+
+`handled_at` and `snooze_until` are the two a triage list is expected to read;
+they are written here so both sides spell them the same way.
+
+<a id="annotate-what-you-learned"></a>
+
+#### Annotate what you learned
+
+The same convention the media notes ask for, applied to people: **when a pass
+concludes something about a chat, a contact or a message that you would not want
+to work out twice, write it down before moving on.** A chat that comes back with
+empty `notes` is one nobody has judged yet; that is the backlog. Without this
+step the next session re-reads the archive to reach the same conclusions, and a
+listing cannot sort by importance or hide known noise because nothing told it
+any of that exists.
+
+Two rules keep the memory honest:
+
+- **Read before you replace.** `set` overwrites the whole value. `get_notes`
+  first, merge, then write — and check `replaced` in the response to confirm
+  nothing was dropped.
+- **Correct, do not accumulate contradictions.** A wrong note is fixed with
+  another `set` (the old value stays in the history); `append` is for keys that
+  are meant to grow, and `compact` is how they stop growing.
+
 **Natural Language Examples:**
 
 - "Remember that this number is a marketing bot"
 - "Mark Ana as importance 5 and note that she is waiting on the invoice"
 - "Who did I mark as an accountant?"
+
+### `compact`
+
+`compact(target_type, target_id, key, value)` replaces an append key's
+accumulated log with a summary, in one write. Note values are capped at **64 KB**
+and a write that would cross the cap is refused with `invalid_argument`; this is
+how the agent makes room: read the log with `get_notes`, write the summary of it
+here. The whole previous value comes back as `replaced` and stays in the
+history, so compacting loses nothing.
+
+It is `annotate(..., mode="set")` with the intent recorded — the history entry
+says `source: "compact"`, which is how a later reader tells a summary apart from
+an ordinary correction.
+
+**Natural Language Examples:**
+
+- "Summarise this chat's log into one line and replace it"
+- "The call log for Ana is getting long, compact it"
 
 ### `purge_media`
 

@@ -10,6 +10,7 @@ import main
 import media_inventory
 import media_notes
 import notes
+import untrusted
 import whatsapp
 from tests.conftest import ALICE, BOB, BOB_LID, FAMILY
 
@@ -334,7 +335,165 @@ class TestValidation:
         main.annotate("chat", ALICE, "log", "x" * (media_notes.MAX_VALUE_BYTES - 10))
         out = main.annotate("chat", ALICE, "log", "y" * 20, mode="append")
         assert out["error"]["code"] == "invalid_argument"
-        assert "summarise" in out["error"]["message"]
+        assert "compact()" in out["error"]["message"]
 
     def test_unknown_target_type_in_search(self, notes_store):
         assert main.search_notes("x", target_type="group")["error"]["code"] == "invalid_argument"
+
+
+class TestCompact:
+    def test_compact_replaces_the_log_and_returns_it(self, notes_store):
+        main.annotate("chat", ALICE, "log", "2026-09-01: called", mode="append")
+        main.annotate("chat", ALICE, "log", "2026-09-02: no answer", mode="append")
+        out = main.compact("chat", ALICE, "log", "called twice in September, no answer")
+        assert out["replaced"] == "2026-09-01: called\n2026-09-02: no answer"
+        assert out["source"] == "compact" and out["version"] == 3
+        assert main.get_notes("chat", ALICE)["notes"]["log"]["value"] == "called twice in September, no answer"
+
+    def test_the_log_survives_in_the_history(self, notes_store):
+        main.annotate("chat", ALICE, "log", "2026-09-01: called", mode="append")
+        main.compact("chat", ALICE, "log", "one call")
+        history = main.get_notes("chat", ALICE, include_history=True)["history"]
+        assert [entry["source"] for entry in history] == ["compact", "append"]
+        assert history[-1]["value"] == "2026-09-01: called"
+
+    def test_compact_makes_room_for_the_next_append(self, notes_store):
+        main.annotate("chat", ALICE, "log", "x" * (media_notes.MAX_VALUE_BYTES - 10))
+        assert main.annotate("chat", ALICE, "log", "y" * 20, mode="append")["error"]["code"] == "invalid_argument"
+        main.compact("chat", ALICE, "log", "a long log, summarised")
+        assert main.annotate("chat", ALICE, "log", "y" * 20, mode="append")["success"] is True
+
+    def test_compact_needs_a_summary(self, notes_store):
+        main.annotate("chat", ALICE, "log", "something", mode="append")
+        out = main.compact("chat", ALICE, "log", "   ")
+        assert out["error"]["code"] == "invalid_argument"
+        assert main.get_notes("chat", ALICE)["notes"]["log"]["value"] == "something"
+
+    def test_compact_works_on_media_too(self, notes_store):
+        main.annotate("media", SHA_A, "log", "seen in Alice's chat", mode="append")
+        assert main.compact("media", SHA_A, "log", "seen once")["replaced"] == "seen in Alice's chat"
+
+
+class TestInlineNotes:
+    def test_list_chats_and_get_chat_carry_chat_notes(self, notes_store):
+        main.annotate("chat", ALICE, "label", "patient")
+        by_jid = {row["jid"]: row for row in main.list_chats()["items"]}
+        assert by_jid[ALICE]["notes"] == {"label": "patient"}
+        # An unnoted chat says so with an empty mapping rather than staying silent.
+        assert by_jid[FAMILY]["notes"] == {}
+        assert main.get_chat(ALICE)["notes"] == {"label": "patient"}
+
+    def test_one_query_for_a_whole_page(self, notes_store, monkeypatch):
+        """No N+1: the page costs one notes lookup, whatever it holds."""
+        main.annotate("chat", ALICE, "label", "patient")
+        main.annotate("chat", FAMILY, "label", "family")
+        calls = []
+        original = notes.fetch_notes_for
+
+        def counted(target_type, target_ids):
+            calls.append(target_type)
+            return original(target_type, target_ids)
+
+        monkeypatch.setattr(notes, "fetch_notes_for", counted)
+        items = main.list_chats()["items"]
+        assert len([row for row in items if row["notes"]]) == 2
+        assert calls == ["chat"]
+
+    def test_list_unanswered_and_list_unread_carry_them(self, notes_store):
+        with notes_store.messages() as c:
+            c.execute(
+                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
+                "VALUES ('MSG2', ?, ?, 'oi', '2026-09-05 11:00:00', 0)",
+                (ALICE, ALICE.split("@")[0]),
+            )
+        main.annotate("chat", ALICE, "importance", "5")
+        assert [row["notes"] for row in main.list_unanswered()["items"] if row["jid"] == ALICE] == [{"importance": "5"}]
+        assert [chat["notes"] for chat in main.list_unread()["chats"] if chat["chat_jid"] == ALICE] == [
+            {"importance": "5"}
+        ]
+
+    def test_get_contact_carries_contact_notes(self, notes_store):
+        main.annotate("contact", BOB, "label", "supplier")
+        assert main.get_contact(BOB)["notes"] == {"label": "supplier"}
+        assert main.get_contact(ALICE)["notes"] == {}
+
+    def test_a_blocked_target_gets_no_notes_from_the_batch(self, notes_store, monkeypatch):
+        """The batched lookup applies the allow-list itself, whatever the caller filtered."""
+        main.annotate("contact", BOB, "label", "supplier")
+        main.annotate("chat", FAMILY, "label", "family")
+        policy = chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": ALICE})
+        for module in (whatsapp, media_inventory, media_notes, notes):
+            monkeypatch.setattr(module, "CHAT_POLICY", policy)
+        assert notes.fetch_notes_for("contact", [BOB]) == {}
+        assert notes.fetch_notes_for("chat", [FAMILY]) == {}
+        assert main.get_contact(BOB)["error"]["code"] == "denied"
+
+    def test_the_untrusted_envelope_reaches_message_notes(self, notes_store, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_WRAP_UNTRUSTED", "1")
+        main.annotate("message", MSG, "summary", "asked about the quote")
+        main.annotate("chat", ALICE, "label", "patient")
+        row = next(row for row in main.list_messages(chat_jid=ALICE)["items"] if row["id"] == "MSG1")
+        assert row["message_notes"]["summary"] == f"{untrusted.OPEN_TAG}asked about the quote{untrusted.CLOSE_TAG}"
+        chat = main.get_chat(ALICE)
+        assert chat["notes"]["label"] == f"{untrusted.OPEN_TAG}patient{untrusted.CLOSE_TAG}"
+
+    def test_message_rows_carry_message_notes_only_where_there_are_any(self, notes_store):
+        main.annotate("message", MSG, "summary", "asked about the quote")
+        rows = main.list_messages(chat_jid=ALICE)["items"]
+        annotated = [row for row in rows if row["id"] == "MSG1"]
+        assert annotated and annotated[0]["message_notes"] == {"summary": "asked about the quote"}
+        assert all("message_notes" not in row for row in rows if row["id"] != "MSG1")
+
+    def test_message_notes_are_not_the_media_notes_of_the_same_row(self, notes_store):
+        main.annotate("media", SHA_A, "summary", "a photo")
+        main.annotate("message", f"{ALICE}/IMG1", "summary", "why the photo matters")
+        row = next(row for row in main.list_messages(chat_jid=ALICE)["items"] if row["id"] == "IMG1")
+        assert row["notes"] == {"summary": "a photo"}
+        assert row["message_notes"] == {"summary": "why the photo matters"}
+
+    def test_get_message_context_carries_them_in_one_query(self, notes_store, monkeypatch):
+        with notes_store.messages() as conn:
+            conn.executemany(
+                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES (?, ?, 'x', ?, ?, 0)",
+                [
+                    ("MSG0", ALICE, "antes", "2026-09-01 10:30:00"),
+                    ("MSG2", ALICE, "depois", "2026-09-01 11:30:00"),
+                ],
+            )
+        main.annotate("message", MSG, "summary", "asked about the quote")
+        main.annotate("message", f"{ALICE}/MSG2", "summary", "the answer")
+        calls = []
+        original = notes.fetch_notes_for
+
+        def counted(target_type, target_ids):
+            calls.append(target_type)
+            return original(target_type, target_ids)
+
+        monkeypatch.setattr(notes, "fetch_notes_for", counted)
+        context = main.get_message_context(ALICE, "MSG1", before=1, after=1)
+        assert context["message"]["message_notes"] == {"summary": "asked about the quote"}
+        assert [row["id"] for row in context["before"]] == ["MSG0"]
+        assert [row["id"] for row in context["after"]] == ["MSG2"]
+        assert context["after"][0]["message_notes"] == {"summary": "the answer"}
+        # The whole window, not one query per side.
+        assert calls == ["message"]
+
+    def test_notes_are_projectable_and_droppable(self, notes_store):
+        """`notes` is a CHAT_FIELDS name, so the compact reads can keep or drop it."""
+        with notes_store.messages() as conn:
+            conn.execute(
+                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
+                "VALUES ('MSG3', ?, ?, 'oi', '2026-09-05 11:00:00', 0)",
+                (ALICE, ALICE.split("@")[0]),
+            )
+        main.annotate("chat", ALICE, "label", "patient")
+        projected = main.list_unanswered(fields=["jid", "notes"])["items"]
+        assert next(row for row in projected if row["jid"] == ALICE) == {"jid": ALICE, "notes": {"label": "patient"}}
+        # omit_nulls drops the empty mapping of a chat nobody annotated.
+        lean = main.list_unanswered(omit_nulls=True)["items"]
+        assert all("notes" not in row for row in lean if row["jid"] != ALICE)
+
+    def test_a_store_without_notes_costs_nothing(self, notes_store):
+        assert not os.path.exists(media_notes.notes_db_path())
+        assert all(row["notes"] == {} for row in main.list_chats()["items"])
+        assert not os.path.exists(media_notes.notes_db_path())

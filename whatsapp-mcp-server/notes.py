@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -205,7 +206,7 @@ def _check_size(value: str) -> None:
     if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
         raise ToolError(
             "invalid_argument",
-            f"value exceeds {MAX_VALUE_BYTES} bytes; read the note, summarise it and write it back with mode='set'",
+            f"value exceeds {MAX_VALUE_BYTES} bytes; read the note and replace it with a summary through compact()",
         )
 
 
@@ -395,6 +396,111 @@ def _current_rows(conn: sqlite3.Connection, ttype: str, tid: str, ids: list[str]
     for target_id, key, value, updated_at, _version in sorted(rows, key=lambda row: (row[0] == tid, row[3], row[0])):
         best[key] = (key, value, updated_at)
     return [row for row in best.values() if row[1]]
+
+
+def compact(target_type: str, target_id: str, key: str, value: str) -> dict[str, Any]:
+    """Replace an accumulated ``append`` key with a summary, in one write.
+
+    The growth policy for append keys: a value is capped at 64 KB, a write that
+    would cross the cap is refused, and this is how the agent makes room —
+    read the log, summarise it, write the summary back. The whole log comes back
+    as ``replaced`` and stays in the history, so compacting loses nothing.
+    """
+    if not (value or "").strip():
+        raise ToolError(
+            "invalid_argument", "compact needs the summary that replaces the log; annotate deletes a note instead"
+        )
+    return annotate(target_type, target_id, key, value, mode="set", source="compact")
+
+
+def _listing_ids(target_type: str, target_id: str) -> list[str]:
+    """The spellings a listing reads one target under: as given, plus the canonical one.
+
+    Deliberately not the full ``_jid_spellings`` set: that asks the LID map about
+    every row, and a page of fifty chats would pay fifty lookups for a case
+    ``get_notes`` still covers — notes written under a LID before the map learned
+    its phone number.
+    """
+    raw = (target_id or "").strip()
+    if not raw:
+        return []
+    if target_type == "message":
+        chat, separator, message_id = raw.partition("/")
+        if not separator or not message_id:
+            return []
+        canonical = f"{_canonical_jid(chat)}{separator}{message_id}"
+    else:
+        raw = normalize_chat_entry(raw)
+        canonical = _canonical_jid(raw)
+    return [raw] if raw == canonical else [raw, canonical]
+
+
+def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, dict[str, str]]:
+    """Current notes for many targets in one query: ``{target_id as given: {key: value}}``.
+
+    This is what puts ``notes`` on a listing row without an N+1: one query per
+    page, keyed by the id the caller passed, so a row looks its own notes up.
+    Targets with nothing recorded are absent from the result.
+
+    The allow-list is applied here rather than trusted from the caller: most
+    callers pass rows a policy-filtered query produced, but ``get_contact``
+    resolves an identifier of its own, and a note must not be the one place a
+    blocked conversation shows through.
+    """
+    spellings = {
+        tid: _listing_ids(target_type, tid) for tid in dict.fromkeys(target_ids) if tid and _visible(target_type, tid)
+    }
+    lookup = sorted({spelling for ids in spellings.values() for spelling in ids})
+    if not lookup:
+        return {}
+    conn = _connect(create=False)
+    if conn is None:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
+            f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(lookup))})"
+            " GROUP BY target_id, key",
+            [target_type, *lookup],
+        ).fetchall()
+    finally:
+        conn.close()
+    by_id: dict[str, dict[str, tuple[str, str]]] = {}
+    for target_id, key, value, updated_at, _version in rows:
+        by_id.setdefault(target_id, {})[key] = (value, updated_at)
+    out: dict[str, dict[str, str]] = {}
+    for tid, ids in spellings.items():
+        merged: dict[str, tuple[str, str]] = {}
+        # _listing_ids puts the canonical spelling last, and that is where writes
+        # land, so it overwrites anything left under an older one.
+        for spelling in ids:
+            merged.update(by_id.get(spelling, {}))
+        current = {key: value for key, (value, _at) in merged.items() if value}
+        if current:
+            out[tid] = current
+    return out
+
+
+def attach_notes(
+    rows: Sequence[dict[str, Any]],
+    target_type: str,
+    id_of: Callable[[dict[str, Any]], str],
+    field: str = "notes",
+    only_when_present: bool = False,
+) -> None:
+    """Put each row's notes on it, from one query for the whole page.
+
+    ``only_when_present`` leaves unnoted rows untouched — right for message rows,
+    where most of a page never carries a note and an empty mapping per row is
+    noise. Chat and contact rows always get the field: an empty one is the signal
+    that nobody has recorded anything about that conversation yet.
+    """
+    ids = [id_of(row) or "" for row in rows]
+    found = fetch_notes_for(target_type, ids)
+    for row, tid in zip(rows, ids, strict=True):
+        current = found.get(tid, {})
+        if current or not only_when_present:
+            row[field] = current
 
 
 def get_notes(target_type: str, target_id: str, include_history: bool = False) -> dict[str, Any]:
