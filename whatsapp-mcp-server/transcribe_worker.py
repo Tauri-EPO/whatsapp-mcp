@@ -33,8 +33,10 @@ Properties that matter:
   (``annotate_media(sha256, "transcript_error", "")``) queues it again.
 
 ``messages.db`` is the bridge's; this module only ever reads it. Everything it
-writes goes to ``notes.db``, and ``WHATSAPP_ALLOWED_CHATS`` bounds what it can
-see just like it bounds the tools.
+writes goes to ``notes.db``, and the policies that bound the tools bound it too:
+``WHATSAPP_ALLOWED_CHATS`` for what it may see, and the tool policy for what it
+may do — a deployment that does not offer ``transcribe_audio`` gets no worker,
+and one that does not offer ``download_media`` gets no fetching.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import media_inventory
@@ -55,7 +57,7 @@ import media_notes
 import whatsapp
 from errors import ToolError
 from media_notes import TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
-from tool_policy import parse_bool_env
+from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, load_tool_policy, parse_bool_env
 from transcribe import TranscriptionError, load_config, transcribe_file
 from whatsapp import CHAT_POLICY
 
@@ -65,6 +67,11 @@ ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
 BATCH_ENV = "TRANSCRIBE_ON_INGEST_BATCH"
 FETCH_ENV = "TRANSCRIBE_ON_INGEST_FETCH"
+
+# The tools this worker is: it transcribes like `transcribe_audio` and fetches
+# like `download_media`, so the tool policy that hides either one binds it too.
+TRANSCRIBE_TOOL = "transcribe_audio"
+DOWNLOAD_TOOL = "download_media"
 
 DEFAULT_INTERVAL_S = 300.0
 MIN_INTERVAL_S = 5.0
@@ -482,14 +489,44 @@ def start_worker(
 
 
 def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thread | None:
-    """Start the worker when the operator asked for it and a backend exists.
+    """Start the worker when the operator asked for it, the policy offers it, and a backend exists.
 
     Called once at startup, for every transport. Returns None (after one log
     line) when it stays off, so a misread of the switch is visible in the log.
+
+    The worker is ``transcribe_audio`` on a timer, and its fetch path is
+    ``download_media``: it calls the same whisper backend and the same bridge
+    endpoint the tools do, only without an agent asking. So the same tool policy
+    applies (``tool_policy.py``). A deployment that took ``transcribe_audio``
+    away — ``WHATSAPP_DENY_TOOLS``, or a ``WHATSAPP_ALLOW_TOOLS`` that omits it —
+    must not get it back through a background thread, and one that took
+    ``download_media`` away keeps the archive as it is: the worker then
+    transcribes what is cached and asks the bridge for nothing.
     """
     config = load_ingest_config(env)
     if not config.enabled:
         return None
+    policy = load_tool_policy(env)
+    if not policy.allows(TRANSCRIBE_TOOL):
+        logger.warning(
+            "%s=1 but %s / %s do not offer %s; the worker stays off (list %s to keep it running)",
+            ENABLED_ENV,
+            ALLOW_TOOLS_ENV,
+            DENY_TOOLS_ENV,
+            TRANSCRIBE_TOOL,
+            TRANSCRIBE_TOOL,
+        )
+        return None
+    if config.fetch and not policy.allows(DOWNLOAD_TOOL):
+        logger.warning(
+            "%s=1 but %s / %s do not offer %s; the worker transcribes cached audio only (list %s to fetch)",
+            FETCH_ENV,
+            ALLOW_TOOLS_ENV,
+            DENY_TOOLS_ENV,
+            DOWNLOAD_TOOL,
+            DOWNLOAD_TOOL,
+        )
+        config = replace(config, fetch=False)
     if load_config(env).backend is None:
         logger.warning(
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV

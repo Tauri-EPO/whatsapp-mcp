@@ -500,6 +500,16 @@ What to know before turning it on:
   queue the file again; a later success clears it by itself.
 - **`WHATSAPP_ALLOWED_CHATS` bounds it** exactly like it bounds the tools: audio
   in a chat the allow-list excludes is never transcribed.
+- **The tool policy bounds it too.** The worker is `transcribe_audio` on a timer
+  and its fetching is `download_media`, so a deployment that hides either one
+  hides it here as well: with `transcribe_audio` denied (`WHATSAPP_DENY_TOOLS`,
+  or a `WHATSAPP_ALLOW_TOOLS` that does not list it) the worker logs a warning at
+  startup and stays off, and with `download_media` denied it transcribes what is
+  cached and asks the bridge for nothing, even with
+  `TRANSCRIBE_ON_INGEST_FETCH=1`. That is a bound on the background thread, not a
+  bound on media traffic: `transcribe_audio` and `read_media`, when an agent
+  calls them on a voice note whose bytes are not cached, still download it.
+  `WHATSAPP_READ_ONLY` leaves the worker running: both tools are reads.
 - **Uncached audio is skipped unless you ask for it.** By default a voice note
   whose bytes are not under the store directory (`WHATSAPP_MEDIA_AUTODOWNLOAD=false`,
   or a retention sweep took them) is left for a manual `transcribe_audio`, which

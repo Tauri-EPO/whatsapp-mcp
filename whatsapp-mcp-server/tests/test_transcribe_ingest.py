@@ -159,6 +159,55 @@ def test_install_does_nothing_when_off_or_without_a_backend(archive, monkeypatch
     assert started == ["go"]
 
 
+ON = {"TRANSCRIBE_ON_INGEST": "yes", "WHISPER_URL": "http://127.0.0.1:8178/inference"}
+
+
+def test_the_worker_names_tools_the_server_actually_registers():
+    """A renamed tool must break here, not silently let the worker through every policy."""
+    import main
+    from tool_policy import registered_tool_names
+
+    known = registered_tool_names(main.mcp)
+    assert {transcribe_worker.TRANSCRIBE_TOOL, transcribe_worker.DOWNLOAD_TOOL} <= known
+
+
+@pytest.fixture
+def installed(monkeypatch):
+    """install_ingest_worker without a thread: the configs it would have started."""
+    configs: list[transcribe_worker.IngestConfig] = []
+    monkeypatch.setattr(transcribe_worker, "start_worker", configs.append)
+    return configs
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"WHATSAPP_DENY_TOOLS": "transcribe_audio"},
+        {"WHATSAPP_ALLOW_TOOLS": "list_messages,search_contacts"},  # no transcribe_audio in it
+    ],
+)
+def test_a_deployment_that_does_not_offer_transcribe_audio_gets_no_worker(installed, policy, caplog):
+    """The worker is that tool on a timer; hiding the tool must not leave it running."""
+    with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+        assert transcribe_worker.install_ingest_worker(ON | policy) is None
+    assert installed == []
+    assert "transcribe_audio" in caplog.text
+
+
+def test_denying_download_media_leaves_the_fetch_path_off(installed, caplog):
+    """Cached audio is still transcribed; the bridge is not asked for the rest."""
+    env = ON | {"TRANSCRIBE_ON_INGEST_FETCH": "1", "WHATSAPP_DENY_TOOLS": "download_media"}
+    with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+        transcribe_worker.install_ingest_worker(env)
+    assert [config.fetch for config in installed] == [False]
+    assert "download_media" in caplog.text
+
+    # Without the deny-list the same environment fetches.
+    installed.clear()
+    transcribe_worker.install_ingest_worker(ON | {"TRANSCRIBE_ON_INGEST_FETCH": "1"})
+    assert [config.fetch for config in installed] == [True]
+
+
 # --- one batch --------------------------------------------------------------
 
 
