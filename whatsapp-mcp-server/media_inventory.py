@@ -153,6 +153,77 @@ def _notes_exists_clause(conn: sqlite3.Connection, has_notes: bool) -> str | Non
     return exists if has_notes else f"NOT {exists}"
 
 
+ORDER_BY = {
+    "size": "m.file_length DESC, m.timestamp DESC",
+    "date": "m.timestamp DESC",
+    "copies": "copies DESC, m.file_length DESC, m.timestamp DESC",
+}
+
+# The display columns of one inventory row, in the order _row_to_item unpacks them.
+_ITEM_COLUMNS = """m.id, m.chat_jid, c.name, m.sender, m.timestamp, m.is_from_me, m.media_type, m.filename,
+                       m.file_length, lower(hex(m.file_sha256)), m.deleted_at"""
+
+
+def _page_sql(clauses: list[str], order: str, copies_clauses: list[str] | None = None) -> str:
+    """The page query, with or without the archive-wide copies aggregate.
+
+    Sorting by ``copies`` needs the aggregate to order the rows, so it keeps the
+    CTE. The date and size sorts do not: they select the page first and look the
+    counts up for its hashes afterwards (``_copies_for_hashes``), so the page no
+    longer pays for every other hash in the archive (issue #317). Then the last
+    column is the raw hash instead of the two counts. What the page still costs
+    is its own select: seeked when the filters and the sort match an index
+    (chat and time), a sort of the filtered rows when they do not (by size).
+    """
+    if copies_clauses is None:
+        return f"""
+            SELECT {_ITEM_COLUMNS}, m.file_sha256
+            FROM messages m
+            LEFT JOIN chats c ON c.jid = m.chat_jid
+            WHERE {" AND ".join(clauses)}
+            ORDER BY {order}, m.id, m.chat_jid
+            LIMIT ? OFFSET ?
+        """
+    return f"""
+        WITH copies AS (
+            SELECT file_sha256, COUNT(*) AS copies, COUNT(DISTINCT chat_jid) AS copies_in
+            FROM messages
+            WHERE file_sha256 IS NOT NULL AND {" AND ".join(copies_clauses)}
+            GROUP BY file_sha256
+        )
+        SELECT {_ITEM_COLUMNS}, COALESCE(copies.copies, 1), COALESCE(copies.copies_in, 1)
+        FROM messages m
+        LEFT JOIN chats c ON c.jid = m.chat_jid
+        LEFT JOIN copies ON copies.file_sha256 = m.file_sha256
+        WHERE {" AND ".join(clauses)}
+        ORDER BY {order}, m.id, m.chat_jid
+        LIMIT ? OFFSET ?
+    """
+
+
+def _copies_for_hashes(
+    conn: sqlite3.Connection, hashes: list[bytes], copies_clauses: list[str], copies_params: list[Any]
+) -> dict[bytes, tuple[int, int]]:
+    """Copy and chat counts for the page's hashes, counted over the whole visible archive.
+
+    Same meaning as the CTE the ``copies`` sort joins — every policy-visible
+    media row carrying that hash, in any chat, whatever the page was filtered
+    on — computed for at most one page of hashes. ``file_sha256`` is indexed
+    (``idx_messages_file_sha256``, partial on NOT NULL), so the work follows the
+    duplicates of this page instead of the size of the archive.
+    """
+    if not hashes:
+        return {}
+    sql = f"""
+        SELECT file_sha256, COUNT(*), COUNT(DISTINCT chat_jid)
+        FROM messages
+        WHERE file_sha256 IS NOT NULL AND file_sha256 IN ({",".join("?" * len(hashes))})
+          AND {" AND ".join(copies_clauses)}
+        GROUP BY file_sha256
+    """
+    return {row[0]: (int(row[1]), int(row[2])) for row in conn.execute(sql, (*hashes, *copies_params))}
+
+
 def list_media_page(
     chat_jid: str | Sequence[str] | None = None,
     media_type: str | None = None,
@@ -175,11 +246,9 @@ def list_media_page(
 
     clauses, params = _media_filters(chat_jid, media_type, after, before, min_bytes, "m.", exclude_chat_jid)
     copies_clauses, copies_params = _media_filters(None, None, None, None, None, "")
-    order = {
-        "size": "m.file_length DESC, m.timestamp DESC",
-        "date": "m.timestamp DESC",
-        "copies": "copies DESC, m.file_length DESC, m.timestamp DESC",
-    }[sort]
+    order = ORDER_BY[sort]
+    rows: list[Any] = []
+    has_more = False
     try:
         conn = whatsapp._connect_messages_db()
         try:
@@ -188,31 +257,29 @@ def list_media_page(
                 if notes_clause is None:
                     return PageResult([], None, False)
                 clauses.append(notes_clause)
-            sql = f"""
-                WITH copies AS (
-                    SELECT file_sha256, COUNT(*) AS copies, COUNT(DISTINCT chat_jid) AS copies_in
-                    FROM messages
-                    WHERE file_sha256 IS NOT NULL AND {" AND ".join(copies_clauses)}
-                    GROUP BY file_sha256
+            if sort == "copies":
+                sql = _page_sql(clauses, order, copies_clauses)
+                rows = conn.execute(sql, (*copies_params, *params, limit + 1, offset)).fetchall()
+                has_more = len(rows) > limit
+                rows = rows[:limit]
+            else:
+                sql = _page_sql(clauses, order)
+                page_rows = conn.execute(sql, (*params, limit + 1, offset)).fetchall()
+                has_more = len(page_rows) > limit
+                page_rows = page_rows[:limit]
+                counts = _copies_for_hashes(
+                    conn,
+                    sorted({row[11] for row in page_rows if row[11] is not None}),
+                    copies_clauses,
+                    copies_params,
                 )
-                SELECT m.id, m.chat_jid, c.name, m.sender, m.timestamp, m.is_from_me, m.media_type, m.filename,
-                       m.file_length, lower(hex(m.file_sha256)), m.deleted_at,
-                       COALESCE(copies.copies, 1), COALESCE(copies.copies_in, 1)
-                FROM messages m
-                LEFT JOIN chats c ON c.jid = m.chat_jid
-                LEFT JOIN copies ON copies.file_sha256 = m.file_sha256
-                WHERE {" AND ".join(clauses)}
-                ORDER BY {order}, m.id, m.chat_jid
-                LIMIT ? OFFSET ?
-            """
-            rows = conn.execute(sql, (*copies_params, *params, limit + 1, offset)).fetchall()
+                # A row whose hash is NULL (or somehow unaccounted for) is its own single copy.
+                rows = [(*row[:11], *counts.get(row[11], (1, 1))) for row in page_rows]
         finally:
             conn.close()
     except sqlite3.Error as exc:
         raise ToolError("internal", f"database error: {exc}") from exc
 
-    has_more = len(rows) > limit
-    rows = rows[:limit]
     cache = _CacheIndex()
     notes = media_notes.fetch_notes([row[9] for row in rows])
     items = [_row_to_item(row, cache, notes) for row in rows]

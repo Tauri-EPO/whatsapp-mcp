@@ -141,6 +141,7 @@ def test_note_survives_purge_of_the_cached_file(notes_store):
 
 def test_hash_lookups_use_the_bridge_index(notes_store, monkeypatch):
     """The bridge creates idx_messages_file_sha256; the note/inventory queries must be able to use it."""
+    import re
     import sqlite3
 
     with notes_store.messages() as c:
@@ -157,8 +158,14 @@ def test_hash_lookups_use_the_bridge_index(notes_store, monkeypatch):
     main.get_media_notes(SHA_A)
     media_notes.visible_hashes([SHA_A, SHA_B])
     main.list_media()
-    hash_queries = [q for q in executed if "file_sha256" in q and q.lstrip().upper().startswith(("SELECT", "WITH"))]
-    assert len(hash_queries) >= 3
+    # Only the queries that seek by hash: since issue #317 the page select
+    # carries file_sha256 as a column and reads its rows by chat and time.
+    hash_queries = [
+        q
+        for q in executed
+        if q.lstrip().upper().startswith(("SELECT", "WITH")) and re.search(r"file_sha256 (=|IN \(|IS NOT NULL)", q)
+    ]
+    assert len(hash_queries) >= 3, executed
     with sqlite3.connect(notes_store.messages_db) as c:
         for q in hash_queries:
             plan = "\n".join(row[3] for row in c.execute("EXPLAIN QUERY PLAN " + q))

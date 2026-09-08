@@ -1,6 +1,7 @@
 """list_media / get_media_stats over a real store: sizes, copies, cache state, allow-list."""
 
 import os
+import sqlite3
 from datetime import datetime
 
 import pytest
@@ -9,7 +10,7 @@ import chat_policy
 import main
 import media_inventory
 import whatsapp
-from tests.conftest import ALICE, BOB, FAMILY
+from tests.conftest import ALICE, BOB, FAMILY, MESSAGES_SCHEMA
 
 SHA_A = bytes.fromhex("aa" * 32)  # a photo forwarded into three chats
 SHA_B = bytes.fromhex("bb" * 32)  # a big video, once
@@ -194,3 +195,166 @@ def test_list_messages_rows_carry_bytes_and_sha256(media_store):
     assert by_id["T1"]["bytes"] is None and by_id["T1"]["sha256"] is None
     assert by_id["R1"]["bytes"] is None and by_id["R1"]["sha256"] is None  # pointer row
     assert by_id["GONE"]["bytes"] == 9_000 and by_id["GONE"]["sha256"] is None
+
+
+# --- copy counts are computed for the page, not for the archive (issue #317) ---
+
+
+def _counts(page):
+    return {i["message_id"]: (i["copies"], i["copies_in"]) for i in page["items"]}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"chat_jid": FAMILY},
+        {"chat_jid": [ALICE, FAMILY], "exclude_chat_jid": FAMILY},
+        {"exclude_chat_jid": [FAMILY, BOB]},
+        {"media_type": "image"},
+        {"min_bytes": 100_000},
+        {"after": "2026-09-02T00:00:00"},
+        {"before": "2026-09-02T23:59:59"},
+    ],
+)
+def test_page_first_counts_match_the_archive_wide_aggregate(media_store, kwargs):
+    """The two paths must answer the same numbers.
+
+    Sorting by copies still groups the whole visible archive in SQL; the date
+    and size sorts select the page first and look its hashes up afterwards. The
+    same request under the three sorts returns the same rows, so their counts
+    are directly comparable.
+    """
+    reference = _counts(main.list_media(sort="copies", **kwargs))
+    assert _counts(main.list_media(sort="date", **kwargs)) == reference
+    assert _counts(main.list_media(sort="size", **kwargs)) == reference
+
+
+def test_counts_stay_global_on_a_narrow_page(media_store):
+    # One row of one chat, and both copies of that photo live in another chat.
+    assert _counts(main.list_media(chat_jid=ALICE, media_type="image", sort="date")) == {"IMG1": (3, 2)}
+    # A page of one, walked with the cursor: a row without a hash is its own copy.
+    first = main.list_media(limit=1, sort="date")
+    assert _counts(first) == {"GONE": (1, 1)} and first["has_more"]
+    second = main.list_media(limit=1, sort="date", cursor=first["next_cursor"])
+    assert _counts(second) == {"DOC1": (1, 1)}
+    third = main.list_media(limit=1, sort="size")
+    assert _counts(third) == {"VID1": (1, 1)}
+
+
+def test_allow_list_hides_copies_in_denied_chats_on_every_sort(media_store, monkeypatch):
+    policy = chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": ALICE})
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    monkeypatch.setattr(media_inventory, "CHAT_POLICY", policy)
+    for sort in media_inventory.SORTS:
+        assert _counts(main.list_media(sort=sort))["IMG1"] == (1, 1), sort
+
+
+def _statements(monkeypatch, **kwargs) -> list[str]:
+    """The SELECTs one list_media_page call sends to messages.db."""
+    executed: list[str] = []
+    real = whatsapp._connect_messages_db
+
+    def connect() -> sqlite3.Connection:
+        conn = real()
+        conn.set_trace_callback(executed.append)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", connect)
+    try:
+        media_inventory.list_media_page(**kwargs)
+    finally:
+        monkeypatch.setattr(whatsapp, "_connect_messages_db", real)
+    return [q for q in executed if q.lstrip().upper().startswith(("SELECT", "WITH"))]
+
+
+@pytest.mark.parametrize(("sort", "materialises"), [("size", False), ("date", False), ("copies", True)])
+def test_only_the_copies_sort_materialises_the_archive_wide_aggregate(media_store, monkeypatch, sort, materialises):
+    """What the call actually runs, planned: the CTE is gone from the other two sorts."""
+    with media_store.messages() as c:  # the hash index the bridge creates (store.go)
+        c.execute("CREATE INDEX idx_messages_file_sha256 ON messages(file_sha256) WHERE file_sha256 IS NOT NULL")
+    statements = _statements(monkeypatch, chat_jid=ALICE, sort=sort)
+    assert len(statements) == (1 if materialises else 2)  # page (+ the counts for its hashes)
+    with media_store.messages() as c:
+        # EXPLAIN with the parameters left unbound: the plan does not depend on them.
+        plans = "\n".join("\n".join(row[3] for row in c.execute("EXPLAIN QUERY PLAN " + q)) for q in statements)
+    assert ("MATERIALIZE" in plans.upper()) is materialises, plans
+    if not materialises:
+        assert "idx_messages_file_sha256" in plans  # the counts are seeked, not grouped
+
+
+# --- work bound (issue #317) --------------------------------------------------
+#
+# The page used to join a CTE grouping every visible media row in the store, so
+# one row of one chat paid for the whole archive. The guard: with the page fixed,
+# unrelated hashes elsewhere must not move the VM instructions the call spends.
+
+TARGET = "5511555555555@s.whatsapp.net"
+NOISE = "5511444444444@s.whatsapp.net"
+
+
+def _archive_db(path, noise_rows: int) -> None:
+    """Ten media rows in the target chat, `noise_rows` unique hashes in another one."""
+    conn = sqlite3.connect(path)
+    conn.executescript(MESSAGES_SCHEMA)
+    # The two indexes the bridge creates (store.go) and that this query needs:
+    # one to seek the page, one to count the copies of its hashes.
+    conn.execute("CREATE INDEX idx_messages_chat_timestamp ON messages(chat_jid, timestamp)")
+    conn.execute("CREATE INDEX idx_messages_file_sha256 ON messages(file_sha256) WHERE file_sha256 IS NOT NULL")
+    conn.executemany("INSERT INTO chats (jid, name) VALUES (?, ?)", [(TARGET, "Target"), (NOISE, "Noise")])
+    insert = (
+        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, file_length, "
+        "file_sha256) VALUES (?, ?, 's', '', ?, 0, 'image', 1000, ?)"
+    )
+    conn.executemany(
+        insert,
+        [(f"t{i}", TARGET, f"2026-09-01 10:{i:02d}:00+00:00", i.to_bytes(32, "big")) for i in range(10)],
+    )
+    conn.executemany(
+        insert,
+        [(f"n{i}", NOISE, "2026-08-01 10:00:00+00:00", (1000 + i).to_bytes(32, "big")) for i in range(noise_rows)],
+    )
+    # No ANALYZE: the bridge never runs it, so a real store has no sqlite_stat1
+    # either and the planner works from the same defaults as here.
+    conn.commit()
+    conn.close()
+
+
+def _page_instructions(path, monkeypatch, sort: str) -> tuple[int, list[dict]]:
+    """VM instructions one page of the target chat costs, and the page."""
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+    counted = 0
+
+    def tick() -> int:
+        nonlocal counted
+        counted += 1
+        return 0
+
+    real = whatsapp._connect_messages_db
+
+    def connect() -> sqlite3.Connection:
+        conn = real()
+        # The handler fires every 1000 VM instructions; counting the calls is
+        # the portable stand-in for sqlite3_stmt_status().
+        conn.set_progress_handler(tick, 1000)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", connect)
+    try:
+        page = media_inventory.list_media_page(chat_jid=TARGET, limit=1, sort=sort)
+    finally:
+        monkeypatch.setattr(whatsapp, "_connect_messages_db", real)
+    return counted * 1000, page.items
+
+
+@pytest.mark.parametrize("sort", ["date", "size"])
+def test_a_small_page_does_not_aggregate_the_whole_archive(tmp_path, monkeypatch, sort):
+    small, large = tmp_path / "small.db", tmp_path / "large.db"
+    _archive_db(small, 1_000)
+    _archive_db(large, 50_000)
+    small_work, small_items = _page_instructions(small, monkeypatch, sort)
+    large_work, large_items = _page_instructions(large, monkeypatch, sort)
+    # Same page, same counts, whatever the rest of the store holds.
+    assert [i["message_id"] for i in small_items] == [i["message_id"] for i in large_items] == ["t9"]
+    assert [(i["copies"], i["copies_in"]) for i in large_items] == [(1, 1)]
+    assert large_work <= max(small_work, 20_000) * 2, f"{small_work} -> {large_work} VM instructions"
