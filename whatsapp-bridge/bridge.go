@@ -89,6 +89,9 @@ type Bridge struct {
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc
+	// autoDownloads is the bounded pool that caches inbound media; a full
+	// queue drops the download instead of growing (see media_budget.go).
+	autoDownloads *mediaJobQueue
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
 	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
@@ -132,6 +135,11 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		b.Webhook.failures = &b.metrics.webhookFailures
 	}
 	b.DownloadMedia = b.downloadMedia
+	b.autoDownloads = newMediaJobQueue(b.ctx, autoDownloadWorkers, autoDownloadQueue, b.runAutoDownload)
+	if b.MediaAutoDownload {
+		logger.Infof("Automatic media downloads: %d at a time, up to %d queued; extra media is not cached on arrival and stays available through download_media",
+			autoDownloadWorkers, autoDownloadQueue)
+	}
 	b.Connect = client.Connect
 	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
@@ -162,7 +170,11 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	go func() {
 		b.historyVotes.Wait()
 		// Media transfers outlive the request that started them, so they are
-		// waited on here too: the lifecycle context above already aborted them.
+		// waited on here too: the lifecycle context above already aborted them
+		// and stopped the auto-download workers.
+		if b.autoDownloads != nil {
+			b.autoDownloads.wait()
+		}
 		b.mediaTransfers.wait()
 		close(done)
 	}()
