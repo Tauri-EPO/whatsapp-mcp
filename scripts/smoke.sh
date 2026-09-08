@@ -17,6 +17,8 @@
 #   3. mcp     GET /metrics      (skipped when WHATSAPP_MCP_METRICS=false; a 404 is a
 #                                warning, not a failure: a proxy may route /mcp only)
 #   4. mcp     POST /mcp initialize with the bearer token -> 200 + mcp-session-id
+#   5. whisper on 127.0.0.1:8178 from inside the mcp container (skipped when this
+#                                deployment has no whisper sidecar and no WHISPER_URL)
 #
 # Without --project the script drives `docker compose` in the repository directory.
 # With it -- or when that directory has no usable stack -- it resolves the containers
@@ -74,10 +76,15 @@ MODE=compose
 BRIDGE_CTR=""
 MCP_CTR=""
 
-container_of() { # $1 service name -> container name (empty when it is not running)
-  docker ps --filter "label=com.docker.compose.project=$PROJECT" \
+container_of() { # $1 service, $2 project (default $PROJECT) -> container name, empty when not running
+  docker ps --filter "label=com.docker.compose.project=${2:-$PROJECT}" \
             --filter "label=com.docker.compose.service=$1" \
             --format '{{.Names}}' 2>/dev/null | head -n1
+}
+
+inspect_f() { # $1 container, $2 Go template -> the value, empty when it cannot be read
+  [ -n "$1" ] || return 0
+  docker inspect -f "$2" "$1" 2>/dev/null </dev/null | tr -d '\r\n'
 }
 
 detect_project() { # names of the running compose projects that look like this stack
@@ -104,6 +111,14 @@ bridge_exec() { # run a command inside the bridge container
     docker exec "$BRIDGE_CTR" "$@"
   else
     compose exec -T bridge "$@"
+  fi
+}
+
+mcp_exec() { # run a command inside the mcp container
+  if [ "$MODE" = "project" ]; then
+    docker exec "$MCP_CTR" "$@"
+  else
+    compose exec -T mcp "$@"
   fi
 }
 
@@ -162,6 +177,44 @@ if [ "$MODE" = "project" ]; then
     --format '  {{.Label "com.docker.compose.service"}}: {{.State}} ({{.Status}})'
 else
   printf '%s\n' "$ps_out"
+fi
+
+# The optional `whisper` sidecar joins the bridge's network namespace, which
+# Docker resolves to a container id when whisper is created. A `docker compose
+# up` whose whisper profile is not active recreates the bridge and never touches
+# whisper: it stays Up, attached to a namespace whose container is gone, and
+# nothing reaches it again (issue #415). Classify it here, where the containers
+# are resolved; step 5 reports it, after the checks this was run for.
+WHISPER_CTR=""
+WHISPER_STATE=absent   # absent | attached | orphaned | elsewhere | unknown
+WHISPER_DETAIL=""
+if [ "$MODE" = "project" ]; then
+  BRIDGE_ID=$(inspect_f "$BRIDGE_CTR" '{{.Id}}')
+  WHISPER_CTR=$(container_of whisper)
+else
+  # Compose mode spells the project name nowhere: read it off the bridge
+  # container, whose id the namespace comparison needs anyway.
+  BRIDGE_ID=$(compose ps -q bridge 2>/dev/null | head -n1)
+  compose_project=$(inspect_f "$BRIDGE_ID" '{{index .Config.Labels "com.docker.compose.project"}}')
+  [ -n "$compose_project" ] && WHISPER_CTR=$(container_of whisper "$compose_project")
+fi
+if [ -n "$WHISPER_CTR" ]; then
+  whisper_netns=$(inspect_f "$WHISPER_CTR" '{{.HostConfig.NetworkMode}}')
+  whisper_target=${whisper_netns#container:}
+  if [ -z "$whisper_netns" ] || [ -z "$BRIDGE_ID" ]; then
+    WHISPER_STATE=unknown
+    WHISPER_DETAIL="could not read the network mode of $WHISPER_CTR, or the bridge container id"
+  elif [ "$whisper_netns" = "$whisper_target" ]; then
+    WHISPER_STATE=elsewhere
+    WHISPER_DETAIL="$WHISPER_CTR runs with network mode '$whisper_netns', not the bridge namespace"
+  elif [ "$(inspect_f "$whisper_target" '{{.Id}}')" = "$BRIDGE_ID" ]; then
+    # Resolved through docker, so an id, a short id or a name all work; a
+    # namespace whose container is gone inspects to nothing and fails here.
+    WHISPER_STATE=attached
+  else
+    WHISPER_STATE=orphaned
+    WHISPER_DETAIL="$WHISPER_CTR -> $whisper_netns, current bridge ${BRIDGE_ID:0:12}"
+  fi
 fi
 
 # ./.env carries WHATSAPP_MCP_PORT in compose mode; in project mode it is out of
@@ -277,6 +330,61 @@ case "$code" in
   *) rm -f "$hdrs" "$body"; fail "unexpected status $code from $URL/mcp" ;;
 esac
 rm -f "$hdrs" "$body"
+
+# The mcp container reaches whisper over the shared namespace, so the compose
+# profile is the only thing that can serve this address. Nothing configured and
+# no container: this deployment does not transcribe, and step 5 is skipped.
+[ -n "${WHISPER_URL:-}" ] || WHISPER_URL=$(mcp_env WHISPER_URL)
+case "${WHISPER_URL:-}" in
+  *//127.0.0.1:8178/*|*//localhost:8178/*) whisper_expected=yes ;;
+  *) whisper_expected=no ;;
+esac
+
+if [ "$WHISPER_STATE" != "absent" ] || [ "$whisper_expected" = "yes" ]; then
+  step "5. whisper"
+  case "$WHISPER_STATE" in
+    orphaned)
+      fail "whisper is attached to a bridge container that no longer exists; run: docker compose --profile whisper up -d --force-recreate whisper" \
+           "$WHISPER_DETAIL" ;;
+    absent)
+      echo "  warning: WHISPER_URL is $WHISPER_URL but this stack runs no whisper container; the profile was dropped (COMPOSE_PROFILES=whisper)" ;;
+    elsewhere|unknown)
+      echo "  skipped: $WHISPER_DETAIL" ;;
+    *)
+      if [ "$MODE" = "project" ] && [ -z "$MCP_CTR" ]; then
+        echo "  skipped: no mcp container to probe from"
+      else
+        # The mcp image is python:3.13-slim: python is the only HTTP client it
+        # has. Any HTTP answer proves the server is there; whisper-server has no
+        # health route, so the status code itself says nothing.
+        reached=no
+        while :; do
+          if out=$(mcp_exec python -c 'import sys, urllib.error, urllib.request
+
+try:
+    urllib.request.urlopen("http://127.0.0.1:8178/", timeout=5)
+except urllib.error.HTTPError:
+    pass
+except Exception as exc:
+    print(exc)
+    sys.exit(1)
+' 2>&1 </dev/null); then
+            reached=yes
+            break
+          fi
+          # A first start downloads the ggml model before it listens at all.
+          [ "$(date +%s)" -ge "$deadline" ] && break
+          sleep 3
+        done
+        if [ "$reached" = "yes" ]; then
+          green "  reachable on 127.0.0.1:8178 ($WHISPER_CTR)"
+        else
+          fail "whisper is running but does not answer on 127.0.0.1:8178 (${out:-no output})" \
+               "a first start downloads the ggml model: docker compose logs --tail 50 whisper"
+        fi
+      fi ;;
+  esac
+fi
 
 echo
 if [ "$PAIRED" = "yes" ]; then
