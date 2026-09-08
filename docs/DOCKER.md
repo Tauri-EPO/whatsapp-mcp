@@ -314,16 +314,20 @@ The compose file names those images, so you choose per host:
   `docker compose pull`. This is what the README quick start does.
 
 **What the MCP image carries for media.** Besides the static `ffmpeg` binary
-(voice notes), the server image installs Pillow (~21 MB with its bundled codecs)
-and pillow-heif (~26 MB, almost all of it libheif and the HEVC decoders) so
-`read_media` can downscale a photo to ~1568 px before it travels instead of
-shipping 6 MB of base64 into the model's context, and can turn a TIFF, BMP or
-HEIC into something the client renders. Both ship self-contained manylinux
-wheels for `amd64` and `arm64`, so nothing is added to the Debian layer: the
-runtime is still the bare interpreter plus `/app/.venv`. The cost at runtime is
-CPU during the call (a few hundred milliseconds for a 12 MP photo, nothing
-between calls); an image above 64 megapixels is refused rather than decoded, and
-`read_media(max_edge=0)` skips the path entirely and returns the stored bytes.
+(voice notes), the server image installs Pillow (~21 MB with its bundled codecs),
+pillow-heif (~26 MB, almost all of it libheif and the HEVC decoders) and
+pypdfium2 (~8 MB, Google's PDFium) so `read_media` can downscale a photo to ~1568 px
+before it travels instead of shipping 6 MB of base64 into the model's context,
+turn a TIFF, BMP or HEIC into something the client renders, and render the pages
+of a scanned PDF as pictures. All three ship self-contained manylinux wheels for
+`amd64` and `arm64`, so nothing is added to the Debian layer: the runtime is
+still the bare interpreter plus `/app/.venv`. The cost at runtime is CPU during
+the call (a few hundred milliseconds for a 12 MP photo or a rendered page,
+nothing between calls); an image above 64 megapixels is refused rather than
+decoded, a PDF render is capped at 20 pages and 8 MB of image per call and runs
+one at a time (PDFium is not thread-safe), and
+`read_media(max_edge=0)` skips the image path entirely and returns the stored
+bytes.
 
 Each push carries a SLSA provenance attestation and an SBOM
 (`docker buildx imagetools inspect ghcr.io/tauri-epo/whatsapp-mcp-bridge:latest`

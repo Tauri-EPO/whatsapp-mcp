@@ -1089,8 +1089,13 @@ tool an agent on another machine uses to actually look at a photo;
   raise it, it only lets a client with a small context lower it
 - `as_text` (optional, default false): read a PDF, DOCX or XLSX **on the server**
   and return its text instead of its bytes (see below)
-- `max_pages` (optional, default 20): with `as_text`, how many pages, tables or
-  sheets to read
+- `as_images` (optional, default false): render a PDF's pages **on the server**
+  and return them as pictures — the answer for a scan (see below). Cannot be
+  combined with `as_text`
+- `max_pages` (optional, default 20 with `as_text`, 5 with `as_images`): how many
+  pages, tables or sheets to read, or pages to render (at most 20)
+- `first_page` (optional, default 1): with `as_images`, the page to start at,
+  counting from 1 — how you walk a document longer than one answer holds
 - `max_edge` (optional, default 1568): longest edge, in pixels, of the image that
   comes back. `0` returns the stored bytes untouched (see below); values above
   8192 are clamped
@@ -1219,16 +1224,61 @@ document really has) and `truncated` (`max_pages`, 500 rows per sheet, or the
 200 000-character ceiling on the whole answer cut it short).
 
 **There is no OCR.** A scanned PDF has no text layer, and the answer says so in
-as many words instead of coming back empty. Legacy `.doc`/`.xls`/`.ppt` and PPTX
-are not supported; asking for `as_text` on an image or a video is refused with
-`invalid_argument` rather than silently answered with its bytes. A text file is
-already text, so `as_text` changes nothing for it.
+as many words instead of coming back empty — and names
+[`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures), which reads it
+a different way. Legacy `.doc`/`.xls`/`.ppt` and PPTX are not supported; asking
+for `as_text` on an image or a video is refused with `invalid_argument` rather
+than silently answered with its bytes. A text file is already text, so `as_text`
+changes nothing for it.
+
+#### `as_images`: a scanned PDF rendered as pictures
+
+`as_text` cannot read paper somebody photographed, and that is most of what an
+archive of clinical reports, receipts and signed contracts actually holds.
+`as_images=true` renders the PDF's pages here with PDFium (`pypdfium2`) and
+returns them as image blocks — one per page, each behind a
+`--- page 3 of 40 (rendered image) ---` marker — so a vision model reads the page
+the way a person would. No OCR is involved: nothing is turned into text on the
+server, the model simply sees the page.
+
+- `max_pages` defaults to **5** here (not 20): a rendered page is a few hundred
+  KB where a page of text is a few KB. The ceiling is 20, and the whole answer is
+  capped at 8 MB of image — hitting either sets `truncated`.
+- **`first_page` walks the rest.** Pages 1-5, then `first_page=6`, and so on; the
+  marker keeps naming the real page, and when there is more the answer ends with
+  one line telling you the `first_page` to ask for next. A `first_page` past the
+  last page is `invalid_argument` saying how many there are.
+- `max_edge` sizes each page as it does a photo, capped at 4096 px: past that a
+  render carries no detail a model can use.
+- The metadata block carries `pages_total`, `first_page`, `next_page`,
+  `pages_rendered`, `truncated` and `image_bytes`; `mime` and `bytes` still
+  describe the PDF itself.
+- A single page PDFium cannot draw is **skipped**, not fatal: the rest of the
+  scan still comes back and the page numbers that failed are listed under
+  `pages_failed`, so a gap is never mistaken for a page that was not there. A
+  document where every page fails is `invalid_argument`.
+- The file's own size stops mattering, as with `as_text`: a 30 MB scan is five
+  JPEGs either way.
+- **One render at a time.** PDFium is not thread-safe, so the server serialises
+  the whole open/render/close; two agents asking for pages at the same moment
+  queue rather than race. It also bounds the memory to one page bitmap.
+
+**Prefer `as_text` for any PDF that has text.** It is cheaper, the words are
+exact instead of read off pixels, and 40 pages fit in one answer where 5 images
+do not. Reach for `as_images` when `as_text` told you the PDF is a scan, or when
+the layout *is* the content — a filled form, a stamped receipt, a signature.
+The two are mutually exclusive: passing both is `invalid_argument`, because they
+are two different readings of the same document and the choice should be
+deliberate. `as_images` on anything that is not a PDF is refused the same way.
+A PDF that PDFium will not open — a broken download, a password-protected file —
+comes back as `invalid_argument` saying which.
 
 **Natural Language Examples:**
 
 - "Show me the last photo Ana sent"
 - "What does the attachment in that message say?"
 - "Read the PDF Dr. Souza sent and tell me the diagnosis" (`as_text=true`)
+- "The exam is a scan — look at the pages and tell me the result" (`as_images=true`)
 - "Look at the receipts from the family group and summarise each one"
 
 ### `list_media`

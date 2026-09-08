@@ -38,6 +38,11 @@ dependencies = [
     # system packages.
     "pillow>=12.3",
     "pillow-heif>=1.7",
+    # read_media(as_images=True): render the pages of a scanned PDF here, so the
+    # documents as_text cannot read (photographed paper) reach a vision model as
+    # pictures (media_pdf.py). Google's PDFium, the renderer in Chrome; same
+    # wheel story as above.
+    "pypdfium2>=5.13",
 ]
 
 [project.optional-dependencies]

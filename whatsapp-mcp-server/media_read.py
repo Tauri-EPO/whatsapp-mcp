@@ -23,7 +23,10 @@ read its size and its notes, and never look at it.
   (issue #367); the ``base64:<mime>:<bytes>`` text block it replaces was one
   every client had to decode itself, and none did;
 * with ``as_text=True``, a PDF, DOCX or XLSX **read on this side** and returned
-  as text (media_text.py), which is what makes a 5 MiB clinical PDF affordable.
+  as text (media_text.py), which is what makes a 5 MiB clinical PDF affordable;
+* with ``as_images=True``, a PDF **rendered** here, one ``ImageContent`` per page
+  behind a page marker (media_pdf.py) — the answer for a scan, which has no text
+  layer for ``as_text`` to find and which a vision model can simply read.
 
 Every answer ends with one JSON text block carrying ``sha256``, ``mime``,
 ``bytes`` and the ``notes`` already recorded for the file, so the loop
@@ -60,6 +63,7 @@ from mcp_types import (
 
 import media_image
 import media_inventory
+import media_pdf
 import media_text
 import whatsapp
 from errors import ToolError
@@ -452,7 +456,7 @@ def is_text_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in TEXT_MIMES
 
 
-def hard_limit(mime: str, as_text: bool = False, max_edge: int = 0) -> int:
+def hard_limit(mime: str, as_text: bool = False, max_edge: int = 0, as_images: bool = False) -> int:
     """The ceiling for this type — and, with the branches below, what decides the block.
 
     Extraction has its own, much higher ceiling: what bounds ``as_text`` is the
@@ -466,7 +470,9 @@ def hard_limit(mime: str, as_text: bool = False, max_edge: int = 0) -> int:
     types are what they were before #368: bytes in a resource, capped like any
     other blob, rather than 12 MB of base64 in a block no client renders.
     """
-    if as_text and mime in media_text.EXTRACTABLE_MIMES:
+    if (as_text and mime in media_text.EXTRACTABLE_MIMES) or (as_images and mime == media_text.PDF_MIME):
+        # Rendering is bounded by the pages it draws, not by the file it reads:
+        # a 30 MiB scan is five JPEGs either way.
         return media_text.MAX_EXTRACT_BYTES
     if mime in RENDERABLE_IMAGE_MIMES or (max_edge and mime in media_image.CONVERTIBLE_IMAGE_MIMES):
         return MAX_IMAGE_BYTES
@@ -597,6 +603,7 @@ def resolve_media(
     max_bytes: int = 0,
     as_text: bool = False,
     max_edge: int = 0,
+    as_images: bool = False,
 ) -> ResolvedMedia:
     """The file behind one message, proven readable, or the refusal.
 
@@ -605,9 +612,10 @@ def resolve_media(
     allow-list, the row, the implicit-download policy of issue #350, the proof
     that the path resolves inside this chat's directory (inside
     ``cached_path`` / ``download_path``), and the cap for the resolved type.
-    ``caller`` only names the tool in the refusal an agent reads; ``as_text``
-    and ``max_edge`` only tell ``hard_limit`` which ceiling applies, because a
-    file read as text or as a downscaled picture is not the size it costs.
+    ``caller`` only names the tool in the refusal an agent reads; ``as_text``,
+    ``as_images`` and ``max_edge`` only tell ``hard_limit`` which ceiling
+    applies, because a file read as text, as rendered pages or as a downscaled
+    picture is not the size it costs.
     """
     whatsapp._require_allowed(chat_jid)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
@@ -623,19 +631,21 @@ def resolve_media(
         # skips the obvious no.
         if reported:
             expected = guess_mime(media_type, filename)
-            check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge)), expected, caller)
+            check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge, as_images)), expected, caller)
         path = download_path(chat_jid, message_id)
 
     mime = declared_mime(media_type, filename, path)
-    if as_text and not is_text_mime(mime):
-        # Before the size check: "as_text does not apply to a video" is the
+    if as_images:
+        # Before the size check: "as_images does not apply to a video" is the
         # useful answer, not "that video is over the 2 MiB cap".
+        media_pdf.require_renderable(mime)
+    elif as_text and not is_text_mime(mime):
         media_text.require_extractable(mime)
     try:
         size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
-    check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge)), mime, caller)
+    check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images)), mime, caller)
     return ResolvedMedia(path, mime, size, sha256, filename)
 
 
@@ -678,6 +688,55 @@ def _image_blocks(found: ResolvedMedia, max_edge: int, quality: int) -> tuple[li
     return blocks, extra
 
 
+def _page_image_blocks(
+    found: ResolvedMedia, first: int, max_pages: int, max_edge: int, quality: int
+) -> tuple[list[ContentBlock], dict[str, Any]]:
+    """A scanned PDF as one picture per page, each behind the marker that names it.
+
+    The marker is its own text block because an image block carries no caption:
+    without it a model handed five pictures cannot say which page it is quoting,
+    nor that pages 6 to 40 are still waiting behind ``first_page=6``.
+    """
+    result = media_pdf.render_pages(found.path, first, media_pdf.page_limit(max_pages), max_edge, quality)
+    blocks: list[ContentBlock] = []
+    for page in result.pages:
+        # Written here, not by whoever sent the file, so these stay outside the
+        # untrusted envelope.
+        marker = f"--- page {page.number} of {result.pages_total} (rendered image) ---"
+        blocks.append(TextContent(type="text", text=marker))
+        assert page.image.data is not None  # render_pages always encodes
+        blocks.append(
+            ImageContent(
+                type="image", data=base64.b64encode(page.image.data).decode("ascii"), mime_type=page.image.mime
+            )
+        )
+    if result.next_page <= result.pages_total:
+        # The one line that makes the rest of the document reachable: a model
+        # holding five pictures has no other way to learn the argument.
+        blocks.append(
+            TextContent(
+                type="text",
+                text=(
+                    f"[{result.pages_total} pages in this PDF; call "
+                    f"read_media(as_images=true, first_page={result.next_page}) for the next ones.]"
+                ),
+            )
+        )
+    extra: dict[str, Any] = {
+        "pages_total": result.pages_total,
+        "first_page": result.first_page,
+        "next_page": result.next_page,
+        "pages_rendered": len(result.pages),
+        "truncated": result.truncated,
+        "image_bytes": sum(len(page.image.data or b"") for page in result.pages),
+    }
+    if result.failed:
+        # A page PDFium could not draw is a gap in what the model sees; unnamed,
+        # it reads as a page that was never there.
+        extra["pages_failed"] = list(result.failed)
+    return blocks, extra
+
+
 def read_media(
     chat_jid: str,
     message_id: str,
@@ -686,18 +745,38 @@ def read_media(
     max_pages: int = 0,
     max_edge: int = media_image.DEFAULT_MAX_EDGE,
     quality: int = media_image.DEFAULT_QUALITY,
+    as_images: bool = False,
+    first_page: int = 1,
 ) -> list[ContentBlock]:
     """The media of one message as content blocks. See the module docstring."""
+    if as_text and as_images:
+        raise ToolError(
+            "invalid_argument",
+            "as_text and as_images are two ways to read the same document and cannot be combined: "
+            "as_text reads the text layer (cheap, exact, many pages), as_images renders the pages as "
+            "pictures for a scan that has no text layer. Pick one",
+        )
     # Argument validation before any I/O: "max_edge cannot be negative" must not
     # arrive after a CDN transfer paid for it.
     edge = media_image.edge_limit(max_edge)
     encode_quality = media_image.quality_limit(quality)
-    found = resolve_media(chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_edge=edge)
+    page_one = media_pdf.first_page(first_page) if as_images else 1
+    if as_images:
+        media_pdf.page_limit(max_pages)
+    found = resolve_media(
+        chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_edge=edge, as_images=as_images
+    )
     path, mime, size, sha256 = found.path, found.mime, found.size, found.sha256
 
     blocks: list[ContentBlock]
     extra: dict[str, Any] = {}
-    if as_text and not is_text_mime(mime):
+    if as_images:
+        # The type was proven a PDF in resolve_media; max_edge=0 still renders,
+        # because "the stored bytes" is what as_images was asked *not* to give.
+        blocks, extra = _page_image_blocks(
+            found, page_one, max_pages, edge or media_image.DEFAULT_MAX_EDGE, encode_quality
+        )
+    elif as_text and not is_text_mime(mime):
         # A text file is already text: as_text changes nothing for it, and
         # asking for a JPEG as text is refused inside extract() rather than
         # silently answered with its bytes.
