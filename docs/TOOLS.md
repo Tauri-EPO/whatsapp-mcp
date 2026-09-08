@@ -277,9 +277,9 @@ nobody is waiting there for a reply. It gets its own family (issue #379):
 
 - **Excluded from `list_unread` and `list_unanswered` unconditionally**, the way a reaction never counts as speaking — including when you name it in `chat_jid`, and it is left out of `count_only` too.
 - **Listed by `list_chats`, `get_chat` and `get_contact_chats`** as `name: "Status updates"`, `name_source: "system"`, `is_group: false`, `is_status: true`. `is_status` is only on this row, the way `aliases` is only on a merged pair, and it is a valid `fields` name on the chat listings.
-- Never merged with another chat: `aliases` collapses phone/LID pairs only, and `status@broadcast` is neither spelling. It is not a contact either — `search_contacts` skips it, instead of answering the last poster's number with a "contact" whose phone number was the word `status`.
+- Never merged with another chat: `aliases` collapses phone/LID pairs only, and `status@broadcast` is neither spelling. It is not a contact either — `search_contacts` skips it and `get_contact("status@broadcast")` is refused with `invalid_argument`, instead of answering with a "contact" whose phone number is the word `status`.
 - `exclude_groups` is unchanged — it was already dropping the feed as a non-direct server.
-- Everything else still sees it, under the same label: `list_messages(chat_jid="status@broadcast")` returns the posts (`chat_name: "Status updates"`), and `message_stats(group_by="chat")` and `coverage(by_chat=true)` count and name it, because those report what the archive holds rather than what is waiting for you.
+- Everything else still sees it, under the same label: `list_messages(chat_jid="status@broadcast")` returns the posts (`chat_name: "Status updates"`), and `message_stats(group_by="chat")`, `coverage(by_chat=true)`, `list_media`, `get_media_stats` and `search_media_notes` count and name it, because those report what the archive holds rather than what is waiting for you. Status posts are mostly images and video, so the feed is often the largest media consumer on a busy account — naming it after the last poster would blame the wrong chat for the disk.
 - The label is also what `list_chats` sorts and searches on, so `sort_by="name"` files it under "Status updates" and `query="Status updates"` finds it. Searching the poster's number does not.
 
 ### Who sent it (`sender_phone` / `sender_lid`)
@@ -569,7 +569,10 @@ and `lid` never holds a phone number. (An identifier that is neither, a name or
 another server's JID, is echoed back in `phone_number` as it always was.)
 `resolved` says whether a *name* was found;
 when it is `false` for a LID, `name` is `null` rather than the digits, because
-nobody named "184125298348272" exists.
+nobody named "184125298348272" exists. `status@broadcast` is refused with
+`invalid_argument`: the [status feed](#the-status-feed-statusbroadcast) is not a
+person, and its user part would otherwise be reported as the phone number
+"status".
 
 **Natural Language Examples:**
 

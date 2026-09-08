@@ -26,20 +26,36 @@ def _stamp(**delta) -> str:
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
-    """One waiting DM and one status post, the feed newer so it would sort first."""
+    """One waiting DM and one status post, the feed newer so it would sort first.
+
+    The status post is an image, which is what a status usually is: the feed is
+    then a media row too, and the inventory has to name it like the listings.
+    """
     path = tmp_path / "messages.db"
     with sqlite3.connect(path) as c:
         c.executescript(MESSAGES_SCHEMA)
         c.execute("ALTER TABLE chats ADD COLUMN last_read_time TIMESTAMP")
         rows = [(ALICE, "Alice", _stamp(hours=2)), (STATUS, POSTER, _stamp(minutes=15))]
         for jid, name, stamp in rows:
+            status = jid == STATUS
             c.execute("INSERT INTO chats VALUES (?, ?, ?, NULL)", (jid, name, stamp))
             c.execute(
-                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES (?,?,?,?,?,0)",
-                (f"m-{jid}", jid, POSTER if jid == STATUS else jid.split("@")[0], "hi", stamp),
+                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me,"
+                " media_type, filename, file_length) VALUES (?,?,?,?,?,0,?,?,?)",
+                (
+                    f"m-{jid}",
+                    jid,
+                    POSTER if status else jid.split("@")[0],
+                    "hi",
+                    stamp,
+                    "image" if status else None,
+                    "status.jpg" if status else None,
+                    1024 if status else None,
+                ),
             )
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
     monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(tmp_path / "absent.db"))
+    monkeypatch.setenv("WHATSAPP_STORE_DIR", str(tmp_path / "store"))
     whatsapp._reset_schema_cache()
     whatsapp._reset_name_cache()
     yield path
@@ -104,6 +120,10 @@ def test_the_feed_is_not_a_contact(db):
     assert STATUS not in [hit["jid"] for hit in whatsapp.search_contacts("status")]
     # Someone else with the same digits is still found.
     assert whatsapp.search_contacts("5511999999999")[0]["jid"] == ALICE
+    # And the direct lookup refuses instead of handing back "status" as a number.
+    error = main.get_contact(STATUS)["error"]
+    assert error["code"] == "invalid_argument" and "status feed" in error["message"]
+    assert main.get_contact(ALICE)["jid"] == ALICE
 
 
 def test_the_label_is_what_sorting_and_query_read(db):
@@ -121,6 +141,14 @@ def test_the_archive_reports_the_feed_under_the_same_name(db):
     assert buckets[STATUS] == "Status updates"
     by_chat = {row["chat_jid"]: row["name"] for row in whatsapp.coverage(by_chat=True)["items"]}
     assert by_chat[STATUS] == "Status updates"
+
+
+def test_the_media_inventory_names_the_feed_too(db):
+    """Status posts are images: the feed is often the top media consumer (#379)."""
+    (item,) = main.list_media()["items"]
+    assert item["chat_jid"] == STATUS and item["chat_name"] == "Status updates"
+    (row,) = main.get_media_stats()["by_chat"]
+    assert row["chat_jid"] == STATUS and row["chat_name"] == "Status updates"
 
 
 def test_is_status_is_a_chat_listing_field(db):

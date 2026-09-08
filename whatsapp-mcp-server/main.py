@@ -53,6 +53,7 @@ from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
     MESSAGES_MAX_LIMIT,
+    STATUS_BROADCAST_JID,
     UNANSWERED_FIELDS,
     UNANSWERED_MENTION_FIELDS,
     attach_message_notes,
@@ -398,6 +399,14 @@ def get_contact(identifier: str) -> dict[str, Any]:
     identifier = (identifier or "").strip()
     if not identifier:
         raise ValueError("identifier must be non-empty")
+    if identifier == STATUS_BROADCAST_JID:
+        # Its user part is the word "status", which this function would report
+        # as a phone number an agent could then try to message (issue #379).
+        raise ToolError(
+            "invalid_argument",
+            f"{STATUS_BROADCAST_JID} is the status feed, not a contact; "
+            f"read it with list_messages(chat_jid='{STATUS_BROADCAST_JID}')",
+        )
 
     # Detect identifier type and normalize to JID.
     bare_numeric_digits: str | None = None
