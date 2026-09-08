@@ -2129,7 +2129,8 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     `file_path` is a path on the machine running this server, not on yours: it is
     only useful to a client that shares that filesystem (a stdio server on your
     laptop). Over a network transport, **call read_media instead** — it returns the
-    bytes themselves, images as image content and everything else as text or base64.
+    bytes themselves: images as image content, text as text, and everything else as
+    a resource carrying the file's real MIME type.
 
     The response carries the file's `sha256` and the `notes` you already recorded
     for it. When `notes` is empty, this file has never been interpreted: read it

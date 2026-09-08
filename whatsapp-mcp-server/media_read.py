@@ -91,9 +91,9 @@ RENDERABLE_IMAGE_MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "ima
 
 # The audio types that go out as ``AudioContent``. WhatsApp voice notes are all
 # Opus in an Ogg container; the other three are what a forwarded audio file
-# turns out to be. Anything else labelled audio/* (AMR, MIDI, a container we do
-# not recognise) takes the resource path with its real type, which is the
-# honest answer for a payload no client is going to play.
+# turns out to be. Anything else (FLAC, AMR, a container we do not recognise)
+# takes the resource path with its real type, which is the honest answer for a
+# payload no client is going to play.
 #
 # ``transcribe_audio`` remains the tool for a voice note the *model* has to
 # understand: no model reads Opus, and a transcript is text, cached and
@@ -101,8 +101,8 @@ RENDERABLE_IMAGE_MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "ima
 PLAYABLE_AUDIO_MIMES = frozenset({"audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav"})
 
 # Scheme of the URI that names one message's media. It is the identity the
-# EmbeddedResource below carries, so a client can tell two attachments apart,
-# cache one, or ask for it again.
+# EmbeddedResource below carries, so a client can tell two attachments apart
+# and match a block it already holds to the row it came from.
 MEDIA_URI_PREFIX = "whatsapp://media/"
 
 # The bridge names every cached image `.jpg` whatever it actually is
@@ -114,6 +114,19 @@ IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"GIF87a", "image/gif"),
     (b"GIF89a", "image/gif"),
+)
+
+# Same problem, worse: the bridge names *every* audioMessage `.ogg`
+# (whatsapp-bridge/content.go), so an MP3 a contact attached from WhatsApp's
+# audio picker arrives with an `.ogg` name and no mime column to contradict it.
+# Declaring that AudioContent as audio/ogg would be a block whose data
+# disagrees with its type, which is the one thing a strict client refuses
+# outright. The first bytes decide here too.
+AUDIO_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"OggS", "audio/ogg"),
+    (b"ID3", "audio/mpeg"),
+    (b"fLaC", "audio/flac"),
+    (b"#!AMR", "audio/amr"),
 )
 
 # The extensions read_media branches on, resolved here rather than by
@@ -142,6 +155,8 @@ EXTENSION_MIME = {
     ".opus": "audio/ogg",
     ".mp3": "audio/mpeg",
     ".m4a": "audio/mp4",
+    # CPython's built-in table says audio/x-wav and Windows says audio/wav.
+    ".wav": "audio/wav",
     ".mp4": "video/mp4",
     ".zip": "application/zip",
 }
@@ -171,10 +186,11 @@ TYPE_FALLBACK_MIME = {
 def media_uri(chat_jid: str, message_id: str) -> str:
     """``whatsapp://media/<chat_jid>/<message_id>`` — the URI of one message's media.
 
-    Both halves are percent-encoded so the URI has exactly three path segments
-    whatever a JID contains: a device suffix (``…:12@s.whatsapp.net``) would
-    otherwise put a ``:`` where the authority ends. ``@`` is left readable —
-    it is legal in a path segment and the JID is the useful half of the URI.
+    Both halves are percent-encoded, so the URI is exactly two segments under
+    the prefix and splitting it back into a JID and an id needs no knowledge of
+    what either may contain (a slash in a message id, a device suffix in a
+    JID). ``@`` is left readable: it is legal in a path segment, and the JID is
+    the half of the URI a human recognises.
     """
     return f"{MEDIA_URI_PREFIX}{quote(chat_jid, safe='@')}/{quote(message_id, safe='')}"
 
@@ -309,6 +325,28 @@ def sniff_image_mime(path: str) -> str | None:
             return mime
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "image/webp"
+    return None
+
+
+def sniff_audio_mime(path: str) -> str | None:
+    """The audio type the first bytes say it is, or None for anything else."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return None
+    for signature, mime in AUDIO_SIGNATURES:
+        if head.startswith(signature):
+            return mime
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return "audio/wav"
+    # ISO base media: `....ftyp<brand>`, which is M4A here and also how an
+    # MP4 video starts — the caller only asks about a file the name calls audio.
+    if head[4:8] == b"ftyp":
+        return "audio/mp4"
+    # An MP3 without an ID3 tag starts straight at a frame header: 11 set bits.
+    if len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0:
+        return "audio/mpeg"
     return None
 
 
@@ -464,6 +502,11 @@ def read_media(
         # resource (application/octet-stream) instead.
         sniffed = sniff_image_mime(path)
         mime = sniffed or ("application/octet-stream" if mime in RENDERABLE_IMAGE_MIMES else mime)
+    elif mime.startswith("audio/"):
+        # And here too, for the same reason: the bridge calls every audio
+        # message `.ogg`, so an MP3 would go out declared audio/ogg.
+        sniffed = sniff_audio_mime(path)
+        mime = sniffed or ("application/octet-stream" if mime in PLAYABLE_AUDIO_MIMES else mime)
     if as_text and not is_text_mime(mime):
         # Before the size check: "as_text does not apply to a video" is the
         # useful answer, not "that video is over the 2 MiB cap".
@@ -505,4 +548,19 @@ def read_media(
                 ),
             )
         ]
+        if mime in media_text.EXTRACTABLE_MIMES:
+            # A client that does not open resources shows the model the
+            # metadata block and nothing else, and an unread document reads
+            # exactly like an empty one. This line is written here, not by
+            # whoever sent the file, so it stays outside the untrusted
+            # envelope; it is the only thing that makes that case recoverable.
+            blocks.append(
+                TextContent(
+                    type="text",
+                    text=(
+                        f"[{mime}, {size} bytes, returned as a resource. If you cannot read its "
+                        f"contents, call read_media(as_text=true) and the text will be extracted here.]"
+                    ),
+                )
+            )
     return [*blocks, meta_block(sha256, mime, size, **extra)]

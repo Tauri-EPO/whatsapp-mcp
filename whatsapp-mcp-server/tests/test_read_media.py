@@ -123,6 +123,20 @@ class TestBlocks:
         assert uri == f"whatsapp://media/{ALICE}/DOC1"
         assert _meta(blocks)["mime"] == "application/pdf"
 
+    def test_an_extractable_document_says_as_text_is_there(self, store):
+        """A client that drops the resource must not leave the PDF looking empty."""
+        _cache(ALICE, "document_20260904_100000_DOC1.pdf", b"%PDF-1.4 not really")
+        blocks = media_read.read_media(ALICE, "DOC1")
+        assert [block.type for block in blocks] == ["resource", "text", "text"]
+        assert "as_text=true" in blocks[1].text and "application/pdf" in blocks[1].text
+
+    def test_a_video_resource_carries_no_such_hint(self, store):
+        """There is nothing to extract from an MP4, so nothing to advertise."""
+        with store.messages() as conn:
+            _insert(conn, "VID1", ALICE, "video", None, filename="clip.mp4")
+        _cache(ALICE, "video_20260904_100000_VID1.mp4", b"\x00\x00\x00\x18ftypmp42")
+        assert [block.type for block in media_read.read_media(ALICE, "VID1")] == ["resource", "text"]
+
     @pytest.mark.parametrize(
         ("name", "mime"),
         [
@@ -144,6 +158,29 @@ class TestBlocks:
         blocks = media_read.read_media(ALICE, "OGG1")
         assert blocks[0].type == "audio" and blocks[0].mime_type == "audio/ogg"
         assert base64.b64decode(blocks[0].data) == b"OggS not really opus"
+
+    def test_an_mp3_under_the_bridge_s_ogg_name_is_declared_audio_mpeg(self, store):
+        """content.go names every audioMessage .ogg; an AudioContent must not lie."""
+        with store.messages() as conn:
+            _insert(conn, "MP31", ALICE, "audio", None, filename="audio_20260904_100000_MP31.ogg")
+        _cache(ALICE, "audio_20260904_100000_MP31.ogg", b"ID3\x03\x00\x00\x00 not really mp3")
+        blocks = media_read.read_media(ALICE, "MP31")
+        assert blocks[0].type == "audio" and blocks[0].mime_type == "audio/mpeg"
+        assert _meta(blocks)["mime"] == "audio/mpeg"
+
+    def test_audio_bytes_matching_nothing_are_not_an_audio_block(self, store):
+        """Same rule as the image branch: an unknown payload is never a typed block."""
+        with store.messages() as conn:
+            _insert(conn, "ODD1", ALICE, "audio", None, filename="nota.ogg")
+        _cache(ALICE, "audio_20260904_100000_ODD1.ogg", b"not audio at all")
+        assert _blob(media_read.read_media(ALICE, "ODD1")[0])[1] == "application/octet-stream"
+
+    def test_a_flac_keeps_its_own_type_as_a_resource(self, store):
+        """A type no client plays is still worth naming; only playable audio is a block."""
+        with store.messages() as conn:
+            _insert(conn, "FLA1", ALICE, "audio", None, filename="nota.ogg")
+        _cache(ALICE, "audio_20260904_100000_FLA1.ogg", b"fLaC\x00\x00\x00\x22")
+        assert _blob(media_read.read_media(ALICE, "FLA1")[0])[1] == "audio/flac"
 
     def test_an_audio_type_no_client_plays_stays_a_resource(self, store, monkeypatch):
         """AudioContent is for the types a client can play; the rest keep their bytes."""
@@ -179,6 +216,10 @@ class TestTypes:
         assert media_read.guess_mime("document", "contrato.docx") == media_text.DOCX_MIME
         assert media_read.guess_mime("document", "leituras.xlsx") == media_text.XLSX_MIME
         assert media_read.guess_mime("audio", "nota.ogg") == "audio/ogg"
+        # CPython's built-in table answers audio/x-wav for .wav, which is not a
+        # type PLAYABLE_AUDIO_MIMES knows: the block would change per platform.
+        assert bare.guess_type("a.wav") == ("audio/x-wav", None)
+        assert media_read.guess_mime("audio", "nota.wav") == "audio/wav"
         # ...and not on Windows either, where the registry calls a CSV a spreadsheet.
         assert media_read.guess_mime("document", "planilha.csv") == "text/csv"
 
@@ -298,14 +339,14 @@ class TestTool:
         monkeypatch.setenv(WRAP_ENV, "1")
         _cache(ALICE, "document_20260904_100000_DOC1.pdf", b"%PDF-1.4 not really")
         blocks = main.read_media(chat_jid=ALICE, message_id="DOC1")
-        assert [block.type for block in blocks] == ["resource", "text"]
+        assert [block.type for block in blocks] == ["resource", "text", "text"]
         assert _blob(blocks[0])[2] == b"%PDF-1.4 not really"
 
     async def test_the_sdk_ships_the_resource_block_over_the_wire(self, store):
         """The strict-args server still counts and converts a block-returning call."""
         _cache(ALICE, "document_20260904_100000_DOC1.pdf", b"%PDF-1.4 not really")
         result = await main.mcp.call_tool("read_media", {"chat_jid": ALICE, "message_id": "DOC1"})
-        assert [block.type for block in result.content] == ["resource", "text"]
+        assert [block.type for block in result.content] == ["resource", "text", "text"]
         assert result.content[0].resource.mime_type == "application/pdf"
 
     def test_the_sdk_publishes_it_as_unstructured_content(self):
