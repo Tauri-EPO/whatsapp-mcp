@@ -1263,8 +1263,8 @@ notes have `summary` / `tags` / `keep`:
 | `snooze_until` | chat | ISO timestamp before which the target should not resurface |
 
 `mute`, `handled_at` and `snooze_until` are not decoration: `list_unanswered`
-reads all three by default, and [`mark_handled` / `snooze`](#triage-state) write
-the last two for you. A `handled_at` or `snooze_until` value that is not a
+reads all three by default and `list_unread` reads `mute` and `snooze_until`, and
+[`mark_handled` / `snooze`](#triage-state) write the last two for you. A `handled_at` or `snooze_until` value that is not a
 readable timestamp is ignored rather than guessed at, so a hand-written note can
 never make a chat disappear; clearing one (`annotate(..., "")`) brings the chat
 back on the next call.
@@ -1457,10 +1457,26 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 - `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them — see [Chat filters](#chat-filters). A digest over a hand-picked set of conversations, or the same read minus the known noise
 - `fields`, `omit_nulls`, `max_content_chars`: shape the message rows inside each chat — see [Compact reads](#compact-reads)
 - `count_only` (optional, default false): return `{"count", "chats_with_unread"}` over every matching chat and read no message row
+- `hide_handled` (optional, **default false**): skip chats whose `handled_at` note is at or after their newest unread message
+- `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
+- `include_snoozed` (optional, default false): also return chats whose `snooze_until` note is still in the future
 
 Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled.
 
 `since` / `max_age_days` bound the counts and the returned rows alike. On a busy account the totals are dominated by group chatter nobody reads: `list_unread(exclude_groups=True, max_age_days=3)` is the "what actually needs an answer" call. Per-call and independent of `WHATSAPP_ALLOWED_CHATS`, which stays a process-wide setting.
+
+**The triage filters here apply per chat, and `hide_handled` is off.** The last
+three read the same [triage state](#triage-state) `list_unanswered` does, with
+one difference in the defaults: a chat you marked handled is still *unread* —
+`mark_handled` deliberately sends no read receipt — and this is the list an
+agent picks what to `mark_messages_read` from, so hiding it by default would
+hide the messages you were about to clear. `mute` and `snooze` are statements
+about surfacing rather than about reading, so they default on, exactly as in
+`list_unanswered`; a message that arrives after a snooze was set lifts it here
+too. Whichever filter applies, it removes the **whole chat**: the mark is
+compared with the chat's newest unread message, so a chat is returned with all
+its unread rows or with none, and `count_only`, `limit_chats` and `total_unread`
+all agree with what a page shows.
 
 ### `list_unanswered`
 
@@ -1489,6 +1505,7 @@ Chats with no stored messages never appear.
 - `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
 - `include_snoozed` (optional, default false): also return chats whose `snooze_until` note is still in the future
 - `ignore_closing_messages` (optional, default false): skip chats whose last inbound message only closes the conversation — a sticker, or one of `ok`, `obrigado`, `obrigada`, `valeu`, `blz`, `thanks`, `👍`, `🙏` (compared after trimming and dropping trailing `.` / `!`)
+- `min_messages` (optional, default 0): only chats holding at least this many stored messages, counted in both directions. `min_messages=2` drops the numbers that said one thing and were never a conversation — a delivery notice, a confirmation code, a broadcast. A negative value is an `invalid_argument` error; 0 and 1 change nothing, since a chat with no message never appears here anyway
 
 The first three read the [triage state](#triage-state) an agent writes back. They
 default to *on* because the whole point of recording a decision is that the next
@@ -1496,9 +1513,10 @@ run reflects it, and nothing is hidden that the agent did not mark itself: on a
 store with no triage notes the results are identical. `hide_handled=False` brings
 the full backlog back when you want to audit it.
 
-The four filters are applied in SQL before the page is cut, so `count_only`,
+All five filters are applied in SQL before the page is cut, so `count_only`,
 `limit` and the cursor all agree with each other: a hidden chat never occupies a
-slot in a page.
+slot in a page. `min_messages` bounds the group-mention stream below too, so a
+group cannot come back through that door under the floor.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
@@ -1581,6 +1599,11 @@ arrives after the snooze was set lifts it**, so "chase on Thursday" never buries
 drops a pending snooze as it marks the chat done.
 
 `mute` is the one filter a new message does *not* lift — that is what it is for.
+
+All three notes are read by [`list_unread`](#list_unread) as well, so a muted or
+snoozed chat leaves both backlog lists at once. Only `handled_at` is treated
+differently there: it defaults to *shown*, because a handled chat is still
+unread on the phone.
 
 **The loop:**
 

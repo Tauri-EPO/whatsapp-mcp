@@ -209,6 +209,14 @@ def test_group_mention_survives_a_chatty_group(store, bridge_down):
     assert len(jids) == len(set(jids))
 
 
+def test_min_messages_bounds_the_mention_stream_too(store, bridge_down):
+    """A group added by its mention obeys the same floor as the ordinary rule (#336)."""
+    kept = main.list_unanswered(min_age_hours=24, include_group_mentions=True, min_messages=3)
+    assert TEAM in [item["jid"] for item in kept["items"]]  # t1, t2, t3
+    dropped = main.list_unanswered(min_age_hours=24, include_group_mentions=True, min_messages=4)
+    assert TEAM not in [item["jid"] for item in dropped["items"]]
+
+
 def test_exclude_groups_wins_over_group_mentions(store, bridge_down):
     """ "No groups" means no group comes back through the mention door either."""
     out = main.list_unanswered(exclude_groups=True, include_group_mentions=True, min_age_hours=24)

@@ -101,6 +101,29 @@ def test_min_age_hours_skips_live_conversations(db):
     assert main.list_unanswered(min_age_hours=-1)["error"]["code"] == "invalid_argument"
 
 
+def test_min_messages_drops_the_one_line_broadcasts(db):
+    """Chats that never were a conversation (issue #336): GROUP and FRESH hold one row."""
+    assert _jids(main.list_unanswered(min_messages=2)) == [WAITING, REACTED]
+    # WAITING's two rows are one each way: the floor counts the stored conversation.
+    assert _jids(main.list_unanswered(min_messages=3)) == [REACTED]
+    assert _jids(main.list_unanswered(min_messages=1)) == _jids(main.list_unanswered())
+    assert main.list_unanswered(min_messages=-1)["error"]["code"] == "invalid_argument"
+
+
+def test_min_messages_holds_for_the_count_and_the_cursor(db):
+    assert main.list_unanswered(count_only=True, min_messages=2)["count"] == 2
+
+    seen, cursor = [], None
+    while True:
+        page = main.list_unanswered(limit=1, min_messages=2, cursor=cursor)
+        seen.extend(_jids(page))
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+        assert len(seen) < 5
+    assert seen == [WAITING, REACTED]  # no page spent on a chat the floor removed
+
+
 def test_since_bounds_the_last_inbound_message(db):
     recent = (datetime.now(UTC) - timedelta(days=3)).isoformat()
     assert _jids(main.list_unanswered(since=recent)) == [FRESH, WAITING]

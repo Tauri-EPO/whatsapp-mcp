@@ -76,6 +76,11 @@ def _count(**kwargs):
     return main.list_unanswered(count_only=True, **kwargs)["count"]
 
 
+def _unread(**kwargs):
+    """The chats list_unread returns. No chat has a read marker, so all of them are unread."""
+    return [chat["chat_jid"] for chat in main.list_unread(**kwargs)["chats"]]
+
+
 class TestMarkHandled:
     def test_handled_chat_leaves_the_list_and_the_count(self, store):
         assert set(_jids()) == {ALICE, BOB, CARLA, VIVO}
@@ -302,9 +307,76 @@ class TestLidSpellings:
         assert BOB_LID in _jids()
 
 
+class TestListUnread:
+    """The same notes on the other backlog list (issue #336), applied per chat.
+
+    list_unread groups several rows per chat, so the mark is compared with the
+    chat's newest unread message: a chat is in the list with everything it holds
+    or not in it at all.
+    """
+
+    def test_muted_chats_leave_the_unread_list(self, store):
+        main.annotate("chat", VIVO, "mute", "yes")
+        assert VIVO not in _unread()
+        assert main.list_unread(count_only=True)["chats_with_unread"] == 3
+        assert VIVO in _unread(exclude_muted=False)
+
+    def test_handled_chats_stay_unless_asked(self, store):
+        """mark_handled writes no read receipt, so "handled" is not "read"."""
+        main.mark_handled(ALICE)
+        assert ALICE in _unread()
+        assert ALICE not in _unread(hide_handled=True)
+
+    def test_a_newer_unread_message_brings_the_whole_chat_back(self, store):
+        handled = main.mark_handled(ALICE)["handled_at"]
+        assert ALICE not in _unread(hide_handled=True)
+
+        _speak(store, ALICE, "a2", whatsapp.timestamp_bound(whatsapp.parse_db_time(handled) + timedelta(minutes=1)))
+        back = next(chat for chat in main.list_unread(hide_handled=True)["chats"] if chat["chat_jid"] == ALICE)
+        # Per chat, not per message: the row the mark covered is still unread.
+        assert back["unread_count"] == 2 and [m["id"] for m in back["messages"]] == ["a1", "a2"]
+
+    def test_an_older_message_does_not(self, store):
+        main.mark_handled(ALICE)
+        _speak(store, ALICE, "a0", _stamp(days=9))
+        assert ALICE not in _unread(hide_handled=True)
+
+    def test_snoozed_until_the_date_then_back(self, store):
+        main.snooze(BOB, (datetime.now(UTC) + timedelta(days=2)).date().isoformat())
+        assert BOB not in _unread()
+        assert BOB in _unread(include_snoozed=True)
+
+        main.annotate("chat", BOB, "snooze_until", whatsapp.timestamp_bound(datetime.now(UTC) - timedelta(minutes=1)))
+        assert BOB in _unread()
+
+    def test_a_message_after_the_snooze_lifts_it(self, store):
+        main.snooze(BOB, (datetime.now(UTC) + timedelta(days=30)).isoformat())
+        assert BOB not in _unread()
+
+        snoozed_at = main.get_notes("chat", BOB)["notes"]["snooze_until"]["updated_at"]
+        _speak(store, BOB, "b2", whatsapp.timestamp_bound(whatsapp.parse_db_time(snoozed_at) + timedelta(minutes=1)))
+        assert BOB in _unread()
+
+    def test_count_only_and_the_page_hide_the_same_chats(self, store):
+        main.annotate("chat", VIVO, "mute", "yes")
+        main.mark_handled(BOB)
+
+        counted = main.list_unread(count_only=True, hide_handled=True)
+        listed = main.list_unread(hide_handled=True)
+        assert counted["chats_with_unread"] == listed["chats_with_unread"] == 2
+        assert counted["count"] == listed["total_unread"] == 2
+        assert set(chat["chat_jid"] for chat in listed["chats"]) == {ALICE, CARLA}
+
+    def test_limit_chats_is_not_spent_on_a_hidden_chat(self, store):
+        """ALICE is the newest; muting it must promote the next one, not blank the page."""
+        main.annotate("chat", ALICE, "mute", "yes")
+        assert _unread(limit_chats=1) == [BOB]
+
+
 class TestNoNotes:
     def test_an_untouched_store_is_unaffected(self, store):
         """Defaults are on, so this is the guarantee they rest on."""
         assert set(_jids()) == {ALICE, BOB, CARLA, VIVO}
         assert _count() == 4
+        assert set(_unread()) == {ALICE, BOB, CARLA, VIVO}
         assert triage.install_filter(sqlite3.connect(":memory:"), True, True, False) == ("", [])

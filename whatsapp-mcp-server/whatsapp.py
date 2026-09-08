@@ -4109,6 +4109,9 @@ def list_unread(
     count_only: bool = False,
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
+    hide_handled: bool = False,
+    exclude_muted: bool = True,
+    include_snoozed: bool = False,
 ) -> dict[str, Any]:
     """Chats with unread inbound messages, each with its newest unread rows.
 
@@ -4122,6 +4125,14 @@ def list_unread(
     form of since (both are rejected together). chat_jid / exclude_chat_jid narrow
     the set of conversations (one JID or a list). All of them bound the counted
     rows and the returned messages alike.
+
+    The triage notes (`triage.py`) are honoured per chat, never per message: a
+    chat is either in the list with all its unread rows or not in it at all.
+    hide_handled defaults to *False* here, unlike list_unanswered — `handled_at`
+    deliberately writes no read receipt, so a handled chat is still genuinely
+    unread, and hiding it by default would hide from the one list an agent uses
+    to decide what to mark_messages_read. mute and snooze are statements about
+    surfacing rather than about reading, so they default on as they do there.
 
     count_only returns {"count", "chats_with_unread"} over *every* matching
     chat, ignoring limit_chats and limit_per_chat, and reads no message row.
@@ -4147,18 +4158,24 @@ def list_unread(
               AND {policy_clause}
               {filter_clause}
             """
+        # Per chat, not per row: the mark is compared with the chat's newest
+        # unread message, which set_anchor computes under these same bounds.
+        triage_clause, triage_params = _install_triage_filter(
+            conn, hide_handled, exclude_muted, include_snoozed, anchor="t.anchor"
+        )
+        if triage_clause:
+            _set_triage_anchor(conn, unread_where, (*policy_params, *filter_params))
+        where_params: tuple[Any, ...] = (*policy_params, *filter_params, *triage_params)
         if count_only:
-            cursor.execute(
-                f"SELECT COUNT(*), COUNT(DISTINCT chats.jid) {unread_where}", (*policy_params, *filter_params)
-            )
+            cursor.execute(f"SELECT COUNT(*), COUNT(DISTINCT chats.jid) {unread_where} {triage_clause}", where_params)
             counted = cursor.fetchone() or (0, 0)
             return {"count": int(counted[0] or 0), "chats_with_unread": int(counted[1] or 0)}
-        params: list[Any] = [*policy_params, *filter_params, limit_chats]
+        params: list[Any] = [*where_params, limit_chats]
         cursor.execute(
             f"""
             SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
                    COUNT(*) AS unread_count, MAX(messages.timestamp) AS latest_unread
-            {unread_where}
+            {unread_where} {triage_clause}
             GROUP BY chats.jid
             ORDER BY latest_unread DESC
             LIMIT ?
@@ -4243,6 +4260,7 @@ def list_unanswered(
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
     include_group_mentions: bool = False,
+    min_messages: int = 0,
 ) -> list[dict[str, Any]]:
     """Items of one page of list_unanswered_page."""
     return list_unanswered_page(
@@ -4258,7 +4276,24 @@ def list_unanswered(
         include_snoozed=include_snoozed,
         ignore_closing_messages=ignore_closing_messages,
         include_group_mentions=include_group_mentions,
+        min_messages=min_messages,
     ).items
+
+
+def _min_messages_clause(min_messages: int) -> tuple[str, list[Any]]:
+    """Chats holding at least N stored messages, `chats` in scope.
+
+    The whole stored conversation, inbound and outbound alike: what this filter
+    is for is the number that never became one — a broadcast that said its one
+    thing and left. 0 and 1 are no-ops, since a chat with no message never
+    reaches these lists anyway.
+    """
+    threshold = int(min_messages or 0)
+    if threshold < 0:
+        raise ToolError("invalid_argument", f"min_messages must be 0 or more, got {min_messages!r}")
+    if threshold < 2:
+        return "", []
+    return "AND (SELECT COUNT(*) FROM messages stored WHERE stored.chat_jid = chats.jid) >= ?", [threshold]
 
 
 def _unanswered_from_where(
@@ -4268,6 +4303,7 @@ def _unanswered_from_where(
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
     ignore_closing_messages: bool = False,
+    min_messages: int = 0,
 ) -> tuple[str, list[Any]]:
     """FROM/WHERE shared by the list_unanswered page and its count."""
     filter_clause, filter_params = unread_filters(since, None, exclude_groups, chat_jid, exclude_chat_jid)
@@ -4282,19 +4318,24 @@ def _unanswered_from_where(
     if ignore_closing_messages:
         closing, closing_params = _closing_message_clause("messages")
         closing_clause = f"AND NOT {closing}"
+    stored_clause, stored_params = _min_messages_clause(min_messages)
     policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
     sql = f"""
             FROM chats
             {_last_message_join("chats", "messages", spoken_only=True)}
             WHERE messages.is_from_me = 0
               AND {policy_clause}
-              {filter_clause} {age_clause} {closing_clause}
+              {filter_clause} {age_clause} {closing_clause} {stored_clause}
             """
-    return sql, [*policy_params, *filter_params, *age_params, *closing_params]
+    return sql, [*policy_params, *filter_params, *age_params, *closing_params, *stored_params]
 
 
 def _install_triage_filter(
-    conn: sqlite3.Connection, hide_handled: bool, exclude_muted: bool, include_snoozed: bool
+    conn: sqlite3.Connection,
+    hide_handled: bool,
+    exclude_muted: bool,
+    include_snoozed: bool,
+    anchor: str = "messages.timestamp",
 ) -> tuple[str, list[Any]]:
     """The handled/snoozed/muted predicate, applied before LIMIT so counts and pages agree.
 
@@ -4302,7 +4343,14 @@ def _install_triage_filter(
     """
     from triage import install_filter
 
-    return install_filter(conn, hide_handled, exclude_muted, include_snoozed)
+    return install_filter(conn, hide_handled, exclude_muted, include_snoozed, anchor)
+
+
+def _set_triage_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any]) -> None:
+    """Fill `t.anchor` for a caller that groups several rows per chat (list_unread)."""
+    from triage import set_anchor
+
+    set_anchor(conn, from_where, params)
 
 
 # --- group mentions in triage --------------------------------------------------
@@ -4369,6 +4417,7 @@ def _mention_only_rows(
     include_last_message: bool,
     cursor_state: dict[str, Any] | None,
     limit: int,
+    min_messages: int = 0,
 ) -> tuple[list[tuple], list[tuple[str, str]]]:
     """Groups waiting on a mention that the ordinary unanswered rule does not return.
 
@@ -4382,6 +4431,7 @@ def _mention_only_rows(
     filter_clause, filter_params = unread_filters(since, None, False, chat_jid, exclude_chat_jid)
     # unread_filters bounds `messages`, which is the mention row here.
     mention_where, mention_params = _pending_mention_where(cur, "messages", "chats.jid")
+    stored_clause, stored_params = _min_messages_clause(min_messages)
     policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
     age_clause, age_params = "", []
     if float(min_age_hours or 0) > 0:
@@ -4423,14 +4473,23 @@ def _mention_only_rows(
         WHERE chats.jid LIKE '%@g.us'
           AND {policy_clause}
           AND {mention_where}
-          {filter_clause} {age_clause}
+          {filter_clause} {age_clause} {stored_clause}
           AND COALESCE(last_spoken.is_from_me = 0 {covered_bounds}, 0) = 0
         GROUP BY chats.jid
         {keyset_clause}
         ORDER BY MAX(messages.timestamp) DESC, chats.jid ASC
         LIMIT ?
         """,
-        (*policy_params, *mention_params, *filter_params, *age_params, *covered_params, *keyset_params, limit),
+        (
+            *policy_params,
+            *mention_params,
+            *filter_params,
+            *age_params,
+            *stored_params,
+            *covered_params,
+            *keyset_params,
+            limit,
+        ),
     )
     # The bounds the anchor was chosen under, for the annotation query.
     bounds: list[tuple[str, str]] = []
@@ -4487,10 +4546,11 @@ def count_unanswered(
     exclude_muted: bool = True,
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
+    min_messages: int = 0,
 ) -> int:
     """How many chats are waiting for a reply, without returning any of them."""
     from_where, params = _unanswered_from_where(
-        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages
+        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages, min_messages
     )
     try:
         conn = _connect_messages_db()
@@ -4521,6 +4581,7 @@ def list_unanswered_page(
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
     include_group_mentions: bool = False,
+    min_messages: int = 0,
 ) -> PageResult:
     """Chats whose newest stored message is inbound: the other side spoke last.
 
@@ -4540,11 +4601,14 @@ def list_unanswered_page(
     this account (`mention`, `mention_message_id`, `mention_time`) and adds the
     groups whose mention is still waiting even though the group kept talking
     after it — the rows min_age_hours would otherwise hide.
+
+    min_messages drops the chats holding fewer than N stored messages, the
+    one-line broadcasts that were never a conversation.
     """
     limit = page_size(limit, UNANSWERED_MAX_LIMIT)
     cursor_state = decode_cursor(cursor, "unanswered")
     from_where, where_params = _unanswered_from_where(
-        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages
+        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages, min_messages
     )
     # Resolve "who am I" before opening the database (see list_messages_page).
     if include_group_mentions:
@@ -4596,6 +4660,7 @@ def list_unanswered_page(
                     include_last_message=include_last_message,
                     cursor_state=cursor_state,
                     limit=limit + 1,
+                    min_messages=min_messages,
                 )
             rows = _merge_by_anchor(rows, extra, limit + 1)
             # Same bounds as the rows: the mention named here is the one the
