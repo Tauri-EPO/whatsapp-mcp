@@ -4,41 +4,62 @@
 #   scripts/smoke.sh                 # check the stack described by ./.env
 #   scripts/smoke.sh --wait 90       # poll up to 90 s for the bridge to come up first
 #   scripts/smoke.sh --url https://box.tailnet.ts.net   # MCP endpoint as clients see it
+#   scripts/smoke.sh --project whatsapp-mcp             # stack owned by a manager (Komodo,
+#                                    #   Portainer): reach the containers by compose label
+#                                    #   instead of reading ./.env, root-owned over there
+#   scripts/smoke.sh --mcp-token XYZ # MCP bearer token when ./.env is unreadable; the
+#                                    #   value shows up in `ps`, so prefer
+#                                    #   WHATSAPP_MCP_TOKEN=... scripts/smoke.sh ...
 #
 # Steps, in order:
 #   1. bridge  GET /api/health   (inside the container: the bridge listens on loopback)
 #   2. bridge  GET /api/ready    200 = paired and connected, 503 = waiting for the QR scan
-#   3. mcp     GET /metrics      (skipped when WHATSAPP_MCP_METRICS=false)
+#   3. mcp     GET /metrics      (skipped when WHATSAPP_MCP_METRICS=false; a 404 is a
+#                                warning, not a failure: a proxy may route /mcp only)
 #   4. mcp     POST /mcp initialize with the bearer token -> 200 + mcp-session-id
+#
+# Without --project the script drives `docker compose` in the repository directory.
+# With it -- or when that directory has no usable stack -- it resolves the containers
+# through `docker ps --filter label=com.docker.compose.project=<name>` and reads the
+# tokens from the container environment, so a root-owned .env is never needed.
 #
 # Exit codes: 0 everything answers, 2 stack is up but not paired yet (scan the QR
 # in `docker compose logs -f bridge`), 1 something is broken (the failing step
-# says what to look at). Needs docker compose and curl on the host.
+# says what to look at). Needs docker and curl on the host.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$0")/." || exit 1
 
 WAIT=0
 URL=""
+PROJECT=""
+MCP_TOKEN_ARG=""
+# `shift 2` on a flag given without its value shifts nothing and returns 1, which
+# would spin this loop forever: ask for the value explicitly.
+need_value() { [ "$2" -ge 2 ] || { echo "$1 needs a value" >&2; exit 1; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --wait) WAIT="${2:-0}"; shift 2 ;;
-    --url) URL="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --wait) need_value "$1" $#; WAIT="$2"; shift 2 ;;
+    --url) need_value "$1" $#; URL="$2"; shift 2 ;;
+    --project) need_value "$1" $#; PROJECT="$2"; shift 2 ;;
+    --mcp-token) need_value "$1" $#; MCP_TOKEN_ARG="$2"; shift 2 ;;
+    -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
 # .env is KEY=VALUE lines (see .env.example); export them for the defaults below.
-if [ -f .env ]; then
+# A stack deployed by Komodo/Portainer keeps it root-owned: skip it there and read
+# the tokens from the containers instead (--project, or the fallback below).
+if [ -z "$PROJECT" ] && [ -r .env ]; then
   set -a
   # shellcheck disable=SC1091
   . ./.env
   set +a
+elif [ -z "$PROJECT" ] && [ -e .env ]; then
+  echo "note: ./.env is not readable; reading the tokens from the containers instead"
 fi
-MCP_PORT="${WHATSAPP_MCP_PORT:-8000}"
-URL="${URL:-http://127.0.0.1:${MCP_PORT}}"
-URL="${URL%/}"
+URL="${URL%/}"   # the default needs the containers; it is built after "containers"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -46,13 +67,58 @@ step()  { printf '\n== %s\n' "$*"; }
 fail()  { red "FAIL: $1"; [ -n "${2:-}" ] && echo "      $2"; exit 1; }
 
 compose() { docker compose "$@"; }
+
+# MODE=compose: `docker compose` here reads ./.env and ./docker-compose.yml.
+# MODE=project: the stack belongs to a manager; reach the containers by label.
+MODE=compose
+BRIDGE_CTR=""
+MCP_CTR=""
+
+container_of() { # $1 service name -> container name (empty when it is not running)
+  docker ps --filter "label=com.docker.compose.project=$PROJECT" \
+            --filter "label=com.docker.compose.service=$1" \
+            --format '{{.Names}}' 2>/dev/null | head -n1
+}
+
+detect_project() { # names of the running compose projects that look like this stack
+  # `docker compose ls --format json` prints one JSON array of flat objects:
+  # one object per line (portably, no sed newline escapes), then keep the ones
+  # whose name or config path mentions whatsapp-mcp.
+  docker compose ls --format json 2>/dev/null \
+    | grep -o '{[^{}]*}' \
+    | grep -i 'whatsapp-mcp' \
+    | sed -n 's/.*"Name":"\([^"]*\)".*/\1/p'
+}
+
+published_port() { # host port mapped to container port $1, empty when unmapped
+  local ctr port
+  for ctr in "$MCP_CTR" "$BRIDGE_CTR"; do   # compose puts the mcp in the bridge netns
+    [ -n "$ctr" ] || continue
+    port=$(docker port "$ctr" "$1/tcp" 2>/dev/null | sed -n 's/.*:\([0-9]\{1,5\}\)$/\1/p' | head -n1)
+    [ -n "$port" ] && { printf '%s' "$port"; return 0; }
+  done
+}
+
+bridge_exec() { # run a command inside the bridge container
+  if [ "$MODE" = "project" ]; then
+    docker exec "$BRIDGE_CTR" "$@"
+  else
+    compose exec -T bridge "$@"
+  fi
+}
+
+mcp_env() { # $1 variable name -> its value inside the mcp container (project mode only)
+  [ "$MODE" = "project" ] && [ -n "$MCP_CTR" ] || return 0
+  docker exec "$MCP_CTR" printenv "$1" 2>/dev/null </dev/null | tr -d '\r\n'
+}
+
 bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
   # Results go through globals on purpose: `x=$(bridge_get ...)` would run the
   # function in a subshell and lose the status.
   # busybox wget: exit 0 with the body on a 2xx; on other statuses it prints
   # "server returned error: HTTP/1.1 503 Service Unavailable" and exits 1.
   local out rc
-  out=$(compose exec -T bridge wget -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
+  out=$(bridge_exec wget -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
   rc=$?
   BRIDGE_BODY=""
   if [ "$rc" -eq 0 ]; then
@@ -65,19 +131,62 @@ bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
 }
 
 step "containers"
-if ! compose ps --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | grep -q .; then
-  fail "docker compose reports no containers" "run: docker compose up -d --build"
+ps_out=""
+if [ -n "$PROJECT" ]; then
+  MODE=project
+elif ps_out=$(compose ps --format '  {{.Service}}: {{.State}} {{.Health}}' 2>/dev/null) &&
+     printf '%s' "$ps_out" | grep -q '[^[:space:]]'; then
+  : # a stack of our own in this directory
+else
+  # Nothing here: either docker compose could not read this directory (root-owned
+  # .env) or the stack lives elsewhere. Fall back to the one running compose
+  # project that looks like ours.
+  candidates=$(detect_project)
+  found=$(printf '%s\n' "$candidates" | grep -c '[^[:space:]]')
+  if [ "$found" = "1" ]; then
+    PROJECT=$(printf '%s\n' "$candidates" | head -n1)
+    MODE=project
+    echo "  no stack in $(pwd); using the running compose project '$PROJECT'"
+  elif [ "$found" = "0" ]; then
+    fail "docker compose reports no containers" "run: docker compose up -d --build, or point at a managed stack: scripts/smoke.sh --project <name>"
+  else
+    fail "several compose projects match whatsapp-mcp" "pick one: scripts/smoke.sh --project <name> ($(printf '%s' "$candidates" | tr '\n' ' '))"
+  fi
 fi
-compose ps --format '  {{.Service}}: {{.State}} {{.Health}}'
+if [ "$MODE" = "project" ]; then
+  BRIDGE_CTR=$(container_of bridge)
+  [ -n "$BRIDGE_CTR" ] || fail "no running bridge container in compose project '$PROJECT'" "docker ps --filter label=com.docker.compose.project=$PROJECT"
+  MCP_CTR=$(container_of mcp)
+  [ -n "$MCP_CTR" ] || echo "  warning: no running mcp container in project '$PROJECT' (steps 3 and 4 will only reach it if it runs elsewhere)"
+  docker ps --filter "label=com.docker.compose.project=$PROJECT" \
+    --format '  {{.Label "com.docker.compose.service"}}: {{.State}} ({{.Status}})'
+else
+  printf '%s\n' "$ps_out"
+fi
+
+# ./.env carries WHATSAPP_MCP_PORT in compose mode; in project mode it is out of
+# reach and the published port is a compose mapping, not a container variable, so
+# ask docker for it (the mcp shares the bridge's network namespace).
+if [ -z "$URL" ]; then
+  if [ "$MODE" = "project" ]; then
+    MCP_PORT=$(published_port 8000)
+  fi
+  URL="http://127.0.0.1:${MCP_PORT:-${WHATSAPP_MCP_PORT:-8000}}"
+fi
 
 step "bridge token"
 TOKEN="${WHATSAPP_BRIDGE_TOKEN:-}"
-if [ -z "$TOKEN" ]; then
-  TOKEN=$(compose exec -T bridge cat /app/store/.bridge-token 2>/dev/null </dev/null | tr -d '\r\n')
-  [ -n "$TOKEN" ] || fail "no WHATSAPP_BRIDGE_TOKEN in .env and no /app/store/.bridge-token yet" "is the bridge running? docker compose logs bridge"
-  echo "  using the token generated by the bridge (store/.bridge-token)"
+if [ -n "$TOKEN" ]; then
+  echo "  using WHATSAPP_BRIDGE_TOKEN from the environment"
 else
-  echo "  using WHATSAPP_BRIDGE_TOKEN from .env"
+  TOKEN=$(bridge_exec printenv WHATSAPP_BRIDGE_TOKEN 2>/dev/null </dev/null | tr -d '\r\n')
+  if [ -n "$TOKEN" ]; then
+    echo "  using WHATSAPP_BRIDGE_TOKEN from the bridge container"
+  else
+    TOKEN=$(bridge_exec cat /app/store/.bridge-token 2>/dev/null </dev/null | tr -d '\r\n')
+    [ -n "$TOKEN" ] || fail "no WHATSAPP_BRIDGE_TOKEN and no /app/store/.bridge-token yet" "is the bridge running? docker compose logs bridge"
+    echo "  using the token generated by the bridge (store/.bridge-token)"
+  fi
 fi
 
 step "1. bridge /api/health"
@@ -106,19 +215,32 @@ case "${BRIDGE_STATUS:-}" in
 esac
 
 step "3. mcp /metrics ($URL/metrics)"
-if [ "$(printf '%s' "${WHATSAPP_MCP_METRICS:-true}" | tr '[:upper:]' '[:lower:]')" = "false" ]; then
-  echo "  skipped (WHATSAPP_MCP_METRICS=false)"
+# In project mode ./.env is out of reach: ask the container for the two knobs.
+[ -n "${WHATSAPP_MCP_METRICS:-}" ] || WHATSAPP_MCP_METRICS=$(mcp_env WHATSAPP_MCP_METRICS)
+[ -n "${WHATSAPP_MCP_METRICS_TOKEN:-}" ] || WHATSAPP_MCP_METRICS_TOKEN=$(mcp_env WHATSAPP_MCP_METRICS_TOKEN)
+# Same off switches as the server (observability.metrics_enabled): 0/false/off/no.
+case "$(printf '%s' "${WHATSAPP_MCP_METRICS:-true}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|off|no) metrics_off=yes ;;
+  *) metrics_off=no ;;
+esac
+if [ "$metrics_off" = "yes" ]; then
+  echo "  skipped (WHATSAPP_MCP_METRICS=${WHATSAPP_MCP_METRICS:-false})"
 else
   while :; do
     # WHATSAPP_MCP_METRICS_TOKEN (optional) gates /metrics on its own bearer.
     metrics_auth=()
     [ -n "${WHATSAPP_MCP_METRICS_TOKEN:-}" ] && metrics_auth=(-H "Authorization: Bearer ${WHATSAPP_MCP_METRICS_TOKEN}")
-    code=$(curl -sS -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null || echo 000)
-    [ "$code" = "200" ] || [ "$(date +%s)" -ge "$deadline" ] && break
+    # curl already prints 000 as %{http_code} when it cannot connect; assign, do
+    # not append, or the status becomes "000000" and no branch below matches it.
+    code=$(curl -sS -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null) || code="${code:-000}"
+    # 404: the endpoint answers but does not route /metrics, so waiting is pointless.
+    if [ "$code" = "200" ] || [ "$code" = "404" ] || [ "$(date +%s)" -ge "$deadline" ]; then break; fi
     sleep 3 # the mcp container starts after the bridge is healthy
   done
   if [ "$code" = "200" ] && grep -q '^whatsapp_mcp_uptime_seconds' /tmp/wamcp-metrics.$$; then
     green "  ok ($(grep -c '^whatsapp_mcp_' /tmp/wamcp-metrics.$$) series)"
+  elif [ "$code" = "404" ]; then
+    echo "  warning: 404. Either this endpoint routes /mcp only (a Tailscale Serve mapping does that: scrape the MCP port itself) or the MCP server has metrics disabled."
   else
     rm -f /tmp/wamcp-metrics.$$
     fail "GET $URL/metrics -> $code" "is the MCP port published (WHATSAPP_MCP_BIND / WHATSAPP_MCP_PORT) and the mcp container healthy?"
@@ -127,7 +249,9 @@ else
 fi
 
 step "4. mcp initialize ($URL/mcp)"
-MCP_TOKEN="${WHATSAPP_MCP_TOKEN:-$TOKEN}"
+MCP_TOKEN="${MCP_TOKEN_ARG:-${WHATSAPP_MCP_TOKEN:-}}"
+[ -n "$MCP_TOKEN" ] || MCP_TOKEN=$(mcp_env WHATSAPP_MCP_TOKEN)
+MCP_TOKEN="${MCP_TOKEN:-$TOKEN}"
 hdrs=/tmp/wamcp-init-h.$$
 body=/tmp/wamcp-init-b.$$
 while :; do
@@ -135,7 +259,7 @@ while :; do
     -H "Authorization: Bearer ${MCP_TOKEN}" \
     -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
-    "$URL/mcp" 2>/dev/null || echo 000)
+    "$URL/mcp" 2>/dev/null) || code="${code:-000}"
   [ "$code" != "000" ] || [ "$(date +%s)" -ge "$deadline" ] && break
   sleep 3
 done
@@ -147,7 +271,7 @@ case "$code" in
     else
       rm -f "$hdrs" "$body"; fail "200 without mcp-session-id header" "is $URL really the MCP server?"
     fi ;;
-  401) rm -f "$hdrs" "$body"; fail "401 Unauthorized" "token mismatch: WHATSAPP_MCP_TOKEN (or the bridge token when unset) differs from what the mcp container loaded; docker compose restart mcp after changing .env" ;;
+  401) rm -f "$hdrs" "$body"; fail "401 Unauthorized" "token mismatch: pass --mcp-token, or line up WHATSAPP_MCP_TOKEN (the bridge token when unset) with what the mcp container loaded; restart mcp after changing it" ;;
   421) rm -f "$hdrs" "$body"; fail "421 Misdirected Request" "the Host you used (${URL#*://}) is not in WHATSAPP_MCP_ALLOWED_HOSTS" ;;
   000) rm -f "$hdrs" "$body"; fail "no answer from $URL/mcp" "port not published, wrong URL, or the mcp container is down (docker compose logs --tail 50 mcp)" ;;
   *) rm -f "$hdrs" "$body"; fail "unexpected status $code from $URL/mcp" ;;

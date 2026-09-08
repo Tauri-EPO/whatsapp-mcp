@@ -206,6 +206,19 @@ works as before.
   `--wait 90` polls while the containers start; `--url https://box.tailnet.ts.net`
   tests the endpoint the way a remote client reaches it. CI runs it against
   the compose stack on every PR (unpaired path).
+  On a host where the stack belongs to a manager (Komodo, Portainer) the compose
+  directory and its `.env` are root-owned, so `docker compose` refuses to read
+  them: `scripts/smoke.sh --project whatsapp-mcp --url https://box.tailnet.ts.net`
+  finds the containers by compose label instead
+  (`docker ps --filter label=com.docker.compose.project=…`) and takes the bridge
+  and MCP tokens from the container environment. Without `--project` the script
+  falls back to the single running compose project whose name or config path
+  mentions `whatsapp-mcp`, and names the ones it found when there are several.
+  Without `--url` it asks docker for the published port. The token for the
+  `initialize` step comes from `WHATSAPP_MCP_TOKEN` in the environment (or
+  `--mcp-token <token>`, which anyone can read in `ps`). A `404` on `/metrics`
+  is reported as a warning, not a failure: a Tailscale Serve mapping that only
+  routes `/mcp` gives exactly that, and the metrics are still on the MCP port.
 - Logs: `docker compose logs -f bridge` / `docker compose logs -f mcp`. Files
   rotate at 10 MB × 5 per container (json-file driver), so `DEBUG` cannot fill
   the disk. Both
