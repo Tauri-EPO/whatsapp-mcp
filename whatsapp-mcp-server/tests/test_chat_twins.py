@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+import triage
 import whatsapp
 from chat_policy import ChatPolicy
 from tests.conftest import ALICE, BOB, BOB_LID, BOB_PN, DECOY, FAMILY
@@ -231,3 +232,137 @@ def test_aliases_is_a_projectable_field(twinned):
     rows = whatsapp.shape_rows(whatsapp.list_chats(limit=50), fields=["jid", "aliases"], known=whatsapp.CHAT_FIELDS)
     assert {"jid": BOB, "aliases": [BOB, BOB_LID_JID]} in rows
     assert {"jid": LONE_LID} in rows  # no key at all on a chat with one spelling
+
+
+# --- the triage listings (issue #366) -------------------------------------------
+
+
+def test_list_unread_counts_the_pair_as_one_conversation(twinned):
+    """Two rows, one backlog: the counts are summed and the messages listed together."""
+    out = whatsapp.list_unread(limit_chats=50, limit_per_chat=10)
+    rows = {chat["chat_jid"]: chat for chat in out["chats"]}
+
+    assert BOB_LID_JID not in rows
+    bob = rows[BOB]
+    assert bob["aliases"] == [BOB, BOB_LID_JID]
+    assert bob["unread_count"] == 2
+    assert [message["content"] for message in bob["messages"]] == ["under the number", "under the lid"]
+    assert bob["latest_unread"].startswith("2026-09-05 11:00:00")
+    assert bob["chat_name"] == "Bob"  # the LID row that lists carries none
+    # count_only answers over the same rows.
+    counted = whatsapp.list_unread(count_only=True)
+    assert (counted["count"], counted["chats_with_unread"]) == (out["total_unread"], len(out["chats"]))
+    assert counted["chats_with_unread"] == 2  # Bob and the unpaired LID
+
+
+def test_a_read_marker_on_either_spelling_reads_the_pair(twinned):
+    """The marker sits on the row that does not list; it still covers both."""
+    with twinned.messages() as conn:
+        conn.execute("UPDATE chats SET last_read_time = ? WHERE jid = ?", ("2026-09-05 12:00:00", BOB))
+    out = whatsapp.list_unread(limit_chats=50)
+    assert BOB not in {chat["chat_jid"] for chat in out["chats"]}
+    assert whatsapp.list_unread(count_only=True)["chats_with_unread"] == 1
+
+
+def test_list_unanswered_waits_once_for_the_pair(twinned):
+    items = whatsapp.list_unanswered(limit=50)
+    rows = {item["jid"]: item for item in items}
+
+    assert BOB_LID_JID not in rows
+    assert rows[BOB]["aliases"] == [BOB, BOB_LID_JID]
+    assert rows[BOB]["last_inbound_time"].startswith("2026-09-05 11:00:00")
+    assert whatsapp.count_unanswered() == len(items)
+
+
+def test_an_answer_under_one_spelling_answers_the_pair(twinned):
+    """Who spoke last is asked of the conversation, not of the spelling."""
+    with twinned.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)"
+            " VALUES ('p2', ?, ?, 'respondi', '2026-09-06 08:00:00', 1)",
+            (BOB, BOB_PN),
+        )
+    whatsapp._reset_name_cache()
+    assert BOB not in [item["jid"] for item in whatsapp.list_unanswered(limit=50)]
+    assert whatsapp.count_unanswered() == 1  # the unpaired LID alone
+
+
+def test_paging_the_unanswered_queue_holds_the_pair_once(twinned):
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):
+        page = whatsapp.list_unanswered_page(limit=1, cursor=cursor)
+        seen.extend(item["jid"] for item in page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert seen == [BOB, LONE_LID]  # newest inbound first, and the pair once
+    assert whatsapp.count_unanswered() == len(seen)
+
+
+def test_a_triage_note_decides_for_the_pair(twinned):
+    """mark_handled writes the phone spelling; the row listing under the LID obeys it."""
+    out = triage.mark_handled(BOB_LID_JID)
+    assert out["chat_jid"] == BOB
+
+    assert BOB not in [item["jid"] for item in whatsapp.list_unanswered(limit=50)]
+    assert whatsapp.count_unanswered() == 1
+    unread = whatsapp.list_unread(limit_chats=50, hide_handled=True)
+    assert BOB not in {chat["chat_jid"] for chat in unread["chats"]}
+    assert whatsapp.list_unread(count_only=True, hide_handled=True)["chats_with_unread"] == len(unread["chats"])
+
+
+def test_message_stats_sums_the_pair_into_one_bucket(twinned):
+    stats = whatsapp.message_stats(group_by="chat")
+    buckets = {bucket["key"]: bucket for bucket in stats["buckets"]}
+
+    assert BOB_LID_JID not in buckets
+    assert buckets[BOB]["messages"] == 2
+    assert buckets[BOB]["label"] == "Bob"
+    assert stats["total"]["buckets"] == len(buckets) == 2
+    assert stats["total"]["messages"] == 3
+
+
+def test_the_unanswered_row_carries_aliases_as_a_field(twinned):
+    rows = whatsapp.shape_rows(
+        whatsapp.list_unanswered(limit=50), fields=["jid", "aliases"], known=whatsapp.UNANSWERED_FIELDS
+    )
+    assert {"jid": BOB, "aliases": [BOB, BOB_LID_JID]} in rows
+
+
+def test_a_read_receipt_goes_to_the_row_that_stores_each_message(twinned, monkeypatch):
+    """The merged row lists both spellings; the bridge validates one chat at a time."""
+    sent: list[dict] = []
+
+    def fake_request(method, path, json=None, **kwargs):
+        sent.append(json)
+        return {"success": True, "messages": len(json.get("message_ids") or []), "message": "ok"}
+
+    monkeypatch.setattr(whatsapp, "_bridge_request", fake_request)
+    monkeypatch.setattr(whatsapp, "_bridge_json", lambda payload: payload)
+
+    out = whatsapp.mark_messages_read(["p1", "l1"], BOB)
+    assert {call["chat_jid"]: call["message_ids"] for call in sent} == {BOB: ["p1"], BOB_LID_JID: ["l1"]}
+    assert out["messages"] == 2
+
+    # The whole-chat form has no ids to route, so both rows are marked.
+    sent.clear()
+    whatsapp.mark_messages_read(None, BOB)
+    assert sorted(call["chat_jid"] for call in sent) == sorted([BOB, BOB_LID_JID])
+
+    # A chat WhatsApp knows one way is one call, as before.
+    sent.clear()
+    whatsapp.mark_messages_read(["s1"], LONE_LID)
+    assert sent == [{"chat_jid": LONE_LID, "message_ids": ["s1"]}]
+
+
+def test_the_stats_label_is_the_name_the_merged_row_shows(twinned):
+    """MIN() over the pair's two names would file a person under a bare number."""
+    with twinned.messages() as conn:
+        conn.execute("UPDATE chats SET name = ? WHERE jid = ?", (BOB_PN, BOB))
+        conn.execute("UPDATE chats SET name = 'Bob Silva' WHERE jid = ?", (BOB_LID_JID,))
+    whatsapp._reset_name_cache()
+
+    labels = {bucket["key"]: bucket["label"] for bucket in whatsapp.message_stats(group_by="chat")["buckets"]}
+    assert labels[BOB] == "Bob Silva"  # the row that lists, not the smaller string
+    assert labels[BOB] == _by_jid(whatsapp.list_chats(limit=50))[BOB]["name"]

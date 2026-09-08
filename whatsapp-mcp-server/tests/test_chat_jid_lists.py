@@ -147,7 +147,9 @@ def test_one_chat_still_seeks_the_chat_index(archive):
 def test_message_stats_counts_a_query_per_chat(archive):
     stats = whatsapp.message_stats(group_by="chat", query="orcamento")
     assert stats["total"]["messages"] == 3
-    assert {b["key"]: b["messages"] for b in stats["buckets"]} == {ALICE: 1, BOB_CHAT: 1, FAMILY: 1}
+    # Bob's LID row is bucketed under his phone spelling, the one row the pair
+    # gets everywhere else (issue #366).
+    assert {b["key"]: b["messages"] for b in stats["buckets"]} == {ALICE: 1, BOB: 1, FAMILY: 1}
 
 
 def test_message_stats_buckets_a_query_over_time(archive):
@@ -216,8 +218,11 @@ def test_list_unread_takes_a_list(archive):
     assert {chat["chat_jid"] for chat in unread["chats"]} == {ALICE, FAMILY}
     assert whatsapp.list_unread(chat_jid=[ALICE, FAMILY], count_only=True)["chats_with_unread"] == 2
     assert whatsapp.list_unread(exclude_chat_jid=DECOY, count_only=True)["chats_with_unread"] == 3
-    # The LID chat is reachable by the phone spelling here too.
-    assert {chat["chat_jid"] for chat in whatsapp.list_unread(chat_jid=BOB)["chats"]} == {BOB_CHAT}
+    # The LID chat is reachable by the phone spelling here too, and reported
+    # under it: Bob's two rows are one conversation (issue #366).
+    bob = whatsapp.list_unread(chat_jid=BOB)["chats"]
+    assert [chat["chat_jid"] for chat in bob] == [BOB]
+    assert bob[0]["aliases"] == [BOB, BOB_CHAT]
 
 
 def test_list_unanswered_takes_a_list(archive):

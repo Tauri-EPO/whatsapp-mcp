@@ -251,6 +251,8 @@ chat listings return **one row** for them (issue #337):
 - `last_message`, `last_sender`, `last_is_from_me`, `has_messages` and `last_message_time` all come from the spelling holding the newest message, so a listing stays ordered by the timestamp it prints. `last_read_time` is the newer of the two markers: a conversation read under one spelling counts as read under both.
 - `coverage(by_chat=true)` reports the messages of both rows under one `chat_jid`, and `chats_total` counts the person once.
 - `list_chats`, `get_chat`, `get_contact_chats` and `get_direct_chat_by_contact` all answer with that merged row, whichever of the two spellings you asked with. Paging is over the merged rows, so a page never holds the same person twice.
+- The triage listings merge the pair as well (issue #366): `list_unread` sums the two `unread_count`s and lists the unread rows of both under one `chat_jid` (with `aliases`), `list_unanswered` asks who spoke last of the conversation rather than of the spelling — so a reply sent under one answers both — and `message_stats(group_by="chat")` sums the pair into one bucket. `count_only` and the cursors count the merged rows, as the pages do.
+- The [triage notes](#triage-state) follow the person, not the spelling: `mark_handled` and `snooze` store their note under the phone JID (the returned `chat_jid` says which), `get_notes` reads it back under either, and the filters apply it to the merged row however the archive spells it. A note left under the `@lid` before the map paired the two still counts.
 
 A `@lid` chat the map has not paired — and one whose phone twin has no row in
 this archive — keeps listing on its own, under its own JID. So does either half
@@ -259,10 +261,7 @@ not the other: the allow-list hides exactly what it hid before, rather than
 folding the unlisted half into a row you can see.
 
 The message tools need nothing for this: a `chat_jid` filter already expands to
-both spellings, so the JID of a merged row reads the whole conversation. What
-does **not** merge yet is `list_unread`, `list_unanswered` and
-`message_stats(group_by="chat")` — those can still show a person twice, and
-their rows carry no `aliases` to reconnect the two.
+both spellings, so the JID of a merged row reads the whole conversation.
 
 Up to 2000 pairs are collapsed per store, orders of magnitude more than an
 account has (fewer on a build of SQLite older than 3.32, which allows far fewer
@@ -717,6 +716,11 @@ true. `key` is the chat JID, the sender JID, `YYYY-MM-DD` or `YYYY-MM`; `label`
 carries the chat or contact name for the `chat` and `sender` groupings.
 Reactions and poll votes are pointer rows and never counted as `media`.
 
+With `group_by="chat"`, a contact WhatsApp knows under both a phone JID and a
+`@lid` is one bucket keyed by the phone spelling, summing what the two rows hold
+([One person, two spellings](#one-person-two-spellings-aliases)). `group_by="sender"`
+is untouched: it counts identifiers as the messages carry them.
+
 **Natural Language Examples:**
 
 - "Which chats have the most messages?"
@@ -901,6 +905,11 @@ how many messages were acknowledged, how many senders they were grouped by and
 how many receipts left the bridge. A receipt that fails mid-run advances the read
 marker only over the uninterrupted prefix that was acknowledged, so calling again
 resumes from there.
+
+A chat WhatsApp keeps under [two spellings](#one-person-two-spellings-aliases)
+is two rows behind the one JID `list_unread` reports, so this becomes one call
+per row and the counts are summed: the IDs of a merged row can be passed as they
+were returned, and the whole-chat form clears both halves.
 
 **Natural Language Examples:**
 
@@ -1552,7 +1561,7 @@ One call for "what is waiting for me": chats with unread inbound messages, each 
 - `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
 - `include_snoozed` (optional, default false): also return chats whose `snooze_until` note is still in the future
 
-Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled.
+Returns `{"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread, last_read_time, messages}], "total_unread", "chats_with_unread"}`. Pair with `mark_messages_read` once handled. A chat WhatsApp keeps under two spellings is one row here too, with `aliases` and the unread rows of both ([One person, two spellings](#one-person-two-spellings-aliases)).
 
 `since` / `max_age_days` bound the counts and the returned rows alike. On a busy account the totals are dominated by group chatter nobody reads: `list_unread(exclude_groups=True, max_age_days=3)` is the "what actually needs an answer" call. Per-call and independent of `WHATSAPP_ALLOWED_CHATS`, which stays a process-wide setting.
 
@@ -1622,8 +1631,11 @@ standard [chat shape](#chat-operations) plus:
 - `age_hours` — how long the chat has been waiting, on the same clock `min_age_hours` filters with ([Time bounds](#time-bounds)), so every returned row satisfies `age_hours >= min_age_hours`
 
 `unread` tells the two backlogs apart: `false` on a `list_unanswered` row means
-you read it and never answered — the case `list_unread` cannot report.
-Respects `WHATSAPP_ALLOWED_CHATS`.
+you read it and never answered — the case `list_unread` cannot report. A contact
+WhatsApp keeps under two spellings waits in one row, carrying `aliases`, and a
+reply sent under either answers it ([One person, two
+spellings](#one-person-two-spellings-aliases)). Respects
+`WHATSAPP_ALLOWED_CHATS`.
 
 **Direct chats vs groups.** "The newest message is inbound" is a real signal in
 a direct chat and almost none in a group: a busy group is always inbound, and a

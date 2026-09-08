@@ -271,12 +271,16 @@ def install_filter(
     return clause, params
 
 
-def set_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any]) -> None:
+def set_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any], prefix: str = "") -> None:
     """Record each marked chat's newest matching message, for ``anchor="t.anchor"``.
 
     ``from_where`` is the caller's own FROM/WHERE over ``messages`` joined to
     ``chats``, AND-extensible; only the chats ``install_filter`` just marked are
     read, so the cost is bounded by the note table rather than by the mailbox.
+    ``prefix`` carries the caller's ``WITH`` clause, which has to lead the
+    statement — ``list_unread`` reads a merged phone/LID pair through one, and
+    the anchor has to be the pair's newest unread message or the two halves
+    would be filtered apart.
 
     Call it after ``install_filter`` and only when that returned a clause — with
     no marked chat there is no temp table to fill. A chat with no matching
@@ -284,7 +288,7 @@ def set_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any])
     timestamp notes cannot hide it, ``mute`` still can.
     """
     rows = conn.execute(
-        f"SELECT chats.jid, MAX(messages.timestamp) {from_where}"
+        f"{prefix}SELECT chats.jid, MAX(messages.timestamp) {from_where}"
         f" AND chats.jid IN (SELECT jid FROM temp.{_TABLE}) GROUP BY chats.jid",
         tuple(params),
     ).fetchall()
