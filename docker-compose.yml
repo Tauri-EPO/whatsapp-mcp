@@ -173,6 +173,13 @@ services:
   #   docker compose --profile whisper up -d
   # Downloads the ggml model on first start into the whisper-models volume and
   # serves it on 127.0.0.1:8178 inside the shared network namespace (CPU only).
+  #
+  # Keep the profile active on *every* `up` (COMPOSE_PROFILES=whisper in .env or
+  # in the stack manager's environment): network_mode below is resolved to the
+  # bridge's container id when this container is created, so an `up` without the
+  # profile recreates the bridge, leaves whisper running attached to the old
+  # namespace and nothing can reach it again. scripts/smoke.sh detects it;
+  # `docker compose --profile whisper up -d --force-recreate whisper` fixes it.
   whisper:
     profiles: ["whisper"]
     # Pinned by digest: the `main` tag moves and is amd64-only. Dependabot

@@ -199,8 +199,10 @@ works as before.
 - `mcp` is healthy while the ASGI server answers on `/mcp`.
 - `scripts/smoke.sh` runs the whole checklist from the host after a deploy:
   bridge `/api/health` and `/api/ready` (through the container, with the
-  bridge token from `.env` or `store/.bridge-token`), MCP `/metrics`, and an
-  MCP `initialize` with the bearer token. Exit 0 = paired and answering,
+  bridge token from `.env` or `store/.bridge-token`), MCP `/metrics`, an
+  MCP `initialize` with the bearer token, and — only when the whisper profile
+  is up — whisper on `127.0.0.1:8178` from inside the mcp container.
+  Exit 0 = paired and answering,
   2 = up but waiting for the QR scan, 1 = something to fix (the failing step
   names the variable to look at: token, `WHATSAPP_MCP_ALLOWED_HOSTS`, port).
   `--wait 90` polls while the containers start; `--url https://box.tailnet.ts.net`
@@ -379,6 +381,17 @@ section, not in the `.env` file on disk. A redeploy rewrites that file from what
 the manager holds, so an edit made on the server works until the next deploy and
 then vanishes without a word — including `WHATSAPP_IMAGE_TAG`, which is how you
 pin or roll back an image.
+
+**Profiles are part of that environment.** `COMPOSE_PROFILES=whisper` belongs in
+the manager's Environment section next to `WHISPER_URL`, or every redeploy runs
+without the profile: compose recreates `bridge` and `mcp` and leaves the whisper
+container alone — still `Up`, still attached to the network namespace of the
+bridge container that was just replaced (`network_mode: service:bridge` is
+resolved to a *container id* when whisper is created). Nothing reaches it after
+that: `bridge_status` reports `whisper.reachable: false` and transcription stops
+while the container still looks healthy. `scripts/smoke.sh` fails on that state
+and prints the recreate command
+([Troubleshooting](TROUBLESHOOTING.md#whisper-unreachable-after-a-redeploy)).
 
 **`docker logs` only covers the container that is running now.** A redeploy
 replaces it, and everything the previous one printed is gone unless the manager
