@@ -599,11 +599,33 @@ def fetch_sender_identities(messages: Sequence[Message]) -> dict[str, SenderIden
     return _sender_identities([message.sender for message in messages if message.sender])
 
 
+def attach_message_notes(rows: Sequence[dict[str, Any]]) -> None:
+    """Add `message_notes` to the rows that have one, in a single query.
+
+    Notes about the *message* (why it matters, that it was answered by voice),
+    which is not the same thing as `notes`: that one belongs to the file a media
+    row carries and is keyed by its sha256. Rows nobody annotated are left
+    without the key rather than carrying an empty mapping — a page of a hundred
+    messages would otherwise pay for a hundred of them.
+    """
+    from notes import attach_notes
+
+    attach_notes(
+        rows,
+        "message",
+        lambda row: f"{row.get('chat_jid') or ''}/{row.get('id') or ''}",
+        field="message_notes",
+        only_when_present=True,
+    )
+
+
 def msgs_to_dicts(messages: Sequence[Message], include_sender_name: bool = True) -> list[dict[str, Any]]:
-    """Convert a page of messages, looking their media notes up in one query."""
+    """Convert a page of messages, looking their media and message notes up in one query each."""
     notes = fetch_media_notes(messages)
     identities = fetch_sender_identities(messages)
-    return [msg_to_dict(message, include_sender_name, notes, identities) for message in messages]
+    rows = [msg_to_dict(message, include_sender_name, notes, identities) for message in messages]
+    attach_message_notes(rows)
+    return rows
 
 
 def media_notes_for_message(chat_jid: str, message_id: str) -> dict[str, Any]:
@@ -746,10 +768,15 @@ MESSAGE_FIELDS: tuple[str, ...] = (
         include_sender_name=False,
     ),
     "notes",
+    "message_notes",
     "transcript",
     "content_truncated",
 )
-_CHAT_ROW_FIELDS: tuple[str, ...] = tuple(chat_to_dict(Chat(jid="", name=None, last_message_time=None)))
+# "notes" is on every chat row, whichever listing produced it.
+_CHAT_ROW_FIELDS: tuple[str, ...] = (
+    *chat_to_dict(Chat(jid="", name=None, last_message_time=None)),
+    "notes",
+)
 # Two tuples rather than one: list_chats / get_chat can truncate last_message,
 # list_unanswered cannot but reports how long the chat has been waiting. A name
 # accepted and then always absent from the row is the silent no-op `fields`

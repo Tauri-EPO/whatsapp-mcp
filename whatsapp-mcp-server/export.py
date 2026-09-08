@@ -37,9 +37,10 @@ EXPORT_BATCH = 1000
 # list the conversion itself defines (whatsapp.MESSAGE_FIELDS, #252) instead of
 # hand-copied, so a new message key cannot be forgotten here (#257). The two
 # names left out are added by the page shaping, never by the export: it writes
-# whole rows straight from msg_to_dict, so nothing is truncated and no
-# transcript is attached.
-PAGE_ONLY_FIELDS = ("transcript", "content_truncated")
+# whole rows straight from msg_to_dict, so nothing is truncated, no transcript is
+# attached and the agent's own notes about a message stay out of what is, by
+# design, an archive of what other people wrote.
+PAGE_ONLY_FIELDS = ("transcript", "content_truncated", "message_notes")
 EXPORT_FIELDS = tuple(name for name in whatsapp.MESSAGE_FIELDS if name not in PAGE_ONLY_FIELDS)
 
 

@@ -71,6 +71,7 @@ EXPECTED_UNTRUSTED = {
     "search_notes",
     # `replaced` echoes whatever the displaced note held, transcripts included.
     "annotate",
+    "compact",
     "download_media",
     "transcribe_audio",
     # Returns a summary, but the NDJSON file it writes is a corpus of exactly

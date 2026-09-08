@@ -57,6 +57,7 @@ EXPECTED_READABLE = {
     "annotate_media",
     "get_media_notes",
     "annotate",
+    "compact",
     "get_notes",
     "search_notes",
     "bridge_status",

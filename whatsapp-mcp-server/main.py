@@ -24,6 +24,8 @@ from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
 from notes import annotate as notes_annotate
+from notes import attach_notes
+from notes import compact as notes_compact
 from notes import get_notes as notes_get_notes
 from notes import search_notes as notes_search_notes
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
@@ -43,6 +45,7 @@ from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
     UNANSWERED_FIELDS,
+    attach_message_notes,
     fetch_media_notes,
     fetch_sender_identities,
     msg_to_dict,
@@ -362,7 +365,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
     # `display_name` still says who this is, the way message rows do.
     fallback_name = identity.phone if is_lid else jid_user
     fallback_display = fallback_name or f"{identity.lid}@lid"
-    return {
+    contact = {
         "identifier": identifier,
         "jid": jid,
         "phone_number": identity.phone,
@@ -372,6 +375,8 @@ def get_contact(identifier: str) -> dict[str, Any]:
         "is_lid": is_lid,
         "resolved": resolved,
     }
+    attach_notes([contact], "contact", lambda row: row["jid"])
+    return contact
 
 
 MAX_LIST_LIMIT = 500
@@ -842,6 +847,7 @@ def list_unread(
         exclude_chat_jid=exclude_chat_jid,
     )
     if not count_only:
+        attach_notes(unread["chats"], "chat", lambda row: row["chat_jid"])
         for chat in unread["chats"]:
             chat["messages"] = shape_rows(chat["messages"], fields, omit_nulls, max_content_chars)
     return unread
@@ -929,6 +935,7 @@ def list_unanswered(
         exclude_chat_jid=exclude_chat_jid,
         cursor=cursor,
     ).to_dict()
+    attach_notes(result["items"], "chat", lambda row: row["jid"])
     result["items"] = _shape_chats(result["items"], fields, omit_nulls, known=UNANSWERED_FIELDS)
     return result
 
@@ -999,6 +1006,7 @@ def list_chats(
         query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by, cursor=cursor
     )
     result = chats.to_dict()
+    attach_notes(result["items"], "chat", lambda row: row["jid"])
     result["items"] = _shape_chats(result["items"], fields, omit_nulls, max_content_chars)
     return result
 
@@ -1030,6 +1038,7 @@ def get_chat(
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     if chat is None:
         raise ToolError("not_found", f"No chat {chat_jid} in the archive")
+    attach_notes([chat], "chat", lambda row: row["jid"])
     return _shape_chats([chat], fields, omit_nulls, max_content_chars)[0]
 
 
@@ -1118,14 +1127,17 @@ def get_message_context(
     notes = fetch_media_notes(window)
     identities = fetch_sender_identities(window)
 
-    def shaped(messages: list[Any]) -> list[dict[str, Any]]:
-        rows = [msg_to_dict(m, notes=notes, identities=identities) for m in messages]
-        return shape_rows(rows, fields, omit_nulls, max_content_chars)
-
+    # One conversion and one message-notes query for the whole window; the three
+    # slices are cut afterwards.
+    window = [context.message, *context.before, *context.after]
+    rows = [msg_to_dict(m, notes=notes, identities=identities) for m in window]
+    attach_message_notes(rows)
+    shaped = shape_rows(rows, fields, omit_nulls, max_content_chars)
+    before_end = 1 + len(context.before)
     return {
-        "message": shaped([context.message])[0],
-        "before": shaped(context.before),
-        "after": shaped(context.after),
+        "message": shaped[0],
+        "before": shaped[1:before_end],
+        "after": shaped[before_end:],
     }
 
 
@@ -1686,7 +1698,8 @@ def annotate(
     `set` replaces the whole value: read the current one and merge before writing; the
     previous value is returned as `replaced` so you can verify nothing was lost. Use
     `mode="append"` for keys that accumulate (a dated `log`), where each call adds a
-    line instead of replacing the note.
+    line instead of replacing the note; when one grows past the 64 KB cap the write
+    is refused and compact() replaces the log with a summary.
 
     Nothing is ever destroyed: every write is a new version, and get_notes(...,
     include_history=True) returns the trail. An empty `value` with `mode="set"` hides
@@ -1767,6 +1780,30 @@ def search_notes(query: str, key: str = "", target_type: str = "", limit: int = 
         restricted to allowed chats; pass a target back to get_notes for the full set
     """
     return notes_search_notes(query, key or None, target_type or None, limit)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def compact(target_type: str, target_id: str, key: str, value: str) -> dict[str, Any]:
+    """Replace an accumulated `append` note with a summary, in one write.
+
+    The growth policy for append keys (a dated `log`): values are capped at 64 KB
+    and a write that would cross the cap is refused with `invalid_argument`. This
+    is how you make room — read the log with get_notes, write the summary of it
+    here. The whole previous value comes back as `replaced` and stays in the
+    history, so nothing is lost by compacting.
+
+    Args:
+        target_type: "chat", "contact", "message" or "media"
+        target_id: Chat/contact JID, "<chat_jid>/<message_id>", or a media sha256
+        key: The note to compact (usually the append key you have been growing)
+        value: The summary that replaces it; must not be empty
+
+    Returns:
+        {"success": true, ..., "replaced", "replaced_at", "version"} like annotate
+    """
+    return notes_compact(target_type, target_id, key, value)
 
 
 @mcp.tool()

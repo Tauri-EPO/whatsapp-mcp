@@ -66,6 +66,7 @@ var unenforcedTools = []string{
 	"annotate",
 	"annotate_media",
 	"bridge_status",
+	"compact",
 	"coverage",
 	"download_media",
 	"export_messages",
