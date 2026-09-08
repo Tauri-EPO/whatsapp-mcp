@@ -19,6 +19,10 @@ Properties that matter:
 - **Idempotent by sha256.** The work list is "rows with no ``transcript`` note",
   so a restart resumes where it stopped and the same audio forwarded into three
   chats is transcribed once.
+- **The walk always moves.** Each round looks at the newest rows, so a voice
+  note that just arrived is transcribed next interval, and then at a page
+  starting where the previous round stopped (``Position``), so audio it cannot
+  read never hides the older audio it can.
 - **Concurrency one.** One thread, one file at a time, sleeping between batches:
   the box keeps a core free for the tools.
 - **Never blocks a tool call.** Its own SQLite connections, its own thread, and
@@ -36,12 +40,13 @@ see just like it bounds the tools.
 from __future__ import annotations
 
 import functools
+import itertools
 import logging
 import os
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -65,13 +70,18 @@ DEFAULT_INTERVAL_S = 300.0
 MIN_INTERVAL_S = 5.0
 DEFAULT_BATCH = 10
 MAX_BATCH = 200
-# Rows read per wanted transcript. Audio whose bytes were never cached (or were
-# purged) cannot be transcribed and would otherwise fill every batch; reading a
-# few times the batch size lets the newest cached rows through anyway.
+# Rows walked per wanted transcript, past the newest ones. Audio whose bytes were
+# never cached (or were purged) cannot be transcribed and would otherwise fill
+# every round; the walk steps over it a page at a time (see ``Position``).
 CANDIDATE_FACTOR = 5
-# Consecutive failed downloads that end the fetching for a round: one bad file
+# Consecutive failed downloads that end the fetching for a page: one bad file
 # must not stop the batch, a bridge that is down must not be asked ten times.
 MAX_FETCH_FAILURES = 3
+# Downloads a round may spend on the newest rows while the walk is deeper in the
+# archive, so a voice note that arrives with no bytes cached is not invisible
+# until the walk wraps. Small on purpose, and below MAX_FETCH_FAILURES: newest
+# rows the bridge refuses must not eat the budget the walk needs.
+HEAD_FETCHES = 2
 # A note value is capped at 64 KiB; a backend error message needs far less.
 MAX_ERROR_CHARS = 500
 
@@ -95,10 +105,36 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class Position:
+    """Where the last round stopped walking the pending rows.
+
+    ``(timestamp, id, chat_jid)`` is a total order over ``messages`` (the primary
+    key is ``(id, chat_jid)``, and forwards reuse an id across chats), so a round
+    resumes exactly past the last row it looked at instead of reading the same
+    newest page again. ``None`` means "start at the newest row".
+    """
+
+    timestamp: str
+    message_id: str
+    chat_jid: str
+
+
+@dataclass(frozen=True)
+class Selection:
+    """The candidates one round will transcribe, and where its walk stopped."""
+
+    candidates: list[Candidate]
+    examined: int
+    position: Position | None
+
+
+@dataclass(frozen=True)
 class BatchResult:
     pending: int
     transcribed: int
     failed: int
+    examined: int = 0
+    position: Position | None = None
 
 
 def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
@@ -161,8 +197,11 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
     )
 
 
-def _pending_rows(limit: int) -> list[tuple[str, str, str]]:
-    """(message_id, chat_jid, sha256) for inbound audio with no transcript, newest first."""
+PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestamp
+
+
+def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]:
+    """Inbound audio with no transcript, newest first, resuming just past ``after``."""
     conn = whatsapp._connect_messages_db()
     try:
         handled_clause, handled_params = _already_handled_clause(conn)
@@ -174,23 +213,33 @@ def _pending_rows(limit: int) -> list[tuple[str, str, str]]:
             handled_clause,
         ]
         params: list[Any] = list(handled_params)
+        if after is not None:
+            # Keyset, not OFFSET: rows transcribed since the last round leave the
+            # result and would shift every offset under the walk.
+            clauses.append("(m.timestamp < ? OR (m.timestamp = ? AND (m.id > ? OR (m.id = ? AND m.chat_jid > ?))))")
+            params.extend([after.timestamp, after.timestamp, after.message_id, after.message_id, after.chat_jid])
         if CHAT_POLICY.restricted:
             clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
             clauses.append(clause)
             params.extend(clause_params)
         rows = conn.execute(
             f"""
-            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256))
+            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp
             FROM messages m
             WHERE {" AND ".join(clauses)}
-            ORDER BY m.timestamp DESC, m.id
+            ORDER BY m.timestamp DESC, m.id, m.chat_jid
             LIMIT ?
             """,
             (*params, limit),
         ).fetchall()
     finally:
         conn.close()
-    return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+    return [(str(r[0]), str(r[1]), str(r[2]), str(r[3])) for r in rows]
+
+
+def _walk(head: list[PendingRow], page: list[PendingRow]) -> Iterator[tuple[PendingRow, bool]]:
+    """The newest rows first, then the traversal page; the flag says which is which."""
+    return itertools.chain(((row, False) for row in head), ((row, True) for row in page))
 
 
 def find_pending(
@@ -198,55 +247,101 @@ def find_pending(
     *,
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
-) -> list[Candidate]:
-    """Up to ``batch`` voice notes to transcribe, newest first, one per distinct hash.
+    position: Position | None = None,
+) -> Selection:
+    """Up to ``batch`` voice notes to transcribe, one per distinct hash, and where to resume.
+
+    Two pages are walked. The newest ``batch`` rows first, so a voice note that
+    just arrived is never queued behind a backlog (skipped when ``position`` is
+    ``None``: the page below already starts at the newest row). Then
+    ``CANDIDATE_FACTOR`` times ``batch`` rows starting at ``position``: this is
+    the walk that makes progress, so audio this process cannot read — never
+    cached, purged, or a bridge that will not send it — is stepped over instead
+    of filling every round with the same unprocessable prefix. The returned
+    position is the last row the walk resolved, and ``None`` once it reached the
+    oldest row: the next round starts again at the newest, and an older readable
+    file is therefore reached within a bounded number of rounds.
 
     With ``fetch`` (``TRANSCRIBE_ON_INGEST_FETCH``) audio whose bytes are not
     cached is asked from the bridge over the same ``/api/download`` path
     ``transcribe_audio`` uses, so auto-download off or a retention sweep no
-    longer silences the archive. ``batch`` bounds the downloads too — failed
+    longer silences the archive. ``batch`` bounds the downloads — failed
     attempts included, so a bridge that says no to everything cannot turn one
     round into ``CANDIDATE_FACTOR`` times as many requests — and
     ``MAX_FETCH_FAILURES`` failures in a row (what a bridge that is down looks
-    like) end the fetching for the round. A file the bridge will never send is
-    just skipped: it is not the file whisper could not read, so it gets no
-    ``transcript_error`` note, and the next round tries it again.
+    like) end the fetching for a page. Most of that budget belongs to the walk:
+    the newest rows may spend at most ``HEAD_FETCHES`` of it, and never its last
+    download — enough to pick up an arrival whose bytes are not here, too little
+    for a newest row the bridge refuses to eat the round. When the budget runs
+    out mid-page the position stays at the last row that was *resolved*, so the
+    next round asks for the rows this one could not try instead of striding over
+    them: with the bridge refusing everything the walk still advances by the
+    downloads it attempted, and the rest of the page is read anyway, so audio
+    that is already cached further down is picked up in the same round. A file
+    the bridge will never send is just skipped: it is not the file whisper could
+    not read, so it gets no ``transcript_error`` note, and it is tried again
+    when the walk comes round.
     """
-    rows = _pending_rows(max(1, batch) * CANDIDATE_FACTOR)
+    batch = max(1, batch)
+    page_limit = batch * CANDIDATE_FACTOR
+    head = _pending_rows(batch) if position is not None else []
+    page = _pending_rows(page_limit, after=position)
     fetcher = download or whatsapp.download_media
-    budget = max(1, batch) if fetch else 0  # fetch attempts left this round
+    budget = batch if fetch else 0  # fetch attempts left this round
+    head_budget = min(batch - 1, HEAD_FETCHES) if fetch else 0  # ... of which the newest rows may spend these
     failures = 0  # consecutive; a success clears them
+    parked = False  # out of fetches: the walk stops advancing so nothing is stepped over untried
+    walking = False
     caches: dict[str, dict[str, media_inventory.CachedFile]] = {}
     out: list[Candidate] = []
     seen: set[str] = set()
-    for message_id, chat_jid, sha256 in rows:
-        if sha256 in seen:
-            continue
+    looked_at: set[tuple[str, str]] = set()  # rows read this round, for the log line
+    resolved: set[tuple[str, str]] = set()  # ... of which these are done with (the rest go to the walk)
+    next_position = position
+    full = False
+    for (message_id, chat_jid, sha256, timestamp), traversing in _walk(head, page):
+        if traversing and not walking:
+            walking, failures = True, 0  # the walk gets its own three strikes
+        if sha256 in seen or (message_id, chat_jid) in resolved:
+            continue  # already picked, or the same row seen on both pages
+        looked_at.add((message_id, chat_jid))
         if chat_jid not in caches:
             caches[chat_jid] = media_inventory.scan_chat_cache(chat_jid)
         cached = caches[chat_jid].get(message_id)
+        if cached is None and not traversing:
+            if head_budget <= 0 or budget <= 0:
+                continue  # the newest rows are out of downloads; the walk still owns the rest
+            head_budget -= 1
+        if cached is None and traversing and fetch and budget <= 0:
+            parked = True
+        if traversing and not parked:
+            next_position = Position(timestamp=timestamp, message_id=message_id, chat_jid=chat_jid)
+        path: str | None = None
         if cached is not None:
             path = os.path.join(media_inventory.chat_media_dir(chat_jid), cached.name)
-        elif budget <= 0:
-            continue  # not fetching (or done fetching): nothing on disk to read
-        else:
+        elif budget > 0:
             budget -= 1
-            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
-            if fetched is None:
+            path = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
+            if path is None:
                 failures += 1
                 if failures >= MAX_FETCH_FAILURES:
                     budget = 0
                     logger.warning(
                         "transcribe_on_ingest: %d fetches failed in a row, no more this round", MAX_FETCH_FAILURES
                     )
-                continue
-            failures = 0
-            path = fetched
+            else:
+                failures = 0
+        resolved.add((message_id, chat_jid))
+        if path is None:
+            continue  # not fetching, done fetching, or the bridge would not send it
         seen.add(sha256)
         out.append(Candidate(message_id=message_id, chat_jid=chat_jid, sha256=sha256, path=path))
         if len(out) >= batch:
+            full = True
             break
-    return out
+    if not full and not parked and len(page) < page_limit:
+        next_position = None  # the walk reached the oldest row; start over at the newest
+    return Selection(candidates=out, examined=len(looked_at), position=next_position)
 
 
 def _fetch_bytes(
@@ -302,16 +397,18 @@ def run_once(
     transcribe: Callable[[str], dict[str, Any]] | None = None,
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
+    position: Position | None = None,
 ) -> BatchResult:
-    """Transcribe one batch. Never raises: a broken batch is a logged batch."""
+    """Transcribe one batch from ``position``. Never raises: a broken batch is a logged batch."""
     transcribe = transcribe or _default_transcribe
     started = time.monotonic()
     try:
-        pending = find_pending(batch, fetch=fetch, download=download)
+        selection = find_pending(batch, fetch=fetch, download=download, position=position)
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
-        return BatchResult(0, 0, 0)
+        return BatchResult(0, 0, 0, position=position)  # the read failed, the walk did not move
 
+    pending = selection.candidates
     transcribed = failed = 0
     for candidate in pending:
         try:
@@ -329,15 +426,16 @@ def run_once(
 
     if pending:
         logger.info(
-            "transcribe_on_ingest: %d pending, %d transcribed, %d failed in %.1fs",
+            "transcribe_on_ingest: %d examined, %d pending, %d transcribed, %d failed in %.1fs",
+            selection.examined,
             len(pending),
             transcribed,
             failed,
             time.monotonic() - started,
         )
     else:
-        logger.debug("transcribe_on_ingest: nothing pending")
-    return BatchResult(len(pending), transcribed, failed)
+        logger.debug("transcribe_on_ingest: nothing pending in %d rows examined", selection.examined)
+    return BatchResult(len(pending), transcribed, failed, selection.examined, selection.position)
 
 
 def run_forever(
@@ -345,12 +443,19 @@ def run_forever(
     *,
     stop: threading.Event,
     sleep: Callable[[float], None] = time.sleep,
-    run: Callable[[int], BatchResult] | None = None,
+    run: Callable[..., BatchResult] | None = None,
 ) -> None:
-    """Poll until ``stop`` is set. ``sleep`` and ``run`` are injected by the tests."""
+    """Poll until ``stop`` is set. ``sleep`` and ``run`` are injected by the tests.
+
+    The traversal position is carried from one round to the next: that is what
+    makes the walk advance past audio it cannot read instead of restarting on
+    the same newest page every interval. It lives in this loop only — a restart
+    starts at the newest rows again, which is where the new work is.
+    """
     run_batch = run or functools.partial(run_once, fetch=config.fetch)
+    position: Position | None = None
     while not stop.is_set():
-        run_batch(config.batch)
+        position = run_batch(config.batch, position=position).position
         if stop.is_set():
             return
         sleep(config.interval_s)
@@ -361,7 +466,7 @@ def start_worker(
     *,
     stop: threading.Event | None = None,
     sleep: Callable[[float], None] = time.sleep,
-    run: Callable[[int], BatchResult] | None = None,
+    run: Callable[..., BatchResult] | None = None,
 ) -> threading.Thread:
     """Start the poll loop on a daemon thread (so it never holds up shutdown)."""
     event = stop or threading.Event()
