@@ -93,6 +93,52 @@ Fix or delete those rows with the bridge stopped
 (`sqlite3 store/messages.db "UPDATE messages SET timestamp = '2026-09-04 20:13:09+00:00' WHERE rowid = 871"`);
 the next start picks the change up and stops warning.
 
+## Pulling the images from GHCR
+
+- **`docker compose pull` fails with `denied`**:
+
+  ```text
+  Head "https://ghcr.io/v2/tauri-epo/whatsapp-mcp-server/manifests/latest": denied: denied
+  ```
+
+  Both packages are public and anonymous pulls work, so this is almost never
+  the package. It is the Docker client on the host presenting a **stale
+  credential**: an old `docker login ghcr.io` whose token has since expired or
+  lost `read:packages` still sits in `~/.docker/config.json`. GHCR rejects that
+  token instead of falling back to anonymous access, and the rejection reads
+  exactly like a private-package error. Mind whose config it is: a stack
+  deployed by a manager (Komodo, Portainer) pulls as root, so root's
+  `config.json` is the one that counts, not yours.
+
+  **Fix**, as the user that runs the deploy (`sudo -i` for a root-owned stack)
+  and from the stack's own directory, because `docker compose` needs the file:
+
+  ```bash
+  docker logout ghcr.io                        # drop the stale credential
+  cd /etc/komodo/stacks/whatsapp-mcp           # wherever the stack lives
+  docker compose pull                          # anonymous pull; public package
+  ```
+
+  With a stack manager, redeploying from its UI after the `docker logout` does
+  the same thing.
+
+  **Confirm the package is public** before chasing anything else — an anonymous
+  pull token and one manifest request, from any machine:
+
+  ```bash
+  token=$(curl -s "https://ghcr.io/token?scope=repository:tauri-epo/whatsapp-mcp-server:pull" \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  curl -sI -H "Authorization: Bearer $token" \
+    -H "Accept: application/vnd.oci.image.index.v1+json" \
+    https://ghcr.io/v2/tauri-epo/whatsapp-mcp-server/manifests/latest | head -1
+  # HTTP/2 200 (or HTTP/1.1 200 OK) <- public. A 401 or 403 means it is private.
+  ```
+
+  A 200 there next to a `denied` from `docker compose pull` proves the
+  credential is at fault. Visibility itself is a one-time switch in GitHub
+  (Packages > package > Package settings > Change visibility), see
+  [DOCKER.md](DOCKER.md#published-images).
+
 ## Published HTTPS endpoint
 
 - **`certificate verify failed: certificate has expired`**: the certificate
