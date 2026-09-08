@@ -81,17 +81,27 @@ class FakeBridge:
     """Stands in for whatsapp.download_media: caches the bytes and answers with the path.
 
     ``fail`` names the messages it refuses (down, disconnected, expired media
-    link — all of them ``bridge_unavailable``); ``foreign_path`` makes it answer
-    with the bridge's own view of the path, which a split deployment cannot open.
+    link — all of them ``bridge_unavailable``); ``gone`` names the ones the
+    sender's phone answered it no longer has (``media_unavailable``, which no
+    retry can change); ``foreign_path`` makes it answer with the bridge's own
+    view of the path, which a split deployment cannot open.
     """
 
-    def __init__(self, *, fail: set[str] | None = None, foreign_path: bool = False) -> None:
+    def __init__(
+        self, *, fail: set[str] | None = None, gone: set[str] | None = None, foreign_path: bool = False
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.fail = fail or set()
+        self.gone = gone or set()
         self.foreign_path = foreign_path
 
     def __call__(self, message_id: str, chat_jid: str) -> str:
         self.calls.append((message_id, chat_jid))
+        if message_id in self.gone:
+            raise ToolError(
+                "media_unavailable",
+                "Failed to download media: sender's phone declined media retry: NOT_FOUND",
+            )
         if message_id in self.fail:
             raise ToolError("bridge_unavailable", "bridge unreachable at http://localhost:8080/api")
         directory = media_inventory.chat_media_dir(chat_jid)
@@ -322,6 +332,118 @@ def test_a_bridge_that_refuses_everything_is_asked_a_bounded_number_of_times(pai
     assert (result.pending, result.transcribed, result.failed) == (0, 0, 0)
     assert len(down.calls) == transcribe_worker.MAX_FETCH_FAILURES
     assert media_notes.fetch_notes([SHA[m] for m in uncached]) == {}
+
+
+def test_media_the_phone_no_longer_has_is_recorded_and_never_asked_for_again(paired_dbs, caplog):
+    """Issue #378: 600 expired voice notes must not be asked for on every pass."""
+    gone = ("AUD1", "AUD2", "AUD3", "AUD4")
+    for message_id in gone:
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    bridge = FakeBridge(gone=set(gone))
+
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        result = transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=bridge)
+
+    # A definitive miss is not a strike: all four are asked, not just three.
+    assert (result.pending, result.transcribed, result.failed) == (0, 0, 0)
+    assert len(bridge.calls) == 4
+    notes = media_notes.fetch_notes([SHA[m] for m in gone])
+    assert len(notes) == 4
+    recorded = notes[SHA["AUD1"]]["media_unavailable"]
+    assert "NOT_FOUND" in recorded and recorded[:2] == "20"  # the reason, dated
+    assert "no longer has" in caplog.text
+
+    # The next round does not ask again: the note takes the rows off the walk.
+    again = FakeBridge(gone=set(gone))
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=again).pending == 0
+    assert again.calls == []
+
+    # Clearing the note asks the phone again (a backup restored on it, say).
+    media_notes.annotate_media(SHA["AUD1"], "media_unavailable", "")
+    third = FakeBridge()
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=third).transcribed == 1
+    assert third.calls == [("AUD1", ALICE)]
+
+
+def test_a_definitive_miss_does_not_spend_the_rounds_failure_budget(paired_dbs):
+    """Three dead files in front of a live one must not end the fetching (issue #378)."""
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    bridge = FakeBridge(gone={"AUD4", "AUD3", "AUD2"})  # the three newest are gone
+
+    result = transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=bridge)
+    assert (result.pending, result.transcribed) == (1, 1)  # AUD1 was still fetched
+    assert [message_id for message_id, _ in bridge.calls] == ["AUD4", "AUD3", "AUD2", "AUD1"]
+
+
+def test_a_transient_refusal_is_still_a_strike_and_writes_no_note(paired_dbs):
+    """The bridge being down is not the phone saying no: nothing is recorded."""
+    uncached = ("AUD1", "AUD2", "AUD3", "AUD4")
+    for message_id in uncached:
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    down = FakeBridge(fail=set(uncached))
+
+    transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=down)
+    assert len(down.calls) == transcribe_worker.MAX_FETCH_FAILURES
+    assert media_notes.fetch_notes([SHA[m] for m in uncached]) == {}
+
+
+def test_a_copy_cached_in_another_chat_is_not_hidden_by_the_note(paired_dbs):
+    """The note is per hash: it must not take a readable copy off the work list."""
+    # The same voice note in two chats: Bob's copy is on disk, Alice's is not.
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    with paired_dbs.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
+            "file_length, file_sha256, filename) VALUES ('FWD1', ?, ?, '', '2026-09-05 08:00:00', 0, 'audio', "
+            "3000, ?, ?)",
+            (BOB, BOB, bytes.fromhex(SHA["AUD1"]), _media_filename("FWD1")),
+        )
+    directory = media_inventory.chat_media_dir(BOB)
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, _media_filename("FWD1")), "wb") as fh:
+        fh.write(b"opus")
+
+    backend = FakeBackend()
+    result = transcribe_worker.run_once(10, transcribe=backend, fetch=True, download=FakeBridge(gone={"AUD1"}))
+
+    # No note was written, and the cached copy was transcribed in the same round.
+    assert result.transcribed == 1
+    assert [os.path.basename(p) for p in backend.runs] == [_media_filename("FWD1")]
+    assert "media_unavailable" not in media_notes.fetch_notes([SHA["AUD1"]]).get(SHA["AUD1"], {})
+
+
+def test_a_note_that_cannot_be_written_still_ends_the_round(paired_dbs, monkeypatch):
+    """With notes.db unwritable the misses are not remembered, so the strikes must stay."""
+    uncached = ("AUD1", "AUD2", "AUD3", "AUD4")
+    for message_id in uncached:
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    monkeypatch.setattr(transcribe_worker, "_record_unavailable", lambda sha256, reason: False)
+    bridge = FakeBridge(gone=set(uncached))
+
+    transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=bridge)
+    assert len(bridge.calls) == transcribe_worker.MAX_FETCH_FAILURES
+
+
+def test_a_transcript_retracts_a_recorded_miss(archive):
+    """Another copy turned out to be readable: the hash is not unavailable after all."""
+    media_notes.annotate_media(SHA["AUD1"], "media_unavailable", "2026-09-08: NOT_FOUND")
+    media_notes.store_transcript(SHA["AUD1"], {"text": "spoken words", "language": "pt", "backend": "server"})
+    assert media_notes.fetch_notes([SHA["AUD1"]])[SHA["AUD1"]] == {
+        "transcript": "spoken words",
+        "transcript_lang": "pt",
+        "transcript_backend": "server",
+    }
+
+
+def test_coverage_counts_the_media_the_phone_no_longer_has(paired_dbs):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    _add_audio(paired_dbs, "AUD2", ALICE)
+    transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=FakeBridge(gone={"AUD1"}))
+
+    audio = whatsapp.coverage()["audio"]
+    assert (audio["messages"], audio["transcribed"], audio["unavailable"]) == (2, 1, 1)
+    assert audio["backlog"] == 0  # nothing left to do: one done, one impossible
 
 
 def test_failed_fetches_count_against_the_batch(paired_dbs):

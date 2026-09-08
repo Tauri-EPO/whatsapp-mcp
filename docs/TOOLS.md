@@ -122,6 +122,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 | `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
 | `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit`, or `pixels` and `limit` for an image too big to decode | Read a smaller file, or `download_media` when the client shares the filesystem |
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
+| `media_unavailable` | The bytes are not cached here and the sender's phone answered that it no longer has them (WhatsApp media expires from its CDN after a few days) | Do not retry: that file is gone. Work from the message text, or ask the sender to send it again |
 | `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
 
 An unreadable database is reported as `internal`, never as an empty result, so an empty list really means "nothing matched".
@@ -424,7 +425,8 @@ allow-list as the numbers above:
 | `cached` | Of those, the ones whose bytes are on disk under the store directory |
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |
-| `backlog` | `messages - transcribed - errors` — what is actually left to do |
+| `unavailable` | Rows whose hash carries a `media_unavailable` note: the bytes are not here and the sender's phone answered that it no longer has them, so no download can ever bring them back |
+| `backlog` | `messages` minus the rows carrying any of those three notes — what is actually left to do |
 | `backlog_cached` | How many of the backlog have their bytes on disk. `backlog - backlog_cached` is what a batch would download first (`TRANSCRIBE_ON_INGEST_FETCH=1`, or `transcribe_audio`, which fetches on demand) |
 | `cached_examined` | How many rows the two cached counts looked at |
 
@@ -1094,7 +1096,12 @@ WhatsApp CDN URLs expire after a few days. When a stored URL answers 403/404/410
 the **sender's phone** to re-upload the file via WhatsApp's media-retry protocol,
 downloads it from the refreshed path, and persists that path for next time. The
 sender's phone must be online; the bridge waits up to 30 seconds before giving
-up with a clear error. Media the phone no longer has cannot be recovered.
+up with a clear error. Media the phone no longer has cannot be recovered, and
+says so with its own code: `media_unavailable` means "do not ask again", where
+`bridge_unavailable` means "try later". The `TRANSCRIBE_ON_INGEST` worker turns
+that answer into a `media_unavailable` note on the file's hash, so
+`list_media` and `get_media_notes` show which files are gone and when the phone
+said so.
 
 ### `read_media`
 
@@ -1465,6 +1472,11 @@ Conventional keys (use them before inventing new ones):
   clearing it (`annotate_media(sha256, "transcript_error", "")`) queues the file
   again, and a transcript that succeeds later clears it as well. A backend that
   was merely unreachable never writes one: that round is retried instead
+- `media_unavailable` — the bytes are gone for good: not cached here, and the
+  sender's phone answered the bridge's media retry with "I no longer have it"
+  (dated in the value). Written by the `TRANSCRIBE_ON_INGEST` worker so it stops
+  asking a phone for a dead file on every pass; clearing it asks again, which is
+  worth doing only if that phone restored a backup
 - `keep` — `yes` for files a cleanup pass must not purge, `no` for disposable ones
 
 `list_media(has_notes=false)` is the backlog view (what has never been

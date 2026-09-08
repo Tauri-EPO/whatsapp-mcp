@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -141,6 +142,19 @@ func downloadRequest(token, body string) *http.Request {
 	return req
 }
 
+// downloadErrorCode reads error.code out of a failed /api/download answer.
+func downloadErrorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body apiError
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error body is not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body.Success {
+		t.Fatalf("error body reports success: %s", rec.Body.String())
+	}
+	return body.Error.Code
+}
+
 func TestHandleDownload(t *testing.T) {
 	const token = "test-token-0123456789"
 	b := testBridge(t, nil, newTestMessageStore(t), installRecordingLogger(t))
@@ -179,6 +193,25 @@ func TestHandleDownload(t *testing.T) {
 	}
 	if gotID != "m1" || gotChat != "c@s.whatsapp.net" {
 		t.Errorf("handler passed (%q, %q) to DownloadMedia", gotID, gotChat)
+	}
+	// A transient failure keeps the code its status maps to: the caller retries.
+	if code := downloadErrorCode(t, rec); code != "internal" {
+		t.Errorf("transient download failure code = %q, want internal", code)
+	}
+
+	// The sender's phone answering "gone" is definitive, so it gets its own
+	// code and the caller can record the miss instead of asking for that file
+	// on every pass over the archive (issue #378).
+	b.DownloadMedia = func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
+		return false, "", "", "", fmt.Errorf("failed to download media: %w",
+			fmt.Errorf("sender's phone declined media retry: NOT_FOUND: %w", errMediaUnavailable))
+	}
+	rec = do(`{"message_id":"m1","chat_jid":"c@s.whatsapp.net"}`)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "NOT_FOUND") {
+		t.Errorf("definitive miss: %d %s", rec.Code, rec.Body.String())
+	}
+	if code := downloadErrorCode(t, rec); code != "media_unavailable" {
+		t.Errorf("definitive miss code = %q, want media_unavailable", code)
 	}
 
 	b.DownloadMedia = func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {

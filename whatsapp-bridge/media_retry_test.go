@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waMmsRetry"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -151,4 +152,24 @@ func TestMediaRetryWaiterCancelDoesNotRemoveReplacement(t *testing.T) {
 		t.Fatal("newer waiter should still receive events")
 	}
 	<-chNew
+}
+
+func TestMediaRetryDirectPathClassifiesTheAnswer(t *testing.T) {
+	// The phone's verdict decides whether the caller may ever ask again: only
+	// "I looked and it is gone" (NOT_FOUND) is definitive. DECRYPTION_ERROR may
+	// be our own key or receipt, and GENERAL_ERROR is the catch-all (issue #378).
+	cases := []struct {
+		res        waMmsRetry.MediaRetryNotification_ResultType
+		definitive bool
+	}{
+		{waMmsRetry.MediaRetryNotification_NOT_FOUND, true},
+		{waMmsRetry.MediaRetryNotification_DECRYPTION_ERROR, false},
+		{waMmsRetry.MediaRetryNotification_GENERAL_ERROR, false},
+		{waMmsRetry.MediaRetryNotification_SUCCESS, false},
+	}
+	for _, tc := range cases {
+		if got := definitiveRetryResult(tc.res); got != tc.definitive {
+			t.Errorf("definitiveRetryResult(%s) = %v, want %v", tc.res, got, tc.definitive)
+		}
+	}
 }
