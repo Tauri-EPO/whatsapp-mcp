@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -328,8 +329,98 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 	}
 }
 
-// A store already at messagesDBUserVersion is not scanned again.
-func TestMigrateCanonicalTimestampsSkipsStampedStore(t *testing.T) {
+// An operator who pins the image back to a release without the migration, then
+// rolls forward, leaves driver-formatted rows behind a stamped store. The
+// startup probe finds them and re-runs the rewrite for that column, whatever
+// legacy spelling the older bridge used, and says so in the log.
+func TestMigrateCanonicalTimestampsRepairsRolledBackRows(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	t.Chdir(t.TempDir())
+	rec := installRecordingLogger(t)
+
+	ms, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore: %v", err)
+	}
+	defer func() { _ = ms.Close() }()
+	db := ms.db
+
+	// NewMessageStore stamps the empty store; these rows land after the stamp.
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != messagesDBUserVersion {
+		t.Fatalf("a fresh store should be stamped, user_version = %d", version)
+	}
+
+	const chat = "5511999999999@s.whatsapp.net"
+	seedLegacyRow(t, db, `INSERT INTO chats (jid, name, last_message_time, last_read_time) VALUES (?, 'Alice', ?, ?)`,
+		chat, "2026-09-04 17:13:09.123456-03:00", "2026-09-04 17:13:09 -0300 -03")
+	// One row per legacy spelling parseDBTime knows, all the same instant.
+	legacy := []string{
+		"2026-09-04 17:13:09.123456-03:00",       // driver write form
+		"2026-09-04T17:13:09.123456-03:00",       // driver write form, T separator
+		"2026-09-04 17:13:09 -0300 -03",          // Go time.Time.String()
+		"2026-09-04 17:13:09.123456 -0300 -03",   // same, fractional seconds
+		"2026-09-04T20:13:09Z",                   // RFC3339
+		"2026-09-04 20:13:09.123456",             // no offset, read as UTC
+		"2026-09-04T20:13:09.123456",             // same, T separator
+		"2026-09-04 20:13:09 +0000 UTC m=+0.001", // String() with a monotonic reading
+	}
+	for i, raw := range legacy {
+		seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+			VALUES (?, ?, 's', 'a', ?, 0)`, fmt.Sprintf("M%d", i), chat, raw)
+	}
+	seedLegacyRow(t, db, `INSERT INTO calls (call_id, chat_jid, from_jid, timestamp, is_from_me, call_type, is_group, result, ended_at)
+		VALUES ('C1', ?, ?, ?, 0, 'voice', 0, 'ended', ?)`,
+		chat, chat, "2026-09-04 17:13:09 -0300 -03", "2026-09-04 17:14:39.5-03:00")
+
+	if err := migrateCanonicalTimestamps(db); err != nil {
+		t.Fatalf("migrateCanonicalTimestamps: %v", err)
+	}
+
+	for _, col := range canonicalTimeColumns {
+		if n := countNonCanonical(t, db, col.table, col.column); n != 0 {
+			t.Errorf("%s.%s: %d value(s) left in a legacy spelling after the repair", col.table, col.column, n)
+		}
+	}
+	for i := range legacy {
+		var got string
+		id := fmt.Sprintf("M%d", i)
+		if err := db.QueryRow(`SELECT CAST(timestamp AS TEXT) FROM messages WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != "2026-09-04 20:13:09+00:00" {
+			t.Errorf("%s (%q) repaired to %q", id, legacy[i], got)
+		}
+	}
+
+	logged := rec.String()
+	if !strings.Contains(logged, "repaired 8 messages.timestamp value(s) written by an older bridge") {
+		t.Errorf("expected the repair to log the per-column count, got:\n%s", logged)
+	}
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != messagesDBUserVersion {
+		t.Errorf("user_version = %d after the repair, want %d", version, messagesDBUserVersion)
+	}
+
+	// Idempotent: the next start probes, finds nothing and rewrites nothing.
+	if err := migrateCanonicalTimestamps(db); err != nil {
+		t.Fatalf("migrateCanonicalTimestamps (second run): %v", err)
+	}
+	if second := strings.TrimPrefix(rec.String(), logged); strings.Contains(second, "Timestamp migration") {
+		t.Errorf("a repaired store should be silent on the next start, got:\n%s", second)
+	}
+}
+
+// The probe reads one column and stops at the first hit, so where the column is
+// indexed SQLite answers it from the index instead of the table. This is the
+// cost the bridge pays on every start; the plan is asserted so a future index
+// change that turns it into a table scan is visible.
+func TestLegacyTimeProbeQueryPlan(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	t.Chdir(t.TempDir())
 	installRecordingLogger(t)
@@ -340,12 +431,25 @@ func TestMigrateCanonicalTimestampsSkipsStampedStore(t *testing.T) {
 	}
 	defer func() { _ = ms.Close() }()
 
-	seedLegacyRow(t, ms.db, `INSERT INTO chats (jid, last_message_time) VALUES ('c@s.whatsapp.net', ?)`,
-		"2026-09-04 17:13:09 -0300 -03")
-	if err := migrateCanonicalTimestamps(ms.db); err != nil {
-		t.Fatalf("migrateCanonicalTimestamps: %v", err)
+	// messages is the table that grows without bound, so both of its time
+	// columns must be answered from an index; the rest are small enough to read.
+	indexed := map[string]bool{
+		"messages.timestamp":      true,
+		"messages.deleted_at":     true,
+		"chats.last_message_time": true,
+		"calls.timestamp":         true,
 	}
-	if n := countNonCanonical(t, ms.db, "chats", "last_message_time"); n != 1 {
-		t.Errorf("expected the stamped store to be skipped, non-canonical rows: %d", n)
+	for _, col := range canonicalTimeColumns {
+		name := col.table + "." + col.column
+		var id, parent, notUsed int
+		var detail string
+		row := ms.db.QueryRow("EXPLAIN QUERY PLAN "+legacyTimeProbeSQL(col.table, col.column), canonicalTimeGlob)
+		if err := row.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("EXPLAIN QUERY PLAN %s: %v", name, err)
+		}
+		t.Logf("%s: %s", name, detail)
+		if indexed[name] && !strings.Contains(detail, "INDEX") {
+			t.Errorf("%s probe no longer uses an index: %s", name, detail)
+		}
 	}
 }

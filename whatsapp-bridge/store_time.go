@@ -11,7 +11,8 @@ package main
 //
 //   - `ORDER BY timestamp` and `timestamp > ?` compare the strings, so rows
 //     with different offsets sort and filter by wall clock, not by instant: a
-//     -03:00 row looks three hours later than it is.
+//     -03:00 row carries the local hour, so it sorts three hours earlier than
+//     the instant it stands for.
 //   - a bound time.Time cannot be compared against a column whose rows use a
 //     different offset, which is why the readers grew expression wrappers that
 //     defeat the index.
@@ -21,10 +22,12 @@ package main
 // The fix is to format the string here: UTC, seconds resolution, explicit
 // "+00:00" offset. Every row then has the same width and the same offset, so
 // lexicographic order is chronological order and a bound value is directly
-// comparable. migrateCanonicalTimestamps rewrites existing rows once.
+// comparable. migrateCanonicalTimestamps rewrites existing rows, and probes for
+// stragglers at every start.
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -136,27 +139,41 @@ var canonicalTimeColumns = []struct{ table, column string }{
 // wrong on the strength of one startup warning; leaving the store unstamped
 // costs a scan per boot and keeps saying so until the row is fixed.
 //
-// Known gap: the stamp is trusted, so rows written by an *older* binary after
-// this migration ran (an image pinned back to a previous release for a day,
-// then rolled forward) are never revisited. Re-running the rewrite means
-// clearing the stamp by hand: PRAGMA user_version = 0 with the bridge stopped.
+// The stamp is not trusted on its own: an operator who pins the image back to a
+// release without this migration for a day, then rolls forward, leaves rows in
+// the driver's spelling behind a stamped store. A stamped store therefore still
+// gets one probe per column at startup (hasLegacyTimeValue) and the rewrite is
+// re-run for whichever column the probe hits. A value nothing can parse keeps
+// its column hitting the probe at every start, which costs one more pass and
+// repeats the warning — the same deal an unstamped store already made, and the
+// same cure: fix or delete the row.
 func migrateCanonicalTimestamps(db *sql.DB) error {
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("failed to read messages.db user_version: %w", err)
 	}
-	if version >= messagesDBUserVersion {
-		return nil
-	}
+	stamped := version >= messagesDBUserVersion
 
 	skipped := 0
 	for _, col := range canonicalTimeColumns {
+		if stamped {
+			legacy, err := hasLegacyTimeValue(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("failed to probe %s.%s: %w", col.table, col.column, err)
+			}
+			if !legacy {
+				continue
+			}
+		}
 		rewritten, columnSkipped, err := rewriteToCanonicalTime(db, col.table, col.column)
 		if err != nil {
 			return fmt.Errorf("failed to normalise %s.%s: %w", col.table, col.column, err)
 		}
 		skipped += columnSkipped
-		if rewritten > 0 {
+		switch {
+		case rewritten > 0 && stamped:
+			bridgeLog.Warnf("Timestamp migration: repaired %d %s.%s value(s) written by an older bridge after the migration ran", rewritten, col.table, col.column)
+		case rewritten > 0:
 			bridgeLog.Infof("Timestamp migration: rewrote %d %s.%s value(s) to UTC", rewritten, col.table, col.column)
 		}
 	}
@@ -166,10 +183,43 @@ func migrateCanonicalTimestamps(db *sql.DB) error {
 			"time bounds and ordering are wrong for those rows until they are fixed or deleted", skipped)
 		return nil
 	}
+	if stamped {
+		return nil
+	}
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", messagesDBUserVersion)); err != nil {
 		return fmt.Errorf("failed to stamp messages.db user_version: %w", err)
 	}
 	return nil
+}
+
+// legacyTimeProbeSQL asks for the first value in one column that is not in the
+// canonical spelling. GLOB cannot seek, so LIMIT 1 is the only bound there is
+// and the cost is one pass over the column: SQLite turns the IS NOT NULL into a
+// range and walks a covering index where one exists (messages.timestamp,
+// messages.deleted_at, chats.last_message_time, calls.timestamp), reading the
+// table otherwise — chats, calls, polls and poll_votes, none of which grow with
+// message volume. The LIMIT rarely saves anything, because a rolled-back binary
+// writes the newest rows and an index walk reaches those last. Once per start,
+// that buys a store that repairs itself after an image rollback.
+func legacyTimeProbeSQL(table, column string) string {
+	// The table/column names come from canonicalTimeColumns, never from input.
+	return fmt.Sprintf(
+		`SELECT 1 FROM %[2]s WHERE %[1]s IS NOT NULL AND CAST(%[1]s AS TEXT) NOT GLOB ? LIMIT 1`,
+		column, table)
+}
+
+// hasLegacyTimeValue reports whether one column still holds a value an older
+// bridge wrote in a non-canonical spelling.
+func hasLegacyTimeValue(db *sql.DB, table, column string) (bool, error) {
+	var hit int
+	err := db.QueryRow(legacyTimeProbeSQL(table, column), canonicalTimeGlob).Scan(&hit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // canonicalTimeChunk bounds how many rows one migration transaction holds, so

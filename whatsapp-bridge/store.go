@@ -183,6 +183,15 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
 		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
+	// Only revoked messages carry deleted_at, so this partial index holds a
+	// handful of rows; it keeps the startup timestamp probe (store_time.go) off
+	// the messages table. It lives here rather than with the other indexes
+	// because the column above may have just been added.
+	if _, err := db.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_messages_deleted_at ON messages(deleted_at) WHERE deleted_at IS NOT NULL`,
+	); err != nil {
+		return fmt.Errorf("failed to ensure idx_messages_deleted_at: %w", err)
+	}
 	// target_message_id: the message a reaction or poll vote refers to. Older
 	// rows kept that ID in `filename`; the migration below copies it over once
 	// and is a no-op afterwards (WHERE target_message_id IS NULL).
