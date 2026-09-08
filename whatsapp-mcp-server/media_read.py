@@ -189,11 +189,16 @@ def _in_chat_dir(chat_jid: str, path: str) -> str:
 
 
 def cached_path(chat_jid: str, message_id: str) -> str | None:
-    """The message's file on disk, or None when nothing is cached for it."""
-    cached = media_inventory.scan_chat_cache(chat_jid).get(message_id)
-    if cached is None:
+    """The message's file on disk, or None when nothing is cached for it.
+
+    Looked up by message id (issue #318): reading one file must not stat every
+    other file in the chat, and the answer is the directory as it is now, not a
+    memoised scan — the bytes are opened right after this.
+    """
+    name = media_inventory.lookup_cached_name(chat_jid, message_id)
+    if name is None:
         return None
-    return _in_chat_dir(chat_jid, os.path.join(media_inventory.chat_media_dir(chat_jid), cached.name))
+    return _in_chat_dir(chat_jid, os.path.join(media_inventory.chat_media_dir(chat_jid), name))
 
 
 def download_path(chat_jid: str, message_id: str) -> str:

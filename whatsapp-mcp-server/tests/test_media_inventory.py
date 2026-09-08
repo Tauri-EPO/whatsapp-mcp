@@ -358,3 +358,198 @@ def test_a_small_page_does_not_aggregate_the_whole_archive(tmp_path, monkeypatch
     assert [i["message_id"] for i in small_items] == [i["message_id"] for i in large_items] == ["t9"]
     assert [(i["copies"], i["copies_in"]) for i in large_items] == [(1, 1)]
     assert large_work <= max(small_work, 20_000) * 2, f"{small_work} -> {large_work} VM instructions"
+
+
+# --- one message, one lookup; one page, one directory read (issue #318) -------
+#
+# The cache lookup used to build the chat's whole map — a stat per file the chat
+# ever received — for every single message and again after every fetched file.
+# What a listing needs is the names (one directory read, reused across pages)
+# plus one stat per row of the page; what a single message needs is the name.
+
+
+class _CountingScanner:
+    """Stands in for os.scandir over fixed names, counting what the caller stats."""
+
+    def __init__(self, names) -> None:
+        self.names = list(names)
+        self.stats: list[str] = []
+
+    def __call__(self, path):
+        scanner = self
+
+        class Entry:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def is_file(self) -> bool:
+                return True
+
+            def stat(self):
+                scanner.stats.append(self.name)
+                return os.stat_result((0o100644, 0, 0, 1, 0, 0, len(self.name), 0, 0, 0))
+
+        class Listing:
+            def __enter__(self):
+                return iter([Entry(name) for name in scanner.names])
+
+            def __exit__(self, *exc) -> bool:
+                return False
+
+        return Listing()
+
+
+def _record_stats(monkeypatch) -> list[str]:
+    """Every path os.stat is asked about while the test runs."""
+    seen: list[str] = []
+    real = os.stat
+
+    def recording(path, *args, **kwargs):
+        seen.append(str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(media_inventory.os, "stat", recording)
+    return seen
+
+
+def test_lookup_cached_name_answers_like_the_whole_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "messages.db"))
+    d = media_inventory.chat_media_dir(ALICE)
+    os.makedirs(d)
+    for name in (
+        "image_20260904_150405_ABC.jpg",
+        "document_20260904_150405_DEF",  # legacy: no extension
+        "audio_20260904_150405_GHI.ogg",
+        "notes.txt",
+        "image_20260904_150405_PART.jpg.part",
+    ):
+        open(os.path.join(d, name), "wb").write(b"12345")
+    os.makedirs(os.path.join(d, "image_20260904_150405_DIR.jpg"))
+    scan = media_inventory.scan_chat_cache(ALICE)
+    for message_id in ("ABC", "DEF", "GHI", "PART", "DIR", "notes", "nope"):
+        found = media_inventory.lookup_cached_name(ALICE, message_id)
+        assert found == (scan[message_id].name if message_id in scan else None), message_id
+    assert media_inventory.lookup_cached_name("nobody@s.whatsapp.net", "ABC") is None
+
+
+def test_one_message_is_looked_up_without_stat_ing_the_chat(media_store, monkeypatch):
+    scanner = _CountingScanner(f"audio_20260905_090000_M{i}.ogg" for i in range(1_000))
+    monkeypatch.setattr(media_inventory.os, "scandir", scanner)
+    assert media_inventory.lookup_cached_name(ALICE, "M998") == "audio_20260905_090000_M998.ogg"
+    assert media_inventory.lookup_cached_name(ALICE, "M0") == "audio_20260905_090000_M0.ogg"
+    assert scanner.stats == []  # two lookups, no file stat-ed
+    assert len(media_inventory.scan_chat_cache(ALICE)) == 1_000
+    assert len(scanner.stats) == 1_000  # what the map costs, and why a lookup does not build one
+
+
+def test_a_page_stats_its_own_rows_and_nothing_else(media_store, monkeypatch):
+    cached_name = "image_20260901_100000_IMG1.jpg"
+    scanner = _CountingScanner([cached_name, *(f"image_20260901_100000_M{i}.jpg" for i in range(1_000))])
+    monkeypatch.setattr(media_inventory.os, "scandir", scanner)
+    stats = _record_stats(monkeypatch)
+    page = main.list_media(chat_jid=ALICE, media_type="image", sort="date")
+    assert [i["message_id"] for i in page["items"]] == ["IMG1"]
+    assert page["items"][0]["cached"] and page["items"][0]["cached_bytes"] == 1234
+    chat_dir = media_inventory.chat_media_dir(ALICE)
+    assert [p for p in stats if p.startswith(chat_dir + os.sep)] == [os.path.join(chat_dir, cached_name)]
+    assert scanner.stats == []  # the listing never stats a directory entry
+
+
+def _count_listings(monkeypatch) -> list[str]:
+    listed: list[str] = []
+    real = media_inventory.list_chat_names
+
+    def counting(chat_jid: str) -> dict[str, str]:
+        listed.append(chat_jid)
+        return real(chat_jid)
+
+    monkeypatch.setattr(media_inventory, "list_chat_names", counting)
+    return listed
+
+
+def test_repeated_pages_reuse_one_directory_read_per_chat(media_store, monkeypatch):
+    listed = _count_listings(monkeypatch)
+    for _ in range(3):
+        assert _ids(main.list_media(chat_jid=ALICE)) == ["IMG1", "DOC1", "GONE"]
+    assert listed == [ALICE]
+
+
+def test_the_memo_never_claims_a_deleted_file_is_readable(media_store, monkeypatch):
+    # Pinned mtime: the memo is reused even though the directory changed, which
+    # is the worst case the TTL allows. The stat per row is what answers.
+    monkeypatch.setattr(media_inventory, "_dir_mtime_ns", lambda chat_jid: 1)
+    assert main.list_media(chat_jid=ALICE)["items"][-1]["message_id"] == "GONE"
+    by_id = {i["message_id"]: i for i in main.list_media(chat_jid=ALICE)["items"]}
+    assert by_id["IMG1"]["cached"] and by_id["IMG1"]["cached_bytes"] == 1234
+    os.unlink(os.path.join(media_inventory.chat_media_dir(ALICE), "image_20260901_100000_IMG1.jpg"))
+    by_id = {i["message_id"]: i for i in main.list_media(chat_jid=ALICE)["items"]}
+    assert not by_id["IMG1"]["cached"] and by_id["IMG1"]["cached_bytes"] is None
+
+
+def test_an_arrival_is_seen_at_once_and_the_ttl_bounds_the_rest(media_store, monkeypatch):
+    listed = _count_listings(monkeypatch)
+    assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]  # DOC1, nothing on disk
+    doc = os.path.join(media_inventory.chat_media_dir(ALICE), "document_20260904_100000_DOC1.pdf")
+    open(doc, "wb").write(b"pdf")
+    # Writing the file moved the directory's mtime, so the listing is read again.
+    assert main.list_media(chat_jid=ALICE)["items"][1]["cached"]
+    assert listed == [ALICE, ALICE]
+
+    # The one case the mtime cannot catch (a change the filesystem timestamps
+    # cannot separate from the read): pinned mtime, frozen clock. The file is
+    # missed for at most CACHE_TTL_S, and never the other way round.
+    monkeypatch.setattr(media_inventory, "_dir_mtime_ns", lambda chat_jid: 1)
+    now = [1000.0]
+    monkeypatch.setattr(media_inventory.time, "monotonic", lambda: now[0])
+    media_inventory.forget_cached_names()
+    os.unlink(doc)
+    assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]
+    open(doc, "wb").write(b"pdf")
+    assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]  # missed, not wrongly claimed
+    now[0] += media_inventory.CACHE_TTL_S
+    assert main.list_media(chat_jid=ALICE)["items"][1]["cached"]
+
+
+def test_the_memo_is_bounded(media_store, monkeypatch):
+    monkeypatch.setattr(media_inventory, "list_chat_names", lambda chat_jid: {})
+    for i in range(media_inventory.CACHE_MAX_CHATS * 2):
+        media_inventory.cached_names(f"{i}@s.whatsapp.net")
+    assert len(media_inventory._names) == media_inventory.CACHE_MAX_CHATS
+    assert f"{media_inventory.CACHE_MAX_CHATS * 2 - 1}@s.whatsapp.net" in media_inventory._names  # newest kept
+
+
+def test_two_files_for_one_message_are_read_the_same_way_everywhere(media_store):
+    """A legacy name and its re-download coexist: the listing and a read agree."""
+    import media_read
+
+    alice = media_inventory.chat_media_dir(ALICE)
+    legacy = os.path.join(alice, "document_20260904_100000_DOC1")
+    open(legacy, "wb").write(b"old")
+    fresh = os.path.join(alice, "document_20260904_100000_DOC1.pdf")
+    open(fresh, "wb").write(b"new bytes")
+    names = media_inventory.list_chat_names(ALICE)
+    assert media_inventory.lookup_cached_name(ALICE, "DOC1") == names["DOC1"]
+    assert media_read.cached_path(ALICE, "DOC1") == os.path.realpath(os.path.join(alice, names["DOC1"]))
+    item = next(i for i in main.list_media(chat_jid=ALICE)["items"] if i["message_id"] == "DOC1")
+    assert item["cached_file"] == names["DOC1"]
+    assert item["cached_bytes"] == os.path.getsize(os.path.join(alice, names["DOC1"]))
+
+
+def test_a_download_this_process_asked_for_drops_the_memo(media_store, monkeypatch):
+    """The mtime cannot always separate our own write from the read; this can."""
+
+    class Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"success": True, "path": doc}
+
+    monkeypatch.setattr(media_inventory, "_dir_mtime_ns", lambda chat_jid: 1)  # frozen: only the drop can help
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token-0123456789")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: Resp())
+    doc = os.path.join(media_inventory.chat_media_dir(ALICE), "document_20260904_100000_DOC1.pdf")
+    assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]  # DOC1, memo now holds the listing
+    open(doc, "wb").write(b"pdf")
+    whatsapp.download_media("DOC1", ALICE)
+    assert main.list_media(chat_jid=ALICE)["items"][1]["cached"]

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import media_inventory
 import whatsapp
 
 # messages.db as written by a bridge from before the read-state migration
@@ -58,6 +59,14 @@ def _no_ambient_whisper(monkeypatch):
     """
     for var in ("WHISPER_URL", "WHISPER_BIN", "WHISPER_MODEL", "TRANSCRIBE_ON_INGEST"):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_media_cache():
+    """No test inherits another's directory listing (media_inventory memoises them)."""
+    media_inventory.forget_cached_names()
+    yield
+    media_inventory.forget_cached_names()
 
 
 @pytest.fixture(autouse=True)

@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,45 +49,173 @@ class CachedFile:
     bytes: int
 
 
-def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
-    """Map message id -> cached file for one chat directory.
+def cached_message_id(name: str) -> str | None:
+    """The message id a cached filename carries, or None when it is not one.
 
     Filenames are ``<type>_<date>_<time>_<id>[.ext]``; the id is what follows
     the third underscore, minus the extension (fixed per type; documents take
     the sender's, and files cached before that change have none). Message IDs
     never contain a dot, so splitting the extension is safe for every shape.
-    A missing or unreadable directory means nothing is cached.
+    A half-written download (``.part``) carries no readable bytes yet.
+    """
+    if name.endswith(".part"):
+        return None
+    parts = name.split("_", 3)
+    if len(parts) != 4 or parts[0] not in MEDIA_TYPES:
+        return None
+    return os.path.splitext(parts[3])[0]
+
+
+def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
+    """Map message id -> cached file for one chat directory.
+
+    One stat per file, so this is for callers that want every entry (the store
+    totals). A single message is answered by ``lookup_cached_name``, a page by
+    ``_CacheIndex``. A missing or unreadable directory means nothing is cached.
     """
     found: dict[str, CachedFile] = {}
     try:
         with os.scandir(chat_media_dir(chat_jid)) as entries:
             for entry in entries:
-                if not entry.is_file() or entry.name.endswith(".part"):
+                message_id = cached_message_id(entry.name)
+                if message_id is None or not entry.is_file():
                     continue
-                parts = entry.name.split("_", 3)
-                if len(parts) != 4 or parts[0] not in MEDIA_TYPES:
-                    continue
-                tail = os.path.splitext(parts[3])[0]
                 try:
                     size = entry.stat().st_size
                 except OSError:
                     continue
-                found[tail] = CachedFile(entry.name, size)
+                found[message_id] = CachedFile(entry.name, size)
     except OSError:
         return {}
     return found
 
 
+def lookup_cached_name(chat_jid: str, message_id: str) -> str | None:
+    """The filename cached for one message, or None when nothing is.
+
+    The names come from the directory entries, which cost no syscall of their
+    own: one directory read and no stat at all, whatever the chat holds.
+    Building the whole map to answer for one message meant a stat per file the
+    chat ever received, on every lookup and again after every fetched file
+    (issue #318). Not memoised: the caller is about to open the bytes, or to
+    decide whether to pay the bridge for them.
+
+    The directory is read to the end and the last match wins, which is the rule
+    the maps above follow: one message can have two files (a document cached
+    before the extension was kept, and its re-download), and a listing and a
+    read of the same message must not answer with different bytes.
+    """
+    found: str | None = None
+    try:
+        with os.scandir(chat_media_dir(chat_jid)) as entries:
+            for entry in entries:
+                if cached_message_id(entry.name) == message_id and entry.is_file():
+                    found = entry.name
+    except OSError:
+        return None
+    return found
+
+
+def list_chat_names(chat_jid: str) -> dict[str, str]:
+    """Map message id -> cached filename for one chat, without stat-ing anything.
+
+    The names alone answer "which message is this file", and reading them costs
+    one directory read whatever the chat holds. What a file *is* — still there,
+    how many bytes — is a stat, and the callers that need it take it one file at
+    a time (``_stat_cached``).
+    """
+    names: dict[str, str] = {}
+    try:
+        with os.scandir(chat_media_dir(chat_jid)) as entries:
+            for entry in entries:
+                message_id = cached_message_id(entry.name)
+                if message_id is not None and entry.is_file():
+                    names[message_id] = entry.name
+    except OSError:
+        return {}
+    return names
+
+
+def _stat_cached(chat_jid: str, name: str) -> CachedFile | None:
+    """One named file of a chat directory, or None when it is gone or unreadable."""
+    try:
+        return CachedFile(name, os.stat(os.path.join(chat_media_dir(chat_jid), name)).st_size)
+    except OSError:
+        return None
+
+
+# How long a directory listing is reused across calls, and how many chats keep
+# one. Paging a listing re-reads the same directories call after call, so the
+# names are kept for the few seconds that takes; the mtime of the directory
+# drops the entry as soon as anything is written there (an arrival, a purge, a
+# retention sweep). Only names are kept, never "this file exists": every row of
+# a page is stat-ed through the name, so a file that is gone is reported as not
+# cached whatever the memo still says. The bound the memo can cost is therefore
+# one-sided and small — a file that arrived in the last CACHE_TTL_S seconds
+# under a directory mtime too coarse to separate it from the read can be listed
+# as not cached for that long.
+CACHE_TTL_S = 5.0
+CACHE_MAX_CHATS = 16
+
+_names: OrderedDict[str, tuple[int, float, dict[str, str]]] = OrderedDict()
+_names_lock = threading.Lock()
+
+
+def _dir_mtime_ns(chat_jid: str) -> int:
+    """The chat directory's mtime, or 0 when it does not exist."""
+    try:
+        return os.stat(chat_media_dir(chat_jid)).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def cached_names(chat_jid: str) -> dict[str, str]:
+    """``list_chat_names`` memoised per process, bounded by the mtime and CACHE_TTL_S."""
+    mtime, now = _dir_mtime_ns(chat_jid), time.monotonic()
+    with _names_lock:
+        entry = _names.get(chat_jid)
+        if entry is not None and entry[0] == mtime and now - entry[1] < CACHE_TTL_S:
+            _names.move_to_end(chat_jid)
+            return entry[2]
+    listed = list_chat_names(chat_jid)
+    with _names_lock:
+        # Expired entries can never be served again: drop them instead of
+        # holding one map per file of the last CACHE_MAX_CHATS chats forever.
+        for jid in [j for j, (_, at, _map) in _names.items() if now - at >= CACHE_TTL_S]:
+            del _names[jid]
+        _names[chat_jid] = (mtime, now, listed)
+        _names.move_to_end(chat_jid)
+        while len(_names) > CACHE_MAX_CHATS:
+            _names.popitem(last=False)
+    return listed
+
+
+def forget_cached_names(chat_jid: str | None = None) -> None:
+    """Drop the memoised listing of one chat, or of all of them."""
+    with _names_lock:
+        if chat_jid is None:
+            _names.clear()
+        else:
+            _names.pop(chat_jid, None)
+
+
 class _CacheIndex:
-    """Lazily scans one directory per chat for the duration of a call."""
+    """The cached file of each row of one page.
+
+    One directory read per chat, reused across pages, and one stat per row —
+    not one stat per file the chat ever received (issue #318). The stat is what
+    answers ``cached``, so nothing the memo names is claimed to be readable
+    without the filesystem saying so on this call.
+    """
 
     def __init__(self) -> None:
-        self._by_chat: dict[str, dict[str, CachedFile]] = {}
+        self._by_chat: dict[str, dict[str, str]] = {}
 
     def lookup(self, chat_jid: str, message_id: str) -> CachedFile | None:
         if chat_jid not in self._by_chat:
-            self._by_chat[chat_jid] = scan_chat_cache(chat_jid)
-        return self._by_chat[chat_jid].get(message_id)
+            self._by_chat[chat_jid] = cached_names(chat_jid)
+        name = self._by_chat[chat_jid].get(message_id)
+        return _stat_cached(chat_jid, name) if name else None
 
 
 def _media_filters(

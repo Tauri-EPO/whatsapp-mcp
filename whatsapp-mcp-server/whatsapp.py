@@ -3325,6 +3325,8 @@ def purge_media(
         if media_type:
             body["media_type"] = media_type
     payload = _bridge_json(_bridge_request("POST", "/media/purge", json=body))
+    if not dry_run:
+        _forget_media_listing(None)  # any chat may have lost files
     return {
         "success": True,
         "dry_run": bool(payload.get("dry_run", dry_run)),
@@ -3428,6 +3430,21 @@ def request_history(chat_jid: str, count: int = HISTORY_DEFAULT_COUNT) -> dict[s
     }
 
 
+def _forget_media_listing(chat_jid: str | None) -> None:
+    """Drop the memoised directory listing of a chat this process just changed.
+
+    ``media_inventory`` keeps the names of a chat's cached files for a few
+    seconds and lets the directory's mtime invalidate them, which covers files
+    that arrive on their own. A file this process asked for is different: on a
+    store whose timestamps cannot separate the write from the read, the next
+    listing would keep saying the bytes are not here (issue #318). Imported
+    inside the function because media_inventory reads this module.
+    """
+    import media_inventory
+
+    media_inventory.forget_cached_names(chat_jid)
+
+
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 
@@ -3441,6 +3458,7 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     path = result.get("path")
     if path:
         logger.info("Media downloaded successfully: %s", path)
+    _forget_media_listing(chat_jid)
     return path
 
 
