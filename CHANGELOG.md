@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.5.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.4.0...v1.5.0) (2026-09-08)
+
+
+### Features
+
+* **scripts:** smoke.sh works against manager-owned stacks ([#384](https://github.com/Tauri-EPO/whatsapp-mcp/issues/384)) ([cc2337a](https://github.com/Tauri-EPO/whatsapp-mcp/commit/cc2337a0f996a5fe915b48acf47152b690d13e90)), closes [#380](https://github.com/Tauri-EPO/whatsapp-mcp/issues/380)
+
+
+### Bug fixes
+
+* a media row with no key is a permanent miss, not a retry ([#401](https://github.com/Tauri-EPO/whatsapp-mcp/issues/401)) ([e3b27ba](https://github.com/Tauri-EPO/whatsapp-mcp/commit/e3b27ba0beff81edcf858b86717ab8414c1d9798)), closes [#392](https://github.com/Tauri-EPO/whatsapp-mcp/issues/392)
+* audio the sender's phone no longer has is recorded, not re-fetched ([#391](https://github.com/Tauri-EPO/whatsapp-mcp/issues/391)) ([18ff6bc](https://github.com/Tauri-EPO/whatsapp-mcp/commit/18ff6bc04b75aa60221effa0432d0c137619fb29)), closes [#378](https://github.com/Tauri-EPO/whatsapp-mcp/issues/378)
+* **bridge:** gofmt group_members_test.go so the lint gate is green on main ([#405](https://github.com/Tauri-EPO/whatsapp-mcp/issues/405)) ([0097a14](https://github.com/Tauri-EPO/whatsapp-mcp/commit/0097a14b64b0f300ada44721b86c1d7937cf258a))
+* **bridge:** record which namespace a stored sender belongs to ([#383](https://github.com/Tauri-EPO/whatsapp-mcp/issues/383)) ([aac47c2](https://github.com/Tauri-EPO/whatsapp-mcp/commit/aac47c20161bce864e5704ca8f3f041688a7404f)), closes [#375](https://github.com/Tauri-EPO/whatsapp-mcp/issues/375)
+* **bridge:** the group owner comes back dual-addressed, like a participant ([#400](https://github.com/Tauri-EPO/whatsapp-mcp/issues/400)) ([f1c589e](https://github.com/Tauri-EPO/whatsapp-mcp/commit/f1c589eaa0a9b5da0b43e5ea6d7df102bc96e5fb)), closes [#396](https://github.com/Tauri-EPO/whatsapp-mcp/issues/396)
+* gofmt -s on that one file (two lines of alignment), nothing else. ([0097a14](https://github.com/Tauri-EPO/whatsapp-mcp/commit/0097a14b64b0f300ada44721b86c1d7937cf258a))
+* **mcp:** "ok [@you](https://github.com/you)" is a closing message for the ordinary rule too ([#414](https://github.com/Tauri-EPO/whatsapp-mcp/issues/414)) ([ef40edf](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ef40edffee12f349ec7f33d5751ab2b79a848545)), closes [#411](https://github.com/Tauri-EPO/whatsapp-mcp/issues/411)
+* **mcp:** a mention that only says "ok" no longer counts as waiting ([#404](https://github.com/Tauri-EPO/whatsapp-mcp/issues/404)) ([b198e70](https://github.com/Tauri-EPO/whatsapp-mcp/commit/b198e70d12c521d02e4b1bc1af0893402831ecc9)), closes [#395](https://github.com/Tauri-EPO/whatsapp-mcp/issues/395)
+* **mcp:** a third party's "ok" no longer hides a pending mention ([#410](https://github.com/Tauri-EPO/whatsapp-mcp/issues/410)) ([40f0ef3](https://github.com/Tauri-EPO/whatsapp-mcp/commit/40f0ef3fd6073ee4df9bea726c4012e44d22680f))
+* **mcp:** a whisper outage no longer parks a voice note for ever ([#386](https://github.com/Tauri-EPO/whatsapp-mcp/issues/386)) ([bc0a10d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/bc0a10d16c7fb12a9244267d3ac49ac12c8bb6e5)), closes [#377](https://github.com/Tauri-EPO/whatsapp-mcp/issues/377)
+* **mcp:** py-modules lists every module, and the tree test keeps it that way ([#403](https://github.com/Tauri-EPO/whatsapp-mcp/issues/403)) ([fdfd952](https://github.com/Tauri-EPO/whatsapp-mcp/commit/fdfd952d3dcd18f43b9c3734baa1bd5cddf9fd0d)), closes [#398](https://github.com/Tauri-EPO/whatsapp-mcp/issues/398)
+* **mcp:** status@broadcast is the status feed, not a conversation ([#387](https://github.com/Tauri-EPO/whatsapp-mcp/issues/387)) ([b68c447](https://github.com/Tauri-EPO/whatsapp-mcp/commit/b68c4475ce912f84761ed812a5a488574a25c6c7))
+* **mcp:** the sender's namespace comes from the store, not from its length ([#389](https://github.com/Tauri-EPO/whatsapp-mcp/issues/389)) ([a48e857](https://github.com/Tauri-EPO/whatsapp-mcp/commit/a48e85749fb1eb43c5ca0010e5bd0156980ac405)), closes [#375](https://github.com/Tauri-EPO/whatsapp-mcp/issues/375)
+
+
+### Refactoring
+
+* **bridge:** timing knobs live on Bridge, testBridge drains its own pool ([#390](https://github.com/Tauri-EPO/whatsapp-mcp/issues/390)) ([971ce81](https://github.com/Tauri-EPO/whatsapp-mcp/commit/971ce819eb9ff88d4178e4188c47b64bd721154b)), closes [#382](https://github.com/Tauri-EPO/whatsapp-mcp/issues/382)
+
 ## [1.4.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.3.0...v1.4.0) (2026-09-08)
 
 
