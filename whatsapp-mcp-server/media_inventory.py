@@ -448,7 +448,10 @@ def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]
     return {
         "message_id": msg_id,
         "chat_jid": chat_jid,
-        "chat_name": chat_name,
+        # One label per chat across the server: the status feed is stored under
+        # the last poster's number and is usually the largest media consumer,
+        # so naming it after a contact blames the wrong chat (issue #379).
+        "chat_name": whatsapp.chat_display_name(chat_jid, chat_name),
         "sender_jid": sender,
         "is_from_me": bool(is_from_me),
         "timestamp": parse_db_time(timestamp).isoformat() if timestamp else None,
@@ -519,7 +522,7 @@ def media_stats(
         by_chat.append(
             {
                 "chat_jid": jid,
-                "chat_name": name,
+                "chat_name": whatsapp.chat_display_name(jid, name),
                 "files": int(count),
                 "distinct_files": int(distinct),
                 "bytes": int(total_bytes),
