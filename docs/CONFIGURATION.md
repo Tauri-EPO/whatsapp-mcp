@@ -485,6 +485,13 @@ back for free.
 
 What to know before turning it on:
 
+- **Measure the backlog first.** `coverage()` returns an `audio` block —
+  `{messages, cached, transcribed, errors, backlog, backlog_cached,
+  cached_examined}` — over the same window and chat filter as the rest of its
+  numbers, so `backlog` is how many voice notes this worker would have to chew
+  through and `backlog - backlog_cached` is how many of them it would have to
+  download first (`TRANSCRIBE_ON_INGEST_FETCH`). See
+  [the `audio` block in TOOLS.md](TOOLS.md#the-audio-block-how-much-is-left-to-transcribe).
 - **It costs CPU on this machine.** Whisper is the most expensive thing this
   server does, and the worker will chew through the whole backlog of voice notes
   at `BATCH` files per interval. Start with the defaults on a small model; the

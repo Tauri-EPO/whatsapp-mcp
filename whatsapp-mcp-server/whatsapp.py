@@ -3662,6 +3662,134 @@ def _coverage_by_chat(
     }
 
 
+# Ceilings on the cached-file count of the audio block (issue #334). The counts
+# themselves are SQL, but "is this one on disk" is the filesystem: one directory
+# read per chat that has audio in scope, and no stat per row — a stat per file a
+# chat ever received is exactly the cost issue #318 removed from the media
+# tools. An archive-wide call therefore reads at most COVERAGE_AUDIO_MAX_CHATS
+# directories, over the newest COVERAGE_AUDIO_MAX_ROWS audio rows. When a
+# ceiling cuts the work, `cached_examined` is below `messages` and the two
+# cached counts are floors over the rows that were examined — the untranscribed
+# ones first, so `backlog_cached` is the last number to lose accuracy; every
+# other number stays exact. Narrowing with chat_jid or after/before is how a
+# caller on a huge archive gets an exact count — and pays for fewer directories.
+COVERAGE_AUDIO_MAX_ROWS = 20_000
+COVERAGE_AUDIO_MAX_CHATS = 200
+
+# Inbound, undeleted voice notes that carry a content hash: exactly what a
+# transcription batch looks at (transcribe_worker._pending_rows). A row without
+# a hash cannot be keyed to a transcript note, so the worker can never drain it
+# and counting it would leave a backlog that never reaches zero.
+_COVERAGE_AUDIO_WHERE = (
+    "messages.media_type = 'audio' AND messages.is_from_me = 0 "
+    "AND messages.deleted_at IS NULL AND messages.file_sha256 IS NOT NULL"
+)
+
+
+def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any]) -> dict[str, int]:
+    """The voice-note transcription backlog inside the same scope as the aggregates.
+
+    `messages` is every inbound voice note in scope, `transcribed` and `errors`
+    the ones whose content hash already carries a `transcript` /
+    `transcript_error` note — notes.db is attached for the query instead of
+    pulling every transcribed hash into the statement as parameters, the way
+    transcribe_worker reads it. No notes.db, or no table in it yet, means
+    nothing was transcribed.
+
+    Two cached counts, because they answer different questions: `cached` is how
+    much of the audio in scope is on disk at all, and `backlog_cached` how much
+    of the *backlog* is, so `backlog - backlog_cached` is what a batch would
+    have to download first. Counting only the first would be misleading in the
+    deployment this is for — with a retention sweep on, most cached files are
+    recent and already transcribed, while the backlog is old and gone from disk.
+    """
+    import media_inventory  # local: media_inventory reads this module
+    import media_notes
+
+    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE}"
+    params = tuple(msg_params)
+
+    note_params: tuple[Any, ...] = ()
+    transcribed_expr = error_expr = "0"
+    notes_path = media_notes.notes_db_path()
+    if os.path.exists(notes_path):
+        cur.execute("ATTACH DATABASE ? AS notesdb", (notes_path,))
+        if cur.execute("SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'").fetchone():
+            note_exists = (
+                "EXISTS (SELECT 1 FROM notesdb.media_notes n "
+                "WHERE n.sha256 = lower(hex(messages.file_sha256)) AND n.key = ?)"
+            )
+            transcribed_expr = error_expr = note_exists
+            note_params = (media_notes.TRANSCRIPT_KEY, media_notes.TRANSCRIPT_ERROR_KEY)
+
+    # `handled` is the predicate the ingest worker skips on: either note, counted
+    # once. `transcribed` and `errors` overlap — a hash the worker failed on and
+    # an agent then transcribed by hand carries both — so subtracting them
+    # separately would take that row off the backlog twice.
+    handled_expr = "0" if not note_params else f"({transcribed_expr} OR {error_expr})"
+    cur.execute(
+        f"""SELECT COUNT(*),
+                   COALESCE(SUM({transcribed_expr}), 0),
+                   COALESCE(SUM({error_expr}), 0),
+                   COALESCE(SUM({handled_expr}), 0)
+              FROM messages WHERE {clause}""",
+        # Each EXISTS probe carries its own key placeholder, in the order the
+        # expressions appear above (transcript, error, then both again), then the scope.
+        (*note_params, *note_params, *params),
+    )
+    total, transcribed, errors, handled_total = (int(value or 0) for value in cur.fetchone())
+
+    # Untranscribed rows first, then newest: when COVERAGE_AUDIO_MAX_ROWS bites,
+    # the budget is spent on the rows the answer is about. The worker transcribes
+    # newest-first, so ordering by time alone would spend a whole ceiling on
+    # already-transcribed rows and report backlog_cached: 0 on an archive whose
+    # entire backlog is on disk. `handled` is computed once in the subquery, so
+    # the ordering costs no extra probe.
+    cur.execute(
+        f"""SELECT chat_jid, id, handled FROM (
+                SELECT chat_jid, id, timestamp, {handled_expr} AS handled
+                  FROM messages WHERE {clause}
+            ) ORDER BY handled, timestamp DESC LIMIT ?""",
+        (*note_params, *params, COVERAGE_AUDIO_MAX_ROWS),
+    )
+    by_chat: dict[str, list[tuple[str, bool]]] = {}
+    for chat_jid, message_id, handled in cur.fetchall():
+        by_chat.setdefault(str(chat_jid), []).append((str(message_id), bool(handled)))
+    if len(by_chat) > COVERAGE_AUDIO_MAX_CHATS:
+        # The busiest chats first: they are where a backlog actually lives.
+        busiest = sorted(by_chat.items(), key=lambda item: len(item[1]), reverse=True)
+        by_chat = dict(busiest[:COVERAGE_AUDIO_MAX_CHATS])
+
+    # The memoised listing while it can hold every chat this call reads: a store
+    # with a handful of voice-note chats then costs nothing when an agent polls
+    # coverage(). Above that bound the memo would only evict what list_media is
+    # paging through, so the plain read is used instead.
+    list_names = (
+        media_inventory.cached_names
+        if len(by_chat) <= media_inventory.CACHE_MAX_CHATS
+        else media_inventory.list_chat_names
+    )
+    cached = backlog_cached = 0
+    for chat_jid, rows in by_chat.items():
+        names = list_names(chat_jid)
+        for message_id, handled in rows:
+            if message_id not in names:
+                continue
+            cached += 1
+            if not handled:
+                backlog_cached += 1
+
+    return {
+        "messages": total,
+        "cached": cached,
+        "cached_examined": sum(len(rows) for rows in by_chat.values()),
+        "transcribed": transcribed,
+        "errors": errors,
+        "backlog": total - handled_total,
+        "backlog_cached": backlog_cached,
+    }
+
+
 def coverage(
     gap_hours: float = COVERAGE_DEFAULT_GAP_HOURS,
     max_gaps: int = COVERAGE_DEFAULT_MAX_GAPS,
@@ -3756,6 +3884,8 @@ def coverage(
         )
         messages_by_month = {month: int(count) for month, count in cur.fetchall() if month}
 
+        audio = _coverage_audio(cur, msg_clause, msg_params)
+
         # One ordered pass over the timestamp index: LAG gives every pair of
         # consecutive points, and only the pairs further apart than the
         # threshold ever reach Python.
@@ -3810,22 +3940,26 @@ def coverage(
         "chats_with_messages": chats_total - chats_without_messages,
         "chats_without_messages": chats_without_messages,
         "messages_by_month": messages_by_month,
+        "audio": audio,
         "gap_hours": gap_hours,
         "gaps": gaps,
         "gaps_truncated": len(gaps) >= max_gaps,
         "scope": scope,
         "allow_list_applied": CHAT_POLICY.restricted,
-        "hint": _coverage_hint(scope),
+        "hint": _coverage_hint(scope, audio),
     }
 
 
-def _coverage_hint(scope: dict[str, Any]) -> str:
+def _coverage_hint(scope: dict[str, Any], audio: dict[str, int]) -> str:
     """How to read the aggregates — different once a window narrows them.
 
     Unbounded, first_message_time is where the archive itself begins and
     chats_without_messages means "never synced". Under after/before both
     describe the window and nothing else, so saying otherwise would have the
     agent report the period before the bound as never synced.
+
+    The audio sentence is only added when there is a backlog: on an archive with
+    every voice note transcribed (or none at all) it would be noise.
     """
     windowed = scope["after"] is not None or scope["before"] is not None
     middle = (
@@ -3835,11 +3969,18 @@ def _coverage_hint(scope: dict[str, Any]) -> str:
         else "Chats in chats_without_messages, and anything before first_message_time, were never synced either. "
         "Narrow with after/before/chat_jid to keep old sync artefacts out of the list."
     )
+    backlog = ""
+    if audio["backlog"]:
+        backlog = (
+            f" {audio['backlog']} of the {audio['messages']} voice notes in scope are still untranscribed, "
+            f"{audio['backlog_cached']} of them with their bytes already on disk: transcribe_audio one at a "
+            "time, or set TRANSCRIBE_ON_INGEST=1 to walk them in the background."
+        )
     return (
         "Gaps cover every chat in scope: no message at all between 'from' and 'to', which usually means the bridge "
         f"was down or never synced that period rather than everyone going quiet. {middle} Call "
         "coverage(by_chat=True) for the queue of chats to backfill with request_history(chat_jid); it cannot fill "
-        "a period the phone itself no longer has."
+        f"a period the phone itself no longer has.{backlog}"
     )
 
 
