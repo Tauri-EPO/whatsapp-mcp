@@ -2753,27 +2753,58 @@ def purge_media(
 
 
 def mark_messages_read(
-    message_ids: list[str],
+    message_ids: list[str] | None,
     chat_jid: str,
     sender_jid: str = "",
     timestamp: str | None = None,
-) -> tuple[bool, str]:
-    """Mark selected messages as read through the WhatsApp bridge."""
-    normalized_ids = [message_id.strip() for message_id in (message_ids or [])]
-    if not normalized_ids or any(not message_id for message_id in normalized_ids):
-        raise ToolError("invalid_argument", "At least one non-empty message ID must be provided")
+    up_to: str | None = None,
+) -> dict[str, Any]:
+    """Send read receipts through the WhatsApp bridge.
+
+    message_ids=None marks the whole chat read up to `up_to` (default: now);
+    the bridge groups the pending messages by sender itself. An empty list is
+    rejected instead: a caller that computed zero IDs did not ask for the whole
+    chat. Returns the bridge's counts (messages, senders, batches, truncated).
+    """
     if not chat_jid:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(chat_jid)
-    if chat_jid.endswith("@g.us") and not sender_jid:
-        raise ToolError("invalid_argument", "sender_jid must be provided for group read receipts")
-    payload: dict[str, Any] = {"message_ids": normalized_ids, "chat_jid": chat_jid}
-    if sender_jid:
-        payload["sender_jid"] = sender_jid
+
+    payload: dict[str, Any] = {"chat_jid": chat_jid}
+    if message_ids is None:
+        if sender_jid:
+            raise ToolError(
+                "invalid_argument",
+                "sender_jid is only used together with message_ids; without them the bridge groups by sender itself",
+            )
+        if up_to:
+            payload["up_to"] = up_to
+    else:
+        normalized_ids = [message_id.strip() for message_id in message_ids]
+        if not normalized_ids or any(not message_id for message_id in normalized_ids):
+            raise ToolError(
+                "invalid_argument",
+                "At least one non-empty message ID must be provided (omit message_ids to mark the whole chat read)",
+            )
+        if up_to:
+            raise ToolError("invalid_argument", "up_to_timestamp is only used without message_ids")
+        if chat_jid.endswith("@g.us") and not sender_jid:
+            raise ToolError("invalid_argument", "sender_jid must be provided for group read receipts")
+        payload["message_ids"] = normalized_ids
+        if sender_jid:
+            payload["sender_jid"] = sender_jid
     if timestamp:
         payload["timestamp"] = timestamp
+
     result = _bridge_json(_bridge_request("POST", "/mark-read", json=payload))
-    return True, result.get("message", "Marked as read")
+    return {
+        "success": True,
+        "message": result.get("message") or "Marked as read",
+        "messages": int(result.get("messages") or 0),
+        "senders": int(result.get("senders") or 0),
+        "batches": int(result.get("batches") or 0),
+        "truncated": bool(result.get("truncated", False)),
+    }
 
 
 HISTORY_DEFAULT_COUNT = 50

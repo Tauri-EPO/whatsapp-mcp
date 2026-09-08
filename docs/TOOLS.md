@@ -608,20 +608,41 @@ Re-send a stored message to another chat: text as is, media re-uploaded from the
 
 ### `mark_messages_read`
 
-Mark one or more messages from the same chat and sender as read. This explicitly
-sends WhatsApp read receipts; reading or searching messages never does so
-automatically.
+Send WhatsApp read receipts (the blue ticks). This is a visible side effect on
+the other person's phone and it cannot be undone; reading or searching messages
+never sends one automatically. It is not a private "I dealt with this" marker —
+for bookkeeping that must stay invisible use the notes tools
+([`annotate_media` / `get_media_notes`](#annotate_media--get_media_notes--search_media_notes)) or
+your own state.
+
+Two forms:
+
+- **Whole chat** — omit `message_ids`. Every inbound message the read marker
+  (`chats.last_read_time`) has not covered yet, up to `up_to_timestamp`, is
+  acknowledged; the bridge resolves the senders itself and sends the receipts in
+  batches of 100 IDs, which is what makes a chat with a thousand unread messages
+  practical. At most 2,000 messages per call: past that the reply sets
+  `truncated` and the call is repeated, resuming where the marker now is.
+- **Specific messages** — pass `message_ids`, all from the same chat and sender.
 
 **Parameters:**
 
-- `chat_jid` (required): JID of the chat containing the messages
-- `message_ids` (required): IDs of messages from the same chat and sender
-- `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
+- `chat_jid` (required): JID of the chat
+- `message_ids` (optional): IDs of messages from the same chat and sender; omit to mark the whole chat read. An empty list is refused, so a caller that computed zero IDs never marks everything by accident
+- `sender_jid` (required for groups with `message_ids`, refused without them): Full JID or bare phone number of the original message sender
 - `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
+- `up_to_timestamp` (whole-chat form only): RFC 3339 cut-off; nothing newer is marked. Defaults to now
+
+Returns `{"success", "message", "messages", "senders", "batches", "truncated"}` —
+how many messages were acknowledged, how many senders they were grouped by and
+how many receipts left the bridge. A receipt that fails mid-run advances the read
+marker only over the uninterrupted prefix that was acknowledged, so calling again
+resumes from there.
 
 **Natural Language Examples:**
 
-- "Mark those messages as read"
+- "Mark that whole conversation as read"
+- "Mark everything in the team group read up to yesterday noon"
 - "Mark the last three messages from Alice in the team group as read"
 
 ### `send_reaction`

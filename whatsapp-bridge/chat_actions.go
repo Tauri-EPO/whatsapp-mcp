@@ -3,127 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"go.mau.fi/whatsmeow/types"
 	"net/http"
 	"strings"
-	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
-// Outbound chat actions: read receipts, reactions, typing presence.
-// Registered in rest.go; all behind the token, Host and chat allow-list checks.
-
-// handleMarkRead serves POST /api/mark-read.
-func (b *Bridge) handleMarkRead() http.HandlerFunc {
-	client, messageStore := b.Client, b.Store
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req MarkReadRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "Invalid request format")
-			return
-		}
-		if req.ChatJID == "" || len(req.MessageIDs) == 0 {
-			writeError(w, http.StatusBadRequest, "chat_jid and message_ids are required")
-			return
-		}
-		if rejectByChatPolicy(w, b.Policy, req.ChatJID) {
-			return
-		}
-
-		messageIDs := make([]types.MessageID, len(req.MessageIDs))
-		for i, id := range req.MessageIDs {
-			if strings.TrimSpace(id) == "" {
-				writeError(w, http.StatusBadRequest, "message_ids must not contain empty values")
-				return
-			}
-			messageIDs[i] = types.MessageID(id)
-		}
-
-		chatJID, err := types.ParseJID(req.ChatJID)
-		if err != nil || chatJID.User == "" || chatJID.Server == "" {
-			writeError(w, http.StatusBadRequest, "Invalid chat_jid")
-			return
-		}
-
-		senderJID := types.EmptyJID
-		if req.SenderJID != "" {
-			if strings.Contains(req.SenderJID, "@") {
-				senderJID, err = types.ParseJID(req.SenderJID)
-			} else {
-				senderJID = types.NewJID(strings.TrimSpace(req.SenderJID), types.DefaultUserServer)
-			}
-			if err != nil || senderJID.User == "" || senderJID.Server == "" {
-				writeError(w, http.StatusBadRequest, "Invalid sender_jid")
-				return
-			}
-		} else if chatJID.Server == types.GroupServer {
-			writeError(w, http.StatusBadRequest, "sender_jid is required for group read receipts")
-			return
-		}
-
-		readAt := time.Now()
-		if req.Timestamp != "" {
-			readAt, err = time.Parse(time.RFC3339, req.Timestamp)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "timestamp must be RFC 3339")
-				return
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if !b.Connected() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(SendMessageResponse{
-				Success: false,
-				Message: "WhatsApp client is not connected. Please wait for reconnection.",
-			})
-			return
-		}
-
-		// Validate against the storage (phone-form) chat JID before any
-		// external side effect. LID rewrite happens only for the receipt.
-		if err := messageStore.ValidateInboundMarkRead(req.ChatJID, req.SenderJID, req.MessageIDs); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		// MCP storage normalizes chats/senders to phone JIDs; MarkRead routes
-		// the receipt `to`/`participant` as given, so resolve PN -> LID the
-		// same way sendWhatsAppMessage does or migrated contacts silently fail.
-		chatJID, err = resolveRecipientJID(client, req.ChatJID)
-		if err != nil || chatJID.User == "" || chatJID.Server == "" {
-			writeError(w, http.StatusBadRequest, "Invalid chat_jid")
-			return
-		}
-		if req.SenderJID != "" {
-			senderJID, err = resolveRecipientJID(client, req.SenderJID)
-			if err != nil || senderJID.User == "" || senderJID.Server == "" {
-				writeError(w, http.StatusBadRequest, "Invalid sender_jid")
-				return
-			}
-		}
-
-		ctx, cancel := requestContext(r, actionDeadline)
-		defer cancel()
-		if err := client.MarkRead(ctx, messageIDs, readAt, chatJID, senderJID); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
-			return
-		}
-
-		// Advance the local read marker immediately so list_chats unread
-		// clears without waiting for the self-read receipt round-trip.
-		localReadAt := readAt
-		if ts, ok, tsErr := messageStore.MaxMessageTimestamp(req.ChatJID, req.MessageIDs); tsErr == nil && ok {
-			localReadAt = ts
-		}
-		if err := messageStore.MarkChatRead(req.ChatJID, localReadAt); err != nil {
-			// Receipt already sent; log but still report success to the caller.
-			b.Log.Warnf("failed to persist local read marker for %s: %v", req.ChatJID, err)
-		}
-
-		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
-	}
-}
+// Outbound chat actions: reactions and typing presence. Read receipts live in
+// mark_read.go. Registered in rest.go; all behind the token, Host and chat
+// allow-list checks.
 
 // handleReact serves POST /api/react.
 func (b *Bridge) handleReact() http.HandlerFunc {

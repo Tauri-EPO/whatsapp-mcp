@@ -62,7 +62,8 @@ whatsapp-mcp/
 │   ├── rest.go                 # newRESTMux route table + HTTP server; handlers live next to their features
 │   ├── rest_middleware.go      # writeError (JSON error shape), requireMethod, requestLog
 │   ├── health.go               # /api/health (liveness), /api/ready (readiness)
-│   ├── chat_actions.go         # /api/mark-read, /api/react, /api/typing
+│   ├── chat_actions.go         # /api/react, /api/typing
+│   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
