@@ -299,7 +299,7 @@ def find_pending(
     failures = 0  # consecutive; a success clears them
     parked = False  # out of fetches: the walk stops advancing so nothing is stepped over untried
     walking = False
-    caches: dict[str, dict[str, media_inventory.CachedFile]] = {}
+    caches: dict[str, dict[str, str]] = {}  # chat -> message id -> cached filename
     out: list[Candidate] = []
     seen: set[str] = set()
     looked_at: set[tuple[str, str]] = set()  # rows read this round, for the log line
@@ -313,7 +313,9 @@ def find_pending(
             continue  # already picked, or the same row seen on both pages
         looked_at.add((message_id, chat_jid))
         if chat_jid not in caches:
-            caches[chat_jid] = media_inventory.scan_chat_cache(chat_jid)
+            # Names only: the worker wants the path of a file, never its size,
+            # so the chat's map costs one directory read and no stat (#318).
+            caches[chat_jid] = media_inventory.list_chat_names(chat_jid)
         cached = caches[chat_jid].get(message_id)
         if cached is None and not traversing:
             if head_budget <= 0 or budget <= 0:
@@ -325,7 +327,7 @@ def find_pending(
             next_position = Position(timestamp=timestamp, message_id=message_id, chat_jid=chat_jid)
         path: str | None = None
         if cached is not None:
-            path = os.path.join(media_inventory.chat_media_dir(chat_jid), cached.name)
+            path = os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
         elif budget > 0:
             budget -= 1
             path = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
@@ -355,7 +357,7 @@ def _fetch_bytes(
     message_id: str,
     chat_jid: str,
     download: Callable[[str, str], str | None],
-    caches: dict[str, dict[str, media_inventory.CachedFile]],
+    caches: dict[str, dict[str, str]],
     *,
     quiet: bool,
 ) -> str | None:
@@ -363,17 +365,21 @@ def _fetch_bytes(
 
     The path the bridge answers with is the bridge's; this process looks the file
     up in its own view of the chat directory first, so a store mounted under two
-    names still works. ``caches`` is refreshed for that chat on the way.
+    names still works. Only this message's entry is looked up and recorded in
+    ``caches``, so the round's map stays true without being rebuilt: refreshing
+    the chat's whole map after every fetched file cost a full directory read per
+    download (issue #318). The row is resolved right after this, so nothing in
+    this round reads that entry back; it is written to keep the map honest.
     """
     try:
         path = download(message_id, chat_jid)
     except Exception as exc:  # noqa: BLE001 - one message must not end the round
         _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
         return None
-    caches[chat_jid] = media_inventory.scan_chat_cache(chat_jid)
-    cached = caches[chat_jid].get(message_id)
-    if cached is not None:
-        return os.path.join(media_inventory.chat_media_dir(chat_jid), cached.name)
+    name = media_inventory.lookup_cached_name(chat_jid, message_id)
+    if name is not None:
+        caches.setdefault(chat_jid, {})[message_id] = name
+        return os.path.join(media_inventory.chat_media_dir(chat_jid), name)
     if path and os.path.exists(path):
         return path
     _log_fetch_problem(quiet, f"the bytes of {message_id} are not readable here ({path or 'no path'})")

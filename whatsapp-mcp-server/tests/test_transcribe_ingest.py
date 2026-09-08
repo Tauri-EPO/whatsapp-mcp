@@ -591,3 +591,43 @@ def test_start_worker_runs_on_a_daemon_thread_and_stops():
     assert thread.daemon  # never holds up shutdown
     thread.join(timeout=5)
     assert ran.is_set() and not thread.is_alive()
+
+
+# --- the cache is not rebuilt per fetched file (issue #318) -------------------
+
+
+def test_ten_fetches_do_not_read_the_chat_directory_ten_more_times(paired_dbs, monkeypatch):
+    """The batch entry is updated from the file that was just fetched."""
+    for i in range(10):
+        message_id = f"FET{i}"
+        with paired_dbs.messages() as conn:
+            conn.execute(
+                "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
+                "file_length, file_sha256, filename) VALUES (?, ?, ?, '', ?, 0, 'audio', 3000, ?, ?)",
+                (
+                    message_id,
+                    ALICE,
+                    ALICE,
+                    f"2026-09-05 09:1{i}:00",
+                    bytes.fromhex(f"{i:02x}" * 32),
+                    _media_filename(message_id),
+                ),
+            )
+    listings, lookups = [], []
+    real_list, real_lookup = media_inventory.list_chat_names, media_inventory.lookup_cached_name
+
+    def counting_list(chat_jid):
+        listings.append(chat_jid)
+        return real_list(chat_jid)
+
+    def counting_lookup(chat_jid, message_id):
+        lookups.append((chat_jid, message_id))
+        return real_lookup(chat_jid, message_id)
+
+    monkeypatch.setattr(media_inventory, "list_chat_names", counting_list)
+    monkeypatch.setattr(media_inventory, "lookup_cached_name", counting_lookup)
+    bridge = FakeBridge()
+    result = transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=bridge)
+    assert result.transcribed == 10 and len(bridge.calls) == 10
+    assert listings == [ALICE]  # one directory read for the chat, not one per download
+    assert len(lookups) == 10  # one targeted lookup per fetched file

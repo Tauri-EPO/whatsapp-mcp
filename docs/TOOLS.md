@@ -1074,7 +1074,9 @@ and text never appear.
 Each item carries `message_id`, `chat_jid`, `chat_name`, `sender_jid`,
 `is_from_me`, `timestamp`, `media_type`, `filename`, `bytes` (reported by
 WhatsApp), `sha256` (hex content hash; `null` for rows without one), `cached`
-(the file is on disk under the store right now), `cached_bytes` / `cached_file`
+(the file is on disk under the store right now — a listing reuses one read of the
+chat's directory for a few seconds, so a file that arrived inside that window can
+read as `false`, never the other way round), `cached_bytes` / `cached_file`
 (actual size and name on disk), `copies` (rows sharing the hash across allowed
 chats), `copies_in` (distinct chats), `deleted_at`, `notes` (`{key: value}` for
 the hash) and `has_notes`. A `cached: false` entry is still one
