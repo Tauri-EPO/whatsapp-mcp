@@ -236,6 +236,32 @@ works as before.
         - targets: ["home-server:8080"]   # only if the bridge port is published
   ```
 
+  The MCP server also exposes `whatsapp_mcp_tool_duration_seconds`, a
+  histogram of tool wall-clock time per tool (buckets 5 ms → 300 s, plus
+  `+Inf`), so a slow tail shows up even when the average does not. The 95th
+  percentile per tool over the last hour:
+
+  ```promql
+  histogram_quantile(
+    0.95,
+    sum by (tool, le) (rate(whatsapp_mcp_tool_duration_seconds_bucket[1h]))
+  )
+  ```
+
+  The share of `list_messages` calls slower than a second, which is the number
+  to compare before and after a performance change:
+
+  ```promql
+  1 - (
+    rate(whatsapp_mcp_tool_duration_seconds_bucket{tool="list_messages",le="1"}[1h])
+    / ignoring(le) rate(whatsapp_mcp_tool_duration_seconds_count{tool="list_messages"}[1h])
+  )
+  ```
+
+  The counters restart at zero when the container restarts, which `rate()`
+  handles; comparing a deploy therefore means comparing two time ranges of the
+  same query, not two absolute values.
+
   `WHATSAPP_METRICS=false` / `WHATSAPP_MCP_METRICS=false` remove the endpoints;
   `WHATSAPP_MCP_METRICS_TOKEN` puts a bearer token in front of the MCP one
   (needed when the port is reachable beyond the tailnet, see Funnel).

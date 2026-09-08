@@ -234,7 +234,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_METRICS` | `true` | Serve `GET /metrics` on the bridge (Prometheus text, unauthenticated like `/api/version`: counters and connection state only, `metrics.go`); `false` removes the route |
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO` | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text` | `json` switches the MCP server stderr log to one JSON object per line (`observability.py`) |
-| `WHATSAPP_MCP_METRICS` | `true` | Serve `GET /metrics` on the `http`/`sse` transports (tool calls/errors/seconds per tool, HTTP requests by status class); `false` disables it |
+| `WHATSAPP_MCP_METRICS` | `true` | Serve `GET /metrics` on the `http`/`sse` transports (tool calls/errors/seconds per tool, the `whatsapp_mcp_tool_duration_seconds` histogram, HTTP requests by status class); `false` disables it |
 | `WHATSAPP_MCP_METRICS_TOKEN` | *(unset = open)* | Bearer token required on the MCP `/metrics` only (401 otherwise); set it when the MCP port is reachable beyond the tailnet (Funnel). Independent of `WHATSAPP_MCP_TOKEN` |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
