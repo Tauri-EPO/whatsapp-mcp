@@ -1481,10 +1481,12 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
     Queries WhatsApp live through the bridge, so the bridge must be connected. Each
     item has jid (address to use when mentioning or messaging them), phone_number
     (when known), lid, name (from your contacts, when known), display, is_admin and
-    is_super_admin. Also returns the group's name, topic and owner,
+    is_super_admin. Also returns the group's name, topic, owner (the creator with
+    the same four fields — jid, phone_number, lid, name — match it to a member
+    row on lid or phone_number, not on jid; owner_jid repeats owner.jid),
     participant_count (the whole group, not the page) and fetched_at, when this
-    roster came off the network. The call also refreshes the bridge's cached
-    copy of that roster, so use it to make one group current right now.
+    roster came off the network. The call also refreshes the bridge's cached copy
+    of that roster, so use it to make one group current right now.
 
     The topic is somebody else's text: it is cleaned of invisible characters, and
     with WHATSAPP_WRAP_UNTRUSTED it comes back inside <untrusted>…</untrusted>

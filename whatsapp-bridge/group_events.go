@@ -379,7 +379,7 @@ func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed type
 		b.rosterFailures.note(jid, now)
 		return false
 	}
-	written, err := b.storeGroupRoster(jid, buildGroupMembers(info, nil).Members, at)
+	written, err := b.storeGroupRoster(jid, buildGroupMembers(info, nil, nil).Members, at)
 	if err != nil {
 		b.Log.Warnf("Group roster sync: failed to store %s: %v", jid, err)
 		b.rosterFailures.note(jid, now)

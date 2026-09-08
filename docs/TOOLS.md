@@ -2054,11 +2054,22 @@ List the participants of a group, one page at a time (live query through the bri
 - `page` (optional): Page number (default 0); ignored when `cursor` is set
 - `cursor` (optional): `next_cursor` from the previous page
 
-Returns the group's `name`, `topic`, `owner_jid`, `participant_count` (the whole
-group), `fetched_at` (when this roster came off the network, UTC) and the page
-keys `items`, `next_cursor`, `has_more`. Each item has `jid`, `phone_number`,
-`lid`, `name` (from your contacts when known), `display`, `is_admin` and
-`is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
+Returns the group's `name`, `topic`, `owner`, `owner_jid`, `participant_count`
+(the whole group), `fetched_at` (when this roster came off the network, UTC) and
+the page keys `items`, `next_cursor`, `has_more`. Each item has `jid`,
+`phone_number`, `lid`, `name` (from your contacts when known), `display`,
+`is_admin` and `is_super_admin`. Respects `WHATSAPP_ALLOWED_CHATS`.
+
+`owner` is the group's creator carrying the same four fields as a member —
+`{jid, phone_number, lid, name}` — so it can be joined to a member row on
+`lid` or `phone_number` (not on `jid`: a member's `jid` is the form WhatsApp
+returned them under, while `owner.jid` is the phone JID whenever it is known).
+WhatsApp identifies the owner of a modern group by a bare LID; the bridge
+resolves it against the roster it just fetched and, when the owner has left the
+group, against the LID map, and only falls back to the LID alone when neither
+knows the number. `owner_jid` is the same as `owner.jid` (the phone JID when
+known, the LID otherwise) and is kept for callers written before the block
+existed.
 
 The bridge returns the whole membership; the MCP server sorts it (super admins,
 then admins, then JID ascending) and slices, so pages never overlap or skip even

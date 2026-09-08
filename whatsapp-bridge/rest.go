@@ -114,6 +114,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 			return client.GetGroupInfo(ctx, jid)
 		},
 		storeContactName(client),
+		storeAltJID(client),
 		b.Policy,
 		b.recordGroupRoster,
 	)))

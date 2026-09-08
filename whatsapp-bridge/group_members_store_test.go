@@ -381,7 +381,7 @@ func TestStoreGroupRosterResolvesLIDOnlyMembers(t *testing.T) {
 		{User: "888", Server: types.HiddenUserServer}: {User: "5511777777777", Server: types.DefaultUserServer},
 	}})
 	b := testBridge(t, client, store, testLogger())
-	if _, err := b.storeGroupRoster(testGroupJID, buildGroupMembers(fakeGroup(), nil).Members, time.Now()); err != nil {
+	if _, err := b.storeGroupRoster(testGroupJID, buildGroupMembers(fakeGroup(), nil, nil).Members, time.Now()); err != nil {
 		t.Fatalf("store roster: %v", err)
 	}
 	members := readMembers(t, store, testGroupJID)
@@ -628,7 +628,7 @@ func TestHandleGroupMembersCachesRoster(t *testing.T) {
 		}
 		return fakeGroup(), nil
 	}
-	h := handleGroupMembers(fetch, nil, parseChatPolicy("*@g.us"), b.recordGroupRoster)
+	h := handleGroupMembers(fetch, nil, nil, parseChatPolicy("*@g.us"), b.recordGroupRoster)
 
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodGet, "/api/group/members?jid="+testGroupJID, nil))
@@ -660,7 +660,7 @@ func TestHandleGroupMembersCachesRoster(t *testing.T) {
 	}
 
 	// Neither does a request the allow-list denies.
-	denied := handleGroupMembers(fetch, nil, parseChatPolicy("5511999999999"), b.recordGroupRoster)
+	denied := handleGroupMembers(fetch, nil, nil, parseChatPolicy("5511999999999"), b.recordGroupRoster)
 	rec = httptest.NewRecorder()
 	denied(rec, httptest.NewRequest(http.MethodGet, "/api/group/members?jid=120363000000000009@g.us", nil))
 	if rec.Code != http.StatusForbidden {

@@ -3,6 +3,7 @@ import pytest
 import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
+from untrusted import clean_untrusted
 
 GROUP = "120363000000000001@g.us"
 
@@ -56,6 +57,36 @@ def test_get_group_members_happy_path(monkeypatch):
     assert "members" not in result
     assert result["participant_count"] == 3
     assert result["has_more"] is False and result["next_cursor"] is None
+
+
+def test_get_group_members_passes_the_owner_block_through(monkeypatch):
+    """The bridge dual-addresses the owner (issue #396); the MCP server only forwards it."""
+    owner = {
+        "jid": "5511888888888@s.whatsapp.net",
+        "phone_number": "5511888888888",
+        "lid": "777@lid",
+        # a zero-width space in a name is never legitimate: the untrusted layer drops it
+        "name": "A​na",
+    }
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "get",
+        lambda *a, **k: Resp(
+            payload={
+                "success": True,
+                "group_jid": GROUP,
+                "owner_jid": owner["jid"],
+                "owner": dict(owner),
+                "members": [{"jid": "777@lid", "phone_number": "5511888888888", "is_admin": True}],
+            }
+        ),
+    )
+
+    result = whatsapp.get_group_members(GROUP)
+
+    assert result["owner"] == owner
+    assert result["owner_jid"] == owner["jid"]
+    assert clean_untrusted(result, wrap=False)["owner"]["name"] == "Ana"
 
 
 def test_get_group_members_rejects_non_group(monkeypatch):
