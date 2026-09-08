@@ -299,26 +299,19 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
-			// Fall back to async download so media is cached for future MCP tool calls
+			// Fall back to a background download so media is cached for future MCP tool calls
 			if b.MediaAutoDownload {
-				go func() {
-					_, _, _, _, _ = b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
-				}()
+				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 			}
 		}
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
 		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload {
-		// Media that is not included in a webhook payload: async download for caching.
+		// Media that is not included in a webhook payload: cached in the
+		// background by the bounded pool (media_budget.go), so a burst cannot
+		// start one transfer per message and shutdown can stop them all.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
-		go func() {
-			success, _, _, downloadPath, err := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
-			if success && err == nil {
-				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
-			} else {
-				logger.Warnf("❌ Auto-download failed: %v", err)
-			}
-		}()
+		b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 	}
 
 	// Send webhook for incoming messages.

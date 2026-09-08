@@ -74,6 +74,13 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_send_failures_total", "Failed /api/send calls.", "counter", fmt.Sprint(m.sendFailures.Load()))
 	add("whatsapp_bridge_media_downloads_total", "Media files downloaded.", "counter", fmt.Sprint(m.mediaDownloads.Load()))
 	add("whatsapp_bridge_media_download_failures_total", "Media downloads that failed.", "counter", fmt.Sprint(m.mediaDownloadFails.Load()))
+	autoQueued, autoRunning, autoDropped := 0, int64(0), int64(0)
+	if b.autoDownloads != nil {
+		autoQueued, autoRunning, autoDropped = b.autoDownloads.queued(), b.autoDownloads.running(), b.autoDownloads.dropped()
+	}
+	add("whatsapp_bridge_media_autodownload_queued", "Inbound media waiting for an auto-download worker.", "gauge", fmt.Sprint(autoQueued))
+	add("whatsapp_bridge_media_autodownload_running", "Inbound media being cached right now.", "gauge", fmt.Sprint(autoRunning))
+	add("whatsapp_bridge_media_autodownload_drops_total", "Inbound media not cached on arrival because the auto-download queue was full.", "counter", fmt.Sprint(autoDropped))
 	add("whatsapp_bridge_webhook_failures_total", "Outbound webhook POSTs that failed.", "counter", fmt.Sprint(m.webhookFailures.Load()))
 	add("whatsapp_bridge_reconnects_total", "Reconnection attempts.", "counter", fmt.Sprint(m.reconnects.Load()))
 	m.mu.Lock()
