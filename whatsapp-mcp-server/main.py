@@ -50,6 +50,7 @@ from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
     UNANSWERED_FIELDS,
+    UNANSWERED_MENTION_FIELDS,
     attach_message_notes,
     fetch_media_notes,
     fetch_sender_identities,
@@ -550,6 +551,7 @@ def list_messages(
     omit_nulls: bool = False,
     max_content_chars: int | None = None,
     count_only: bool = False,
+    mentions_me: bool = False,
 ) -> dict[str, Any]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -641,6 +643,11 @@ def list_messages(
         max_content_chars: Cut `content` to this many characters and mark the row
                  content_truncated=true. Use it to skim long messages; re-read the
                  chat without it (or with get_message_context) for the full text.
+        mentions_me: Only messages that mentioned you (the WhatsApp @-mention,
+                 matched on both spellings of your own account, not a text
+                 search). This is how you find what a group actually addressed
+                 to you: bridge_status → owner says who "you" is here. Needs a
+                 paired bridge.
         count_only: Return {"count": N} for exactly these filters and no rows —
                  the cheap way to size a job before pulling it. Combining it with
                  fields, cursor or page is an error; limit and the row-shaping
@@ -662,6 +669,7 @@ def list_messages(
                 has_media=has_media,
                 media_type=media_type,
                 exclude_groups=exclude_groups,
+                mentions_me=mentions_me,
             )
         }
     # Cap limit at 500 to prevent excessive queries
@@ -687,6 +695,7 @@ def list_messages(
         has_media=has_media,
         media_type=media_type,
         exclude_groups=exclude_groups,
+        mentions_me=mentions_me,
     )
     result = messages.to_dict()
     if include_transcripts:
@@ -717,6 +726,7 @@ def message_stats(
     exclude_groups: bool = False,
     include_deleted: bool = True,
     unread_only: bool = False,
+    mentions_me: bool = False,
 ) -> dict[str, Any]:
     """How many messages, grouped by chat, day, month or sender — without reading them.
 
@@ -758,6 +768,9 @@ def message_stats(
                  dropping groups, broadcast lists, channels and bots
         include_deleted: False drops revoked messages from the counts (default True)
         unread_only: Only unread inbound messages (implies from_me=False)
+        mentions_me: Only messages that mentioned you (the WhatsApp @-mention,
+                 both spellings of your own account); group_by="chat" then says
+                 which groups address you and how often. Needs a paired bridge.
     """
     return whatsapp_message_stats(
         group_by=group_by,
@@ -774,6 +787,7 @@ def message_stats(
         exclude_groups=exclude_groups,
         include_deleted=include_deleted,
         unread_only=unread_only,
+        mentions_me=mentions_me,
     )
 
 
@@ -946,6 +960,7 @@ def list_unanswered(
     exclude_muted: bool = True,
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
+    include_group_mentions: bool = False,
 ) -> dict[str, Any]:
     """Chats where the other side spoke last: conversations waiting for a reply from you.
 
@@ -990,7 +1005,8 @@ def list_unanswered(
                 max_content_chars here — use include_last_message=False to drop it.
         count_only: Return {"count": N}, how many chats are waiting, for exactly
                 these filters and no rows. Combining it with fields or cursor is
-                an error; limit is ignored.
+                an error; limit is ignored (it counts the direct-and-inbound rule
+                only, without the group mentions below).
         hide_handled: Skip chats whose `handled_at` note is at or after their last
                 inbound message (default True). False shows the whole backlog again.
         exclude_muted: Skip chats whose `mute` note says yes (default True)
@@ -999,6 +1015,16 @@ def list_unanswered(
         ignore_closing_messages: Also skip chats whose last inbound message only
                 closes the conversation — a sticker, or one of "ok", "obrigado",
                 "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False)
+        include_group_mentions: Answer the group question too. In a group "the
+                last message is inbound" is always true and means nothing; what
+                waits for you is a mention nobody answered. Each row then carries
+                `mention` (true when this chat has one), `mention_message_id` and
+                `mention_time`, and the groups whose mention is still unanswered
+                are added even when the group kept talking afterwards and
+                min_age_hours would have hidden them. exclude_groups wins over
+                it, and count_only counts the ordinary rule alone. Needs a
+                paired deployment: the account's own LID is what a mention is
+                matched against (see bridge_status → owner).
 
     Returns:
         Chat dictionaries in the list_chats shape (jid, name, push_name, name_source,
@@ -1035,9 +1061,11 @@ def list_unanswered(
         exclude_muted=exclude_muted,
         include_snoozed=include_snoozed,
         ignore_closing_messages=ignore_closing_messages,
+        include_group_mentions=include_group_mentions,
     ).to_dict()
     attach_notes(result["items"], "chat", lambda row: row["jid"])
-    result["items"] = _shape_chats(result["items"], fields, omit_nulls, known=UNANSWERED_FIELDS)
+    known = UNANSWERED_MENTION_FIELDS if include_group_mentions else UNANSWERED_FIELDS
+    result["items"] = _shape_chats(result["items"], fields, omit_nulls, known=known)
     return result
 
 

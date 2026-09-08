@@ -24,7 +24,7 @@ CREATE TABLE messages (
     id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP, is_from_me BOOLEAN,
     media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB,
     file_length INTEGER, quoted_message_id TEXT, deleted_at TIMESTAMP, view_once INTEGER DEFAULT 0,
-    target_message_id TEXT,
+    target_message_id TEXT, mentions TEXT,
     PRIMARY KEY (id, chat_jid)
 );
 """
@@ -58,6 +58,14 @@ def _no_ambient_whisper(monkeypatch):
     """
     for var in ("WHISPER_URL", "WHISPER_BIN", "WHISPER_MODEL", "TRANSCRIBE_ON_INGEST"):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_cached_owner():
+    """The owner identity is cached for a minute; no test inherits another's."""
+    whatsapp._reset_owner_cache()
+    yield
+    whatsapp._reset_owner_cache()
 
 
 @dataclass
