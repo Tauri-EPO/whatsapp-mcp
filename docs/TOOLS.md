@@ -947,6 +947,10 @@ tool an agent on another machine uses to actually look at a photo;
 - `max_bytes` (optional, default 0): refuse anything larger. `0` means the
   per-type limit below, which is also the ceiling — a larger value does not
   raise it, it only lets a client with a small context lower it
+- `as_text` (optional, default false): read a PDF, DOCX or XLSX **on the server**
+  and return its text instead of its bytes (see below)
+- `max_pages` (optional, default 20): with `as_text`, how many pages, tables or
+  sheets to read
 
 Returns a list of MCP **content blocks**, not a JSON object:
 
@@ -977,10 +981,35 @@ reporting its real size.
 Voice notes are better served by `transcribe_audio` (text, cached, searchable)
 than by 2 MB of base64.
 
+#### `as_text`: documents read on the server
+
+A 5 MB clinical PDF is over the 2 MB byte cap, and even under it, megabytes of
+base64 are not something a model can read. `as_text=true` parses it here and
+returns text — a few dozen KB — so the file's own size stops mattering (the
+parser accepts up to 64 MB on disk, and a DOCX/XLSX that expands past 256 MB is
+refused before a parser sees it).
+
+| Format | What comes back |
+|---|---|
+| PDF (`pypdf`) | one text block per page, `--- page 3 of 40 ---` markers, in reading order |
+| DOCX (`python-docx`) | one block with the paragraphs, then one per table (rows tab-separated) |
+| XLSX (`openpyxl`) | one block per sheet, `--- sheet leituras (120 rows) ---`, rows tab-separated |
+
+The metadata block then also carries `pages_total` (pages, tables or sheets the
+document really has) and `truncated` (`max_pages`, 500 rows per sheet, or the
+200 000-character ceiling on the whole answer cut it short).
+
+**There is no OCR.** A scanned PDF has no text layer, and the answer says so in
+as many words instead of coming back empty. Legacy `.doc`/`.xls`/`.ppt` and PPTX
+are not supported; asking for `as_text` on an image or a video is refused with
+`invalid_argument` rather than silently answered with base64. A text file is
+already text, so `as_text` changes nothing for it.
+
 **Natural Language Examples:**
 
 - "Show me the last photo Ana sent"
 - "What does the attachment in that message say?"
+- "Read the PDF Dr. Souza sent and tell me the diagnosis" (`as_text=true`)
 - "Look at the receipts from the family group and summarise each one"
 
 ### `list_media`

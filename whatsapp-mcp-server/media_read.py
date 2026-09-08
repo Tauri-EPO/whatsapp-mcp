@@ -12,7 +12,9 @@ read its size and its notes, and never look at it.
 * an image as ``ImageContent`` — the model sees the picture, capped at 16 MiB;
 * a small text-ish file (``text/*``, JSON, CSV) as text, capped at 1 MiB;
 * anything else base64-encoded in a text block behind a
-  ``base64:<mime>:<bytes>`` header line, capped at 2 MiB.
+  ``base64:<mime>:<bytes>`` header line, capped at 2 MiB;
+* with ``as_text=True``, a PDF, DOCX or XLSX **read on this side** and returned
+  as text (media_text.py), which is what makes a 5 MiB clinical PDF affordable.
 
 Every answer ends with one JSON text block carrying ``sha256``, ``mime``,
 ``bytes`` and the ``notes`` already recorded for the file, so the loop
@@ -38,6 +40,7 @@ from typing import Any
 from mcp_types import CallToolResult, ContentBlock, ImageContent, TextContent
 
 import media_inventory
+import media_text
 import whatsapp
 from errors import ToolError
 from untrusted import clean_untrusted, wrap_enabled, wrap_text
@@ -81,6 +84,36 @@ IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"GIF87a", "image/gif"),
     (b"GIF89a", "image/gif"),
 )
+
+# The extensions read_media branches on, resolved here rather than by
+# mimetypes. Its table is the platform's: python:3.13-slim has no
+# /etc/mime.types, so `.docx`, `.xlsx` and `.ogg` all come back as None there
+# (as_text would then refuse the very documents it exists for), while Windows
+# answers from the registry and maps `.csv` to application/vnd.ms-excel. What a
+# WhatsApp attachment is must not depend on which of those is running.
+EXTENSION_MIME = {
+    ".pdf": media_text.PDF_MIME,
+    ".docx": media_text.DOCX_MIME,
+    ".xlsx": media_text.XLSX_MIME,
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".mp4": "video/mp4",
+    ".zip": "application/zip",
+}
 
 # A name like `notes.txt.gz` guesses as text/plain *with an encoding*: the bytes
 # on disk are an archive, and decoding them as UTF-8 would hand the model
@@ -133,7 +166,9 @@ def _media_row(chat_jid: str, message_id: str) -> tuple[str, str | None, int | N
             f"message {message_id} carries no media (media_type={media_type or 'text'}); "
             f"read_media reads {', '.join(media_inventory.MEDIA_TYPES)} rows",
         )
-    return media_type, row[1], int(row[2]) if row[2] else None, row[3]
+    # SQLite's hex(NULL) is '', not NULL: a row without a content hash has to be
+    # reported as null, the way download_media and list_media report it.
+    return media_type, row[1], int(row[2]) if row[2] else None, row[3] or None
 
 
 def _in_chat_dir(chat_jid: str, path: str) -> str:
@@ -174,6 +209,9 @@ def guess_mime(media_type: str, filename: str | None, path: str = "") -> str:
     for candidate in (path, filename or ""):
         if not candidate:
             continue
+        extension = os.path.splitext(candidate)[1].lower()
+        if extension in EXTENSION_MIME:
+            return EXTENSION_MIME[extension]
         guessed, encoding = mimetypes.guess_type(candidate)
         if encoding:
             return ENCODING_MIME.get(encoding, "application/octet-stream")
@@ -201,8 +239,15 @@ def is_text_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in TEXT_MIMES
 
 
-def hard_limit(mime: str) -> int:
-    """The ceiling for this type — and, with the branches below, what decides the block."""
+def hard_limit(mime: str, as_text: bool = False) -> int:
+    """The ceiling for this type — and, with the branches below, what decides the block.
+
+    Extraction has its own, much higher ceiling: what bounds ``as_text`` is the
+    text it produces (media_text.MAX_TEXT_CHARS), not the size of the file it
+    reads, which is the whole reason to extract instead of returning base64.
+    """
+    if as_text and mime in media_text.EXTRACTABLE_MIMES:
+        return media_text.MAX_EXTRACT_BYTES
     if mime in RENDERABLE_IMAGE_MIMES:
         return MAX_IMAGE_BYTES
     if is_text_mime(mime):
@@ -297,7 +342,25 @@ def content_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[ContentBlock]:
+def _extracted_blocks(path: str, mime: str, max_pages: int) -> tuple[list[ContentBlock], dict[str, Any]]:
+    """The document's text, one block per page/table/sheet, and what to report about it."""
+    result = media_text.extract(path, mime, max_pages)
+    blocks: list[ContentBlock] = [text_block(section) for section in result.sections]
+    if result.note:
+        # Written here, not by whoever sent the file: it stays outside the
+        # untrusted envelope, and an empty answer never reads like an empty
+        # document.
+        blocks.append(TextContent(type="text", text=result.note))
+    return blocks, {"pages_total": result.units_total, "truncated": result.truncated}
+
+
+def read_media(
+    chat_jid: str,
+    message_id: str,
+    max_bytes: int = 0,
+    as_text: bool = False,
+    max_pages: int = 0,
+) -> list[ContentBlock]:
     """The media of one message as content blocks. See the module docstring."""
     whatsapp._require_allowed(chat_jid)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
@@ -309,20 +372,34 @@ def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[Conte
         # obvious no.
         if reported:
             expected = guess_mime(media_type, filename)
-            check_size(reported, cap(max_bytes, hard_limit(expected)), expected)
+            check_size(reported, cap(max_bytes, hard_limit(expected, as_text)), expected)
         path = download_path(chat_jid, message_id)
 
     mime = guess_mime(media_type, filename, path)
     if mime.startswith("image/"):
-        mime = sniff_image_mime(path) or mime
+        # The bytes decide. A name that promises a JPEG over a payload that is
+        # not one must not produce an ImageContent: the client rejects a block
+        # whose data disagrees with its type, so it goes out as an unknown blob.
+        sniffed = sniff_image_mime(path)
+        mime = sniffed or ("application/octet-stream" if mime in RENDERABLE_IMAGE_MIMES else mime)
+    if as_text and not is_text_mime(mime):
+        # Before the size check: "as_text does not apply to a video" is the
+        # useful answer, not "that video is over the base64 cap".
+        media_text.require_extractable(mime)
     try:
         size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
-    check_size(size, cap(max_bytes, hard_limit(mime)), mime)
+    check_size(size, cap(max_bytes, hard_limit(mime, as_text)), mime)
 
     blocks: list[ContentBlock]
-    if mime in RENDERABLE_IMAGE_MIMES:
+    extra: dict[str, Any] = {}
+    if as_text and not is_text_mime(mime):
+        # A text file is already text: as_text changes nothing for it, and
+        # asking for a JPEG as text is refused inside extract() rather than
+        # silently answered with base64.
+        blocks, extra = _extracted_blocks(path, mime, max_pages)
+    elif mime in RENDERABLE_IMAGE_MIMES:
         data = _read(path, size)
         blocks = [ImageContent(type="image", data=base64.b64encode(data).decode("ascii"), mime_type=mime)]
     elif is_text_mime(mime):
@@ -334,4 +411,4 @@ def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[Conte
         # The header line is what tells a model the rest of the block is not
         # prose: decode it, or hand the whole block to something that can.
         blocks = [TextContent(type="text", text=f"base64:{mime}:{size}\n{encoded}")]
-    return [*blocks, meta_block(sha256, mime, size)]
+    return [*blocks, meta_block(sha256, mime, size, **extra)]

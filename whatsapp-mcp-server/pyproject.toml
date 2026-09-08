@@ -23,6 +23,13 @@ dependencies = [
     "mcp[cli]>=2.1.1,<3",
     # Bridge REST and whisper-server client; the same HTTP stack the SDK uses.
     "httpx>=0.28",
+    # read_media(as_text=True): turn the documents WhatsApp carries into text on
+    # this side, so a 5 MiB clinical PDF costs the agent a few dozen KB instead
+    # of 7 MiB of base64 it cannot read. One small library per format, no OCR
+    # and no office suite.
+    "pypdf>=6.4",
+    "python-docx>=1.2",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
