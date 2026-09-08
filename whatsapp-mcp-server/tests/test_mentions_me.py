@@ -314,6 +314,58 @@ def test_group_mentions_compose_with_the_triage_notes(store, bridge_down):
     assert TEAM in [item["jid"] for item in shown["items"]]
 
 
+def test_a_muted_group_does_not_come_back_through_the_mention_stream(store, bridge_down):
+    """mute is "never surface this", and the mention stream is a surface (#361)."""
+    main.annotate("chat", TEAM, "mute", "yes")
+    out = main.list_unanswered(min_age_hours=24, include_group_mentions=True)
+    assert TEAM not in [item["jid"] for item in out["items"]]
+    shown = main.list_unanswered(min_age_hours=24, include_group_mentions=True, exclude_muted=False)
+    assert TEAM in [item["jid"] for item in shown["items"]]
+
+
+def test_a_snoozed_group_does_not_come_back_through_the_mention_stream(store, bridge_down):
+    """The snooze was set today, after the mention: it covers it (#361)."""
+    main.annotate("chat", TEAM, "snooze_until", _stamp(days=-2))
+    out = main.list_unanswered(min_age_hours=24, include_group_mentions=True)
+    assert TEAM not in [item["jid"] for item in out["items"]]
+    shown = main.list_unanswered(min_age_hours=24, include_group_mentions=True, include_snoozed=True)
+    assert TEAM in [item["jid"] for item in shown["items"]]
+
+
+def test_handled_hides_the_mention_stream_until_a_newer_mention(store, bridge_down):
+    """The mark is compared with the mention, so a new one brings the group back (#361)."""
+    main.annotate("chat", TEAM, "handled_at", _stamp(days=2))
+    out = main.list_unanswered(min_age_hours=24, include_group_mentions=True)
+    assert TEAM not in [item["jid"] for item in out["items"]]
+
+    with sqlite3.connect(store) as c:
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, mentions)"
+            " VALUES ('t6', ?, 'x', ?, ?, 0, ?)",
+            (TEAM, f"@{OWNER_LID} e agora?", _stamp(hours=30), OWNER_LID),
+        )
+    again = main.list_unanswered(min_age_hours=24, include_group_mentions=True)
+    team = next(item for item in again["items"] if item["jid"] == TEAM)
+    assert team["mention_message_id"] == "t6"
+    assert team["mention_time"] == team["last_inbound_time"]
+
+
+def test_a_hidden_group_never_takes_a_slot_in_a_page(store, bridge_down):
+    """The filter runs before LIMIT, so paging returns no hole and no repeat (#361)."""
+    main.annotate("chat", TEAM, "mute", "yes")
+    seen: list[str] = []
+    cursor = None
+    for _ in range(5):
+        page = main.list_unanswered(limit=1, min_age_hours=24, include_group_mentions=True, cursor=cursor)
+        seen += [item["jid"] for item in page["items"]]
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert TEAM not in seen
+    assert FAMILY in seen and QUIET in seen
+    assert len(seen) == len(set(seen)), seen
+
+
 def test_group_mentions_are_off_by_default(store, bridge_down):
     out = main.list_unanswered()
     assert all("mention" not in item for item in out["items"])

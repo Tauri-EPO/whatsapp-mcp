@@ -1607,10 +1607,13 @@ the full backlog back when you want to audit it.
 
 All five filters are applied in SQL before the page is cut, so `count_only`,
 `limit` and the cursor all agree with each other: a hidden chat never occupies a
-slot in a page. They bound the ordinary "they spoke last" rule; of the five, only
-`exclude_groups` and `min_messages` also bound the group-mention stream below, so
-a group that stream *adds back* can still carry a triage note or a closing
-message.
+slot in a page. They bound the group-mention stream below as well, so a group
+marked handled, muted or snoozed does not come back through it. There the two
+timestamp notes are compared with the **mention**, the message such a row is
+about, so a mention that arrived after the mark still brings the group back.
+`ignore_closing_messages` is the ordinary rule's own: it describes the chat's
+last inbound message, and a group it drops does not come back through the
+mention stream either, which leaves the chats that rule already covers to it.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
@@ -1633,7 +1636,10 @@ that question to the same page:
   answer a question, and a mention either side revoked stops counting) — plus
   `mention_message_id` and `mention_time` pointing at it, so you can read the
   message that asked. `since` and `min_age_hours` bound that pointer too, so it
-  always names the mention the row is about;
+  always names the mention the row is about. The triage notes do not: the flag
+  describes the conversation, so a row a later message brought back can still
+  point at a mention older than its `handled_at` — compare `mention_time` with
+  the mark when that matters;
 - groups whose mention is still waiting are **added** even when the ordinary
   rule dropped them, which is what `min_age_hours` does to a group that kept
   talking after the mention: the chatter is 20 minutes old, the question asked
@@ -1643,7 +1649,8 @@ that question to the same page:
   as everywhere else — the mention is what `mention_*` names.
 
 `exclude_groups=True` wins over it — "no groups" means no group comes back
-through this door either — and `count_only` counts the ordinary rule alone.
+through this door either, and neither does a group the triage notes hide — and
+`count_only` counts the ordinary rule alone.
 
 It needs a paired deployment, since the account's own identity is what a mention
 is matched against ([`bridge_status`](#bridge_status) → `owner`), and it reads

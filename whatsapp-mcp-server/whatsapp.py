@@ -4969,6 +4969,8 @@ def _mention_only_rows(
     cursor_state: dict[str, Any] | None,
     limit: int,
     min_messages: int = 0,
+    triage_clause: str = "",
+    triage_params: Sequence[Any] = (),
 ) -> tuple[list[tuple], list[tuple[str, str]]]:
     """Groups waiting on a mention that the ordinary unanswered rule does not return.
 
@@ -4978,6 +4980,14 @@ def _mention_only_rows(
     mention itself has been waiting for days. Chats the ordinary rule already
     returns are left to it (the COALESCE(last_spoken…) clause), so the two
     streams never describe the same chat twice, on this page or the next.
+
+    ``triage_clause`` is the caller's own filter (`install_filter`), applied here
+    to the mention row: a chat marked handled, snoozed or muted must not come
+    back through this door (issue #361), and the message that lifts a mark is the
+    mention itself, since that is what this row is about. Both timestamp marks
+    hide the rows *older* than themselves, so the surviving mentions are still
+    the newest ones and MAX() below picks the same anchor
+    ``newest_pending_mentions`` names.
     """
     filter_clause, filter_params = unread_filters(since, None, False, chat_jid, exclude_chat_jid)
     # unread_filters bounds `messages`, which is the mention row here.
@@ -5024,7 +5034,7 @@ def _mention_only_rows(
         WHERE chats.jid LIKE '%@g.us'
           AND {policy_clause}
           AND {mention_where}
-          {filter_clause} {age_clause} {stored_clause}
+          {filter_clause} {age_clause} {stored_clause} {triage_clause}
           AND COALESCE(last_spoken.is_from_me = 0 {covered_bounds}, 0) = 0
         GROUP BY chats.jid
         {keyset_clause}
@@ -5037,6 +5047,7 @@ def _mention_only_rows(
             *filter_params,
             *age_params,
             *stored_params,
+            *triage_params,
             *covered_params,
             *keyset_params,
             limit,
@@ -5212,10 +5223,21 @@ def list_unanswered_page(
                     cursor_state=cursor_state,
                     limit=limit + 1,
                     min_messages=min_messages,
+                    # The same clause, and deliberately so: its anchor is
+                    # `messages.timestamp`, which is the last inbound message
+                    # above and the mention row there — the message each stream
+                    # compares a mark with. Switching the query above to
+                    # `t.anchor` (as list_unread does) would have to build the
+                    # mention stream its own clause, since that column is not
+                    # filled for it.
+                    triage_clause=triage_clause,
+                    triage_params=triage_params,
                 )
             rows = _merge_by_anchor(rows, extra, limit + 1)
             # Same bounds as the rows: the mention named here is the one the
-            # page was built around, never a newer one the bound left out.
+            # page was built around, never a newer one the bound left out. The
+            # triage notes are not among them — the flag says what the chat
+            # holds, and a row they did not hide keeps naming its mention.
             mentions_by_chat = newest_pending_mentions(cur, [row[0] for row in rows], bounds)
         has_more = len(rows) > limit
         rows = rows[:limit]
