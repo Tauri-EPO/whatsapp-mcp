@@ -20,7 +20,7 @@ func (r *exitRecorder) fn(reason string, code int) {
 }
 
 func TestHandleEvent_LoggedOutExitsForRepair(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	rec := &exitRecorder{}
 	b.Exit = rec.fn
 
@@ -35,7 +35,7 @@ func TestHandleEvent_LoggedOutExitsForRepair(t *testing.T) {
 }
 
 func TestHandleEvent_ClientOutdatedExits(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	rec := &exitRecorder{}
 	b.Exit = rec.fn
 
@@ -47,7 +47,7 @@ func TestHandleEvent_ClientOutdatedExits(t *testing.T) {
 }
 
 func TestHandleEvent_DisconnectedDoesNotExit(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	rec := &exitRecorder{}
 	b.Exit = rec.fn
 	reconnect := make(chan bool, 1)

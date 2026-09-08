@@ -275,10 +275,15 @@ func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content str
 	}
 }
 
-// historyVoteRetryDelays paces retries while whatsmeow is still writing the
-// secrets it received in the same history-sync chunk (it stores them
-// asynchronously). Tests shorten it.
-var historyVoteRetryDelays = []time.Duration{2 * time.Second, 10 * time.Second}
+// defaultHistoryVoteRetryDelays paces retries while whatsmeow is still writing
+// the secrets it received in the same history-sync chunk (it stores them
+// asynchronously). It is the default of Bridge.HistoryVoteRetryDelays, which is
+// what the decode loop reads; a function rather than a package variable so no
+// two bridges share the slice and no test can shorten it under a running
+// goroutine (issue #382).
+func defaultHistoryVoteRetryDelays() []time.Duration {
+	return []time.Duration{2 * time.Second, 10 * time.Second}
+}
 
 // storeHistoryPollVotes decodes PollUpdateMessage rows delivered by history
 // sync for one conversation. Runs after the conversation's messages (and
@@ -311,8 +316,8 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 					pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
 				break
 			}
-			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(historyVoteRetryDelays) {
-				time.Sleep(historyVoteRetryDelays[attempt])
+			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(b.HistoryVoteRetryDelays) {
+				time.Sleep(b.HistoryVoteRetryDelays[attempt])
 				continue
 			}
 			b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)

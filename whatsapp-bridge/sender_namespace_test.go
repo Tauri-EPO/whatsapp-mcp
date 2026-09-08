@@ -150,7 +150,7 @@ func TestHandleMessage_RecordsSenderNamespace(t *testing.T) {
 		ms := newTestMessageStore(t)
 		msg := buildTextMessage(phoneLID, phoneLID, types.EmptyJID, types.EmptyJID, false, "orphan")
 
-		testBridge(client, ms, testLogger()).handleMessage(msg)
+		testBridge(t, client, ms, testLogger()).handleMessage(msg)
 
 		sender, server := querySenderServer(t, ms, msg.Info.ID, phoneLID.String())
 		if sender != phoneLID.User || server != types.HiddenUserServer {
@@ -164,7 +164,7 @@ func TestHandleMessage_RecordsSenderNamespace(t *testing.T) {
 		ms := newTestMessageStore(t)
 		msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "hello")
 
-		testBridge(client, ms, testLogger()).handleMessage(msg)
+		testBridge(t, client, ms, testLogger()).handleMessage(msg)
 
 		sender, server := querySenderServer(t, ms, msg.Info.ID, phonePN.String())
 		if sender != phonePN.User || server != types.DefaultUserServer {
@@ -178,7 +178,7 @@ func TestHandleMessage_RecordsSenderNamespace(t *testing.T) {
 		ms := newTestMessageStore(t)
 		msg := buildTextMessage(phoneLID, phoneLID, types.EmptyJID, types.EmptyJID, false, "mapped")
 
-		testBridge(client, ms, testLogger()).handleMessage(msg)
+		testBridge(t, client, ms, testLogger()).handleMessage(msg)
 
 		sender, server := querySenderServer(t, ms, msg.Info.ID, phonePN.String())
 		if sender != phonePN.User || server != types.DefaultUserServer {

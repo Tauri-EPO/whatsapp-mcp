@@ -11,7 +11,7 @@ import (
 )
 
 func TestReconnectLoopStopsDuringBackoff(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	var dials atomic.Int32
 	b.Connect = func() error { dials.Add(1); return errors.New("still down") }
 
@@ -40,7 +40,7 @@ func TestReconnectLoopStopsDuringBackoff(t *testing.T) {
 }
 
 func TestStreamReplacedTimerIsCancelledByShutdown(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	// Written before the event is handled and never again: the timer reads the
 	// delay off this Bridge, so the goroutine has nothing to race with. A
 	// package-level variable restored in t.Cleanup did (issue #351).
@@ -58,7 +58,7 @@ func TestStreamReplacedTimerIsCancelledByShutdown(t *testing.T) {
 }
 
 func TestStreamReplacedSignalsReconnectWhenRunning(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.StreamReplacedDelay = 20 * time.Millisecond
 
 	reconnect := make(chan bool, 1)
@@ -71,7 +71,7 @@ func TestStreamReplacedSignalsReconnectWhenRunning(t *testing.T) {
 }
 
 func TestShutdownDrainsRESTServer(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.RESTBind = "127.0.0.1"
 	b.startRESTServer(0, "test-token-0123456789") // port 0: any free port
 	if b.httpServer == nil {
@@ -86,7 +86,7 @@ func TestShutdownDrainsRESTServer(t *testing.T) {
 }
 
 func TestShutdownWaitsForHistoryVotesWithDeadline(t *testing.T) {
-	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.historyVotes.Add(1)
 	go func() {
 		time.Sleep(100 * time.Millisecond)

@@ -16,7 +16,7 @@ import (
 // bridge carrying the given policies.
 func toolPolicyRequest(t *testing.T, readOnly bool, p toolPolicy, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	b := testBridge(nil, newTestMessageStore(t), testLogger())
+	b := testBridge(t, nil, newTestMessageStore(t), testLogger())
 	b.ReadOnly = readOnlyPolicy{enabled: readOnly}
 	b.Tools = p
 	b.MediaRoots = []string{t.TempDir()}

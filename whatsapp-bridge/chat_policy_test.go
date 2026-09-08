@@ -69,7 +69,7 @@ func TestRejectByChatPolicy(t *testing.T) {
 // touching the (absent) connection.
 func TestRESTSendRejectedByChatPolicy(t *testing.T) {
 	ms := newTestMessageStore(t)
-	b := testBridge(nil, ms, testLogger())
+	b := testBridge(t, nil, ms, testLogger())
 	b.Policy = parseChatPolicy("5511999999999")
 	b.MediaRoots = []string{t.TempDir()}
 	mux := b.newRESTMux(8080, "test-token-0123456789")

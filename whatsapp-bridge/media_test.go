@@ -40,7 +40,7 @@ func fullMediaInfo() (string, []byte, []byte, []byte, uint64) {
 func TestDownloadMedia_Errors(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 
 	if _, _, _, _, err := b.downloadMedia(context.Background(), "missing", mediaTestChat); err == nil || !strings.Contains(err.Error(), "failed to find message") {
 		t.Errorf("unknown message: err = %v", err)
@@ -83,7 +83,7 @@ func TestDownloadMedia_Errors(t *testing.T) {
 func TestDownloadMedia_ReturnsCachedFileWithoutClient(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 
 	// Filenames must match what extractMediaInfo produces on arrival:
 	// <type>_<yyyymmdd_hhmmss>_<message id><ext>.
@@ -116,7 +116,7 @@ func TestDownloadMedia_ReturnsCachedFileWithoutClient(t *testing.T) {
 func TestDownloadMedia_ChatDirSanitisesColons(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	chat := "5511999999999:12@s.whatsapp.net" // device-suffixed JID
 	// Local, like the timestamps whatsmeow delivers: the cached file name is
 	// the local wall clock (mediaFileName), while the row is stored in UTC.
@@ -143,7 +143,7 @@ func downloadRequest(token, body string) *http.Request {
 
 func TestHandleDownload(t *testing.T) {
 	const token = "test-token-0123456789"
-	b := testBridge(nil, newTestMessageStore(t), installRecordingLogger(t))
+	b := testBridge(t, nil, newTestMessageStore(t), installRecordingLogger(t))
 	mux := b.newRESTMux(8080, token)
 	do := func(body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -239,7 +239,7 @@ func TestMediaFileName_DocumentExtension(t *testing.T) {
 func TestDownloadMedia_DocumentsUseAndFallBackOnLegacyName(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	// Local, like the timestamps whatsmeow delivers: the cached file name is
 	// the local wall clock (mediaFileName), while the row is stored in UTC.
 	ts := time.Date(2026, 9, 4, 15, 4, 5, 0, time.Local)

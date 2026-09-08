@@ -46,7 +46,7 @@ func TestGroupRenameUpdatesStoreAndCache(t *testing.T) {
 	}
 	ms.names.put(group.String(), "Old Name")
 
-	b := testBridge(newTestClient(&mockLIDStore{}), ms, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
 	b.handleEvent(&events.GroupInfo{JID: group, Name: &types.GroupName{Name: "New Name"}}, make(chan bool, 1))
 
 	if name, ok := ms.names.get(group.String()); !ok || name != "New Name" {

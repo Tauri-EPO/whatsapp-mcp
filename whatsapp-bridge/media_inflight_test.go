@@ -102,7 +102,7 @@ func blockingTransfer(started chan<- struct{}, release <-chan struct{}, payload 
 func TestDownloadMediaSharesOneTransferPerDestination(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newConcurrentTestStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	dest := seedMediaRowIn(t, ms, mediaTestChat, "IMG1")
 
 	payload := []byte("decrypted media bytes")
@@ -147,7 +147,7 @@ func TestDownloadMediaCancellationLeavesTheTransferAlone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
 			ms := newConcurrentTestStore(t)
-			b := testBridge(nil, ms, installRecordingLogger(t))
+			b := testBridge(t, nil, ms, installRecordingLogger(t))
 			dest := seedMediaRowIn(t, ms, mediaTestChat, "IMG2")
 
 			payload := []byte("transferred bytes")
@@ -195,7 +195,7 @@ func TestDownloadMediaCancellationLeavesTheTransferAlone(t *testing.T) {
 func TestDownloadMediaPropagatesTransferFailure(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newConcurrentTestStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	dest := seedMediaRowIn(t, ms, mediaTestChat, "IMG3")
 
 	release := make(chan struct{})
@@ -243,7 +243,7 @@ func TestDownloadMediaPropagatesTransferFailure(t *testing.T) {
 func TestDownloadMediaKeepsChatsIndependent(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newConcurrentTestStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	const other = "120363000000000000@g.us"
 	seedMediaRowIn(t, ms, mediaTestChat, "IMG4")
 	seedMediaRowIn(t, ms, other, "IMG4")
@@ -280,7 +280,7 @@ func TestDownloadMediaKeepsChatsIndependent(t *testing.T) {
 func TestDownloadMediaSurvivesAPanickingTransfer(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newConcurrentTestStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	seedMediaRowIn(t, ms, mediaTestChat, "IMG5")
 	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, _ string) (int64, error) {
 		panic("whatsmeow blew up mid-download")
@@ -303,7 +303,7 @@ func TestDownloadMediaSurvivesAPanickingTransfer(t *testing.T) {
 func TestShutdownDrainsMediaTransfers(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newConcurrentTestStore(t)
-	b := testBridge(nil, ms, installRecordingLogger(t))
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
 	seedMediaRowIn(t, ms, mediaTestChat, "IMG6")
 
 	started := make(chan struct{}, 1)

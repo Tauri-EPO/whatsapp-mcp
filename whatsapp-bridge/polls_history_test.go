@@ -51,7 +51,7 @@ func TestUndecodableVotesAreCountedNotTallied(t *testing.T) {
 func TestHandleMessage_UndecryptableVoteIsRecorded(t *testing.T) {
 	t.Setenv("WEBHOOK_ENABLED", "false")
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClient(&mockLIDStore{}), ms, testLogger())
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
 	b.PollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) {
 		return nil, whatsmeow.ErrOriginalMessageSecretNotFound
 	}
@@ -105,12 +105,12 @@ func historySyncWithPoll(chat types.JID, now time.Time) *events.HistorySync {
 }
 
 func TestHandleHistorySync_StoresPollAndDecodesVoteAfterRetry(t *testing.T) {
-	prev := historyVoteRetryDelays
-	historyVoteRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { historyVoteRetryDelays = prev })
-
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	// Two retries, both immediate (the decrypter below only needs the first):
+	// the decode runs in b.historyVotes, so the pacing belongs to this bridge
+	// and not to a shared slice (issue #382).
+	b.HistoryVoteRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	var calls atomic.Int32
 	b.PollVoteDecrypt = func(_ context.Context, evt *events.Message) ([][]byte, error) {
 		// First attempt: whatsmeow has not written the secret yet.
@@ -147,12 +147,9 @@ func TestHandleHistorySync_StoresPollAndDecodesVoteAfterRetry(t *testing.T) {
 }
 
 func TestHandleHistorySync_VoteWithoutSecretIsUndecodable(t *testing.T) {
-	prev := historyVoteRetryDelays
-	historyVoteRetryDelays = []time.Duration{time.Millisecond}
-	t.Cleanup(func() { historyVoteRetryDelays = prev })
-
 	ms := newTestMessageStore(t)
-	b := testBridge(newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	b.HistoryVoteRetryDelays = []time.Duration{time.Millisecond}
 	b.PollVoteDecrypt = func(_ context.Context, _ *events.Message) ([][]byte, error) {
 		return nil, whatsmeow.ErrOriginalMessageSecretNotFound
 	}
