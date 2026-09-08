@@ -8,7 +8,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import islice
@@ -349,6 +349,11 @@ class Message:
     is_from_me: bool
     chat_jid: str
     id: str
+    # Which namespace `sender` belongs to, as the bridge recorded it when it
+    # stored the row: "s.whatsapp.net", "lid", or None when it never knew —
+    # rows written before the column existed, and senders that are not user
+    # JIDs at all (issue #375).
+    sender_server: str | None = None
     chat_name: str | None = None
     media_type: str | None = None
     # Bridge-side filename of the media (documents keep the sender's original
@@ -381,8 +386,27 @@ MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
     "messages.deleted_at, messages.view_once, messages.target_message_id, "
-    "messages.file_length, lower(hex(messages.file_sha256))"
+    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server"
 )
+
+
+def message_columns(cursor: sqlite3.Cursor) -> str:
+    """MESSAGE_COLUMNS as this store can answer it.
+
+    messages.sender_server is the newest column the bridge adds (#375), and a
+    messages.db written by an older one does not have it yet. Reads must keep
+    working there, so the column is selected as NULL — which is what the
+    readers already treat as "namespace not recorded". The width of the row
+    never changes, so _row_to_message is untouched.
+    """
+    has_column = _schema_memo(
+        "messages.sender_server",
+        MESSAGES_DB_PATH,
+        # Iterated, not fetchall()'d: this runs on the caller's cursor, and
+        # export.py's guard against buffering a whole archive watches for it.
+        lambda: "sender_server" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+    )
+    return MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
 
 
 def _row_to_message(row: tuple) -> Message:
@@ -403,10 +427,12 @@ def _row_to_message(row: tuple) -> Message:
         target,
         file_length,
         sha256,
+        sender_server,
     ) = row
     return Message(
         timestamp=parse_db_time(timestamp),
         sender=sender,
+        sender_server=sender_server or None,
         chat_name=chat_name,
         content=content,
         # SQLite hands the BOOLEAN column back as 0/1; the dataclass (and the
@@ -543,6 +569,10 @@ class SenderIdentity(NamedTuple):
     the LID resolved at write time, bare LID digits otherwise. `phone` is a real
     phone number and never a LID; `lid` is the anonymous link-ID. A LID keeps
     `phone` only when `whatsmeow_lid_map` knows the number behind it (#281).
+
+    Rows written since #375 carry `messages.sender_server`, which says the
+    namespace outright; the length heuristic below only decides for the rows
+    that predate it.
     """
 
     phone: str | None
@@ -554,34 +584,59 @@ class SenderIdentity(NamedTuple):
 # LID map tells them apart: a bare number it does not know stays a phone number,
 # which is the deliberate limit of this classification — an unmapped 15-digit
 # LID is indistinguishable from a (rare, but legal) 15-digit number, so it is
-# reported as one rather than guessed away.
+# reported as one rather than guessed away. It is the fallback for legacy rows;
+# what the bridge recorded (`sender_server`) wins wherever it is present.
 MAX_PHONE_DIGITS = 15
 
+# The two namespace values messages.sender_server holds
+# (whatsapp-bridge/sender_namespace.go); DEFAULT_USER_SERVER is the other one.
+LID_SERVER = "lid"
 
-def _sender_identities(values: Sequence[str]) -> dict[str, SenderIdentity]:
+
+def _sender_identities(
+    values: Sequence[str], servers: Mapping[str, str | None] | None = None
+) -> dict[str, SenderIdentity]:
     """Classify a batch of stored senders / identifiers in one LID-map query.
+
+    `servers` maps a value to the namespace the bridge recorded for it
+    (`messages.sender_server`); it settles the classification and the heuristic
+    is left to decide only for the values it has nothing for.
 
     Results are cached per value for NAME_CACHE_TTL_S like sender names, so a
     page with repeated senders — or the next page of the same chat — is free.
     """
+    recorded = servers or {}
     result: dict[str, SenderIdentity] = {}
     pending: dict[str, str] = {}  # value -> bare digits still to look up
+    lid_namespace: set[str] = set()  # values a namespace already calls a LID
+    # The cache key carries the namespace the value was classified under, so a
+    # legacy row and a row the bridge stamped can never serve each other's
+    # answer for the same digits.
+    keys = {value: f"{value.partition('@')[2] or recorded.get(value) or ''}|{value}" for value in values}
     for value in values:
         if value in result or value in pending:
             continue
-        hit, cached = _cache_get("identity", value)
+        hit, cached = _cache_get("identity", keys[value])
         if hit:
             result[value] = cached
             continue
         bare, _, server = value.partition("@")
-        if server == "lid" or (bare.isdigit() and server == ""):
-            # An @lid JID says which namespace it is even when the user part
-            # carries a device suffix ("1841...:3"); a bare number does not.
+        namespace = server or recorded.get(value) or ""
+        if namespace == LID_SERVER:
+            # A LID, whether the JID said so or the bridge recorded it. The map
+            # is still queried below for the number behind it.
+            pending[value] = bare
+            lid_namespace.add(value)
+        elif namespace == DEFAULT_USER_SERVER:
+            result[value] = _cache_put("identity", keys[value], SenderIdentity(bare, None))
+        elif bare.isdigit() and server == "":
+            # A bare number says nothing on its own and no row recorded its
+            # namespace: the LID map and the length limit decide below.
             pending[value] = bare
         else:
-            # A phone JID, or something we cannot classify at all (an empty
-            # sender, a group JID): it stays where it has always been.
-            result[value] = _cache_put("identity", value, SenderIdentity(bare or value, None))
+            # A JID of some other namespace, or something we cannot classify at
+            # all (an empty sender, a group JID): it stays where it always was.
+            result[value] = _cache_put("identity", keys[value], SenderIdentity(bare or value, None))
     if not pending:
         return result
 
@@ -609,22 +664,104 @@ def _sender_identities(values: Sequence[str]) -> dict[str, SenderIdentity]:
             logger.debug("sender-identity batch failed: %s", e)
 
     for value, bare in pending.items():
-        is_lid = value.endswith("@lid") or bare in known_lids or len(bare) > MAX_PHONE_DIGITS
+        is_lid = value in lid_namespace or bare in known_lids or len(bare) > MAX_PHONE_DIGITS
         identity = SenderIdentity(pn_by_lid.get(bare), bare) if is_lid else SenderIdentity(bare, None)
         result[value] = identity
         # Only an answer the map actually gave is cached. A classification made
         # while whatsapp.db was missing, locked or broken is a guess, and
         # caching it would report a LID as a phone number for the next five
         # minutes — the bug this exists to prevent (#281). Guessing costs no
-        # I/O, so recomputing it on the next call is cheap.
+        # I/O, so recomputing it on the next call is cheap — and a LID the
+        # bridge recorded still has a number to find once the map is readable.
         if map_read:
-            _cache_put("identity", value, identity)
+            _cache_put("identity", keys[value], identity)
     return result
 
 
-def sender_identity(value: str) -> SenderIdentity:
-    """Phone/LID namespace of one sender or identifier (see :class:`SenderIdentity`)."""
-    return _sender_identities([value])[value]
+def sender_identity(value: str, server: str | None = None) -> SenderIdentity:
+    """Phone/LID namespace of one sender or identifier (see :class:`SenderIdentity`).
+
+    `server` is the namespace the bridge recorded for it, when the caller has a
+    row to read it from (`messages.sender_server`).
+    """
+    return _sender_identities([value], {value: server} if server else None)[value]
+
+
+# Bare identifiers of this length are the ambiguous ones: over MAX_PHONE_DIGITS
+# nothing can be a phone number, and no real archive holds one longer than 13,
+# so 14 and 15 digits are where an unmapped LID passes for a number. The bridge
+# backfill draws the same line (whatsapp-bridge/sender_namespace.go).
+AMBIGUOUS_LID_DIGITS = (14, 15)
+
+
+def stored_sender_namespace(bare: str) -> str | None:
+    """The namespace messages.db recorded for a bare sender, when a row has one.
+
+    A tool is handed an identifier with no namespace attached, but the archive
+    usually knows which one it is: the bridge stamps it on every row it stores
+    (`messages.sender_server`, #375).
+    """
+    if not bare or "@" in bare:
+        return None
+    hit, cached = _cache_get("sender_server", bare)
+    if hit:
+        return cached
+    if not os.path.isfile(MESSAGES_DB_PATH):
+        # Asked before the bridge ever ran: connecting would create the archive.
+        return None
+    namespace = None
+    try:
+        conn = _connect_messages_db()
+        try:
+            row = conn.execute(
+                "SELECT sender_server FROM messages WHERE sender = ? AND sender_server IS NOT NULL LIMIT 1",
+                (bare,),
+            ).fetchone()
+            namespace = row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        # An unreadable archive is not an error for the caller: the identifier
+        # is classified by the LID map and its shape instead.
+        logger.debug("sender-namespace lookup failed: %s", e)
+        return None
+    return _cache_put("sender_server", bare, namespace)
+
+
+def unknown_lid_digits(bare: str) -> bool:
+    """Is this bare 14-15 digit identifier a LID nothing in the deployment knows?
+
+    Callers use it after the LID map and the chats table have come up empty: at
+    that length a LID and an E.164 number have the same shape, and an identifier
+    that no chat, no stored sender and no phone-book entry has ever carried as a
+    number is a LID whose mapping was never learned (#375).
+
+    Every source has to have answered for that to hold, so a phone book that
+    cannot be read says "no" rather than "no entry" — a classification made
+    against a missing or locked whatsapp.db is a guess (#281), and guessing
+    towards a LID would rename a real number on the strength of a lock.
+    """
+    if not bare.isdigit() or len(bare) not in AMBIGUOUS_LID_DIGITS:
+        return False
+    if stored_sender_namespace(bare) == DEFAULT_USER_SERVER:
+        return False
+    if not os.path.isfile(WHATSMEOW_DB_PATH):
+        return False
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            # The phone book is keyed by full JID, so a row under the phone
+            # spelling is the phone book saying this is a number.
+            known = conn.execute(
+                "SELECT 1 FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1",
+                (f"{bare}@{DEFAULT_USER_SERVER}",),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.debug("phone-book check for %s failed: %s", bare, e)
+        return False
+    return known is None
 
 
 def _is_pointer_row(message: Message) -> bool:
@@ -655,9 +792,18 @@ def fetch_sender_identities(messages: Sequence[Message]) -> dict[str, SenderIden
     """Sender namespaces for a batch of messages: {stored sender: SenderIdentity}.
 
     One LID-map query for a whole page instead of one per row; pass the result
-    to msg_to_dict alongside the notes.
+    to msg_to_dict alongside the notes. Each sender is classified with the
+    namespace its row recorded, so only the rows that predate the column fall
+    back to the length heuristic.
     """
-    return _sender_identities([message.sender for message in messages if message.sender])
+    senders = [message.sender for message in messages if message.sender]
+    servers: dict[str, str | None] = {}
+    for message in messages:
+        # Rows disagree only when one of them predates sender_server, so a
+        # recorded namespace wins over a missing one whatever the row order.
+        if message.sender and message.sender_server and not servers.get(message.sender):
+            servers[message.sender] = message.sender_server
+    return _sender_identities(senders, servers)
 
 
 def attach_message_notes(rows: Sequence[dict[str, Any]]) -> None:
@@ -728,10 +874,12 @@ def msg_to_dict(
     lookup.
     """
     # The two identifier namespaces stay apart: `sender_phone` is a phone number
-    # or nothing, `sender_lid` the anonymous link-ID (#281). `sender_jid` keeps
-    # the value the bridge stored, whichever form that was.
+    # or nothing, `sender_lid` the anonymous link-ID (#281). Which one a row is
+    # comes from the row itself when the bridge recorded it (#375), and from the
+    # LID map and the length limit for rows that predate the column.
+    # `sender_jid` keeps the value the bridge stored, whichever form that was.
     bare = message.sender.split("@", 1)[0]
-    identity = (identities or {}).get(message.sender) or sender_identity(message.sender)
+    identity = (identities or {}).get(message.sender) or sender_identity(message.sender, message.sender_server)
     sender_phone = identity.phone
     sender_lid = identity.lid
 
@@ -1675,7 +1823,7 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
 _CONTEXT_HITS_PER_QUERY = 300
 
 
-def _context_side_sql(values: str, newest_first: bool, include_deleted: bool) -> str:
+def _context_side_sql(values: str, newest_first: bool, include_deleted: bool, columns: str) -> str:
     """One direction of the context window for a batch of hits.
 
     The neighbours are chosen inside a correlated subquery that seeks
@@ -1699,7 +1847,7 @@ def _context_side_sql(values: str, newest_first: bool, include_deleted: bool) ->
     deleted_filter = "" if include_deleted else "AND neighbour.deleted_at IS NULL"
     return f"""
         WITH hits(hit_idx, chat_jid, ts) AS (VALUES {values})
-        SELECT {MESSAGE_COLUMNS}, hits.hit_idx
+        SELECT {columns}, hits.hit_idx
         FROM hits
         CROSS JOIN messages ON messages.rowid IN (
             SELECT neighbour.rowid
@@ -1738,6 +1886,7 @@ def _fetch_context_windows(
             anchors.append(hit)
     if not anchors or (before <= 0 and after <= 0):
         return windows
+    columns = message_columns(cursor)
     width = len(MESSAGE_COLUMNS.split(","))
     for start in range(0, len(anchors), _CONTEXT_HITS_PER_QUERY):
         batch = anchors[start : start + _CONTEXT_HITS_PER_QUERY]
@@ -1751,7 +1900,7 @@ def _fetch_context_windows(
         for newest_first, count in ((True, before), (False, after)):
             if count <= 0:
                 continue
-            cursor.execute(_context_side_sql(values, newest_first, include_deleted), (*hit_params, count))
+            cursor.execute(_context_side_sql(values, newest_first, include_deleted, columns), (*hit_params, count))
             side = 0 if newest_first else 1
             for row in cursor.fetchall():
                 hit = batch[row[width]]
@@ -2363,7 +2512,7 @@ def list_messages_page(
         ranked = predicate.relevance_order is not None
 
         # Build base query
-        query_parts = [f"SELECT {MESSAGE_COLUMNS} FROM messages"]
+        query_parts = [f"SELECT {message_columns(cur)} FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         if predicate.join:
             query_parts.append(predicate.join)
@@ -2664,7 +2813,7 @@ def get_message_context(
         cursor = conn.cursor()
 
         # Get the target message first
-        select = f"SELECT {MESSAGE_COLUMNS} FROM messages JOIN chats ON messages.chat_jid = chats.jid"
+        select = f"SELECT {message_columns(cursor)} FROM messages JOIN chats ON messages.chat_jid = chats.jid"
         if chat_jid:
             cursor.execute(select + " WHERE messages.id = ? AND messages.chat_jid = ?", (message_id, chat_jid))
         else:
@@ -2682,7 +2831,7 @@ def get_message_context(
         # Get messages before
         cursor.execute(
             f"""
-            SELECT {MESSAGE_COLUMNS}
+            SELECT {message_columns(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ? {deleted_filter}
@@ -2697,7 +2846,7 @@ def get_message_context(
         # Get messages after
         cursor.execute(
             f"""
-            SELECT {MESSAGE_COLUMNS}
+            SELECT {message_columns(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ? {deleted_filter}
@@ -3292,7 +3441,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         placeholders = ",".join("?" * len(aliases))
         cursor.execute(
             f"""
-            SELECT {MESSAGE_COLUMNS}
+            SELECT {message_columns(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE (messages.sender IN ({placeholders}) OR chats.jid = ?) AND {policy_clause}
@@ -4847,7 +4996,7 @@ def list_unread(
             spellings = [jid, twin.absorbed] if twin is not None else [jid]
             cursor.execute(
                 f"""
-                SELECT {MESSAGE_COLUMNS}
+                SELECT {message_columns(cursor)}
                 FROM messages JOIN chats ON messages.chat_jid = chats.jid
                 WHERE {_chat_jid_clause("messages.chat_jid", spellings)} AND messages.is_from_me = 0
                   AND (? IS NULL OR messages.timestamp > ?)

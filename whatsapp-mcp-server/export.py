@@ -23,7 +23,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
-from whatsapp import MESSAGE_COLUMNS, MessageFilters
+from whatsapp import MessageFilters, message_columns
 
 logger = logging.getLogger("whatsapp_mcp")
 
@@ -150,7 +150,7 @@ def export_messages(
             ).build(cur)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             cur.execute(
-                f"SELECT {MESSAGE_COLUMNS} FROM messages JOIN chats ON messages.chat_jid = chats.jid "
+                f"SELECT {message_columns(cur)} FROM messages JOIN chats ON messages.chat_jid = chats.jid "
                 f"{where} ORDER BY messages.timestamp ASC, messages.id ASC",
                 tuple(params),
             )

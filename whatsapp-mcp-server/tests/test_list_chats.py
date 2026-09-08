@@ -28,6 +28,7 @@ def _make_messages_db(path):
             id TEXT,
             chat_jid TEXT,
             sender TEXT,
+            sender_server TEXT,
             content TEXT,
             timestamp TIMESTAMP,
             is_from_me BOOLEAN,
