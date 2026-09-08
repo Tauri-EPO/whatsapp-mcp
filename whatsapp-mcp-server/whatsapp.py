@@ -3197,12 +3197,6 @@ def _coverage_by_chat(
     limit: int,
 ) -> dict[str, Any]:
     """One page of the per-chat work queue for request_history."""
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError) as exc:
-        raise ToolError("invalid_argument", f"limit must be an integer, got {limit!r}") from exc
-    limit = max(1, min(limit, COVERAGE_BY_CHAT_MAX_LIMIT))
-
     fingerprint = _coverage_fingerprint(scope)
     state = decode_cursor(cursor, "coverage_by_chat")
     offset = 0
@@ -3212,7 +3206,12 @@ def _coverage_by_chat(
                 "invalid_argument",
                 "cursor was created for a different window or chat_jid; start again without a cursor",
             )
-        offset = max(0, int(state.get("o") or 0))
+        # A cursor is opaque but caller-supplied: anything that is not a
+        # non-negative integer offset is a mangled cursor, not a server fault.
+        raw_offset = state.get("o")
+        if not isinstance(raw_offset, int) or isinstance(raw_offset, bool) or raw_offset < 0:
+            raise ToolError("invalid_argument", "cursor is not valid; pass next_cursor from the previous page")
+        offset = raw_offset
 
     cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_where}", tuple(chat_params))
     chats_total = int(cur.fetchone()[0] or 0)
@@ -3314,6 +3313,13 @@ def coverage(
     except (TypeError, ValueError) as exc:
         raise ToolError("invalid_argument", f"max_gaps must be an integer, got {max_gaps!r}") from exc
     max_gaps = max(1, min(max_gaps, 500))
+    # Validated even when by_chat is off, so a typo is named rather than
+    # silently dropped along with the argument it belongs to.
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", f"limit must be an integer, got {limit!r}") from exc
+    limit = max(1, min(limit, COVERAGE_BY_CHAT_MAX_LIMIT))
     if cursor and not by_chat:
         raise ToolError("invalid_argument", "cursor only pages the by_chat=True result; pass by_chat=True with it")
 

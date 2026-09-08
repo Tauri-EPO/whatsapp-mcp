@@ -212,16 +212,24 @@ def test_coverage_by_chat_applies_the_window(archive):
 def test_coverage_by_chat_ranks_on_the_whole_history_not_the_window(paired_dbs):
     """A window scopes the counts; it must not decide who needs backfilling.
 
-    Alice synced back to 2019 and said one thing this week; Bob's stored
-    history only starts this month. Bob is the one missing history, whatever
-    window the caller asked about.
+    Alice synced back to 2019, Bob's history starts this month and Family's
+    starts later still, so Family is the one missing the most. The three chats
+    are laid out so that both wrong rankings answer something else: ordering by
+    the in-window first message gives Alice, Bob, Family, and ordering by a raw
+    message count instead of the saturating "none / one / more" probe gives
+    Bob, Family, Alice.
     """
     rows = [(f"a{i}", ALICE, f"2019-01-{i + 1:02d} 09:00:00") for i in range(20)]
     rows += [
-        ("a99", ALICE, "2026-09-06 09:00:00"),
-        ("b1", BOB, "2026-09-01 09:00:00"),
+        ("a99", ALICE, "2026-09-06 12:00:00"),  # latest in-window first message
+        ("b1", BOB, "2026-09-01 09:00:00"),  # second-latest overall start
         ("b2", BOB, "2026-09-06 10:00:00"),
         ("b3", BOB, "2026-09-06 11:00:00"),
+        ("f1", FAMILY, "2026-09-03 08:00:00"),  # latest overall start
+        ("f2", FAMILY, "2026-09-06 07:00:00"),
+        ("f3", FAMILY, "2026-09-06 08:00:00"),
+        ("f4", FAMILY, "2026-09-06 09:00:00"),
+        ("f5", FAMILY, "2026-09-07 08:00:00"),
     ]
     with paired_dbs.messages() as conn:
         conn.executemany(
@@ -229,12 +237,13 @@ def test_coverage_by_chat_ranks_on_the_whole_history_not_the_window(paired_dbs):
             [(mid, chat, chat.split("@")[0], ts) for mid, chat, ts in rows],
         )
 
-    result = whatsapp.coverage(by_chat=True, after="2026-09-05", chat_jid=[ALICE, BOB])
+    result = whatsapp.coverage(by_chat=True, after="2026-09-05", chat_jid=[ALICE, BOB, FAMILY])
     by_jid = {item["chat_jid"]: item for item in result["items"]}
-    assert [item["chat_jid"] for item in result["items"]] == [BOB, ALICE]
-    # ...even though Alice holds fewer messages inside the window than Bob.
-    assert by_jid[ALICE]["messages"] == 1 and by_jid[BOB]["messages"] == 2
-    assert by_jid[ALICE]["stub_only"] is False
+    assert [item["chat_jid"] for item in result["items"]] == [FAMILY, BOB, ALICE]
+    # Alice's 21 stored messages and Family's 5 rank alike — both are "more
+    # than a stub" — and only where their history starts separates them.
+    assert by_jid[ALICE]["messages"] == 1 and by_jid[ALICE]["stub_only"] is False
+    assert by_jid[FAMILY]["messages"] == 4 and by_jid[BOB]["messages"] == 2
 
 
 def test_coverage_by_chat_cursor_ignores_the_order_of_the_chat_list(archive):
@@ -261,6 +270,25 @@ def test_coverage_by_chat_pages_with_a_cursor(archive):
     with pytest.raises(ToolError) as exc:
         whatsapp.coverage(cursor=first["next_cursor"])
     assert exc.value.code == "invalid_argument"
+
+
+def test_coverage_by_chat_rejects_a_mangled_cursor_offset(archive):
+    """A cursor is caller-supplied: a bad offset is invalid_argument, not internal."""
+    scope = {"after": None, "before": None, "chat_jid": None}
+    fingerprint = whatsapp._coverage_fingerprint(scope)
+    for bad in ("2", -1, {"a": 1}, None):
+        cursor = whatsapp.encode_cursor({"k": "coverage_by_chat", "o": bad, "s": fingerprint})
+        with pytest.raises(ToolError) as exc:
+            whatsapp.coverage(by_chat=True, cursor=cursor)
+        assert exc.value.code == "invalid_argument"
+
+
+def test_coverage_validates_limit_even_without_by_chat(archive):
+    """The one argument that would otherwise vanish silently along with by_chat."""
+    for bad in ("lots", None):
+        with pytest.raises(ToolError) as exc:
+            whatsapp.coverage(limit=bad)  # type: ignore[arg-type]
+        assert exc.value.code == "invalid_argument"
 
 
 def test_coverage_by_chat_honours_the_allow_list(archive, monkeypatch):
