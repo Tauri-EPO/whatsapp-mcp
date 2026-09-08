@@ -313,6 +313,18 @@ The compose file names those images, so you choose per host:
   tags the result under the same name, so local changes win until the next
   `docker compose pull`. This is what the README quick start does.
 
+**What the MCP image carries for media.** Besides the static `ffmpeg` binary
+(voice notes), the server image installs Pillow (~21 MB with its bundled codecs)
+and pillow-heif (~26 MB, almost all of it libheif and the HEVC decoders) so
+`read_media` can downscale a photo to ~1568 px before it travels instead of
+shipping 6 MB of base64 into the model's context, and can turn a TIFF, BMP or
+HEIC into something the client renders. Both ship self-contained manylinux
+wheels for `amd64` and `arm64`, so nothing is added to the Debian layer: the
+runtime is still the bare interpreter plus `/app/.venv`. The cost at runtime is
+CPU during the call (a few hundred milliseconds for a 12 MP photo, nothing
+between calls); an image above 64 megapixels is refused rather than decoded, and
+`read_media(max_edge=0)` skips the path entirely and returns the stored bytes.
+
 Each push carries a SLSA provenance attestation and an SBOM
 (`docker buildx imagetools inspect ghcr.io/tauri-epo/whatsapp-mcp-bridge:latest`
 lists them), and the weekly security workflow scans the published images

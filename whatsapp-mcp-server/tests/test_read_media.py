@@ -96,6 +96,11 @@ class TestBlocks:
             "mime": "image/png",
             "bytes": len(PNG),
             "truncated": False,
+            "original_bytes": len(PNG),
+            "original_mime": "image/png",
+            "width": 1,
+            "height": 1,
+            "resized": False,
             "notes": {},
             "resource_link": {
                 "type": "resource_link",
@@ -211,9 +216,18 @@ class TestTypes:
         assert blocks[0].mime_type == "image/png"
         assert _meta(blocks)["mime"] == "image/png"
 
-    def test_an_image_type_no_client_renders_falls_back_to_a_resource(self, store):
-        """image/* is not enough: an ImageContent a client refuses fails the whole call."""
-        assert _blob(media_read.read_media(ALICE, "TIF1")[0])[1] == "image/tiff"
+    def test_bytes_matching_no_image_signature_fall_back_to_a_resource(self, store):
+        """A .tiff whose payload is not one is untyped bytes — and never reaches a decoder."""
+        assert _blob(media_read.read_media(ALICE, "TIF1")[0])[1] == "application/octet-stream"
+
+    def test_two_bytes_of_bmp_magic_are_not_enough(self, store):
+        """`BM` is two bytes; typing on it alone would fail whole calls on a coincidence."""
+        path = _cache(ALICE, "image_20260904_100000_IMG1.jpg", b"BM" + b"\x00" * 30)
+        assert media_read.sniff_image_mime(path) is None
+        assert _blob(media_read.read_media(ALICE, "IMG1")[0])[1] == "application/octet-stream"
+        # A real BMP declares its own length in the header, and that is what decides.
+        path = _cache(ALICE, "image_20260904_100000_IMG1.jpg", b"BM" + (32).to_bytes(4, "little") + b"\x00" * 26)
+        assert media_read.sniff_image_mime(path) == "image/bmp"
 
     def test_the_types_do_not_depend_on_the_platform_s_mime_table(self, monkeypatch):
         """python:3.13-slim has no /etc/mime.types: .docx, .xlsx and .ogg are None there."""
