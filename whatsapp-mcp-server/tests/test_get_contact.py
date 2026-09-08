@@ -127,6 +127,16 @@ def test_get_contact_classifies_a_bare_lid_and_resolves_its_phone(paired_dbs, mo
     assert result["name"] == BOB_PN  # the number behind the LID, never the LID itself
 
 
+def test_get_contact_reports_the_name_the_contact_gave_themselves(paired_dbs, monkeypatch):
+    """`name` is what this account saved; `push_name` is what they call themselves (#280)."""
+    monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
+
+    result = mcp_main.get_contact(identifier=BOB_PN)
+
+    assert result["name"] == "Bob"  # the chat name this account stored
+    assert result["push_name"] == "bobby"  # the name he gave himself
+
+
 def test_get_contact_classifies_an_over_long_bare_number_as_a_lid(paired_dbs, monkeypatch):
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)

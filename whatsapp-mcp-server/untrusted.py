@@ -70,8 +70,11 @@ WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "valu
 # clean one side only and an agent can no longer join a vote to its option.
 # "voters" holds JIDs and stays out.
 #
-# "push_name", "subject" and "recipient_name" are not returned by a decorated
-# tool today; they are here so that the next result shape carrying a name is
+# "push_name" and "sender_push_name" are the name a contact gave themselves,
+# returned since #280 by the contact, chat and message tools — the most
+# attacker-controlled label in the archive, since nobody in this account chose
+# it. "subject" and "recipient_name" are not returned by a decorated tool
+# today; they are here so that the next result shape carrying a name is
 # covered without anyone having to remember this file. Prose keys are *not*
 # here: a group topic and a poll question can legitimately be long, so they are
 # neither capped nor delimited today.
@@ -80,6 +83,7 @@ NAME_KEYS = frozenset(
         "name",
         "chat_name",
         "sender_name",
+        "sender_push_name",
         "sender_display",
         "display",
         "display_name",

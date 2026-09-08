@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 import whatsapp
-from tests.conftest import BOB, BOB_LID, BOB_PN, CARLA
+from tests.conftest import ALICE, BOB, BOB_LID, BOB_PN, CARLA
 
 STRANGER = "5599000000000@s.whatsapp.net"
 UNNAMED_GROUP = "120363000000000009@g.us"
@@ -133,6 +133,38 @@ def test_get_contact_chats_resolves_too(unnamed_chats):
     chats = _by_jid(whatsapp.get_contact_chats(CARLA))
     assert chats[CARLA]["name"] == "Carla Consultoria"
     assert chats[CARLA]["name_source"] == "contacts"
+
+
+def test_push_name_rides_along_with_the_stored_chat_name(unnamed_chats):
+    """The contact's own name is returned even when `name` came from the chat (#280)."""
+    with unnamed_chats.whatsmeow() as conn:
+        conn.execute(
+            "INSERT INTO whatsmeow_contacts VALUES ('me', ?, NULL, 'Alice Saved', 'Ali', NULL)",
+            (ALICE,),
+        )
+    whatsapp._reset_name_cache()
+    chats = _by_jid(whatsapp.list_chats(limit=50))
+
+    assert chats[ALICE]["name"] == "Alice"  # what WhatsApp stored for the conversation
+    assert chats[ALICE]["name_source"] == "chat"  # unchanged by the push name
+    assert chats[ALICE]["push_name"] == "Ali"
+    assert chats[BOB]["name"] == "Bob Silva"  # phone book still wins over the push name
+    assert chats[BOB]["push_name"] == "bobby"
+    assert chats[UNNAMED_GROUP]["push_name"] is None  # groups have no contact entry
+
+
+def test_name_source_says_push_when_only_the_contact_named_themselves(unnamed_chats):
+    with unnamed_chats.whatsmeow() as conn:
+        conn.execute(
+            "INSERT INTO whatsmeow_contacts VALUES ('me', ?, NULL, NULL, 'Alena Lima', NULL)",
+            (STRANGER,),
+        )
+    whatsapp._reset_name_cache()
+    chat = _by_jid(whatsapp.list_chats(limit=50))[STRANGER]
+
+    assert chat["name"] == "Alena Lima"
+    assert chat["name_source"] == "push"  # not the phone book: they named themselves
+    assert chat["push_name"] == "Alena Lima"
 
 
 def test_missing_contact_store_leaves_names_alone(unnamed_chats, monkeypatch, tmp_path):

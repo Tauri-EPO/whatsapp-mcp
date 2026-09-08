@@ -49,6 +49,29 @@ def test_search_contacts_keeps_lids_out_of_phone_number(paired_dbs):
     )
 
 
+def test_search_contacts_finds_the_name_a_contact_gave_themselves(paired_dbs):
+    """A contact saved as "Z Aa" is still found by "Alena" (#280)."""
+    with paired_dbs.whatsmeow() as c:
+        c.execute(
+            "UPDATE whatsmeow_contacts SET full_name = 'Z Aa', push_name = 'Alena Lima' WHERE their_jid = ?", (BOB,)
+        )
+    (row,) = whatsapp.search_contacts("alena")
+    assert row["jid"] == BOB
+    assert row["name"] == "Z Aa"  # what this account saved them as, unchanged
+    assert row["push_name"] == "Alena Lima"
+    assert row["matched"] == "push_name"
+
+
+def test_search_contacts_reports_which_field_matched(paired_dbs):
+    (by_name,) = whatsapp.search_contacts("bob")
+    assert (by_name["matched"], by_name["push_name"]) == ("name", "bobby")
+    by_digits = whatsapp.search_contacts("5511999999999")
+    assert {row["matched"] for row in by_digits} == {"jid"}
+    (by_business,) = whatsapp.search_contacts("consultoria")
+    # business_name matched, and it is the name shown, so nothing is hidden.
+    assert by_business["matched"] == "business_name"
+
+
 def test_search_contacts_whatsmeow_only_contact_uses_name_fallback_chain(paired_dbs):
     rows = whatsapp.search_contacts("consultoria")
     assert _jids(rows) == [CARLA]
@@ -164,6 +187,30 @@ def test_msg_to_dict_never_reports_an_unresolved_lid_as_a_phone_or_a_name(paired
     assert row["sender_display"] == f"{UNKNOWN_LID}@lid"
 
 
+def test_msg_to_dict_reports_the_push_name_beside_the_name(paired_dbs):
+    """Both facts, not one collapsed string (#280)."""
+    row = whatsapp.msg_to_dict(_lid_message(BOB_LID))
+    assert row["sender_name"] == "Bob Silva"  # the phone book
+    assert row["sender_push_name"] == "bobby"  # what he calls himself
+    assert whatsapp.msg_to_dict(_lid_message(UNKNOWN_LID))["sender_push_name"] is None
+
+
+def test_msg_to_dict_page_resolves_push_names_in_one_query(paired_dbs, monkeypatch):
+    executed: list[str] = []
+    real = whatsapp._connect_whatsmeow_db
+
+    def recording():
+        conn = real()
+        conn.set_trace_callback(executed.append)
+        return conn
+
+    messages = [_lid_message(BOB_LID), _lid_message(f"{BOB_LID}@lid")] * 25
+    monkeypatch.setattr(whatsapp, "_connect_whatsmeow_db", recording)
+    rows = whatsapp.msgs_to_dicts(messages)
+    assert {row["sender_push_name"] for row in rows} == {"bobby"}
+    assert len([q for q in executed if "whatsmeow_contacts" in q]) == 1, executed
+
+
 def test_msg_to_dict_page_shares_one_sender_lookup(paired_dbs, monkeypatch):
     counts = {"n": 0}
     real = whatsapp._connect_whatsmeow_db
@@ -210,10 +257,42 @@ def test_contact_names_prefer_full_then_push_then_first(paired_dbs):
     assert whatsapp._contact_names([BOB]) == {BOB: "Bob"}
 
 
+def test_contact_profiles_keep_the_push_name_beside_the_name(paired_dbs):
+    """Same `name` as before, plus the fact it used to hide (#280)."""
+    assert whatsapp.contact_profile(BOB) == ("Bob Silva", "bobby", "contacts")
+    assert whatsapp.contact_profile(CARLA) == ("Carla Consultoria", None, "contacts")
+    assert whatsapp.contact_profile("999@lid") == (None, None, "")  # nobody
+    with paired_dbs.whatsmeow() as c:
+        c.execute("UPDATE whatsmeow_contacts SET full_name = NULL WHERE their_jid = ?", (BOB,))
+    whatsapp._reset_name_cache()
+    # The phone book has nothing, so the name shown is his own: source says so.
+    assert whatsapp.contact_profile(BOB) == ("bobby", "bobby", "push")
+
+
+def test_a_name_that_is_just_the_number_is_skipped_field_by_field(paired_dbs):
+    """One numeric field must not hide the real name in the next one (#280)."""
+    with paired_dbs.whatsmeow() as c:
+        c.execute("UPDATE whatsmeow_contacts SET push_name = ? WHERE their_jid = ?", ("+55 11 8888-8888", BOB))
+    whatsapp._reset_name_cache()
+    assert whatsapp.contact_profile(BOB) == ("Bob Silva", None, "contacts")  # digits are not a push name
+
+    with paired_dbs.whatsmeow() as c:
+        c.execute(
+            "UPDATE whatsmeow_contacts SET full_name = '5511888888888', push_name = 'Bob' WHERE their_jid = ?",
+            (BOB,),
+        )
+    whatsapp._reset_name_cache()
+    # The phone book entry is just the number, so his own name is what is left.
+    assert whatsapp.contact_profile(BOB) == ("Bob", "Bob", "push")
+
+
 def test_a_name_that_is_just_the_number_identifies_nobody(paired_dbs):
     """get_sender_name and the chat-row fallback now agree on that (#257)."""
     with paired_dbs.whatsmeow() as c:
-        c.execute("UPDATE whatsmeow_contacts SET full_name = ? WHERE their_jid = ?", ("+55 11 8888-8888", BOB))
+        c.execute(
+            "UPDATE whatsmeow_contacts SET full_name = ?, push_name = ?, first_name = NULL WHERE their_jid = ?",
+            ("+55 11 8888-8888", "5511888888888", BOB),
+        )
     whatsapp._reset_name_cache()
     assert whatsapp._contact_names([f"{BOB_LID}@lid"]) == {}
     assert whatsapp.get_sender_name(f"{BOB_LID}@lid") == f"{BOB_LID}@lid"
