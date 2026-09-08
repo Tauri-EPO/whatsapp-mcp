@@ -4159,11 +4159,12 @@ def list_unread(
               {filter_clause}
             """
         # Per chat, not per row: the mark is compared with the chat's newest
-        # unread message, which set_anchor computes under these same bounds.
+        # unread message, which set_anchor computes under these same bounds. Only
+        # the two timestamp notes need it — a mute filter alone reads no message.
         triage_clause, triage_params = _install_triage_filter(
             conn, hide_handled, exclude_muted, include_snoozed, anchor="t.anchor"
         )
-        if triage_clause:
+        if triage_clause and (hide_handled or not include_snoozed):
             _set_triage_anchor(conn, unread_where, (*policy_params, *filter_params))
         where_params: tuple[Any, ...] = (*policy_params, *filter_params, *triage_params)
         if count_only:
@@ -4281,19 +4282,27 @@ def list_unanswered(
 
 
 def _min_messages_clause(min_messages: int) -> tuple[str, list[Any]]:
-    """Chats holding at least N stored messages, `chats` in scope.
+    """Chats where at least N messages were spoken, `chats` in scope.
 
-    The whole stored conversation, inbound and outbound alike: what this filter
-    is for is the number that never became one — a broadcast that said its one
-    thing and left. 0 and 1 are no-ops, since a chat with no message never
-    reaches these lists anyway.
+    Inbound and outbound alike — what this filter is for is the number that
+    never became a conversation, and both sides make one. Reactions, poll votes
+    and revoked rows do not count, the same rule the rest of the tool applies:
+    a 👍 on a one-line delivery notice must not turn it into a conversation.
+    0 and 1 are no-ops, since a chat with nothing said never reaches these lists.
+
+    Counted through a bounded subquery so a 200k-message group costs the
+    threshold, not the group: the question is "at least N", never "how many".
     """
     threshold = int(min_messages or 0)
     if threshold < 0:
         raise ToolError("invalid_argument", f"min_messages must be 0 or more, got {min_messages!r}")
     if threshold < 2:
         return "", []
-    return "AND (SELECT COUNT(*) FROM messages stored WHERE stored.chat_jid = chats.jid) >= ?", [threshold]
+    clause = (
+        "AND (SELECT COUNT(*) FROM (SELECT 1 FROM messages stored"
+        f" WHERE stored.chat_jid = chats.jid AND {_spoken_filter('stored')} LIMIT ?)) >= ?"
+    )
+    return clause, [threshold, threshold]
 
 
 def _unanswered_from_where(
@@ -4602,8 +4611,8 @@ def list_unanswered_page(
     groups whose mention is still waiting even though the group kept talking
     after it — the rows min_age_hours would otherwise hide.
 
-    min_messages drops the chats holding fewer than N stored messages, the
-    one-line broadcasts that were never a conversation.
+    min_messages drops the chats where fewer than N messages were ever spoken,
+    the one-line broadcasts that were never a conversation.
     """
     limit = page_size(limit, UNANSWERED_MAX_LIMIT)
     cursor_state = decode_cursor(cursor, "unanswered")

@@ -1263,7 +1263,8 @@ notes have `summary` / `tags` / `keep`:
 | `snooze_until` | chat | ISO timestamp before which the target should not resurface |
 
 `mute`, `handled_at` and `snooze_until` are not decoration: `list_unanswered`
-reads all three by default and `list_unread` reads `mute` and `snooze_until`, and
+reads all three by default, `list_unread` reads all three too (`mute` and
+`snooze_until` by default, `handled_at` only with `hide_handled=True`), and
 [`mark_handled` / `snooze`](#triage-state) write the last two for you. A `handled_at` or `snooze_until` value that is not a
 readable timestamp is ignored rather than guessed at, so a hand-written note can
 never make a chat disappear; clearing one (`annotate(..., "")`) brings the chat
@@ -1475,8 +1476,9 @@ about surfacing rather than about reading, so they default on, exactly as in
 `list_unanswered`; a message that arrives after a snooze was set lifts it here
 too. Whichever filter applies, it removes the **whole chat**: the mark is
 compared with the chat's newest unread message, so a chat is returned with all
-its unread rows or with none, and `count_only`, `limit_chats` and `total_unread`
-all agree with what a page shows.
+its unread rows or with none — never with the older half of them missing. It is
+applied in SQL before `limit_chats` cuts the list, so a hidden chat never
+occupies a slot and `count_only` counts exactly the chats a page would show.
 
 ### `list_unanswered`
 
@@ -1505,7 +1507,7 @@ Chats with no stored messages never appear.
 - `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
 - `include_snoozed` (optional, default false): also return chats whose `snooze_until` note is still in the future
 - `ignore_closing_messages` (optional, default false): skip chats whose last inbound message only closes the conversation — a sticker, or one of `ok`, `obrigado`, `obrigada`, `valeu`, `blz`, `thanks`, `👍`, `🙏` (compared after trimming and dropping trailing `.` / `!`)
-- `min_messages` (optional, default 0): only chats holding at least this many stored messages, counted in both directions. `min_messages=2` drops the numbers that said one thing and were never a conversation — a delivery notice, a confirmation code, a broadcast. A negative value is an `invalid_argument` error; 0 and 1 change nothing, since a chat with no message never appears here anyway
+- `min_messages` (optional, default 0): only chats where at least this many messages were **spoken**, counted in both directions. `min_messages=2` drops the numbers that said one thing and were never a conversation — a delivery notice, a confirmation code, a broadcast. Reactions, poll votes and revoked messages do not count, the same rule the rest of this tool applies, so a 👍 on a one-line notice does not promote it. A negative value is an `invalid_argument` error; 0 and 1 change nothing, since a chat with nothing said never appears here anyway
 
 The first three read the [triage state](#triage-state) an agent writes back. They
 default to *on* because the whole point of recording a decision is that the next
@@ -1515,8 +1517,10 @@ the full backlog back when you want to audit it.
 
 All five filters are applied in SQL before the page is cut, so `count_only`,
 `limit` and the cursor all agree with each other: a hidden chat never occupies a
-slot in a page. `min_messages` bounds the group-mention stream below too, so a
-group cannot come back through that door under the floor.
+slot in a page. They bound the ordinary "they spoke last" rule; of the five, only
+`exclude_groups` and `min_messages` also bound the group-mention stream below, so
+a group that stream *adds back* can still carry a triage note or a closing
+message.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:

@@ -1036,11 +1036,13 @@ def list_unanswered(
         ignore_closing_messages: Also skip chats whose last inbound message only
                 closes the conversation — a sticker, or one of "ok", "obrigado",
                 "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False)
-        min_messages: Only chats holding at least this many stored messages, in
-                either direction (default 0, no bound). min_messages=2 drops the
-                numbers that said one thing and were never a conversation — a
-                delivery notice, a code, a broadcast. Counted before the page is
-                cut, so count_only and the cursor agree with it.
+        min_messages: Only chats where at least this many messages were spoken,
+                in either direction (default 0, no bound). min_messages=2 drops
+                the numbers that said one thing and were never a conversation — a
+                delivery notice, a code, a broadcast. Reactions, poll votes and
+                revoked rows do not count, so a 👍 on a one-line notice does not
+                promote it. Applied before the page is cut, so count_only and the
+                cursor agree with it.
         include_group_mentions: Answer the group question too. In a group "the
                 last message is inbound" is always true and means nothing; what
                 waits for you is a mention nobody answered. Each row then carries
