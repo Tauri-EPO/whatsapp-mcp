@@ -23,8 +23,11 @@ re-pairing with the rest of notes.db.
 
 The filter itself is SQL. ``install_filter`` copies the current triage notes into
 a temp table on the caller's ``messages.db`` connection, which lets
-``list_unanswered`` and ``count_unanswered`` apply it *before* LIMIT: pagination
-and ``count_only`` stay consistent with the rows returned. The copy is also where
+``list_unanswered``, ``count_unanswered`` and ``list_unread`` apply it *before*
+LIMIT: pagination and ``count_only`` stay consistent with the rows returned. The
+message a mark is compared against is the caller's (``anchor``): the chat's
+newest inbound row in ``list_unanswered``, its newest *unread* row in
+``list_unread``, which ``set_anchor`` computes per chat. The copy is also where
 the two timestamp notes are normalised into the spelling messages.timestamp uses,
 so the comparison is a plain string comparison in SQL (a note written as
 ``2026-09-07T20:00:00+00:00`` must not sort after ``2026-09-07 21:00:00+00:00``),
@@ -35,6 +38,7 @@ under every spelling — notes are stored canonically, chat rows are not.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -206,12 +210,21 @@ def install_filter(
     hide_handled: bool,
     exclude_muted: bool,
     include_snoozed: bool,
+    anchor: str = "messages.timestamp",
 ) -> tuple[str, list[Any]]:
     """Copy the triage notes onto ``conn`` and return the SQL that applies them.
 
-    The returned fragment is AND-prefixed and expects ``chats`` and ``messages``
-    in scope, ``messages`` being the chat's newest inbound row. Empty when no
-    filter is active or when nothing has been marked yet.
+    The returned fragment is AND-prefixed and expects ``chats`` in scope. Empty
+    when no filter is active or when nothing has been marked yet.
+
+    ``anchor`` is the SQL expression for the message the two timestamp notes are
+    compared with — the message that must bring a marked chat back. In
+    ``list_unanswered`` that is the row the query is already built on, the chat's
+    newest inbound message. ``list_unread`` groups several rows per chat and has
+    no such row in scope, so it fills ``t.anchor`` with ``set_anchor`` first and
+    names that column here; the filter then applies per chat rather than per
+    message, which is what keeps ``count_only`` and ``limit_chats`` agreeing with
+    the rows returned.
 
     A temp table rather than an ``ATTACH``ed join because the two timestamp notes
     have to be normalised into the spelling ``messages.timestamp`` uses before they
@@ -236,7 +249,7 @@ def install_filter(
         return "", []
     conn.execute(
         f"CREATE TEMP TABLE IF NOT EXISTS {_TABLE} (jid TEXT PRIMARY KEY, handled_at TEXT,"
-        " snooze_until TEXT, snoozed_at TEXT, muted INTEGER NOT NULL DEFAULT 0)"
+        " snooze_until TEXT, snoozed_at TEXT, muted INTEGER NOT NULL DEFAULT 0, anchor TEXT)"
     )
     conn.execute(f"DELETE FROM temp.{_TABLE}")
     conn.executemany(
@@ -248,11 +261,31 @@ def install_filter(
     if hide_handled:
         # ">=", not ">": the message that arrived in the same second as the note
         # is the one the agent had just read when it marked the chat handled.
-        tests.append("(t.handled_at IS NOT NULL AND t.handled_at >= messages.timestamp)")
+        tests.append(f"(t.handled_at IS NOT NULL AND t.handled_at >= {anchor})")
     if not include_snoozed:
-        tests.append("(t.snooze_until IS NOT NULL AND t.snooze_until > ? AND t.snoozed_at >= messages.timestamp)")
+        tests.append(f"(t.snooze_until IS NOT NULL AND t.snooze_until > ? AND t.snoozed_at >= {anchor})")
         params.append(whatsapp.timestamp_bound(datetime.now(UTC)))
     if exclude_muted:
         tests.append("t.muted = 1")
     clause = f"AND NOT EXISTS (SELECT 1 FROM temp.{_TABLE} t WHERE t.jid = chats.jid AND ({' OR '.join(tests)}))"
     return clause, params
+
+
+def set_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any]) -> None:
+    """Record each marked chat's newest matching message, for ``anchor="t.anchor"``.
+
+    ``from_where`` is the caller's own FROM/WHERE over ``messages`` joined to
+    ``chats``, AND-extensible; only the chats ``install_filter`` just marked are
+    read, so the cost is bounded by the note table rather than by the mailbox.
+
+    Call it after ``install_filter`` and only when that returned a clause — with
+    no marked chat there is no temp table to fill. A chat with no matching
+    message keeps a NULL anchor, which reads as "nothing to compare": the two
+    timestamp notes cannot hide it, ``mute`` still can.
+    """
+    rows = conn.execute(
+        f"SELECT chats.jid, MAX(messages.timestamp) {from_where}"
+        f" AND chats.jid IN (SELECT jid FROM temp.{_TABLE}) GROUP BY chats.jid",
+        tuple(params),
+    ).fetchall()
+    conn.executemany(f"UPDATE temp.{_TABLE} SET anchor = ? WHERE jid = ?", [(newest, jid) for jid, newest in rows])

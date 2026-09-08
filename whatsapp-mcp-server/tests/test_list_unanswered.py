@@ -101,6 +101,49 @@ def test_min_age_hours_skips_live_conversations(db):
     assert main.list_unanswered(min_age_hours=-1)["error"]["code"] == "invalid_argument"
 
 
+def test_min_messages_drops_the_one_line_broadcasts(db):
+    """Chats that never were a conversation (issue #336): GROUP and FRESH hold one row."""
+    # WAITING's two rows are one each way: the floor counts the conversation, not
+    # who spoke. REACTED stores three rows, but only c1 was ever said — a reaction
+    # and a revoked message do not count here either.
+    assert _jids(main.list_unanswered(min_messages=2)) == [WAITING]
+    assert _jids(main.list_unanswered(min_messages=1)) == _jids(main.list_unanswered())
+    assert main.list_unanswered(min_messages=-1)["error"]["code"] == "invalid_argument"
+
+
+def test_a_reaction_does_not_promote_a_one_line_notice(db):
+    """The 👍 you left on a delivery notice must not make it a conversation."""
+    with sqlite3.connect(db) as c:
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type)"
+            " VALUES ('d2', ?, 'me', '👍', ?, 1, 'reaction')",
+            (FRESH, _stamp(minutes=29)),
+        )
+    assert FRESH in _jids(main.list_unanswered())  # still waiting, the reaction is not an answer
+    assert FRESH not in _jids(main.list_unanswered(min_messages=2))
+
+
+def test_min_messages_holds_for_the_count_and_the_cursor(db):
+    with sqlite3.connect(db) as c:  # a second spoken row, so two chats clear the floor
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)"
+            " VALUES ('g0', ?, 'someone', 'oi', ?, 0)",
+            (GROUP, _stamp(days=6)),
+        )
+    assert main.list_unanswered(count_only=True, min_messages=2)["count"] == 2
+
+    seen, cursor = [], None
+    while True:
+        page = main.list_unanswered(limit=1, min_messages=2, cursor=cursor)
+        seen.extend(_jids(page))
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+        assert len(seen) < 5
+    # FRESH sorts first unfiltered: no page is spent on a chat the floor removed.
+    assert seen == [WAITING, GROUP]
+
+
 def test_since_bounds_the_last_inbound_message(db):
     recent = (datetime.now(UTC) - timedelta(days=3)).isoformat()
     assert _jids(main.list_unanswered(since=recent)) == [FRESH, WAITING]

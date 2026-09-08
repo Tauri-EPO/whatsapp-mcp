@@ -888,6 +888,9 @@ def list_unread(
     omit_nulls: bool = False,
     max_content_chars: int | None = None,
     count_only: bool = False,
+    hide_handled: bool = False,
+    exclude_muted: bool = True,
+    include_snoozed: bool = False,
 ) -> dict[str, Any]:
     """What is waiting for me: chats with unread inbound messages and their newest unread rows.
 
@@ -899,6 +902,12 @@ def list_unread(
     Busy accounts are dominated by group chatter nobody reads: pass
     exclude_groups=True to see only direct conversations, and max_age_days to
     ignore a backlog older than a few days.
+
+    The triage notes are honoured per chat: a muted or snoozed chat leaves the
+    list whole, with every unread row it holds, and comes back whole. Chats you
+    marked handled are *kept* by default, unlike in list_unanswered — mark_handled
+    writes no read receipt, so those messages are still unread and this is the
+    list you pick what to mark_messages_read from. hide_handled=True drops them.
 
     Args:
         limit_chats: Max chats to return, most recently active first (default 20, max 100)
@@ -918,6 +927,12 @@ def list_unread(
         count_only: Return {"count": N, "chats_with_unread": N} over every matching
                 chat — limit_chats/limit_per_chat and the shaping arguments do not
                 apply, and no message row is read. Combining it with fields is an error.
+        hide_handled: Skip chats whose `handled_at` note is at or after their newest
+                unread message (default False — they are still unread)
+        exclude_muted: Skip chats whose `mute` note says yes (default True)
+        include_snoozed: Show chats whose `snooze_until` note is still in the future
+                too (default False). A message that arrived after the snooze was set
+                lifts it, here as in list_unanswered.
 
     Returns:
         {"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread,
@@ -935,6 +950,9 @@ def list_unread(
         count_only=count_only,
         chat_jid=chat_jid,
         exclude_chat_jid=exclude_chat_jid,
+        hide_handled=hide_handled,
+        exclude_muted=exclude_muted,
+        include_snoozed=include_snoozed,
     )
     if not count_only:
         attach_notes(unread["chats"], "chat", lambda row: row["chat_jid"])
@@ -963,6 +981,7 @@ def list_unanswered(
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
     include_group_mentions: bool = False,
+    min_messages: int = 0,
 ) -> dict[str, Any]:
     """Chats where the other side spoke last: conversations waiting for a reply from you.
 
@@ -1017,6 +1036,13 @@ def list_unanswered(
         ignore_closing_messages: Also skip chats whose last inbound message only
                 closes the conversation — a sticker, or one of "ok", "obrigado",
                 "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False)
+        min_messages: Only chats where at least this many messages were spoken,
+                in either direction (default 0, no bound). min_messages=2 drops
+                the numbers that said one thing and were never a conversation — a
+                delivery notice, a code, a broadcast. Reactions, poll votes and
+                revoked rows do not count, so a 👍 on a one-line notice does not
+                promote it. Applied before the page is cut, so count_only and the
+                cursor agree with it.
         include_group_mentions: Answer the group question too. In a group "the
                 last message is inbound" is always true and means nothing; what
                 waits for you is a mention nobody answered. Each row then carries
@@ -1048,6 +1074,7 @@ def list_unanswered(
                 exclude_muted=exclude_muted,
                 include_snoozed=include_snoozed,
                 ignore_closing_messages=ignore_closing_messages,
+                min_messages=min_messages,
             )
         }
     result = whatsapp_list_unanswered(
@@ -1064,6 +1091,7 @@ def list_unanswered(
         include_snoozed=include_snoozed,
         ignore_closing_messages=ignore_closing_messages,
         include_group_mentions=include_group_mentions,
+        min_messages=min_messages,
     ).to_dict()
     attach_notes(result["items"], "chat", lambda row: row["jid"])
     known = UNANSWERED_MENTION_FIELDS if include_group_mentions else UNANSWERED_FIELDS
