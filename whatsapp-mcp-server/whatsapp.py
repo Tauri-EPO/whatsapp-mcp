@@ -905,6 +905,31 @@ def _spoken_filter(alias: str) -> str:
     )
 
 
+# A conversation that ends on "ok" or a sticker is closed, not waiting. The list
+# is short and literal on purpose: a heuristic that guesses is worse than one an
+# operator can read, and docs/TOOLS.md publishes exactly these words.
+CLOSING_MESSAGES: tuple[str, ...] = ("ok", "obrigado", "obrigada", "valeu", "blz", "thanks", "👍", "🙏")
+
+
+def _closing_message_clause(alias: str) -> tuple[str, list[str]]:
+    """Rows that acknowledge rather than ask: a sticker, or one of CLOSING_MESSAGES.
+
+    Reactions and poll votes are already excluded by `_spoken_filter`. Trailing
+    "." and "!" are ignored so "ok!" reads the same as "ok"; SQLite's lower() is
+    ASCII-only, which is all these words need and leaves the emoji untouched.
+
+    Both columns are nullable and the caller negates this clause, so `IS` and
+    COALESCE keep it two-valued: `NOT NULL` is NULL, which would drop every plain
+    text message instead of keeping it.
+    """
+    placeholders = ",".join("?" * len(CLOSING_MESSAGES))
+    clause = (
+        f"({alias}.media_type IS 'sticker'"
+        f" OR rtrim(lower(trim(COALESCE({alias}.content, ''))), '.!') IN ({placeholders}))"
+    )
+    return clause, list(CLOSING_MESSAGES)
+
+
 def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = False) -> str:
     """Deterministic single-row join to the chat's newest stored message.
 
@@ -1131,6 +1156,40 @@ def _placeholders(values: list[str]) -> str:
 
 def _in_chunks(values: list[str]) -> list[list[str]]:
     return [values[i : i + _SQL_IN_CHUNK] for i in range(0, len(values), _SQL_IN_CHUNK)]
+
+
+def lid_map_counterparts(users: Sequence[str]) -> dict[str, str]:
+    """{bare user part: the same person's user part in the other namespace}, in one query.
+
+    The batched form of what `_sender_aliases` answers one value at a time: a
+    filter that has to resolve a few thousand stored JIDs must not open a
+    connection per value. Both directions are returned; users the LID map has
+    not paired are absent, and a missing or locked whatsapp.db yields {} rather
+    than an error — a caller that cannot see the pairing degrades to the single
+    spelling it was given.
+    """
+    wanted = sorted({user for user in users if user})
+    if not wanted or not os.path.isfile(WHATSMEOW_DB_PATH):
+        return {}
+    pairs: dict[str, str] = {}
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            for chunk in _in_chunks(wanted):
+                marks = _placeholders(chunk)
+                rows = conn.execute(
+                    f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({marks}) OR pn IN ({marks})",
+                    [*chunk, *chunk],
+                ).fetchall()
+                for lid, pn in rows:
+                    # Equal parts are the map repeating one identifier, not a pair.
+                    if lid and pn and lid != pn:
+                        pairs[lid], pairs[pn] = pn, lid
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.debug("lid-map batch failed: %s", e)
+    return pairs
 
 
 def _apply_name_fallback(chats: list[Chat]) -> None:
@@ -3512,6 +3571,10 @@ def list_unanswered(
     include_last_message: bool = True,
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
+    hide_handled: bool = True,
+    exclude_muted: bool = True,
+    include_snoozed: bool = False,
+    ignore_closing_messages: bool = False,
 ) -> list[dict[str, Any]]:
     """Items of one page of list_unanswered_page."""
     return list_unanswered_page(
@@ -3522,6 +3585,10 @@ def list_unanswered(
         include_last_message=include_last_message,
         chat_jid=chat_jid,
         exclude_chat_jid=exclude_chat_jid,
+        hide_handled=hide_handled,
+        exclude_muted=exclude_muted,
+        include_snoozed=include_snoozed,
+        ignore_closing_messages=ignore_closing_messages,
     ).items
 
 
@@ -3531,6 +3598,7 @@ def _unanswered_from_where(
     min_age_hours: float,
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
+    ignore_closing_messages: bool = False,
 ) -> tuple[str, list[Any]]:
     """FROM/WHERE shared by the list_unanswered page and its count."""
     filter_clause, filter_params = unread_filters(since, None, exclude_groups, chat_jid, exclude_chat_jid)
@@ -3541,15 +3609,31 @@ def _unanswered_from_where(
     if hours > 0:
         age_clause = "AND messages.timestamp <= ?"
         age_params = [timestamp_bound(datetime.now(UTC) - timedelta(hours=hours))]
+    closing_clause, closing_params = "", []
+    if ignore_closing_messages:
+        closing, closing_params = _closing_message_clause("messages")
+        closing_clause = f"AND NOT {closing}"
     policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
     sql = f"""
             FROM chats
             {_last_message_join("chats", "messages", spoken_only=True)}
             WHERE messages.is_from_me = 0
               AND {policy_clause}
-              {filter_clause} {age_clause}
+              {filter_clause} {age_clause} {closing_clause}
             """
-    return sql, [*policy_params, *filter_params, *age_params]
+    return sql, [*policy_params, *filter_params, *age_params, *closing_params]
+
+
+def _install_triage_filter(
+    conn: sqlite3.Connection, hide_handled: bool, exclude_muted: bool, include_snoozed: bool
+) -> tuple[str, list[Any]]:
+    """The handled/snoozed/muted predicate, applied before LIMIT so counts and pages agree.
+
+    triage imports this module, so the import lives here rather than at the top.
+    """
+    from triage import install_filter
+
+    return install_filter(conn, hide_handled, exclude_muted, include_snoozed)
 
 
 def count_unanswered(
@@ -3558,13 +3642,20 @@ def count_unanswered(
     min_age_hours: float = 0,
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
+    hide_handled: bool = True,
+    exclude_muted: bool = True,
+    include_snoozed: bool = False,
+    ignore_closing_messages: bool = False,
 ) -> int:
     """How many chats are waiting for a reply, without returning any of them."""
-    from_where, params = _unanswered_from_where(since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid)
+    from_where, params = _unanswered_from_where(
+        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages
+    )
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) {from_where}", tuple(params))
+        triage_clause, triage_params = _install_triage_filter(conn, hide_handled, exclude_muted, include_snoozed)
+        cur.execute(f"SELECT COUNT(*) {from_where} {triage_clause}", (*params, *triage_params))
         row = cur.fetchone()
         return int(row[0]) if row else 0
     except sqlite3.Error as e:
@@ -3584,6 +3675,10 @@ def list_unanswered_page(
     cursor: str | None = None,
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
+    hide_handled: bool = True,
+    exclude_muted: bool = True,
+    include_snoozed: bool = False,
+    ignore_closing_messages: bool = False,
 ) -> PageResult:
     """Chats whose newest stored message is inbound: the other side spoke last.
 
@@ -3593,15 +3688,23 @@ def list_unanswered_page(
     speaking, so a thumbs-up from you does not hide a chat and a thumbs-up from
     them does not create one. Newest inbound message first. Honours
     WHATSAPP_ALLOWED_CHATS.
+
+    The triage notes an agent writes back (`triage.py`) are honoured by default:
+    a chat marked handled after its last inbound message, one snoozed into the
+    future, and one muted are all left out — see `install_filter` for why that
+    happens in SQL rather than on the page.
     """
     limit = max(1, min(int(limit), 200))
     cursor_state = decode_cursor(cursor, "unanswered")
-    from_where, where_params = _unanswered_from_where(since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid)
+    from_where, where_params = _unanswered_from_where(
+        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages
+    )
 
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
         read_marker = _last_read_time_select(cur, "chats")
+        triage_clause, triage_params = _install_triage_filter(conn, hide_handled, exclude_muted, include_snoozed)
         # Same contract as list_chats: the last message is always joined
         # because is_from_me is the filter, its content is optional.
         if include_last_message:
@@ -3619,11 +3722,11 @@ def list_unanswered_page(
                    {last_message_select},
                    messages.is_from_me, {read_marker},
                    messages.id IS NOT NULL, messages.timestamp
-            {from_where} {keyset_clause}
+            {from_where} {triage_clause} {keyset_clause}
             ORDER BY messages.timestamp DESC, chats.jid ASC
             LIMIT ?
             """,
-            (*where_params, *keyset_params, limit + 1),
+            (*where_params, *triage_params, *keyset_params, limit + 1),
         )
         rows = cur.fetchall()
         has_more = len(rows) > limit

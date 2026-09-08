@@ -87,6 +87,10 @@ EXPECTED_TRUSTED = {
     "coverage",
     "request_history",
     "annotate_media",
+    # Triage state: they echo the timestamp they just wrote, nothing a third
+    # party authored — the `log` line the caller passes comes back only as a flag.
+    "mark_handled",
+    "snooze",
     "purge_media",
     "send_message",
     "send_file",

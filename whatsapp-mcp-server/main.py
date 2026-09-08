@@ -41,6 +41,8 @@ from tool_policy import (
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
 from transcribe_worker import install_ingest_worker
+from triage import mark_handled as triage_mark_handled
+from triage import snooze as triage_snooze
 from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
@@ -889,6 +891,10 @@ def list_unanswered(
     fields: list[str] | None = None,
     omit_nulls: bool = False,
     count_only: bool = False,
+    hide_handled: bool = True,
+    exclude_muted: bool = True,
+    include_snoozed: bool = False,
+    ignore_closing_messages: bool = False,
 ) -> dict[str, Any]:
     """Chats where the other side spoke last: conversations waiting for a reply from you.
 
@@ -901,6 +907,13 @@ def list_unanswered(
     Reactions, poll votes and revoked messages do not count as speaking: a thumbs-up
     from you does not hide a chat, and one from them does not create one. A chat with
     no stored messages never appears.
+
+    Feed your decisions back or the same backlog comes round every run: mark_handled
+    once a chat is dealt with (including by phone call or by somebody else), snooze
+    the ones to chase later, and annotate(..., "mute", "yes") the sources nobody is
+    waiting on. Those three notes are honoured here by default — a chat is only ever
+    hidden because you marked it, so a store with no triage notes is unaffected — and
+    a *new* inbound message overrides handled_at and brings the chat straight back.
 
     Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
     next_cursor back as `cursor` for the following page.
@@ -927,6 +940,14 @@ def list_unanswered(
         count_only: Return {"count": N}, how many chats are waiting, for exactly
                 these filters and no rows. Combining it with fields or cursor is
                 an error; limit is ignored.
+        hide_handled: Skip chats whose `handled_at` note is at or after their last
+                inbound message (default True). False shows the whole backlog again.
+        exclude_muted: Skip chats whose `mute` note says yes (default True)
+        include_snoozed: Show chats whose `snooze_until` note is still in the
+                future too (default False)
+        ignore_closing_messages: Also skip chats whose last inbound message only
+                closes the conversation — a sticker, or one of "ok", "obrigado",
+                "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False)
 
     Returns:
         Chat dictionaries in the list_chats shape (jid, name, push_name, name_source,
@@ -944,6 +965,10 @@ def list_unanswered(
                 min_age_hours=min_age_hours,
                 chat_jid=chat_jid,
                 exclude_chat_jid=exclude_chat_jid,
+                hide_handled=hide_handled,
+                exclude_muted=exclude_muted,
+                include_snoozed=include_snoozed,
+                ignore_closing_messages=ignore_closing_messages,
             )
         }
     result = whatsapp_list_unanswered(
@@ -955,6 +980,10 @@ def list_unanswered(
         chat_jid=chat_jid,
         exclude_chat_jid=exclude_chat_jid,
         cursor=cursor,
+        hide_handled=hide_handled,
+        exclude_muted=exclude_muted,
+        include_snoozed=include_snoozed,
+        ignore_closing_messages=ignore_closing_messages,
     ).to_dict()
     attach_notes(result["items"], "chat", lambda row: row["jid"])
     result["items"] = _shape_chats(result["items"], fields, omit_nulls, known=UNANSWERED_FIELDS)
@@ -1830,6 +1859,63 @@ def compact(target_type: str, target_id: str, key: str, value: str) -> dict[str,
         {"success": true, ..., "replaced", "replaced_at", "version"} like annotate
     """
     return notes_compact(target_type, target_id, key, value)
+
+
+@mcp.tool()
+@tool_errors
+def mark_handled(chat_jid: str, note: str = "") -> dict[str, Any]:
+    """Mark a conversation as dealt with, so list_unanswered stops repeating it.
+
+    The other half of the triage loop: list_unanswered tells you who is waiting,
+    this records the decision you took. Nothing is sent — the other side sees no
+    read receipt and no message — and nothing is deleted; it writes the chat note
+    `handled_at`, which list_unanswered then compares against the chat's last
+    inbound message. If they write again the chat comes straight back, which is
+    why this is safe to use on anything you consider closed: answered by phone,
+    handled by somebody else, or simply nothing to reply to.
+
+    Use snooze instead when you do mean to come back to it on a date.
+
+    Args:
+        chat_jid: The conversation, as returned by list_unanswered / list_chats
+        note: Optional one-liner appended to the chat's dated `log` note
+              ("called back, she will send the invoice")
+
+    Returns:
+        {"success": true, "chat_jid", "handled_at", "logged", "snooze_cleared"};
+        `handled_at` is the UTC timestamp recorded, and a pending snooze is dropped
+        because handled supersedes it. `denied` when WHATSAPP_ALLOWED_CHATS blocks
+        the chat
+    """
+    return triage_mark_handled(chat_jid, note)
+
+
+@mcp.tool()
+@tool_errors
+def snooze(chat_jid: str, until: str) -> dict[str, Any]:
+    """Hide a conversation from list_unanswered until a date, then let it come back.
+
+    For the ones that are not handled but not now either: "chase the lab on
+    Thursday". Writes the chat note `snooze_until` and sends nothing. The chat
+    reappears by itself once the instant passes — no reminder is scheduled, the
+    triage list simply stops skipping it — and *sooner* if they write in the
+    meantime, because a message newer than the snooze lifts it.
+
+    Clear it early with annotate("chat", chat_jid, "snooze_until", ""), or with
+    mark_handled, which drops a pending snooze along with marking the chat done.
+
+    Args:
+        chat_jid: The conversation, as returned by list_unanswered / list_chats
+        until: ISO-8601 date or timestamp, must be in the future. Read as UTC
+               unless it carries an offset, so a bare date ("2026-09-10") means
+               2026-09-10T00:00:00Z — check your own timezone if you mean a
+               local morning.
+
+    Returns:
+        {"success": true, "chat_jid", "snooze_until"}; `invalid_argument` when the
+        date is unreadable or in the past, `denied` when the chat is not allowed
+    """
+    return triage_snooze(chat_jid, until)
 
 
 @mcp.tool()

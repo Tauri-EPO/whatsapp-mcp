@@ -86,10 +86,12 @@ var unenforcedTools = []string{
 	"list_messages",
 	"list_unanswered",
 	"list_unread",
+	"mark_handled",
 	"message_stats",
 	"search_contacts",
 	"search_media_notes",
 	"search_notes",
+	"snooze",
 	"transcribe_audio",
 }
 
