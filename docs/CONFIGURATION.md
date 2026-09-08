@@ -572,18 +572,26 @@ What to know before turning it on:
   walk comes round; three such failures in a row end the fetching for the newest
   rows or for the walk, whichever was asking, so one round makes at most five
   refused requests.
-- **Media the sender no longer has is recorded once.** WhatsApp media leaves the
-  CDN after a few days, and the bridge then asks the *sender's phone* to
-  re-upload it. When that phone answers "I no longer have it", the file is gone
-  for good: the hash gets a dated `media_unavailable` note, leaves the work list
-  and is never asked for again, and one log line per round says how many were
-  recorded. Those misses cost nothing against the three-strike budget — an
+- **Media that can never arrive is recorded once.** Two causes, one answer from
+  the bridge (`media_unavailable`). WhatsApp media leaves the CDN after a few
+  days, and the bridge then asks the *sender's phone* to re-upload it; that
+  phone can answer "I no longer have it". Or the message was stored without the
+  CDN fields a download needs (`incomplete media information`: history-sync
+  stubs, some forwards) — a media retry hands back a fresh path, never the key
+  the file has to be decrypted with, so there is nothing left to ask for. Either
+  way the file is gone for good: the hash gets a dated `media_unavailable` note
+  naming the cause, leaves the work list and is never asked for again, and one
+  log line per round says how many were recorded. Those misses cost nothing
+  against the three-strike budget — an
   archive full of expired voice notes would otherwise end every round after
   three rows and take days to walk. `coverage().audio.unavailable` counts them
   and they are out of `backlog`, so the backlog reaches zero instead of holding
-  files nothing can ever fetch; `list_media` shows the note and its date. If the
-  phone gets its history back (a restored backup), clear the note with
-  `annotate_media(sha256, "media_unavailable", "")` to ask again.
+  files nothing can ever fetch; `list_media` shows the note and its date. Two
+  things make a recorded miss worth asking about again: the phone getting its
+  history back (a restored backup), and a later history sync (`request_history`)
+  storing the same message with the media information the stub was missing.
+  Clear the note with `annotate_media(sha256, "media_unavailable", "")` to queue
+  the file again — a transcript obtained any other way clears it too.
 
 One line per non-empty batch goes to the MCP server log:
 

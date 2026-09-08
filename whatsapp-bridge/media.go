@@ -77,6 +77,26 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 	return d.MediaType
 }
 
+// errMediaUnavailable marks a download that no later request can turn into
+// bytes, whatever the cause: the sender's phone was asked to re-upload and said
+// it no longer has the file (media_retry.go, issue #378), or the row never
+// carried the CDN fields a download needs (issue #392). A phone that is merely
+// offline, a disconnected bridge and a CDN that timed out are not this — those
+// are worth retrying. Callers (handleDownload, and through it the MCP server's
+// ingest worker) use it to record the miss once instead of asking for the same
+// dead file on every pass over the archive.
+var errMediaUnavailable = errors.New("the sender's phone no longer has this media")
+
+// permanentMediaError is an errMediaUnavailable that keeps its own wording.
+// The two causes are equally final but not interchangeable to whoever reads the
+// answer — "the phone declined the retry" is a file that once existed, "the
+// media information is incomplete" is a row this bridge never captured the keys
+// for — so the message stays the cause and errors.Is still sees the sentinel.
+type permanentMediaError string
+
+func (e permanentMediaError) Error() string { return string(e) }
+func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
+
 // Function to download media from a message
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	client, messageStore := b.Client, b.Store
@@ -131,9 +151,16 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		return true, mediaType, filepath.Base(absPath), absPath, nil
 	}
 
-	// If we don't have all the media info we need, we can't download
+	// If we don't have all the media info we need, we can't download, and no
+	// request can change that: the media-retry protocol hands back a fresh
+	// path, never the key the file is decrypted with. Report it as permanent
+	// (errMediaUnavailable) so the caller records the miss once instead of
+	// asking on every pass over the archive (issue #392). What *can* change it
+	// is a later history sync storing the same message with its media info; the
+	// caller clears its note to ask again then, exactly as it does for a phone
+	// that restored a backup.
 	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
-		return false, "", "", "", fmt.Errorf("incomplete media information for download")
+		return false, "", "", "", permanentMediaError("incomplete media information for download")
 	}
 
 	b.Log.Debugf("Attempting to download media for message %s in chat %s...", messageID, chatJID)
@@ -374,9 +401,10 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			if err != nil {
 				errMsg = err.Error()
 			}
-			// The phone answering "I no longer have this file" is not a failure
-			// to retry: name it so the caller records the miss once instead of
-			// asking again on every pass over the archive (issue #378).
+			// A file that can never arrive — the phone answered "I no longer
+			// have this", or the row has no media key — is not a failure to
+			// retry: name it so the caller records the miss once instead of
+			// asking again on every pass over the archive (issues #378, #392).
 			code := errorCode(http.StatusInternalServerError)
 			if errors.Is(err, errMediaUnavailable) {
 				code = "media_unavailable"
