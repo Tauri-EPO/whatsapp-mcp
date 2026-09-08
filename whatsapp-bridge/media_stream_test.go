@@ -54,6 +54,7 @@ func TestHandleMessageSkipsAutoDownloadAboveMaxBytes(t *testing.T) {
 
 	var calls atomic.Int32
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	drainBridge(t, b) // the second message below reaches the auto-download pool
 	b.MediaAutoDownload = true
 	b.MediaMaxBytes = 10 * 1024 * 1024
 	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {

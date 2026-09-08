@@ -554,6 +554,18 @@ func testLogger() waLog.Logger {
 	return waLog.Stdout("Test", "WARN", true)
 }
 
+// drainBridge stops a test bridge's background workers when the test ends.
+//
+// A bridge that queued an auto-download keeps a pool goroutine running after
+// the test that started it returned, and that goroutine logs — which reads the
+// clock, which races with the test that swaps the process zone
+// (media_tz_test.go). Any test that lets a job reach the pool drains it here
+// instead of leaking it into whatever runs next (issue #351).
+func drainBridge(t *testing.T, b *Bridge) {
+	t.Helper()
+	t.Cleanup(func() { b.Shutdown(2 * time.Second) })
+}
+
 // testBridge builds a Bridge with production defaults for the pieces tests do
 // not care about; individual tests override fields (DownloadMedia, Policy,
 // PollVoteDecrypt, ForwardSelf) instead of touching package state.
@@ -565,10 +577,13 @@ func testBridge(client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger)
 		ForwardSelf:       true,
 		MediaAutoDownload: true,
 		Webhook:           newWebhookSender(""),
-		origTimes:         newOriginalTimestamps(),
-		mediaRetry:        newMediaRetryHub(),
-		storeStats:        newStoreStats(storeDir()),
-		metrics:           newMetricsRegistry(),
+		// The production default; a test that times the StreamReplaced timer
+		// shortens it on its own Bridge (issue #351).
+		StreamReplacedDelay: defaultStreamReplacedDelay,
+		origTimes:           newOriginalTimestamps(),
+		mediaRetry:          newMediaRetryHub(),
+		storeStats:          newStoreStats(storeDir()),
+		metrics:             newMetricsRegistry(),
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
@@ -1739,6 +1754,9 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 	downloadStarted := make(chan struct{})
 	releaseDownload := make(chan struct{})
 	b := testBridge(client, ms, logger)
+	// Drained first so the cleanups run the other way round (they are LIFO):
+	// the download is released, then Shutdown waits out the worker it unblocks.
+	drainBridge(t, b)
 	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 		close(downloadStarted)
 		<-releaseDownload

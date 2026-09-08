@@ -40,11 +40,12 @@ func TestReconnectLoopStopsDuringBackoff(t *testing.T) {
 }
 
 func TestStreamReplacedTimerIsCancelledByShutdown(t *testing.T) {
-	prev := streamReplacedDelay
-	streamReplacedDelay = 200 * time.Millisecond
-	t.Cleanup(func() { streamReplacedDelay = prev })
-
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	// Written before the event is handled and never again: the timer reads the
+	// delay off this Bridge, so the goroutine has nothing to race with. A
+	// package-level variable restored in t.Cleanup did (issue #351).
+	b.StreamReplacedDelay = 200 * time.Millisecond
+
 	reconnect := make(chan bool, 1)
 	b.handleEvent(&events.StreamReplaced{}, reconnect)
 	b.Shutdown(time.Second)
@@ -57,11 +58,9 @@ func TestStreamReplacedTimerIsCancelledByShutdown(t *testing.T) {
 }
 
 func TestStreamReplacedSignalsReconnectWhenRunning(t *testing.T) {
-	prev := streamReplacedDelay
-	streamReplacedDelay = 20 * time.Millisecond
-	t.Cleanup(func() { streamReplacedDelay = prev })
-
 	b := testBridge(newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.StreamReplacedDelay = 20 * time.Millisecond
+
 	reconnect := make(chan bool, 1)
 	b.handleEvent(&events.StreamReplaced{}, reconnect)
 	select {

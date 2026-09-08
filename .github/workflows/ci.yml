@@ -62,6 +62,13 @@ jobs:
           # The compose file sets TZ; media file names and timestamps must not
           # depend on the process zone (media_tz_test.go and friends).
           TZ=America/Sao_Paulo go test ./...
+      - name: Race detector
+        # Own step so its cost and its failures are legible. The shipped binary
+        # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it; the
+        # suite takes about ten seconds this way (issue #351).
+        run: |
+          cd whatsapp-bridge
+          go test -race ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
