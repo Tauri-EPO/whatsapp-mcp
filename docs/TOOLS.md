@@ -1089,12 +1089,29 @@ Returns a list of MCP **content blocks**, not a JSON object:
 |---|---|---|
 | a JPEG, PNG, GIF or WebP image | `ImageContent`: the model sees the picture | 16 MB |
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
-| anything else (PDF, video, audio, archives, TIFF/HEIC) | a text block whose first line is `base64:<mime>:<bytes>`, the rest base64 | 2 MB |
+| audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
+| anything else (PDF, DOCX, XLSX, video, archives, TIFF/HEIC) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
 
-The type is taken from the file's first bytes for images and from the sender's
-filename otherwise, not from the name the bridge cached it under (it calls every
-image `.jpg`): a block whose declared type disagrees with its payload is rejected
-by strict clients.
+That last row is what makes a PDF usable at all (issue #367). It used to be a
+text block whose first line was `base64:<mime>:<bytes>` — a shape every client
+would have had to decode itself, and none does, so the model was handed two
+megabytes of letters. As a resource the bytes keep their type, and a client that
+knows `application/pdf` can pass the attachment to the model as a document.
+Claude Desktop and Claude Code are **documented** to accept `application/pdf`
+embedded resources that way; this fork has **not verified** it on either client,
+so `as_text=true` below remains the answer that works everywhere. For exactly
+that reason a PDF, DOCX or XLSX resource is followed by one short line saying
+what was returned and that `as_text=true` extracts its text: a client that drops
+the resource would otherwise leave the model with metadata only, and an unread
+document reads exactly like an empty one.
+
+The type is taken from the file's **first bytes** for images and audio and from
+the filename otherwise: a block whose declared type disagrees with its payload is
+rejected by strict clients, and the name proves nothing here — the bridge caches
+every image as `.jpg` and every audio message as `.ogg`, whatever the sender
+attached, and `messages` has no MIME column to contradict it. Bytes that match
+no signature come back as a resource (`application/octet-stream` when the name
+promised an image or playable audio), never as a block a client would refuse.
 
 The last block is always JSON with `{"sha256", "mime", "bytes", "truncated", "notes"}`.
 That is what closes the loop below: `list_media(has_notes=false)` finds a file
@@ -1111,13 +1128,14 @@ into a reader for the rest of the store (`.bridge-token`, the databases, the
 exports). A file over the applicable limit fails with [`too_large`](#errors)
 reporting its real size.
 Voice notes are better served by `transcribe_audio` (text, cached, searchable)
-than by 2 MB of base64.
+than by 2 MB of Opus: the audio block is for the client and the human behind it,
+no model listens to it.
 
 #### `as_text`: documents read on the server
 
-A 5 MB clinical PDF is over the 2 MB byte cap, and even under it, megabytes of
-base64 are not something a model can read. `as_text=true` parses it here and
-returns text — a few dozen KB — so the file's own size stops mattering (the
+A 5 MB clinical PDF is over the 2 MB byte cap, and even under it a client that
+does not open the resource leaves the model with nothing. `as_text=true` parses
+it here and returns text — a few dozen KB — so the file's own size stops mattering (the
 parser accepts up to 64 MB on disk, and a DOCX/XLSX that expands past 256 MB is
 refused before a parser sees it).
 
@@ -1134,7 +1152,7 @@ document really has) and `truncated` (`max_pages`, 500 rows per sheet, or the
 **There is no OCR.** A scanned PDF has no text layer, and the answer says so in
 as many words instead of coming back empty. Legacy `.doc`/`.xls`/`.ppt` and PPTX
 are not supported; asking for `as_text` on an image or a video is refused with
-`invalid_argument` rather than silently answered with base64. A text file is
+`invalid_argument` rather than silently answered with its bytes. A text file is
 already text, so `as_text` changes nothing for it.
 
 **Natural Language Examples:**
