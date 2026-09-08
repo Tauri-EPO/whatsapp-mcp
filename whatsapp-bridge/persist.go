@@ -20,6 +20,7 @@ type messageWriter interface {
 		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
 		quotedMessageId string) error
 	MarkViewOnce(messageID, chatJID string) error
+	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
 }
 
@@ -83,6 +84,14 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
 		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen, quotedID); err != nil {
 		return err
+	}
+	// Mentions ride in a side update rather than the insert: only a minority of
+	// messages carry any, and the write then costs nothing on the rest
+	// (mentions.go).
+	if mentions := mentionsColumn(e.mentions); mentions != "" {
+		if err := w.SetMentions(id, chatJID, mentions); err != nil {
+			logger.Warnf("Failed to store mentions for message %s: %v", id, err)
+		}
 	}
 	if e.poll != nil {
 		if err := w.StorePoll(id, chatJID, e.poll, ts); err != nil {

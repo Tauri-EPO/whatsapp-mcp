@@ -116,6 +116,7 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			view_once BOOLEAN NOT NULL DEFAULT 0,
 			target_message_id TEXT,
 			quoted_message_id TEXT,
+			mentions TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
