@@ -30,8 +30,8 @@ either decorated (and covered) or it is not (and stays readable).
 
 Deliberately *not* mutating:
 
-- ``download_media`` / ``transcribe_audio`` — fetch and read; they only write to
-  the local media cache.
+- ``download_media`` / ``read_media`` / ``transcribe_audio`` — fetch and read;
+  they only write to the local media cache.
 - ``annotate_media`` and ``annotate`` — write notes.db, which is local MCP-owned
   state, never WhatsApp. A read-only assistant still needs somewhere to keep its
   own notes; a triage pass that cannot record what it concluded is the failure

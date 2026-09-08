@@ -75,6 +75,9 @@ EXPECTED_UNTRUSTED = {
     "annotate",
     "compact",
     "download_media",
+    # Returns content blocks rather than a mapping, so `clean_untrusted` has
+    # nothing to walk; the file's own text is delimited by media_read itself.
+    "read_media",
     "transcribe_audio",
     # Returns a summary, but the NDJSON file it writes is a corpus of exactly
     # this text, and the description is where the agent learns that before

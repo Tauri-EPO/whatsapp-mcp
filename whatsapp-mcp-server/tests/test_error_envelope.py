@@ -72,4 +72,12 @@ def test_tools_report_not_found_and_denied(monkeypatch):
 
 
 def test_codes_are_documented():
-    assert set(ERROR_CODES) == {"not_found", "denied", "bridge_unavailable", "invalid_argument", "conflict", "internal"}
+    assert set(ERROR_CODES) == {
+        "not_found",
+        "denied",
+        "bridge_unavailable",
+        "invalid_argument",
+        "conflict",
+        "too_large",
+        "internal",
+    }
