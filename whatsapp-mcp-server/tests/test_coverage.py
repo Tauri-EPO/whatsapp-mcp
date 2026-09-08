@@ -5,7 +5,7 @@ import pytest
 import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
-from tests.conftest import ALICE, BOB, FAMILY
+from tests.conftest import ALICE, BOB, DECOY, FAMILY
 
 # Dense June, then a 14-day hole (2026-07-22 -> 2026-08-05), then July/August
 # again. DECOY has metadata but no message at all.
@@ -101,12 +101,226 @@ def test_coverage_rejects_bad_arguments(paired_dbs):
         whatsapp.coverage(max_gaps="all")  # type: ignore[arg-type]
 
 
+def test_coverage_window_scopes_counts_and_gaps(archive):
+    result = whatsapp.coverage(after="2026-07-01")
+
+    assert result["total_messages"] == 3  # m4, m5, m6
+    assert result["first_message_time"].startswith("2026-07-22 08:00:00")
+    assert result["last_message_time"].startswith("2026-08-05 20:00:00")
+    assert result["messages_by_month"] == {"2026-07": 1, "2026-08": 2}
+    # FAMILY and DECOY hold nothing inside the window, so they count as missing.
+    assert result["chats_with_messages"] == 2 and result["chats_without_messages"] == 2
+    # The June artefacts are outside the window; what is left is the 14-day
+    # hole and the three empty weeks between the bound and the first message.
+    assert [(gap["from"][:10], gap["to"][:10]) for gap in result["gaps"]] == [
+        ("2026-07-01", "2026-07-22"),
+        ("2026-07-22", "2026-08-05"),
+    ]
+    assert result["gaps"][1]["hours"] == pytest.approx(336.0, abs=0.1)
+    assert result["scope"] == {"after": "2026-07-01 00:00:00+00:00", "before": None, "chat_jid": None}
+
+    bounded = whatsapp.coverage(after="2026-07-01", before="2026-08-05 12:00:00")
+    assert bounded["total_messages"] == 2 and bounded["messages_by_month"] == {"2026-07": 1, "2026-08": 1}
+
+
+def test_coverage_window_inside_an_outage_reports_the_whole_window(archive):
+    """A window with no message in it is one gap, not an empty gap list.
+
+    Pairing stored messages alone can only see holes *between* two of them, so
+    a window that falls entirely inside the 14-day outage would answer "no
+    gaps" about a period holding nothing at all.
+    """
+    result = whatsapp.coverage(after="2026-07-23", before="2026-08-04")
+
+    assert result["total_messages"] == 0
+    assert len(result["gaps"]) == 1
+    assert result["gaps"][0]["from"].startswith("2026-07-23")
+    assert result["gaps"][0]["to"].startswith("2026-08-04")
+    assert result["gaps"][0]["hours"] == pytest.approx(288.0, abs=0.1)
+
+
+def test_coverage_gaps_are_unchanged_without_a_window(archive):
+    """The bounds are the only new points: an unbounded scan still pairs messages only."""
+    assert [gap["from"][:10] for gap in whatsapp.coverage()["gaps"]] == [
+        "2026-06-08",
+        "2026-07-22",
+        "2026-06-07",
+    ]
+
+
+def test_coverage_hint_stops_claiming_never_synced_under_a_window(archive):
+    """The unbounded reading of first_message_time is false once a bound is set."""
+    unbounded = whatsapp.coverage()
+    assert "were never synced either" in unbounded["hint"]
+
+    windowed = whatsapp.coverage(after="2026-07-01")
+    assert "were never synced either" not in windowed["hint"]
+    assert "anything before first_message_time" not in windowed["hint"]
+    assert "describe that window alone" in windowed["hint"]
+    assert "request_history" in windowed["hint"]
+
+
+def test_coverage_per_chat_scopes_everything(archive):
+    result = whatsapp.coverage(chat_jid=ALICE)
+
+    assert result["total_messages"] == 3
+    assert result["first_message_time"].startswith("2026-06-07 09:00:00")
+    assert result["last_message_time"].startswith("2026-08-05 20:00:00")
+    assert result["chats_total"] == 1 and result["chats_without_messages"] == 0
+    # Alice's own silences, not the archive's.
+    assert [gap["from"][:10] for gap in result["gaps"]] == ["2026-06-07", "2026-07-22"]
+    assert result["scope"]["chat_jid"] and ALICE in result["scope"]["chat_jid"]
+
+    both = whatsapp.coverage(chat_jid=[ALICE, FAMILY])
+    assert both["total_messages"] == 4 and both["chats_total"] == 2
+
+
+def test_coverage_by_chat_orders_the_backfill_queue(archive):
+    result = whatsapp.coverage(by_chat=True)
+
+    assert result["by_chat"] is True and result["chats_total"] == 4
+    assert result["has_more"] is False and result["next_cursor"] is None
+    # No messages first, then the stub-only chat, then by first_message_time desc.
+    assert [item["chat_jid"] for item in result["items"]] == [DECOY, FAMILY, BOB, ALICE]
+    decoy, family, _bob, alice = result["items"]
+    assert decoy["messages"] == 0 and decoy["stub_only"] is False
+    assert decoy["first_message_time"] is None and decoy["last_message_time"] is None
+    assert family["messages"] == 1 and family["stub_only"] is True and family["name"] == "Family"
+    assert alice["messages"] == 3 and alice["stub_only"] is False
+    assert alice["first_message_time"].startswith("2026-06-07 09:00:00")
+    assert alice["last_message_time"].startswith("2026-08-05 20:00:00")
+    assert "request_history" in result["hint"]
+
+
+def test_coverage_by_chat_applies_the_window(archive):
+    result = whatsapp.coverage(by_chat=True, after="2026-07-01")
+
+    by_jid = {item["chat_jid"]: item for item in result["items"]}
+    assert by_jid[FAMILY]["messages"] == 0  # its only message is before the window
+    assert by_jid[ALICE]["first_message_time"].startswith("2026-07-22")
+    assert by_jid[ALICE]["messages"] == 2
+    # A window narrows the counts but cannot invent a stub: Bob has two stored
+    # messages and only one inside it, which is not "never synced".
+    assert by_jid[BOB]["messages"] == 1 and by_jid[BOB]["stub_only"] is False
+    # ...while the chat that really is a stub keeps the flag even though the
+    # window empties it.
+    assert by_jid[FAMILY]["stub_only"] is True
+    # The order is about the whole history, so the window does not move it.
+    assert [item["chat_jid"] for item in result["items"]] == [DECOY, FAMILY, BOB, ALICE]
+
+
+def test_coverage_by_chat_ranks_on_the_whole_history_not_the_window(paired_dbs):
+    """A window scopes the counts; it must not decide who needs backfilling.
+
+    Alice synced back to 2019, Bob's history starts this month and Family's
+    starts later still, so Family is the one missing the most. The three chats
+    are laid out so that both wrong rankings answer something else: ordering by
+    the in-window first message gives Alice, Bob, Family, and ordering by a raw
+    message count instead of the saturating "none / one / more" probe gives
+    Bob, Family, Alice.
+    """
+    rows = [(f"a{i}", ALICE, f"2019-01-{i + 1:02d} 09:00:00") for i in range(20)]
+    rows += [
+        ("a99", ALICE, "2026-09-06 12:00:00"),  # latest in-window first message
+        ("b1", BOB, "2026-09-01 09:00:00"),  # second-latest overall start
+        ("b2", BOB, "2026-09-06 10:00:00"),
+        ("b3", BOB, "2026-09-06 11:00:00"),
+        ("f1", FAMILY, "2026-09-03 08:00:00"),  # latest overall start
+        ("f2", FAMILY, "2026-09-06 07:00:00"),
+        ("f3", FAMILY, "2026-09-06 08:00:00"),
+        ("f4", FAMILY, "2026-09-06 09:00:00"),
+        ("f5", FAMILY, "2026-09-07 08:00:00"),
+    ]
+    with paired_dbs.messages() as conn:
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES (?, ?, ?, 'hi', ?, 0)",
+            [(mid, chat, chat.split("@")[0], ts) for mid, chat, ts in rows],
+        )
+
+    result = whatsapp.coverage(by_chat=True, after="2026-09-05", chat_jid=[ALICE, BOB, FAMILY])
+    by_jid = {item["chat_jid"]: item for item in result["items"]}
+    assert [item["chat_jid"] for item in result["items"]] == [FAMILY, BOB, ALICE]
+    # Alice's 21 stored messages and Family's 5 rank alike — both are "more
+    # than a stub" — and only where their history starts separates them.
+    assert by_jid[ALICE]["messages"] == 1 and by_jid[ALICE]["stub_only"] is False
+    assert by_jid[FAMILY]["messages"] == 4 and by_jid[BOB]["messages"] == 2
+
+
+def test_coverage_by_chat_cursor_ignores_the_order_of_the_chat_list(archive):
+    page = whatsapp.coverage(by_chat=True, limit=1, chat_jid=[ALICE, BOB])
+    resumed = whatsapp.coverage(by_chat=True, limit=1, chat_jid=[BOB, ALICE], cursor=page["next_cursor"])
+
+    assert [item["chat_jid"] for item in resumed["items"]] == [ALICE]
+
+
+def test_coverage_by_chat_pages_with_a_cursor(archive):
+    first = whatsapp.coverage(by_chat=True, limit=2)
+    assert [item["chat_jid"] for item in first["items"]] == [DECOY, FAMILY]
+    assert first["has_more"] is True and first["next_cursor"]
+
+    second = whatsapp.coverage(by_chat=True, limit=2, cursor=first["next_cursor"])
+    assert [item["chat_jid"] for item in second["items"]] == [BOB, ALICE]
+    assert second["has_more"] is False and second["next_cursor"] is None
+
+    # A cursor cannot be replayed against another scope, which would skip chats.
+    with pytest.raises(ToolError) as exc:
+        whatsapp.coverage(by_chat=True, limit=2, cursor=first["next_cursor"], after="2026-07-01")
+    assert exc.value.code == "invalid_argument"
+
+    with pytest.raises(ToolError) as exc:
+        whatsapp.coverage(cursor=first["next_cursor"])
+    assert exc.value.code == "invalid_argument"
+
+
+def test_coverage_by_chat_rejects_a_mangled_cursor_offset(archive):
+    """A cursor is caller-supplied: a bad offset is invalid_argument, not internal."""
+    scope = {"after": None, "before": None, "chat_jid": None}
+    fingerprint = whatsapp._coverage_fingerprint(scope)
+    for bad in ("2", -1, {"a": 1}, None):
+        cursor = whatsapp.encode_cursor({"k": "coverage_by_chat", "o": bad, "s": fingerprint})
+        with pytest.raises(ToolError) as exc:
+            whatsapp.coverage(by_chat=True, cursor=cursor)
+        assert exc.value.code == "invalid_argument"
+
+
+def test_coverage_validates_limit_even_without_by_chat(archive):
+    """The one argument that would otherwise vanish silently along with by_chat."""
+    for bad in ("lots", None):
+        with pytest.raises(ToolError) as exc:
+            whatsapp.coverage(limit=bad)  # type: ignore[arg-type]
+        assert exc.value.code == "invalid_argument"
+
+
+def test_coverage_by_chat_honours_the_allow_list(archive, monkeypatch):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([ALICE]))
+    result = whatsapp.coverage(by_chat=True)
+
+    assert [item["chat_jid"] for item in result["items"]] == [ALICE]
+    assert result["chats_total"] == 1 and result["allow_list_applied"] is True
+
+    with pytest.raises(ToolError) as exc:
+        whatsapp.coverage(chat_jid=BOB)
+    assert exc.value.code == "denied"
+
+
 def test_coverage_tool_passes_arguments(monkeypatch):
     import main
 
-    monkeypatch.setattr(main, "whatsapp_coverage", lambda gap_hours, max_gaps: {"g": gap_hours, "m": max_gaps})
-    assert main.coverage() == {"g": 24.0, "m": 20}
-    assert main.coverage(6, 5) == {"g": 6, "m": 5}
+    monkeypatch.setattr(main, "whatsapp_coverage", lambda **kwargs: kwargs)
+    assert main.coverage() == {
+        "gap_hours": 24.0,
+        "max_gaps": 20,
+        "after": None,
+        "before": None,
+        "chat_jid": None,
+        "by_chat": False,
+        "cursor": None,
+        "limit": 50,
+    }
+    passed = main.coverage(6, 5, after="2026-07-01", chat_jid=[ALICE], by_chat=True, limit=10)
+    assert passed["gap_hours"] == 6 and passed["max_gaps"] == 5
+    assert passed["after"] == "2026-07-01" and passed["chat_jid"] == [ALICE]
+    assert passed["by_chat"] is True and passed["limit"] == 10
 
 
 def test_coverage_database_error_is_internal(monkeypatch, paired_dbs):

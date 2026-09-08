@@ -67,6 +67,8 @@ EXPECTED_UNTRUSTED = {
     "get_media_stats",
     "get_media_notes",
     "search_media_notes",
+    # by_chat=True names every chat in the backfill queue.
+    "coverage",
     "get_notes",
     "search_notes",
     # `replaced` echoes whatever the displaced note held, transcripts included.
@@ -84,7 +86,6 @@ EXPECTED_UNTRUSTED = {
 # what this agent itself just wrote — nothing a third party authored.
 EXPECTED_TRUSTED = {
     "bridge_status",
-    "coverage",
     "request_history",
     "annotate_media",
     "purge_media",

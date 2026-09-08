@@ -10,13 +10,13 @@ Seven conventions apply to every tool below: [Pagination](#pagination) for the o
 
 ## Pagination
 
-`list_messages`, `list_chats`, `list_unanswered`, `get_contact_chats` and `list_group_members` return one page:
+`list_messages`, `list_chats`, `list_unanswered`, `get_contact_chats`, `list_group_members` and `coverage(by_chat=True)` return one page:
 
 ```json
 {"items": [...], "next_cursor": "eyJrIjoi...", "has_more": true}
 ```
 
-Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based (`timestamp, id`), so paging stays consistent while new messages arrive and does not slow down on deep pages. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor. `list_group_members` reads a live list from the bridge rather than the database, so its cursor is an offset into a deterministic ordering (see below).
+Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch the next page; stop when `has_more` is false (`next_cursor` is then `null`). Cursors are keyset-based (`timestamp, id`), so paging stays consistent while new messages arrive and does not slow down on deep pages. `page` is still accepted for the first request but is ignored once a cursor is given; relevance-sorted searches carry an offset inside the cursor. `list_group_members` reads a live list from the bridge rather than the database, so its cursor is an offset into a deterministic ordering (see below); `coverage(by_chat=True)` orders by an aggregate over the whole page, so its cursor is an offset too, bound to the window and `chat_jid` that produced it.
 
 ## Compact reads
 
@@ -74,10 +74,12 @@ Above a few thousand rows, stop paging into the conversation at all: [`export_me
 
 ## Chat filters
 
-`chat_jid` takes **one conversation or a list of them**, and every tool that
+`chat_jid` takes **one conversation or a list of them**, and every listing that
 takes it also takes the mirror `exclude_chat_jid`. Both are available on
 `list_messages`, `message_stats`, `export_messages`, `list_media`,
-`get_media_stats`, `list_unread` and `list_unanswered`:
+`get_media_stats`, `list_unread` and `list_unanswered`; `coverage` takes
+`chat_jid` alone (there is nothing to exclude from a report about what is
+missing):
 
 ```jsonc
 list_unread(chat_jid=["5511999999999@s.whatsapp.net", "120363000000000001@g.us"])
@@ -94,7 +96,7 @@ Rules:
 
 ## Time bounds
 
-`after` / `before` (`list_messages`, `message_stats`, `export_messages`, `list_media`) and `since` (`list_unread`, `list_unanswered`) all take the same thing: an ISO-8601 date or date-time, `2026-01-09` or `2026-01-09T18:00:00`. A date alone means midnight. Anything else is `invalid_argument`. On the message tools both ends are **strict** (`>` and `<`), so a bound naming the exact instant of a message excludes that message; `list_media` includes them (`>=` / `<=`).
+`after` / `before` (`list_messages`, `message_stats`, `export_messages`, `list_media`, `coverage`) and `since` (`list_unread`, `list_unanswered`) all take the same thing: an ISO-8601 date or date-time, `2026-01-09` or `2026-01-09T18:00:00`. A date alone means midnight. Anything else is `invalid_argument`. On the message tools both ends are **strict** (`>` and `<`), so a bound naming the exact instant of a message excludes that message; `list_media` includes them (`>=` / `<=`).
 
 Everything is **UTC**. The archive stores one spelling — `2026-01-09 18:00:00+00:00` — and results report it as stored, never converted to the server's zone. A bound carrying an offset (`2026-01-09T18:00:00-03:00`, `…Z`) is converted to UTC first, so the same instant selects the same rows however it is spelled; a bound without one is read as UTC. Seconds are the resolution — a fractional part in the bound is ignored.
 
@@ -294,28 +296,90 @@ computed from `messages.db` alone, so it answers while the bridge is down.
 
 - `gap_hours` (optional, default `24`): report periods longer than this with no message at all
 - `max_gaps` (optional, default `20`, capped at 500): how many gaps to return, biggest first
+- `after`, `before` (optional): ISO-8601 bounds; they scope **every** number, the gap scan included
+- `chat_jid` (optional): one chat JID or a list of them — per-chat coverage instead of archive-wide
+- `by_chat` (optional, default `false`): return the paginated per-chat queue instead of the aggregates
+- `cursor` (optional): `next_cursor` from the previous `by_chat` page
+- `limit` (optional, default `50`, max 200): chats per `by_chat` page
 
 **Returns:**
 
 | Field | Meaning |
 | --- | --- |
-| `first_message_time`, `last_message_time` | The archive's real boundaries. Anything asked about before the first is unanswerable, not empty |
+| `first_message_time`, `last_message_time` | The archive's real boundaries. Anything asked about before the first is unanswerable, not empty. With `after`/`before` set they are the window's boundaries instead |
 | `total_messages` | Messages stored |
 | `chats_total`, `chats_with_messages`, `chats_without_messages` | Chats the bridge knows vs. chats it has any message for. A large `chats_without_messages` means metadata synced but history did not |
 | `messages_by_month` | `{"2026-06": 1234, …}` — where coverage thins out |
-| `gaps` | `[{"from", "to", "hours"}]`, biggest first: periods longer than `gap_hours` with no message in **any** chat |
+| `gaps` | `[{"from", "to", "hours"}]`, biggest first: periods longer than `gap_hours` with no message in **any** chat in scope |
 | `gaps_truncated` | `true` when `max_gaps` cut the list |
+| `scope` | `{"after", "before", "chat_jid"}` — the narrowing that produced the numbers, normalised |
 | `allow_list_applied` | `true` when `WHATSAPP_ALLOWED_CHATS` restricted every number above |
 | `hint` | How to read the result and what to do next |
 
-A gap is archive-wide: the bridge stored nothing at all in that window, which
-normally means it was down or never synced that period — not that everybody went
-quiet. Use it before concluding "this chat has been quiet": `list_messages`
-returns the same empty result either way. To fill a hole, ask the phone with
-[`request_history`](#request_history) for the chat you care about.
+A gap covers every chat in scope: the bridge stored nothing at all in that
+window, which normally means it was down or never synced that period — not that
+everybody went quiet. Use it before concluding "this chat has been quiet":
+`list_messages` returns the same empty result either way.
+
+With `after`/`before` set, the bounds count as gap edges: an empty stretch
+between `after` and the first message it holds is reported, as is one between
+the last message and `before`. A window that falls entirely inside an outage is
+therefore one gap covering all of it, not an empty list — pairing stored
+messages alone would have nothing to pair.
+
+**A window changes what the numbers mean.** Unbounded, `first_message_time` is
+where the archive itself begins and `chats_without_messages` counts chats that
+never synced. With `after`/`before` set, both describe the window and nothing
+else — `first_message_time` is simply the first message after the bound, and a
+chat lands in `chats_without_messages` because it was quiet that period. `hint`
+says which of the two readings applies, so an agent that reads it cannot report
+"never synced" about a period it never asked about.
 
 The aggregates and the gap scan run in SQL (one ordered pass over the timestamp
 index), so cost does not grow with the size of the result.
+
+#### Find gaps, then backfill with `request_history`
+
+On a store whose pre-pairing history is one stub message per chat, an unscoped
+call answers with years-old sync artefacts. Narrow it, then ask which chats are
+behind:
+
+1. `coverage(after="2026-07-01")` — the same aggregates over the period you care
+   about, so `gaps` holds the holes that are actually worth filling.
+2. `coverage(by_chat=True, after="2026-07-01")` — the work queue, paginated.
+3. `request_history(chat_jid=…)` for the JIDs at the top, then re-run step 1 to
+   see the hole close. The phone answers asynchronously and cannot return a
+   period it no longer holds itself.
+
+With `by_chat=True` the result is a page — `items`, `next_cursor`, `has_more`
+(plus `chats_total`, `scope`, `allow_list_applied` and `hint`) — where each item
+is:
+
+| Field | Meaning |
+| --- | --- |
+| `chat_jid`, `name` | The conversation; `name` falls back to your phone book when WhatsApp stored none |
+| `first_message_time`, `last_message_time` | Its stored boundaries, inside the window when `after`/`before` are set |
+| `messages` | Stored messages for it, `0` when nothing synced |
+| `stub_only` | `true` when the chat's **whole** stored history is a single row — almost always the history-sync stub the phone pushed at pair time, i.e. a chat that never really synced |
+
+Items come back in backfill order: chats with nothing stored at all first, then
+`stub_only` ones, then the rest by first message descending (history that starts
+latest is missing the most). `request_history` anchors on the oldest stored
+message, so a chat with `messages: 0` cannot be backfilled until something
+arrives there — send or receive one message first.
+
+**`stub_only` and the order are the parts `after`/`before` do not scope**, on
+purpose. They answer "did this chat ever really sync", which no window can: a
+fully synced chat that got one message that week would otherwise be ranked — and
+flagged — as a never-synced stub. So the window narrows `messages`,
+`first_message_time` and `last_message_time`, and the queue still puts the chats
+that actually lack history on top.
+
+Pass `next_cursor` back as `cursor` to page. The cursor is bound to the window
+and `chat_jid` it was created with (as a set — naming the same chats in another
+order still resumes); resuming against a different scope is refused rather than
+silently skipping chats. Because the ordering is an aggregate over every chat in
+scope, each page costs the same as the first, rather than less.
 
 ### `request_history`
 

@@ -49,6 +49,11 @@ Ask the archive what it actually has, with the `coverage` tool
   conversation is a sync outage, not silence.
 - `chats_without_messages`: chats known by name with zero messages stored.
 
+Scope it with `after`/`before` when old sync artefacts crowd out the hole you
+care about, or with `chat_jid` to ask about one conversation. Then
+`coverage(by_chat=True)` lists *which* chats to backfill, worst first, with a
+`stub_only` flag for the ones holding nothing but a pair-time history-sync stub.
+
 To fill a hole, ask the phone for one chat with `request_history(chat_jid)`
 (or `POST /api/history`, see
 [CONFIGURATION.md](CONFIGURATION.md#requesting-history-for-a-single-chat-on-demand)).

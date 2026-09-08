@@ -203,7 +203,17 @@ def bridge_status() -> dict[str, Any]:
 
 @mcp.tool()
 @tool_errors
-def coverage(gap_hours: float = 24.0, max_gaps: int = 20) -> dict[str, Any]:
+@untrusted_content
+def coverage(
+    gap_hours: float = 24.0,
+    max_gaps: int = 20,
+    after: str | None = None,
+    before: str | None = None,
+    chat_jid: str | list[str] | None = None,
+    by_chat: bool = False,
+    cursor: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
     """What the local archive actually contains, and the periods it is missing.
 
     Call this before concluding "this chat has been quiet" or "nothing happened
@@ -215,20 +225,58 @@ def coverage(gap_hours: float = 24.0, max_gaps: int = 20) -> dict[str, Any]:
     Returns first_message_time and last_message_time (the archive's real
     boundaries), total_messages, chats_total / chats_with_messages /
     chats_without_messages, messages_by_month ({"2026-06": 1234}) to see where
-    coverage thins out, and gaps: periods longer than gap_hours with no message
-    in *any* chat, biggest first, as {"from", "to", "hours"}. A gap means the
-    bridge stored nothing at all then, not that your contacts were silent.
+    coverage thins out, gaps (periods longer than gap_hours with no message in
+    *any* chat in scope, biggest first, as {"from", "to", "hours"}) and scope,
+    the window and chat filter that produced them. A gap means the bridge stored
+    nothing at all then, not that your contacts were silent.
+
+    after/before/chat_jid narrow every number, the gap scan included: scope the
+    question to the period you care about instead of reading past sync artefacts
+    out of a whole-archive answer. Under a window those numbers describe the
+    window and nothing else — first_message_time is then the first message after
+    the bound, not the moment the archive begins, and chats_without_messages
+    means "nothing in this period" rather than "never synced". The returned hint
+    says which of the two readings applies. The bounds also act as gap edges, so
+    an empty stretch between `after` and the first stored message shows up, and
+    a window falling entirely inside an outage comes back as one gap covering
+    it rather than as no gaps at all.
+
+    by_chat=True answers a different question — *which* chats to backfill. It
+    returns {"items", "next_cursor", "has_more"} where each item is
+    {chat_jid, name, first_message_time, last_message_time, messages,
+    stub_only}, ordered as a work queue: chats with nothing stored, then
+    stub_only ones (their whole stored history is a single row, usually the
+    pair-time history-sync stub), then the chats whose history starts latest.
+    That order and stub_only always describe each chat's whole history, even
+    with after/before set — a window scopes the counts and boundaries, but it
+    cannot tell a quiet week from a chat that never synced. Feed the JIDs to
+    request_history, which needs one stored message to anchor on — so a chat
+    with messages: 0 cannot be backfilled until something arrives there.
 
     Read-only, computed from messages.db, so it works while the bridge is down.
     With WHATSAPP_ALLOWED_CHATS set, every number covers the allowed chats only
-    (allow_list_applied says so). To fill a hole, ask the phone to backfill one
-    chat with request_history(chat_jid).
+    (allow_list_applied says so).
 
     Args:
         gap_hours: Report periods with no message longer than this (default 24)
         max_gaps: Largest N gaps to return (default 20, capped at 500)
+        after: Only count messages after this ISO-8601 moment
+        before: Only count messages before this ISO-8601 moment
+        chat_jid: One chat JID, or a list of them, to report on instead of every chat
+        by_chat: Return the paginated per-chat queue instead of the aggregates
+        cursor: next_cursor from the previous by_chat page
+        limit: Chats per by_chat page (default 50, max 200)
     """
-    return whatsapp_coverage(gap_hours, max_gaps)
+    return whatsapp_coverage(
+        gap_hours=gap_hours,
+        max_gaps=max_gaps,
+        after=after,
+        before=before,
+        chat_jid=chat_jid,
+        by_chat=by_chat,
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 @mcp.tool()
