@@ -42,6 +42,15 @@ TRANSCRIPT_ERROR_KEY = "transcript_error"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
+# How many matching note rows a search pulls off its cursor before enriching
+# them. Everything a note search does after the SQL match — asking messages.db
+# which hashes are visible, resolving a target's canonical spelling — costs a
+# query per batch or per row, so the batch is what keeps that cost proportional
+# to the limit instead of to the archive. Reading every match first put every
+# matching hash into one IN clause, which an archive with more matching notes
+# than SQLite's variable limit (32,766) answered with "too many SQL variables"
+# even for limit=1. notes.py batches its own search with the same number.
+SEARCH_BATCH = 200
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 SCHEMA = """
@@ -478,7 +487,17 @@ def transcript_matches(query: str) -> list[tuple[str, float]]:
 
 
 def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-    """Substring search over note values (and keys) for hashes the agent can see."""
+    """Substring search over note values (and keys) for hashes the agent can see.
+
+    The matches are walked newest first in batches of ``SEARCH_BATCH`` and the
+    walk stops as soon as ``limit`` visible ones are in hand, so a small limit
+    over a large archive reads a batch or two rather than every match. What the
+    walk cannot skip is the matches *ahead* of the ones it returns: with an
+    allow-list hiding the newest thousand notes, all thousand are still read and
+    asked about, a batch at a time. That is the price of checking visibility
+    after the match and before the limit — pushing the limit into the SQL would
+    count notes on files the agent may not see and answer with nothing.
+    """
     needle = (query or "").strip()
     if not needle:
         raise ToolError("invalid_argument", "query must not be empty")
@@ -491,14 +510,28 @@ def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> l
     if key:
         clauses.append("key = ?")
         params.append(normalize_key(key))
+    hits: list[dict[str, Any]] = []
+    # One hash carries several keys, and its batch may not be the only one it
+    # appears in; remembering the verdict keeps that to one question per hash.
+    verdict: dict[str, bool] = {}
     try:
         rows = conn.execute(
             f"SELECT sha256, key, value, updated_at FROM media_notes WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC",
             params,
-        ).fetchall()
+        )
+        while len(hits) < limit:
+            batch = rows.fetchmany(SEARCH_BATCH)
+            if not batch:
+                break
+            unknown = [sha for sha in dict.fromkeys(r[0] for r in batch) if sha not in verdict]
+            if unknown:
+                allowed = visible_hashes(unknown)
+                verdict.update({sha: sha in allowed for sha in unknown})
+            for sha, k, v, updated in batch:
+                if verdict.get(sha):
+                    hits.append({"sha256": sha, "key": k, "value": v, "updated_at": updated})
+                    if len(hits) == limit:
+                        break
     finally:
         conn.close()
-    allowed = visible_hashes([r[0] for r in rows])
-    return [
-        {"sha256": sha, "key": k, "value": v, "updated_at": updated} for sha, k, v, updated in rows if sha in allowed
-    ][:limit]
+    return hits

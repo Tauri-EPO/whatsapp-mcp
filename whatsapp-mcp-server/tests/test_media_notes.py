@@ -10,6 +10,7 @@ import main
 import media_inventory
 import media_notes
 import whatsapp
+from errors import ToolError
 from tests.conftest import ALICE, BOB, FAMILY
 
 SHA_A = "aa" * 32  # photo in Alice's chat and in Family
@@ -253,3 +254,91 @@ def test_list_media_has_notes_flag_and_filter(notes_store):
     backlog = main.list_media(has_notes=False)["items"]
     assert [item["message_id"] for item in backlog] == ["VID1"]
     assert backlog[0]["has_notes"] is False
+
+
+def _bulk_notes(store, count, visible):
+    """``count`` matching notes on distinct hashes, oldest first; ``visible`` of them carry a message.
+
+    Written straight into the two databases: the point of these tests is what
+    one search does with a large archive, not how it got there.
+    """
+    hashes = [f"{i:064x}" for i in range(count)]
+    with store.messages() as c:
+        c.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
+            "file_length, file_sha256) VALUES (?, ?, 'x', '', '2026-09-01 10:00:00', 0, 'image', 10, ?)",
+            [(f"M{i}", ALICE, bytes.fromhex(sha)) for i, sha in enumerate(hashes) if i in visible],
+        )
+    conn = media_notes._connect(create=True)
+    assert conn is not None
+    try:
+        conn.executemany(
+            "INSERT INTO media_notes (sha256, key, value, updated_at) VALUES (?, 'summary', 'common note', ?)",
+            # Zero-padded so the string order the query sorts by is the index
+            # order: hash 0 is the oldest note, hence the last one examined.
+            [(sha, f"2026-09-08T00:00:00.{i:06d}+00:00") for i, sha in enumerate(hashes)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return hashes
+
+
+def _visibility_spy(monkeypatch):
+    """Every ``visible_hashes`` call, as the number of hashes it was asked about."""
+    sizes: list[int] = []
+    original = media_notes.visible_hashes
+
+    def spy(hashes):
+        sizes.append(len(hashes))
+        return original(hashes)
+
+    monkeypatch.setattr(media_notes, "visible_hashes", spy)
+    return sizes
+
+
+def test_search_asks_about_hashes_in_bounded_batches(notes_store, monkeypatch):
+    """More distinct matching hashes than messages.db will bind at once, still one answer."""
+    hashes = _bulk_notes(notes_store, 1200, visible={0})
+    # The bundled SQLite binds 32,766 variables, so reproducing the production
+    # failure faithfully would take 32,767 notes. Lowering that ceiling makes
+    # 1,200 hashes in one IN clause the same overflow, at 1/27 of the fixture.
+    connect = whatsapp._connect_messages_db
+
+    def tight_connect():
+        conn = connect()
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, media_notes.SEARCH_BATCH + 10)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", tight_connect)
+    # What the old single-IN-clause search did with every matching hash at once.
+    with pytest.raises(ToolError, match="too many SQL variables"):
+        media_notes.visible_hashes(hashes)
+
+    sizes = _visibility_spy(monkeypatch)
+    # The only visible hash is the oldest note, so the walk exhausts the matches.
+    assert [hit["sha256"] for hit in main.search_media_notes("common note", limit=1)] == [hashes[0]]
+    assert sum(sizes) == 1200  # every match examined...
+    assert max(sizes) <= media_notes.SEARCH_BATCH  # ...never in one IN clause
+    assert len(sizes) == 1200 // media_notes.SEARCH_BATCH
+
+
+def test_a_small_limit_stops_after_one_batch(notes_store, monkeypatch):
+    """1,000 notes, all visible, limit=1: one batch examined, one hash question."""
+    hashes = _bulk_notes(notes_store, 1000, visible=set(range(1000)))
+    sizes = _visibility_spy(monkeypatch)
+
+    hits = main.search_media_notes("common note", limit=1)
+    assert [hit["sha256"] for hit in hits] == [hashes[-1]]  # newest note
+    assert sizes == [media_notes.SEARCH_BATCH]
+    assert len(main.search_media_notes("common note", limit=200)) == 200
+
+
+def test_the_batch_size_only_changes_how_many_rounds_it_takes(notes_store, monkeypatch):
+    """A hidden run ahead of the match is walked through, whatever the batch size."""
+    monkeypatch.setattr(media_notes, "SEARCH_BATCH", 2)
+    hashes = _bulk_notes(notes_store, 5, visible={0})
+    sizes = _visibility_spy(monkeypatch)
+
+    assert [hit["sha256"] for hit in main.search_media_notes("common note", limit=1)] == [hashes[0]]
+    assert sizes == [2, 2, 1]
