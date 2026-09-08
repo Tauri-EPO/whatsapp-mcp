@@ -216,6 +216,21 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "mentions", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.mentions column: %w", err)
 	}
+	// sender_server: the namespace messages.sender lives in ("s.whatsapp.net"
+	// or "lid"), NULL when it is unknown — rows an older bridge wrote, and
+	// senders that are not user JIDs at all (sender_namespace.go).
+	if err := ensureColumn(db, "messages", "sender_server", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.sender_server column: %w", err)
+	}
+	// The backfill and its startup probe only ever look at the unclassified
+	// rows, so a partial index bounds both by how many of those are left
+	// instead of by the size of the table.
+	if _, err := db.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_messages_sender_server_null
+		 ON messages(sender) WHERE sender_server IS NULL`,
+	); err != nil {
+		return fmt.Errorf("failed to ensure idx_messages_sender_server_null: %w", err)
+	}
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
@@ -456,13 +471,14 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 
 	insertResult, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages (
-			id, chat_jid, sender, content, timestamp, is_from_me,
+			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
 			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length
 		)
 		SELECT
 			msg.id,
 			m.phone_jid,
 			msg.sender,
+			msg.sender_server,
 			msg.content,
 			msg.timestamp,
 			msg.is_from_me,
@@ -599,12 +615,18 @@ func (store *MessageStore) MigrateLegacyLIDSendersToPhones(whatsappDBPath string
 		return nil
 	}
 
+	// The namespace moves with the user part: a row whose LID we can now name
+	// is a phone-number row (sender_namespace.go). It also bounds the rewrite,
+	// which used to match on the digits alone: a row already recorded as a
+	// phone number is not a LID that happens to spell the same number.
 	updateResult, err := tx.Exec(`
 		UPDATE messages
 		SET sender = (
 			SELECT phone_user FROM tmp_lid_sender_map WHERE lid_user = messages.sender
-		)
-		WHERE sender IN (SELECT lid_user FROM tmp_lid_sender_map);
+		),
+		sender_server = 's.whatsapp.net'
+		WHERE sender IN (SELECT lid_user FROM tmp_lid_sender_map)
+		  AND (sender_server IS NULL OR sender_server = 'lid');
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to rewrite legacy LID senders: %w", err)
@@ -894,7 +916,10 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 	return pending, rows.Err()
 }
 
-// Store a message in the database
+// StoreMessage stores one message. sender may be the full resolved JID —
+// which is what every bridge write path passes, so the row records which
+// namespace the sender lives in — or the bare user part, which leaves
+// messages.sender_server unset (splitSenderJID, sender_namespace.go).
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
 	quotedMessageId string) error {

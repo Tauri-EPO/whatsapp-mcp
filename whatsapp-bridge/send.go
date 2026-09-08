@@ -310,7 +310,9 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		persistJID := resolveUserJID(client, storageJID, types.EmptyJID)
 		chatJID := persistJID.String()
 		sent.ChatJID = chatJID
-		senderUser := client.Store.ID.User
+		// Our own JID is always a phone JID, so an outbound row records the
+		// phone namespace (#375); ToNonAD drops the device suffix.
+		senderJID := storedSender(client.Store.ID.ToNonAD())
 		timestamp := sent.Timestamp
 
 		var mediaType, filename string
@@ -326,7 +328,7 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 			bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
 		}
 		if storeErr := messageStore.StoreMessage(
-			resp.ID, chatJID, senderUser, message, timestamp, true,
+			resp.ID, chatJID, senderJID, message, timestamp, true,
 			mediaType, filename, "", nil, nil, nil, 0, quotedMsgID,
 		); storeErr != nil {
 			bridgeLog.Warnf("failed to persist outbound message: %v", storeErr)

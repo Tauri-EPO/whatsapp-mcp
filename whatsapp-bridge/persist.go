@@ -14,7 +14,8 @@ import (
 )
 
 // messageWriter is satisfied by *MessageStore (single rows) and *messageBatch
-// (one transaction per history-sync conversation).
+// (one transaction per history-sync conversation). Both take the sender as
+// the full resolved JID; see StoreMessage (store.go).
 type messageWriter interface {
 	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,

@@ -19,10 +19,17 @@ type sqlExecer interface {
 }
 
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
+			-- Keep a namespace the row already has only while the user part it
+			-- describes stays the same; a caller with a different bare sender
+			-- and no namespace leaves it unknown rather than mislabelled.
+			sender_server = CASE
+				WHEN excluded.sender_server IS NOT NULL THEN excluded.sender_server
+				WHEN excluded.sender = messages.sender THEN messages.sender_server
+			END,
 			content = excluded.content,
 			timestamp = excluded.timestamp,
 			is_from_me = excluded.is_from_me,
@@ -96,8 +103,11 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 
 // messageArgs builds the bound parameters for insertMessageSQL. An empty
 // quoted_message_id is stored as NULL so the COALESCE in the upsert keeps a
-// previously stored ID; the timestamp goes in through dbTime (store_time.go)
-// so every row carries the same UTC spelling.
+// previously stored ID; the sender is split into its user part and its
+// namespace the same way (splitSenderJID, sender_namespace.go), so a caller
+// that only has the bare user part does not erase a namespace already stored.
+// The timestamp goes in through dbTime (store_time.go) so every row carries
+// the same UTC spelling.
 func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
 	quotedMessageId string) []any {
@@ -105,6 +115,7 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	if quotedMessageId != "" {
 		qmid = quotedMessageId
 	}
-	return []any{id, chatJID, sender, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
+	senderUser, senderServer := splitSenderJID(sender)
+	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
 		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid}
 }

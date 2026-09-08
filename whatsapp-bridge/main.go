@@ -198,6 +198,13 @@ func main() {
 		return
 	}
 
+	// Runs last: it classifies the senders the rewrite above could not turn
+	// into phone numbers (sender_namespace.go).
+	if err := messageStore.MigrateSenderNamespaces(whatsmeowDBPath(), logger); err != nil {
+		logger.Errorf("Failed to backfill sender namespaces: %v", err)
+		return
+	}
+
 	// Resolve the REST API port. Pure env parsing with no dependency on the
 	// WhatsApp connection, so it's safe to do this early alongside the token
 	// load below — and failing fast here means we don't run a QR-pairing

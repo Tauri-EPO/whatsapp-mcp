@@ -125,7 +125,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 					// Determine sender. History-sync rows do not carry SenderAlt,
 					// so any LID-based participant is resolved through the
 					// whatsmeow LID store (populated during live message handling).
-					var sender string
+					var resolvedSender types.JID
 					isFromMe := false
 					if msg.Message.Key != nil {
 						if msg.Message.Key.FromMe != nil {
@@ -156,10 +156,15 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						if isFromMe && client.Store.ID != nil {
 							alt = client.Store.ID.ToNonAD()
 						}
-						sender = resolveUserJID(client, rawSender, alt).User
+						resolvedSender = resolveUserJID(client, rawSender, alt)
 					} else {
-						sender = jid.User
+						resolvedSender = jid
 					}
+					sender := resolvedSender.User
+					// The row records which namespace that user part belongs
+					// to, so a LID the store cannot map is not read back as a
+					// phone number (#375).
+					storedSenderJID := storedSender(resolvedSender)
 
 					// Store message
 					msgID := ""
@@ -176,7 +181,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 
 					// quoted_message_id is not persisted: history sync does not
 					// carry a usable ContextInfo.
-					err = persistMessage(batch, msgID, chatJID, sender, msgTimestamp, isFromMe, ex, false, logger)
+					err = persistMessage(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
 					if err != nil {
 						logger.Warnf("Failed to store history message: %v", err)
 					} else {
