@@ -31,7 +31,10 @@ either decorated (and covered) or it is not (and stays readable).
 Deliberately *not* mutating:
 
 - ``download_media`` / ``read_media`` / ``transcribe_audio`` — fetch and read;
-  they only write to the local media cache.
+  they only write to the local media cache. Naming ``download_media`` in a list
+  still binds the other two: both fetch an uncached file through the endpoint
+  ``download_media`` calls, so ``offers_download()`` gates that implicit fetch
+  and the tools fall back to what the store already holds (issue #350).
 - ``annotate_media`` and ``annotate`` — write notes.db, which is local MCP-owned
   state, never WhatsApp. A read-only assistant still needs somewhere to keep its
   own notes; a triage pass that cannot record what it concluded is the failure
@@ -59,6 +62,11 @@ DENY_TOOLS_ENV = "WHATSAPP_DENY_TOOLS"
 
 _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off")
+
+# The tool every implicit fetch is: read_media, transcribe_audio and the ingest
+# worker all reach the bridge's /api/download, the endpoint download_media
+# calls. Named once here so the three ask the same question.
+DOWNLOAD_TOOL = "download_media"
 
 # Populated by @mutating_tool at import time; see module docstring.
 _MUTATING: set[str] = set()
@@ -179,6 +187,32 @@ def active_policy() -> ToolPolicy:
         except ValueError:
             _active = ToolPolicy(read_only=True)
     return _active
+
+
+def offers_download() -> bool:
+    """Whether the active policy still offers ``download_media``.
+
+    The question ``read_media``, ``transcribe_audio`` and the ingest worker ask
+    before fetching a file the store does not have: that fetch is
+    ``download_media`` under another name, so a deployment that took the tool
+    away must not get it back through a tool it kept (issue #350).
+    """
+    return active_policy().allows(DOWNLOAD_TOOL)
+
+
+def download_denied(caller: str) -> ToolError:
+    """The ``denied`` error for an implicit fetch the policy does not allow.
+
+    Returned rather than raised, so the caller decides where the refusal sits.
+    It names ``download_media`` and the list that removed it: ``caller`` is
+    still enabled, so an agent reading only "denied" would take the refusal for
+    a bug in the tool it actually called.
+    """
+    return ToolError(
+        "denied",
+        f"{caller} would have to fetch this file from WhatsApp first, and "
+        f"{active_policy().denial_message(DOWNLOAD_TOOL)}. Media already in the store is still readable.",
+    )
 
 
 def mutating_tool(fn: Callable[..., Any]) -> Callable[..., Any]:

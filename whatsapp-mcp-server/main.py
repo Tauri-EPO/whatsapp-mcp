@@ -24,6 +24,7 @@ from media_notes import annotate_media as notes_annotate_media
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
+from media_read import cached_only_path as media_cached_only_path
 from media_read import content_tool
 from media_read import read_media as media_read_bytes
 from notes import annotate as notes_annotate
@@ -38,6 +39,7 @@ from tool_policy import (
     apply_tool_policy,
     load_tool_policy,
     mutating_tool,
+    offers_download,
     registered_tool_names,
     set_active_policy,
 )
@@ -2174,7 +2176,8 @@ def read_media(
     A file above the applicable limit fails with `too_large` reporting its real size;
     lower `max_bytes` yourself when your client cannot hold that much. A file that is
     not cached yet is fetched through the bridge first, unless the archive already
-    knows it is over the limit.
+    knows it is over the limit — and where download_media is disabled that fetch is
+    refused with `denied`, so only media already in the store can be read.
 
     Args:
         chat_jid: JID of the chat containing the message
@@ -2214,6 +2217,22 @@ def _stored_transcript_notes(chat_jid: str, message_id: str) -> dict[str, Any]:
         return {"sha256": None, "notes": {}}
 
 
+def _audio_to_transcribe(chat_jid: str, message_id: str) -> str:
+    """The local file for a voice note: fetched through the bridge, or the cached copy.
+
+    The bridge answers /api/download from its own cache when the bytes are
+    already there, which is why this normally asks for every message. That
+    request is what `download_media` does, so a policy that does not offer that
+    tool gets the cached file or a refusal instead (issue #350).
+    """
+    if not offers_download():
+        return media_cached_only_path(chat_jid, message_id, "transcribe_audio")
+    downloaded = whatsapp_download_media(message_id, chat_jid)
+    if not downloaded:
+        raise ToolError("internal", "Failed to download media for transcription")
+    return downloaded
+
+
 @mcp.tool()
 @tool_errors
 @untrusted_content
@@ -2226,8 +2245,10 @@ def transcribe_audio(
 ) -> dict[str, Any]:
     """Transcribe a WhatsApp voice note (or any audio file) to text with local whisper.cpp.
 
-    Pass either message_id + chat_jid (the audio is downloaded via the bridge first)
-    or an absolute file_path that is already on disk. Requires a whisper backend
+    Pass either message_id + chat_jid (the audio is downloaded via the bridge first;
+    where download_media is disabled only a voice note already in the store can be
+    transcribed, anything else fails with `denied`) or an absolute file_path that is
+    already on disk. Requires a whisper backend
     configured through WHISPER_URL (whisper.cpp server) or WHISPER_BIN + WHISPER_MODEL;
     nothing is sent to a cloud API. **bridge_status().whisper says whether this
     deployment has one**: when it reports configured=false (or reachable=false) every
@@ -2272,10 +2293,7 @@ def transcribe_audio(
     if not file_path:
         if not message_id or not chat_jid:
             raise ToolError("invalid_argument", "Provide chat_jid and message_id, or file_path")
-        downloaded = whatsapp_download_media(message_id, chat_jid)
-        if not downloaded:
-            raise ToolError("internal", "Failed to download media for transcription")
-        file_path = downloaded
+        file_path = _audio_to_transcribe(chat_jid, message_id)
     try:
         result = transcribe_file(file_path, language=language or None, config=load_whisper_config())
     except FileNotFoundError as exc:

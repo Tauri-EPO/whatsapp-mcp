@@ -12,9 +12,11 @@ import main
 import media_inventory
 import media_read
 import media_text
+import tool_policy
 import whatsapp
 from errors import ToolError
 from tests.conftest import ALICE, BOB
+from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, ToolPolicy
 from untrusted import CLOSE_TAG, OPEN_TAG, WRAP_ENV
 
 SHA_IMG = bytes.fromhex("aa" * 32)
@@ -254,3 +256,84 @@ class TestTool:
         """The return annotation is what makes the SDK emit blocks instead of JSON."""
         tool = main.mcp._tool_manager.get_tool("read_media")
         assert tool is not None and tool.fn_metadata.output_schema is None
+
+
+class TestImplicitDownloadPolicy:
+    """Taking download_media off the list stops the fetch these tools make (#350)."""
+
+    @pytest.fixture(autouse=True)
+    def _never_fetches(self, monkeypatch):
+        def explode(*args, **kwargs):
+            raise AssertionError("the tool policy should have stopped this fetch")
+
+        monkeypatch.setattr(whatsapp, "download_media", explode)
+        monkeypatch.setattr(main, "whatsapp_download_media", explode)
+        monkeypatch.setattr(main, "load_whisper_config", lambda: "cfg")
+        monkeypatch.setattr(
+            main,
+            "transcribe_file",
+            lambda path, language=None, config=None: {"text": "olá", "language": "pt", "backend": "server"},
+        )
+        yield
+        tool_policy.set_active_policy(None)
+
+    def _denied(self, envelope):
+        assert envelope["code"] == "denied"
+        assert "download_media" in envelope["message"]
+        return envelope["message"]
+
+    def test_read_media_refuses_a_file_that_is_not_cached(self, store):
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        out = main.read_media(chat_jid=ALICE, message_id="DOC1")
+        assert out.is_error is True
+        assert DENY_TOOLS_ENV in self._denied(out.structured_content["error"])
+
+    def test_read_media_still_reads_the_cached_bytes(self, store):
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        assert [block.type for block in main.read_media(chat_jid=ALICE, message_id="IMG1")] == ["image", "text"]
+
+    def test_an_allow_list_without_download_media_refuses_the_same_way(self, store):
+        tool_policy.set_active_policy(ToolPolicy(allow=frozenset({"read_media", "transcribe_audio"})))
+        out = main.read_media(chat_jid=ALICE, message_id="DOC1")
+        assert ALLOW_TOOLS_ENV in self._denied(out.structured_content["error"])
+
+    def test_transcribe_audio_refuses_a_voice_note_that_is_not_cached(self, store):
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        self._denied(main.transcribe_audio(chat_jid=ALICE, message_id="DOC1")["error"])
+
+    def test_transcribe_audio_reads_the_cached_file(self, store):
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        out = main.transcribe_audio(chat_jid=ALICE, message_id="TXT1")
+        assert out["success"] and out["text"] == "olá"
+        assert out["file_path"].endswith("document_20260904_100000_TXT1.txt")
+
+    def test_a_denied_chat_still_wins_over_the_cache(self, store, monkeypatch):
+        """The cached path is not a way around WHATSAPP_ALLOWED_CHATS."""
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", chat_policy.ChatPolicy.from_entries([BOB]))
+        out = main.transcribe_audio(chat_jid=ALICE, message_id="TXT1")
+        assert out["error"]["code"] == "denied" and "download_media" not in out["error"]["message"]
+
+    def test_a_bad_id_is_still_a_bad_id_and_not_a_refusal(self, store):
+        """The row is read first: "denied" must not hide a typo or a text message."""
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        assert main.transcribe_audio(chat_jid=ALICE, message_id="NOPE")["error"]["code"] == "not_found"
+        assert main.transcribe_audio(chat_jid=ALICE, message_id="T1")["error"]["code"] == "invalid_argument"
+        assert main.read_media(chat_jid=ALICE, message_id="NOPE").structured_content["error"]["code"] == "not_found"
+
+    def test_an_oversized_uncached_file_is_denied_not_pointed_at_download_media(self, store):
+        """too_large advises download_media, which is exactly what is disabled here."""
+        tool_policy.set_active_policy(ToolPolicy(deny=frozenset({"download_media"})))
+        out = main.read_media(chat_jid=ALICE, message_id="BIG1")
+        self._denied(out.structured_content["error"])
+
+    def test_the_fetch_happens_as_before_when_the_policy_allows_it(self, store, monkeypatch):
+        """The whole point of the gate is that nothing changes without it."""
+        tool_policy.set_active_policy(ToolPolicy())
+        monkeypatch.setattr(
+            whatsapp,
+            "download_media",
+            lambda mid, chat: _cache(chat, f"document_20260904_100000_{mid}.pdf", b"%PDF-1.4 not really"),
+        )
+        blocks = main.read_media(chat_jid=ALICE, message_id="DOC1")
+        assert blocks[0].text.split("\n", 1)[0] == "base64:application/pdf:19"

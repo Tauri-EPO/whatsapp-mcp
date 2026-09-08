@@ -43,6 +43,7 @@ import media_inventory
 import media_text
 import whatsapp
 from errors import ToolError
+from tool_policy import download_denied, offers_download
 from untrusted import clean_untrusted, wrap_enabled, wrap_text
 
 # Hard limits, and the default value of ``max_bytes``. An ImageContent is
@@ -202,11 +203,41 @@ def cached_path(chat_jid: str, message_id: str) -> str | None:
 
 
 def download_path(chat_jid: str, message_id: str) -> str:
-    """Fetch the bytes through the bridge and return where they landed."""
+    """Fetch the bytes through the bridge and return where they landed.
+
+    The fetch is ``download_media`` under another name, so a policy that does
+    not offer that tool refuses here too (issue #350). Only a message with
+    nothing cached reaches this function, so the refusal never touches media
+    the store already holds.
+    """
+    if not offers_download():
+        raise download_denied("read_media")
     path = whatsapp.download_media(message_id, chat_jid)
     if not path:
         raise ToolError("internal", "the bridge reported success without a file path")
     return _in_chat_dir(chat_jid, path)
+
+
+def cached_only_path(chat_jid: str, message_id: str, caller: str) -> str:
+    """The cached file of one message, for a caller that may not fetch it.
+
+    ``transcribe_audio`` lets the bridge answer from its own cache, so with
+    ``download_media`` off the list it needs this local lookup instead (issue
+    #350). The chat allow-list still applies and the file still has to resolve
+    inside the chat's directory; a message whose bytes are not here is refused
+    with ``denied`` naming ``download_media``, never fetched.
+
+    The row is read first, so a mistyped id or a text message answers
+    ``not_found`` / ``invalid_argument`` as it does when fetching is allowed:
+    "the policy forbids this" would send the agent away from a mistake it could
+    have corrected.
+    """
+    whatsapp._require_allowed(chat_jid)
+    _media_row(chat_jid, message_id)
+    path = cached_path(chat_jid, message_id)
+    if path is None:
+        raise download_denied(caller)
+    return path
 
 
 def guess_mime(media_type: str, filename: str | None, path: str = "") -> str:
@@ -371,10 +402,14 @@ def read_media(
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
     path = cached_path(chat_jid, message_id)
     if path is None:
-        # Nothing is cached, so reading means a CDN transfer: refuse a file the
-        # row already says is too big instead of paying for it first. The
-        # authority is still the size on disk below; this only skips the
-        # obvious no.
+        # Nothing is cached, so reading means a CDN transfer. Whether it may
+        # happen at all comes first: "too_large, and download_media returns a
+        # path instead" would recommend a tool this very policy took away.
+        if not offers_download():
+            raise download_denied("read_media")
+        # Refuse a file the row already says is too big instead of paying for
+        # it first. The authority is still the size on disk below; this only
+        # skips the obvious no.
         if reported:
             expected = guess_mime(media_type, filename)
             check_size(reported, cap(max_bytes, hard_limit(expected, as_text)), expected)
