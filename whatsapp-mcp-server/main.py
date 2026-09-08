@@ -1091,7 +1091,9 @@ def list_unanswered(
                 future too (default False)
         ignore_closing_messages: Also skip chats whose last inbound message only
                 closes the conversation — a sticker, or one of "ok", "obrigado",
-                "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False)
+                "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False).
+                The same words are ignored when they are the mention that would
+                have added a group through include_group_mentions.
         min_messages: Only chats where at least this many messages were spoken,
                 in either direction (default 0, no bound). min_messages=2 drops
                 the numbers that said one thing and were never a conversation — a

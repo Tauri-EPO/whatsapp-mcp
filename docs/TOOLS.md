@@ -1830,7 +1830,7 @@ Chats with no stored messages never appear, and neither does the
 - `hide_handled` (optional, **default true**): skip chats whose `handled_at` note is at or after their last inbound message
 - `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
 - `include_snoozed` (optional, default false): also return chats whose `snooze_until` note is still in the future
-- `ignore_closing_messages` (optional, default false): skip chats whose last inbound message only closes the conversation — a sticker, or one of `ok`, `obrigado`, `obrigada`, `valeu`, `blz`, `thanks`, `👍`, `🙏` (compared after trimming and dropping trailing `.` / `!`)
+- `ignore_closing_messages` (optional, default false): skip chats whose last inbound message only closes the conversation — a sticker, or one of `ok`, `obrigado`, `obrigada`, `valeu`, `blz`, `thanks`, `👍`, `🙏` (compared after trimming and dropping trailing `.` / `!` / spaces). With `include_group_mentions` it reads the mention too — see below
 - `min_messages` (optional, default 0): only chats where at least this many messages were **spoken**, counted in both directions. `min_messages=2` drops the numbers that said one thing and were never a conversation — a delivery notice, a confirmation code, a broadcast. Reactions, poll votes and revoked messages do not count, the same rule the rest of this tool applies, so a 👍 on a one-line notice does not promote it. A negative value is an `invalid_argument` error; 0 and 1 change nothing, since a chat with nothing said never appears here anyway
 
 The first three read the [triage state](#triage-state) an agent writes back. They
@@ -1845,9 +1845,15 @@ slot in a page. They bound the group-mention stream below as well, so a group
 marked handled, muted or snoozed does not come back through it. There the two
 timestamp notes are compared with the **mention**, the message such a row is
 about, so a mention that arrived after the mark still brings the group back.
-`ignore_closing_messages` is the ordinary rule's own: it describes the chat's
-last inbound message, and a group it drops does not come back through the
-mention stream either, which leaves the chats that rule already covers to it.
+`ignore_closing_messages` reads the same words on both sides: the chat's last
+inbound message for the ordinary rule, and the mention itself for the stream
+below, so a group whose only pending mention is "ok @me" or a sticker is not
+waiting on anything and is left out (a group the ordinary rule already dropped
+does not come back through the mention stream either). A row that survives is
+anchored on, and names, the newest mention that is not one of those words.
+WhatsApp writes a mention into the text, so "ok @you" is stored as `ok @158…`:
+**your own** two spellings are removed before the words are compared, and
+nobody else's — "ok @outro @you" still names somebody and stays on the list.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
@@ -1872,8 +1878,10 @@ that question to the same page:
   than your own last **spoken** message there (a thumbs-up from you does not
   answer a question, and a mention either side revoked stops counting) — plus
   `mention_message_id` and `mention_time` pointing at it, so you can read the
-  message that asked. `since` and `min_age_hours` bound that pointer too, so it
-  always names the mention the row is about. The triage notes do not: the flag
+  message that asked. `since`, `min_age_hours` and `ignore_closing_messages`
+  bound that pointer too, so it always names the mention the row is about — with
+  the last of them on, the newest mention that is not itself a closing word. The
+  triage notes do not: the flag
   describes the conversation, so a row a later message brought back can still
   point at a mention older than its `handled_at` — compare `mention_time` with
   the mark when that matters;
