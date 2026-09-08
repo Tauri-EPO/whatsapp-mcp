@@ -6,7 +6,7 @@ With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, 
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
-Six conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Chat filters](#chat-filters) for `chat_jid` / `exclude_chat_jid`, [Time bounds](#time-bounds) for `after` / `before` / `since`, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
+Seven conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Unknown arguments](#unknown-arguments) for what happens to a parameter that is not on this page, [Chat filters](#chat-filters) for `chat_jid` / `exclude_chat_jid`, [Time bounds](#time-bounds) for `after` / `before` / `since`, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
 
 ## Pagination
 
@@ -20,22 +20,34 @@ Pass `next_cursor` back as `cursor` with the same filters and `sort_by` to fetch
 
 ## Compact reads
 
-A full page is built for a human reading a conversation: 20 keys per message, most of them `null` for plain text, and four spellings of the same sender. `list_messages(limit=500, include_context=false)` is ~270 KB of JSON, which many MCP hosts refuse to render. Four arguments shape that down, on `list_messages`, `get_message_context`, `list_unread` and `list_unanswered`:
+A full page is built for a human reading a conversation: 20 keys per message, most of them `null` for plain text, and four spellings of the same sender. `list_messages(limit=500, include_context=false)` is ~270 KB of JSON, which many MCP hosts refuse to render. Four arguments shape that down, on `list_messages`, `get_message_context`, `list_unread`, `list_unanswered`, `list_chats` and `get_chat` — not all four everywhere, see the rules below and each tool's own parameter list:
 
 | Argument | Effect |
 | --- | --- |
 | `count_only` (default `false`) | Return `{"count": N}` for exactly the same filters and no rows. Size a job before pulling it |
 | `fields` (default unset) | Keep only these keys on each row, e.g. `["timestamp","sender_phone","content"]`. An unknown name is `invalid_argument` and the message lists the valid ones |
 | `omit_nulls` (default `false`) | Drop keys that carry nothing: `null`, `false`, empty text, empty `notes` |
-| `max_content_chars` (default unset) | Cut `content` to N characters and set `content_truncated: true` on that row |
+| `max_content_chars` (default unset) | Cut the row's long text to N characters and set `content_truncated: true` on that row |
 
 Measured on a 500-message text page (269,890 bytes as returned today): `omit_nulls` alone brings it to 154,640 bytes (**-43%**), `fields=["timestamp","sender_phone","content"]` to 64,640 bytes (**-76%**). The two combine; `max_content_chars` is on top of both.
 
 Rules worth knowing:
 
-- **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them.
+- **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them. The single-row tools `get_chat` and `get_message_context` have no `count_only` — there is nothing to count — and passing it is refused as an [unknown argument](#unknown-arguments).
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_unanswered` returns chat rows, so its names are the chat ones (`jid`, `name`, `last_message`, `last_inbound_time`, `age_hours`…) and it has no `max_content_chars` — use `include_last_message=false` to drop the text.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only — those two are refused elsewhere rather than accepted and then dropped.
+- **The long text `max_content_chars` cuts is the row's own.** `content` on message rows, `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
+
+## Unknown arguments
+
+A parameter this page does not list is refused, not ignored:
+
+```json
+{"error": {"code": "invalid_argument",
+           "message": "list_chats has no argument(s) feilds; it accepts: count_only, cursor, fields, include_last_message, limit, max_content_chars, omit_nulls, page, query, sort_by"}}
+```
+
+The MCP SDK drops undeclared keys before the tool runs, so `list_chats(fields=[…])` used to return full rows and report success — a projection that silently did nothing, noticeable only by measuring the payload. The server now compares the incoming keys with the ones the tool declares and answers with the valid names, so a typo costs one round trip instead of a context window.
 
 **Compact read for bulk analysis** — "who wrote what in this chat last month", without spending the context on nulls:
 
@@ -1130,11 +1142,21 @@ Respects `WHATSAPP_ALLOWED_CHATS`.
 
 ### `list_chats`
 
-List all chats with metadata.
+List all chats with metadata. The heaviest listing on a busy account — 200 chats
+with their last message run to tens of kilobytes — so it takes the full set of
+[compact reads](#compact-reads) arguments.
 
 **Parameters:**
 
+- `query` (optional): Filter by chat name or JID
 - `limit` (optional): Number of chats (default 50, max 200)
+- `page` / `cursor` (optional): [Pagination](#pagination)
+- `include_last_message` (optional): Include `last_message` / `last_sender` (default `true`)
+- `sort_by` (optional): `"last_active"` (default) or `"name"`
+- `count_only` (optional): Return `{"count": N}` for `query` and no rows
+- `fields` (optional): Keep only these keys, e.g. `["jid","name","last_message_time"]`
+- `omit_nulls` (optional): Drop keys that carry nothing
+- `max_content_chars` (optional): Cut `last_message` to N characters and set `content_truncated: true`
 
 ### `get_chat`
 
@@ -1143,6 +1165,8 @@ Get specific chat metadata by JID.
 **Parameters:**
 
 - `chat_jid` (required): Chat JID
+- `include_last_message` (optional): Include `last_message` / `last_sender` (default `true`)
+- `fields`, `omit_nulls`, `max_content_chars` (optional): as in `list_chats`, applied to the single row
 
 ### `get_direct_chat_by_contact`
 

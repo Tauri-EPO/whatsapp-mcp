@@ -88,6 +88,7 @@ whatsapp-mcp/
 │   └── store/                  # WHATSAPP_STORE_DIR: whatsapp.db, messages.db, media, .bridge-token, .bridge.lock (gitignored)
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
+│   ├── strict_args.py          # StrictArgumentServer: call_tool refuses arguments no tool declares
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
 │   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
 │   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes; transcripts_fts

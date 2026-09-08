@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -24,6 +25,7 @@ from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
+from strict_args import StrictArgumentServer
 from tool_policy import (
     apply_tool_policy,
     load_tool_policy,
@@ -37,6 +39,7 @@ from transcribe_worker import install_ingest_worker
 from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
+    UNANSWERED_FIELDS,
     fetch_media_notes,
     fetch_sender_identities,
     msg_to_dict,
@@ -48,6 +51,9 @@ from whatsapp import (
 )
 from whatsapp import (
     bridge_status as whatsapp_bridge_status,
+)
+from whatsapp import (
+    count_chats as whatsapp_count_chats,
 )
 from whatsapp import (
     count_messages as whatsapp_count_messages,
@@ -157,7 +163,10 @@ from whatsapp import (
 # v2, host/port/transport security are passed to run() rather than stored on the
 # server, so nothing network-related is decided at import time either.
 MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
-mcp = MCPServer("whatsapp", version=MCP_VERSION)
+# StrictArgumentServer, not MCPServer: the SDK drops undeclared arguments
+# silently, so a misspelled or invented parameter would be ignored instead of
+# reported (strict_args.py).
+mcp = StrictArgumentServer("whatsapp", version=MCP_VERSION)
 
 
 @mcp.tool()
@@ -419,6 +428,17 @@ def _optional_chats(value: str | list[str]) -> str | list[str] | None:
     is refused there, instead of quietly widening the read to every chat.
     """
     return None if isinstance(value, str) and not value.strip() else value
+
+
+def _shape_chats(
+    rows: list[dict[str, Any]],
+    fields: list[str] | None,
+    omit_nulls: bool,
+    max_content_chars: int | None = None,
+    known: Sequence[str] = CHAT_FIELDS,
+) -> list[dict[str, Any]]:
+    """shape_rows for chat rows: chat field names, and `last_message` is the long text."""
+    return shape_rows(rows, fields, omit_nulls, max_content_chars, known=known, content_key="last_message")
 
 
 @mcp.tool()
@@ -906,7 +926,7 @@ def list_unanswered(
         exclude_chat_jid=exclude_chat_jid,
         cursor=cursor,
     ).to_dict()
-    result["items"] = shape_rows(result["items"], fields, omit_nulls, known=CHAT_FIELDS)
+    result["items"] = _shape_chats(result["items"], fields, omit_nulls, known=UNANSWERED_FIELDS)
     return result
 
 
@@ -920,11 +940,19 @@ def list_chats(
     include_last_message: bool = True,
     sort_by: str = "last_active",
     cursor: str | None = None,
+    fields: list[str] | None = None,
+    omit_nulls: bool = False,
+    max_content_chars: int | None = None,
+    count_only: bool = False,
 ) -> dict[str, Any]:
     """Get WhatsApp chats matching specified criteria.
 
     Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
     next_cursor back as `cursor` to fetch the following page.
+
+    This is the heaviest listing on a busy account: 200 chats with their last
+    message run to tens of kilobytes, most of it text you already have. Shape it
+    with fields / omit_nulls / max_content_chars, or ask for count_only first.
 
     Args:
         query: Search term to filter chats by name or JID
@@ -933,6 +961,15 @@ def list_chats(
         cursor: next_cursor from the previous page
         include_last_message: Include the last message in each chat (default True)
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
+        fields: Keep only these keys on each chat row (jid, name, last_message,
+                last_message_time, unread…); an unknown name is an error listing
+                the valid ones
+        omit_nulls: Drop chat keys that carry nothing (null, false, empty text)
+        max_content_chars: Cut each `last_message` to N characters and set
+                content_truncated=true on that row
+        count_only: Return {"count": N}, how many chats match `query`, and no
+                rows. Combining it with fields, cursor or page is an error;
+                limit is ignored.
 
     Returns:
         Chat dictionaries with jid, name, name_source, is_group, last_message_time,
@@ -950,23 +987,39 @@ def list_chats(
         reported); `unread` is true when the last message is inbound and newer than
         that marker, so chats already read on the phone are not reported as unread.
     """
+    if count_only:
+        _reject_count_only_extras(fields, cursor, page)
+        return {"count": whatsapp_count_chats(query=query)}
     # Cap limit at 200 to prevent excessive queries
     limit = min(limit, 200)
     chats = whatsapp_list_chats(
         query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by, cursor=cursor
     )
-    return chats.to_dict()
+    result = chats.to_dict()
+    result["items"] = _shape_chats(result["items"], fields, omit_nulls, max_content_chars)
+    return result
 
 
 @mcp.tool()
 @tool_errors
 @untrusted_content
-def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]:
+def get_chat(
+    chat_jid: str,
+    include_last_message: bool = True,
+    fields: list[str] | None = None,
+    omit_nulls: bool = False,
+    max_content_chars: int | None = None,
+) -> dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
 
     Args:
         chat_jid: The JID of the chat to retrieve
         include_last_message: Whether to include the last message (default True)
+        fields: Keep only these keys on the row (same names as list_chats); an
+                unknown name is an error listing the valid ones
+        omit_nulls: Drop keys that carry nothing (null, false, empty text)
+        max_content_chars: Cut `last_message` to N characters and set
+                content_truncated=true
 
     Returns:
         Chat dictionary — same shape as list_chats, including last_read_time and unread.
@@ -974,7 +1027,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     if chat is None:
         raise ToolError("not_found", f"No chat {chat_jid} in the archive")
-    return chat
+    return _shape_chats([chat], fields, omit_nulls, max_content_chars)[0]
 
 
 @mcp.tool()
