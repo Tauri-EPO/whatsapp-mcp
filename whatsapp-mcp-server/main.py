@@ -1062,9 +1062,14 @@ def list_unanswered(
                 `mention_time`, and the groups whose mention is still unanswered
                 are added even when the group kept talking afterwards and
                 min_age_hours would have hidden them. exclude_groups wins over
-                it, and count_only counts the ordinary rule alone. Needs a
-                paired deployment: the account's own LID is what a mention is
-                matched against (see bridge_status → owner).
+                it, hide_handled / exclude_muted / include_snoozed and
+                min_messages bound the added groups as well (a handled, muted or
+                snoozed group does not come back through it), and count_only
+                counts the ordinary rule alone. The `mention_*` pointer itself
+                describes the conversation, not the triage state: a row a later
+                message brought back can name a mention older than its
+                handled_at. Needs a paired deployment: the account's own LID is
+                what a mention is matched against (see bridge_status → owner).
 
     Returns:
         Chat dictionaries in the list_chats shape (jid, name, push_name, name_source,
