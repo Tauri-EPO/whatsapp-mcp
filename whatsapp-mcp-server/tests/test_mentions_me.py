@@ -369,3 +369,42 @@ def test_a_hidden_group_never_takes_a_slot_in_a_page(store, bridge_down):
 def test_group_mentions_are_off_by_default(store, bridge_down):
     out = main.list_unanswered()
     assert all("mention" not in item for item in out["items"])
+
+
+def test_a_reply_under_one_spelling_answers_a_mention_under_the_other(store, bridge_down):
+    """A phone/LID pair is one conversation, so my last word covers both rows (#366)."""
+    alice_lid = "197654321098765"
+    alice_lid_chat = f"{alice_lid}@lid"
+    with sqlite3.connect(whatsapp.WHATSMEOW_DB_PATH) as c:
+        c.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (alice_lid, ALICE.split("@")[0]))
+    with sqlite3.connect(store) as c:
+        c.execute(
+            "INSERT INTO chats (jid, name, last_message_time) VALUES (?, 'Alice', ?)",
+            (alice_lid_chat, _stamp(days=6)),
+        )
+        c.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, mentions)"
+            " VALUES (?,?,?,?,?,?,?)",
+            [
+                # Older than the reply stored under the phone JID (a2, seven days).
+                ("al1", alice_lid_chat, alice_lid, f"@{OWNER_LID} e o pdf?", _stamp(days=9), 0, OWNER_LID),
+                ("al2", alice_lid_chat, alice_lid, "ainda?", _stamp(days=6), 0, None),
+            ],
+        )
+    whatsapp._reset_name_cache()
+
+    out = main.list_unanswered(include_group_mentions=True)
+    alice = next(item for item in out["items"] if item["jid"] == ALICE)
+    assert alice["aliases"] == [ALICE, alice_lid_chat]
+    assert alice["mention"] is False and "mention_message_id" not in alice
+
+    # A mention newer than that reply is still found in the row that does not list.
+    with sqlite3.connect(store) as c:
+        c.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, mentions)"
+            " VALUES ('al3', ?, ?, ?, ?, 0, ?)",
+            (alice_lid_chat, alice_lid, f"@{OWNER_LID} ?", _stamp(days=1), OWNER_LID),
+        )
+    again = main.list_unanswered(include_group_mentions=True)
+    alice = next(item for item in again["items"] if item["jid"] == ALICE)
+    assert alice["mention"] is True and alice["mention_message_id"] == "al3"

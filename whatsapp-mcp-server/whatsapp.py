@@ -862,10 +862,9 @@ _CHAT_ROW_FIELDS: tuple[str, ...] = (
 # list_unanswered cannot but reports how long the chat has been waiting. A name
 # accepted and then always absent from the row is the silent no-op `fields`
 # exists to avoid, so each tool validates against the keys its rows can carry.
-# "aliases" is on the listings that collapse a phone/LID pair (issue #337), which
-# the unanswered queue does not, so it is a valid name on one tuple only.
+# Both collapse a phone/LID pair (issues #337, #366), so "aliases" is on both.
 CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated", "aliases")
-UNANSWERED_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "last_inbound_time", "age_hours")
+UNANSWERED_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "last_inbound_time", "age_hours", "aliases")
 
 # The three keys include_group_mentions=True adds. They are only valid names
 # when that flag is on: naming `mention` without it must be the error every
@@ -1033,7 +1032,7 @@ def _closing_message_clause(alias: str) -> tuple[str, list[str]]:
     return clause, list(CLOSING_MESSAGES)
 
 
-def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = False) -> str:
+def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = False, chat_match: str = "") -> str:
     """Deterministic single-row join to the chat's newest stored message.
 
     The row is picked by ordering the chat's messages, never by matching
@@ -1050,17 +1049,29 @@ def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = Fals
 
     `spoken_only` skips reactions, poll votes and revoked messages, for callers
     that ask "who spoke last" rather than "what is the last row".
+
+    `chat_match` is an AND-ready predicate on `chat_jid` for a caller that reads
+    a merged phone/LID pair (`ChatTwins.both_rows`, issue #366): the newest
+    message is then the newest of the two rows. The chat is bound as well as the
+    id there, because one pair can hold the same message id under both
+    spellings — history sync writing it under the phone JID and the live event
+    under the `@lid` — and matching the id alone would return the person twice,
+    which is the duplicate this is meant to remove.
     """
     spoken = f"AND {_spoken_filter('m')}" if spoken_only else ""
+    match = chat_match or f"= {chat_alias}.jid"
+
+    def newest(column: str) -> str:
+        return (
+            f"SELECT m.{column} FROM messages m WHERE m.chat_jid {match} {spoken}"
+            " ORDER BY m.timestamp DESC, m.id DESC LIMIT 1"
+        )
+
+    of_the_pair = f"AND {msg_alias}.chat_jid = ({newest('chat_jid')})" if chat_match else ""
     return f"""
-            LEFT JOIN messages {msg_alias} ON {chat_alias}.jid = {msg_alias}.chat_jid
-                AND {msg_alias}.id = (
-                    SELECT m.id FROM messages m
-                    WHERE m.chat_jid = {chat_alias}.jid
-                    {spoken}
-                    ORDER BY m.timestamp DESC, m.id DESC
-                    LIMIT 1
-                )
+            LEFT JOIN messages {msg_alias} ON {msg_alias}.chat_jid {match}
+                AND {msg_alias}.id = ({newest("id")})
+                {of_the_pair}
     """
 
 
@@ -2541,6 +2552,7 @@ def message_stats(
     if mentions_me:
         owner_identity()
 
+    twins = NO_CHAT_TWINS
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
@@ -2564,17 +2576,34 @@ def message_stats(
         bound, match_index = predicate.bind(filter_params)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         join = f" {predicate.join}" if predicate.join else ""
-        base = f"FROM messages JOIN chats ON messages.chat_jid = chats.jid{join} {where}"
-        # SUM(media) placeholders come first: they sit in the SELECT list, ahead
-        # of the search join and the WHERE.
-        params = [*MEDIA_TYPES, *bound]
+        # A phone/LID pair is one person's messages, split over two chat rows
+        # (issue #366): the bucket key is the row that lists for the pair, so
+        # the counts of the two are summed instead of ranked against each other.
+        if group_by == "chat":
+            twins = _chat_twins(cur)
+        prefix, twin_params, twin_join = "", [], ""
+        if twins.active:
+            cte, twin_params = twins.cte()
+            prefix = f"WITH {cte} "
+            twin_join = " LEFT JOIN chat_twin tw ON tw.jid = messages.chat_jid"
+            bucket_sql = "COALESCE(tw.listed_jid, messages.chat_jid)"
+        base = f"FROM messages JOIN chats ON messages.chat_jid = chats.jid{twin_join}{join} {where}"
+        # The WITH clause binds first, then the SUM(media) placeholders in the
+        # SELECT list, ahead of the search join and the WHERE.
+        params = [*twin_params, *MEDIA_TYPES, *bound]
         if match_index is not None:
-            match_index += len(MEDIA_TYPES)
+            match_index += len(twin_params) + len(MEDIA_TYPES)
 
+        # The name of the row that lists, never MIN() over a merged pair's two
+        # names — that would file a person under whichever of them sorts first,
+        # a bare number included. The other name is the fallback below, the
+        # precedence every merged row follows.
         label = "MIN(chats.name)" if group_by == "chat" else "NULL"
+        if twins.active:
+            label = f"MIN(CASE WHEN chats.jid = {bucket_sql} THEN chats.name END)"
         _execute_message_sql(
             cur,
-            f"SELECT {bucket_sql}, {label}, {_STATS_AGGREGATES} {base} "
+            f"{prefix}SELECT {bucket_sql}, {label}, {_STATS_AGGREGATES} {base} "
             f"GROUP BY {bucket_sql} ORDER BY COUNT(*) DESC, {bucket_sql} DESC LIMIT ?",
             [*params, limit],
             match_index,
@@ -2582,7 +2611,11 @@ def message_stats(
         )
         rows = cur.fetchall()
         _execute_message_sql(
-            cur, f"SELECT COUNT(DISTINCT {bucket_sql}), {_STATS_AGGREGATES} {base}", list(params), match_index, query
+            cur,
+            f"{prefix}SELECT COUNT(DISTINCT {bucket_sql}), {_STATS_AGGREGATES} {base}",
+            list(params),
+            match_index,
+            query,
         )
         total_row = cur.fetchone() or (0, 0, 0, 0, 0, None, None)
     except sqlite3.Error as e:
@@ -2596,6 +2629,12 @@ def message_stats(
     for key, chat_name, *aggregates in rows:
         bucket: dict[str, Any] = {"key": key, **_stats_row(tuple(aggregates))}
         if group_by == "chat":
+            # Reported under the phone spelling, as every merged row is.
+            twin = twins.merged_row(key)
+            if twin is not None:
+                bucket["key"] = key = twin.jid
+                if _is_placeholder_name(chat_name) and not _is_placeholder_name(twin.name):
+                    chat_name = twin.name
             bucket["label"] = chat_name or key
         elif group_by == "sender":
             bucket["label"] = get_sender_name(key) if key else None
@@ -3758,6 +3797,54 @@ def purge_media(
     }
 
 
+def _read_receipt_targets(chat_jid: str, message_ids: list[str] | None) -> list[tuple[str, list[str] | None]]:
+    """The (chat row, message ids) one read receipt call has to become.
+
+    One target for a chat WhatsApp knows one way, which is nearly all of them.
+    A merged phone/LID row lists the unread messages of *both* spellings (issue
+    #366) while the bridge validates every id against a single `chats` row, so
+    the ids are routed back to the row that stores them and the whole-chat form
+    is sent to both. No allow-list hole: a pair only merges when the policy
+    admits both spellings, so every target here was reachable already.
+
+    An id neither row holds stays with the chat the caller named, and the bridge
+    answers about it as it always did; a database that cannot be read leaves the
+    call exactly as it was before this routing existed.
+    """
+    conn = None
+    try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+        twins = _chat_twins(cur, only=[chat_jid])
+        # The caller holds the merged row's JID, which is the phone spelling —
+        # not always the row that lists for the pair.
+        twin = twins.merged_row(twins.listing_jid(chat_jid))
+        if twin is None:
+            return [(chat_jid, message_ids)]
+        spellings = list(twin.aliases)
+        if message_ids is None:
+            return [(jid, None) for jid in spellings]
+        owner: dict[str, str] = {}
+        for chunk in _in_chunks(message_ids):
+            owner.update(
+                cur.execute(
+                    f"SELECT id, chat_jid FROM messages WHERE id IN ({_placeholders(chunk)})"
+                    f" AND chat_jid IN ({_placeholders(spellings)})",
+                    (*chunk, *spellings),
+                ).fetchall()
+            )
+        by_chat: dict[str, list[str]] = {}
+        for message_id in message_ids:
+            by_chat.setdefault(owner.get(message_id, chat_jid), []).append(message_id)
+        return list(by_chat.items())
+    except sqlite3.Error as e:
+        logger.warning("read receipt: could not resolve the chat rows of %s: %s", chat_jid, e)
+        return [(chat_jid, message_ids)]
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def mark_messages_read(
     message_ids: list[str] | None,
     chat_jid: str,
@@ -3771,12 +3858,17 @@ def mark_messages_read(
     the bridge groups the pending messages by sender itself. An empty list is
     rejected instead: a caller that computed zero IDs did not ask for the whole
     chat. Returns the bridge's counts (messages, senders, batches, truncated).
+
+    A merged phone/LID chat is two `chats` rows behind one JID, so it becomes one
+    call per row (`_read_receipt_targets`) and the counts are summed — otherwise
+    the ids `list_unread` returned under the merged row would be refused by the
+    bridge as "not in that chat".
     """
     if not chat_jid:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(chat_jid)
 
-    payload: dict[str, Any] = {"chat_jid": chat_jid}
+    payload: dict[str, Any] = {}
     if message_ids is None:
         if sender_jid:
             raise ToolError(
@@ -3796,21 +3888,25 @@ def mark_messages_read(
             raise ToolError("invalid_argument", "up_to_timestamp is only used without message_ids")
         if chat_jid.endswith("@g.us") and not sender_jid:
             raise ToolError("invalid_argument", "sender_jid must be provided for group read receipts")
-        payload["message_ids"] = normalized_ids
+        message_ids = normalized_ids
         if sender_jid:
             payload["sender_jid"] = sender_jid
     if timestamp:
         payload["timestamp"] = timestamp
 
-    result = _bridge_json(_bridge_request("POST", "/mark-read", json=payload))
-    return {
-        "success": True,
-        "message": result.get("message") or "Marked as read",
-        "messages": int(result.get("messages") or 0),
-        "senders": int(result.get("senders") or 0),
-        "batches": int(result.get("batches") or 0),
-        "truncated": bool(result.get("truncated", False)),
-    }
+    counts = {"messages": 0, "senders": 0, "batches": 0}
+    truncated = False
+    message = ""
+    for target_jid, ids in _read_receipt_targets(chat_jid, message_ids):
+        body = {**payload, "chat_jid": target_jid}
+        if ids is not None:
+            body["message_ids"] = ids
+        result = _bridge_json(_bridge_request("POST", "/mark-read", json=body))
+        for key in counts:
+            counts[key] += int(result.get(key) or 0)
+        truncated = truncated or bool(result.get("truncated", False))
+        message = message or (result.get("message") or "")
+    return {"success": True, "message": message or "Marked as read", **counts, "truncated": truncated}
 
 
 HISTORY_DEFAULT_COUNT = 50
@@ -4688,18 +4784,32 @@ def list_unread(
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
+        # One row per person, not one per spelling (issue #366): the row another
+        # one reports for leaves the chat side, its unread messages join the
+        # listing row's, and the marker both are measured against is the newer of
+        # the two — a conversation read under one spelling is read under both.
+        twins = _chat_twins(cursor)
+        prefix, twin_join, of_this_chat, twin_params = twins.both_rows()
+        hidden_clause, hidden_params = twins.hidden_clause("chats.jid")
         read_marker = _last_read_time_select(cursor, "chats")
+        if twins.active:
+            twin_join += " LEFT JOIN chats twin ON twin.jid = tw.twin_jid"
+            other_marker = _last_read_time_select(cursor, "twin")
+            read_marker = f"NULLIF(MAX(COALESCE({read_marker}, ''), COALESCE({other_marker}, '')), '')"
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         spoken_filter = _spoken_filter("messages")
         unread_where = f"""
-            FROM messages
-            JOIN chats ON chats.jid = messages.chat_jid
+            FROM chats
+            {twin_join}
+            JOIN messages ON messages.chat_jid {of_this_chat}
             WHERE messages.is_from_me = 0
               AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
               AND {spoken_filter}
               AND {policy_clause}
+              AND {hidden_clause}
               {filter_clause}
             """
+        scope_params: tuple[Any, ...] = (*twin_params, *policy_params, *hidden_params, *filter_params)
         # Per chat, not per row: the mark is compared with the chat's newest
         # unread message, which set_anchor computes under these same bounds. Only
         # the two timestamp notes need it — a mute filter alone reads no message.
@@ -4707,16 +4817,18 @@ def list_unread(
             conn, hide_handled, exclude_muted, include_snoozed, anchor="t.anchor"
         )
         if triage_clause and (hide_handled or not include_snoozed):
-            _set_triage_anchor(conn, unread_where, (*policy_params, *filter_params))
-        where_params: tuple[Any, ...] = (*policy_params, *filter_params, *triage_params)
+            _set_triage_anchor(conn, unread_where, scope_params, prefix)
+        where_params: tuple[Any, ...] = (*scope_params, *triage_params)
         if count_only:
-            cursor.execute(f"SELECT COUNT(*), COUNT(DISTINCT chats.jid) {unread_where} {triage_clause}", where_params)
+            cursor.execute(
+                f"{prefix}SELECT COUNT(*), COUNT(DISTINCT chats.jid) {unread_where} {triage_clause}", where_params
+            )
             counted = cursor.fetchone() or (0, 0)
             return {"count": int(counted[0] or 0), "chats_with_unread": int(counted[1] or 0)}
         params: list[Any] = [*where_params, limit_chats]
         cursor.execute(
             f"""
-            SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
+            {prefix}SELECT chats.jid, chats.name, {read_marker} AS last_read_time,
                    COUNT(*) AS unread_count, MAX(messages.timestamp) AS latest_unread
             {unread_where} {triage_clause}
             GROUP BY chats.jid
@@ -4729,32 +4841,39 @@ def list_unread(
         chats: list[dict[str, Any]] = []
         total = 0
         for jid, name, last_read, count, latest in groups:
+            twin = twins.merged_row(jid)
+            # The pair's rows, and the marker the count was taken against, so the
+            # messages listed are the ones counted.
+            spellings = [jid, twin.absorbed] if twin is not None else [jid]
             cursor.execute(
                 f"""
                 SELECT {MESSAGE_COLUMNS}
                 FROM messages JOIN chats ON messages.chat_jid = chats.jid
-                WHERE messages.chat_jid = ? AND messages.is_from_me = 0
-                  AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
+                WHERE {_chat_jid_clause("messages.chat_jid", spellings)} AND messages.is_from_me = 0
+                  AND (? IS NULL OR messages.timestamp > ?)
                   AND {spoken_filter}
                   {filter_clause}
                 ORDER BY messages.timestamp DESC, messages.id DESC
                 LIMIT ?
                 """,
-                (jid, *filter_params, limit_per_chat),
+                (*spellings, last_read, last_read, *filter_params, limit_per_chat),
             )
             rows = cursor.fetchall()
             total += int(count)
-            chats.append(
-                {
-                    "chat_jid": jid,
-                    "chat_name": name,
-                    "is_group": jid.endswith("@g.us"),
-                    "unread_count": int(count),
-                    "latest_unread": latest,
-                    "last_read_time": last_read,
-                    "messages": [_row_to_message(row) for row in reversed(rows)],
-                }
-            )
+            if twin is not None and _is_placeholder_name(name) and not _is_placeholder_name(twin.name):
+                name = twin.name
+            chat_row: dict[str, Any] = {
+                "chat_jid": jid if twin is None else twin.jid,
+                "chat_name": name,
+                "is_group": jid.endswith("@g.us"),
+                "unread_count": int(count),
+                "latest_unread": latest,
+                "last_read_time": last_read,
+                "messages": [_row_to_message(row) for row in reversed(rows)],
+            }
+            if twin is not None:
+                chat_row["aliases"] = list(twin.aliases)
+            chats.append(chat_row)
         # One notes query for the whole call, not one per chat or per message.
         every_message = [message for chat in chats for message in chat["messages"]]
         notes = fetch_media_notes(every_message)
@@ -4823,7 +4942,7 @@ def list_unanswered(
     ).items
 
 
-def _min_messages_clause(min_messages: int) -> tuple[str, list[Any]]:
+def _min_messages_clause(min_messages: int, chat_match: str = "") -> tuple[str, list[Any]]:
     """Chats where at least N messages were spoken, `chats` in scope.
 
     Inbound and outbound alike — what this filter is for is the number that
@@ -4834,15 +4953,19 @@ def _min_messages_clause(min_messages: int) -> tuple[str, list[Any]]:
 
     Counted through a bounded subquery so a 200k-message group costs the
     threshold, not the group: the question is "at least N", never "how many".
+
+    `chat_match` counts a merged phone/LID pair as the one conversation it is
+    (issue #366) — halves that each said one thing must not each be dropped.
     """
     threshold = int(min_messages or 0)
     if threshold < 0:
         raise ToolError("invalid_argument", f"min_messages must be 0 or more, got {min_messages!r}")
     if threshold < 2:
         return "", []
+    match = chat_match or "= chats.jid"
     clause = (
         "AND (SELECT COUNT(*) FROM (SELECT 1 FROM messages stored"
-        f" WHERE stored.chat_jid = chats.jid AND {_spoken_filter('stored')} LIMIT ?)) >= ?"
+        f" WHERE stored.chat_jid {match} AND {_spoken_filter('stored')} LIMIT ?)) >= ?"
     )
     return clause, [threshold, threshold]
 
@@ -4855,8 +4978,20 @@ def _unanswered_from_where(
     exclude_chat_jid: str | Sequence[str] | None = None,
     ignore_closing_messages: bool = False,
     min_messages: int = 0,
-) -> tuple[str, list[Any]]:
-    """FROM/WHERE shared by the list_unanswered page and its count."""
+    twins: ChatTwins = NO_CHAT_TWINS,
+) -> tuple[str, str, list[Any]]:
+    """(WITH prefix, FROM/WHERE, params) shared by the list_unanswered page and its count.
+
+    A phone/LID pair is one waiting conversation, not two (issue #366): the row
+    another one reports for leaves the chat side, and both rows' messages feed
+    the "who spoke last" join, so the anchor is the newest of the pair. The
+    prefix is returned apart because `WITH` has to lead the whole statement,
+    ahead of the caller's own SELECT.
+    """
+    prefix, twin_join, of_this_chat, twin_params = twins.both_rows()
+    # Empty on a store with no pair, so the queries keep the shape they had.
+    of_this_chat = of_this_chat if twins.active else ""
+    hidden_clause, hidden_params = twins.hidden_clause("chats.jid")
     filter_clause, filter_params = unread_filters(since, None, exclude_groups, chat_jid, exclude_chat_jid)
     age_clause, age_params = "", []
     hours = float(min_age_hours or 0)
@@ -4869,16 +5004,30 @@ def _unanswered_from_where(
     if ignore_closing_messages:
         closing, closing_params = _closing_message_clause("messages")
         closing_clause = f"AND NOT {closing}"
-    stored_clause, stored_params = _min_messages_clause(min_messages)
+    stored_clause, stored_params = _min_messages_clause(min_messages, of_this_chat)
     policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
     sql = f"""
             FROM chats
-            {_last_message_join("chats", "messages", spoken_only=True)}
+            {twin_join}
+            {_last_message_join("chats", "messages", spoken_only=True, chat_match=of_this_chat)}
             WHERE messages.is_from_me = 0
               AND {policy_clause}
+              AND {hidden_clause}
               {filter_clause} {age_clause} {closing_clause} {stored_clause}
             """
-    return sql, [*policy_params, *filter_params, *age_params, *closing_params, *stored_params]
+    return (
+        prefix,
+        sql,
+        [
+            *twin_params,
+            *policy_params,
+            *hidden_params,
+            *filter_params,
+            *age_params,
+            *closing_params,
+            *stored_params,
+        ],
+    )
 
 
 def _install_triage_filter(
@@ -4897,11 +5046,11 @@ def _install_triage_filter(
     return install_filter(conn, hide_handled, exclude_muted, include_snoozed, anchor)
 
 
-def _set_triage_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any]) -> None:
+def _set_triage_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any], prefix: str = "") -> None:
     """Fill `t.anchor` for a caller that groups several rows per chat (list_unread)."""
     from triage import set_anchor
 
-    set_anchor(conn, from_where, params)
+    set_anchor(conn, from_where, params, prefix)
 
 
 # --- group mentions in triage --------------------------------------------------
@@ -4915,17 +5064,24 @@ def _set_triage_anchor(conn: sqlite3.Connection, from_where: str, params: Sequen
 # because the group kept talking after the mention.
 
 
-def _pending_mention_where(cur: sqlite3.Cursor, alias: str, chat_jid_expr: str) -> tuple[str, list[Any]]:
+def _pending_mention_where(
+    cur: sqlite3.Cursor, alias: str, chat_jid_expr: str, own_match: str = ""
+) -> tuple[str, list[Any]]:
     """`alias` is an inbound mention of the owner, newer than the owner's last word.
 
     "Word" on both sides means a spoken message (_spoken_filter): a thumbs-up
     from you does not answer a question, and a mention you revoked is not one
     any more — the same rule list_unanswered already applies to everything else.
+
+    `own_match` widens "your last word" to both rows of a merged phone/LID pair
+    (issue #366): a reply sent under one spelling answers a mention filed under
+    the other, exactly as it does for the ordinary "who spoke last" rule.
     """
     mention_clause, mention_params = mentions_me_predicate(cur, alias)
+    own_scope = own_match or f"= {chat_jid_expr}"
     sql = f"""{alias}.is_from_me = 0 AND {_spoken_filter(alias)} AND {mention_clause}
               AND {alias}.timestamp > COALESCE((SELECT MAX(own.timestamp) FROM messages own
-                                                 WHERE own.chat_jid = {chat_jid_expr}
+                                                 WHERE own.chat_jid {own_scope}
                                                    AND own.is_from_me = 1 AND {_spoken_filter("own")}), '')"""
     return sql, mention_params
 
@@ -4934,6 +5090,7 @@ def newest_pending_mentions(
     cur: sqlite3.Cursor,
     chat_jids: Sequence[str],
     bounds: Sequence[tuple[str, str]] = (),
+    twins: ChatTwins = NO_CHAT_TWINS,
 ) -> dict[str, tuple[str, str]]:
     """{chat_jid: (message_id, timestamp)} of the newest unanswered mention per chat.
 
@@ -4941,20 +5098,58 @@ def newest_pending_mentions(
     so the annotation costs one bounded query per page. `bounds` carries the
     same time bounds the page was built with — a row anchored on a mention must
     name that mention, not a newer one the bound excluded.
+
+    `twins` makes "you answered" span both spellings of a merged pair: without
+    it a reply sent under the phone JID would leave a mention filed under the
+    `@lid` pending for ever (issue #366).
     """
     if not chat_jids:
         return {}
-    where, params = _pending_mention_where(cur, "messages", "messages.chat_jid")
+    prefix, twin_join, own_match, twin_params = "", "", "", []
+    if twins.active:
+        cte, twin_params = twins.cte()
+        prefix = f"WITH {cte} "
+        twin_join = " LEFT JOIN chat_twin tw ON tw.jid = messages.chat_jid"
+        own_match = "IN (messages.chat_jid, tw.twin_jid)"
+    where, params = _pending_mention_where(cur, "messages", "messages.chat_jid", own_match)
     bound_sql = "".join(f" AND messages.timestamp {op} ?" for op, _ in bounds)
     placeholders = ",".join("?" * len(chat_jids))
     cur.execute(
-        f"""SELECT messages.chat_jid, messages.id, MAX(messages.timestamp)
-            FROM messages
+        f"""{prefix}SELECT messages.chat_jid, messages.id, MAX(messages.timestamp)
+            FROM messages{twin_join}
             WHERE messages.chat_jid IN ({placeholders}) AND {where}{bound_sql}
             GROUP BY messages.chat_jid""",
-        (*chat_jids, *params, *(value for _, value in bounds)),
+        (*twin_params, *chat_jids, *params, *(value for _, value in bounds)),
     )
     return {chat: (message_id, timestamp) for chat, message_id, timestamp in cur.fetchall()}
+
+
+def _pending_mentions_by_row(
+    cur: sqlite3.Cursor,
+    listed: Sequence[str],
+    bounds: Sequence[tuple[str, str]],
+    twins: ChatTwins,
+) -> dict[str, tuple[str, str]]:
+    """`newest_pending_mentions` keyed by the row that lists, both spellings folded.
+
+    A mention of this account can sit in the row of a merged pair that another
+    one reports for (issue #366), and the row is about the conversation: both
+    halves are probed, answered messages on either side of the pair count as
+    answered, and the newer of what is left names the row.
+    """
+    if not twins.active:
+        return newest_pending_mentions(cur, listed, bounds)
+    lists_for = {jid: jid for jid in listed}
+    for jid in listed:
+        twin = twins.merged_row(jid)
+        if twin is not None:
+            lists_for[twin.absorbed] = jid
+    merged: dict[str, tuple[str, str]] = {}
+    for chat, pending in newest_pending_mentions(cur, list(lists_for), bounds, twins).items():
+        row = lists_for[chat]
+        if row not in merged or merged[row][1] < pending[1]:
+            merged[row] = pending
+    return merged
 
 
 def _mention_only_rows(
@@ -5111,14 +5306,23 @@ def count_unanswered(
     min_messages: int = 0,
 ) -> int:
     """How many chats are waiting for a reply, without returning any of them."""
-    from_where, params = _unanswered_from_where(
-        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages, min_messages
-    )
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        # One row per waiting conversation, so a merged pair counts once and
+        # this number keeps agreeing with the page (issue #366).
+        prefix, from_where, params = _unanswered_from_where(
+            since,
+            exclude_groups,
+            min_age_hours,
+            chat_jid,
+            exclude_chat_jid,
+            ignore_closing_messages,
+            min_messages,
+            _chat_twins(cur),
+        )
         triage_clause, triage_params = _install_triage_filter(conn, hide_handled, exclude_muted, include_snoozed)
-        cur.execute(f"SELECT COUNT(*) {from_where} {triage_clause}", (*params, *triage_params))
+        cur.execute(f"{prefix}SELECT COUNT(*) {from_where} {triage_clause}", (*params, *triage_params))
         row = cur.fetchone()
         return int(row[0]) if row else 0
     except sqlite3.Error as e:
@@ -5166,12 +5370,13 @@ def list_unanswered_page(
 
     min_messages drops the chats where fewer than N messages were ever spoken,
     the one-line broadcasts that were never a conversation.
+
+    A contact WhatsApp knows under both a phone JID and a `@lid` waits in one
+    row, as everywhere else (`ChatTwins`, issue #366): the pair is collapsed
+    before the page is cut, so it cannot straddle a page boundary either.
     """
     limit = page_size(limit, UNANSWERED_MAX_LIMIT)
     cursor_state = decode_cursor(cursor, "unanswered")
-    from_where, where_params = _unanswered_from_where(
-        since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages, min_messages
-    )
     # Resolve "who am I" before opening the database (see list_messages_page).
     if include_group_mentions:
         owner_identity()
@@ -5179,6 +5384,17 @@ def list_unanswered_page(
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+        twins = _chat_twins(cur)
+        prefix, from_where, where_params = _unanswered_from_where(
+            since,
+            exclude_groups,
+            min_age_hours,
+            chat_jid,
+            exclude_chat_jid,
+            ignore_closing_messages,
+            min_messages,
+            twins,
+        )
         read_marker = _last_read_time_select(cur, "chats")
         triage_clause, triage_params = _install_triage_filter(conn, hide_handled, exclude_muted, include_snoozed)
         # Same contract as list_chats: the last message is always joined
@@ -5194,7 +5410,7 @@ def list_unanswered_page(
 
         cur.execute(
             f"""
-            SELECT chats.jid, chats.name, chats.last_message_time,
+            {prefix}SELECT chats.jid, chats.name, chats.last_message_time,
                    {last_message_select},
                    messages.is_from_me, {read_marker},
                    messages.id IS NOT NULL, messages.timestamp
@@ -5238,7 +5454,7 @@ def list_unanswered_page(
             # page was built around, never a newer one the bound left out. The
             # triage notes are not among them — the flag says what the chat
             # holds, and a row they did not hide keeps naming its mention.
-            mentions_by_chat = newest_pending_mentions(cur, [row[0] for row in rows], bounds)
+            mentions_by_chat = _pending_mentions_by_row(cur, [row[0] for row in rows], bounds, twins)
         has_more = len(rows) > limit
         rows = rows[:limit]
         next_cursor = None
@@ -5258,6 +5474,7 @@ def list_unanswered_page(
             )
             for row in rows
         ]
+        twins.merge(page_chats)
         _apply_name_fallback(page_chats)
         items = []
         for chat, row in zip(page_chats, rows, strict=True):
@@ -5265,7 +5482,9 @@ def list_unanswered_page(
             item["last_inbound_time"] = row[8]
             item["age_hours"] = _hours_since(row[8])
             if include_group_mentions:
-                pending = mentions_by_chat.get(chat.jid)
+                # Keyed by the row, not by chat.jid: merge() has just relabelled
+                # a pair to its phone spelling, which need not be the row's.
+                pending = mentions_by_chat.get(row[0])
                 item["mention"] = pending is not None
                 if pending is not None:
                     item["mention_message_id"], item["mention_time"] = pending

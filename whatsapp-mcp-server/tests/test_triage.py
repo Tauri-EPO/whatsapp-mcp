@@ -15,13 +15,14 @@ import notes
 import triage
 import whatsapp
 from chat_policy import ChatPolicy
+from tests.conftest import BOB as PAIRED_BOB
 from tests.conftest import MESSAGES_SCHEMA
 
 ALICE = "5511111111111@s.whatsapp.net"
 BOB = "5511222222222@s.whatsapp.net"
 CARLA = "5511333333333@s.whatsapp.net"
 VIVO = "5511444444444@s.whatsapp.net"  # the service notice nobody is waiting on
-BOB_LID = "231241139937355@lid"
+BOB_LID = "231241139937355@lid"  # the LID of PAIRED_BOB in the paired store
 
 
 def _stamp(**delta):
@@ -257,7 +258,12 @@ class TestPagination:
 
 
 class TestLidSpellings:
-    """The chat is stored as `<lid>@lid`; annotate writes its notes under the phone JID."""
+    """The chat is stored as `<lid>@lid`; annotate writes its notes under the phone JID.
+
+    The paired store also holds Bob's phone chat row, so the two are one listing
+    row reported under the phone spelling (issue #366) — what these tests pin is
+    that a note under either spelling decides for that row.
+    """
 
     @pytest.fixture(autouse=True)
     def lid_chat(self, paired_dbs):
@@ -285,26 +291,26 @@ class TestLidSpellings:
         conn.close()
 
     def test_a_note_stored_under_the_phone_jid_hides_the_lid_chat(self):
-        assert BOB_LID in _jids()
+        assert PAIRED_BOB in _jids()
 
         out = main.mark_handled(BOB_LID)
         assert out["chat_jid"].endswith("@s.whatsapp.net")  # stored under the phone form
-        assert BOB_LID not in _jids()
+        assert PAIRED_BOB not in _jids()
 
     def test_the_phone_spelling_wins_over_a_note_left_under_the_lid(self):
         """A stale note must not outrank the current one just because rows come back in that order."""
         main.annotate("chat", BOB_LID, "mute", "no")  # canonicalised to the phone JID
         self._legacy_note("mute", "yes")
-        assert BOB_LID in _jids()
+        assert PAIRED_BOB in _jids()
 
     def test_clearing_a_note_beats_a_live_row_under_the_older_spelling(self):
         """The delete lands on the phone JID; the chat must come back all the same."""
         self._legacy_note("handled_at", _stamp(minutes=5))
-        assert BOB_LID not in _jids()
+        assert PAIRED_BOB not in _jids()
 
         assert main.annotate("chat", BOB_LID, "handled_at", "")["deleted"] is True
         assert main.get_notes("chat", BOB_LID)["notes"] == {}
-        assert BOB_LID in _jids()
+        assert PAIRED_BOB in _jids()
 
 
 class TestListUnread:

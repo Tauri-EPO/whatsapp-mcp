@@ -764,7 +764,10 @@ def message_stats(
 
     Args:
         group_by: "chat" (default), "day", "month" or "sender". Day and month
-                 buckets use the timestamp as stored (UTC).
+                 buckets use the timestamp as stored (UTC). With "chat", a
+                 contact WhatsApp keeps under both a phone JID and a "@lid" is
+                 one bucket keyed by the phone spelling, summing the two rows;
+                 "sender" counts identifiers as the messages carry them.
         chat_jid: Restrict to one conversation or a list of them (JIDs, or phone
                  numbers with country code)
         exclude_chat_jid: One conversation or a list of them to leave out
@@ -951,6 +954,11 @@ def list_unread(
         {"chats": [{chat_jid, chat_name, is_group, unread_count, latest_unread,
         last_read_time, messages: [...]}], "total_unread": N, "chats_with_unread": N}.
         Use mark_messages_read(chat_jid, message_ids) once handled.
+
+        A contact WhatsApp keeps under both a phone JID and a "@lid" is one row,
+        reported under the phone spelling with `aliases` naming both: the two
+        unread counts are summed, the messages of both are listed, and a read
+        marker on either covers the pair.
     """
     if count_only:
         _reject_count_only_extras(fields)
@@ -1014,6 +1022,10 @@ def list_unanswered(
     waiting on. Those three notes are honoured here by default — a chat is only ever
     hidden because you marked it, so a store with no triage notes is unaffected — and
     a *new* inbound message overrides handled_at and brings the chat straight back.
+
+    A contact WhatsApp keeps under both a phone JID and a "@lid" waits in one row,
+    reported under the phone spelling with `aliases` naming both: who spoke last is
+    asked of the conversation, so a reply sent under either spelling answers it.
 
     Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
     next_cursor back as `cursor` for the following page.
@@ -1663,6 +1675,11 @@ def mark_messages_read(
 
     Read receipts do not consume view-once media (that needs a separate view
     receipt the bridge never sends).
+
+    A chat WhatsApp keeps under both a phone JID and a "@lid" is two rows behind
+    the one JID list_unread reports: the ids are routed back to the row that
+    stores each of them, so a merged row's ids can be passed as they came, and
+    the whole-chat form clears both halves.
 
     Args:
         chat_jid: JID of the chat
