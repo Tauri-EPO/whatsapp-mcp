@@ -480,6 +480,20 @@ What to know before turning it on:
   forwarded into three chats — and a restart resumes where it stopped.
 - **It never blocks a tool call.** One daemon thread, one file at a time, its own
   database connections; `messages.db` is only ever read.
+- **It works through the whole archive, not just its newest page.** Each round
+  looks at the newest voice notes first — an arrival whose bytes are here is
+  transcribed the next interval, and with `TRANSCRIBE_ON_INGEST_FETCH=1` up to
+  two of the round's downloads are kept for the uncached ones (none when
+  `BATCH=1`, where the walk needs the only one) — and then at a page of older
+  ones starting where the previous round stopped, wrapping back to the newest
+  once it reaches the oldest row. Audio whose bytes are not here does not fill
+  every round any more, so older audio that *is* readable is reached after a
+  bounded number of intervals: the walk advances about `5 × BATCH` rows per
+  interval, or about `BATCH` rows with `TRANSCRIBE_ON_INGEST_FETCH=1`, since it
+  then stops where its downloads ran out rather than skipping what it could not
+  ask for. A backlog of thousands therefore takes hours to come round. The
+  position of the walk lives in the process: a restart begins at the newest rows
+  again, which is where the new work is.
 - **Failures are parked, not retried forever.** A file the backend cannot read
   gets a `transcript_error` note instead of a transcript, which takes it off the
   work list. Clear it with `annotate_media(sha256, "transcript_error", "")` to
@@ -498,13 +512,14 @@ What to know before turning it on:
   for the voice notes only; set `WHATSAPP_MEDIA_RETENTION_DAYS` if that disk use
   matters, the transcript survives the sweep. A file the bridge cannot send (down,
   disconnected, expired media link) is skipped with a warning and gets no
-  `transcript_error` note, so the next round tries it again; three failures in a
-  row end the fetching for that round.
+  `transcript_error` note, so it is asked for again when the walk comes round;
+  three failures in a row end the fetching for the newest rows or for the walk,
+  whichever was asking, so one round makes at most five refused requests.
 
 One line per non-empty batch goes to the MCP server log:
 
 ```
-transcribe_on_ingest: 10 pending, 9 transcribed, 1 failed in 41.2s
+transcribe_on_ingest: 50 examined, 10 pending, 9 transcribed, 1 failed in 41.2s
 ```
 
 ## Bridge authentication and media paths

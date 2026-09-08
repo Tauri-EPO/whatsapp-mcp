@@ -345,6 +345,150 @@ def test_the_allow_list_bounds_what_the_worker_transcribes(paired_dbs, monkeypat
     assert media_notes.fetch_notes([SHA["BOB1"]]) == {}
 
 
+# --- walking the archive ----------------------------------------------------
+
+
+def _numbered_filename(index: int) -> str:
+    return f"audio_20260905_{index:06d}_VOICE{index:03d}.ogg"
+
+
+def _add_numbered_audio(store, index: int, *, cached: bool, chat_jid: str = ALICE) -> None:
+    """One inbound voice note; a higher index is newer and has its own hash."""
+    message_id = f"VOICE{index:03d}"
+    filename = _numbered_filename(index)
+    with store.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
+            "file_length, file_sha256, filename) VALUES (?, ?, ?, '', ?, 0, 'audio', 3000, ?, ?)",
+            (
+                message_id,
+                chat_jid,
+                chat_jid,
+                f"2026-09-05 {10 + index // 60:02d}:{index % 60:02d}:00",
+                bytes.fromhex(f"{index:02x}" * 32),
+                filename,
+            ),
+        )
+    if cached:
+        directory = media_inventory.chat_media_dir(chat_jid)
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, filename), "wb") as fh:
+            fh.write(b"opus")
+
+
+@pytest.fixture
+def starved_archive(paired_dbs):
+    """One older cached voice note buried under 50 newer ones whose bytes are not here."""
+    _add_numbered_audio(paired_dbs, 0, cached=True)
+    for index in range(1, 51):
+        _add_numbered_audio(paired_dbs, index, cached=False)
+    return paired_dbs
+
+
+def _rounds(backend, *, batch: int = 10, limit: int = 8, **kwargs) -> list[transcribe_worker.BatchResult]:
+    """Run batches the way the loop does — carrying the position — until one transcribes."""
+    results: list[transcribe_worker.BatchResult] = []
+    position = None
+    for _ in range(limit):
+        result = transcribe_worker.run_once(batch, transcribe=backend, position=position, **kwargs)
+        results.append(result)
+        position = result.position
+        if result.transcribed:
+            break
+    return results
+
+
+def test_an_unreadable_prefix_does_not_hide_older_cached_audio(starved_archive):
+    """Fetch off: the walk steps past the 50 rows with no bytes and reaches the cached one."""
+    backend = FakeBackend()
+    results = _rounds(backend)
+
+    assert [r.transcribed for r in results] == [0, 1]  # second round, not the tenth
+    assert results[0].examined == 50  # the whole candidate page was looked at, not just its head
+    assert results[0].position is not None  # and the next round resumes past it
+    assert [os.path.basename(p) for p in backend.runs] == [_numbered_filename(0)]
+    assert results[-1].position is None  # oldest row reached: the next round starts at the newest again
+
+
+def test_a_bridge_that_refuses_everything_does_not_hide_older_cached_audio(starved_archive):
+    """Fetch on: the round parks in front of what it could not try, and reads the page anyway."""
+    refused = {f"VOICE{index:03d}" for index in range(1, 51)}
+    bridge = FakeBridge(fail=refused)
+    backend = FakeBackend()
+
+    results = _rounds(backend, fetch=True, download=bridge)
+
+    assert [r.transcribed for r in results] == [0, 1]
+    assert [os.path.basename(p) for p in backend.runs] == [_numbered_filename(0)]
+    # Per round the bridge is asked at most the walk's three strikes plus the slice
+    # the newest rows may spend, however many rows the page holds.
+    per_round = transcribe_worker.MAX_FETCH_FAILURES + transcribe_worker.HEAD_FETCHES
+    assert len(bridge.calls) <= len(results) * per_round
+    # A file the bridge would not send is skipped, never recorded as a whisper failure.
+    assert media_notes.fetch_notes([f"{index:02x}" * 32 for index in range(1, 51)]) == {}
+
+
+def test_the_next_round_resumes_at_the_row_the_fetch_budget_did_not_reach(paired_dbs):
+    """A round that spends its downloads mid-page parks there; nothing is stepped over untried."""
+    for index in range(1, 9):
+        _add_numbered_audio(paired_dbs, index, cached=False)
+    bridge = FakeBridge(fail={"VOICE005"})
+    backend = FakeBackend()
+
+    first = transcribe_worker.run_once(4, transcribe=backend, fetch=True, download=bridge)
+    assert (first.transcribed, first.failed) == (3, 0)
+    assert [message_id for message_id, _ in bridge.calls] == ["VOICE008", "VOICE007", "VOICE006", "VOICE005"]
+
+    second = transcribe_worker.run_once(4, transcribe=backend, fetch=True, download=bridge, position=first.position)
+    # VOICE004 is where the budget ran out, so that is where the walk starts again.
+    assert "VOICE004" in [message_id for message_id, _ in bridge.calls[4:]]
+    assert second.transcribed == 3
+
+
+def test_a_few_refused_rows_at_the_top_do_not_stall_the_fetching(paired_dbs):
+    """The newest rows the bridge will not send must not be the only ones ever asked for."""
+    for index in range(1, 21):
+        _add_numbered_audio(paired_dbs, index, cached=False)
+    bridge = FakeBridge(fail={"VOICE020", "VOICE019", "VOICE018"})  # expired media, say
+    backend = FakeBackend()
+
+    results = _rounds(backend, fetch=True, download=bridge)
+
+    assert results[0].transcribed == 0  # the round spends its strikes on the three dead rows
+    assert results[-1].transcribed > 0  # and the next one asks for the rows behind them
+    assert ("VOICE017", ALICE) in bridge.calls
+
+
+def test_an_uncached_arrival_is_fetched_while_the_walk_is_deep_in_the_archive(starved_archive):
+    """Autodownload off, fetch on: the newest rows keep a slice of the downloads."""
+    bridge = FakeBridge(fail={f"VOICE{index:03d}" for index in range(1, 51)})
+    backend = FakeBackend()
+
+    first = transcribe_worker.run_once(10, transcribe=backend, fetch=True, download=bridge)
+    assert (first.transcribed, first.position is None) == (0, False)  # the walk is mid-archive now
+
+    _add_numbered_audio(starved_archive, 60, cached=False)  # arrives with no bytes here
+    second = transcribe_worker.run_once(10, transcribe=backend, fetch=True, download=bridge, position=first.position)
+
+    assert ("VOICE060", ALICE) in bridge.calls
+    assert any("VOICE060" in os.path.basename(path) for path in backend.runs)  # the bridge's own name
+    assert second.transcribed == 2  # the arrival and the older cached row the walk reached
+
+
+def test_a_new_arrival_is_not_queued_behind_the_walk(starved_archive):
+    backend = FakeBackend()
+    first = transcribe_worker.run_once(10, transcribe=backend)
+    assert (first.transcribed, first.position is None) == (0, False)  # mid-archive now
+
+    _add_numbered_audio(starved_archive, 60, cached=True)  # arrives while the walk is far from the top
+    second = transcribe_worker.run_once(10, transcribe=backend, position=first.position)
+
+    # The newest rows are looked at every round, so the arrival is transcribed
+    # in the very next one — together with the older row the walk had reached.
+    assert second.transcribed == 2
+    assert [os.path.basename(p) for p in backend.runs] == [_numbered_filename(60), _numbered_filename(0)]
+
+
 # --- the loop ---------------------------------------------------------------
 
 
@@ -355,7 +499,7 @@ def test_the_loop_sleeps_the_configured_interval_between_batches():
     batches: list[int] = []
     slept: list[float] = []
 
-    def run(batch: int) -> transcribe_worker.BatchResult:
+    def run(batch: int, *, position: transcribe_worker.Position | None = None) -> transcribe_worker.BatchResult:
         batches.append(batch)
         return transcribe_worker.BatchResult(0, 0, 0)
 
@@ -389,7 +533,7 @@ def test_start_worker_runs_on_a_daemon_thread_and_stops():
     stop = threading.Event()
     ran = threading.Event()
 
-    def run(batch: int) -> transcribe_worker.BatchResult:
+    def run(batch: int, *, position: transcribe_worker.Position | None = None) -> transcribe_worker.BatchResult:
         ran.set()
         stop.set()
         return transcribe_worker.BatchResult(0, 0, 0)
