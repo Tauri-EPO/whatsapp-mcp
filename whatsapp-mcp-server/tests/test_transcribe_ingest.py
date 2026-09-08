@@ -82,17 +82,24 @@ class FakeBridge:
 
     ``fail`` names the messages it refuses (down, disconnected, expired media
     link — all of them ``bridge_unavailable``); ``gone`` names the ones the
-    sender's phone answered it no longer has (``media_unavailable``, which no
-    retry can change); ``foreign_path`` makes it answer with the bridge's own
+    sender's phone answered it no longer has and ``keyless`` the rows stored
+    without the CDN fields a download needs (both ``media_unavailable``, which
+    no retry can change); ``foreign_path`` makes it answer with the bridge's own
     view of the path, which a split deployment cannot open.
     """
 
     def __init__(
-        self, *, fail: set[str] | None = None, gone: set[str] | None = None, foreign_path: bool = False
+        self,
+        *,
+        fail: set[str] | None = None,
+        gone: set[str] | None = None,
+        keyless: set[str] | None = None,
+        foreign_path: bool = False,
     ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.fail = fail or set()
         self.gone = gone or set()
+        self.keyless = keyless or set()
         self.foreign_path = foreign_path
 
     def __call__(self, message_id: str, chat_jid: str) -> str:
@@ -101,6 +108,11 @@ class FakeBridge:
             raise ToolError(
                 "media_unavailable",
                 "Failed to download media: sender's phone declined media retry: NOT_FOUND",
+            )
+        if message_id in self.keyless:
+            raise ToolError(
+                "media_unavailable",
+                "Failed to download media: incomplete media information for download",
             )
         if message_id in self.fail:
             raise ToolError("bridge_unavailable", "bridge unreachable at http://localhost:8080/api")
@@ -351,7 +363,7 @@ def test_media_the_phone_no_longer_has_is_recorded_and_never_asked_for_again(pai
     assert len(notes) == 4
     recorded = notes[SHA["AUD1"]]["media_unavailable"]
     assert "NOT_FOUND" in recorded and recorded[:2] == "20"  # the reason, dated
-    assert "no longer has" in caplog.text
+    assert "no longer fetchable" in caplog.text
 
     # The next round does not ask again: the note takes the rows off the walk.
     again = FakeBridge(gone=set(gone))
@@ -363,6 +375,28 @@ def test_media_the_phone_no_longer_has_is_recorded_and_never_asked_for_again(pai
     third = FakeBridge()
     assert transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=third).transcribed == 1
     assert third.calls == [("AUD1", ALICE)]
+
+
+def test_media_rows_without_cdn_fields_are_recorded_like_a_definitive_miss(paired_dbs):
+    """Issue #392: a row with no media key can never be downloaded either."""
+    keyless = ("AUD1", "AUD2", "AUD3", "AUD4")
+    for message_id in keyless:
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    bridge = FakeBridge(keyless=set(keyless))
+
+    result = transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=bridge)
+
+    # All four are asked (no strike is spent) and all four are recorded.
+    assert (result.pending, result.transcribed, result.failed) == (0, 0, 0)
+    assert len(bridge.calls) == 4
+    notes = media_notes.fetch_notes([SHA[m] for m in keyless])
+    assert len(notes) == 4
+    assert "incomplete media information" in notes[SHA["AUD1"]]["media_unavailable"]
+
+    # And the next round walks past them instead of asking again.
+    again = FakeBridge(keyless=set(keyless))
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=again).pending == 0
+    assert again.calls == []
 
 
 def test_a_definitive_miss_does_not_spend_the_rounds_failure_budget(paired_dbs):

@@ -88,15 +88,6 @@ func (h *mediaRetryHub) dispatch(evt *events.MediaRetry) bool {
 	}
 }
 
-// errMediaUnavailable marks the definitive answer: the sender's phone was asked
-// to re-upload the file and said it cannot. The CDN copy is gone and the phone
-// no longer has the original, so no later request can succeed — unlike a phone
-// that is merely offline, a bridge that is disconnected or a CDN that timed
-// out, all of which are worth retrying. Callers (handleDownload, and through it
-// the MCP server's ingest worker) use it to record the miss once instead of
-// asking for the same dead file on every pass over the archive (issue #378).
-var errMediaUnavailable = errors.New("the sender's phone no longer has this media")
-
 // definitiveRetryResult reports whether a MediaRetryNotification result means
 // "never". Only NOT_FOUND does: the phone looked and no longer has the file.
 // GENERAL_ERROR is the catch-all (and the zero value of the enum), and

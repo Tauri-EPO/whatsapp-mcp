@@ -53,10 +53,15 @@ func TestDownloadMedia_Errors(t *testing.T) {
 	}
 
 	// Media row whose CDN fields were never captured (old rows, view-once
-	// placeholders): refuse before touching the network.
+	// placeholders): refuse before touching the network, and say it is final —
+	// a media retry hands back a path, never the key (issue #392).
 	seedMediaRow(t, ms, "no-keys", "image", "https://mmg.whatsapp.net/v/x", nil, nil, nil, 0)
-	if _, _, _, _, err := b.downloadMedia(context.Background(), "no-keys", mediaTestChat); err == nil || !strings.Contains(err.Error(), "incomplete media information") {
-		t.Errorf("incomplete row: err = %v", err)
+	_, _, _, _, keyless := b.downloadMedia(context.Background(), "no-keys", mediaTestChat)
+	if keyless == nil || !strings.Contains(keyless.Error(), "incomplete media information") {
+		t.Errorf("incomplete row: err = %v", keyless)
+	}
+	if !errors.Is(keyless, errMediaUnavailable) {
+		t.Errorf("incomplete row must read as permanent: %v", keyless)
 	}
 
 	url, key, sha, enc, n := fullMediaInfo()
@@ -71,6 +76,9 @@ func TestDownloadMedia_Errors(t *testing.T) {
 	ok, _, _, _, err := b.downloadMedia(context.Background(), "img-1", mediaTestChat)
 	if ok || err == nil || !strings.Contains(err.Error(), "failed to download media") {
 		t.Errorf("download failure: ok=%v err=%v", ok, err)
+	}
+	if errors.Is(err, errMediaUnavailable) {
+		t.Errorf("a transfer that failed must stay retryable: %v", err)
 	}
 	if got := b.metrics.mediaDownloadFails.Load(); got != 1 {
 		t.Errorf("mediaDownloadFails = %d, want 1", got)
@@ -227,6 +235,30 @@ func TestHandleDownload(t *testing.T) {
 	}
 	if !resp.Success || resp.Filename != "image_20260904_150405_m1.jpg" || !strings.HasSuffix(resp.Path, "m1.jpg") || !strings.Contains(resp.Message, "image") {
 		t.Errorf("response = %+v", resp)
+	}
+}
+
+// TestHandleDownload_RowWithoutCDNFieldsIsUnavailable goes through the real
+// downloadMedia: a row stored without the CDN fields (history-sync stubs, some
+// forwards) can never be fetched, so /api/download must answer the code that
+// means "stop asking" rather than the transient one (issue #392).
+func TestHandleDownload_RowWithoutCDNFieldsIsUnavailable(t *testing.T) {
+	const token = "test-token-0123456789"
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms := newTestMessageStore(t)
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
+	b.Connected = func() bool { return true }
+	seedMediaRow(t, ms, "no-keys", "audio", "", nil, nil, nil, 0)
+
+	rec := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"message_id":"no-keys","chat_jid":%q}`, mediaTestChat)
+	b.newRESTMux(8080, token).ServeHTTP(rec, downloadRequest(token, body))
+
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "incomplete media information") {
+		t.Fatalf("keyless row: %d %s", rec.Code, rec.Body.String())
+	}
+	if code := downloadErrorCode(t, rec); code != "media_unavailable" {
+		t.Errorf("keyless row code = %q, want media_unavailable", code)
 	}
 }
 

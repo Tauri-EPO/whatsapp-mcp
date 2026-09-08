@@ -36,11 +36,11 @@ Properties that matter:
   round with a warning and no note, so those files are tried again next
   interval; the notes an older build wrote for such an outage are cleared when
   the worker starts (``clear_outage_failures``).
-- **Media the sender no longer has is recorded once.** When the bridge answers
-  ``media_unavailable`` — it asked the sender's phone to re-upload and the phone
-  said the file is gone — the hash gets a ``media_unavailable`` note and leaves
-  the work list, instead of being asked for again on every pass over the archive
-  (issue #378).
+- **Media that can never arrive is recorded once.** When the bridge answers
+  ``media_unavailable`` — the sender's phone was asked to re-upload and said the
+  file is gone, or the row carries no media key to decrypt it with — the hash
+  gets a ``media_unavailable`` note and leaves the work list, instead of being
+  asked for again on every pass over the archive (issues #378, #392).
 
 ``messages.db`` is the bridge's; this module only ever reads it. Everything it
 writes goes to ``notes.db``, and the policies that bound the tools bound it too:
@@ -108,9 +108,11 @@ MAX_ERROR_CHARS = 500
 # request the server choked on, and skipping it keeps the batch moving instead
 # of letting one voice note stall the walk for ever.
 MAX_OUTAGE_SKIPS = 3
-# The bridge's code for "the sender's phone no longer has this media"
-# (whatsapp-bridge/media_retry.go). Asking again cannot help, so the row is
-# noted and skipped instead of retried on every pass (issue #378).
+# The bridge's code for "these bytes can never arrive" (errMediaUnavailable in
+# whatsapp-bridge/media.go): the sender's phone was asked to re-upload and said
+# the file is gone (issue #378), or the row was stored without the CDN fields a
+# download needs (issue #392). Asking again cannot help either way, so the row
+# is noted and skipped instead of retried on every pass.
 MEDIA_UNAVAILABLE_CODE = "media_unavailable"
 # ``transcript_error`` values written before an outage was told apart from a file
 # whisper cannot read (#377): they name the backend, not the audio, so they are
@@ -156,8 +158,9 @@ class Fetched:
     """One download attempt: the readable path, or why there will never be one."""
 
     path: str | None = None
-    # The bridge's `media_unavailable`: the sender's phone answered that the
-    # bytes are gone. Empty for a failure worth retrying.
+    # The bridge's `media_unavailable`: the bytes can never arrive (the phone
+    # no longer has them, or the row has no key). Empty for a failure worth
+    # retrying.
     unavailable: str = ""
 
 
@@ -240,9 +243,9 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
     """SQL predicate for "this hash is done with": a transcript, or a recorded miss.
 
     The recorded misses are ``transcript_error`` (whisper could not read the
-    file) and ``media_unavailable`` (the sender's phone answered that the bytes
-    are gone, so no download will ever bring them here — issue #378). Both take
-    the row off the work list until the note is cleared.
+    file) and ``media_unavailable`` (no download will ever bring the bytes here:
+    the sender's phone no longer has them, or the row has no media key — issues
+    #378, #392). Both take the row off the work list until the note is cleared.
 
     notes.db is a separate file, so it is attached to the read connection for the
     query instead of pulling every transcribed hash into the statement as
@@ -346,10 +349,10 @@ def find_pending(
     the bridge could not send this time is just skipped: it is not the file
     whisper could not read, so it gets no ``transcript_error`` note, and it is
     tried again when the walk comes round. A file the bridge says is *gone* —
-    the sender's phone was asked to re-upload and answered that it no longer has
-    it — gets a ``media_unavailable`` note instead, which takes it off the work
-    list for good, and costs no strike: an archive of expired media would
-    otherwise end every round after three rows (issue #378).
+    the sender's phone no longer has it, or the row was stored without the CDN
+    fields — gets a ``media_unavailable`` note instead, which takes it off the
+    work list for good, and costs no strike: an archive of expired media would
+    otherwise end every round after three rows (issues #378, #392).
     """
     batch = max(1, batch)
     page_limit = batch * CANDIDATE_FACTOR
@@ -359,7 +362,7 @@ def find_pending(
     budget = batch if fetch else 0  # fetch attempts left this round
     head_budget = min(batch - 1, HEAD_FETCHES) if fetch else 0  # ... of which the newest rows may spend these
     failures = 0  # consecutive; a success clears them
-    unavailable = 0  # rows the sender's phone answered are gone, recorded this round
+    unavailable = 0  # rows whose bytes can never arrive, recorded this round
     parked = False  # out of fetches: the walk stops advancing so nothing is stepped over untried
     walking = False
     caches: dict[str, dict[str, str]] = {}  # chat -> message id -> cached filename
@@ -432,7 +435,7 @@ def find_pending(
         next_position = None  # the walk reached the oldest row; start over at the newest
     if unavailable:
         logger.info(
-            "transcribe_on_ingest: %d voice notes the sender's phone no longer has, recorded and skipped from now on",
+            "transcribe_on_ingest: %d voice notes no longer fetchable, recorded and skipped from now on",
             unavailable,
         )
     return Selection(candidates=out, examined=len(looked_at), position=next_position)
@@ -457,8 +460,9 @@ def _fetch_bytes(
     this round reads that entry back; it is written to keep the map honest.
 
     ``media_unavailable`` is the one answer that is not a failure of the bridge:
-    the sender's phone was asked to re-upload and said it no longer has the
-    file, which no later request can change (issue #378).
+    the sender's phone was asked to re-upload and said it no longer has the file
+    (issue #378), or the row was stored without the CDN fields a download needs
+    (issue #392). No later request can change either.
     """
     try:
         path = download(message_id, chat_jid)
@@ -496,7 +500,7 @@ def _record_unavailable(sha256: str, reason: str) -> bool:
     the caller must keep counting the round's strikes, or it would spend a whole
     batch of downloads per round on rows it cannot remember.
     """
-    dated = f"{datetime.now(UTC).date().isoformat()}: {reason or 'the sender no longer has this media'}"
+    dated = f"{datetime.now(UTC).date().isoformat()}: {reason or 'this media can no longer be fetched'}"
     try:
         media_notes.annotate_media(sha256, MEDIA_UNAVAILABLE_KEY, dated[:MAX_ERROR_CHARS])
     except (ToolError, sqlite3.Error) as exc:

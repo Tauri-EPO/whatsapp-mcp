@@ -248,8 +248,9 @@ def coverage(
     audio is the voice-note side of the same scope: {messages, cached,
     transcribed, errors, unavailable, backlog, backlog_cached, cached_examined} —
     inbound voice notes stored, how many have their bytes on disk, how many
-    already have a transcript, a recorded failure (errors) or bytes the sender's
-    phone no longer has (unavailable: nothing can ever fetch those), and
+    already have a transcript, a recorded failure (errors) or bytes no download
+    brought here (unavailable: the sender's phone no longer has them, or the row
+    was stored without the fields a download needs), and
     backlog = the rest, what transcribe_audio or TRANSCRIBE_ON_INGEST would
     still work through. Ask
     it before starting a batch: backlog - backlog_cached is how many of those
@@ -2206,8 +2207,9 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
 
     WhatsApp media expires from its CDN after a few days, and the bridge then asks
     the sender's phone to re-upload it. When that phone answers that it no longer
-    has the file, this fails with `media_unavailable`: that file is gone for good,
-    so do not retry it — `bridge_unavailable` is the one worth retrying.
+    has the file — or when the message was stored without the CDN fields a
+    download needs — this fails with `media_unavailable`: that file is gone for
+    good, so do not retry it; `bridge_unavailable` is the one worth retrying.
 
     Args:
         chat_jid: The JID of the chat containing the message
