@@ -22,6 +22,7 @@ CHAT = "111@s.whatsapp.net"
 OTHER = "222@s.whatsapp.net"
 SHA_VOICE = "aa" * 32
 SHA_OTHER = "bb" * 32
+SHA_NEW = "cc" * 32
 
 # One text message that mentions the budget, two voice notes that only say it.
 TEXT_ROWS = [
@@ -295,3 +296,139 @@ def test_an_index_write_that_fails_invalidates_the_index(fts_db, monkeypatch):
     notes.close()
     assert ids("jabuticaba") == ["v2"]
     assert ids("domingo") == []
+
+
+# --- the index write path (one row per hash, reached by rowid) ---------------
+
+FTS = media_notes.TRANSCRIPTS_FTS_TABLE
+MAP = media_notes.TRANSCRIPTS_MAP_TABLE
+
+
+def _notes_conn():
+    return sqlite3.connect(media_notes.notes_db_path())
+
+
+def _index_rows(sha: str) -> tuple[list[tuple[int, str]], list[int]]:
+    """The index entries and the map entries for one hash."""
+    conn = _notes_conn()
+    try:
+        entries = conn.execute(f"SELECT rowid, text FROM {FTS} WHERE sha256 = ?", (sha,)).fetchall()
+        mapped = [row[0] for row in conn.execute(f"SELECT fts_rowid FROM {MAP} WHERE sha256 = ?", (sha,))]
+    finally:
+        conn.close()
+    return entries, mapped
+
+
+def _write_plans(sha: str, value: str) -> list[str]:
+    """The query plans SQLite chooses for the statements one transcript write issues."""
+    conn = _notes_conn()
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    media_notes.index_transcript(conn, sha, value)
+    conn.commit()
+    conn.set_trace_callback(None)
+    plans = []
+    for statement in statements:
+        # fts5 traces its own internal statements with a "--" prefix; the ones
+        # this module wrote are the rest.
+        if statement.startswith("--") or not statement.lstrip().upper().startswith(("SELECT", "INSERT", "DELETE")):
+            continue
+        if FTS not in statement and MAP not in statement:
+            continue
+        plans.extend(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + statement))
+    conn.close()
+    return plans
+
+
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 45),
+    reason="fts5 only spells the plan it chose into the idxStr EXPLAIN prints from 3.45 on",
+)
+def test_replacing_a_transcript_never_scans_the_index(fts_db):
+    _bulk_voice_notes(fts_db, 200, "jabuticaba")
+    media_notes.transcript_matches("jabuticaba")  # the rebuild that fills the map
+    plans = _write_plans(f"{7:064x}", "falamos de jabuticaba e tambem de manga")
+    assert plans
+    # "VIRTUAL TABLE INDEX 0:" is the full scan the hash lookup used to be;
+    # "INDEX 0:=" is the same table reached by rowid.
+    assert [plan for plan in plans if plan.endswith("VIRTUAL TABLE INDEX 0:")] == []
+    assert any(plan.endswith("VIRTUAL TABLE INDEX 0:=") for plan in plans)
+    assert any(f"SEARCH {MAP}" in plan for plan in plans)
+    assert [plan for plan in plans if f"SCAN {MAP}" in plan] == []
+
+
+def test_one_index_row_per_hash_through_replace_delete_and_rewrite(fts_db):
+    entries, mapped = _index_rows(SHA_VOICE)
+    assert len(entries) == 1 and mapped == [entries[0][0]]
+    first_rowid = entries[0][0]
+
+    media_notes.annotate_media(SHA_VOICE, "transcript", "agora falamos de jabuticaba")
+    entries, mapped = _index_rows(SHA_VOICE)
+    assert [row[0] for row in entries] == mapped == [first_rowid]
+    assert "jabuticaba" in entries[0][1]
+    # The replaced text is really gone, not merely outranked.
+    assert ids("orcamento") == ["m1"]
+    assert ids("jabuticaba") == ["v1"]
+
+    media_notes.annotate_media(SHA_VOICE, "transcript", "")
+    assert _index_rows(SHA_VOICE) == ([], [])
+    assert ids("jabuticaba") == []
+
+    media_notes.annotate_media(SHA_VOICE, "transcript", "falamos de novo de jabuticaba")
+    entries, mapped = _index_rows(SHA_VOICE)
+    assert len(entries) == 1 and mapped == [entries[0][0]]
+    assert ids("jabuticaba") == ["v1"]
+
+
+def test_a_store_whose_index_predates_the_map_is_rebuilt_with_it(fts_db):
+    conn = _notes_conn()
+    # What version 1 left behind: the index, no map, and its own marker.
+    conn.executescript(f"DROP TABLE {MAP};")
+    conn.execute("UPDATE notes_meta SET value = '1' WHERE key = ?", (media_notes._FTS_VERSION_KEY,))
+    conn.commit()
+    conn.close()
+
+    assert ids("domingo") == ["v2"]  # first use notices the version and rebuilds
+
+    conn = _notes_conn()
+    try:
+        assert conn.execute(
+            "SELECT value FROM notes_meta WHERE key = ?", (media_notes._FTS_VERSION_KEY,)
+        ).fetchone() == (media_notes._FTS_VERSION,)
+        paired = conn.execute(
+            f"SELECT f.sha256 FROM {FTS} f JOIN {MAP} m ON m.fts_rowid = f.rowid AND m.sha256 = f.sha256"
+        ).fetchall()
+        assert sorted(row[0] for row in paired) == sorted([SHA_OTHER, SHA_VOICE])
+        assert conn.execute(f"SELECT COUNT(*) FROM {MAP}").fetchone()[0] == 2
+    finally:
+        conn.close()
+    # And the next write still lands on the one row the rebuild mapped.
+    media_notes.annotate_media(SHA_OTHER, "transcript", "chego domingo com jabuticaba")
+    entries, mapped = _index_rows(SHA_OTHER)
+    assert len(entries) == 1 and mapped == [entries[0][0]]
+    assert ids("jabuticaba") == ["v2"]
+
+
+def test_a_rolled_back_write_leaves_neither_an_entry_nor_a_map_row(fts_db):
+    conn = _notes_conn()
+    try:
+        media_notes.index_transcript(conn, SHA_NEW, "falamos de jabuticaba")
+        conn.rollback()
+        assert conn.execute(f"SELECT COUNT(*) FROM {FTS} WHERE sha256 = ?", (SHA_NEW,)).fetchone()[0] == 0
+        assert conn.execute(f"SELECT COUNT(*) FROM {MAP} WHERE sha256 = ?", (SHA_NEW,)).fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert ids("jabuticaba") == []
+
+
+def test_deleting_a_transcript_whose_map_row_is_gone_still_clears_the_index(fts_db):
+    # Nothing in this module can lose a map row (writes and rebuilds touch both
+    # tables in one transaction), but a forgotten transcript must never stay
+    # searchable, so the delete falls back to the sweep by hash.
+    conn = _notes_conn()
+    conn.execute(f"DELETE FROM {MAP} WHERE sha256 = ?", (SHA_VOICE,))
+    conn.commit()
+    conn.close()
+    media_notes.annotate_media(SHA_VOICE, "transcript", "")
+    assert _index_rows(SHA_VOICE) == ([], [])
+    assert ids("orcamento") == ["m1"]
