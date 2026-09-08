@@ -204,6 +204,13 @@ def resource_link(chat_jid: str, message_id: str, name: str, mime: str, size: in
     inside JSON — a ``list_media`` row, the metadata block of ``read_media`` —
     and not as a content block of its own. Dumped from the model so the keys
     stay the protocol's if the SDK renames one.
+
+    ``name`` is a *display* label, which is why it is spelled ``name`` and not
+    ``filename``: ``@untrusted_content`` sanitises it (invisible characters
+    out, length capped) while the row's own ``filename`` is deliberately left
+    byte-for-byte, because that one is matched against the file on disk. The
+    two can therefore differ for a sender who put a bidi override in a
+    filename, which is the direction to differ in.
     """
     return ResourceLink(
         type="resource_link",
@@ -624,6 +631,13 @@ def read_media(
             )
     # The link is redundant with the bytes above and cheap; it is what lets a
     # client (or the agent, on a second pass) come back for the same file
-    # through resources/read instead of paying for another tool call.
-    link = resource_link(chat_jid, message_id, found.filename or os.path.basename(path), mime, size)
-    return [*blocks, meta_block(sha256, mime, size, **extra, resource_link=link)]
+    # through resources/read instead of paying for another tool call. Only when
+    # that read would actually succeed: with as_text a 5 MiB PDF is answered
+    # here and refused there (a resource is never extracted, so its ceiling is
+    # the 2 MiB one), and a link to bytes the server would refuse is worse than
+    # no link.
+    if size <= hard_limit(mime):
+        extra["resource_link"] = resource_link(
+            chat_jid, message_id, found.filename or os.path.basename(path), mime, size
+        )
+    return [*blocks, meta_block(sha256, mime, size, **extra)]

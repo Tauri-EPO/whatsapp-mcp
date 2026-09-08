@@ -202,9 +202,9 @@ class TestDenials:
 
 
 class TestListMediaLinks:
-    def test_every_row_carries_a_link_to_its_bytes(self, store):
+    def test_every_readable_row_carries_a_link_to_its_bytes(self, store):
         items = main.list_media(chat_jid=ALICE)["items"]
-        links = {item["message_id"]: item["resource_link"] for item in items}
+        links = {item["message_id"]: item.get("resource_link") for item in items}
         assert links["DOC1"] == {
             "type": "resource_link",
             "uri": _uri("DOC1"),
@@ -226,6 +226,14 @@ class TestListMediaLinks:
         item = next(item for item in main.list_media(chat_jid=ALICE)["items"] if item["message_id"] == "IMG1")
         assert item["resource_link"]["mimeType"] == "image/png"
         assert list(await main.mcp.read_resource(_uri("IMG1")))[0].mime_type == "image/png"
+
+    async def test_a_row_over_the_cap_gets_no_link(self, store):
+        """A link to bytes resources/read would answer too_large for is worse than none."""
+        item = next(item for item in main.list_media(chat_jid=ALICE)["items"] if item["message_id"] == "BIG1")
+        assert item["bytes"] == 200_000_000 and "resource_link" not in item
+        with pytest.raises(ResourceError) as exc:
+            await main.mcp.read_resource(_uri("BIG1"))
+        assert str(exc.value).startswith("too_large:")
 
     def test_a_row_with_nothing_cached_still_gets_a_link(self, store):
         item = next(item for item in main.list_media(chat_jid=ALICE)["items"] if item["message_id"] == "GONE")

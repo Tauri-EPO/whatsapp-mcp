@@ -1116,7 +1116,8 @@ promised an image or playable audio), never as a block a client would refuse.
 The last block is always JSON with `{"sha256", "mime", "bytes", "truncated", "notes",
 "resource_link"}` (`resource_link` being the same
 [`whatsapp://media/...`](#reading-media-whatsappmedia) URI the file has as an MCP
-resource). That is what closes the loop below: `list_media(has_notes=false)` finds a file
+resource, present whenever a resource read of it would succeed — `as_text` reads
+documents far past that ceiling). That is what closes the loop below: `list_media(has_notes=false)` finds a file
 nobody has interpreted, `read_media` shows it, `annotate_media(sha256, "summary", ...)`
 records what it was — no extra call to learn the hash.
 
@@ -1215,7 +1216,13 @@ whatsapp://media/{chat_jid}/{message_id}
  "name": "laudo.pdf", "mimeType": "application/pdf", "size": 244138}
 ```
 
-so the loop is: **`list_media`** to see what is there and what it costs →
+A row the archive already reports as over its type's cap carries **no** link — a
+resource read of it would answer `too_large` — and neither does one when the
+policy does not offer `read_media`. The link's `name` is a display label, so it
+is sanitised like every other name field; the row's own `filename` is the exact
+string on disk and is never edited.
+
+So the loop is: **`list_media`** to see what is there and what it costs →
 **`resources/read`** (or `read_media`) for the files worth opening →
 **`annotate_media(sha256, "summary", ...)`** so the next pass does not read them
 again. `read_media` puts the same link in its trailing JSON block.

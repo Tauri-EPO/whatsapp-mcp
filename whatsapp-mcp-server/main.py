@@ -1784,8 +1784,9 @@ def list_media(
         deleted_at, notes ({key: value} you recorded for the hash), has_notes and
         resource_link ({"type": "resource_link", "uri": "whatsapp://media/...", "name",
         "mimeType", "size"}): the MCP resource holding the bytes, for a client that
-        fetches a file with resources/read instead of a tool call. read_media reads the
-        same file and works everywhere.
+        fetches a file with resources/read instead of a tool call. Absent on a row too
+        large for a resource read; read_media reads the same file, works everywhere,
+        and with as_text=true is not bound by that limit.
         After interpreting a file with has_notes=false, store what you understood with
         annotate_media(sha256, "summary", ...) so the next pass does not redo the work.
     """
@@ -2201,7 +2202,9 @@ def read_media(
     The last block is always JSON with {"sha256", "mime", "bytes", "truncated", "notes"}:
     if `notes` is empty nobody has interpreted this file yet, so write what you saw
     back with annotate_media(sha256, "summary", ...) — keyed by content hash, it
-    comes back for free every time the file turns up again.
+    comes back for free every time the file turns up again. It also carries
+    `resource_link` — the same file as an MCP resource, `whatsapp://media/...`, for a
+    client that fetches bytes itself — whenever a resource read of it would succeed.
 
     A file above the applicable limit fails with `too_large` reporting its real size;
     lower `max_bytes` yourself when your client cannot hold that much. A file that is

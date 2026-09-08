@@ -157,19 +157,27 @@ def attach_resource_links(items: Sequence[dict[str, Any]]) -> None:
 
     ``size`` is the cached file when the bytes are here and WhatsApp's reported
     length otherwise; a row with neither carries no size, which is what
-    ``ResourceLink.size`` being optional is for.
+    ``ResourceLink.size`` being optional is for — and a row the archive already
+    reports as over its type's cap gets **no** link at all, because
+    ``resources/read`` would answer ``too_large``. The row still says how big
+    the file is, and ``read_media(as_text=true)`` can still read a document
+    that size.
     """
     if not resources_offered():
         return
     for item in items:
         cached_file = item.get("cached_file")
         cached_path = os.path.join(media_inventory.chat_media_dir(item["chat_jid"]), cached_file) if cached_file else ""
+        mime = media_read.declared_mime(item.get("media_type") or "", item.get("filename"), cached_path)
+        size = item.get("cached_bytes") or item.get("bytes")
+        if size is not None and size > media_read.hard_limit(mime):
+            continue
         item["resource_link"] = media_read.resource_link(
             item["chat_jid"],
             item["message_id"],
             item.get("filename") or cached_file or f"{item.get('media_type') or 'media'}-{item['message_id']}",
-            media_read.declared_mime(item.get("media_type") or "", item.get("filename"), cached_path),
-            item.get("cached_bytes") or item.get("bytes"),
+            mime,
+            size,
         )
 
 
