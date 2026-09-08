@@ -202,7 +202,7 @@ def list_media_page(
                 LEFT JOIN chats c ON c.jid = m.chat_jid
                 LEFT JOIN copies ON copies.file_sha256 = m.file_sha256
                 WHERE {" AND ".join(clauses)}
-                ORDER BY {order}, m.id
+                ORDER BY {order}, m.id, m.chat_jid
                 LIMIT ? OFFSET ?
             """
             rows = conn.execute(sql, (*copies_params, *params, limit + 1, offset)).fetchall()
