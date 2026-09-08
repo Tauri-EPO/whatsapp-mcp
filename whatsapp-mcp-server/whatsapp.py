@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -3136,6 +3137,8 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
 
 COVERAGE_DEFAULT_GAP_HOURS = 24.0
 COVERAGE_DEFAULT_MAX_GAPS = 20
+COVERAGE_BY_CHAT_DEFAULT_LIMIT = 50
+COVERAGE_BY_CHAT_MAX_LIMIT = 200
 
 # Gap detection subtracts one row's timestamp from the next, never compares
 # against a bound, so it does not need the index and can afford substr(): the
@@ -3145,11 +3148,155 @@ COVERAGE_DEFAULT_MAX_GAPS = 20
 _COVERAGE_TS = "julianday(substr({col}, 1, 19))"
 
 
+def _coverage_scope(
+    after: str | None, before: str | None, chat_jid: str | Sequence[str] | None
+) -> tuple[dict[str, Any], list[str], list[Any]]:
+    """The narrowing arguments as (echo, window clauses, window params).
+
+    The window predicates are kept apart from the chat filter because the
+    per-chat query needs them inside its LEFT JOIN: moved into the WHERE they
+    would drop the very rows that queue exists to list, the chats holding
+    nothing in the window.
+    """
+    after_bound = _parse_filter_date(after, "after") if after else None
+    before_bound = _parse_filter_date(before, "before") if before else None
+    window: list[str] = []
+    params: list[Any] = []
+    if after_bound is not None:
+        window.append("messages.timestamp > ?")
+        params.append(after_bound)
+    if before_bound is not None:
+        window.append("messages.timestamp < ?")
+        params.append(before_bound)
+    scope = {"after": after_bound, "before": before_bound, "chat_jid": chat_jid_filter(chat_jid) or None}
+    return scope, window, params
+
+
+def _coverage_fingerprint(scope: dict[str, Any]) -> str:
+    """Digest of the scope, carried in the by_chat cursor.
+
+    Paging is by offset over one ORDER BY, so resuming against a different
+    window or chat filter would silently skip or repeat chats; the cursor
+    carries this instead and the mismatch is refused. The JIDs are sorted first:
+    the same set named in another order is the same scope, not a new one.
+    """
+    jids = scope.get("chat_jid")
+    canonical = {**scope, "chat_jid": sorted(jids) if jids else None}
+    raw = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _coverage_by_chat(
+    cur: sqlite3.Cursor,
+    scope: dict[str, Any],
+    window: list[str],
+    window_params: list[Any],
+    chat_where: str,
+    chat_params: list[Any],
+    cursor: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    """One page of the per-chat work queue for request_history."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", f"limit must be an integer, got {limit!r}") from exc
+    limit = max(1, min(limit, COVERAGE_BY_CHAT_MAX_LIMIT))
+
+    fingerprint = _coverage_fingerprint(scope)
+    state = decode_cursor(cursor, "coverage_by_chat")
+    offset = 0
+    if state is not None:
+        if state.get("s") != fingerprint:
+            raise ToolError(
+                "invalid_argument",
+                "cursor was created for a different window or chat_jid; start again without a cursor",
+            )
+        offset = max(0, int(state.get("o") or 0))
+
+    cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_where}", tuple(chat_params))
+    chats_total = int(cur.fetchone()[0] or 0)
+
+    # The queue ranks on what each chat is missing *overall*, never on the
+    # window: request_history backfills whole histories, and inside a window a
+    # fully synced chat with one quiet week is indistinguishable from one that
+    # never synced. So `depth` (0 = nothing stored, 1 = a lone history-sync
+    # stub, 2 = a real history) and the tie-break both read the chat's own rows,
+    # while the reported counts and boundaries stay scoped to the window.
+    #
+    # The inner LIMIT 2 is what keeps `depth` cheap: it answers "none, one or
+    # more" with at most two rows of the (chat_jid, timestamp) index per chat
+    # instead of counting the chat's whole history.
+    depth = """(SELECT COUNT(*) FROM (
+                    SELECT 1 FROM messages AS probe WHERE probe.chat_jid = chats.jid LIMIT 2))"""
+    overall_first = "(SELECT MIN(timestamp) FROM messages AS whole WHERE whole.chat_jid = chats.jid)"
+    join_on = " AND ".join(["messages.chat_jid = chats.jid", *window])
+    cur.execute(
+        f"""SELECT chats.jid, chats.name,
+                   MIN(messages.timestamp) AS first_time,
+                   MAX(messages.timestamp) AS last_time,
+                   COUNT(messages.id) AS stored,
+                   {depth} AS depth,
+                   {overall_first} AS overall_first
+              FROM chats LEFT JOIN messages ON {join_on}
+             WHERE {chat_where}
+             GROUP BY chats.jid, chats.name
+             ORDER BY depth, overall_first DESC, chats.jid
+             LIMIT ? OFFSET ?""",
+        (*window_params, *chat_params, limit + 1, offset),
+    )
+    rows = cur.fetchall()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    placeholders = [jid for jid, name, *_ in rows if _is_placeholder_name(name)]
+    names = _contact_names(placeholders) if placeholders else {}
+    items = [
+        {
+            "chat_jid": jid,
+            "name": names.get(jid, name),
+            "first_message_time": first_time,
+            "last_message_time": last_time,
+            "messages": int(stored or 0),
+            "stub_only": depth == 1,
+        }
+        for jid, name, first_time, last_time, stored, depth, _overall_first in rows
+    ]
+    next_cursor = (
+        encode_cursor({"k": "coverage_by_chat", "o": offset + len(rows), "s": fingerprint}) if has_more else None
+    )
+    return {
+        "by_chat": True,
+        **PageResult(items, next_cursor, has_more).to_dict(),
+        "chats_total": chats_total,
+        "scope": scope,
+        "allow_list_applied": CHAT_POLICY.restricted,
+        "hint": (
+            "Ordered as a work queue: chats with nothing stored first, then stub_only chats (their whole stored "
+            "history is one row, usually the history-sync stub the phone pushed at pair time), then the chats "
+            "whose stored history starts latest. Backfill one with request_history(chat_jid); it needs a stored "
+            "message to anchor on, so a chat with messages: 0 has to receive one first. With after/before set, "
+            "first/last_message_time and messages describe the window; stub_only and the order still describe "
+            "each chat's whole history, because a window cannot tell a quiet week from a chat that never synced."
+        ),
+    }
+
+
 def coverage(
     gap_hours: float = COVERAGE_DEFAULT_GAP_HOURS,
     max_gaps: int = COVERAGE_DEFAULT_MAX_GAPS,
+    after: str | None = None,
+    before: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    by_chat: bool = False,
+    cursor: str | None = None,
+    limit: int = COVERAGE_BY_CHAT_DEFAULT_LIMIT,
 ) -> dict[str, Any]:
     """What the local archive actually contains, and where it is missing.
+
+    `after`/`before`/`chat_jid` narrow every number, the gap scan included, so
+    the answer is about one period or one conversation instead of the whole
+    archive. `by_chat` swaps the aggregates for the paginated per-chat queue.
 
     Reads messages.db only (works with the bridge down). Aggregates and the gap
     scan run in SQL, so nothing proportional to the archive is held in memory.
@@ -3167,13 +3314,39 @@ def coverage(
     except (TypeError, ValueError) as exc:
         raise ToolError("invalid_argument", f"max_gaps must be an integer, got {max_gaps!r}") from exc
     max_gaps = max(1, min(max_gaps, 500))
+    if cursor and not by_chat:
+        raise ToolError("invalid_argument", "cursor only pages the by_chat=True result; pass by_chat=True with it")
 
-    msg_clause, msg_params = CHAT_POLICY.sql_clause("messages.chat_jid")
-    chat_clause, chat_params = CHAT_POLICY.sql_clause("chats.jid")
+    scope, window, window_params = _coverage_scope(after, before, chat_jid)
+    msg_clauses, msg_params = list(window), list(window_params)
+    chat_clauses: list[str] = []
+    chat_params: list[Any] = []
+    if jids := scope["chat_jid"]:
+        msg_clauses.append(_chat_jid_clause("messages.chat_jid", jids))
+        msg_params.extend(jids)
+        chat_clauses.append(_chat_jid_clause("chats.jid", jids))
+        chat_params.extend(jids)
+    policy_clause, policy_params = CHAT_POLICY.sql_clause("messages.chat_jid")
+    msg_clauses.append(policy_clause)
+    msg_params.extend(policy_params)
+    policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
+    chat_clauses.append(policy_clause)
+    chat_params.extend(policy_params)
+    msg_clause = " AND ".join(msg_clauses)
+    chat_clause = " AND ".join(chat_clauses)
+    # The window lives on the messages side, so it narrows the EXISTS probe
+    # rather than the chats it runs over.
+    window_where = "".join(f" AND {clause}" for clause in window)
+
     conn = None
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
+
+        if by_chat:
+            return _coverage_by_chat(
+                cur, scope, window, window_params, chat_clause, chat_params, cursor=cursor, limit=limit
+            )
 
         cur.execute(
             f"SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM messages WHERE {msg_clause}",
@@ -3186,8 +3359,9 @@ def coverage(
         cur.execute(
             f"""SELECT COUNT(*) FROM chats
                  WHERE {chat_clause}
-                   AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid)""",
-            tuple(chat_params),
+                   AND NOT EXISTS (
+                       SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid{window_where})""",
+            (*chat_params, *window_params),
         )
         chats_without_messages = int(cur.fetchone()[0] or 0)
 
@@ -3239,15 +3413,34 @@ def coverage(
         "gap_hours": gap_hours,
         "gaps": gaps,
         "gaps_truncated": len(gaps) >= max_gaps,
+        "scope": scope,
         "allow_list_applied": CHAT_POLICY.restricted,
-        "hint": (
-            "Gaps are archive-wide: no message in any chat between 'from' and 'to', which usually means the bridge "
-            "was down or never synced that period rather than everyone going quiet. Chats in "
-            "chats_without_messages, and anything before first_message_time, were never synced either. Ask the "
-            "phone to backfill one chat with request_history(chat_jid); it cannot fill a period the phone itself "
-            "no longer has."
-        ),
+        "hint": _coverage_hint(scope),
     }
+
+
+def _coverage_hint(scope: dict[str, Any]) -> str:
+    """How to read the aggregates — different once a window narrows them.
+
+    Unbounded, first_message_time is where the archive itself begins and
+    chats_without_messages means "never synced". Under after/before both
+    describe the window and nothing else, so saying otherwise would have the
+    agent report the period before the bound as never synced.
+    """
+    windowed = scope["after"] is not None or scope["before"] is not None
+    middle = (
+        "after/before are set, so first_message_time, chats_without_messages and the gaps describe that window "
+        "alone — they say nothing about what the archive holds outside it. Drop the bounds to ask that."
+        if windowed
+        else "Chats in chats_without_messages, and anything before first_message_time, were never synced either. "
+        "Narrow with after/before/chat_jid to keep old sync artefacts out of the list."
+    )
+    return (
+        "Gaps cover every chat in scope: no message at all between 'from' and 'to', which usually means the bridge "
+        f"was down or never synced that period rather than everyone going quiet. {middle} Call "
+        "coverage(by_chat=True) for the queue of chats to backfill with request_history(chat_jid); it cannot fill "
+        "a period the phone itself no longer has."
+    )
 
 
 def _whisper_status() -> dict[str, Any]:
