@@ -117,9 +117,11 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			target_message_id TEXT,
 			quoted_message_id TEXT,
 			mentions TEXT,
+			sender_server TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+		CREATE INDEX idx_messages_sender_server_null ON messages(sender) WHERE sender_server IS NULL;
 		CREATE TABLE calls (
 			call_id TEXT,
 			chat_jid TEXT,

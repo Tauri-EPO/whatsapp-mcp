@@ -263,7 +263,8 @@ func handlePollVote(ctx context.Context, decrypt pollVoteDecrypter, store *Messa
 }
 
 // storePollVoteMessage writes the message row for a decoded vote (media_type
-// poll_vote, target = the poll's message ID), shared by live and history paths.
+// poll_vote, target = the poll's message ID), shared by live and history
+// paths. sender is the voter's full resolved JID (see StoreMessage).
 func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) {
 	if err := store.StoreMessage(id, chatJID, sender, content, ts, fromMe, "poll_vote", pollID, "", nil, nil, nil, 0, ""); err != nil {
 		logger.Warnf("Failed to store poll vote: %v", err)
@@ -295,7 +296,8 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 			b.Log.Warnf("Could not parse history poll vote %s: %v", web.GetKey().GetID(), err)
 			continue
 		}
-		sender := resolveUserJID(b.Client, evt.Info.Sender, types.EmptyJID).User
+		resolvedSender := resolveUserJID(b.Client, evt.Info.Sender, types.EmptyJID)
+		sender := resolvedSender.User
 		for attempt := 0; ; attempt++ {
 			pollID, names, derr := decodePollVote(context.Background(), b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
 			if pollID == "" {
@@ -305,7 +307,8 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 				if serr := b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp); serr != nil {
 					b.Log.Warnf("Failed to store history poll vote: %v", serr)
 				}
-				b.Store.storePollVoteMessage(evt.Info.ID, chatJID, sender, pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
+				b.Store.storePollVoteMessage(evt.Info.ID, chatJID, storedSender(resolvedSender),
+					pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
 				break
 			}
 			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(historyVoteRetryDelays) {

@@ -68,6 +68,7 @@ whatsapp-mcp/
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text
+│   ├── sender_namespace.go     # messages.sender_server: which namespace a stored sender is in + its backfill
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
@@ -273,7 +274,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 
 ## 8. Gotchas (read before editing)
 
-1. **JIDs.** WhatsApp identifies users as `1234567890@s.whatsapp.net` (DM), `123456@g.us` (group), and `<random>@lid` (link-ID, anonymous). The bridge maintains a phone↔LID map in `whatsapp.db.whatsmeow_lid_map`. Many "user is missing" / "messages don't show" bugs trace back to JID-form mismatches. Always think about both forms (`resolveUserJID`, `resolveQuotedParticipantJID`, `resolveMentionJIDs`).
+1. **JIDs.** WhatsApp identifies users as `1234567890@s.whatsapp.net` (DM), `123456@g.us` (group), and `<random>@lid` (link-ID, anonymous). The bridge maintains a phone↔LID map in `whatsapp.db.whatsmeow_lid_map`. Many "user is missing" / "messages don't show" bugs trace back to JID-form mismatches. Always think about both forms (`resolveUserJID`, `resolveQuotedParticipantJID`, `resolveMentionJIDs`). `messages.sender` holds the bare user part and `messages.sender_server` the namespace it belongs to (`s.whatsapp.net` / `lid`, NULL when unknown — rows written before the column existed, and senders that are not user JIDs): a bare number does not say which one it is, and a 15-digit LID reads exactly like a phone number. Write paths pass the full resolved JID to `StoreMessage`, which splits it (`sender_namespace.go`); readers keep using the bare `sender`.
 2. **Message IDs are unique per chat, not globally.** The `messages` primary key is `(id, chat_jid)`. Always pass `chat_jid` alongside an ID; forwards reuse IDs across chats.
 3. **Pointer rows.** `reaction` and `poll_vote` messages refer to another message via `messages.target_message_id` (the bridge also writes it to `filename` for one release; readers use `_target_id()` which falls back to `filename` for pre-migration rows). Do not add new meanings to `filename`.
 4. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Use `/api/download`, never hand-built paths. CDN URLs expire (403/404/410 after days); `downloadMedia` runs one media-retry round trip against the sender's phone (`media_retry.go`) before failing. Only one transfer per destination file ever runs (`media_inflight.go`): callers that miss the cache together share its result instead of writing the same `<file>.part`, and the transfer follows the bridge lifecycle rather than the caller that started it. Automatic caching of inbound media is background work with a budget (`media_budget.go`): four at a time, 256 queued, the overflow dropped with a WARN and a counter — the row stays, so `download_media` still fetches that file.

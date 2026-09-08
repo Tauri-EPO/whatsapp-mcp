@@ -151,6 +151,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// the LID store has a mapping.
 	resolvedSender := resolveUserJID(client, msg.Info.Sender, senderAltForMessage(client, msg.Info))
 	sender := resolvedSender.User
+	// What the row records: the same user part plus the namespace it lives in,
+	// so an unresolved LID is never read back as a phone number (#375).
+	storedSenderJID := storedSender(resolvedSender)
 
 	// Get appropriate chat name (pass resolved JID so contact lookup works)
 	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, true, logger)
@@ -204,7 +207,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// poll's ID in `filename` (same convention as reactions). See polls.go.
 	if handled, pollID, voteContent := handlePollVote(context.Background(), b.PollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
 		if voteContent != "" {
-			messageStore.storePollVoteMessage(msg.Info.ID, chatJID, sender, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+			messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
 		}
 		return
 	}
@@ -223,7 +226,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		if reactedToID != "" {
 			emoji := reaction.GetText()
 			if err := messageStore.StoreMessage(
-				msg.Info.ID, chatJID, sender, emoji,
+				msg.Info.ID, chatJID, storedSenderJID, emoji,
 				msgTimestamp, msg.Info.IsFromMe,
 				"reaction", reactedToID, "", nil, nil, nil, 0, "",
 			); err != nil {
@@ -254,7 +257,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
-	if err := persistMessage(messageStore, msg.Info.ID, chatJID, sender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
+	if err := persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
 		b.metrics.messagesStored.Add(1)
