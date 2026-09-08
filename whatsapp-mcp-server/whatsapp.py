@@ -805,6 +805,11 @@ _CHAT_ROW_FIELDS: tuple[str, ...] = (
 CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated")
 UNANSWERED_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "last_inbound_time", "age_hours")
 
+# The three keys include_group_mentions=True adds. They are only valid names
+# when that flag is on: naming `mention` without it must be the error every
+# other unknown field is, not a column of nothing.
+UNANSWERED_MENTION_FIELDS: tuple[str, ...] = (*UNANSWERED_FIELDS, "mention", "mention_message_id", "mention_time")
+
 
 def _is_empty(value: Any) -> bool:
     """Values omit_nulls drops: null, false, empty text, empty notes.
@@ -890,6 +895,41 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
         lambda: "last_read_time" in {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()},
     )
     return f"{table_alias}.last_read_time" if has_column else "NULL"
+
+
+def _has_mentions_column(cursor: sqlite3.Cursor) -> bool:
+    """Whether the bridge that wrote this store records messages.mentions."""
+    return _schema_memo(
+        "messages.mentions",
+        MESSAGES_DB_PATH,
+        lambda: "mentions" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()},
+    )
+
+
+def mentions_me_predicate(cursor: sqlite3.Cursor, alias: str) -> tuple[str, list[Any]]:
+    """SQL for "this message addressed the account this bridge is logged in as".
+
+    The bridge stores the mentioned users as they arrive: the LID user for a
+    LID mention, the phone user for a phone one (bridge mentions.go). Matching
+    both spellings of our own identity here is what makes that write cheap, and
+    the commas around the column are what stop 5511 from matching 5511999.
+    """
+    if not _has_mentions_column(cursor):
+        raise ToolError(
+            "bridge_unavailable",
+            "this archive was written by a bridge that does not record mentions yet "
+            "(messages.mentions is missing); upgrade the bridge, which backfills the column on startup",
+        )
+    owner = owner_identity()
+    users = [user for user in (owner.get("phone"), owner.get("lid")) if user]
+    if not users:
+        raise ToolError(
+            "bridge_unavailable",
+            "the bridge did not report this account's phone or LID, so a mention of it cannot be recognised; "
+            "call bridge_status",
+        )
+    matches = " OR ".join([f"(',' || {alias}.mentions || ',') LIKE ?"] * len(users))
+    return f"({alias}.mentions IS NOT NULL AND ({matches}))", [f"%,{user},%" for user in users]
 
 
 def _spoken_filter(alias: str) -> str:
@@ -1495,6 +1535,7 @@ class MessageFilters:
     exclude_groups: bool = False
     include_deleted: bool = True
     unread_only: bool = False
+    mentions_me: bool = False
 
     def build(self, cur: sqlite3.Cursor) -> tuple[list[str], list[Any]]:
         clauses: list[str] = []
@@ -1548,6 +1589,11 @@ class MessageFilters:
         if media_clause:
             clauses.append(media_clause)
             params.extend(media_params)
+
+        if self.mentions_me:
+            mention_clause, mention_params = mentions_me_predicate(cur, "messages")
+            clauses.append(mention_clause)
+            params.extend(mention_params)
 
         return clauses, params
 
@@ -1734,8 +1780,14 @@ def count_messages(
     has_media: bool | None = None,
     media_type: str | None = None,
     exclude_groups: bool = False,
+    mentions_me: bool = False,
 ) -> int:
     """How many messages match the list_messages filters, without returning any row."""
+    # Resolve "who am I" before opening the database: it is a local read in the
+    # normal case but can fall back to the bridge over HTTP, and a cursor must
+    # never be held open across that.
+    if mentions_me:
+        owner_identity()
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
@@ -1752,6 +1804,7 @@ def count_messages(
             exclude_groups=exclude_groups,
             include_deleted=include_deleted,
             unread_only=unread_only,
+            mentions_me=mentions_me,
         ).build(cur)
         if predicate.clause:
             where_clauses.append(predicate.clause)
@@ -1797,6 +1850,7 @@ def list_messages(
     has_media: bool | None = None,
     media_type: str | None = None,
     exclude_groups: bool = False,
+    mentions_me: bool = False,
 ) -> list[dict[str, Any]]:
     """Items of one page of list_messages_page (kept for callers that want a plain list)."""
     return list_messages_page(
@@ -1818,6 +1872,7 @@ def list_messages(
         has_media=has_media,
         media_type=media_type,
         exclude_groups=exclude_groups,
+        mentions_me=mentions_me,
     ).items
 
 
@@ -1841,6 +1896,7 @@ def list_messages_page(
     has_media: bool | None = None,
     media_type: str | None = None,
     exclude_groups: bool = False,
+    mentions_me: bool = False,
 ) -> PageResult:
     """Get messages matching the specified criteria with optional context.
 
@@ -1876,6 +1932,9 @@ def list_messages_page(
         exclude_groups: Keep direct conversations only (@s.whatsapp.net / @lid),
             dropping @g.us groups, @broadcast lists, @newsletter channels and
             @bot chats
+        mentions_me: Only messages that addressed this account with a WhatsApp
+            mention (messages.mentions, matched against both the phone and the
+            LID spelling of the owner, which the bridge reports on /api/me)
 
         cursor: Opaque next_cursor from the previous page (keyset pagination).
             When given, page is ignored. Relevance sort falls back to an offset
@@ -1887,6 +1946,11 @@ def list_messages_page(
     cursor_state = decode_cursor(cursor, "messages")
     if cursor_state is not None and cursor_state.get("s") != sort_by:
         raise ToolError("invalid_argument", "cursor was created with a different sort_by")
+    # Resolve "who am I" before opening the database: it is a local read in the
+    # normal case but can fall back to the bridge over HTTP, and a cursor must
+    # never be held open across that.
+    if mentions_me:
+        owner_identity()
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
@@ -1911,6 +1975,7 @@ def list_messages_page(
             exclude_groups=exclude_groups,
             include_deleted=include_deleted,
             unread_only=unread_only,
+            mentions_me=mentions_me,
         ).build(cur)
 
         if predicate.clause:
@@ -2047,6 +2112,7 @@ def message_stats(
     exclude_groups: bool = False,
     include_deleted: bool = True,
     unread_only: bool = False,
+    mentions_me: bool = False,
 ) -> dict[str, Any]:
     """Aggregate message counts per chat, day, month or sender.
 
@@ -2060,6 +2126,11 @@ def message_stats(
         raise ToolError("invalid_argument", f"group_by must be one of {', '.join(MESSAGE_STATS_GROUPINGS)}")
     limit = max(1, min(int(limit), MAX_STATS_BUCKETS))
     bucket_sql = _STATS_GROUP_SQL[group_by]
+    # Resolve "who am I" before opening the database: it is a local read in the
+    # normal case but can fall back to the bridge over HTTP, and a cursor must
+    # never be held open across that.
+    if mentions_me:
+        owner_identity()
 
     try:
         conn = _connect_messages_db()
@@ -2077,6 +2148,7 @@ def message_stats(
             exclude_groups=exclude_groups,
             include_deleted=include_deleted,
             unread_only=unread_only,
+            mentions_me=mentions_me,
         ).build(cur)
         if predicate.clause:
             clauses.append(predicate.clause)
@@ -3559,6 +3631,127 @@ def _endpoint_cert_status() -> dict[str, Any]:
         return {"endpoint_cert_error": str(exc)}
 
 
+# --- the account's own identity (whatsmeow_device / bridge me.go) --------------
+#
+# An agent cannot recognise itself in a group without this: WhatsApp writes a
+# mention as the mentioned account's LID, which reads like a phone number.
+#
+# Read locally first. whatsmeow stores the paired account's JID and LID in
+# whatsapp.db (whatsmeow_device), which this server already opens read-only for
+# name and LID resolution, so "who am I" — and therefore mentions_me — keeps
+# working when the bridge is down, as every other read does (AGENTS.md §8.7).
+# GET /api/me is the fallback for a deployment whose whatsapp.db is not
+# reachable from this container. Cached for a minute either way: the answer
+# changes only when the account is re-paired.
+
+_OWNER_CACHE_TTL_S = 60.0
+_owner_lock = threading.Lock()
+_owner_cache: tuple[float, dict[str, str | None]] | None = None
+
+
+def _reset_owner_cache() -> None:
+    """Drop the cached identity (tests, and after a re-pair)."""
+    global _owner_cache
+    with _owner_lock:
+        _owner_cache = None
+
+
+def _owner_from_device_table() -> dict[str, str | None] | None:
+    """The paired account as whatsmeow recorded it, or None when unreadable."""
+    if not os.path.isfile(WHATSMEOW_DB_PATH):
+        return None
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            row = conn.execute("SELECT jid, lid FROM whatsmeow_device LIMIT 1").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:  # not paired yet, or an older whatsmeow schema
+        logger.debug("owner identity: whatsmeow_device unreadable: %s", exc)
+        return None
+    if not row:
+        return None
+    jid, phone = _own_jid_parts(row[0])
+    if not phone:
+        return None
+    _, lid = _own_jid_parts(row[1])
+    if lid is None:
+        # A pairing older than whatsmeow's device.lid column. The mapping table
+        # still knows it, and it is the answer the bridge would give (me.go
+        # falls back to the same store): without it mentions_me would match the
+        # phone spelling alone and quietly miss every group mention.
+        lid = _own_lid_from_map(phone)
+    return {"jid": jid, "phone": phone, "lid": lid}
+
+
+def _own_lid_from_map(phone: str) -> str | None:
+    """The LID whatsmeow mapped to our phone number, or None.
+
+    whatsmeow_lid_map stores both sides as bare user parts.
+    """
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ? LIMIT 1", (phone,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.debug("owner identity: whatsmeow_lid_map unreadable: %s", exc)
+        return None
+    if not row or not row[0]:
+        return None
+    _, lid = _own_jid_parts(f"{row[0]}@lid" if "@" not in str(row[0]) else row[0])
+    return lid
+
+
+def _own_jid_parts(raw: Any) -> tuple[str | None, str | None]:
+    """('<user>@<server>', '<user>') from a stored device JID ('user.0:12@server')."""
+    if not raw:
+        return None, None
+    user, _, server = str(raw).partition("@")
+    user = user.split(":", 1)[0].split(".", 1)[0]
+    if not user or not server:
+        return None, None
+    return f"{user}@{server}", user
+
+
+def _owner_from_bridge() -> dict[str, str | None]:
+    """GET /api/me. Raises ToolError("bridge_unavailable") when it cannot answer."""
+    resp = _bridge_request("GET", "/me", timeout=10)
+    if resp.status_code != 200:
+        raise ToolError(
+            "bridge_unavailable",
+            f"the bridge could not say which account it is logged in as (/api/me answered HTTP {resp.status_code}); "
+            "call bridge_status",
+        )
+    try:
+        body = resp.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ToolError("bridge_unavailable", f"/api/me returned an unreadable body: {exc}") from exc
+    if not isinstance(body, dict) or not body.get("phone"):
+        raise ToolError("bridge_unavailable", "/api/me returned no phone number for this account; call bridge_status")
+    return {"jid": body.get("phone_jid"), "phone": body.get("phone"), "lid": body.get("lid")}
+
+
+def owner_identity() -> dict[str, str | None]:
+    """{"jid", "phone", "lid"} of the account this deployment is logged in as.
+
+    Raises ToolError("bridge_unavailable") when neither the local store nor the
+    bridge can say: "who am I" has no useful empty answer, and a mentions_me
+    filter that silently matched nothing would read as "nobody mentioned you".
+    """
+    global _owner_cache
+    now = time.monotonic()
+    with _owner_lock:
+        if _owner_cache is not None and now - _owner_cache[0] < _OWNER_CACHE_TTL_S:
+            return dict(_owner_cache[1])
+
+    owner = _owner_from_device_table() or _owner_from_bridge()
+    with _owner_lock:
+        _owner_cache = (now, dict(owner))
+    return dict(owner)
+
+
 def bridge_status() -> dict[str, Any]:
     """Health, readiness and build identity of the bridge in one call.
 
@@ -3605,6 +3798,15 @@ def bridge_status() -> dict[str, Any]:
                 status["version"] = {k: info.get(k) for k in ("version", "commit", "go", "whatsmeow", "fts5")}
     except (ToolError, json.JSONDecodeError, ValueError):
         pass
+    # Who this deployment is logged in as: the LID is what a group mention is
+    # written with, so an agent needs it to recognise itself. Absent rather than
+    # null when nothing can say (not paired yet, no readable store, bridge
+    # down). Broad except on purpose: this is the one tool an agent calls when
+    # everything else is broken, and it must not raise (see the docstring).
+    try:
+        status["owner"] = owner_identity()
+    except Exception as exc:
+        logger.debug("bridge_status: owner identity unavailable: %s", exc)
     return status
 
 
@@ -3791,6 +3993,7 @@ def list_unanswered(
     exclude_muted: bool = True,
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
+    include_group_mentions: bool = False,
 ) -> list[dict[str, Any]]:
     """Items of one page of list_unanswered_page."""
     return list_unanswered_page(
@@ -3805,6 +4008,7 @@ def list_unanswered(
         exclude_muted=exclude_muted,
         include_snoozed=include_snoozed,
         ignore_closing_messages=ignore_closing_messages,
+        include_group_mentions=include_group_mentions,
     ).items
 
 
@@ -3852,6 +4056,178 @@ def _install_triage_filter(
     return install_filter(conn, hide_handled, exclude_muted, include_snoozed)
 
 
+# --- group mentions in triage --------------------------------------------------
+#
+# "The last message is inbound" is the wrong question in a group: groups are
+# always inbound. What waits for an answer there is a mention of the owner that
+# nobody answered — newer than the owner's own last word in that group. The
+# ordinary rule already returns most of those chats (a mention is itself an
+# inbound message), so include_group_mentions does two things: it flags the
+# rows that actually addressed you, and it adds the groups the age bound hid
+# because the group kept talking after the mention.
+
+
+def _pending_mention_where(cur: sqlite3.Cursor, alias: str, chat_jid_expr: str) -> tuple[str, list[Any]]:
+    """`alias` is an inbound mention of the owner, newer than the owner's last word.
+
+    "Word" on both sides means a spoken message (_spoken_filter): a thumbs-up
+    from you does not answer a question, and a mention you revoked is not one
+    any more — the same rule list_unanswered already applies to everything else.
+    """
+    mention_clause, mention_params = mentions_me_predicate(cur, alias)
+    sql = f"""{alias}.is_from_me = 0 AND {_spoken_filter(alias)} AND {mention_clause}
+              AND {alias}.timestamp > COALESCE((SELECT MAX(own.timestamp) FROM messages own
+                                                 WHERE own.chat_jid = {chat_jid_expr}
+                                                   AND own.is_from_me = 1 AND {_spoken_filter("own")}), '')"""
+    return sql, mention_params
+
+
+def newest_pending_mentions(
+    cur: sqlite3.Cursor,
+    chat_jids: Sequence[str],
+    bounds: Sequence[tuple[str, str]] = (),
+) -> dict[str, tuple[str, str]]:
+    """{chat_jid: (message_id, timestamp)} of the newest unanswered mention per chat.
+
+    One row per chat (MAX picks the bare columns with it), for the chats given,
+    so the annotation costs one bounded query per page. `bounds` carries the
+    same time bounds the page was built with — a row anchored on a mention must
+    name that mention, not a newer one the bound excluded.
+    """
+    if not chat_jids:
+        return {}
+    where, params = _pending_mention_where(cur, "messages", "messages.chat_jid")
+    bound_sql = "".join(f" AND messages.timestamp {op} ?" for op, _ in bounds)
+    placeholders = ",".join("?" * len(chat_jids))
+    cur.execute(
+        f"""SELECT messages.chat_jid, messages.id, MAX(messages.timestamp)
+            FROM messages
+            WHERE messages.chat_jid IN ({placeholders}) AND {where}{bound_sql}
+            GROUP BY messages.chat_jid""",
+        (*chat_jids, *params, *(value for _, value in bounds)),
+    )
+    return {chat: (message_id, timestamp) for chat, message_id, timestamp in cur.fetchall()}
+
+
+def _mention_only_rows(
+    cur: sqlite3.Cursor,
+    *,
+    since: str | None,
+    min_age_hours: float,
+    chat_jid: str | Sequence[str] | None,
+    exclude_chat_jid: str | Sequence[str] | None,
+    read_marker: str,
+    include_last_message: bool,
+    cursor_state: dict[str, Any] | None,
+    limit: int,
+) -> tuple[list[tuple], list[tuple[str, str]]]:
+    """Groups waiting on a mention that the ordinary unanswered rule does not return.
+
+    Same row shape and order as the main query, anchored on the mention instead
+    of on the chat's newest message — that anchor is the point: a group that
+    kept talking after the mention is dropped by min_age_hours even though the
+    mention itself has been waiting for days. Chats the ordinary rule already
+    returns are left to it (the COALESCE(last_spoken…) clause), so the two
+    streams never describe the same chat twice, on this page or the next.
+    """
+    filter_clause, filter_params = unread_filters(since, None, False, chat_jid, exclude_chat_jid)
+    # unread_filters bounds `messages`, which is the mention row here.
+    mention_where, mention_params = _pending_mention_where(cur, "messages", "chats.jid")
+    policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
+    age_clause, age_params = "", []
+    if float(min_age_hours or 0) > 0:
+        age_clause = "AND messages.timestamp <= ?"
+        age_params = [timestamp_bound(datetime.now(UTC) - timedelta(hours=float(min_age_hours)))]
+    # The bounds the ordinary rule applies to the chat's newest spoken message:
+    # when it passes them the chat is already in that stream.
+    covered_bounds, covered_params = "", []
+    if since:
+        # Already validated by unread_filters above, same conversion.
+        covered_bounds += " AND last_spoken.timestamp > ?"
+        covered_params.append(timestamp_bound(datetime.fromisoformat(since)))
+    if age_params:
+        covered_bounds += " AND last_spoken.timestamp <= ?"
+        covered_params.append(age_params[0])
+    # The keyset belongs on the chat's newest mention, not on the individual
+    # mention rows: a group with two unanswered mentions would otherwise come
+    # back on the next page anchored on the older one.
+    keyset_clause, keyset_params = "", []
+    if cursor_state is not None:
+        keyset_clause = "HAVING (MAX(messages.timestamp) < ? OR (MAX(messages.timestamp) = ? AND chats.jid > ?))"
+        keyset_params = [cursor_state["t"], cursor_state["t"], cursor_state["j"]]
+
+    # MAX() is the only aggregate, so SQLite takes the bare columns (the
+    # mention's id, text and sender) from the row that produced it.
+    # last_* describes the chat's newest spoken message here too, so a consumer
+    # that prints last_message beside last_message_time sees one message; the
+    # mention this row is about is named by mention_message_id / mention_time.
+    last_message_select = "last_spoken.content, last_spoken.sender" if include_last_message else "NULL, NULL"
+    cur.execute(
+        f"""
+        SELECT chats.jid, chats.name, chats.last_message_time,
+               {last_message_select},
+               last_spoken.is_from_me, {read_marker},
+               1, MAX(messages.timestamp)
+        FROM chats
+        JOIN messages ON messages.chat_jid = chats.jid
+        {_last_message_join("chats", "last_spoken", spoken_only=True)}
+        WHERE chats.jid LIKE '%@g.us'
+          AND {policy_clause}
+          AND {mention_where}
+          {filter_clause} {age_clause}
+          AND COALESCE(last_spoken.is_from_me = 0 {covered_bounds}, 0) = 0
+        GROUP BY chats.jid
+        {keyset_clause}
+        ORDER BY MAX(messages.timestamp) DESC, chats.jid ASC
+        LIMIT ?
+        """,
+        (*policy_params, *mention_params, *filter_params, *age_params, *covered_params, *keyset_params, limit),
+    )
+    # The bounds the anchor was chosen under, for the annotation query.
+    bounds: list[tuple[str, str]] = []
+    if filter_params and since:
+        bounds.append((">", timestamp_bound(datetime.fromisoformat(since))))
+    if age_params:
+        bounds.append(("<=", age_params[0]))
+    return cur.fetchall(), bounds
+
+
+def _sorts_first(row: tuple, other: tuple) -> bool:
+    """The page order: newest anchor first, chat JID ascending on a tie.
+
+    Timestamps are the canonical UTC spelling, so comparing the strings
+    compares the instants (issue #270).
+    """
+    if row[8] != other[8]:
+        return row[8] > other[8]
+    return row[0] <= other[0]
+
+
+def _merge_by_anchor(primary: Sequence[tuple], extra: Sequence[tuple], cap: int) -> list[tuple]:
+    """Merge two streams already ordered by (anchor DESC, jid ASC), keeping that order.
+
+    Both queries answer the same page bounds, so merging their heads gives the
+    same rows the union would in one query. A chat cannot be in both streams
+    (see _mention_only_rows), so no de-duplication is needed here.
+    """
+    merged: list[tuple] = []
+    i = j = 0
+    while len(merged) < cap and (i < len(primary) or j < len(extra)):
+        if j >= len(extra):
+            merged.append(primary[i])
+            i += 1
+        elif i >= len(primary):
+            merged.append(extra[j])
+            j += 1
+        elif _sorts_first(primary[i], extra[j]):
+            merged.append(primary[i])
+            i += 1
+        else:
+            merged.append(extra[j])
+            j += 1
+    return merged
+
+
 def count_unanswered(
     since: str | None = None,
     exclude_groups: bool = False,
@@ -3895,6 +4271,7 @@ def list_unanswered_page(
     exclude_muted: bool = True,
     include_snoozed: bool = False,
     ignore_closing_messages: bool = False,
+    include_group_mentions: bool = False,
 ) -> PageResult:
     """Chats whose newest stored message is inbound: the other side spoke last.
 
@@ -3909,12 +4286,20 @@ def list_unanswered_page(
     a chat marked handled after its last inbound message, one snoozed into the
     future, and one muted are all left out — see `install_filter` for why that
     happens in SQL rather than on the page.
+
+    include_group_mentions marks every row that carries an unanswered mention of
+    this account (`mention`, `mention_message_id`, `mention_time`) and adds the
+    groups whose mention is still waiting even though the group kept talking
+    after it — the rows min_age_hours would otherwise hide.
     """
     limit = max(1, min(int(limit), 200))
     cursor_state = decode_cursor(cursor, "unanswered")
     from_where, where_params = _unanswered_from_where(
         since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages
     )
+    # Resolve "who am I" before opening the database (see list_messages_page).
+    if include_group_mentions:
+        owner_identity()
 
     try:
         conn = _connect_messages_db()
@@ -3945,6 +4330,28 @@ def list_unanswered_page(
             (*where_params, *triage_params, *keyset_params, limit + 1),
         )
         rows = cur.fetchall()
+        mentions_by_chat: dict[str, tuple[str, str]] = {}
+        if include_group_mentions:
+            # exclude_groups wins: it says "no groups", so no group is added back
+            # here either. The flag on the remaining rows still means what it says.
+            extra: list[tuple] = []
+            bounds: list[tuple[str, str]] = []
+            if not exclude_groups:
+                extra, bounds = _mention_only_rows(
+                    cur,
+                    since=since,
+                    min_age_hours=min_age_hours,
+                    chat_jid=chat_jid,
+                    exclude_chat_jid=exclude_chat_jid,
+                    read_marker=read_marker,
+                    include_last_message=include_last_message,
+                    cursor_state=cursor_state,
+                    limit=limit + 1,
+                )
+            rows = _merge_by_anchor(rows, extra, limit + 1)
+            # Same bounds as the rows: the mention named here is the one the
+            # page was built around, never a newer one the bound left out.
+            mentions_by_chat = newest_pending_mentions(cur, [row[0] for row in rows], bounds)
         has_more = len(rows) > limit
         rows = rows[:limit]
         next_cursor = None
@@ -3970,6 +4377,11 @@ def list_unanswered_page(
             item = chat_to_dict(chat)
             item["last_inbound_time"] = row[8]
             item["age_hours"] = _hours_since(row[8])
+            if include_group_mentions:
+                pending = mentions_by_chat.get(chat.jid)
+                item["mention"] = pending is not None
+                if pending is not None:
+                    item["mention_message_id"], item["mention_time"] = pending
             items.append(item)
         return PageResult(items, next_cursor, has_more)
 

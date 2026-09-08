@@ -255,6 +255,13 @@ unfamiliar 14-16 digit "number" with no name is worth checking with
 
 Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
 
+It reports **which account this is** in an `owner` block — `{jid, phone, lid}`,
+the two spellings of your own identity. The `lid` is the one an agent cannot
+guess: it is what WhatsApp writes into a group message that mentions you, and it
+looks like a phone number that is not yours. It comes from the paired store when
+that is readable and from the bridge otherwise, and the key is **absent** (never
+null) when nothing can say — before pairing, for instance.
+
 It also answers "can this deployment transcribe voice notes?" in a `whisper`
 block, which is local to the MCP server and therefore reported even when the
 bridge is down:
@@ -492,12 +499,44 @@ Get messages with filters, date ranges, and sorting.
 - `has_media` (optional, default unset): `true` for messages carrying a file, `false` for text-only. Reactions and poll votes are pointer rows and never count as media
 - `media_type` (optional): one of `image`, `video`, `audio`, `document`, `sticker`. Implies `has_media=true`; combining it with `has_media=false` is refused
 - `exclude_groups` (optional, default `false`): `true` keeps [direct conversations](#direct-conversations) only — `@s.whatsapp.net` and `@lid` — dropping `@g.us` groups, `@broadcast` lists, `@newsletter` channels and `@bot` chats
+- `mentions_me` (optional, default `false`): `true` keeps only the messages that **mentioned you** — see [Mentions of you](#mentions-of-you)
 - `include_transcripts` (optional, default `false`): `true` copies the stored transcript of each voice note onto its row as `transcript`. It comes from the same batched `notes.db` lookup the rows already do, costs no extra query and **never** transcribes: audio never passed to `transcribe_audio` simply has none. `media_type="audio", include_transcripts=true` reads a conversation held by voice
 - `fields`, `omit_nulls`, `max_content_chars`, `count_only`: shape the response instead of returning every key of every row — see [Compact reads](#compact-reads). Start a bulk read with `count_only=true`
 
 The four filters above are plain WHERE predicates, so they combine with each other and with
 every filter above: `from_me=false, media_type="document", exclude_groups=true`
 is "documents people sent me in a direct chat".
+
+<a id="mentions-of-you"></a>**Mentions of you.** WhatsApp records an @-mention as
+the mentioned account's identity, not as text, and it renders it in the message
+as that account's **LID** — a number that reads exactly like a phone number
+(`@158883943301358`). `mentions_me=True` matches that field against both
+spellings of your own account, so you never have to know or paste either:
+
+```python
+list_messages(mentions_me=True, after="2026-08-08", count_only=True)   # 22
+list_messages(mentions_me=True, chat_jid="1203...@g.us", include_context=False)
+message_stats(mentions_me=True, group_by="chat")   # which groups address me
+```
+
+Who "you" is comes from the paired account itself and is reported by
+[`bridge_status`](#bridge_status) under `owner`. Without a paired store (and an
+unreachable bridge) the filter answers `bridge_unavailable` rather than an empty
+page — "nobody mentioned you" and "I don't know who you are" are different
+answers.
+
+Two caveats worth knowing:
+
+- **Messages archived before this bridge version** have no mention field: their
+  mentions were recovered once from the text (`@` followed by at least five
+  digits), which is what a human search would have found. A number someone typed
+  after an `@` is indistinguishable from a real mention in those rows. Messages
+  stored since carry what WhatsApp actually sent.
+- **Being mentioned is not being addressed** — a group that @-mentions everyone
+  mentions you too. `mentions_me` narrows a group's traffic to what named you;
+  it does not judge whether it wanted an answer. For that, ask
+  [`list_unanswered(include_group_mentions=True)`](#list_unanswered), which only
+  keeps mentions newer than your own last word in the chat.
 
 **`query` searches stored transcripts too.** A voice note has no `content`, so
 the bridge's index cannot see what was said in it — but a transcript that is
@@ -564,7 +603,7 @@ archive through its context.
 - `before` / `after` (optional): ISO-8601 bounds
 - `limit` (optional): max buckets returned (default 100, max 500)
 - `query` (optional): count only the messages matching this search, with the same syntax and the same hits as `list_messages` (FTS operators, stored voice-note transcripts included). `group_by="month", query="orçamento"` plots a topic over time; `group_by="chat"` says where it is discussed. Ranking has no meaning in an aggregate, so `sort_by` has no counterpart here
-- `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`, `unread_only`: the same predicates as `list_messages`, so the same arguments describe the same rows
+- `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`, `unread_only`, `mentions_me`: the same predicates as `list_messages`, so the same arguments describe the same rows. `mentions_me=True, group_by="chat"` is "which groups address me, and how often" ([Mentions of you](#mentions-of-you))
 
 **Returns:**
 
@@ -1439,6 +1478,7 @@ Chats with no stored messages never appear.
 - `include_last_message` (optional, default true): include `last_message` / `last_sender`
 - `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them — see [Chat filters](#chat-filters)
 - `cursor` (optional): `next_cursor` from the previous page
+- `include_group_mentions` (optional, default false): also answer the group question — see below
 - `fields`, `omit_nulls`, `count_only`: shape the response — see [Compact reads](#compact-reads). These are chat rows, so `fields` takes chat names and there is no `max_content_chars`
 - `hide_handled` (optional, **default true**): skip chats whose `handled_at` note is at or after their last inbound message
 - `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
@@ -1465,10 +1505,39 @@ standard [chat shape](#chat-operations) plus:
 you read it and never answered — the case `list_unread` cannot report.
 Respects `WHATSAPP_ALLOWED_CHATS`.
 
+**Direct chats vs groups.** "The newest message is inbound" is a real signal in
+a direct chat and almost none in a group: a busy group is always inbound, and a
+quiet one may have nothing for you in it. What waits for an answer in a group is
+a **mention of you** that nobody answered. `include_group_mentions=True` adds
+that question to the same page:
+
+- every row gains `mention` — `true` when that chat holds a mention of you newer
+  than your own last **spoken** message there (a thumbs-up from you does not
+  answer a question, and a mention either side revoked stops counting) — plus
+  `mention_message_id` and `mention_time` pointing at it, so you can read the
+  message that asked. `since` and `min_age_hours` bound that pointer too, so it
+  always names the mention the row is about;
+- groups whose mention is still waiting are **added** even when the ordinary
+  rule dropped them, which is what `min_age_hours` does to a group that kept
+  talking after the mention: the chatter is 20 minutes old, the question asked
+  of you is three days old. Those rows are ordered and aged by the mention, not
+  by the last message, and each chat still appears exactly once. Their
+  `last_message` / `last_message_time` still describe the chat's newest message,
+  as everywhere else — the mention is what `mention_*` names.
+
+`exclude_groups=True` wins over it — "no groups" means no group comes back
+through this door either — and `count_only` counts the ordinary rule alone.
+
+It needs a paired deployment, since the account's own identity is what a mention
+is matched against ([`bridge_status`](#bridge_status) → `owner`), and it reads
+the same `mentions` column as [`mentions_me`](#list_messages) — including its
+caveat about messages archived before that column existed.
+
 **Natural Language Examples:**
 
 - "Who am I leaving hanging?"
 - "Direct chats waiting more than a day for a reply" (`exclude_groups=True, min_age_hours=24`)
+- "Which groups asked me something I never answered?" (`include_group_mentions=True`)
 
 <a id="triage-state"></a>
 
