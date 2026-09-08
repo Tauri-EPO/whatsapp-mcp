@@ -108,9 +108,12 @@ const messagesDBUserVersion = 1
 // GLOB treats '+', '-' and ':' literally.
 const canonicalTimeGlob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00"
 
-// canonicalTimeColumns are the TIMESTAMP columns the bridge writes.
-// chats.ephemeral_setting_timestamp is deliberately absent: it is an INTEGER
-// of WhatsApp seconds, not a time string.
+// canonicalTimeColumns are the TIMESTAMP columns the bridge writes that can
+// still hold a legacy spelling. chats.ephemeral_setting_timestamp is
+// deliberately absent: it is an INTEGER of WhatsApp seconds, not a time
+// string. group_members.first_seen/last_seen are absent for the opposite
+// reason: that table postdates this migration, so every row it has ever held
+// was written through dbTime and there is nothing to rewrite.
 var canonicalTimeColumns = []struct{ table, column string }{
 	{"messages", "timestamp"},
 	{"messages", "deleted_at"},

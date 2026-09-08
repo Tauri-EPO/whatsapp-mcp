@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -35,6 +36,11 @@ type GroupMembersResponse struct {
 	OwnerJID    string        `json:"owner_jid,omitempty"`
 	Participant int           `json:"participant_count"`
 	Members     []GroupMember `json:"members"`
+	// FetchedAt is when this roster came off the network (canonical UTC, see
+	// store_time.go). It is also the freshness stamp written to group_members,
+	// so a caller can tell how old the cached membership behind
+	// get_contact_chats is.
+	FetchedAt string `json:"fetched_at,omitempty"`
 }
 
 // groupInfoFetcher abstracts the whatsmeow call so the handler can be tested
@@ -105,9 +111,20 @@ func storeContactName(client *whatsmeow.Client) contactNameResolver {
 	}
 }
 
+// rosterRecorder caches a roster we just fetched (group_members_store.go).
+// nil = do not cache, which is what the tests that only check the JSON use.
+type rosterRecorder func(groupJID string, members []GroupMember, now time.Time)
+
 // handleGroupMembers serves /api/group/members. The group JID comes from the
 // `jid` query parameter (GET) or a JSON body {"group_jid": ...} (POST).
-func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, policy chatPolicy) http.HandlerFunc {
+//
+// Every successful fetch also refreshes the cached roster: this endpoint is
+// the one place a full participant list arrives, and paying for the write here
+// is what lets get_contact_chats answer "which groups is this person in?"
+// without a live round trip per group (issue #288). The write is a local cache
+// with no WhatsApp side effect, so the route stays a read for read-only mode —
+// like /api/download, which caches media the same way.
+func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, policy chatPolicy, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		raw := strings.TrimSpace(r.URL.Query().Get("jid"))
@@ -132,12 +149,23 @@ func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, poli
 		if rejectByChatPolicy(w, policy, jid.String()) {
 			return
 		}
+		// Read before the request: this is the stamp the cached roster is swept
+		// with, and a member who joins while the fetch is in flight must not be
+		// deleted by a snapshot taken before they arrived.
+		at := time.Now()
 		info, err := fetch(r.Context(), jid)
 		if err != nil {
 			w.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(GroupMembersResponse{Success: false, Message: "failed to fetch group info: " + err.Error()})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(buildGroupMembers(info, nameOf))
+		resp := buildGroupMembers(info, nameOf)
+		resp.FetchedAt = dbTime(at)
+		if record != nil {
+			// ToNonAD: ParseJID accepts a device suffix, and a roster cached
+			// under "…:1@g.us" would never match chats.jid again.
+			record(jid.ToNonAD().String(), resp.Members, at)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }

@@ -61,7 +61,7 @@ func TestHandleGroupMembers(t *testing.T) {
 		}
 		return fakeGroup(), nil
 	}
-	h := handleGroupMembers(fetch, nil, parseChatPolicy("*@g.us"))
+	h := handleGroupMembers(fetch, nil, parseChatPolicy("*@g.us"), nil)
 
 	do := func(method, target, body string) *httptest.ResponseRecorder {
 		var req *http.Request
@@ -98,7 +98,7 @@ func TestHandleGroupMembers(t *testing.T) {
 	}
 
 	// Allow-list applies to groups too.
-	restricted := handleGroupMembers(fetch, nil, parseChatPolicy("5511999999999"))
+	restricted := handleGroupMembers(fetch, nil, parseChatPolicy("5511999999999"), nil)
 	rec = httptest.NewRecorder()
 	restricted(rec, httptest.NewRequest(http.MethodGet, "/api/group/members?jid=120363000000000001@g.us", nil))
 	if rec.Code != http.StatusForbidden {

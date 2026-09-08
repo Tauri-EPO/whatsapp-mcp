@@ -181,6 +181,10 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		logger.Warnf("Failed to store chat: %v", err)
 	}
 
+	// A group sender we have no roster row for is a member we know about
+	// (group_events.go); no-op for DMs and for members already recorded.
+	b.noteGroupSender(chatJID, resolvedSender, msgTimestamp)
+
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
 	handleMessageRevoke(messageStore, msg.Message, chatJID, msg.Info.Timestamp.Unix(), logger)
 
@@ -510,6 +514,8 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 				b.Log.Warnf("Failed to store group ephemeral settings for %s: %v", v.JID, err)
 			}
 		}
+		// Join/Leave/Promote/Demote keep group_members current (group_events.go).
+		b.applyGroupParticipantChanges(v)
 
 	case *events.CallOffer:
 		// 1:1 incoming call. call_type defaults to "voice"; CallOffer

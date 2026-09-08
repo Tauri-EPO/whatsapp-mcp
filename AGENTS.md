@@ -83,6 +83,8 @@ whatsapp-mcp/
 │   ├── instance_lock.go        # one bridge per store (flock / LockFileEx)
 │   ├── polls.go                # native polls: creation, votes, /api/poll
 │   ├── group_members.go        # /api/group/members
+│   ├── group_members_store.go  # group_members table: rosters cached per group
+│   ├── group_events.go         # GroupInfo join/leave/promote/demote + the paced roster refresh
 │   ├── delete_message.go       # /api/delete (revoke / local delete)
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
@@ -115,7 +117,7 @@ whatsapp-mcp/
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
 
-Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `messages_fts`) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus `notes_meta` and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never opens it — the "never create FTS from Python" rule is about `messages.db` only.
+Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `group_members`, `messages_fts`) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus `notes_meta` and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never opens it — the "never create FTS from Python" rule is about `messages.db` only.
 
 Compose topology: the `mcp` container joins the bridge's network namespace (`network_mode: service:bridge`), so the bridge keeps its loopback bind and loopback-only Host allow-list; the MCP port is published on the bridge service. An alternative topology is issue #58.
 
@@ -208,6 +210,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true` | Cache inbound media on arrival; `false` = fetch only on `/api/download` (`media_retention.go`) |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB) | Inbound files larger than this are not auto-downloaded (`/api/download` still fetches them); `0` = no limit. Downloads stream to `<file>.part` then rename (`media.go`) |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset)* | Daily sweep deletes media files older than N days under `store/<chat>/`; DB rows untouched |
+| `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6` | How stale a cached group roster may get before the bridge refreshes it in the background (`group_events.go`), one group per second, only while connected. `0` turns the pass off, leaving `group_members` fed only by `/api/group/members`, group events and group messages. It is a read (`GetGroupInfo`), so it keeps running under `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_EXPORT_DIR` | `$WHATSAPP_STORE_DIR/exports` | Directory `export_messages` writes NDJSON archives into (`export.py`). `out_path` is resolved under it and anything escaping it (`..`, an absolute path elsewhere, a symlink pointing out) is refused with `denied`. Compose leaves it at `/app/store/exports`, inside the `whatsapp-store` volume |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |

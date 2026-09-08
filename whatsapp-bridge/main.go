@@ -232,6 +232,12 @@ func main() {
 		return
 	}
 
+	rosterSync, rosterErr := resolveGroupRosterSync(os.Getenv(groupRosterSyncEnv))
+	if rosterErr != nil {
+		logger.Errorf("%v", rosterErr)
+		return
+	}
+
 	// Operation-level access control (read_only.go). Parsed before the REST
 	// server starts; a value we cannot read stops the bridge instead of
 	// leaving the mutating endpoints open.
@@ -261,6 +267,7 @@ func main() {
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 	bridge.MediaRetention = mediaRetention
+	bridge.GroupRosterSync = rosterSync
 	bridge.ReadOnly = readOnly
 	bridge.Tools = tools
 
@@ -283,7 +290,9 @@ func main() {
 	logger.Infof("%s", bridge.ReadOnly.Summary())
 	logger.Infof("%s", bridge.Tools.Summary())
 	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(bridge.MediaRetention))
+	logger.Infof("Group roster sync: %s", groupRosterSyncSummary(bridge.GroupRosterSync))
 	go bridge.runMediaRetention()
+	go bridge.runGroupRosterSync()
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to

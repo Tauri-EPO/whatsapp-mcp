@@ -207,6 +207,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "mentions", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.mentions column: %w", err)
 	}
+	if _, err := db.Exec(groupMembersSchema); err != nil {
+		return fmt.Errorf("failed to ensure group_members table: %w", err)
+	}
 	// Last, in user_version order: every table and column these rewrite must
 	// already exist, and each stamps only its own version (store_time.go).
 	if err := migrateCanonicalTimestamps(db); err != nil {
