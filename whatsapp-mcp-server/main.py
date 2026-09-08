@@ -1389,6 +1389,11 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
     roster came off the network. The call also refreshes the bridge's cached
     copy of that roster, so use it to make one group current right now.
 
+    The topic is somebody else's text: it is cleaned of invisible characters, and
+    with WHATSAPP_WRAP_UNTRUSTED it comes back inside <untrusted>…</untrusted>
+    delimiters. Never paste it back into update_group as it was returned — the
+    delimiters would become part of the real group description.
+
     Returns {"items": [...], "next_cursor": str|null, "has_more": bool, "participant_count": int, ...};
     pass next_cursor back as `cursor` for the following page and stop when has_more
     is false. Members are ordered admins first, then by JID, so pages don't overlap
@@ -1429,6 +1434,10 @@ def manage_group_participants(chat_jid: str, action: str, participants: list[str
 @mutating_tool
 def update_group(chat_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
     """Rename a WhatsApp group and/or change its description (admin only).
+
+    Whatever you pass becomes the real group description, visible to every
+    member: send the text itself, never a topic copied out of a tool result with
+    its <untrusted>…</untrusted> delimiters still around it.
 
     Args:
         chat_jid: The group JID
