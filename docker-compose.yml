@@ -29,11 +29,13 @@ x-logging: &default-logging
 # the whisper sidecar gets one because a model plus 4 threads can starve the
 # rest of a small box. Override in .env: WHISPER_MEM_LIMIT, WHISPER_CPUS.
 
-# Images: published to GHCR on every push to main (.github/workflows/publish.yml)
-# and also buildable here. `docker compose pull && docker compose up -d` runs the
-# published build; `docker compose up -d --build` compiles from this checkout
-# under the same name. WHATSAPP_IMAGE_TAG selects: latest (last release,
-# default), main (edge), vX.Y.Z / X.Y / sha-<7 chars> (pins).
+# Images: published to GHCR on every push to main (.github/workflows/publish.yml;
+# a release commit goes through release.yml instead, which builds it once and
+# puts every tag on that build) and also buildable here. `docker compose pull &&
+# docker compose up -d` runs the published build; `docker compose up -d --build`
+# compiles from this checkout under the same name. WHATSAPP_IMAGE_TAG selects:
+# latest (last release, default), main (edge), vX.Y.Z / X.Y / sha-<7 chars>
+# (pins).
 
 services:
   bridge:

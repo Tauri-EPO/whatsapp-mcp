@@ -3,12 +3,16 @@ name: Release cut
 # Cuts at most one release a day. release.yml keeps a "chore(main): release
 # X.Y.Z" PR open whenever main carries releasable commits since the last tag;
 # this job merges that PR on a schedule and then dispatches release.yml, which
-# creates the tag, the GitHub Release and the vX.Y.Z / X.Y / latest images.
+# creates the tag, the GitHub Release and the vX.Y.Z / X.Y / latest / main /
+# sha-<7> images.
 #
 # The explicit dispatch is required: a merge made with GITHUB_TOKEN does not
 # fire `on: push` workflows, and workflow_dispatch is the documented exception.
-# For the same reason publish.yml is dispatched too, so the main / sha-<7> edge
-# images include the release commit instead of stopping at the commit before it.
+# One dispatch is enough: release.yml puts the edge tags on the release commit
+# off the same build, so it is not built a second time in parallel by
+# publish.yml (issue #333). publish.yml is still dispatched, but only if the
+# release dispatch failed after the PR was merged - then it is the only build,
+# not a second one.
 #
 # Merging the release PR by hand earlier still works; the job then finds no PR
 # and exits. It also refuses to merge while CI on main is running (the PR is
@@ -77,6 +81,7 @@ jobs:
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Merge the release PR
+        id: merge
         if: steps.ci.outputs.ready == 'true'
         run: gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
 
@@ -84,12 +89,14 @@ jobs:
         if: steps.ci.outputs.ready == 'true'
         run: |
           gh workflow run release.yml --ref main
-          echo "release.yml dispatched; it creates the tag and publishes the images."
+          echo "release.yml dispatched; it creates the tag and publishes vX.Y.Z, X.Y, latest, main and sha-<7> from one build."
 
-      # Runs even when the release dispatch above failed: the release commit is
-      # on main either way, so the edge images should carry it either way.
-      - name: Dispatch publish.yml for the edge images
-        if: ${{ !cancelled() && steps.ci.outputs.ready == 'true' }}
+      # Only when the dispatch itself failed after the PR was already merged:
+      # the release commit is on main with nothing scheduled to build it, and
+      # publish.yml does not fire on a GITHUB_TOKEN merge. Publishing the edge
+      # images is then not a second build, it is the only one.
+      - name: Publish the edge images if the dispatch failed
+        if: ${{ failure() && steps.merge.outcome == 'success' }}
         run: |
           gh workflow run publish.yml --ref main
-          echo "publish.yml dispatched; it moves main / sha-<7> onto the release commit."
+          echo "release.yml could not be dispatched; publish.yml dispatched so the release commit still gets images. Tag and release it by re-running release.yml."
