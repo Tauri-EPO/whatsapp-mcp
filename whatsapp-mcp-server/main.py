@@ -1195,12 +1195,31 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
 @tool_errors
 @untrusted_content
 def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
-    """Get all WhatsApp chats involving the contact.
+    """Every WhatsApp chat the contact is attached to, groups they belong to but never post in included.
+
+    Use it before answering someone, to see whether the conversation is also
+    running in a group you share with them.
+
+    Each item is a chat row plus `membership`: "spoke" (they have messages
+    here), "member" (the cached group membership lists them, but they have
+    never posted here), "both", or null for their own direct chat when they
+    have never sent anything.
+
+    Group rows also carry `is_admin` and `roster_seen_at`, when the bridge last
+    fetched that group's full participant list. Both are null when the
+    membership is only known from a join event or from a message: those say the
+    person is in the group, not whether they administer it. Memberships come
+    from a local cache rather than a live query — call list_group_members on a
+    group to make its roster current right now.
+
+    Chats they have spoken in come first, most recent message first; the
+    membership-only groups follow, most recently confirmed membership first.
 
     Args:
         contact_jid: The contact's JID or phone number
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
+        cursor: next_cursor from the previous page
     """
     chats = whatsapp_get_contact_chats(contact_jid, limit, page, cursor=cursor)
     return chats.to_dict()

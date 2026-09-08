@@ -2569,55 +2569,166 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
     return get_contact_chats_page(jid, limit=limit, page=page).items
 
 
+def _group_members_available(cur: sqlite3.Cursor) -> bool:
+    """True when the bridge that wrote this store keeps a group_members table.
+
+    The table is created by the bridge's own migration, so a messages.db
+    written by an older bridge does not have it. Reads must keep working
+    against such a store — group memberships are simply not reported until the
+    bridge has run once.
+
+    Deliberately not memoised through `_schema_memo`, unlike the FTS and
+    last_read_time probes. That cache is keyed on the file's mtime and size,
+    and the bridge writes in WAL mode: right after an upgrade the CREATE TABLE
+    sits in messages.db-wal and the main file looks untouched, so a cached
+    "False" would hide every membership until a checkpoint — hours on a quiet
+    account. This is one indexed lookup in sqlite_master on a connection that
+    is already open.
+    """
+    return bool(cur.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'group_members'").fetchone())
+
+
+def _membership_flag(spoke: bool, member: bool) -> str | None:
+    """How the contact is attached to a chat: by talking, by belonging, or both."""
+    if spoke and member:
+        return "both"
+    if member:
+        return "member"
+    if spoke:
+        return "spoke"
+    return None
+
+
 def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str | None = None) -> PageResult:
-    """Get all chats involving the contact.
+    """Every chat the contact is attached to: the ones they talk in and the groups they belong to.
+
+    A join over `messages` alone only finds conversations where the contact has
+    *spoken*, which silently omits the groups they are a member of but have
+    never posted in (issue #288). The bridge caches each group's roster in
+    `group_members`, so those groups are unioned in here and every row says
+    which of the two it is: `membership` is "spoke", "member" or "both".
+    `is_admin` and `roster_seen_at` come from a roster fetch and are null when
+    the membership is only known from a join event or a message — those feeds
+    do not know the admin flags and have not seen the whole group.
+
+    Ordering puts conversations first (most recent message first), then the
+    memberships (most recently confirmed membership first), so the answer to
+    "where do I talk to this person" stays at the top of page one.
 
     Args:
         jid: The contact's JID to search for
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    # An empty (or bare "@lid") argument would otherwise reach the SQL as an
+    # empty alias and match every row whose address form the bridge left empty.
+    if not (jid or "").strip().split("@", 1)[0]:
+        raise ToolError("invalid_argument", "a contact JID or phone number is required")
     cursor_state = decode_cursor(cursor, "contact_chats")
     try:
+        conn = _connect_messages_db()
+        cur = conn.cursor()
+
+        # rank 0 = a conversation (the contact has messages here, or it is
+        # their own direct chat), 1 = membership only. `order_at` is the
+        # timestamp each rank is sorted by. Both are spelled out again in the
+        # keyset clause because SQLite does not accept result aliases in WHERE.
+        talks = "(s.chat_jid IS NOT NULL OR d.jid IS NOT NULL)"
+        rank = f"(NOT {talks})"
+        order_at = f"CASE WHEN {talks} THEN c.last_message_time ELSE gm.member_seen_at END"
+
         offset = page * limit
         keyset_clause, keyset_params = "", []
         if cursor_state is not None:
             offset = 0
+            # Cursors written before memberships existed carry no rank; those
+            # pages were conversations only, which is rank 0.
+            rank_at = cursor_state.get("rk") or 0
             if cursor_state.get("t") is not None:
-                keyset_clause = "AND (c.last_message_time < ? OR (c.last_message_time = ? AND c.jid > ?) OR c.last_message_time IS NULL)"
-                keyset_params = [cursor_state["t"], cursor_state["t"], cursor_state["j"]]
+                keyset_clause = (
+                    f"AND ({rank} > ? OR ({rank} = ? AND ({order_at} < ? "
+                    f"OR ({order_at} = ? AND k.jid > ?) OR {order_at} IS NULL)))"
+                )
+                keyset_params = [rank_at, rank_at, cursor_state["t"], cursor_state["t"], cursor_state["j"]]
             else:
-                keyset_clause = "AND (c.last_message_time IS NULL AND c.jid > ?)"
-                keyset_params = [cursor_state["j"]]
-        policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
-        conn = _connect_messages_db()
-        cur = conn.cursor()
+                keyset_clause = f"AND ({rank} > ? OR ({rank} = ? AND {order_at} IS NULL AND k.jid > ?))"
+                keyset_params = [rank_at, rank_at, cursor_state["j"]]
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("k.jid")
 
         aliases = _sender_aliases(jid)
         placeholders = ",".join("?" * len(aliases))
+        # An older store has no group_members table; an empty CTE keeps one
+        # query shape instead of branching the whole statement.
+        #
+        # The `!= ''` guards matter: the bridge writes an address form it does
+        # not know as the empty string, never NULL, so an empty alias would
+        # match every roster row in the store.
+        #
+        # is_admin and roster_seen_at are read from the roster rows only. A row
+        # written by a join event or by someone's first message says nothing
+        # about admin status and has not seen the whole group, so reporting
+        # is_admin: false and a fresh roster_seen_at for one would be a lie an
+        # agent then repeats. member_seen_at is the ordering key and does count
+        # every feed — the membership is real either way.
+        if _group_members_available(cur):
+            member_of = f"""
+                SELECT group_jid,
+                       MAX(CASE WHEN source = 'roster' THEN is_admin END) AS is_admin,
+                       MAX(CASE WHEN source = 'roster' THEN last_seen END) AS roster_seen_at,
+                       MAX(last_seen) AS member_seen_at
+                FROM group_members
+                WHERE user IN ({placeholders})
+                   OR (phone != '' AND phone IN ({placeholders}))
+                   OR (lid != '' AND lid IN ({placeholders}))
+                GROUP BY group_jid
+            """
+            member_params = [*aliases, *aliases, *aliases]
+        else:
+            member_of = (
+                "SELECT NULL AS group_jid, NULL AS is_admin, NULL AS roster_seen_at, NULL AS member_seen_at WHERE 0"
+            )
+            member_params = []
+
         cur.execute(
             f"""
-            SELECT DISTINCT
-                c.jid,
+            WITH spoke_in AS (
+                SELECT DISTINCT chat_jid FROM messages WHERE sender IN ({placeholders})
+            ),
+            member_of AS ({member_of}),
+            direct_chat AS (
+                SELECT jid FROM chats WHERE jid IN ({placeholders})
+            ),
+            candidate AS (
+                SELECT chat_jid AS jid FROM spoke_in
+                UNION SELECT jid FROM direct_chat
+                UNION SELECT group_jid AS jid FROM member_of
+            )
+            SELECT
+                k.jid,
                 c.name,
                 c.last_message_time,
                 last_msg.content as last_message,
                 last_msg.sender as last_sender,
                 last_msg.is_from_me as last_is_from_me,
                 {_last_read_time_select(cur, "c")},
-                last_msg.id IS NOT NULL as has_messages
-            FROM chats c
-            {_last_message_join("c", "last_msg")}
-            WHERE (EXISTS (
-                SELECT 1
-                FROM messages contact_msg
-                WHERE contact_msg.chat_jid = c.jid
-                    AND contact_msg.sender IN ({placeholders})
-            ) OR c.jid IN ({placeholders})) AND {policy_clause} {keyset_clause}
-            ORDER BY c.last_message_time DESC, c.jid ASC
+                last_msg.id IS NOT NULL as has_messages,
+                s.chat_jid IS NOT NULL as spoke,
+                gm.group_jid IS NOT NULL as member,
+                gm.is_admin,
+                gm.roster_seen_at,
+                {rank} as sort_rank,
+                {order_at} as sort_at
+            FROM candidate k
+            LEFT JOIN chats c ON c.jid = k.jid
+            LEFT JOIN spoke_in s ON s.chat_jid = k.jid
+            LEFT JOIN direct_chat d ON d.jid = k.jid
+            LEFT JOIN member_of gm ON gm.group_jid = k.jid
+            {_last_message_join("k", "last_msg")}
+            WHERE {policy_clause} {keyset_clause}
+            ORDER BY {rank} ASC, {order_at} DESC, k.jid ASC
             LIMIT ? OFFSET ?
         """,
-            (*aliases, *aliases, *policy_params, *keyset_params, limit + 1, offset),
+            (*aliases, *member_params, *aliases, *policy_params, *keyset_params, limit + 1, offset),
         )
 
         chats = cur.fetchall()
@@ -2625,7 +2736,8 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
         chats = chats[:limit]
         next_cursor = None
         if has_more and chats:
-            next_cursor = encode_cursor({"k": "contact_chats", "t": chats[-1][2], "j": chats[-1][0]})
+            last = chats[-1]
+            next_cursor = encode_cursor({"k": "contact_chats", "rk": last[12], "t": last[13], "j": last[0]})
 
         page_chats = [
             Chat(
@@ -2642,7 +2754,19 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
         ]
         _apply_name_fallback(page_chats)
 
-        return PageResult([chat_to_dict(chat) for chat in page_chats], next_cursor, has_more)
+        items = []
+        for chat, chat_data in zip(page_chats, chats):
+            items.append(
+                {
+                    **chat_to_dict(chat),
+                    "membership": _membership_flag(bool(chat_data[8]), bool(chat_data[9])),
+                    # Both stay null unless a roster fetch backed them: see the
+                    # member_of CTE above.
+                    "is_admin": bool(chat_data[10]) if chat_data[10] is not None else None,
+                    "roster_seen_at": parse_db_time(chat_data[11]).isoformat() if chat_data[11] else None,
+                }
+            )
+        return PageResult(items, next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)

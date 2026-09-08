@@ -1629,11 +1629,50 @@ Find a direct message chat with a contact.
 
 ### `get_contact_chats`
 
-List all chats involving a specific contact.
+Every chat a contact is attached to — the ones they talk in *and* the groups
+they belong to but have never posted in. Ask it before replying to someone, to
+see whether the same conversation is also running in a group you share.
 
 **Parameters:**
 
 - `contact_jid` (required): The contact's JID or phone number
+- `limit` (optional): Chats per page (default 20)
+- `page` (optional): Page number (default 0); ignored when `cursor` is set
+- `cursor` (optional): `next_cursor` from the previous page
+
+Each item is a chat row plus three keys:
+
+| Key | Meaning |
+| --- | --- |
+| `membership` | `spoke` (the contact has messages here), `member` (the cached group membership lists them, but they have never posted), `both`, or `null` for their own direct chat when they have never sent anything |
+| `is_admin` | Whether the group's participant list marks them as an admin; `null` unless a roster fetch backed the membership (see below) |
+| `roster_seen_at` | When the bridge last fetched that group's full participant list; `null` unless a roster fetch backed the membership |
+
+Chats they have spoken in come first, most recent message first; the
+membership-only groups follow, most recently confirmed membership first.
+Respects `WHATSAPP_ALLOWED_CHATS` — a group the allow-list excludes is not
+reported, membership or not.
+
+**How fresh the memberships are.** They are read from the bridge's cache, never
+from a live query, so this tool costs one local read rather than a round trip
+per group. The bridge fills that cache from four places:
+
+1. every `list_group_members` call replaces the roster of the group it asked about;
+2. group join, leave, promote and demote events are applied as they arrive, so a group you are added to appears within seconds;
+3. the sender of a group message that arrives live is recorded when the group has no row for them yet;
+4. a background pass refreshes any roster older than `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` (default 6, `0` disables it), one group per second, only while connected, first pass a couple of minutes after the bridge starts.
+
+Only (1) and (4) see a *whole* group, so only they set `is_admin` and
+`roster_seen_at`; a membership learned from (2) or (3) reports both as `null`
+rather than guessing. At the default setting a roster is at most six hours old;
+with the background pass turned off, a group's roster is only ever as fresh as
+the last `list_group_members` call on it.
+
+Two caveats. A store paired before this feature shipped holds no memberships at
+all until the bridge has run once: the first background pass fills them, and a
+`list_group_members` call fills one group right away. And `membership` for a
+*direct* chat is always `spoke` or `null` — there is no roster for a one-to-one
+conversation.
 
 ### `get_last_interaction`
 
