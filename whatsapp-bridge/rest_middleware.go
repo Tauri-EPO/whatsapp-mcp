@@ -29,14 +29,14 @@ type apiErrorBody struct {
 // errorCode maps an HTTP status to the code the MCP server understands
 // (errors.py): invalid_argument, denied, not_found, bridge_unavailable, internal.
 func errorCode(status int) string {
-	switch {
-	case status == http.StatusBadRequest || status == http.StatusMethodNotAllowed:
+	switch status {
+	case http.StatusBadRequest, http.StatusMethodNotAllowed:
 		return "invalid_argument"
-	case status == http.StatusForbidden || status == http.StatusUnauthorized:
+	case http.StatusForbidden, http.StatusUnauthorized:
 		return "denied"
-	case status == http.StatusNotFound:
+	case http.StatusNotFound:
 		return "not_found"
-	case status == http.StatusBadGateway || status == http.StatusServiceUnavailable:
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
 		return "bridge_unavailable"
 	default:
 		return "internal"

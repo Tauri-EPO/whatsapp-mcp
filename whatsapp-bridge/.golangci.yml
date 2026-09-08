@@ -7,6 +7,19 @@ linters:
     - govet
     - ineffassign
     - unused
+    # Security and correctness gate (issue #402): these were enabled by #87 and
+    # lost in its rebase, leaving the //nolint:gosec directives inert.
+    - staticcheck
+    - gosec
+    - misspell
+    # Keeps the suppressions honest: every //nolint must name a linter, carry a
+    # reason, and still be silencing something.
+    - nolintlint
+  settings:
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
 
 # `golangci-lint run` reports formatting drift; `golangci-lint fmt` fixes it.
 # Windows checkouts are CRLF (core.autocrlf=true) and gofmt rewrites line

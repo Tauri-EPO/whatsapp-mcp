@@ -52,7 +52,7 @@ func oggPage(seq uint32, granule uint64, packet []byte) []byte {
 	binary.LittleEndian.PutUint64(h[6:14], granule)
 	binary.LittleEndian.PutUint32(h[18:22], seq)
 	h[26] = 1
-	return append(append(h, byte(len(packet))), packet...)
+	return append(append(h, byte(len(packet))), packet...) //nolint:gosec // the panic above bounds len(packet) at 255
 }
 
 // opusHead is the 19-byte identification packet (RFC 7845 §5.1).
