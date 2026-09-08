@@ -38,7 +38,9 @@ from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
     fetch_media_notes,
+    fetch_sender_identities,
     msg_to_dict,
+    sender_identity,
     shape_rows,
 )
 from whatsapp import (
@@ -251,6 +253,10 @@ def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
 
+    Each hit carries jid, name, phone_number and lid. The two identifier
+    namespaces stay apart: a contact WhatsApp only knows anonymously has
+    phone_number null and its LID in `lid`.
+
     Args:
         query: Search term to match against contact names or phone numbers
     """
@@ -264,7 +270,15 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 def get_contact(identifier: str) -> dict[str, Any]:
     """Look up a WhatsApp contact by phone number, LID, or full JID.
 
-    Automatically detects the identifier type and queries appropriately.
+    Detects which namespace the identifier belongs to. A bare number is
+    ambiguous — phone numbers and LIDs overlap in length — so whatsmeow's LID
+    map decides, and an identifier too long to be a phone number (over 15
+    digits) is a LID on sight. `phone_number` therefore never holds a LID: for
+    one it is the mapped number, or null when the map has never seen that LID.
+    (An identifier that is neither a number nor a LID — a name, another
+    server's JID — is echoed back in `phone_number` as it always was.) A LID
+    nobody can name returns `name: null` rather than its own digits: nobody
+    knows who it is.
 
     Args:
         identifier: Phone number, LID, or full JID. Examples:
@@ -274,7 +288,8 @@ def get_contact(identifier: str) -> dict[str, Any]:
                     - "184125298348272@lid" (LID JID)
 
     Returns:
-        Dictionary with jid, name, display_name, is_lid, and resolved status
+        Dictionary with jid, phone_number, lid, name, display_name, is_lid and
+        resolved status
     """
     identifier = (identifier or "").strip()
     if not identifier:
@@ -285,38 +300,41 @@ def get_contact(identifier: str) -> dict[str, Any]:
     if "@" in identifier:
         # Already a JID - use as-is
         jid = identifier
-        is_lid = jid.endswith("@lid") or jid.split("@", 1)[-1] == "lid"
     else:
         digits = "".join(c for c in identifier if c.isdigit())
         if digits:
-            # LIDs can overlap phone-number lengths, so bare numeric inputs try phone first.
-            jid = f"{digits}@s.whatsapp.net"
-            is_lid = False
-            if identifier.isdigit():
+            # Bare numbers are ambiguous: the LID map (and the E.164 length
+            # limit) say which namespace this one is (#281). Only a guessed
+            # phone spelling is worth retrying as a LID below — flipping one
+            # the map called a LID would undo the classification.
+            guessed_phone = sender_identity(digits).lid is None
+            jid = f"{digits}@s.whatsapp.net" if guessed_phone else f"{digits}@lid"
+            if identifier.isdigit() and guessed_phone:
                 bare_numeric_digits = digits
         else:
             # Non-numeric and not a JID; try as-is.
             jid = identifier
-            is_lid = False
-
-    jid_user = jid.split("@", 1)[0]
 
     display_name: str | None = None
     resolved = False
 
-    # Prefer chats table lookup via get_chat (works for both phone and LID contacts).
-    candidates: list[tuple[str, bool]] = [(jid, is_lid)]
+    # Prefer chats table lookup via get_chat (works for both phone and LID
+    # contacts); a bare number with no chat under the guessed spelling is tried
+    # under the other one.
+    candidates = [jid]
     if bare_numeric_digits:
-        candidates.append((f"{bare_numeric_digits}@lid", True))
+        candidates.append(f"{bare_numeric_digits}@lid")
 
     chat = None
-    for candidate_jid, candidate_is_lid in candidates:
+    for candidate_jid in candidates:
         chat = whatsapp_get_chat(candidate_jid, include_last_message=False)
         if chat:
             jid = candidate_jid
-            is_lid = candidate_is_lid
-            jid_user = jid.split("@", 1)[0]
             break
+
+    jid_user = jid.split("@", 1)[0]
+    identity = sender_identity(jid)
+    is_lid = identity.lid is not None
 
     if chat and chat.get("name"):
         display_name = chat["name"]
@@ -326,13 +344,19 @@ def get_contact(identifier: str) -> dict[str, Any]:
         display_name = whatsapp_get_sender_name(jid)
         resolved = display_name not in (jid, jid_user, identifier)
 
+    # Echoing the identifier back as a name invents a contact called
+    # "117158134681735"; a LID nobody can name has none, unless the map gave us
+    # the number behind it (what a phone identifier falls back to as well).
+    # `display_name` still says who this is, the way message rows do.
+    fallback_name = identity.phone if is_lid else jid_user
+    fallback_display = fallback_name or f"{identity.lid}@lid"
     return {
         "identifier": identifier,
         "jid": jid,
-        "phone_number": jid_user if not is_lid else None,
-        "lid": jid_user if is_lid else None,
-        "name": display_name if resolved else jid_user,
-        "display_name": display_name,
+        "phone_number": identity.phone,
+        "lid": identity.lid,
+        "name": display_name if resolved else fallback_name,
+        "display_name": display_name if resolved else fallback_display,
         "is_lid": is_lid,
         "resolved": resolved,
     }
@@ -702,7 +726,7 @@ def export_messages(
                  for anything but a single chat. An existing file is overwritten
         format: Only "ndjson" today: one JSON object per line, UTF-8, oldest first
         fields: Subset of the message keys to write (id, timestamp, sender_jid,
-                 sender_phone, sender_name, sender_display, content, is_from_me,
+                 sender_phone, sender_lid, sender_name, sender_display, content, is_from_me,
                  chat_jid, chat_name, media_type, filename, target_message_id,
                  reaction_to_message_id, poll_message_id, quoted_message_id,
                  deleted_at, view_once, bytes, sha256, notes). Default: all of them
@@ -1033,11 +1057,14 @@ def get_message_context(
         max_content_chars: Cut `content` and set content_truncated=true on the row
     """
     context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
-    # One notes lookup for the whole window.
-    notes = fetch_media_notes([context.message, *context.before, *context.after])
+    # One notes lookup and one sender lookup for the whole window.
+    window = [context.message, *context.before, *context.after]
+    notes = fetch_media_notes(window)
+    identities = fetch_sender_identities(window)
 
     def shaped(messages: list[Any]) -> list[dict[str, Any]]:
-        return shape_rows([msg_to_dict(m, notes=notes) for m in messages], fields, omit_nulls, max_content_chars)
+        rows = [msg_to_dict(m, notes=notes, identities=identities) for m in messages]
+        return shape_rows(rows, fields, omit_nulls, max_content_chars)
 
     return {
         "message": shaped([context.message])[0],
