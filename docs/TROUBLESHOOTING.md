@@ -61,6 +61,38 @@ It is anchored on the oldest message already stored, arrives asynchronously, and
 the phone decides how much it returns — messages it deleted itself are gone. For
 a full backfill instead, re-pair once with `--full-history-pair`.
 
+## "Messages are out of order after an image rollback"
+
+Every timestamp in `messages.db` is stored in one spelling (UTC, `+00:00`, fixed
+width — see [ARCHITECTURE.md](ARCHITECTURE.md)), because the filters and
+`ORDER BY` compare those strings directly. Releases before the canonical
+spelling let the SQLite driver stamp the local offset of the machine on the row,
+so an operator who pins the image back to one of them for a day and then rolls
+forward leaves rows the current release sorts and filters by wall clock: a row
+written in a `-03:00` zone carries the local hour, so it sorts three hours
+earlier than the instant it stands for, and an `after` / `before` bound can miss
+it entirely.
+
+Nothing to do — the bridge repairs itself. Every start probes each time column
+for a value that is not in the canonical spelling and re-runs the rewrite for
+the columns that hit, logging what it changed:
+
+```text
+[WARN] Timestamp migration: repaired 412 messages.timestamp value(s) written by an older bridge after the migration ran
+```
+
+If instead the log says values *could not be parsed*, those rows keep their old
+spelling and stay wrong, and the bridge re-reads that column at every start. The
+line just above each summary names the table, the column and the rowid:
+
+```text
+[WARN] Timestamp migration: leaving messages.timestamp rowid=871 unchanged: unrecognised timestamp "20/09/2026"
+```
+
+Fix or delete those rows with the bridge stopped
+(`sqlite3 store/messages.db "UPDATE messages SET timestamp = '2026-09-04 20:13:09+00:00' WHERE rowid = 871"`);
+the next start picks the change up and stops warning.
+
 ## Published HTTPS endpoint
 
 - **`certificate verify failed: certificate has expired`**: the certificate
