@@ -2,6 +2,7 @@
 
 import base64
 import json
+import mimetypes
 import os
 
 import pytest
@@ -10,6 +11,7 @@ import chat_policy
 import main
 import media_inventory
 import media_read
+import media_text
 import whatsapp
 from errors import ToolError
 from tests.conftest import ALICE, BOB
@@ -123,6 +125,24 @@ class TestTypes:
         """image/* is not enough: an ImageContent a client refuses fails the whole call."""
         blocks = media_read.read_media(ALICE, "TIF1")
         assert blocks[0].type == "text" and blocks[0].text.startswith("base64:image/tiff:")
+
+    def test_the_types_do_not_depend_on_the_platform_s_mime_table(self, monkeypatch):
+        """python:3.13-slim has no /etc/mime.types: .docx, .xlsx and .ogg are None there."""
+        bare = mimetypes.MimeTypes(filenames=())
+        assert bare.guess_type("a.docx") == (None, None)
+        monkeypatch.setattr(media_read.mimetypes, "guess_type", bare.guess_type)
+        assert media_read.guess_mime("document", "contrato.docx") == media_text.DOCX_MIME
+        assert media_read.guess_mime("document", "leituras.xlsx") == media_text.XLSX_MIME
+        assert media_read.guess_mime("audio", "nota.ogg") == "audio/ogg"
+        # ...and not on Windows either, where the registry calls a CSV a spreadsheet.
+        assert media_read.guess_mime("document", "planilha.csv") == "text/csv"
+
+    def test_a_name_promising_an_image_over_other_bytes_is_not_an_image_block(self, store):
+        """A client rejects a block whose data disagrees with its declared type."""
+        _cache(ALICE, "image_20260904_100000_IMG1.jpg", b"%PDF-1.4 not an image at all")
+        blocks = media_read.read_media(ALICE, "IMG1")
+        assert blocks[0].type == "text"
+        assert blocks[0].text.startswith("base64:application/octet-stream:")
 
     def test_a_compressed_text_file_is_not_decoded_as_text(self, store):
         """notes.txt.gz guesses as text/plain *with an encoding*; the bytes are an archive."""

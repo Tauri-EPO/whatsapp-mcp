@@ -1972,7 +1972,9 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
 @content_tool
 @tool_errors
 @untrusted_content
-def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[ContentBlock]:
+def read_media(
+    chat_jid: str, message_id: str, max_bytes: int = 0, as_text: bool = False, max_pages: int = 0
+) -> list[ContentBlock]:
     """Read the media of a WhatsApp message: the bytes come back, not a path.
 
     This is how you actually look at a photo, and it works over any transport —
@@ -1983,7 +1985,14 @@ def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[Conte
       - a text-ish file (.txt, .csv, .json, .md) as text, up to 1 MB;
       - anything else (PDF, video, audio, archives) base64-encoded in a text block
         whose first line is `base64:<mime>:<bytes>`, up to 2 MB. For a voice note
-        prefer transcribe_audio; for a big document prefer download_media.
+        prefer transcribe_audio.
+
+    **For a document, pass as_text=True**: a PDF, DOCX or XLSX is then read here and
+    comes back as text — a few dozen KB instead of megabytes of base64 you cannot
+    decode, and the file itself may be far larger than the byte limits above. One
+    block per page, table or sheet, in reading order, with `--- page 3 of 40 ---`
+    markers; `max_pages` (default 20) says how many. There is no OCR: a scanned PDF
+    says so in as many words instead of coming back empty.
 
     The last block is always JSON with {"sha256", "mime", "bytes", "truncated", "notes"}:
     if `notes` is empty nobody has interpreted this file yet, so write what you saw
@@ -2000,11 +2009,14 @@ def read_media(chat_jid: str, message_id: str, max_bytes: int = 0) -> list[Conte
         message_id: ID of the message whose media to read
         max_bytes: Refuse anything larger than this (0 = the per-type limit above,
                    which is also the ceiling: a larger value does not raise it)
+        as_text: Extract the text of a PDF/DOCX/XLSX instead of returning its bytes
+        max_pages: With as_text, how many pages (or tables, or sheets) to read (default 20)
 
     Returns:
-        A list of content blocks: the file, then the JSON metadata block.
+        A list of content blocks: the file (or its text), then the JSON metadata
+        block, which carries `pages_total` and `truncated` when as_text is used.
     """
-    return media_read_bytes(chat_jid, message_id, max_bytes=max_bytes)
+    return media_read_bytes(chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_pages=max_pages)
 
 
 def _store_transcript(sha256: str, result: dict[str, Any]) -> bool:
