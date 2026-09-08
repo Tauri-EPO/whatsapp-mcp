@@ -102,7 +102,18 @@ class TestReadsAreFiltered:
     def test_list_messages(self, restricted_db):
         ids = {m["id"] for m in whatsapp.list_messages(query="hello", include_context=False)}
         assert ids == {"a1", "g1"}
-        assert whatsapp.list_messages(chat_jid=DM_B, include_context=False) == []
+        # Asking for a blocked chat by name is refused rather than answered with
+        # an empty page, which would read as "nothing happened there" (#289).
+        with pytest.raises(ToolError) as exc:
+            whatsapp.list_messages(chat_jid=DM_B, include_context=False)
+        assert exc.value.code == "denied"
+        assert DM_B in exc.value.message
+        with pytest.raises(ToolError) as exc:
+            whatsapp.list_messages(chat_jid=[DM_A, DM_B], include_context=False)
+        assert exc.value.code == "denied"
+        # Excluding a blocked chat is a no-op, not an error: it can only narrow.
+        ids = {m["id"] for m in whatsapp.list_messages(exclude_chat_jid=DM_B, include_context=False)}
+        assert ids == {"a1", "g1"}
 
     def test_get_chat_and_direct_chat(self, restricted_db):
         assert whatsapp.get_chat(DM_A) is not None

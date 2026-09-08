@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,14 +52,17 @@ def export_dir() -> str:
     return os.path.join(store, "exports")
 
 
-def _default_name(chat_jid: str | None) -> str:
+def _default_name(chat_jid: str | Sequence[str] | None) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    who = chat_jid.split("@", 1)[0] if chat_jid else "all"
+    # One chat names the file after it; a list (or no filter) is "all", since a
+    # dozen JIDs in a file name help nobody.
+    chats = [chat_jid] if isinstance(chat_jid, str) else list(chat_jid or [])
+    who = chats[0].split("@", 1)[0] if len(chats) == 1 and chats[0] else "all"
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in who)
     return f"messages-{safe}-{stamp}.ndjson"
 
 
-def resolve_export_path(out_path: str | None, chat_jid: str | None = None) -> str:
+def resolve_export_path(out_path: str | None, chat_jid: str | Sequence[str] | None = None) -> str:
     """Absolute destination inside the export directory, or ToolError('denied').
 
     The name is joined onto the export root and the *resolved* result must still
@@ -95,7 +99,8 @@ def resolve_export_path(out_path: str | None, chat_jid: str | None = None) -> st
 def export_messages(
     after: str | None = None,
     before: str | None = None,
-    chat_jid: str | None = None,
+    chat_jid: str | Sequence[str] | None = None,
+    exclude_chat_jid: str | Sequence[str] | None = None,
     out_path: str | None = None,
     format: str = "ndjson",  # noqa: A002 - the tool argument is named `format`
     fields: list[str] | None = None,
@@ -115,8 +120,10 @@ def export_messages(
             raise ToolError("invalid_argument", f"unknown fields: {', '.join(sorted(unknown))}")
         if not fields:
             raise ToolError("invalid_argument", "fields must name at least one column")
-    if chat_jid:
-        whatsapp._require_allowed(chat_jid)
+    # Validates the JIDs and the allow-list before a file is created; the same
+    # call inside MessageFilters.build() then binds them.
+    whatsapp.chat_jid_filter(chat_jid)
+    whatsapp.chat_jid_filter(exclude_chat_jid, "exclude_chat_jid", require_allowed=False)
 
     target = resolve_export_path(out_path, chat_jid)
     partial = f"{target}.part"
@@ -133,6 +140,7 @@ def export_messages(
                 before=before,
                 sender_phone_number=sender_phone_number,
                 chat_jid=chat_jid,
+                exclude_chat_jid=exclude_chat_jid,
                 from_me=from_me,
                 has_media=has_media,
                 media_type=media_type,

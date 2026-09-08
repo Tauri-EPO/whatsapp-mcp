@@ -388,6 +388,15 @@ def _reject_count_only_extras(fields: list[str] | None = None, cursor: str | Non
         )
 
 
+def _optional_chats(value: str | list[str]) -> str | list[str] | None:
+    """A chat filter defaulting to "" as the filter builder wants it.
+
+    Only the blank string means "no filter": an empty *list* is passed on so it
+    is refused there, instead of quietly widening the read to every chat.
+    """
+    return None if isinstance(value, str) and not value.strip() else value
+
+
 @mcp.tool()
 @tool_errors
 @untrusted_content
@@ -395,7 +404,8 @@ def list_messages(
     after: str | None = None,
     before: str | None = None,
     sender_jid: str | None = None,
-    chat_jid: str | None = None,
+    chat_jid: str | list[str] | None = None,
+    exclude_chat_jid: str | list[str] | None = None,
     query: str | None = None,
     limit: int = 50,
     page: int = 0,
@@ -448,7 +458,13 @@ def list_messages(
         before: ISO-8601 upper bound, same convention (e.g., "2026-01-09T18:00:00")
         sender_jid: Only messages from this sender: phone number with country code
                ("12025551234") or JID ("12025551234@s.whatsapp.net")
-        chat_jid: Chat JID to filter by (e.g., "12025551234@s.whatsapp.net" or group JID)
+        chat_jid: One chat, or a list of them: "12025551234@s.whatsapp.net", a group
+               JID, or ["a@s.whatsapp.net", "120363...@g.us"] to read a hand-picked
+               set in one call. Phone and @lid spellings of the same conversation
+               both match. Several JIDs joined into one string is an error, not an
+               empty page.
+        exclude_chat_jid: Same shape, dropped from the result — the way to read
+               everything except a few noisy chats
         query: Search term to filter messages by content. Accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
@@ -513,6 +529,7 @@ def list_messages(
                 before=before,
                 sender_phone_number=sender_jid,
                 chat_jid=chat_jid,
+                exclude_chat_jid=exclude_chat_jid,
                 query=query,
                 include_deleted=include_deleted,
                 unread_only=unread_only,
@@ -530,6 +547,7 @@ def list_messages(
         before=before,
         sender_phone_number=sender_jid,
         chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
         query=query,
         limit=limit,
         page=page,
@@ -561,11 +579,13 @@ def list_messages(
 @untrusted_content
 def message_stats(
     group_by: str = "chat",
-    chat_jid: str | None = None,
+    chat_jid: str | list[str] | None = None,
+    exclude_chat_jid: str | list[str] | None = None,
     after: str | None = None,
     before: str | None = None,
     limit: int = 100,
     sender_jid: str | None = None,
+    query: str | None = None,
     from_me: bool | None = None,
     has_media: bool | None = None,
     media_type: str | None = None,
@@ -577,7 +597,9 @@ def message_stats(
 
     Size a job before doing it: "which chats are big", "when was this
     conversation active", "who talks most". One SQL GROUP BY instead of paging
-    the archive through the conversation.
+    the archive through the conversation. With `query` it also answers "how
+    often was this mentioned, and when": the same search list_messages runs,
+    counted and bucketed instead of returned.
 
     Returns:
         {"group_by": ..., "buckets": [{key, label?, messages, from_me, inbound,
@@ -593,11 +615,17 @@ def message_stats(
     Args:
         group_by: "chat" (default), "day", "month" or "sender". Day and month
                  buckets use the timestamp as stored (UTC).
-        chat_jid: Restrict to one conversation (JID or phone number with country code)
+        chat_jid: Restrict to one conversation or a list of them (JIDs, or phone
+                 numbers with country code)
+        exclude_chat_jid: One conversation or a list of them to leave out
         after: ISO-8601 lower bound (UTC), e.g. "2026-01-01"
         before: ISO-8601 upper bound (UTC), e.g. "2026-02-01"
         limit: Max buckets returned (default 100, max 500)
         sender_jid: Only messages from this sender
+        query: Count only messages matching this search, with the same syntax and
+                 the same hits as list_messages (FTS operators, stored voice-note
+                 transcripts included). group_by="month" then plots a topic over
+                 time; group_by="chat" says where it is discussed.
         from_me: True for what you sent, False for inbound only, None for both
         has_media: True for messages carrying a file, False for text-only
         media_type: "image", "video", "audio", "document" or "sticker"
@@ -609,10 +637,12 @@ def message_stats(
     return whatsapp_message_stats(
         group_by=group_by,
         chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
         after=after,
         before=before,
         limit=limit,
         sender_phone_number=sender_jid,
+        query=query,
         from_me=from_me,
         has_media=has_media,
         media_type=media_type,
@@ -628,7 +658,8 @@ def message_stats(
 def export_messages(
     after: str | None = None,
     before: str | None = None,
-    chat_jid: str | None = None,
+    chat_jid: str | list[str] | None = None,
+    exclude_chat_jid: str | list[str] | None = None,
     out_path: str | None = None,
     format: str = "ndjson",  # noqa: A002 - documented tool argument name
     fields: list[str] | None = None,
@@ -663,10 +694,12 @@ def export_messages(
     Args:
         after: ISO-8601 lower bound (UTC), e.g. "2026-01-01"
         before: ISO-8601 upper bound (UTC), e.g. "2026-02-01"
-        chat_jid: Restrict to one conversation (JID or phone number with country code)
+        chat_jid: Restrict to one conversation or a list of them (JIDs, or phone
+                 numbers with country code)
+        exclude_chat_jid: One conversation or a list of them to leave out
         out_path: File name (or relative path) inside the export directory.
-                 Default: messages-<chat>-<timestamp>.ndjson. An existing file is
-                 overwritten
+                 Default: messages-<chat>-<timestamp>.ndjson, or messages-all-...
+                 for anything but a single chat. An existing file is overwritten
         format: Only "ndjson" today: one JSON object per line, UTF-8, oldest first
         fields: Subset of the message keys to write (id, timestamp, sender_jid,
                  sender_phone, sender_name, sender_display, content, is_from_me,
@@ -685,6 +718,7 @@ def export_messages(
         after=after,
         before=before,
         chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
         out_path=out_path,
         format=format,
         fields=fields,
@@ -706,6 +740,8 @@ def list_unread(
     since: str | None = None,
     exclude_groups: bool = False,
     max_age_days: int | None = None,
+    chat_jid: str | list[str] | None = None,
+    exclude_chat_jid: str | list[str] | None = None,
     fields: list[str] | None = None,
     omit_nulls: bool = False,
     max_content_chars: int | None = None,
@@ -730,6 +766,9 @@ def list_unread(
                       skipping groups, broadcast lists, channels and bots
         max_age_days: Only count messages from the last N days; the relative form of
                       since. Passing both since and max_age_days is an error.
+        chat_jid: Restrict to one chat or a list of them — the daily digest over a
+                      hand-picked set, instead of one call per chat
+        exclude_chat_jid: One chat or a list of them to drop (known noise)
         fields: Keep only these keys on each message row (same names as list_messages);
                 an unknown name is an error listing the valid ones
         omit_nulls: Drop message keys that carry nothing (null, false, empty text)
@@ -752,6 +791,8 @@ def list_unread(
         exclude_groups=exclude_groups,
         max_age_days=max_age_days,
         count_only=count_only,
+        chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
     )
     if not count_only:
         for chat in unread["chats"]:
@@ -768,6 +809,8 @@ def list_unanswered(
     exclude_groups: bool = False,
     min_age_hours: float = 0,
     include_last_message: bool = True,
+    chat_jid: str | list[str] | None = None,
+    exclude_chat_jid: str | list[str] | None = None,
     cursor: str | None = None,
     fields: list[str] | None = None,
     omit_nulls: bool = False,
@@ -798,6 +841,8 @@ def list_unanswered(
                        conversations you are in the middle of (24 = "waiting more
                        than a day"). Default 0, no lower bound.
         include_last_message: Include last_message / last_sender (default True)
+        chat_jid: Restrict to one chat or a list of them
+        exclude_chat_jid: One chat or a list of them to drop
         cursor: next_cursor from the previous page
         fields: Keep only these keys on each chat row (chat names, not message
                 names: jid, name, last_message, last_inbound_time, age_hours…);
@@ -819,7 +864,13 @@ def list_unanswered(
     if count_only:
         _reject_count_only_extras(fields, cursor)
         return {
-            "count": whatsapp_count_unanswered(since=since, exclude_groups=exclude_groups, min_age_hours=min_age_hours)
+            "count": whatsapp_count_unanswered(
+                since=since,
+                exclude_groups=exclude_groups,
+                min_age_hours=min_age_hours,
+                chat_jid=chat_jid,
+                exclude_chat_jid=exclude_chat_jid,
+            )
         }
     result = whatsapp_list_unanswered(
         since=since,
@@ -827,6 +878,8 @@ def list_unanswered(
         exclude_groups=exclude_groups,
         min_age_hours=min_age_hours,
         include_last_message=include_last_message,
+        chat_jid=chat_jid,
+        exclude_chat_jid=exclude_chat_jid,
         cursor=cursor,
     ).to_dict()
     result["items"] = shape_rows(result["items"], fields, omit_nulls, known=CHAT_FIELDS)
@@ -1359,7 +1412,8 @@ def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
 @tool_errors
 @untrusted_content
 def list_media(
-    chat_jid: str = "",
+    chat_jid: str | list[str] = "",
+    exclude_chat_jid: str | list[str] = "",
     media_type: str = "",
     after: str = "",
     before: str = "",
@@ -1383,7 +1437,8 @@ def list_media(
     next_cursor back as `cursor` for the following page.
 
     Args:
-        chat_jid: Restrict to one chat (default: every allowed chat)
+        chat_jid: Restrict to one chat, or a list of them (default: every allowed chat)
+        exclude_chat_jid: One chat, or a list of them, to leave out
         media_type: image | video | audio | document | sticker (default: all)
         after: Only media at or after this ISO-8601 timestamp (UTC)
         before: Only media at or before this ISO-8601 timestamp (UTC)
@@ -1405,7 +1460,8 @@ def list_media(
         annotate_media(sha256, "summary", ...) so the next pass does not redo the work.
     """
     return list_media_page(
-        chat_jid=chat_jid or None,
+        chat_jid=_optional_chats(chat_jid),
+        exclude_chat_jid=_optional_chats(exclude_chat_jid),
         media_type=media_type or None,
         after=after or None,
         before=before or None,
@@ -1421,7 +1477,7 @@ def list_media(
 @mcp.tool()
 @tool_errors
 @untrusted_content
-def get_media_stats(chat_jid: str = "") -> dict[str, Any]:
+def get_media_stats(chat_jid: str | list[str] = "", exclude_chat_jid: str | list[str] = "") -> dict[str, Any]:
     """Media totals by chat and by type, so the agent can decide where to look first.
 
     Read-only. `bytes` comes from the message rows (what WhatsApp reported),
@@ -1430,14 +1486,15 @@ def get_media_stats(chat_jid: str = "") -> dict[str, Any]:
     to. Compare with bridge_status() store_bytes / media_bytes for the operator view.
 
     Args:
-        chat_jid: Restrict to one chat (default: every allowed chat)
+        chat_jid: Restrict to one chat, or a list of them (default: every allowed chat)
+        exclude_chat_jid: One chat, or a list of them, to leave out
 
     Returns:
         {"total": {files, bytes, cached_files, cached_bytes, duplicate_groups, duplicate_bytes},
          "by_chat": [{chat_jid, chat_name, files, distinct_files, bytes, cached_files, cached_bytes}],
          "by_type": [{media_type, files, bytes}], "media_root": path}
     """
-    return media_stats(chat_jid or None)
+    return media_stats(_optional_chats(chat_jid), _optional_chats(exclude_chat_jid))
 
 
 @mcp.tool()
