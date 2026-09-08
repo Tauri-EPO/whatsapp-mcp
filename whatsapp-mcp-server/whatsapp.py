@@ -11,6 +11,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from itertools import islice
 from typing import Any, NamedTuple
 
 import httpx
@@ -1658,12 +1659,17 @@ class QueryPredicate:
 
 # Transcript hits are staged in a TEMP table rather than bound one parameter per
 # hash: the old form capped them at a few hundred files to stay under SQLite's
-# parameter limit, and had nowhere to put the score. What remains of the cap
-# (media_notes.MAX_TRANSCRIPT_MATCHES) is a workload bound, and the index now
-# picks the best hits rather than the most recent ones. TEMP lives in the
+# parameter limit, and had nowhere to put the score. TEMP lives in the
 # connection's own scratch database, so this never writes to the bridge-owned
 # messages.db and dies with the connection.
+#
+# Every hit is staged, in batches. The message query is what decides which of
+# them survive the chat, time and allow-list filters, so a cap here (there used
+# to be one, 5000 hashes) truncated the candidate set *before* the scope was
+# known: a chat whose only matching voice note fell outside the cap counted
+# zero. The batch bounds what is held in memory at once, not the answer.
 _TRANSCRIPT_HITS_TABLE = "transcript_hits"
+_TRANSCRIPT_STAGE_BATCH = 1000
 
 
 def _stage_transcript_hits(conn: sqlite3.Connection, query: str) -> bool:
@@ -1675,25 +1681,38 @@ def _stage_transcript_hits(conn: sqlite3.Connection, query: str) -> bool:
     (media_notes.transcripts_fts). notes.db is the MCP server's own database, so
     the union with the message hits happens here.
     """
-    from media_notes import transcript_matches
+    from media_notes import iter_transcript_matches
 
-    hits = transcript_matches(query)
-    if not hits:
-        return False
+    hits = iter_transcript_matches(query)
+    staged = 0
     try:
+        # Drop first, whatever happens next: no path may leave an earlier query's
+        # hashes behind for this one to read.
         conn.execute(f"DROP TABLE IF EXISTS temp.{_TRANSCRIPT_HITS_TABLE}")
-        conn.execute(f"CREATE TEMP TABLE {_TRANSCRIPT_HITS_TABLE} (sha BLOB PRIMARY KEY, score REAL NOT NULL)")
-        conn.executemany(
-            f"INSERT OR REPLACE INTO {_TRANSCRIPT_HITS_TABLE} (sha, score) VALUES (?, ?)",
-            [(bytes.fromhex(sha), score) for sha, score in hits],
-        )
-        conn.commit()
+        while batch := list(islice(hits, _TRANSCRIPT_STAGE_BATCH)):
+            if not staged:
+                conn.execute(f"CREATE TEMP TABLE {_TRANSCRIPT_HITS_TABLE} (sha BLOB PRIMARY KEY, score REAL NOT NULL)")
+            conn.executemany(
+                f"INSERT OR REPLACE INTO {_TRANSCRIPT_HITS_TABLE} (sha, score) VALUES (?, ?)",
+                [(bytes.fromhex(sha), score) for sha, score in batch],
+            )
+            staged += len(batch)
+        if staged:
+            conn.commit()
     except sqlite3.Error as exc:
-        # No scratch space (a read-only temp dir...) means the audio side is
-        # dropped, not that the search fails.
+        # No scratch space (a read-only temp dir...), or notes.db failing while
+        # its rows are read: the audio side is dropped whole rather than left
+        # half-staged, and the search answers from the message text alone.
         logger.warning("could not stage transcript hits, searching message text only: %s", exc)
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS temp.{_TRANSCRIPT_HITS_TABLE}")
+            conn.commit()
+        except sqlite3.Error:
+            pass
         return False
-    return True
+    finally:
+        hits.close()
+    return staged > 0
 
 
 # Message hits and audio hits as one ranked (rowid, score) set. FTS5 refuses

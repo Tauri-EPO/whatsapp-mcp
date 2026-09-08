@@ -8,6 +8,7 @@ notes.db, so the union happens on the MCP side; these tests pin both paths
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -163,20 +164,15 @@ def test_the_index_is_rebuilt_from_notes_written_before_it_existed(fts_db):
     assert ids("orcamento") == ["m1", "v1"]
 
 
-def test_transcript_hits_are_no_longer_capped_at_a_few_hundred(fts_db):
-    # More voice notes than the old 400-hit cap, and than SQLite's 999-parameter
-    # limit the cap existed for: the hits are staged in a temp table now.
-    assert media_notes.MAX_TRANSCRIPT_MATCHES > 999
-    count = 1200
+def _bulk_voice_notes(db_path, count: int, word: str) -> list[str]:
+    """`count` voice notes in CHAT, each its own hash, all saying the same word."""
     shas = [f"{i:064x}" for i in range(count)]
-    conn = sqlite3.connect(fts_db)
+    start = datetime(2024, 2, 1, 10, 0, 0)
+    conn = sqlite3.connect(db_path)
     conn.executemany(
         "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, file_sha256) "
         "VALUES (?, ?, '111', '', ?, 0, 'audio', ?)",
-        [
-            (f"b{i}", CHAT, f"2024-02-01T10:{i // 60:02d}:{i % 60:02d}", bytes.fromhex(sha))
-            for i, sha in enumerate(shas)
-        ],
+        [(f"b{i}", CHAT, (start + timedelta(seconds=i)).isoformat(), bytes.fromhex(sha)) for i, sha in enumerate(shas)],
     )
     conn.commit()
     conn.close()
@@ -184,14 +180,100 @@ def test_transcript_hits_are_no_longer_capped_at_a_few_hundred(fts_db):
     notes = sqlite3.connect(media_notes.notes_db_path())
     notes.executemany(
         "INSERT INTO media_notes (sha256, key, value, updated_at) VALUES (?, 'transcript', ?, '2024-02-01T00:00:00')",
-        [(sha, "falamos de jabuticaba") for sha in shas],
+        [(sha, f"falamos de {word}") for sha in shas],
     )
     # Written behind media_notes' back, so the index has to be rebuilt.
     notes.execute("DELETE FROM notes_meta")
     notes.commit()
     notes.close()
-    assert len(media_notes.transcript_matches("jabuticaba")) == count
+    return shas
+
+
+def _move_to_chat(db_path, sha: str, chat: str) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE messages SET chat_jid = ? WHERE file_sha256 = ?", (chat, bytes.fromhex(sha)))
+    conn.commit()
+    conn.close()
+
+
+def test_every_matching_transcript_is_counted_and_reachable_after_a_chat_filter(fts_db):
+    # 5,001 voice notes say the same word: one more than the candidate cap that
+    # used to be applied before the message filters ran. The count was 5,000, and
+    # the chat holding only a dropped hash answered zero.
+    count = 5001
+    _bulk_voice_notes(fts_db, count, "jabuticaba")
+    hits = media_notes.transcript_matches("jabuticaba")
+    assert len(hits) == count
     assert whatsapp.count_messages(query="jabuticaba") == count
+    # The hash the cap dropped is the worst-ranked one; give it a chat of its own.
+    _move_to_chat(fts_db, hits[-1][0], OTHER)
+    assert whatsapp.count_messages(query="jabuticaba", chat_jid=OTHER) == 1
+    assert len(ids("jabuticaba", chat_jid=OTHER)) == 1
+    assert whatsapp.count_messages(query="jabuticaba", chat_jid=CHAT) == count - 1
+    # And paging through the whole set still reaches every hit exactly once.
+    seen, cursor = [], None
+    while True:
+        page = whatsapp.list_messages_page(query="jabuticaba", include_context=False, limit=1000, cursor=cursor)
+        seen.extend(m["id"] for m in page.items)
+        cursor = page.next_cursor
+        if cursor is None or not page.has_more:
+            break
+    assert len(seen) == len(set(seen)) == count
+
+
+def _add_audio(db_path, mid: str, chat: str, sha: str, timestamp: str, content: str = "") -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, file_sha256) "
+        "VALUES (?, ?, '111', ?, ?, 0, 'audio', ?)",
+        (mid, chat, content, timestamp, bytes.fromhex(sha)),
+    )
+    conn.commit()
+    conn.close()
+    whatsapp._reset_schema_cache()
+
+
+def test_the_same_file_in_two_chats_is_one_hit_per_message(fts_db):
+    # The voice note was forwarded: one hash, two message rows, two hits — and
+    # each chat filter sees only its own.
+    _add_audio(fts_db, "v3", OTHER, SHA_VOICE, "2024-01-05T10:00:00")
+    assert ids("orcamento") == ["m1", "v1", "v3"]
+    assert whatsapp.count_messages(query="orcamento") == 3
+    assert ids("orcamento", chat_jid=OTHER) == ["v3"]
+    assert ids("orcamento", exclude_chat_jid=OTHER) == ["m1", "v1"]
+    assert whatsapp.count_messages(query="orcamento", exclude_chat_jid=OTHER) == 2
+
+
+def test_a_row_matching_content_and_transcript_is_counted_once(fts_db):
+    # A voice note sent with a caption: messages_fts matches the caption and the
+    # transcript index matches the same row's hash.
+    _add_audio(fts_db, "v3", CHAT, SHA_VOICE, "2024-01-06T10:00:00", content="orcamento em anexo")
+    assert ids("orcamento") == ["m1", "v1", "v3"]
+    assert whatsapp.count_messages(query="orcamento") == 3
+
+
+def test_time_bounds_apply_to_transcript_hits(fts_db):
+    # m1 was written on Jan 1, v1 was spoken on Jan 3.
+    assert ids("orcamento", after="2024-01-02T00:00:00") == ["v1"]
+    assert whatsapp.count_messages(query="orcamento", after="2024-01-02T00:00:00") == 1
+    assert ids("orcamento", before="2024-01-02T00:00:00") == ["m1"]
+    assert whatsapp.count_messages(query="orcamento", before="2024-01-02T00:00:00") == 1
+
+
+def test_the_substring_fallback_is_scoped_the_same_way(plain_db):
+    assert ids("domingo", chat_jid=OTHER) == ["v2"]
+    assert ids("domingo", chat_jid=CHAT) == []
+    assert whatsapp.count_messages(query="domingo", chat_jid=OTHER) == 1
+    assert whatsapp.count_messages(query="domingo", chat_jid=CHAT) == 0
+    assert whatsapp.count_messages(query="orcamento", after="2024-01-02T00:00:00") == 1
+
+
+def test_message_stats_counts_the_same_hits(fts_db):
+    stats = whatsapp.message_stats(group_by="chat", query="orcamento")
+    assert stats["total"]["messages"] == whatsapp.count_messages(query="orcamento") == 2
+    assert {bucket["key"]: bucket["messages"] for bucket in stats["buckets"]} == {CHAT: 2}
+    scoped = whatsapp.message_stats(group_by="chat", query="domingo", chat_jid=OTHER)
+    assert scoped["total"]["messages"] == 1
 
 
 def test_a_missing_notes_db_is_not_an_error(fts_db, monkeypatch):

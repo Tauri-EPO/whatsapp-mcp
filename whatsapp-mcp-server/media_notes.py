@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sqlite3
+from collections.abc import Generator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,12 +42,6 @@ TRANSCRIPT_ERROR_KEY = "transcript_error"
 MAX_VALUE_BYTES = 64 * 1024
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
-# Transcript hits one message query may union in. This is a workload bound, not
-# the old parameter bound (the hits are staged in a temp table now, see
-# whatsapp._stage_transcript_hits): the index ranks them, so the cap keeps the
-# best few thousand instead of truncating an arbitrary set. A word that occurs
-# in more voice notes than this is a listing, not a search — search_media_notes.
-MAX_TRANSCRIPT_MATCHES = 5000
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 SCHEMA = """
@@ -358,34 +353,35 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
     return {"sha256": sha, "notes": notes, "messages": messages}
 
 
-def _match_transcripts(conn: sqlite3.Connection, needle: str, limit: int) -> list[tuple[str, float]]:
-    """Index hits for ``needle`` as (sha256, bm25 score), best match first."""
+def _match_transcripts(conn: sqlite3.Connection, needle: str) -> sqlite3.Cursor:
+    """Every index hit for ``needle`` as (sha256, bm25 score), best match first."""
     sql = (
         f"SELECT sha256, bm25({TRANSCRIPTS_FTS_TABLE}) AS score FROM {TRANSCRIPTS_FTS_TABLE} "
-        f"WHERE {TRANSCRIPTS_FTS_TABLE} MATCH ? ORDER BY score LIMIT ?"
+        f"WHERE {TRANSCRIPTS_FTS_TABLE} MATCH ? ORDER BY score"
     )
-    bound = max(1, int(limit))
     try:
-        rows = conn.execute(sql, (needle, bound)).fetchall()
+        return conn.execute(sql, (needle,))
     except sqlite3.OperationalError:
         # Raw text was not valid FTS5 syntax (operator characters, unbalanced
         # quotes...); retry with every token quoted, as the message side does.
-        rows = conn.execute(sql, (whatsapp._fts_quote_tokens(needle), bound)).fetchall()
-    return [(sha, float(score)) for sha, score in rows if _SHA256_RE.match(sha or "")]
+        return conn.execute(sql, (whatsapp._fts_quote_tokens(needle),))
 
 
-def _substring_transcripts(conn: sqlite3.Connection, needle: str, limit: int) -> list[tuple[str, float]]:
-    """Fallback for what the index cannot serve; unranked, hence a score of 0.0."""
-    rows = conn.execute(
-        "SELECT sha256 FROM media_notes WHERE key = ? "
-        "AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0) "
-        "ORDER BY updated_at DESC LIMIT ?",
-        (TRANSCRIPT_KEY, needle, needle, max(1, int(limit))),
-    ).fetchall()
-    return [(row[0], 0.0) for row in rows if _SHA256_RE.match(row[0] or "")]
+def _substring_transcripts(conn: sqlite3.Connection, needle: str) -> sqlite3.Cursor:
+    """Fallback for what the index cannot serve; unranked, hence a score of 0.0.
+
+    No ORDER BY: these hits all score the same, the caller stages them in a
+    table keyed by hash and the message query does the ordering, so sorting the
+    whole matching set here would only buy a temp B-tree.
+    """
+    return conn.execute(
+        "SELECT sha256, 0.0 FROM media_notes WHERE key = ? "
+        "AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0)",
+        (TRANSCRIPT_KEY, needle, needle),
+    )
 
 
-def transcript_matches(query: str, limit: int = MAX_TRANSCRIPT_MATCHES) -> list[tuple[str, float]]:
+def iter_transcript_matches(query: str) -> Generator[tuple[str, float], None, None]:
     """Hashes whose stored transcript matches ``query``, as (sha256, score) pairs.
 
     This is how ``list_messages(query=...)`` reaches spoken words: ``messages_fts``
@@ -397,24 +393,49 @@ def transcript_matches(query: str, limit: int = MAX_TRANSCRIPT_MATCHES) -> list[
     every ranked one. A missing notes.db, an unreadable one, or an empty query
     all mean "no transcript matched": search degrades to content-only, it never
     fails.
+
+    Every match is yielded, best first, and the rows are streamed rather than
+    read into a list: the caller stages them in batches and lets the message
+    query decide which ones survive its chat, time and allow-list filters
+    (whatsapp._stage_transcript_hits). A cap here would be applied before those
+    filters, which is what used to make a scoped count report zero for a chat
+    whose only hit did not make the cut.
     """
     needle = (query or "").strip()
     if not needle:
-        return []
+        return
     conn = _connect(create=False)
     if conn is None:
-        return []
+        return
     try:
-        if whatsapp._fts_query_kind(needle) == "fts" and _ensure_transcripts_fts(conn):
-            # A rebuild may have happened; nothing else on this connection will
-            # commit it.
-            conn.commit()
-            return _match_transcripts(conn, needle, limit)
-        return _substring_transcripts(conn, needle, limit)
+        try:
+            if whatsapp._fts_query_kind(needle) == "fts" and _ensure_transcripts_fts(conn):
+                # A rebuild may have happened; nothing else on this connection
+                # will commit it.
+                conn.commit()
+                rows = _match_transcripts(conn, needle)
+            else:
+                rows = _substring_transcripts(conn, needle)
+        except sqlite3.Error:
+            return
+        # A failure once the rows are flowing is not silently truncated into a
+        # short answer: it reaches the caller, which drops the audio side whole.
+        for sha, score in rows:
+            if _SHA256_RE.match(sha or ""):
+                yield sha, float(score)
+    finally:
+        conn.close()
+
+
+def transcript_matches(query: str) -> list[tuple[str, float]]:
+    """``iter_transcript_matches`` as a list, for callers that want every hit at once."""
+    hits = iter_transcript_matches(query)
+    try:
+        return list(hits)
     except sqlite3.Error:
         return []
     finally:
-        conn.close()
+        hits.close()
 
 
 def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
