@@ -35,7 +35,7 @@ Rules worth knowing:
 
 - **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them. The single-row tools `get_chat` and `get_message_context` have no `count_only` — there is nothing to count — and passing it is refused as an [unknown argument](#unknown-arguments).
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only — those two are refused elsewhere rather than accepted and then dropped.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only — those two are refused elsewhere rather than accepted and then dropped.
 - **The long text `max_content_chars` cuts is the row's own.** `content` on message rows, `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
 
 ## Unknown arguments
@@ -140,7 +140,7 @@ Wrapped: `content`, `last_message`, `transcript` / `text` and note values. Not w
 
 ### Name fields
 
-The short labels somebody else chose — `name`, `chat_name`, `sender_name`, `sender_display`, `display`, the `label` of a `message_stats` bucket and the poll option under `options[].name` / `votes[].selected` — are third-party text too, but they stay **outside** the envelope whatever `WHATSAPP_WRAP_UNTRUSTED` says (decision on issue #273). An agent matches and prints them on every row, and delimiting one per row of a 200-row listing costs context for no extra boundary: a push name is 25 characters and a group subject 100, too little to carry a useful instruction once it cannot hide anything.
+The short labels somebody else chose — `name`, `chat_name`, `sender_name`, `sender_display`, `display`, the [push names](#name-name--push_name--name_source) `push_name` / `sender_push_name`, the `label` of a `message_stats` bucket and the poll option under `options[].name` / `votes[].selected` — are third-party text too, but they stay **outside** the envelope whatever `WHATSAPP_WRAP_UNTRUSTED` says (decision on issue #273). An agent matches and prints them on every row, and delimiting one per row of a 200-row listing costs context for no extra boundary: a push name is 25 characters and a group subject 100, too little to carry a useful instruction once it cannot hide anything.
 
 Instead they are **sanitised, always, in both modes**:
 
@@ -354,10 +354,20 @@ Search contacts by name or phone number.
 
 - `query` (required): Name or phone number to search
 
-Each hit carries `jid`, `name`, `phone_number` and `lid` — the same two
+Each hit carries `jid`, `name`, `push_name`, `phone_number`, `lid` and
+`matched`. `phone_number` and `lid` are the same two
 [identifier namespaces](#who-sent-it-sender_phone--sender_lid) `get_contact`
 reports, so a contact WhatsApp only knows anonymously has `phone_number: null`
 unless the LID map resolves it.
+
+The search covers the [name a contact gave themselves](#name-name--push_name--name_source)
+as well as the one you saved, so somebody in your phone book as "Z Aa" is found
+by "Alena". `matched` names the field the query actually hit — `name` (the chat name this
+account stored), `full_name`, `push_name`, `first_name` or `business_name` (the
+phone-book fields behind `name`), or `jid` — so a hit on a self-chosen name is
+never mistaken for a hit on your own record. It is `null` when none of those
+fields contains the query literally, which only happens for a wildcard search
+that matched the JID pattern alone.
 
 **Natural Language Examples:**
 
@@ -374,8 +384,10 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 - `identifier` (required): Phone number, LID, or full JID
   - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
 
-Returns `jid`, `phone_number`, `lid`, `name`, `display_name`, `is_lid` and
-`resolved`. Which namespace a bare number belongs to is decided the way
+Returns `jid`, `phone_number`, `lid`, `name`, `push_name`, `display_name`,
+`is_lid` and `resolved`. `name` is what this account knows them by and
+`push_name` [the name they gave themselves](#name-name--push_name--name_source),
+a cached snapshot with no date attached. Which namespace a bare number belongs to is decided the way
 [sender identity](#who-sent-it-sender_phone--sender_lid) is: the LID map first,
 then the E.164 length limit. `phone_number` therefore never holds a LID — for
 one it is the mapped number, or `null` when the map has never seen that LID —
@@ -533,7 +545,7 @@ and flat memory.
 - `chat_jid` / `exclude_chat_jid` (optional): one conversation or a list of them — see [Chat filters](#chat-filters)
 - `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`, or `messages-all-<timestamp>.ndjson` for anything but a single chat. An existing file is overwritten
 - `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
-- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
+- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
 
 **Returns:**
@@ -1151,8 +1163,9 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
 {
   "jid": "1234567890@s.whatsapp.net",
   "name": "Alice",
+  "push_name": "Ali",                  // the name they gave themselves, when known
   "is_group": false,
-  "name_source": "contacts",           // "chat" | "contacts" | "jid"
+  "name_source": "contacts",           // "chat" | "contacts" | "push" | "jid"
   "last_message_time": "2024-01-15T10:30:00+00:00",
   "last_message": "hello world",       // null when include_last_message=false
   "last_sender": "1234567890",         // null when include_last_message=false
@@ -1163,7 +1176,7 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
 }
 ```
 
-### Name (`name` / `name_source`)
+### Name (`name` / `push_name` / `name_source`)
 
 WhatsApp only pushes a name for a conversation when it has one, so a large
 share of direct chats are stored with an empty name or the bare number. The
@@ -1175,8 +1188,25 @@ says where the returned `name` came from:
 | `name_source` | Meaning |
 | --- | --- |
 | `chat` | The name WhatsApp stored for the conversation (a saved contact name or a group subject). |
-| `contacts` | The stored name was empty or just the number, and this one comes from your contacts. |
+| `contacts` | The stored name was empty or just the number, and this one comes from your phone book. |
+| `push` | Nothing in the phone book either: this is the name the contact gave **themselves**. |
 | `jid` | Nobody knows a name: `name` is whatever was stored (`null`, or the number). Identify the chat by its JID. |
+
+**`push_name` is the other half of the answer.** Your phone book and the
+contact's own name are two different facts, and collapsing them lost the one
+you did not save: on a live archive of 1,852 contacts, 1,011 have a push name,
+809 of them are in no phone book at all, and of the 202 with both, 178 differ
+("Kassia Interna" signs herself "Dra. Kássia Timbó"). So `push_name` is
+returned beside `name` whatever `name_source` says — on chats, on
+[`get_contact`](#get_contact) and on message rows as `sender_push_name` — and
+`name` is unchanged from before (issue #280).
+
+Read them for what they are: `name` is a record this account made, `push_name`
+a claim a third party made about themselves. It can be an emoji, a single
+letter or a number, and `whatsmeow_contacts` stores no timestamp, so it is a
+**cached snapshot of unknown age** — possibly from before a rename or a block.
+Present it as "recorded as", never as "is", and prefer `name` when addressing
+somebody.
 
 Resolution is batched per page (two queries against the contact store for a
 whole page, cached for five minutes), so paging a large chat list costs the

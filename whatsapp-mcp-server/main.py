@@ -49,6 +49,7 @@ from whatsapp import (
     fetch_media_notes,
     fetch_sender_identities,
     msg_to_dict,
+    prefetch_sender_names,
     sender_identity,
     shape_rows,
 )
@@ -57,6 +58,9 @@ from whatsapp import (
 )
 from whatsapp import (
     bridge_status as whatsapp_bridge_status,
+)
+from whatsapp import (
+    contact_profile as whatsapp_contact_profile,
 )
 from whatsapp import (
     count_chats as whatsapp_count_chats,
@@ -266,11 +270,22 @@ def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
 @tool_errors
 @untrusted_content
 def search_contacts(query: str) -> list[dict[str, Any]]:
-    """Search WhatsApp contacts by name or phone number.
+    """Search WhatsApp contacts by name, push name or phone number.
 
-    Each hit carries jid, name, phone_number and lid. The two identifier
-    namespaces stay apart: a contact WhatsApp only knows anonymously has
-    phone_number null and its LID in `lid`.
+    Each hit carries jid, name, push_name, phone_number, lid and `matched`. The
+    two identifier namespaces stay apart: a contact WhatsApp only knows
+    anonymously has phone_number null and its LID in `lid`.
+
+    `name` is what this account knows them by, `push_name` the name they gave
+    themselves, so someone saved as "Z Aa" is found by searching "Alena".
+    `matched` names the field the query hit: "name" (the chat name this account
+    stored), "full_name", "push_name", "first_name" or "business_name" (the
+    phone-book fields behind `name`), or "jid". The three that are not returned
+    as keys are still reported by name, so "found by their business name" is
+    not mistaken for "found by the name you saved". It is null when nothing in
+    those fields contains the query literally — a wildcard search that only the
+    JID pattern matched. A push name is a cached snapshot with no date
+    attached: present it as "recorded as", never as "is".
 
     Args:
         query: Search term to match against contact names or phone numbers
@@ -295,6 +310,10 @@ def get_contact(identifier: str) -> dict[str, Any]:
     nobody can name returns `name: null` rather than its own digits: nobody
     knows who it is.
 
+    `name` is what this account knows them by; `push_name` is the name the
+    contact gave themselves, a cached snapshot with no date attached — present
+    it as "recorded as", never as "is".
+
     Args:
         identifier: Phone number, LID, or full JID. Examples:
                     - "12025551234" (phone number)
@@ -303,8 +322,8 @@ def get_contact(identifier: str) -> dict[str, Any]:
                     - "184125298348272@lid" (LID JID)
 
     Returns:
-        Dictionary with jid, phone_number, lid, name, display_name, is_lid and
-        resolved status
+        Dictionary with jid, phone_number, lid, name, push_name, display_name,
+        is_lid and resolved status
     """
     identifier = (identifier or "").strip()
     if not identifier:
@@ -371,6 +390,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
         "phone_number": identity.phone,
         "lid": identity.lid,
         "name": display_name if resolved else fallback_name,
+        "push_name": whatsapp_contact_profile(jid).push_name,
         "display_name": display_name if resolved else fallback_display,
         "is_lid": is_lid,
         "resolved": resolved,
@@ -754,7 +774,8 @@ def export_messages(
                  for anything but a single chat. An existing file is overwritten
         format: Only "ndjson" today: one JSON object per line, UTF-8, oldest first
         fields: Subset of the message keys to write (id, timestamp, sender_jid,
-                 sender_phone, sender_lid, sender_name, sender_display, content, is_from_me,
+                 sender_phone, sender_lid, sender_name, sender_push_name, sender_display,
+                 content, is_from_me,
                  chat_jid, chat_name, media_type, filename, target_message_id,
                  reaction_to_message_id, poll_message_id, quoted_message_id,
                  deleted_at, view_once, bytes, sha256, notes). Default: all of them
@@ -908,8 +929,8 @@ def list_unanswered(
                 an error; limit is ignored.
 
     Returns:
-        Chat dictionaries in the list_chats shape (jid, name, name_source, is_group,
-        last_message, last_sender, last_read_time, unread…) plus last_inbound_time
+        Chat dictionaries in the list_chats shape (jid, name, push_name, name_source,
+        is_group, last_message, last_sender, last_read_time, unread…) plus last_inbound_time
         (when they last spoke) and age_hours (how long they have been waiting).
         `unread` tells the two backlogs apart: false means you read it and never
         answered.
@@ -982,12 +1003,16 @@ def list_chats(
                 limit is ignored.
 
     Returns:
-        Chat dictionaries with jid, name, name_source, is_group, last_message_time,
-        last_message, last_sender, last_is_from_me, last_read_time, has_messages and
-        unread. `name` falls back to your contacts when WhatsApp stored no name for
-        the chat (or only the number); `name_source` says which: "chat" (stored with
-        the conversation), "contacts" (from your phone book) or "jid" (nobody knows a
-        name — identify the chat by its JID).
+        Chat dictionaries with jid, name, push_name, name_source, is_group,
+        last_message_time, last_message, last_sender, last_is_from_me,
+        last_read_time, has_messages and unread. `name` falls back to your contacts
+        when WhatsApp stored no name for the chat (or only the number);
+        `name_source` says which: "chat" (stored with the conversation), "contacts"
+        (from your phone book), "push" (the name the contact gave themselves,
+        because the phone book had nothing) or "jid" (nobody knows a name —
+        identify the chat by its JID). `push_name` is that self-chosen name
+        whatever `name` ended up being: a cached snapshot with no date attached, so
+        present it as "recorded as", never as "is".
         The last_* fields describe the chat's newest stored message, which can be older
         than last_message_time (protocol and unsupported events move that marker
         without storing a message). `has_messages` is false only when the chat has no
@@ -1126,6 +1151,7 @@ def get_message_context(
     window = [context.message, *context.before, *context.after]
     notes = fetch_media_notes(window)
     identities = fetch_sender_identities(window)
+    prefetch_sender_names(window)
 
     # One conversion and one message-notes query for the whole window; the three
     # slices are cut afterwards.

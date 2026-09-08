@@ -161,6 +161,7 @@ def export_messages(
                     messages = [whatsapp._row_to_message(row) for row in rows]
                     notes = whatsapp.fetch_media_notes(messages)
                     identities = whatsapp.fetch_sender_identities(messages)
+                    whatsapp.prefetch_sender_names(messages)
                     for message in messages:
                         record = whatsapp.msg_to_dict(message, notes=notes, identities=identities)
                         if fields is not None:

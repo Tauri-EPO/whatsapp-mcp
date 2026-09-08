@@ -393,10 +393,14 @@ class Chat:
     # last_* fields are null — not "the last message could not be matched".
     has_messages: bool = False
     # Where `name` comes from: "chat" = stored in messages.db (the WhatsApp
-    # chat title or group subject), "contacts" = derived from the phone book
+    # chat title or group subject), "contacts" = your phone book
     # (whatsmeow_contacts) because the stored name was missing or just the
-    # number, "jid" = nothing better than the number/JID exists.
+    # number, "push" = the name the contact gave themselves, because the phone
+    # book had nothing either, "jid" = nothing better than the number exists.
     name_source: str = "chat"
+    # The name the contact gave themselves, whatever `name` ended up being.
+    # A cached snapshot of unknown age (whatsmeow_contacts has no timestamp).
+    push_name: str | None = None
 
     @property
     def is_group(self) -> bool:
@@ -433,6 +437,9 @@ class Contact:
     name: str | None
     jid: str
     lid: str | None = None
+    # The name the contact gave themselves (whatsmeow_contacts.push_name), kept
+    # beside `name` instead of collapsed into it (#280).
+    push_name: str | None = None
 
 
 @dataclass
@@ -623,6 +630,8 @@ def msgs_to_dicts(messages: Sequence[Message], include_sender_name: bool = True)
     """Convert a page of messages, looking their media and message notes up in one query each."""
     notes = fetch_media_notes(messages)
     identities = fetch_sender_identities(messages)
+    if include_sender_name:
+        prefetch_sender_names(messages)
     rows = [msg_to_dict(message, include_sender_name, notes, identities) for message in messages]
     attach_message_notes(rows)
     return rows
@@ -660,8 +669,9 @@ def msg_to_dict(
 
     Media rows carry the agent's notes for their sha256 (`{}` when the file has
     never been annotated). Pass `notes` from fetch_media_notes and `identities`
-    from fetch_sender_identities to convert a whole page with a single query
-    each; without them a row costs one lookup.
+    from fetch_sender_identities, and call prefetch_sender_names once for the
+    page, to convert it with a single query each; without them a row costs one
+    lookup.
     """
     # The two identifier namespaces stay apart: `sender_phone` is a phone number
     # or nothing, `sender_lid` the anonymous link-ID (#281). `sender_jid` keeps
@@ -673,11 +683,16 @@ def msg_to_dict(
 
     sender_name = None
     sender_display = None
+    sender_push_name = None
     if include_sender_name:
         if message.is_from_me:
             sender_name = "Me"
             sender_display = "Me"
         else:
+            # The name the sender gave themselves, whatever `sender_name` ends
+            # up being: a cached snapshot of unknown age, not a live claim
+            # (#280). Served from the cache prefetch_sender_names filled.
+            sender_push_name = _contact_profiles([message.sender]).get(message.sender, _NO_PROFILE).push_name
             # What to show when nobody has a name for this sender. An
             # unresolved LID has no phone number to fall back on, and echoing
             # its digits as a name would invent a contact called "1171581...".
@@ -701,6 +716,7 @@ def msg_to_dict(
         "sender_phone": sender_phone,
         "sender_lid": sender_lid,
         "sender_name": sender_name,
+        "sender_push_name": sender_push_name,  # what they call themselves, when known
         "sender_display": sender_display,  # "Name (phone)" or just phone if no name
         "content": message.content,
         "is_from_me": message.is_from_me,
@@ -728,6 +744,7 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
     return {
         "jid": chat.jid,
         "name": chat.name,
+        "push_name": chat.push_name,
         "name_source": chat.name_source,
         "is_group": chat.is_group,
         "last_message_time": chat.last_message_time.isoformat() if chat.last_message_time else None,
@@ -746,11 +763,14 @@ def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     `phone_number` and `lid` are the two identifier namespaces get_contact
     reports, never each other (#281): a contact WhatsApp only knows
     anonymously has `phone_number: null` unless the LID map resolves it.
+    `push_name` is what the contact calls themselves, beside the `name` this
+    account knows them by (#280).
     """
     return {
         "phone_number": contact.phone_number,
         "lid": contact.lid,
         "name": contact.name,
+        "push_name": contact.push_name,
         "jid": contact.jid,
     }
 
@@ -972,23 +992,50 @@ def _is_placeholder_name(name: str | None) -> bool:
     return name.strip().lstrip("+").replace(" ", "").replace("-", "").isdigit()
 
 
+class ContactProfile(NamedTuple):
+    """What whatsmeow's contact store knows about one person.
+
+    Two different facts, kept apart (#280): `name` is the label to show, with
+    the precedence this archive has always used (full_name → push_name →
+    first_name → business_name), and `push_name` is the name the *contact* gave
+    themselves — the owner's phone book and a third party's self-description
+    answer different questions. `source` says which of the two `name` came from:
+    "contacts" (the phone book) or "push" (their own name, because the phone
+    book had nothing).
+
+    whatsmeow_contacts has no timestamp, so a push name is a cached snapshot of
+    unknown age: present it as "recorded as", never as "is".
+    """
+
+    name: str | None
+    push_name: str | None
+    source: str  # "contacts" | "push" | "" when nothing is known
+
+
+_NO_PROFILE = ContactProfile(None, None, "")
+
+
 def _contact_names(jids: list[str]) -> dict[str, str]:
-    """Phone-book names for a batch of user JIDs — {jid: name} for known ones.
+    """Phone-book names for a batch of user JIDs — {jid: name} for known ones."""
+    return {jid: profile.name for jid, profile in _contact_profiles(jids).items() if profile.name}
+
+
+def _contact_profiles(jids: list[str]) -> dict[str, ContactProfile]:
+    """Phone-book entries for a batch of user JIDs — {jid: ContactProfile}.
 
     One pass for a whole page of chats instead of a lookup per chat: at most
-    two queries against whatsapp.db (the LID map, then whatsmeow_contacts),
-    with the same precedence senders use (full_name → push_name → first_name →
-    business_name). Results, including "this JID has no name", are cached for
-    NAME_CACHE_TTL_S so paging back and forth costs nothing.
+    two queries against whatsapp.db (the LID map, then whatsmeow_contacts).
+    Results, including "this JID has no entry", are cached for NAME_CACHE_TTL_S
+    so paging back and forth costs nothing.
     """
     wanted = {jid for jid in jids if jid and not jid.endswith("@g.us")}
-    resolved: dict[str, str] = {}
+    resolved: dict[str, ContactProfile] = {}
     missing: list[str] = []
     for jid in sorted(wanted):
-        hit, cached = _cache_get("contact_name", jid)
+        hit, cached = _cache_get("contact_profile", jid)
         if not hit:
             missing.append(jid)
-        elif cached:
+        elif cached != _NO_PROFILE:
             resolved[jid] = cached
     if not missing or not os.path.isfile(WHATSMEOW_DB_PATH):
         return resolved
@@ -1006,8 +1053,22 @@ def _contact_names(jids: list[str]) -> dict[str, str]:
     return resolved
 
 
-def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[str, str]:
-    """The two-query core of _contact_names; also fills the name cache."""
+def contact_profile(jid: str) -> ContactProfile:
+    """Phone-book entry for one JID (see :class:`ContactProfile`); cached."""
+    return _contact_profiles([jid]).get(jid, _NO_PROFILE)
+
+
+def prefetch_sender_names(messages: Sequence[Message]) -> None:
+    """Prime the phone-book cache for a page of messages.
+
+    One batched lookup instead of one per row: msg_to_dict then reads each
+    sender's name and push name straight from the cache.
+    """
+    _contact_profiles([message.sender for message in messages if message.sender and not message.is_from_me])
+
+
+def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[str, ContactProfile]:
+    """The two-query core of _contact_profiles; also fills the name cache."""
     # whatsmeow_contacts is keyed by the phone JID, so LIDs (and bare numbers,
     # which may be either form) go through whatsmeow_lid_map first.
     lookup: dict[str, str] = {}
@@ -1035,7 +1096,7 @@ def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[s
                 # Not in the map: a bare number may still be a phone number.
                 lookup[jid] = f"{prefix}@s.whatsapp.net"
 
-    names_by_contact: dict[str, str] = {}
+    profiles_by_contact: dict[str, ContactProfile] = {}
     for chunk in _in_chunks(sorted(set(lookup.values()))):
         rows = conn.execute(
             "SELECT their_jid, full_name, push_name, first_name, business_name "
@@ -1043,17 +1104,24 @@ def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[s
             chunk,
         ).fetchall()
         for their_jid, full_name, push_name, first_name, business_name in rows:
-            name = full_name or push_name or first_name or business_name
-            # A push name that is just the number is no better than the JID.
-            if name and not _is_placeholder_name(name) and their_jid not in names_by_contact:
-                names_by_contact[their_jid] = name
+            # A stored name that is just the number is no better than the JID,
+            # and that is true field by field: a phone book entry saved as the
+            # number must not hide the name the contact gave themselves.
+            full, push, first, business = (
+                None if _is_placeholder_name(value) else value
+                for value in (full_name, push_name, first_name, business_name)
+            )
+            name = full or push or first or business
+            if name and their_jid not in profiles_by_contact:
+                source = "push" if name == push and not full else "contacts"
+                profiles_by_contact[their_jid] = ContactProfile(name, push, source)
 
-    found: dict[str, str] = {}
+    found: dict[str, ContactProfile] = {}
     for jid in jids:
-        name = names_by_contact.get(lookup.get(jid, ""), "")
-        _cache_put("contact_name", jid, name)
-        if name:
-            found[jid] = name
+        profile = profiles_by_contact.get(lookup.get(jid, ""), _NO_PROFILE)
+        _cache_put("contact_profile", jid, profile)
+        if profile != _NO_PROFILE:
+            found[jid] = profile
     return found
 
 
@@ -1066,22 +1134,25 @@ def _in_chunks(values: list[str]) -> list[list[str]]:
 
 
 def _apply_name_fallback(chats: list[Chat]) -> None:
-    """Fill name/name_source from the phone book for chats stored without a name.
+    """Fill name/push_name/name_source from the phone book for a page of chats.
 
     `chats.name` is what WhatsApp pushed for the conversation; for a large share
     of direct chats that is empty or the bare number even when the contact is in
-    the phone book (issue #230). Resolution is batched over the whole page.
+    the phone book (issue #230). `push_name` — the name the contact gave
+    themselves — is attached whatever `name` ended up being, because it answers
+    a different question (#280). Resolution is batched over the whole page.
     """
-    pending = [chat for chat in chats if _is_placeholder_name(chat.name) and not chat.is_group]
-    names = _contact_names([chat.jid for chat in pending]) if pending else {}
+    direct = [chat for chat in chats if not chat.is_group]
+    profiles = _contact_profiles([chat.jid for chat in direct]) if direct else {}
     for chat in chats:
+        profile = profiles.get(chat.jid, _NO_PROFILE)
+        chat.push_name = profile.push_name
         if not _is_placeholder_name(chat.name):
             chat.name_source = "chat"
             continue
-        resolved = names.get(chat.jid)
-        if resolved:
-            chat.name = resolved
-            chat.name_source = "contacts"
+        if profile.name:
+            chat.name = profile.name
+            chat.name_source = profile.source or "contacts"
         else:
             chat.name_source = "jid"
 
@@ -2241,14 +2312,33 @@ def list_chats_page(
             conn.close()
 
 
+def _matched_field(query: str, candidates: list[tuple[str, str | None]]) -> str | None:
+    """Which of the searched fields actually contains the query, first one wins.
+
+    Reported beside every hit so a caller can tell "this is the name I saved"
+    from "this is the name they gave themselves" from "the digits matched".
+    `None` means nothing in the searched fields contains the query literally,
+    which happens when a wildcard (`%`, `_`) matched only the JID pattern.
+    """
+    needle = query.casefold()
+    for label, value in candidates:
+        if value and needle in value.casefold():
+            return label
+    return None
+
+
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
     Searches both the messages.db chats table and whatsmeow's contact store
-    (whatsapp.db) to find contacts. Results are deduplicated by JID.
+    (whatsapp.db) to find contacts. Results are deduplicated by JID, and each
+    one says which field the query matched (#280), because a contact saved as
+    "Z Aa" is found by the name they gave themselves.
     """
     seen_jids: set[str] = set()
-    found: list[tuple[str, str | None]] = []
+    # (jid, name, push name if this hit carried one, fields the query could
+    # have matched in reporting order)
+    found: list[tuple[str, str | None, str | None, list[tuple[str, str | None]]]] = []
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
     jid_pattern = "%" + query + "%"
@@ -2272,7 +2362,8 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         for jid, name in cursor.fetchall():
             if jid not in seen_jids:
                 seen_jids.add(jid)
-                found.append((jid, name))
+                # No push name on a chats-table row; the phone book below has it.
+                found.append((jid, name, None, [("name", name)]))
     except sqlite3.Error as e:
         logger.error("Database error (messages.db): %s", e)
     finally:
@@ -2302,20 +2393,43 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 if their_jid not in seen_jids:
                     seen_jids.add(their_jid)
                     name = full_name or push_name or first_name or business_name or ""
-                    found.append((their_jid, name))
+                    fields = [
+                        ("full_name", full_name),
+                        ("push_name", push_name),
+                        ("first_name", first_name),
+                        ("business_name", business_name),
+                    ]
+                    push = None if _is_placeholder_name(push_name) else push_name
+                    found.append((their_jid, name, push, fields))
         except sqlite3.Error as e:
             logger.error("Database error (whatsapp.db): %s", e)
         finally:
             if "conn2" in locals():
                 conn2.close()
 
-    # One LID-map pass for the whole result, so a contact WhatsApp only knows
-    # anonymously is reported as a LID instead of as a phone number (#281).
-    identities = _sender_identities([jid for jid, _ in found])
-    return [
-        contact_to_dict(Contact(phone_number=identities[jid].phone, lid=identities[jid].lid, name=name, jid=jid))
-        for jid, name in found
-    ]
+    # Two batched passes for the whole result: the LID map, so a contact
+    # WhatsApp only knows anonymously is reported as a LID instead of as a
+    # phone number (#281), and the phone book, for the push name of a hit that
+    # came from the chats table (#280).
+    jids = [jid for jid, _, _, _ in found]
+    identities = _sender_identities(jids)
+    profiles = _contact_profiles([jid for jid, _, push, _ in found if push is None])
+    rows: list[dict[str, Any]] = []
+    for jid, name, push, fields in found:
+        # A whatsmeow hit already carries its own push name; only a chats-table
+        # hit needs the phone book, and only its own entry — never one the LID
+        # map happened to point at.
+        push_name = push if push is not None else profiles.get(jid, _NO_PROFILE).push_name
+        candidates = [*fields, ("push_name", push_name), ("jid", jid)]
+        contact = Contact(
+            phone_number=identities[jid].phone,
+            lid=identities[jid].lid,
+            name=name,
+            push_name=push_name,
+            jid=jid,
+        )
+        rows.append({**contact_to_dict(contact), "matched": _matched_field(query, candidates)})
+    return rows
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
@@ -3359,6 +3473,7 @@ def list_unread(
         every_message = [message for chat in chats for message in chat["messages"]]
         notes = fetch_media_notes(every_message)
         identities = fetch_sender_identities(every_message)
+        prefetch_sender_names(every_message)
         for chat in chats:
             chat["messages"] = [
                 msg_to_dict(message, notes=notes, identities=identities) for message in chat["messages"]
