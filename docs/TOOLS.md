@@ -1218,8 +1218,12 @@ notes have `summary` / `tags` / `keep`:
 | `handled_at` | chat, message | ISO timestamp of when you dealt with it |
 | `snooze_until` | chat | ISO timestamp before which the target should not resurface |
 
-`handled_at` and `snooze_until` are the two a triage list is expected to read;
-they are written here so both sides spell them the same way.
+`mute`, `handled_at` and `snooze_until` are not decoration: `list_unanswered`
+reads all three by default, and [`mark_handled` / `snooze`](#triage-state) write
+the last two for you. A `handled_at` or `snooze_until` value that is not a
+readable timestamp is ignored rather than guessed at, so a hand-written note can
+never make a chat disappear; clearing one (`annotate(..., "")`) brings the chat
+back on the next call.
 
 <a id="annotate-what-you-learned"></a>
 
@@ -1436,6 +1440,20 @@ Chats with no stored messages never appear.
 - `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them — see [Chat filters](#chat-filters)
 - `cursor` (optional): `next_cursor` from the previous page
 - `fields`, `omit_nulls`, `count_only`: shape the response — see [Compact reads](#compact-reads). These are chat rows, so `fields` takes chat names and there is no `max_content_chars`
+- `hide_handled` (optional, **default true**): skip chats whose `handled_at` note is at or after their last inbound message
+- `exclude_muted` (optional, **default true**): skip chats whose `mute` note says yes
+- `include_snoozed` (optional, default false): also return chats whose `snooze_until` note is still in the future
+- `ignore_closing_messages` (optional, default false): skip chats whose last inbound message only closes the conversation — a sticker, or one of `ok`, `obrigado`, `obrigada`, `valeu`, `blz`, `thanks`, `👍`, `🙏` (compared after trimming and dropping trailing `.` / `!`)
+
+The first three read the [triage state](#triage-state) an agent writes back. They
+default to *on* because the whole point of recording a decision is that the next
+run reflects it, and nothing is hidden that the agent did not mark itself: on a
+store with no triage notes the results are identical. `hide_handled=False` brings
+the full backlog back when you want to audit it.
+
+The four filters are applied in SQL before the page is cut, so `count_only`,
+`limit` and the cursor all agree with each other: a hidden chat never occupies a
+slot in a page.
 
 Returns `{"items": [...], "next_cursor", "has_more"}` where each item is the
 standard [chat shape](#chat-operations) plus:
@@ -1451,6 +1469,58 @@ Respects `WHATSAPP_ALLOWED_CHATS`.
 
 - "Who am I leaving hanging?"
 - "Direct chats waiting more than a day for a reply" (`exclude_groups=True, min_age_hours=24`)
+
+<a id="triage-state"></a>
+
+### `mark_handled` / `snooze`
+
+The consumers of the list above. `list_unanswered` says who is waiting; these two
+record what was decided about it, so the next run is shorter instead of identical.
+Neither sends anything — no read receipt, no message, nothing the other side can
+see — and neither deletes a row: they write the chat notes `handled_at` and
+`snooze_until` in `notes.db` (see [Conventional keys](#conventional-keys)), which
+is why they stay available in a read-only deployment.
+
+`mark_handled(chat_jid, note="")`
+
+- `chat_jid`: the conversation, as returned by `list_unanswered` / `list_chats`
+- `note` (optional): a one-liner appended to that chat's dated `log` note ("called back, she will send the invoice")
+- returns `{"success": true, "chat_jid", "handled_at", "logged", "snooze_cleared"}` — handled supersedes "come back later", so a pending `snooze_until` is dropped
+
+Use it for everything you consider closed, including what never needed a WhatsApp
+reply: answered by phone, handled by the secretary, a notification nobody is
+waiting on. It is safe to be liberal with, because **a new inbound message
+overrides it**: `list_unanswered` compares `handled_at` against the chat's last
+inbound message, so the moment they write again the chat is back in the list.
+
+`snooze(chat_jid, until)`
+
+- `until`: ISO-8601 date or timestamp, must be in the future. Read as UTC unless it carries an offset ([Time bounds](#time-bounds)), so a bare date (`2026-09-10`) is `2026-09-10T00:00:00Z` — one evening earlier than the 10th in America/Sao_Paulo
+- returns `{"success": true, "chat_jid", "snooze_until"}`
+
+For the ones that are not handled but not now either — "chase the lab on
+Thursday". Nothing is scheduled and no reminder fires: the chat simply stops
+being skipped once the instant passes — or sooner, because **a message that
+arrives after the snooze was set lifts it**, so "chase on Thursday" never buries
+"urgente, me liga". Clear it by hand with
+`annotate("chat", chat_jid, "snooze_until", "")`, or with `mark_handled`, which
+drops a pending snooze as it marks the chat done.
+
+`mute` is the one filter a new message does *not* lift — that is what it is for.
+
+**The loop:**
+
+1. `list_unanswered(exclude_groups=True, min_age_hours=24)` — who has been waiting more than a day
+2. read and reply where a reply is due (`list_messages`, `send_message`)
+3. `mark_handled(chat_jid, note="...")` on each one you dealt with, `snooze(chat_jid, "2026-09-10")` on the ones to chase later
+4. `annotate("chat", jid, "mute", "yes")` on the sources that will never need an answer — a carrier's service notices, an association's marketing
+5. next run returns what is left, plus whatever arrived since
+
+**Natural Language Examples:**
+
+- "I called Ana back, mark that chat as handled"
+- "Chase the lab on Thursday, not before"
+- "This number is just Vivo notifications, keep it out of my triage list"
 
 ### `list_chats`
 

@@ -95,6 +95,7 @@ whatsapp-mcp/
 │   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
 │   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes; transcripts_fts
 │   ├── notes.py                # notes.db: versioned notes on chats/contacts/messages (media via media_notes)
+│   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
@@ -274,6 +275,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 |---|---|
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ `docs/TOOLS.md`, tests) |
 | Change agent notes (chats, contacts, messages, media) | `whatsapp-mcp-server/notes.py`, `media_notes.py` |
+| Change what `list_unanswered` hides (handled, snoozed, muted, closing messages) | `whatsapp-mcp-server/triage.py` + `_closing_message_clause` in `whatsapp.py` |
 | Change DB queries / dict conversion | `whatsapp-mcp-server/whatsapp.py` |
 | Change HTTP transport, auth, allowed hosts | `whatsapp-mcp-server/main.py` (`__main__`), `mcp_config.py`, `http_auth.py` |
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
