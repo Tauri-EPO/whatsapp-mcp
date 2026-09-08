@@ -236,7 +236,10 @@ def coverage(
     window and nothing else — first_message_time is then the first message after
     the bound, not the moment the archive begins, and chats_without_messages
     means "nothing in this period" rather than "never synced". The returned hint
-    says which of the two readings applies.
+    says which of the two readings applies. The bounds also act as gap edges, so
+    an empty stretch between `after` and the first stored message shows up, and
+    a window falling entirely inside an outage comes back as one gap covering
+    it rather than as no gaps at all.
 
     by_chat=True answers a different question — *which* chats to backfill. It
     returns {"items", "next_cursor", "has_more"} where each item is

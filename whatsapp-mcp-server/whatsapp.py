@@ -3374,22 +3374,39 @@ def coverage(
         messages_by_month = {month: int(count) for month, count in cur.fetchall() if month}
 
         # One ordered pass over the timestamp index: LAG gives every pair of
-        # consecutive messages, and only the pairs further apart than the
+        # consecutive points, and only the pairs further apart than the
         # threshold ever reach Python.
+        #
+        # The bounds join the messages as points, or a window would only ever
+        # see the holes *between* two stored messages: asking about a period
+        # that begins three weeks before the first message it holds — or that
+        # falls entirely inside an outage, with no message to pair up at all —
+        # would answer "no gaps" about a period with nothing in it. Each bound
+        # is written in the stored spelling, so it sorts and subtracts like a
+        # row; msg_clause is strict on both ends, so neither can collide with a
+        # real message.
+        edges = []
+        edge_params: list[Any] = []
+        for bound in (scope["after"], scope["before"]):
+            if bound is not None:
+                edges.append("UNION ALL SELECT ?")
+                edge_params.append(bound)
         delta_hours = f"({_COVERAGE_TS.format(col='ts')} - {_COVERAGE_TS.format(col='prev_ts')}) * 24.0"
         gaps: list[dict[str, Any]] = []
         try:
             cur.execute(
-                f"""WITH ordered AS (
-                        SELECT timestamp AS ts,
-                               LAG(timestamp) OVER (ORDER BY timestamp) AS prev_ts
-                          FROM messages WHERE {msg_clause}
+                f"""WITH points AS (
+                        SELECT timestamp AS ts FROM messages WHERE {msg_clause}
+                        {" ".join(edges)}
+                    ),
+                    ordered AS (
+                        SELECT ts, LAG(ts) OVER (ORDER BY ts) AS prev_ts FROM points
                     )
                     SELECT prev_ts, ts, {delta_hours} AS hours
                       FROM ordered
                      WHERE prev_ts IS NOT NULL AND {delta_hours} > ?
                      ORDER BY hours DESC LIMIT ?""",
-                (*msg_params, gap_hours, max_gaps),
+                (*msg_params, *edge_params, gap_hours, max_gaps),
             )
             gaps = [{"from": start, "to": end, "hours": round(float(hours), 1)} for start, end, hours in cur.fetchall()]
         except sqlite3.OperationalError as exc:  # SQLite without window functions

@@ -110,13 +110,42 @@ def test_coverage_window_scopes_counts_and_gaps(archive):
     assert result["messages_by_month"] == {"2026-07": 1, "2026-08": 2}
     # FAMILY and DECOY hold nothing inside the window, so they count as missing.
     assert result["chats_with_messages"] == 2 and result["chats_without_messages"] == 2
-    # Only the 14-day hole survives; the June artefacts are outside the window.
-    assert len(result["gaps"]) == 1
-    assert result["gaps"][0]["hours"] == pytest.approx(336.0, abs=0.1)
+    # The June artefacts are outside the window; what is left is the 14-day
+    # hole and the three empty weeks between the bound and the first message.
+    assert [(gap["from"][:10], gap["to"][:10]) for gap in result["gaps"]] == [
+        ("2026-07-01", "2026-07-22"),
+        ("2026-07-22", "2026-08-05"),
+    ]
+    assert result["gaps"][1]["hours"] == pytest.approx(336.0, abs=0.1)
     assert result["scope"] == {"after": "2026-07-01 00:00:00+00:00", "before": None, "chat_jid": None}
 
     bounded = whatsapp.coverage(after="2026-07-01", before="2026-08-05 12:00:00")
     assert bounded["total_messages"] == 2 and bounded["messages_by_month"] == {"2026-07": 1, "2026-08": 1}
+
+
+def test_coverage_window_inside_an_outage_reports_the_whole_window(archive):
+    """A window with no message in it is one gap, not an empty gap list.
+
+    Pairing stored messages alone can only see holes *between* two of them, so
+    a window that falls entirely inside the 14-day outage would answer "no
+    gaps" about a period holding nothing at all.
+    """
+    result = whatsapp.coverage(after="2026-07-23", before="2026-08-04")
+
+    assert result["total_messages"] == 0
+    assert len(result["gaps"]) == 1
+    assert result["gaps"][0]["from"].startswith("2026-07-23")
+    assert result["gaps"][0]["to"].startswith("2026-08-04")
+    assert result["gaps"][0]["hours"] == pytest.approx(288.0, abs=0.1)
+
+
+def test_coverage_gaps_are_unchanged_without_a_window(archive):
+    """The bounds are the only new points: an unbounded scan still pairs messages only."""
+    assert [gap["from"][:10] for gap in whatsapp.coverage()["gaps"]] == [
+        "2026-06-08",
+        "2026-07-22",
+        "2026-06-07",
+    ]
 
 
 def test_coverage_hint_stops_claiming_never_synced_under_a_window(archive):

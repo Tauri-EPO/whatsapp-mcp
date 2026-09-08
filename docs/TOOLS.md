@@ -321,6 +321,12 @@ window, which normally means it was down or never synced that period — not tha
 everybody went quiet. Use it before concluding "this chat has been quiet":
 `list_messages` returns the same empty result either way.
 
+With `after`/`before` set, the bounds count as gap edges: an empty stretch
+between `after` and the first message it holds is reported, as is one between
+the last message and `before`. A window that falls entirely inside an outage is
+therefore one gap covering all of it, not an empty list — pairing stored
+messages alone would have nothing to pair.
+
 **A window changes what the numbers mean.** Unbounded, `first_message_time` is
 where the archive itself begins and `chats_without_messages` counts chats that
 never synced. With `after`/`before` set, both describe the window and nothing
