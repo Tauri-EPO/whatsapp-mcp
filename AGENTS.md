@@ -62,10 +62,12 @@ whatsapp-mcp/
 │   ├── rest.go                 # newRESTMux route table + HTTP server; handlers live next to their features
 │   ├── rest_middleware.go      # writeError (JSON error shape), requireMethod, requestLog
 │   ├── health.go               # /api/health (liveness), /api/ready (readiness)
+│   ├── me.go                   # GET /api/me: the account's own phone JID and LID (authenticated)
 │   ├── chat_actions.go         # /api/react, /api/typing
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
+│   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
@@ -280,7 +282,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 | Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
 | Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
-| Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`); FTS in `fts.go` |
+| Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`, and a backfill that marks the rows it read like `mentions.go`); FTS in `fts.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
 | Change build identity (`/api/version`, MCP `version`) | `whatsapp-bridge/version.go`, `ARG GIT_SHA/VERSION` in both Dockerfiles, compose build args |
 | Change startup / wiring (env parsing, pairing, shutdown) | `whatsapp-bridge/main.go` (keep it under ~400 lines; logic goes in a feature file) |

@@ -202,8 +202,17 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
-	// Last: every table and column it rewrites must already exist.
+	// mentions: the users a message addressed, backfilled from the text for
+	// rows stored before the column existed (mentions.go).
+	if err := ensureColumn(db, "messages", "mentions", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.mentions column: %w", err)
+	}
+	// Last, in user_version order: every table and column these rewrite must
+	// already exist, and each stamps only its own version (store_time.go).
 	if err := migrateCanonicalTimestamps(db); err != nil {
+		return err
+	}
+	if err := migrateMentionsBackfill(db); err != nil {
 		return err
 	}
 	return nil

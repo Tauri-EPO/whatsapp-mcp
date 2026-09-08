@@ -89,6 +89,10 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// (/api/ready) is what to poll before sending.
 	mux.HandleFunc("/api/health", auth(requireMethod(http.MethodGet, b.handleHealth())))
 
+	// Own identity (see me.go). Authenticated and separate from /api/health:
+	// the owner's number is personal data, health bodies end up in logs.
+	mux.HandleFunc("/api/me", auth(requireMethod(http.MethodGet, handleMe(clientIdentity(client)))))
+
 	// Build identity; unauthenticated on purpose (see version.go).
 	mux.HandleFunc("/api/version", handleVersion(buildInfo(messageStore != nil && messageStore.fts)))
 	if getEnvBool(metricsEnv, true) {

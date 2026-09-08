@@ -59,8 +59,9 @@ var endpointTools = map[string][]string{
 }
 
 // unenforcedTools are the remaining MCP tool names: reads (including the ones
-// served by /api/group/members, /api/poll and /api/download, which stay open
-// here just as they do in read-only mode) and writes that never leave the host.
+// served by /api/group/members, /api/poll, /api/download and /api/me, which
+// stay open here just as they do in read-only mode) and writes that never
+// leave the host.
 // Accepted in both lists, enforced by the MCP server only.
 var unenforcedTools = []string{
 	"annotate",
