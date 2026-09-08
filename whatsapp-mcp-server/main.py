@@ -23,6 +23,9 @@ from media_notes import annotate_media as notes_annotate_media
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
+from notes import annotate as notes_annotate
+from notes import get_notes as notes_get_notes
+from notes import search_notes as notes_search_notes
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
 from strict_args import StrictArgumentServer
@@ -1659,6 +1662,111 @@ def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[
         pass a sha256 to get_media_notes or list_media(...) to find the messages
     """
     return notes_search_media_notes(query, key or None, limit)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def annotate(
+    target_type: str,
+    target_id: str,
+    key: str,
+    value: str = "",
+    mode: str = "set",
+    if_unchanged_since: str = "",
+) -> dict[str, Any]:
+    """Record what you learned about a chat, a contact, a message or a media file.
+
+    This is the archive's memory for everything that is not a file: the judgements a
+    triage pass produces ("patient", "importance 5", "marketing bot", "waiting on the
+    accountant") belong here, so the next session reads them instead of deriving them
+    again. Write one whenever you conclude something you would not want to work out
+    twice; notes live in notes.db (owned by the MCP server) and survive re-pairing.
+
+    `set` replaces the whole value: read the current one and merge before writing; the
+    previous value is returned as `replaced` so you can verify nothing was lost. Use
+    `mode="append"` for keys that accumulate (a dated `log`), where each call adds a
+    line instead of replacing the note.
+
+    Nothing is ever destroyed: every write is a new version, and get_notes(...,
+    include_history=True) returns the trail. An empty `value` with `mode="set"` hides
+    the note (a tombstone, still recoverable from the history).
+
+    target_id by target type:
+        chat: the chat JID from list_chats ("...@g.us", "...@s.whatsapp.net")
+        contact: the contact JID or phone number; LID and phone spellings find each other
+        message: "<chat_jid>/<message_id>" — message IDs are unique per chat only
+        media: the sha256 from list_media / list_messages (same store as annotate_media)
+
+    Conventional keys — use these before inventing your own:
+        label: what this is (patient, supplier, family, marketing...)
+        importance: 1-5, 5 being "answer today"
+        summary: one or two sentences of what you know
+        mute: "yes" to keep a chat out of triage lists
+        log: an append key; write "2026-09-07: called back, no answer"
+
+    Args:
+        target_type: "chat", "contact", "message" or "media"
+        target_id: Identifier for that type, as described above
+        key: Note name, up to 64 characters
+        value: Note text, up to 64 KB; empty removes the note (mode="set" only)
+        mode: "set" to replace the value (default), "append" to add a line to it
+        if_unchanged_since: Refuse the write unless the note still carries this
+            `updated_at` (optimistic locking against a concurrent session)
+
+    Returns:
+        {"success": true, "target_type", "target_id", "key", "value", "updated_at",
+        "version"} plus "replaced"/"replaced_at" when a value was displaced, or
+        {"deleted": true|false} when removing; `conflict` when if_unchanged_since misses,
+        `denied` when WHATSAPP_ALLOWED_CHATS blocks the chat
+    """
+    return notes_annotate(target_type, target_id, key, value, mode, if_unchanged_since or None)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def get_notes(target_type: str, target_id: str, include_history: bool = False) -> dict[str, Any]:
+    """Everything noted about one chat, contact, message or media file.
+
+    Read this before annotating the same key: `set` replaces the whole value, so the
+    merge has to happen here. The `updated_at` of a note is what `annotate(...,
+    if_unchanged_since=...)` expects.
+
+    Args:
+        target_type: "chat", "contact", "message" or "media"
+        target_id: Chat/contact JID, "<chat_jid>/<message_id>", or a media sha256
+        include_history: Also return every past version, newest first
+
+    Returns:
+        {"target_type", "target_id", "notes": {key: {"value", "updated_at"}}} plus
+        "history": [{key, value, updated_at, source, version}] when asked, and
+        "messages" for a media target
+    """
+    return notes_get_notes(target_type, target_id, include_history)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def search_notes(query: str, key: str = "", target_type: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    """Find chats, contacts, messages and files by what you noted about them.
+
+    Substring match over the current value of every note, across all target types —
+    "who did I mark as an accountant", "which chats are muted", "what did I say about
+    the implant supplier".
+
+    Args:
+        query: Text to look for in note values, case-insensitive
+        key: Restrict to one note name (default: any)
+        target_type: Restrict to "chat", "contact", "message" or "media" (default: all)
+        limit: Max notes to return (default 50, max 200)
+
+    Returns:
+        [{"target_type", "target_id", "key", "value", "updated_at"}] newest first,
+        restricted to allowed chats; pass a target back to get_notes for the full set
+    """
+    return notes_search_notes(query, key or None, target_type or None, limit)
 
 
 @mcp.tool()

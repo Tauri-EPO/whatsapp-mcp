@@ -115,6 +115,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 | `not_found` | The chat, message, contact or file is not in the archive | Check the JID/ID (both come from `list_messages` / `list_chats` rows) |
 | `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
 | `invalid_argument` | Missing or malformed input | Fix the call |
+| `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
 | `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
 
@@ -971,6 +972,63 @@ memory view. A cleanup pass reads `keep: yes` before deciding anything.
 - "Summarise this PDF and remember the summary for later"
 - "Tag the contract from Ana as keep"
 - "Which files did I note as disposable?"
+
+### `annotate` / `get_notes` / `search_notes`
+
+The same memory for everything that is **not** a file: chats, contacts,
+individual messages — and media, through the same call. A triage pass produces
+judgements ("this is a patient", "importance 5", "marketing bot", "waiting on
+the accountant") and this is where they live, in `notes.db`, so the next session
+reads them instead of deriving them again.
+
+- `annotate(target_type, target_id, key, value="", mode="set", if_unchanged_since="")`
+- `get_notes(target_type, target_id, include_history=False)`
+- `search_notes(query, key="", target_type="", limit=50)`
+
+`target_type` is `chat`, `contact`, `message` or `media`, and `target_id` is:
+
+| Target type | `target_id` | Where it comes from |
+|---|---|---|
+| `chat` | the chat JID | `list_chats`, any message row |
+| `contact` | the contact JID or bare phone number | `search_contacts`, `get_contact` |
+| `message` | `"<chat_jid>/<message_id>"` | message IDs are unique **per chat** only |
+| `media` | the `sha256` | `list_media`, `list_messages`; the same store `annotate_media` writes |
+
+A contact is stored under its phone JID when the LID map knows the pair, and
+read under every spelling, so a note written against `<lid>@lid` is found again
+under `<phone>@s.whatsapp.net`. `WHATSAPP_ALLOWED_CHATS` applies to `chat`,
+`contact` and `message` targets, on both the write and the read: a contact JID is
+spelled exactly like its direct chat, and `search_contacts` filters on the same
+list.
+
+#### Nothing is overwritten in silence
+
+`set` (the default) **replaces the whole value**: read the current one and merge
+before writing. Three things make that safe:
+
+- the write returns `replaced` (and `replaced_at`) whenever it displaced a
+  value, so a fact left out is visible in the same turn;
+- storage is append-only. Every write is a new `version` and
+  `get_notes(..., include_history=True)` returns the trail, newest first;
+  deleting (an empty `value`) writes a tombstone rather than dropping rows;
+- `if_unchanged_since=<the updated_at you read>` refuses the write with
+  `conflict` when another session wrote in between.
+
+`mode="append"` is for keys that accumulate — a dated `log` — where each call
+adds a line instead of replacing the note. Values are capped at 64 KB; a write
+that would cross the cap is refused with `invalid_argument` telling you to
+summarise the note and write it back with `set`.
+
+Media targets keep their per-hash store (one current value per key, feeding the
+transcript index), so `annotate_media` and `annotate(target_type="media", ...)`
+are the same note seen twice. They keep one version, so `include_history` returns
+a single entry per key and `version` is always 1.
+
+**Natural Language Examples:**
+
+- "Remember that this number is a marketing bot"
+- "Mark Ana as importance 5 and note that she is waiting on the invoice"
+- "Who did I mark as an accountant?"
 
 ### `purge_media`
 

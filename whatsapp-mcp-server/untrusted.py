@@ -51,10 +51,11 @@ CLOSE_TAG = "</untrusted>"
 
 # Result keys holding third-party prose.
 #
-# "text" is only ever the transcript of a voice note (transcribe_audio) and
-# "value" only ever a media note (media_notes.py); no tool carrying this
-# decorator returns either key with a different meaning.
-WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "value"})
+# "text" is only ever the transcript of a voice note (transcribe_audio),
+# "value" only ever a note (media_notes.py, notes.py) and "replaced" the note
+# value a write displaced; no tool carrying this decorator returns any of them
+# with a different meaning.
+WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "value", "replaced"})
 
 # Result keys holding a short label somebody else chose: a contact's push name,
 # the "Name (phone)" spelling of a sender, the bucket label of message_stats, a
@@ -120,6 +121,11 @@ ELLIPSIS = "…"
 # somebody else's file, so every string leaf below it is wrapped.
 NOTES_KEY = "notes"
 
+# ...except the bookkeeping of a note record ({"value", "updated_at", ...}).
+# updated_at is what annotate(..., if_unchanged_since=...) expects back, so
+# wrapping it would break optimistic locking whenever the envelope is on.
+NOTE_METADATA_KEYS = frozenset({"updated_at", "version", "source"})
+
 # Populated by @untrusted_content at import time.
 _UNTRUSTED: set[str] = set()
 
@@ -182,14 +188,21 @@ def _sanitize_names(value: Any) -> Any:
     return value
 
 
-def _wrap_notes(value: Any) -> Any:
-    """Wrap every string leaf of a notes mapping ({key: value} or {key: {value, updated_at}})."""
+def _wrap_notes(value: Any, depth: int = 0) -> Any:
+    """Wrap the text leaves of a notes mapping ({key: value} or {key: {value, updated_at}}).
+
+    ``depth`` distinguishes the note names (0) from the fields of one note (1+),
+    so a note whose *name* is "updated_at" still has its value wrapped.
+    """
     if isinstance(value, str):
         return wrap_text(value)
     if isinstance(value, dict):
-        return {key: _wrap_notes(item) for key, item in value.items()}
+        return {
+            key: item if depth and key in NOTE_METADATA_KEYS else _wrap_notes(item, depth + 1)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_wrap_notes(item) for item in value]
+        return [_wrap_notes(item, depth) for item in value]
     return value
 
 
