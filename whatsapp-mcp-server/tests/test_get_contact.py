@@ -1,4 +1,5 @@
 import main as mcp_main
+import whatsapp
 from tests.conftest import BOB_LID, BOB_PN
 
 
@@ -147,3 +148,50 @@ def test_get_contact_classifies_an_over_long_bare_number_as_a_lid(paired_dbs, mo
     assert result["is_lid"] is True
     assert result["phone_number"] is None
     assert result["lid"] == "1171581346817350"
+
+
+def test_get_contact_reads_the_namespace_the_archive_recorded(paired_dbs, monkeypatch):
+    """The bridge stored this sender as a LID, so it is one whatever its length (#375)."""
+    with paired_dbs.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, sender_server, content, timestamp, is_from_me) "
+            "VALUES ('M1', 'status@broadcast', '5511666666666', 'lid', 'hi', '2026-09-08 10:00:00+00:00', 0)"
+        )
+    whatsapp._reset_name_cache()
+    monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+
+    # 13 digits: the length rule on its own would call this a phone number.
+    result = mcp_main.get_contact(identifier="5511666666666")
+
+    assert result["jid"] == "5511666666666@lid"
+    assert result["is_lid"] is True
+    assert result["resolved"] is False
+    assert result["phone_number"] is None
+    assert result["lid"] == "5511666666666"
+    assert result["name"] is None  # nobody knows who it is
+
+
+def test_get_contact_treats_an_unknown_15_digit_identifier_as_a_lid(paired_dbs, monkeypatch):
+    """No chat, no message, no phone-book entry: at that length it is a LID (#375)."""
+    monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+
+    result = mcp_main.get_contact(identifier="191134718546018")
+
+    assert result["jid"] == "191134718546018@lid"
+    assert result["is_lid"] is True
+    assert result["resolved"] is False
+    assert result["phone_number"] is None
+
+
+def test_get_contact_keeps_a_plausible_number_a_phone_number(paired_dbs, monkeypatch):
+    """The rule stops at 14 digits: a 13-digit stranger is still a phone number."""
+    monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+
+    result = mcp_main.get_contact(identifier="5511666666666")
+
+    assert result["jid"] == "5511666666666@s.whatsapp.net"
+    assert result["is_lid"] is False
+    assert result["phone_number"] == "5511666666666"

@@ -298,17 +298,20 @@ Group by `sender_phone` to count people: before this split it also held bare
 LIDs, so an archive grew ghost "contacts" whose name was a 15-digit number
 (issue #281). Rows with `sender_phone: null` are the ones WhatsApp has only ever
 identified anonymously; `sender_lid` still groups them together, and
-`sender_display` shows `<id>@lid` so a LID never looks like a phone number. A
-LID is recognised when the JID says so, when whatsmeow's map knows it, or when
-it is too long to be a phone number — see the length caveat below.
+`sender_display` shows `<id>@lid` so a LID never looks like a phone number.
 
-The same rule decides what [`get_contact`](#get_contact) does with a bare
-number: over 15 digits it cannot be E.164, so it is a LID; at 15 and below the
-two overlap, and only a hit in the LID map (or an explicit `…@lid`) makes it
-one. That is the limit of the split — a 15-digit LID the map has never seen
-looks exactly like a legal 15-digit number and is still reported as one, so an
-unfamiliar 14-16 digit "number" with no name is worth checking with
-`get_contact` before treating it as a phone number.
+Which namespace a row belongs to is recorded when the message is stored: the
+bridge knows what WhatsApp addressed the sender as, so an anonymous sender stays
+a LID even when nothing can map it to a number (issue #375). Messages archived
+before that column existed fall back to the older rule — the JID says so,
+whatsmeow's map knows it, or it is too long to be a phone number — and there a
+LID of 15 digits or fewer that the map has never seen still reads as a phone
+number. The bridge backfills what it can of those rows at startup.
+
+[`get_contact`](#get_contact) answers a bare number the same way, plus one rule
+of its own: an identifier of 14 or 15 digits that no chat, no message and no
+phone-book entry has ever carried is reported as a LID, because a phone number
+that long does not appear in a real archive.
 
 ## Bridge
 
@@ -562,8 +565,10 @@ Returns `jid`, `phone_number`, `lid`, `name`, `push_name`, `display_name`,
 `is_lid` and `resolved`. `name` is what this account knows them by and
 `push_name` [the name they gave themselves](#name-name--push_name--name_source),
 a cached snapshot with no date attached. Which namespace a bare number belongs to is decided the way
-[sender identity](#who-sent-it-sender_phone--sender_lid) is: the LID map first,
-then the E.164 length limit. `phone_number` therefore never holds a LID — for
+[sender identity](#who-sent-it-sender_phone--sender_lid) is: what the archive
+recorded for that sender first, then the LID map, then the E.164 length limit —
+and an identifier of 14 or 15 digits none of them has ever seen is read as a LID
+rather than as a number nobody has ever written to. `phone_number` therefore never holds a LID — for
 one it is the mapped number, or `null` when the map has never seen that LID —
 and `lid` never holds a phone number. (An identifier that is neither, a name or
 another server's JID, is echoed back in `phone_number` as it always was.)

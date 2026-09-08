@@ -64,6 +64,8 @@ from whatsapp import (
     prefetch_sender_names,
     sender_identity,
     shape_rows,
+    stored_sender_namespace,
+    unknown_lid_digits,
 )
 from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
@@ -372,10 +374,13 @@ def get_contact(identifier: str) -> dict[str, Any]:
     """Look up a WhatsApp contact by phone number, LID, or full JID.
 
     Detects which namespace the identifier belongs to. A bare number is
-    ambiguous — phone numbers and LIDs overlap in length — so whatsmeow's LID
-    map decides, and an identifier too long to be a phone number (over 15
-    digits) is a LID on sight. `phone_number` therefore never holds a LID: for
-    one it is the mapped number, or null when the map has never seen that LID.
+    ambiguous — phone numbers and LIDs overlap in length — so the archive
+    answers first (every message the bridge stores records its sender's
+    namespace), then whatsmeow's LID map; an identifier too long to be a phone
+    number (over 15 digits) is a LID on sight, and one of 14 or 15 digits that
+    no chat, message or contact has ever carried is reported as a LID too.
+    `phone_number` therefore never holds a LID: for one it is the mapped
+    number, or null when the map has never seen that LID.
     (An identifier that is neither a number nor a LID — a name, another
     server's JID — is echoed back in `phone_number` as it always was.) A LID
     nobody can name returns `name: null` rather than its own digits: nobody
@@ -416,11 +421,13 @@ def get_contact(identifier: str) -> dict[str, Any]:
     else:
         digits = "".join(c for c in identifier if c.isdigit())
         if digits:
-            # Bare numbers are ambiguous: the LID map (and the E.164 length
-            # limit) say which namespace this one is (#281). Only a guessed
-            # phone spelling is worth retrying as a LID below — flipping one
-            # the map called a LID would undo the classification.
-            guessed_phone = sender_identity(digits).lid is None
+            # Bare numbers are ambiguous. The archive answers first — the
+            # bridge records the namespace of every sender it stores (#375) —
+            # and the LID map plus the E.164 length limit decide for the rest
+            # (#281). Only a guessed phone spelling is worth retrying as a LID
+            # below — flipping one the map called a LID would undo the
+            # classification.
+            guessed_phone = sender_identity(digits, stored_sender_namespace(digits)).lid is None
             jid = f"{digits}@s.whatsapp.net" if guessed_phone else f"{digits}@lid"
             if identifier.isdigit() and guessed_phone:
                 bare_numeric_digits = digits
@@ -444,6 +451,13 @@ def get_contact(identifier: str) -> dict[str, Any]:
         if chat:
             jid = candidate_jid
             break
+
+    if chat is None and bare_numeric_digits and unknown_lid_digits(bare_numeric_digits):
+        # Nothing here has ever seen this number: no chat under either
+        # spelling, no message row, no phone-book entry, and the LID map said
+        # nothing above. At 14-15 digits that is a LID whose mapping we never
+        # learned, not a phone number nobody has written to (#375).
+        jid = f"{bare_numeric_digits}@lid"
 
     jid_user = jid.split("@", 1)[0]
     identity = sender_identity(jid)
