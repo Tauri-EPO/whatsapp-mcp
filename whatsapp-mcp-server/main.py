@@ -49,12 +49,14 @@ from triage import snooze as triage_snooze
 from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
+    MESSAGES_MAX_LIMIT,
     UNANSWERED_FIELDS,
     UNANSWERED_MENTION_FIELDS,
     attach_message_notes,
     fetch_media_notes,
     fetch_sender_identities,
     msg_to_dict,
+    page_size,
     prefetch_sender_names,
     sender_identity,
     shape_rows,
@@ -453,7 +455,6 @@ def get_contact(identifier: str) -> dict[str, Any]:
     return contact
 
 
-MAX_LIST_LIMIT = 500
 MAX_CONTEXT_EACH_SIDE = 50
 MAX_RESULT_ROWS = 2000
 
@@ -672,8 +673,9 @@ def list_messages(
                 mentions_me=mentions_me,
             )
         }
-    # Cap limit at 500 to prevent excessive queries
-    limit = max(0, min(limit, MAX_LIST_LIMIT))
+    # Validated here as well as in the page function: the context windows below
+    # are sized from limit, so they need the clamped value.
+    limit = page_size(limit, MESSAGES_MAX_LIMIT)
     context_before, context_after = _cap_context(limit, include_context, context_before, context_after)
     messages = whatsapp_list_messages(
         after=after,
@@ -1133,8 +1135,6 @@ def list_chats(
     if count_only:
         _reject_count_only_extras(fields, cursor, page)
         return {"count": whatsapp_count_chats(query=query)}
-    # Cap limit at 200 to prevent excessive queries
-    limit = min(limit, 200)
     chats = whatsapp_list_chats(
         query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by, cursor=cursor
     )
@@ -1217,7 +1217,7 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: 
 
     Args:
         contact_jid: The contact's JID or phone number
-        limit: Maximum number of chats to return (default 20)
+        limit: Maximum number of chats to return (default 20, max 200)
         page: Page number for pagination (default 0)
         cursor: next_cursor from the previous page
     """

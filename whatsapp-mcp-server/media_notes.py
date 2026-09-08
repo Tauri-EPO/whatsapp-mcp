@@ -501,7 +501,7 @@ def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> l
     needle = (query or "").strip()
     if not needle:
         raise ToolError("invalid_argument", "query must not be empty")
-    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    limit = whatsapp.page_size(limit, MAX_SEARCH_LIMIT)
     conn = _connect(create=False)
     if conn is None:
         return []

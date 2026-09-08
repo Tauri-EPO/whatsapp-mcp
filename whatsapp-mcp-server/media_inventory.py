@@ -21,7 +21,16 @@ from typing import Any
 import media_notes
 import whatsapp
 from errors import ToolError
-from whatsapp import CHAT_POLICY, PageResult, decode_cursor, encode_cursor, parse_db_time, timestamp_bound
+from whatsapp import (
+    CHAT_POLICY,
+    PageResult,
+    decode_cursor,
+    encode_cursor,
+    page_number,
+    page_size,
+    parse_db_time,
+    timestamp_bound,
+)
 
 # Rows that carry a downloadable file. Pointer rows (reaction, poll_vote) and
 # text never appear in the inventory.
@@ -240,9 +249,10 @@ def list_media_page(
     """One page of media rows with size, hash, copy counts and cache state."""
     if sort not in SORTS:
         raise ToolError("invalid_argument", f"sort must be one of {', '.join(SORTS)}")
-    limit = max(1, min(int(limit), MAX_LIMIT))
+    limit = page_size(limit, MAX_LIMIT)
+    page = page_number(page)  # checked even when a cursor overrides it
     state = decode_cursor(cursor, "media")
-    offset = int(state["o"]) if state else max(0, int(page)) * limit
+    offset = int(state["o"]) if state else page * limit
 
     clauses, params = _media_filters(chat_jid, media_type, after, before, min_bytes, "m.", exclude_chat_jid)
     copies_clauses, copies_params = _media_filters(None, None, None, None, None, "")

@@ -544,7 +544,7 @@ def search_notes(
     wanted = (target_type or "").strip().lower()
     if wanted and wanted not in TARGET_TYPES:
         raise ToolError("invalid_argument", f"target_type must be one of {', '.join(TARGET_TYPES)}")
-    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    limit = whatsapp.page_size(limit, MAX_SEARCH_LIMIT)
     key = normalize_key(key) if key else None
 
     hits: list[dict[str, Any]] = []

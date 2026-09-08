@@ -74,6 +74,54 @@ class PageResult:
         return {"items": self.items, "next_cursor": self.next_cursor, "has_more": self.has_more}
 
 
+# Page-size ceilings, one per listing: the numbers the tool docstrings and
+# docs/TOOLS.md quote. page_size() clamps to them.
+MESSAGES_MAX_LIMIT = 500
+CHATS_MAX_LIMIT = 200
+CONTACT_CHATS_MAX_LIMIT = 200
+UNANSWERED_MAX_LIMIT = 200
+UNREAD_MAX_CHATS = 100
+UNREAD_MAX_PER_CHAT = 50
+
+
+def page_size(limit: Any, maximum: int, name: str = "limit") -> int:
+    """One page size for every listing tool: an integer in 1..maximum.
+
+    Asking for more rows than a tool serves is a reasonable request, so the
+    upper bound stays a clamp. Asking for none is not, and the listings read it
+    two different wrong ways (issue #309). Each binds `limit + 1` to see whether
+    a next page exists, so limit=-1 became `LIMIT 0`: an empty page whose
+    has_more (0 > -1) is true, which a walk on has_more never escapes. From
+    limit=-2 down the bound is negative, which SQLite reads as "no limit", so
+    the whole table was read and then sliced away. Neither is a page, so the
+    value is refused with the range named.
+    """
+    try:
+        value = int(limit)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ToolError(
+            "invalid_argument", f"{name} must be an integer between 1 and {maximum}, got {limit!r}"
+        ) from exc
+    if value < 1:
+        raise ToolError("invalid_argument", f"{name} must be between 1 and {maximum}, got {value}")
+    return min(value, maximum)
+
+
+def page_number(page: Any, name: str = "page") -> int:
+    """A page index: 0 or more.
+
+    A negative one is not page "minus something": SQLite reads a negative OFFSET
+    as zero, so it would silently serve page 0 under another page's name.
+    """
+    try:
+        value = int(page)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", f"{name} must be an integer of 0 or more, got {page!r}") from exc
+    if value < 0:
+        raise ToolError("invalid_argument", f"{name} must be 0 or more, got {value}")
+    return value
+
+
 def encode_cursor(payload: dict[str, Any]) -> str:
     """Opaque, URL-safe cursor. Callers pass it back verbatim."""
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -1981,6 +2029,8 @@ def list_messages_page(
     Returns:
         PageResult: items (hits plus context rows), next_cursor, has_more.
     """
+    limit = page_size(limit, MESSAGES_MAX_LIMIT)
+    page = page_number(page)
     cursor_state = decode_cursor(cursor, "messages")
     if cursor_state is not None and cursor_state.get("s") != sort_by:
         raise ToolError("invalid_argument", "cursor was created with a different sort_by")
@@ -2178,7 +2228,7 @@ def message_stats(
     """
     if group_by not in MESSAGE_STATS_GROUPINGS:
         raise ToolError("invalid_argument", f"group_by must be one of {', '.join(MESSAGE_STATS_GROUPINGS)}")
-    limit = max(1, min(int(limit), MAX_STATS_BUCKETS))
+    limit = page_size(limit, MAX_STATS_BUCKETS)
     bucket_sql = _STATS_GROUP_SQL[group_by]
     # Resolve "who am I" before opening the database: it is a local read in the
     # normal case but can fall back to the bridge over HTTP, and a cursor must
@@ -2388,6 +2438,8 @@ def list_chats_page(
     Returns:
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
+    limit = page_size(limit, CHATS_MAX_LIMIT)
+    page = page_number(page)
     cursor_state = decode_cursor(cursor, "chats")
     try:
         conn = _connect_messages_db()
@@ -2678,6 +2730,8 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
     # empty alias and match every row whose address form the bridge left empty.
     if not (jid or "").strip().split("@", 1)[0]:
         raise ToolError("invalid_argument", "a contact JID or phone number is required")
+    limit = page_size(limit, CONTACT_CHATS_MAX_LIMIT)
+    page = page_number(page)
     cursor_state = decode_cursor(cursor, "contact_chats")
     try:
         conn = _connect_messages_db()
@@ -3229,9 +3283,9 @@ def get_group_members(group_jid: str, limit: int = 100, page: int = 0, cursor: s
     if not group_jid.endswith("@g.us"):
         raise ToolError("invalid_argument", f"Not a group JID: {group_jid!r} (expected ...@g.us)")
     _require_allowed(group_jid)
-    limit = max(1, min(int(limit), GROUP_MEMBERS_MAX_LIMIT))
+    limit = page_size(limit, GROUP_MEMBERS_MAX_LIMIT)
     cursor_state = decode_cursor(cursor, "group_members")
-    offset = max(0, int(page)) * limit
+    offset = page_number(page) * limit
     if cursor_state is not None:
         if cursor_state.get("g") != group_jid:
             raise ToolError(
@@ -3624,11 +3678,7 @@ def coverage(
     max_gaps = max(1, min(max_gaps, 500))
     # Validated even when by_chat is off, so a typo is named rather than
     # silently dropped along with the argument it belongs to.
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError) as exc:
-        raise ToolError("invalid_argument", f"limit must be an integer, got {limit!r}") from exc
-    limit = max(1, min(limit, COVERAGE_BY_CHAT_MAX_LIMIT))
+    limit = page_size(limit, COVERAGE_BY_CHAT_MAX_LIMIT)
     if cursor and not by_chat:
         raise ToolError("invalid_argument", "cursor only pages the by_chat=True result; pass by_chat=True with it")
 
@@ -4058,8 +4108,11 @@ def list_unread(
     count_only returns {"count", "chats_with_unread"} over *every* matching
     chat, ignoring limit_chats and limit_per_chat, and reads no message row.
     """
-    limit_chats = max(1, min(int(limit_chats), 100))
-    limit_per_chat = max(1, min(int(limit_per_chat), 50))
+    # count_only ignores both list sizes (they describe rows it does not read),
+    # so they are only validated on the path that uses them.
+    if not count_only:
+        limit_chats = page_size(limit_chats, UNREAD_MAX_CHATS, "limit_chats")
+        limit_per_chat = page_size(limit_per_chat, UNREAD_MAX_PER_CHAT, "limit_per_chat")
     filter_clause, filter_params = unread_filters(since, max_age_days, exclude_groups, chat_jid, exclude_chat_jid)
     try:
         conn = _connect_messages_db()
@@ -4470,7 +4523,7 @@ def list_unanswered_page(
     groups whose mention is still waiting even though the group kept talking
     after it — the rows min_age_hours would otherwise hide.
     """
-    limit = max(1, min(int(limit), 200))
+    limit = page_size(limit, UNANSWERED_MAX_LIMIT)
     cursor_state = decode_cursor(cursor, "unanswered")
     from_where, where_params = _unanswered_from_where(
         since, exclude_groups, min_age_hours, chat_jid, exclude_chat_jid, ignore_closing_messages
