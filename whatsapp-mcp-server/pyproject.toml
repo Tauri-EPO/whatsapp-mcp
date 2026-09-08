@@ -1,3 +1,15 @@
+# The backend that reads [tool.setuptools] below. Without this table PEP 517
+# falls back to setuptools implicitly and uv keeps the project virtual, so
+# `py-modules` is never exercised by anything; declaring it makes the project a
+# real package (editable in the local venv, `uv build` produces the wheel that
+# list describes). The image is unaffected: its `uv sync --no-install-project`
+# still skips the project and the Dockerfile copies `*.py` itself. That wheel
+# is a local check, never a release artifact — the releases are the container
+# images (AGENTS.md §4), which is why `version` below stays nominal.
+[build-system]
+requires = ["setuptools>=84"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "whatsapp-mcp-server"
 version = "0.6.0"
