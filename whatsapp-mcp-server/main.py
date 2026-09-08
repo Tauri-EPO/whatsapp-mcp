@@ -1093,7 +1093,10 @@ def list_unanswered(
                 closes the conversation — a sticker, or one of "ok", "obrigado",
                 "obrigada", "valeu", "blz", "thanks", "👍", "🙏" (default False).
                 The same words are ignored when they are the mention that would
-                have added a group through include_group_mentions.
+                have added a group through include_group_mentions; a group whose
+                last word is somebody else's "ok" but which still holds an
+                unanswered mention of you is added by that mention rather than
+                dropped for the "ok".
         min_messages: Only chats where at least this many messages were spoken,
                 in either direction (default 0, no bound). min_messages=2 drops
                 the numbers that said one thing and were never a conversation — a

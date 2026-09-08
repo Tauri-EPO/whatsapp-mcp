@@ -218,17 +218,26 @@ def test_min_messages_bounds_the_mention_stream_too(store, bridge_down):
     assert TEAM not in [item["jid"] for item in dropped["items"]]
 
 
-def _add_obra(store, *, mention: str | None, media_type: str | None = None, older: str | None = None):
+def _add_obra(
+    store,
+    *,
+    mention: str | None,
+    media_type: str | None = None,
+    older: str | None = None,
+    last: str = "bom dia",
+):
     """A group that only mentions me to acknowledge, and keeps chatting afterwards.
 
     min_age_hours hides it from the ordinary rule, so the mention stream is the
-    only door it can come through. `older` adds a real question before it.
+    only door it can come through. `older` adds a real question before it, and
+    `last` is what the group said afterwards — "ok" makes the ordinary rule drop
+    the chat under `ignore_closing_messages` (issue #407).
     """
     rows = [
         # My last word: everything after it is what "pending" is measured from.
         ("c0", OBRA, "me", "vou ver", _stamp(days=5), 1, None, None),
         ("c1", OBRA, "x", mention, _stamp(days=3), 0, OWNER_LID, media_type),
-        ("c9", OBRA, "x", "bom dia", _stamp(minutes=15), 0, None, None),
+        ("c9", OBRA, "x", last, _stamp(minutes=15), 0, None, None),
     ]
     if older is not None:
         rows.append(("c0b", OBRA, "x", older, _stamp(days=4), 0, OWNER_LID, None))
@@ -305,6 +314,60 @@ def test_closing_mentions_never_take_a_slot_in_a_page(store, bridge_down):
     assert OBRA not in seen
     assert TEAM in seen
     assert len(seen) == len(set(seen)), seen
+
+
+def _listed(**kwargs):
+    """The whole page, no age bound: the ordinary rule is the door most chats use."""
+    return [item["jid"] for item in main.list_unanswered(include_group_mentions=True, **kwargs)["items"]]
+
+
+def test_a_third_party_ok_does_not_hide_a_pending_mention(store, bridge_down):
+    """The last word closes the chat for the ordinary rule; the mention still waits (#407)."""
+    _add_obra(store, mention=f"@{OWNER_LID} manda o orçamento?", last="ok")
+    # Flag off: the ordinary rule lists it, once, anchored on the "ok".
+    assert _listed().count(OBRA) == 1
+    # Flag on: the ordinary rule drops it, the mention stream picks it up.
+    page = main.list_unanswered(include_group_mentions=True, ignore_closing_messages=True)
+    rows = [item for item in page["items"] if item["jid"] == OBRA]
+    assert len(rows) == 1
+    assert rows[0]["mention"] is True and rows[0]["mention_message_id"] == "c1"
+    # Anchored on the mention (three days), not on the "ok" from 15 minutes ago.
+    assert rows[0]["mention_time"] == rows[0]["last_inbound_time"]
+    assert 71 < rows[0]["age_hours"] < 73
+
+
+def test_a_closing_last_message_without_a_mention_stays_hidden(store, bridge_down):
+    """Nothing pending, nothing to add: the group is out under the flag."""
+    _add_obra(store, mention="alguem viu?", last="ok")
+    with sqlite3.connect(store) as c:
+        # The mention row is the only pending one; drop it and the group is quiet.
+        c.execute("UPDATE messages SET mentions = NULL WHERE id = 'c1'")
+    assert OBRA in _listed()
+    assert OBRA not in _listed(ignore_closing_messages=True)
+
+
+def test_a_group_the_ordinary_rule_lists_is_not_added_twice(store, bridge_down):
+    """The coverage clause still leaves the covered chats to the ordinary stream."""
+    _add_obra(store, mention=f"@{OWNER_LID} manda o orçamento?")
+    jids = _listed(ignore_closing_messages=True)
+    assert jids.count(OBRA) == 1
+    assert len(jids) == len(set(jids)), jids
+
+
+def test_a_group_added_past_a_closing_last_message_walks_the_pages_once(store, bridge_down):
+    """Cursor walk: the added group takes one slot, and the page after it has no hole."""
+    _add_obra(store, mention=f"@{OWNER_LID} manda o orçamento?", last="ok")
+    whole = _listed(ignore_closing_messages=True)
+    assert OBRA in whole
+    seen: list[str] = []
+    cursor = None
+    for _ in range(len(whole) + 2):
+        page = main.list_unanswered(limit=1, include_group_mentions=True, ignore_closing_messages=True, cursor=cursor)
+        seen += [item["jid"] for item in page["items"]]
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert seen == whole
 
 
 def test_exclude_groups_wins_over_group_mentions(store, bridge_down):

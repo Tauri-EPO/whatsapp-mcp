@@ -5491,7 +5491,11 @@ def _mention_only_rows(
     mention row (issue #395): "ok @me" or a sticker acknowledges, it does not ask
     for anything, so it must not put a group on the list on its own. Unlike the
     triage marks this one hides a *newer* row, so the annotation query is told
-    about it too and both stay anchored on the same mention.
+    about it too and both stay anchored on the same mention. It also narrows what
+    counts as covered, since a chat the ordinary rule dropped for a closing last
+    message is not in that stream to be left to it: a group whose newest word is
+    somebody else's "ok" still owes you the answer to the mention below it (issue
+    #407).
     """
     filter_clause, filter_params = unread_filters(since, None, False, chat_jid, exclude_chat_jid)
     # unread_filters bounds `messages`, which is the mention row here.
@@ -5513,6 +5517,14 @@ def _mention_only_rows(
     if age_params:
         covered_bounds += " AND last_spoken.timestamp <= ?"
         covered_params.append(age_params[0])
+    if ignore_closing_messages:
+        # The ordinary rule's own predicate, on its row and on its raw text —
+        # nothing is stripped here, unlike on the mention above. Mirroring it
+        # exactly is what keeps the two streams disjoint: a chat it lists is
+        # covered, a chat it dropped for a closing word is not.
+        covered_closing, covered_closing_params = _closing_message_clause("last_spoken")
+        covered_bounds += f" AND NOT {covered_closing}"
+        covered_params += covered_closing_params
     # The keyset belongs on the chat's newest mention, not on the individual
     # mention rows: a group with two unanswered mentions would otherwise come
     # back on the next page anchored on the older one.
