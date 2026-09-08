@@ -93,7 +93,7 @@ func TestBuildGroupOwner(t *testing.T) {
 			wantPhone: "5511888888888", wantLID: "777@lid", wantName: "Ana",
 		},
 		{
-			name: "LID of an owner who left resolves from the map",
+			name:  "LID of an owner who left resolves from the map",
 			owner: lid("999"), wantJID: "5511777777777@s.whatsapp.net",
 			wantPhone: "5511777777777", wantLID: "999@lid", wantName: "Bruno", wantAltLookup: 1,
 		},
@@ -102,7 +102,7 @@ func TestBuildGroupOwner(t *testing.T) {
 			owner: lid("42"), wantJID: "42@lid", wantLID: "42@lid", wantAltLookup: 1,
 		},
 		{
-			name: "phone owner gains the LID from the map",
+			name:  "phone owner gains the LID from the map",
 			owner: phone("5511999999999"), wantJID: "5511999999999@s.whatsapp.net",
 			wantPhone: "5511999999999", wantLID: "111@lid", wantName: "Enrico", wantAltLookup: 1,
 		},
