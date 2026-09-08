@@ -27,6 +27,7 @@ from media_notes import store_transcript as notes_store_transcript
 from media_read import cached_only_path as media_cached_only_path
 from media_read import content_tool
 from media_read import read_media as media_read_bytes
+from media_resource import MediaResourceServer, attach_resource_links
 from notes import annotate as notes_annotate
 from notes import attach_notes
 from notes import compact as notes_compact
@@ -34,7 +35,6 @@ from notes import get_notes as notes_get_notes
 from notes import search_notes as notes_search_notes
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
-from strict_args import StrictArgumentServer
 from tool_policy import (
     apply_tool_policy,
     load_tool_policy,
@@ -183,10 +183,11 @@ from whatsapp import (
 # v2, host/port/transport security are passed to run() rather than stored on the
 # server, so nothing network-related is decided at import time either.
 MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
-# StrictArgumentServer, not MCPServer: the SDK drops undeclared arguments
-# silently, so a misspelled or invented parameter would be ignored instead of
-# reported (strict_args.py).
-mcp = StrictArgumentServer("whatsapp", version=MCP_VERSION)
+# MediaResourceServer, not MCPServer: the StrictArgumentServer (the SDK drops
+# undeclared arguments silently, so a misspelled or invented parameter would be
+# ignored instead of reported — strict_args.py) plus the
+# whatsapp://media/<chat_jid>/<message_id> resource scheme (media_resource.py).
+mcp = MediaResourceServer("whatsapp", version=MCP_VERSION)
 
 
 @mcp.tool()
@@ -1780,11 +1781,16 @@ def list_media(
         media_type, filename (documents keep the sender's name), bytes, sha256 (hex;
         null for rows without a hash), cached, cached_bytes, cached_file, copies (rows
         with the same sha256 across allowed chats), copies_in (distinct chats),
-        deleted_at, notes ({key: value} you recorded for the hash) and has_notes.
+        deleted_at, notes ({key: value} you recorded for the hash), has_notes and
+        resource_link ({"type": "resource_link", "uri": "whatsapp://media/...", "name",
+        "mimeType", "size"}): the MCP resource holding the bytes, for a client that
+        fetches a file with resources/read instead of a tool call. Absent on a row too
+        large for a resource read; read_media reads the same file, works everywhere,
+        and with as_text=true is not bound by that limit.
         After interpreting a file with has_notes=false, store what you understood with
         annotate_media(sha256, "summary", ...) so the next pass does not redo the work.
     """
-    return list_media_page(
+    result = list_media_page(
         chat_jid=_optional_chats(chat_jid),
         exclude_chat_jid=_optional_chats(exclude_chat_jid),
         media_type=media_type or None,
@@ -1797,6 +1803,8 @@ def list_media(
         page=page,
         cursor=cursor or None,
     ).to_dict()
+    attach_resource_links(result["items"])
+    return result
 
 
 @mcp.tool()
@@ -2194,7 +2202,9 @@ def read_media(
     The last block is always JSON with {"sha256", "mime", "bytes", "truncated", "notes"}:
     if `notes` is empty nobody has interpreted this file yet, so write what you saw
     back with annotate_media(sha256, "summary", ...) — keyed by content hash, it
-    comes back for free every time the file turns up again.
+    comes back for free every time the file turns up again. It also carries
+    `resource_link` — the same file as an MCP resource, `whatsapp://media/...`, for a
+    client that fetches bytes itself — whenever a resource read of it would succeed.
 
     A file above the applicable limit fails with `too_large` reporting its real size;
     lower `max_bytes` yourself when your client cannot hold that much. A file that is

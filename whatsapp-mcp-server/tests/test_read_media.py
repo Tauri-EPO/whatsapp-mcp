@@ -97,6 +97,13 @@ class TestBlocks:
             "bytes": len(PNG),
             "truncated": False,
             "notes": {},
+            "resource_link": {
+                "type": "resource_link",
+                "uri": f"whatsapp://media/{ALICE}/IMG1",
+                "name": "image_20260904_100000_IMG1.jpg",
+                "mimeType": "image/png",
+                "size": len(PNG),
+            },
         }
 
     def test_metadata_carries_the_notes_already_written(self, store):

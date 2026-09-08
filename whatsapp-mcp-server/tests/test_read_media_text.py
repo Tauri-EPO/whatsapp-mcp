@@ -137,7 +137,9 @@ class TestPdf:
         assert len(_texts(blocks)) == 3
         assert _texts(blocks)[0].startswith("--- page 1 of 3 ---")
         assert "Laudo do paciente" in _texts(blocks)[0]
-        assert _meta(blocks) | {"notes": {}} == {
+        meta = _meta(blocks)
+        assert meta["resource_link"]["uri"] == f"whatsapp://media/{ALICE}/PDF1"
+        assert {key: value for key, value in meta.items() if key != "resource_link"} | {"notes": {}} == {
             "sha256": None,
             "mime": "application/pdf",
             "bytes": _meta(blocks)["bytes"],
@@ -163,6 +165,9 @@ class TestPdf:
         assert exc.value.code == "too_large"
         blocks = media_read.read_media(ALICE, "BIGPDF", as_text=True)
         assert "Exame completo" in _texts(blocks)[0]
+        # ...and no link to it: resources/read never extracts, so it would
+        # answer too_large for the very file this call just read.
+        assert "resource_link" not in _meta(blocks)
 
     def test_a_corrupt_pdf_is_the_caller_s_problem_not_an_internal_error(self, documents):
         _cache("document_20260904_100000_PDF1.pdf", b"%PDF-1.4 and then nothing useful")
