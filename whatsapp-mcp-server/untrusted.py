@@ -16,7 +16,10 @@ Three layers, cheap first:
    it: a new content-returning tool either gets the decorator or fails the test.
 2. The **name** fields of every such result are sanitised, always, whatever the
    environment says: control characters out, length capped
-   (:func:`sanitize_name`). They stay outside the envelope of layer 3.
+   (:func:`sanitize_name`). They stay outside the envelope of layer 3. The two
+   long labels somebody else wrote — a group ``topic``, a poll ``question`` —
+   are cleaned the same way but keep their line breaks and a far larger cap
+   (:func:`sanitize_prose`), and they *are* inside the envelope.
 3. ``WHATSAPP_WRAP_UNTRUSTED=1`` (off by default) additionally wraps the prose
    fields of the result in ``<untrusted>...</untrusted>`` delimiters, so a model
    that skipped the description still sees a boundary around the data.
@@ -75,9 +78,8 @@ WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "valu
 # attacker-controlled label in the archive, since nobody in this account chose
 # it. "subject" and "recipient_name" are not returned by a decorated tool
 # today; they are here so that the next result shape carrying a name is
-# covered without anyone having to remember this file. Prose keys are *not*
-# here: a group topic and a poll question can legitimately be long, so they are
-# neither capped nor delimited today.
+# covered without anyone having to remember this file. The two long labels
+# ("topic", "question") are in PROSE_KEYS instead.
 NAME_KEYS = frozenset(
     {
         "name",
@@ -114,12 +116,34 @@ NAME_KEYS = frozenset(
 STRIPPED_CATEGORIES = frozenset({"Cc", "Cf"})
 ZERO_WIDTH_JOINER = "\u200d"
 KEPT_FORMAT_CHARS = frozenset({ZERO_WIDTH_JOINER} | {chr(code) for code in range(0xE0020, 0xE0080)})
-_KEPT_FORMAT_STR = "".join(sorted(KEPT_FORMAT_CHARS))
 
 # Cap. WhatsApp allows 25 characters in a push name and 100 in a group subject;
 # anything longer got in some other way and is not worth an agent's context.
 NAME_MAX_CHARS = 200
 ELLIPSIS = "…"
+
+# Long free text somebody else wrote under a fixed key: the group description
+# ("topic", list_group_members) and the poll "question" (get_poll_results).
+# Issue #332 — they fell between the two lists above: too long to cap like a
+# push name, but a label rather than a message, so nothing wrapped them either.
+# They are cleaned like a name and, unlike a name, delimited when the envelope
+# is on: they appear once per result, not once per row, so the delimiters cost
+# nothing an agent will miss.
+PROSE_KEYS = frozenset({"topic", "question"})
+
+# Line breaks and tabs stay in prose. A group description is genuinely written
+# in lines ("1. no links\n2. ..."), so stripping them would run its rules into
+# one sentence — losing legitimate content, which the name rule never risks
+# because a push name has no lines. Carriage return is not kept: with \n there
+# is nothing left for it to express, and a bare \r rewrites the line an
+# operator is reading.
+KEPT_PROSE_CONTROLS = frozenset({"\n", "\t"})
+_KEPT_PROSE_CHARS = KEPT_FORMAT_CHARS | KEPT_PROSE_CONTROLS
+
+# Cap. WhatsApp allows 2048 characters in a group description and 255 in a poll
+# question, so this cuts nothing that came through WhatsApp; it is a ceiling on
+# what a crafted payload can spend of an agent's context, not an edit.
+PROSE_MAX_CHARS = 4096
 
 # Everything under these keys is a {name: note} mapping the agent wrote about
 # somebody else's file, chat, contact or message, so every string leaf below one
@@ -165,24 +189,44 @@ def wrap_text(value: str) -> str:
     return f"{OPEN_TAG}{value}{CLOSE_TAG}"
 
 
-def sanitize_name(value: str) -> str:
-    """Strip the invisible characters from one label and cap its length.
+def _clean(value: str, *, kept: frozenset[str], max_chars: int) -> str:
+    """Drop the invisible characters outside ``kept`` and cap the result.
 
-    Independent of :data:`WRAP_ENV`: labels are never delimited and are always
-    cleaned. ``str.isprintable()`` is the fast path — it is false for exactly the
-    categories worth walking, so an ordinary name is returned untouched, and a
-    name holding a joined emoji takes the slow path and keeps its joiners.
+    ``str.isprintable()`` is the fast path — it is false for exactly the
+    categories worth walking, so an ordinary label is returned untouched, and one
+    holding a joined emoji takes the slow path and keeps its joiners. The cap is
+    measured after stripping, so padding a short label with zero-width
+    characters does not make it "too long".
     """
     if not value:
         return value
     if not value.isprintable():
-        value = "".join(
-            char for char in value if char in KEPT_FORMAT_CHARS or unicodedata.category(char) not in STRIPPED_CATEGORIES
-        )
-    if len(value) > NAME_MAX_CHARS:
-        # rstrip so the cut cannot leave a joiner dangling onto the ellipsis.
-        value = value[: NAME_MAX_CHARS - len(ELLIPSIS)].rstrip(_KEPT_FORMAT_STR) + ELLIPSIS
+        value = "".join(char for char in value if char in kept or unicodedata.category(char) not in STRIPPED_CATEGORIES)
+    if len(value) > max_chars:
+        # rstrip whatever was kept, so the cut cannot leave a joiner dangling
+        # onto the ellipsis (a name) or the ellipsis alone on a line (prose).
+        value = value[: max_chars - len(ELLIPSIS)].rstrip("".join(kept)) + ELLIPSIS
     return value
+
+
+def sanitize_name(value: str) -> str:
+    """Strip the invisible characters from one short label and cap its length.
+
+    Independent of :data:`WRAP_ENV`: labels are never delimited and are always
+    cleaned.
+    """
+    return _clean(value, kept=KEPT_FORMAT_CHARS, max_chars=NAME_MAX_CHARS)
+
+
+def sanitize_prose(value: str) -> str:
+    """The same cleaning for a long free-text label (:data:`PROSE_KEYS`).
+
+    Two differences from :func:`sanitize_name`: the line breaks and tabs of a
+    group description survive, and the cap is :data:`PROSE_MAX_CHARS` — high
+    enough that nothing WhatsApp itself accepts is ever cut. Applied whatever
+    :data:`WRAP_ENV` says; the delimiters go around the result.
+    """
+    return _clean(value, kept=_KEPT_PROSE_CHARS, max_chars=PROSE_MAX_CHARS)
 
 
 def _sanitize_names(value: Any) -> Any:
@@ -216,17 +260,21 @@ def clean_untrusted(payload: Any, *, wrap: bool) -> Any:
     """Return ``payload`` fit to hand to a model.
 
     Walks dicts and lists. The keys in :data:`NAME_KEYS` are sanitised whatever
-    ``wrap`` says (a list of labels item by item); the prose in
-    :data:`WRAPPED_KEYS` (and everything below a :data:`NOTES_KEYS` key) is delimited
-    only when ``wrap`` is true. Nothing else is touched, so JIDs, timestamps,
-    counts and cursors stay byte-identical and remain usable as arguments to the
-    next call.
+    ``wrap`` says (a list of labels item by item), and so are the long labels in
+    :data:`PROSE_KEYS`, which are delimited on top when ``wrap`` is true; the
+    prose in :data:`WRAPPED_KEYS` (and everything below a :data:`NOTES_KEYS` key)
+    is delimited only when ``wrap`` is true. Nothing else is touched, so JIDs,
+    timestamps, counts and cursors stay byte-identical and remain usable as
+    arguments to the next call.
     """
     if isinstance(payload, dict):
         result: dict[Any, Any] = {}
         for key, value in payload.items():
             if key in NAME_KEYS:
                 result[key] = _sanitize_names(value)
+            elif key in PROSE_KEYS and isinstance(value, str):
+                cleaned = sanitize_prose(value)
+                result[key] = wrap_text(cleaned) if wrap else cleaned
             elif key in NOTES_KEYS:
                 result[key] = _wrap_notes(value) if wrap else value
             elif key in WRAPPED_KEYS and isinstance(value, str):

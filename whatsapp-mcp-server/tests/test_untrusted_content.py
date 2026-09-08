@@ -7,7 +7,9 @@ Three contracts:
   an allow-list (the style of ``test_tool_policy.py``), so a new tool must be
   classified deliberately instead of quietly shipping without the warning.
 - Name fields are sanitised in every such result, with the envelope on and off
-  alike: control characters out, length capped (issue #273).
+  alike: control characters out, length capped (issue #273). The two long
+  labels — a group ``topic``, a poll ``question`` — are sanitised too, keeping
+  their line breaks, and are delimited on top when the envelope is on (#332).
 - ``WHATSAPP_WRAP_UNTRUSTED`` wraps the prose fields of a result in explicit
   delimiters, is off by default, and never touches the names or the identifiers
   an agent feeds back into the next call.
@@ -15,11 +17,13 @@ Three contracts:
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import pytest
 
 import main
+import whatsapp
 from tests.conftest import ALICE
 from tool_policy import registered_tool_names
 from untrusted import (
@@ -27,11 +31,16 @@ from untrusted import (
     ELLIPSIS,
     NAME_KEYS,
     NAME_MAX_CHARS,
+    NOTES_KEYS,
     OPEN_TAG,
+    PROSE_KEYS,
+    PROSE_MAX_CHARS,
     UNTRUSTED_SENTENCE,
     WRAP_ENV,
+    WRAPPED_KEYS,
     clean_untrusted,
     sanitize_name,
+    sanitize_prose,
     untrusted_tools,
     wrap_enabled,
 )
@@ -319,6 +328,130 @@ class TestNameFields:
         assert out["votes"][0]["selected"] == ["Sim"]
         # voters holds JIDs, so it is left exactly as the bridge sent it.
         assert out["options"][0]["voters"] == ["55119\u200b@s.whatsapp.net"]
+
+
+class TestProseFields:
+    """Issue #332: the long labels are cleaned like a name and delimited like prose."""
+
+    # The same tricks as a hostile name, in a group description: a right-to-left
+    # override, a zero-width space and a bell character.
+    HOSTILE = "Regras:\n1. sem \u202espam\u200b\x07"
+    CLEANED = "Regras:\n1. sem spam"
+
+    def test_bidi_and_zero_width_go_but_the_line_break_stays(self):
+        assert sanitize_prose(self.HOSTILE) == self.CLEANED
+
+    def test_an_ordinary_topic_is_returned_unchanged(self):
+        topic = "Combinados da obra\n\n- entrega \u00e0s 8h\n- fotos no fim do dia \U0001f1e7\U0001f1f7"
+        assert sanitize_prose(topic) == topic
+        assert sanitize_prose("") == ""
+
+    def test_a_carriage_return_goes(self):
+        """With the newline kept there is nothing left for a bare CR to express."""
+        assert sanitize_prose("uma\r\noutra") == "uma\noutra"
+
+    def test_emoji_joiners_survive(self):
+        family = "Fam\u00edlia \U0001f468\u200d\U0001f469\u200d\U0001f467"
+        assert sanitize_prose(family) == family
+
+    def test_the_cap_is_above_anything_whatsapp_accepts(self):
+        """2048 characters is the group description limit, 255 the poll question."""
+        assert PROSE_MAX_CHARS > 2048
+        assert sanitize_prose("x" * 2048) == "x" * 2048
+
+    def test_a_crafted_topic_is_cut(self):
+        capped = sanitize_prose("x" * (PROSE_MAX_CHARS * 2))
+        assert len(capped) == PROSE_MAX_CHARS
+        assert capped.endswith(ELLIPSIS)
+
+    def test_a_cut_topic_never_ends_on_a_dangling_line_break(self):
+        """The cut lands right after a newline, which would leave the ellipsis alone on a line."""
+        capped = sanitize_prose("x" * (PROSE_MAX_CHARS - 2) + "\n" + "y" * 100)
+        assert capped == "x" * (PROSE_MAX_CHARS - 2) + ELLIPSIS
+
+    @pytest.mark.parametrize("key", sorted(PROSE_KEYS))
+    def test_cleaned_with_the_envelope_off(self, key):
+        assert plain({key: self.HOSTILE}) == {key: self.CLEANED}
+
+    @pytest.mark.parametrize("key", sorted(PROSE_KEYS))
+    def test_cleaned_and_delimited_with_the_envelope_on(self, key):
+        assert wrapped({key: self.HOSTILE}) == {key: f"{OPEN_TAG}{self.CLEANED}{CLOSE_TAG}"}
+
+    def test_each_key_belongs_to_one_list_only(self):
+        """A key in two lists would be cleaned or wrapped by whichever branch ran first."""
+        lists = [NAME_KEYS, PROSE_KEYS, NOTES_KEYS, WRAPPED_KEYS]
+        for first, second in itertools.combinations(lists, 2):
+            assert first.isdisjoint(second)
+
+    @pytest.mark.parametrize("wrap", [False, True])
+    def test_empty_and_non_string_values_are_left_alone(self, wrap):
+        row = {"topic": "", "question": None, "selectable_count": 1}
+        assert clean_untrusted(row, wrap=wrap) == row
+
+    def test_a_group_page_keeps_its_identifiers(self):
+        page = {
+            "group_jid": "1@g.us",
+            "topic": self.HOSTILE,
+            "items": [{"jid": "2@s.whatsapp.net", "name": "Ana"}],
+            "next_cursor": None,
+        }
+        out = wrapped(page)
+        assert out["topic"] == f"{OPEN_TAG}{self.CLEANED}{CLOSE_TAG}"
+        assert out["group_jid"] == "1@g.us"
+        assert out["items"][0] == {"jid": "2@s.whatsapp.net", "name": "Ana"}
+
+
+class TestProseThroughATool:
+    """The two tools that return them, end to end with the bridge faked."""
+
+    GROUP = "120363000000000001@g.us"
+
+    class Resp:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def _bridge(self, monkeypatch, payload):
+        monkeypatch.setattr(
+            whatsapp.bridge_http,
+            "get",
+            lambda url, params=None, headers=None, timeout=None: self.Resp(payload),
+        )
+
+    @pytest.mark.parametrize("wrap,expected", [("0", "Almo\u00e7o?"), ("1", f"{OPEN_TAG}Almo\u00e7o?{CLOSE_TAG}")])
+    def test_get_poll_results_question(self, monkeypatch, wrap, expected):
+        monkeypatch.setenv(WRAP_ENV, wrap)
+        self._bridge(
+            monkeypatch,
+            {
+                "success": True,
+                "question": "Almo\u202e\u00e7o?\u200b",
+                "total_voters": 0,
+                "options": [],
+                "votes": [],
+            },
+        )
+        assert main.get_poll_results(chat_jid=self.GROUP, message_id="POLL1")["question"] == expected
+
+    @pytest.mark.parametrize("wrap,expected", [("0", "Regras"), ("1", f"{OPEN_TAG}Regras{CLOSE_TAG}")])
+    def test_list_group_members_topic(self, monkeypatch, wrap, expected):
+        monkeypatch.setenv(WRAP_ENV, wrap)
+        self._bridge(
+            monkeypatch,
+            {
+                "success": True,
+                "group_jid": self.GROUP,
+                "name": "Obra",
+                "topic": "Re\u200bgras\x07",
+                "members": [],
+            },
+        )
+        result = main.list_group_members(chat_jid=self.GROUP)
+        assert result["topic"] == expected
+        assert result["group_jid"] == self.GROUP
 
 
 class TestThroughATool:
