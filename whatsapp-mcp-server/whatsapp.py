@@ -1211,23 +1211,28 @@ def _spoken_filter(alias: str) -> str:
 CLOSING_MESSAGES: tuple[str, ...] = ("ok", "obrigado", "obrigada", "valeu", "blz", "thanks", "👍", "🙏")
 
 
-def _closing_message_clause(alias: str) -> tuple[str, list[str]]:
+def _closing_message_clause(alias: str, content: str = "", content_params: Sequence[str] = ()) -> tuple[str, list[str]]:
     """Rows that acknowledge rather than ask: a sticker, or one of CLOSING_MESSAGES.
 
     Reactions and poll votes are already excluded by `_spoken_filter`. Trailing
-    "." and "!" are ignored so "ok!" reads the same as "ok"; SQLite's lower() is
-    ASCII-only, which is all these words need and leaves the emoji untouched.
+    ".", "!" and spaces are ignored so "ok!" reads the same as "ok" (and so does
+    what is left of "ok @you!" once the mention is removed below); SQLite's
+    lower() is ASCII-only, which is all these words need and leaves the emoji
+    untouched.
 
     Both columns are nullable and the caller negates this clause, so `IS` and
     COALESCE keep it two-valued: `NOT NULL` is NULL, which would drop every plain
     text message instead of keeping it.
+
+    `content` overrides the text the words are compared with, for the one caller
+    that has to read past the `@…` WhatsApp writes into it
+    (`_closing_mention_clause`); its placeholders are bound by passing them as
+    `content_params`, which come back ahead of the words, in that order.
     """
     placeholders = ",".join("?" * len(CLOSING_MESSAGES))
-    clause = (
-        f"({alias}.media_type IS 'sticker'"
-        f" OR rtrim(lower(trim(COALESCE({alias}.content, ''))), '.!') IN ({placeholders}))"
-    )
-    return clause, list(CLOSING_MESSAGES)
+    text = content or f"{alias}.content"
+    clause = f"({alias}.media_type IS 'sticker' OR rtrim(lower(trim(COALESCE({text}, ''))), '.! ') IN ({placeholders}))"
+    return clause, [*content_params, *CLOSING_MESSAGES]
 
 
 def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = False, chat_match: str = "") -> str:
@@ -5346,11 +5351,38 @@ def _pending_mention_where(
     return sql, mention_params
 
 
+def _closing_mention_clause(ignore_closing_messages: bool, alias: str) -> tuple[str, list[str]]:
+    """`AND NOT <closing>` on a mention row, or nothing when the flag is off.
+
+    The mention stream anchors on the mention itself, so `ignore_closing_messages`
+    has to be applied there as well as to the chat's newest inbound message: a
+    group whose only pending mention is "ok @me" or a sticker is acknowledging,
+    not waiting, and used to come back through this door (issue #395).
+
+    The one difference from the ordinary rule is what "the words" are: WhatsApp
+    writes a mention into the text as `@<lid-or-phone>`, so the message that
+    reads "ok @me" is stored as "ok @158…" and would match nothing. This account's
+    own two spellings are removed before the comparison — only ours, so "ok
+    @someone-else @me" keeps a word we did not write and stays on the list.
+    """
+    if not ignore_closing_messages:
+        return "", []
+    owner = owner_identity()
+    text, strip_params = f"{alias}.content", []
+    for user in (owner.get("phone"), owner.get("lid")):
+        if user:
+            text = f"replace({text}, ?, '')"
+            strip_params.append(f"@{user}")
+    clause, params = _closing_message_clause(alias, text, strip_params)
+    return f" AND NOT {clause}", params
+
+
 def newest_pending_mentions(
     cur: sqlite3.Cursor,
     chat_jids: Sequence[str],
     bounds: Sequence[tuple[str, str]] = (),
     twins: ChatTwins = NO_CHAT_TWINS,
+    ignore_closing_messages: bool = False,
 ) -> dict[str, tuple[str, str]]:
     """{chat_jid: (message_id, timestamp)} of the newest unanswered mention per chat.
 
@@ -5358,6 +5390,11 @@ def newest_pending_mentions(
     so the annotation costs one bounded query per page. `bounds` carries the
     same time bounds the page was built with — a row anchored on a mention must
     name that mention, not a newer one the bound excluded.
+
+    `ignore_closing_messages` is there for the same reason: with the flag on, a
+    mention that only acknowledges is not a mention anyone waits on, so the row
+    anchored on the older real one must name that one rather than the "ok @me"
+    the page was built without (issue #395).
 
     `twins` makes "you answered" span both spellings of a merged pair: without
     it a reply sent under the phone JID would leave a mention filed under the
@@ -5373,13 +5410,14 @@ def newest_pending_mentions(
         own_match = "IN (messages.chat_jid, tw.twin_jid)"
     where, params = _pending_mention_where(cur, "messages", "messages.chat_jid", own_match)
     bound_sql = "".join(f" AND messages.timestamp {op} ?" for op, _ in bounds)
+    closing_sql, closing_params = _closing_mention_clause(ignore_closing_messages, "messages")
     placeholders = ",".join("?" * len(chat_jids))
     cur.execute(
         f"""{prefix}SELECT messages.chat_jid, messages.id, MAX(messages.timestamp)
             FROM messages{twin_join}
-            WHERE messages.chat_jid IN ({placeholders}) AND {where}{bound_sql}
+            WHERE messages.chat_jid IN ({placeholders}) AND {where}{bound_sql}{closing_sql}
             GROUP BY messages.chat_jid""",
-        (*twin_params, *chat_jids, *params, *(value for _, value in bounds)),
+        (*twin_params, *chat_jids, *params, *(value for _, value in bounds), *closing_params),
     )
     return {chat: (message_id, timestamp) for chat, message_id, timestamp in cur.fetchall()}
 
@@ -5389,6 +5427,7 @@ def _pending_mentions_by_row(
     listed: Sequence[str],
     bounds: Sequence[tuple[str, str]],
     twins: ChatTwins,
+    ignore_closing_messages: bool = False,
 ) -> dict[str, tuple[str, str]]:
     """`newest_pending_mentions` keyed by the row that lists, both spellings folded.
 
@@ -5398,14 +5437,17 @@ def _pending_mentions_by_row(
     answered, and the newer of what is left names the row.
     """
     if not twins.active:
-        return newest_pending_mentions(cur, listed, bounds)
+        return newest_pending_mentions(cur, listed, bounds, ignore_closing_messages=ignore_closing_messages)
     lists_for = {jid: jid for jid in listed}
     for jid in listed:
         twin = twins.merged_row(jid)
         if twin is not None:
             lists_for[twin.absorbed] = jid
     merged: dict[str, tuple[str, str]] = {}
-    for chat, pending in newest_pending_mentions(cur, list(lists_for), bounds, twins).items():
+    pending_by_chat = newest_pending_mentions(
+        cur, list(lists_for), bounds, twins, ignore_closing_messages=ignore_closing_messages
+    )
+    for chat, pending in pending_by_chat.items():
         row = lists_for[chat]
         if row not in merged or merged[row][1] < pending[1]:
             merged[row] = pending
@@ -5424,6 +5466,7 @@ def _mention_only_rows(
     cursor_state: dict[str, Any] | None,
     limit: int,
     min_messages: int = 0,
+    ignore_closing_messages: bool = False,
     triage_clause: str = "",
     triage_params: Sequence[Any] = (),
 ) -> tuple[list[tuple], list[tuple[str, str]]]:
@@ -5443,6 +5486,12 @@ def _mention_only_rows(
     hide the rows *older* than themselves, so the surviving mentions are still
     the newest ones and MAX() below picks the same anchor
     ``newest_pending_mentions`` names.
+
+    ``ignore_closing_messages`` applies the ordinary rule's own predicate to the
+    mention row (issue #395): "ok @me" or a sticker acknowledges, it does not ask
+    for anything, so it must not put a group on the list on its own. Unlike the
+    triage marks this one hides a *newer* row, so the annotation query is told
+    about it too and both stay anchored on the same mention.
     """
     filter_clause, filter_params = unread_filters(since, None, False, chat_jid, exclude_chat_jid)
     # unread_filters bounds `messages`, which is the mention row here.
@@ -5453,6 +5502,7 @@ def _mention_only_rows(
     if float(min_age_hours or 0) > 0:
         age_clause = "AND messages.timestamp <= ?"
         age_params = [timestamp_bound(datetime.now(UTC) - timedelta(hours=float(min_age_hours)))]
+    closing_clause, closing_params = _closing_mention_clause(ignore_closing_messages, "messages")
     # The bounds the ordinary rule applies to the chat's newest spoken message:
     # when it passes them the chat is already in that stream.
     covered_bounds, covered_params = "", []
@@ -5489,7 +5539,7 @@ def _mention_only_rows(
         WHERE chats.jid LIKE '%@g.us'
           AND {policy_clause}
           AND {mention_where}
-          {filter_clause} {age_clause} {stored_clause} {triage_clause}
+          {filter_clause} {age_clause}{closing_clause} {stored_clause} {triage_clause}
           AND COALESCE(last_spoken.is_from_me = 0 {covered_bounds}, 0) = 0
         GROUP BY chats.jid
         {keyset_clause}
@@ -5501,6 +5551,7 @@ def _mention_only_rows(
             *mention_params,
             *filter_params,
             *age_params,
+            *closing_params,
             *stored_params,
             *triage_params,
             *covered_params,
@@ -5699,6 +5750,7 @@ def list_unanswered_page(
                     cursor_state=cursor_state,
                     limit=limit + 1,
                     min_messages=min_messages,
+                    ignore_closing_messages=ignore_closing_messages,
                     # The same clause, and deliberately so: its anchor is
                     # `messages.timestamp`, which is the last inbound message
                     # above and the mention row there — the message each stream
@@ -5710,11 +5762,18 @@ def list_unanswered_page(
                     triage_params=triage_params,
                 )
             rows = _merge_by_anchor(rows, extra, limit + 1)
-            # Same bounds as the rows: the mention named here is the one the
-            # page was built around, never a newer one the bound left out. The
-            # triage notes are not among them — the flag says what the chat
-            # holds, and a row they did not hide keeps naming its mention.
-            mentions_by_chat = _pending_mentions_by_row(cur, [row[0] for row in rows], bounds, twins)
+            # Same bounds as the rows, and the same closing-message rule: the
+            # mention named here is the one the page was built around, never a
+            # newer one a bound or "ok @me" left out. The triage notes are not
+            # among them — the flag says what the chat holds, and a row they did
+            # not hide keeps naming its mention.
+            mentions_by_chat = _pending_mentions_by_row(
+                cur,
+                [row[0] for row in rows],
+                bounds,
+                twins,
+                ignore_closing_messages=ignore_closing_messages,
+            )
         has_more = len(rows) > limit
         rows = rows[:limit]
         next_cursor = None

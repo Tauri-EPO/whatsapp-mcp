@@ -21,6 +21,7 @@ OWNER_LID = "158883943301358"
 TEAM = "120363000000000001@g.us"
 FAMILY = "120363000000000002@g.us"
 QUIET = "120363000000000003@g.us"
+OBRA = "120363000000000004@g.us"
 ALICE = "5511888888888@s.whatsapp.net"
 
 
@@ -215,6 +216,95 @@ def test_min_messages_bounds_the_mention_stream_too(store, bridge_down):
     assert TEAM in [item["jid"] for item in kept["items"]]  # t1, t2, t3
     dropped = main.list_unanswered(min_age_hours=24, include_group_mentions=True, min_messages=4)
     assert TEAM not in [item["jid"] for item in dropped["items"]]
+
+
+def _add_obra(store, *, mention: str | None, media_type: str | None = None, older: str | None = None):
+    """A group that only mentions me to acknowledge, and keeps chatting afterwards.
+
+    min_age_hours hides it from the ordinary rule, so the mention stream is the
+    only door it can come through. `older` adds a real question before it.
+    """
+    rows = [
+        # My last word: everything after it is what "pending" is measured from.
+        ("c0", OBRA, "me", "vou ver", _stamp(days=5), 1, None, None),
+        ("c1", OBRA, "x", mention, _stamp(days=3), 0, OWNER_LID, media_type),
+        ("c9", OBRA, "x", "bom dia", _stamp(minutes=15), 0, None, None),
+    ]
+    if older is not None:
+        rows.append(("c0b", OBRA, "x", older, _stamp(days=4), 0, OWNER_LID, None))
+    with sqlite3.connect(store) as c:
+        c.execute("INSERT INTO chats (jid, name, last_message_time) VALUES (?, 'Obra', ?)", (OBRA, _stamp(minutes=15)))
+        c.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, mentions, media_type)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            rows,
+        )
+
+
+def _waiting(**kwargs):
+    return [
+        item["jid"] for item in main.list_unanswered(min_age_hours=24, include_group_mentions=True, **kwargs)["items"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "mention, media_type",
+    [
+        # WhatsApp writes the mention into the text, so this is stored as "ok @158…".
+        (f"ok @{OWNER_LID}", None),
+        (f"@{OWNER_LID} 👍", None),
+        (f"@{OWNER_LID}", "sticker"),
+        # Removing the mention leaves "valeu  !": the space it left goes with the "!".
+        (f"valeu @{OWNER_LID}!", None),
+        (f"Obrigado @{OWNER_LID}.", None),
+    ],
+)
+def test_a_closing_mention_does_not_put_a_group_on_the_list(store, bridge_down, mention, media_type):
+    """ignore_closing_messages reads the mention too, not only the last message (#395)."""
+    _add_obra(store, mention=mention, media_type=media_type)
+    assert OBRA in _waiting()
+    hidden = _waiting(ignore_closing_messages=True)
+    assert OBRA not in hidden
+    # A real mention in another group is untouched by the flag.
+    assert TEAM in hidden
+
+
+def test_a_closing_mention_leaves_the_older_real_one_in_charge(store, bridge_down):
+    """The row must be anchored on, and name, the mention the flag did not hide."""
+    _add_obra(store, mention=f"ok @{OWNER_LID}", older=f"@{OWNER_LID} manda o orçamento?")
+    without = main.list_unanswered(min_age_hours=24, include_group_mentions=True)
+    obra = next(item for item in without["items"] if item["jid"] == OBRA)
+    assert obra["mention_message_id"] == "c1"
+
+    out = main.list_unanswered(min_age_hours=24, include_group_mentions=True, ignore_closing_messages=True)
+    obra = next(item for item in out["items"] if item["jid"] == OBRA)
+    assert obra["mention_message_id"] == "c0b"
+    assert obra["mention_time"] == obra["last_inbound_time"]  # anchor and pointer agree
+    assert 95 < obra["age_hours"] < 97  # four days, not three
+
+
+def test_a_closing_mention_of_somebody_else_is_still_a_mention(store, bridge_down):
+    """Only this account's own @… is read past: the rest of the text still counts."""
+    _add_obra(store, mention=f"ok @5511777777777 @{OWNER_LID}")
+    assert OBRA in _waiting(ignore_closing_messages=True)
+
+
+def test_closing_mentions_never_take_a_slot_in_a_page(store, bridge_down):
+    """Hidden in SQL, before LIMIT, so a walk returns no hole and no repeat."""
+    _add_obra(store, mention=f"ok @{OWNER_LID}")
+    seen: list[str] = []
+    cursor = None
+    for _ in range(5):
+        page = main.list_unanswered(
+            limit=1, min_age_hours=24, include_group_mentions=True, ignore_closing_messages=True, cursor=cursor
+        )
+        seen += [item["jid"] for item in page["items"]]
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    assert OBRA not in seen
+    assert TEAM in seen
+    assert len(seen) == len(set(seen)), seen
 
 
 def test_exclude_groups_wins_over_group_mentions(store, bridge_down):
