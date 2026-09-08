@@ -46,7 +46,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
 | `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
 | `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
-| `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)*                       | MCP server only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values) in `<untrusted>…</untrusted>` delimiters. See [Marking message content as untrusted](#marking-message-content-as-untrusted) |
+| `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)*                       | MCP server only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values) in `<untrusted>…</untrusted>` delimiters. Name fields are sanitised in every mode, set or not. See [Marking message content as untrusted](#marking-message-content-as-untrusted) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
@@ -328,9 +328,11 @@ WHATSAPP_WRAP_UNTRUSTED=1
 - Wrapped: `content`, `last_message`, `transcript` / `text` (voice-note
   transcripts) and every note value, in every tool that carries the sentence.
 - **Not** wrapped: JIDs, message IDs, timestamps, counts, cursors, file paths and
-  the short name fields (`name`, `chat_name`, `sender_display`) — an agent feeds
-  those back into the next call and prints them, so tagging them would cost
-  readability for no extra boundary. The sentence still covers them.
+  the name fields (`name`, `chat_name`, `sender_name`, `sender_display`, group
+  subjects) — an agent feeds those back into the next call and prints them, so
+  tagging them would cost readability for no extra boundary. The sentence still
+  covers them, and they are sanitised instead (below) whether this variable is
+  set or not.
 - Error envelopes are never wrapped: they come from this server, not from WhatsApp.
 - MCP server only; the bridge is unaffected. Same strict boolean parse as
   `WHATSAPP_READ_ONLY` (`1/true/yes/on`, `0/false/no/off`), and an unreadable
@@ -341,8 +343,16 @@ Off by default because it changes the shape of every string an existing client
 reads. Turn it on for an autonomous agent; leave it off when a human is in the
 loop reading the output.
 
-**Neither layer is a control.** Both are hints to a model that is free to ignore
-them. The mitigations that are actually enforced are
+**Always on, nothing to configure:** the name fields are *sanitised* in every
+result — control characters, zero-width characters and bidi controls removed
+(the joiners that build an emoji survive), length capped at 200 characters. A
+name is a label; a newline or a right-to-left override in one is never
+legitimate, so there is no mode in which keeping it would be right. Message
+content is not sanitised: its line breaks and its length are the data you asked
+for. See [TOOLS.md](TOOLS.md#name-fields) for the exact field list.
+
+**Neither the sentence nor the delimiters are a control.** Both are hints to a
+model that is free to ignore them. The mitigations that are actually enforced are
 [read-only mode](#read-only-mode-recommended-for-a-personal-assistant) and the
 [chat allow-list](#restricting-which-chats-the-agent-can-touch); see
 [SECURITY.md](../SECURITY.md).
