@@ -914,7 +914,10 @@ def list_unread(
     One call instead of list_chats followed by list_messages(unread_only=True) per
     chat. A message is unread when it is inbound and newer than the chat's read
     marker (as read on any of your devices); chats never read count as entirely
-    unread. Reactions, poll votes and deleted messages are not counted.
+    unread. Reactions, poll votes and deleted messages are not counted, and
+    neither is the status feed ("status@broadcast"): a status post is a
+    broadcast nobody is waiting on. Read it with
+    list_messages(chat_jid="status@broadcast") when you want it.
 
     Busy accounts are dominated by group chatter nobody reads: pass
     exclude_groups=True to see only direct conversations, and max_age_days to
@@ -1015,7 +1018,8 @@ def list_unanswered(
 
     Reactions, poll votes and revoked messages do not count as speaking: a thumbs-up
     from you does not hide a chat, and one from them does not create one. A chat with
-    no stored messages never appears.
+    no stored messages never appears, and neither does the status feed
+    ("status@broadcast") — a status post is a broadcast, not a question.
 
     Feed your decisions back or the same backlog comes round every run: mark_handled
     once a chat is dealt with (including by phone call or by somebody else), snooze
@@ -1178,8 +1182,12 @@ def list_chats(
         when WhatsApp stored no name for the chat (or only the number);
         `name_source` says which: "chat" (stored with the conversation), "contacts"
         (from your phone book), "push" (the name the contact gave themselves,
-        because the phone book had nothing) or "jid" (nobody knows a name —
-        identify the chat by its JID). `push_name` is that self-chosen name
+        because the phone book had nothing), "jid" (nobody knows a name —
+        identify the chat by its JID) or "system" (this server named it: the
+        status feed "status@broadcast" lists as "Status updates" with
+        `is_status: true`, since WhatsApp stores it under whoever posted last.
+        It carries everyone's status posts and never waits for a reply, so
+        list_unread and list_unanswered leave it out). `push_name` is that self-chosen name
         whatever `name` ended up being: a cached snapshot with no date attached, so
         present it as "recorded as", never as "is".
         The last_* fields describe the chat's newest stored message, which can be older

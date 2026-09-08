@@ -37,7 +37,7 @@ Rules worth knowing:
 
 - **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them. The single-row tools `get_chat` and `get_message_context` have no `count_only` — there is nothing to count — and passing it is refused as an [unknown argument](#unknown-arguments).
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only — those two are refused elsewhere rather than accepted and then dropped.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
 - **The long text `max_content_chars` cuts is the row's own.** `content` on message rows, `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
 
 ## Unknown arguments
@@ -212,7 +212,7 @@ predicate each falls on:
 | `<id>@lid` | The same person's anonymous link-ID alias | **yes** |
 | `<id>@g.us` | Group chat (the only form `is_group: true` covers) | no |
 | `<id>@broadcast` | Broadcast list: one message, many recipients, replies land in separate DMs | no |
-| `status@broadcast` | Status updates (a `@broadcast` JID like any other) | no |
+| `status@broadcast` | The status feed: every contact's status post under one JID. Its own family — see [The status feed](#the-status-feed-statusbroadcast) | no |
 | `<id>@newsletter` | Channel you follow; you cannot reply at all | no |
 | `<id>@bot` | Meta AI and other WhatsApp bots — they answer on their own, nobody is waiting for you (issue #274) | no |
 | anything else | Servers whatsmeow knows but this archive rarely sees (`@c.us`, `@msgr`, `@interop`, `@hosted`), or one WhatsApp adds later | no, until it is decided |
@@ -267,6 +267,20 @@ Up to 2000 pairs are collapsed per store, orders of magnitude more than an
 account has (fewer on a build of SQLite older than 3.32, which allows far fewer
 query parameters). Past that the quietest pairs list under both spellings and
 the server logs a warning, rather than a listing failing.
+
+### The status feed (`status@broadcast`)
+
+WhatsApp files every contact's status post under one JID, `status@broadcast`, so
+the archive holds it as a chat whose stored name is whoever posted last — a
+phone number that changes with the feed. It is not a group, not direct, and
+nobody is waiting there for a reply. It gets its own family (issue #379):
+
+- **Excluded from `list_unread` and `list_unanswered` unconditionally**, the way a reaction never counts as speaking — including when you name it in `chat_jid`, and it is left out of `count_only` too.
+- **Listed by `list_chats`, `get_chat` and `get_contact_chats`** as `name: "Status updates"`, `name_source: "system"`, `is_group: false`, `is_status: true`. `is_status` is only on this row, the way `aliases` is only on a merged pair, and it is a valid `fields` name on the chat listings.
+- Never merged with another chat: `aliases` collapses phone/LID pairs only, and `status@broadcast` is neither spelling. It is not a contact either — `search_contacts` skips it, instead of answering the last poster's number with a "contact" whose phone number was the word `status`.
+- `exclude_groups` is unchanged — it was already dropping the feed as a non-direct server.
+- Everything else still sees it, under the same label: `list_messages(chat_jid="status@broadcast")` returns the posts (`chat_name: "Status updates"`), and `message_stats(group_by="chat")` and `coverage(by_chat=true)` count and name it, because those report what the archive holds rather than what is waiting for you.
+- The label is also what `list_chats` sorts and searches on, so `sort_by="name"` files it under "Status updates" and `query="Status updates"` finds it. Searching the poster's number does not.
 
 ### Who sent it (`sender_phone` / `sender_lid`)
 
@@ -1639,7 +1653,7 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
   "name": "Alice",
   "push_name": "Ali",                  // the name they gave themselves, when known
   "is_group": false,
-  "name_source": "contacts",           // "chat" | "contacts" | "push" | "jid"
+  "name_source": "contacts",           // "chat" | "contacts" | "push" | "jid" | "system"
   "last_message_time": "2024-01-15T10:30:00+00:00",
   "last_message": "hello world",       // null when include_last_message=false
   "last_sender": "1234567890",         // null when include_last_message=false
@@ -1647,6 +1661,7 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
   "last_read_time": "2024-01-15T09:00:00+00:00", // how far the chat is read
   "has_messages": true,                // false = no stored message for this chat
   "unread": true                       // last message is inbound and unread
+  // "is_status": true                 // only on status@broadcast (see below)
 }
 ```
 
@@ -1665,6 +1680,7 @@ says where the returned `name` came from:
 | `contacts` | The stored name was empty or just the number, and this one comes from your phone book. |
 | `push` | Nothing in the phone book either: this is the name the contact gave **themselves**. |
 | `jid` | Nobody knows a name: `name` is whatever was stored (`null`, or the number). Identify the chat by its JID. |
+| `system` | This server named the chat: the [status feed](#the-status-feed-statusbroadcast) lists as "Status updates", since what WhatsApp stored is whoever posted last. |
 
 **`push_name` is the other half of the answer.** Your phone book and the
 contact's own name are two different facts, and collapsing them lost the one
@@ -1727,7 +1743,7 @@ Caveats:
 
 ### `list_unread`
 
-One call for "what is waiting for me": chats with unread inbound messages, each with its newest unread rows (oldest first within the chat), most recently active chat first. Unread = inbound and newer than the chat's read marker on any device; never-read chats count entirely. Reactions, poll votes and deleted messages are excluded.
+One call for "what is waiting for me": chats with unread inbound messages, each with its newest unread rows (oldest first within the chat), most recently active chat first. Unread = inbound and newer than the chat's read marker on any device; never-read chats count entirely. Reactions, poll votes and deleted messages are excluded, and so is the [status feed](#the-status-feed-statusbroadcast).
 
 **Parameters:**
 
@@ -1771,7 +1787,8 @@ Newest inbound message first, paged like every other list tool.
 
 Reactions, poll votes and revoked messages do not count as speaking: a
 thumbs-up from you does not hide a chat, and one from them does not create one.
-Chats with no stored messages never appear.
+Chats with no stored messages never appear, and neither does the
+[status feed](#the-status-feed-statusbroadcast).
 
 **Parameters:**
 

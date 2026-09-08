@@ -425,6 +425,36 @@ def _row_to_message(row: tuple) -> Message:
     )
 
 
+# The status feed. WhatsApp files every contact's status post under this one
+# JID, so the archive holds it as a chat whose stored name is whoever posted
+# last — a phone number that changes with the feed (issue #379). It is a chat
+# for reading (`list_messages(chat_jid="status@broadcast")` returns the posts)
+# and never a conversation waiting for a reply.
+STATUS_BROADCAST_JID = "status@broadcast"
+STATUS_CHAT_NAME = "Status updates"
+
+
+def chat_display_name(jid: str, stored: str | None) -> str | None:
+    """The name a listing shows for a chat, before the phone book is consulted.
+
+    Only the status feed differs from what the archive stored, and it differs
+    for every reader: a label that changed with the last poster would be a
+    different chat on every page (issue #379).
+    """
+    return STATUS_CHAT_NAME if jid == STATUS_BROADCAST_JID else stored
+
+
+def _chat_name_expr(alias: str = "chats") -> str:
+    """`chat_display_name` in SQL, for the statements that sort and search on the name.
+
+    The status feed is listed under a name this server chose, so ordering and
+    `query` have to read that name too — otherwise `list_chats` shows "Status
+    updates" and files it under a phone number nobody can search for. The two
+    constants are module-level, never user input, so they are inlined.
+    """
+    return f"CASE WHEN {alias}.jid = '{STATUS_BROADCAST_JID}' THEN '{STATUS_CHAT_NAME}' ELSE {alias}.name END"
+
+
 @dataclass
 class Chat:
     jid: str
@@ -446,7 +476,8 @@ class Chat:
     # chat title or group subject), "contacts" = your phone book
     # (whatsmeow_contacts) because the stored name was missing or just the
     # number, "push" = the name the contact gave themselves, because the phone
-    # book had nothing either, "jid" = nothing better than the number exists.
+    # book had nothing either, "jid" = nothing better than the number exists,
+    # "system" = this server named the chat itself (the status feed, #379).
     name_source: str = "chat"
     # The name the contact gave themselves, whatever `name` ended up being.
     # A cached snapshot of unknown age (whatsmeow_contacts has no timestamp).
@@ -460,6 +491,16 @@ class Chat:
     def is_group(self) -> bool:
         """Determine if chat is a group based on JID pattern."""
         return self.jid.endswith("@g.us")
+
+    @property
+    def is_status(self) -> bool:
+        """The status feed, the one chat that is nobody's conversation (issue #379).
+
+        `status@broadcast` collects everyone's status posts under a single JID.
+        It is not a group and not direct, and no one is waiting for a reply in
+        it, so the triage listings drop it and this flag names it for the rest.
+        """
+        return self.jid == STATUS_BROADCAST_JID
 
     @property
     def unread(self) -> bool:
@@ -775,7 +816,10 @@ def msg_to_dict(
         "content": message.content,
         "is_from_me": message.is_from_me,
         "chat_jid": message.chat_jid,
-        "chat_name": message.chat_name,
+        # The chat this row belongs to, named as the chat listings name it: the
+        # status feed stores the last poster's number, which describes neither
+        # the chat nor this message (issue #379).
+        "chat_name": chat_display_name(message.chat_jid, message.chat_name),
         "media_type": message.media_type,
         "filename": (message.filename or None) if is_media else None,
         "target_message_id": _target_id(message),
@@ -798,6 +842,8 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 
     `aliases` is only on the rows that carry one — a merged phone/LID pair
     (issue #337) — the way `notes` is only on the rows that have notes.
+    `is_status` follows the same rule: it marks the one status feed row
+    (issue #379) instead of adding `false` to every chat in a listing.
     """
     row = {
         "jid": chat.jid,
@@ -815,6 +861,8 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
     }
     if chat.aliases:
         row["aliases"] = list(chat.aliases)
+    if chat.is_status:
+        row["is_status"] = True
     return row
 
 
@@ -863,7 +911,9 @@ _CHAT_ROW_FIELDS: tuple[str, ...] = (
 # accepted and then always absent from the row is the silent no-op `fields`
 # exists to avoid, so each tool validates against the keys its rows can carry.
 # Both collapse a phone/LID pair (issues #337, #366), so "aliases" is on both.
-CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated", "aliases")
+# "is_status" is only on the chat listings: list_unanswered never returns the
+# status feed (issue #379), so the name would be a column of nothing there.
+CHAT_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "content_truncated", "aliases", "is_status")
 UNANSWERED_FIELDS: tuple[str, ...] = (*_CHAT_ROW_FIELDS, "last_inbound_time", "age_hours", "aliases")
 
 # The three keys include_group_mentions=True adds. They are only valid names
@@ -1606,10 +1656,19 @@ def _apply_name_fallback(chats: list[Chat]) -> None:
     the phone book (issue #230). `push_name` — the name the contact gave
     themselves — is attached whatever `name` ended up being, because it answers
     a different question (#280). Resolution is batched over the whole page.
+
+    The status feed is named here rather than by the phone book: WhatsApp stores
+    it under whoever posted last, so the row would otherwise read as a chat with
+    that person (issue #379).
     """
-    direct = [chat for chat in chats if not chat.is_group]
+    direct = [chat for chat in chats if not chat.is_group and not chat.is_status]
     profiles = _contact_profiles([chat.jid for chat in direct]) if direct else {}
     for chat in chats:
+        if chat.is_status:
+            chat.name = chat_display_name(chat.jid, chat.name)
+            chat.name_source = "system"
+            chat.push_name = None
+            continue
         profile = profiles.get(chat.jid, _NO_PROFILE)
         chat.push_name = profile.push_name
         if not _is_placeholder_name(chat.name):
@@ -2635,7 +2694,9 @@ def message_stats(
                 bucket["key"] = key = twin.jid
                 if _is_placeholder_name(chat_name) and not _is_placeholder_name(twin.name):
                     chat_name = twin.name
-            bucket["label"] = chat_name or key
+            # The status feed is counted like any other chat and labelled like
+            # everywhere else, so a bucket and a chat row name the same thing (#379).
+            bucket["label"] = chat_display_name(key, chat_name) or key
         elif group_by == "sender":
             bucket["label"] = get_sender_name(key) if key else None
         buckets.append(bucket)
@@ -2734,7 +2795,10 @@ def _chat_filter(query: str | None, twins: ChatTwins = NO_CHAT_TWINS) -> tuple[l
         params.extend(hidden)
     if query:
         # instr() on the raw column matches Unicode; LOWER()+LIKE only covers ASCII.
-        clause = "instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?"
+        # The searched name is the one the row shows (#379), so the status feed
+        # answers to "Status updates" and not to the last poster's number.
+        name = _chat_name_expr()
+        clause = f"instr(LOWER({name}), LOWER(?)) > 0 OR instr({name}, ?) > 0 OR chats.jid LIKE ?"
         params.extend([query, query, f"%{query}%"])
         # A merged row answers to its twin's name and spelling too, and those
         # are folded in only after this runs.
@@ -2818,12 +2882,13 @@ def list_chats_page(
         # Sorting by name reads the name the row will *show*: for a merged pair
         # that can be the twin's, and the `@lid` row that usually lists carries
         # none, so ordering on the raw column would file the person under "".
-        prefix, twin_join, sort_name, twin_params = "", "", "chats.name", []
+        # For the status feed it is the label this server gives it (#379).
+        prefix, twin_join, sort_name, twin_params = "", "", _chat_name_expr(), []
         if twins.active and sort_by != "last_active":
             cte, twin_params = twins.cte()
             prefix = f"WITH {cte} "
             twin_join = "LEFT JOIN chat_twin tw ON tw.jid = chats.jid LEFT JOIN chats twin ON twin.jid = tw.twin_jid"
-            sort_name = "COALESCE(NULLIF(chats.name, ''), twin.name)"
+            sort_name = f"COALESCE(NULLIF({_chat_name_expr()}, ''), twin.name)"
 
         query_parts = [
             f"""
@@ -2947,6 +3012,11 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     (whatsapp.db) to find contacts. Results are deduplicated by JID, and each
     one says which field the query matched (#280), because a contact saved as
     "Z Aa" is found by the name they gave themselves.
+
+    Groups are not contacts, and neither is the status feed: `status@broadcast`
+    is stored under the number of whoever posted last, so searching that number
+    used to answer with a "contact" whose phone number was the word "status"
+    (issue #379).
     """
     seen_jids: set[str] = set()
     # (jid, name, push name if this hit carried one, fields the query could
@@ -2961,12 +3031,13 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         conn = _connect_messages_db()
         cursor = conn.cursor()
         cursor.execute(
-            """
+            f"""
             SELECT DISTINCT jid, name
             FROM chats
             WHERE
                 (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR jid LIKE ?)
                 AND jid NOT LIKE '%@g.us'
+                AND jid <> '{STATUS_BROADCAST_JID}'
             ORDER BY name, jid
             LIMIT 50
         """,
@@ -4108,9 +4179,12 @@ def _coverage_by_chat(
         listed_jid = twin.jid if twin else jid
         if twin is not None and _is_placeholder_name(name) and not _is_placeholder_name(twin.name):
             name = twin.name
+        shown = names.get(listed_jid, name) if _is_placeholder_name(name) else name
         item = {
             "chat_jid": listed_jid,
-            "name": names.get(listed_jid, name) if _is_placeholder_name(name) else name,
+            # The status feed is a chat to backfill like any other, under the
+            # name the chat listings give it (#379).
+            "name": chat_display_name(listed_jid, shown),
             "first_message_time": first_time,
             "last_message_time": last_time,
             "messages": int(stored or 0),
@@ -4701,10 +4775,11 @@ def unread_filters(
     chat_jid: str | Sequence[str] | None = None,
     exclude_chat_jid: str | Sequence[str] | None = None,
 ) -> tuple[str, list[Any]]:
-    """Optional predicates shared by the unread queries.
+    """The predicates shared by the unread queries: the caller's, plus the status feed.
 
-    Returns an AND-prefixed SQL fragment (empty when nothing is filtered) and
-    its parameters, for a query that has both `messages` and `chats` in scope.
+    Returns an AND-prefixed SQL fragment and its parameters, for a query that
+    has both `messages` and `chats` in scope. The caller's filters are all
+    optional; dropping `status@broadcast` is not (issue #379).
     `since` and `max_age_days` are two spellings of the same lower bound, so
     passing both is an error rather than a silent winner.
     """
@@ -4722,7 +4797,11 @@ def unread_filters(
             raise ToolError("invalid_argument", f"max_age_days must be 1 or more, got {max_age_days!r}")
         since_ts = timestamp_bound(datetime.now(UTC) - timedelta(days=days))
 
-    clauses: list[str] = []
+    # The status feed is never waiting for a reply, so it leaves the triage
+    # listings the way a reaction never counts as speaking (issue #379) —
+    # unconditionally, even when the caller named it in chat_jid. Its posts stay
+    # readable through list_messages / list_chats.
+    clauses: list[str] = [f"AND chats.jid <> '{STATUS_BROADCAST_JID}'"]
     params: list[Any] = []
     if since_ts is not None:
         clauses.append("AND messages.timestamp > ?")

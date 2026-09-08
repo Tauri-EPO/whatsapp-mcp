@@ -29,6 +29,9 @@ BOT = "867051314767696@bot"  # Meta AI and friends: not a person, not direct
 DIRECT = [PHONE, LID]
 FANOUT = [GROUP, BROADCAST, NEWSLETTER, STATUS, BOT]
 ALL_CHATS = DIRECT + FANOUT
+# The status feed leaves the triage listings whatever exclude_groups says
+# (issue #379); every other chat is only ever dropped by the flag.
+TRIAGED = [jid for jid in ALL_CHATS if jid != STATUS]
 
 
 def _stamp(**delta) -> str:
@@ -81,7 +84,7 @@ def test_export_messages(db):
 
 
 def test_list_unread(db):
-    assert {c["chat_jid"] for c in main.list_unread()["chats"]} == set(ALL_CHATS)
+    assert {c["chat_jid"] for c in main.list_unread()["chats"]} == set(TRIAGED)
 
     out = main.list_unread(exclude_groups=True)
     assert {c["chat_jid"] for c in out["chats"]} == set(DIRECT)
@@ -89,7 +92,7 @@ def test_list_unread(db):
 
 
 def test_list_unanswered(db):
-    assert {item["jid"] for item in main.list_unanswered()["items"]} == set(ALL_CHATS)
+    assert {item["jid"] for item in main.list_unanswered()["items"]} == set(TRIAGED)
     assert {item["jid"] for item in main.list_unanswered(exclude_groups=True)["items"]} == set(DIRECT)
 
 
@@ -102,7 +105,7 @@ def test_bot_chats_are_not_direct(db):
 
 def test_is_group_still_means_g_us_only(db):
     """The flag widened; the field did not. A channel is not a group."""
-    by_jid = {c["chat_jid"]: c for c in main.list_unread()["chats"]}
+    by_jid = {c["jid"]: c for c in main.list_chats(limit=100)["items"]}
     assert by_jid[GROUP]["is_group"] is True
     others = (PHONE, LID, BROADCAST, NEWSLETTER, STATUS, BOT)
     assert [by_jid[jid]["is_group"] for jid in others] == [False] * len(others)
