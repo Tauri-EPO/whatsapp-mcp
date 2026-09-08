@@ -332,7 +332,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 
 | You want to… | Touch |
 |---|---|
-| Add a module at the top level of either component | also its line in the §3 tree (`tests/test_agents_file_tree.py` fails the Python job otherwise, the way `tests/test_env_docs.py` does for a new env var) |
+| Add a module at the top level of either component | also its line in the §3 tree, and for a Python one its name in `[tool.setuptools] py-modules` (`tests/test_agents_file_tree.py` checks both and fails the Python job otherwise, the way `tests/test_env_docs.py` does for a new env var) |
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` (+ `docs/TOOLS.md`, tests) |
 | Change what `resources/read` serves, or add a resource scheme | `whatsapp-mcp-server/media_resource.py` (the `mcp` instance is a `MediaResourceServer`) |
 | Change agent notes (chats, contacts, messages, media) | `whatsapp-mcp-server/notes.py`, `media_notes.py` |
