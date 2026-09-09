@@ -119,8 +119,11 @@ func TestSweepMediaRemovesOnlyOldChatFiles(t *testing.T) {
 }
 
 // A symlink under a chat directory must not make the sweep delete — or even
-// reach — anything outside the store. os.Root refuses the escape; the symlink
-// itself is not a regular file, so it is left in place.
+// reach — anything outside the store. The walk half of that (a symlink is not a
+// regular file, and WalkDir never descends into one) held before this change
+// too; the assertion that only passes with the os.Root is the last one, where a
+// delete addressed through the symlinked directory is refused even though the
+// same relative path resolves out of the store for a plain os.Remove.
 func TestSweepMediaRefusesSymlinkEscape(t *testing.T) {
 	now := time.Now()
 	root, paths := seedStore(t, now)
@@ -143,10 +146,14 @@ func TestSweepMediaRefusesSymlinkEscape(t *testing.T) {
 	if removed != 1 || freed != int64(len("old-content")) {
 		t.Fatalf("removed=%d freed=%d, want only the real old file", removed, freed)
 	}
-	// The control is the root, not the walk: even a delete addressed straight
-	// through the symlinked directory is refused, where os.Remove on the same
-	// path would have followed it out of the store.
-	if err := sr.Remove(filepath.Base(chat) + "/elsewhere/secret.jpg"); err == nil {
+	// The control is the root, not the walk. The same store-relative path
+	// resolves to the file outside the store for ordinary path resolution...
+	escaping := filepath.Base(chat) + "/elsewhere/secret.jpg"
+	if _, err := os.Stat(filepath.Join(root, escaping)); err != nil {
+		t.Fatalf("the escaping path should resolve for a plain os.Stat: %v", err)
+	}
+	// ...and the root refuses it, where os.Remove would have deleted it.
+	if err := sr.Remove(escaping); err == nil {
 		t.Fatal("the store root deleted a file through a symlink out of the store")
 	}
 	if _, err := os.Stat(secret); err != nil {

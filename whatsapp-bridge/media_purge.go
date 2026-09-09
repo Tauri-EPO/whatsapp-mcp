@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -160,9 +161,16 @@ func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 		res.Reason = "path outside the store directory"
 		return res
 	}
-	rel, info := cachedMediaRel(root, chatDir, row.MediaType, row.Timestamp, row.ID, row.Filename)
+	rel, info, refused := cachedMediaRel(root, chatDir, row.MediaType, row.Timestamp, row.ID, row.Filename)
 	if rel == "" {
+		// "not cached" would blame a missing file for a path the root refused —
+		// an operator who symlinked a chat directory onto another disk still
+		// sees those files through download_media, and needs to read that the
+		// purge cannot reach them rather than that they are gone.
 		res.Reason = "not cached"
+		if refused != nil {
+			res.Reason = "cached path does not resolve inside the store directory"
+		}
 		return res
 	}
 	res.Bytes = info.Size()
@@ -182,16 +190,24 @@ func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 
 // cachedMediaRel is cachedMediaPath through the store root: it returns the
 // store-relative path of the row's cached file and its info, or "" when nothing
-// is cached there. A name that resolves out of the store fails root.Stat and is
-// reported as not cached, so no later call can act on it.
-func cachedMediaRel(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) (string, os.FileInfo) {
+// is cached there. A name that resolves out of the store — a symlinked file, or
+// a chat directory an operator moved to another disk — fails root.Stat with
+// something other than "does not exist"; that error comes back as the third
+// value so the caller can tell "no file" from "the root refused this path"
+// instead of reporting both as an empty cache.
+func cachedMediaRel(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) (string, os.FileInfo, error) {
+	var refused error
 	for _, name := range mediaFileNames(mediaType, timestamp, messageID, originalName) {
 		p := path.Join(chatDir, name)
-		if info, err := root.Stat(p); err == nil && !info.IsDir() {
-			return p, info
+		info, err := root.Stat(p)
+		switch {
+		case err == nil && !info.IsDir():
+			return p, info, nil
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			refused = err
 		}
 	}
-	return "", nil
+	return "", nil, refused
 }
 
 func writePurgeResponse(w http.ResponseWriter, status int, resp MediaPurgeResponse) {

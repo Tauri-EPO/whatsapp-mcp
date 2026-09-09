@@ -222,8 +222,9 @@ func TestPurgeOne_RefusesPathsOutsideStore(t *testing.T) {
 }
 
 // A cached name that is a symlink out of the store resolves outside the root,
-// so os.Root refuses it: the purge reports it as not cached and neither the
-// link nor its target is deleted.
+// so os.Root refuses it and the purge says so — before this change os.Stat
+// followed the link and reported the row as purged. Neither the link nor its
+// target is touched.
 func TestPurgeOne_RefusesSymlinkedCacheFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(storeDirEnv, dir)
@@ -241,7 +242,7 @@ func TestPurgeOne_RefusesSymlinkedCacheFile(t *testing.T) {
 	symlinkOrSkip(t, secret, link)
 
 	res := purgeOne(storeRootAt(t, dir), mediaRow{ID: "LINK", ChatJID: purgeChat, MediaType: "image", Timestamp: ts}, false)
-	if res.Purged || res.Reason != "not cached" {
+	if res.Purged || res.Reason != "cached path does not resolve inside the store directory" {
 		t.Errorf("result = %+v", res)
 	}
 	if _, err := os.Stat(secret); err != nil {
