@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.5.0...v1.5.1) (2026-09-09)
+
+
+### Bug fixes
+
+* **bridge:** the store is opened through os.Root, so a symlink cannot lead a delete or a read outside it ([#419](https://github.com/Tauri-EPO/whatsapp-mcp/issues/419)) ([42bbd43](https://github.com/Tauri-EPO/whatsapp-mcp/commit/42bbd430dd4caf63c082d1907256f4332e291c0f))
+* **scripts:** smoke.sh catches a whisper container orphaned by a redeploy ([#416](https://github.com/Tauri-EPO/whatsapp-mcp/issues/416)) ([18e6d83](https://github.com/Tauri-EPO/whatsapp-mcp/commit/18e6d831a37d27479e7a4f853b3998f206d6526a)), closes [#415](https://github.com/Tauri-EPO/whatsapp-mcp/issues/415)
+
 ## [1.5.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.4.0...v1.5.0) (2026-09-08)
 
 
