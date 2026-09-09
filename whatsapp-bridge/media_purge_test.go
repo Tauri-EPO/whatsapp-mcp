@@ -203,14 +203,53 @@ func TestMediaPurge_AllowList(t *testing.T) {
 }
 
 func TestPurgeOne_RefusesPathsOutsideStore(t *testing.T) {
-	t.Setenv(storeDirEnv, t.TempDir())
-	res := purgeOne(mediaRow{ID: "X", ChatJID: "../../etc", MediaType: "image", Timestamp: time.Now()}, false)
+	dir := t.TempDir()
+	t.Setenv(storeDirEnv, dir)
+	root := storeRootAt(t, dir)
+	res := purgeOne(root, mediaRow{ID: "X", ChatJID: "../../etc", MediaType: "image", Timestamp: time.Now()}, false)
 	if res.Purged || res.Reason != "path outside the store directory" {
 		t.Errorf("result = %+v", res)
 	}
-	res = purgeOne(mediaRow{ID: "X", ChatJID: "c@s.whatsapp.net", MediaType: "reaction"}, false)
+	res = purgeOne(root, mediaRow{ID: "X", ChatJID: "c@s.whatsapp.net", MediaType: "reaction"}, false)
 	if res.Reason != "not a media message" {
 		t.Errorf("reaction = %+v", res)
+	}
+	// No store root at all (the directory could not be opened at startup).
+	res = purgeOne(nil, mediaRow{ID: "X", ChatJID: purgeChat, MediaType: "image", Timestamp: time.Now()}, false)
+	if res.Purged || res.Reason != "store directory unavailable" {
+		t.Errorf("nil root = %+v", res)
+	}
+}
+
+// A cached name that is a symlink out of the store resolves outside the root,
+// so os.Root refuses it and the purge says so — before this change os.Stat
+// followed the link and reported the row as purged. Neither the link nor its
+// target is touched.
+func TestPurgeOne_RefusesSymlinkedCacheFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(storeDirEnv, dir)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.bin")
+	if err := os.WriteFile(secret, []byte("secret-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	chat := chatMediaDir(purgeChat)
+	if err := os.MkdirAll(chat, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(chat, mediaFileName("image", ts, "LINK", ""))
+	symlinkOrSkip(t, secret, link)
+
+	res := purgeOne(storeRootAt(t, dir), mediaRow{ID: "LINK", ChatJID: purgeChat, MediaType: "image", Timestamp: ts}, false)
+	if res.Purged || res.Reason != "cached path does not resolve inside the store directory" {
+		t.Errorf("result = %+v", res)
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Fatalf("the purge followed the symlink out of the store: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the symlink itself should be left in place: %v", err)
 	}
 }
 

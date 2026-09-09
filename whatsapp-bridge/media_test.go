@@ -342,7 +342,7 @@ func TestDownloadMedia_DocumentsUseAndFallBackOnLegacyName(t *testing.T) {
 	}
 
 	// Purge finds the legacy file too.
-	res := purgeOne(mediaRow{ID: "OLD", ChatJID: mediaTestChat, MediaType: "document", Timestamp: ts, Filename: "Report Q3.pdf"}, false)
+	res := purgeOne(b.StoreRoot, mediaRow{ID: "OLD", ChatJID: mediaTestChat, MediaType: "document", Timestamp: ts, Filename: "Report Q3.pdf"}, false)
 	if !res.Purged || res.File != "document_20260904_150405_OLD" {
 		t.Errorf("purge legacy: %+v", res)
 	}

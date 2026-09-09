@@ -66,11 +66,33 @@ func seedStore(t *testing.T, now time.Time) (string, map[string]string) {
 	return root, paths
 }
 
+// storeRootAt opens dir the way main() opens the store, and closes the handle
+// when the test ends (before t.TempDir() removes the directory).
+func storeRootAt(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// symlinkOrSkip links target to name, skipping the test where the platform or
+// the account does not allow it (unprivileged Windows).
+func symlinkOrSkip(t *testing.T, target, name string) {
+	t.Helper()
+	if err := os.Symlink(target, name); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+}
+
 func TestSweepMediaRemovesOnlyOldChatFiles(t *testing.T) {
 	now := time.Now()
 	root, paths := seedStore(t, now)
+	sr := storeRootAt(t, root)
 
-	removed, freed, failed := sweepMedia(root, 30*24*time.Hour, now)
+	removed, freed, failed := sweepMedia(sr, 30*24*time.Hour, now)
 	if removed != 1 || failed != 0 {
 		t.Fatalf("removed=%d failed=%d, want 1/0", removed, failed)
 	}
@@ -87,12 +109,58 @@ func TestSweepMediaRemovesOnlyOldChatFiles(t *testing.T) {
 	}
 
 	// Nothing else to do on the second pass.
-	if removed, _, _ := sweepMedia(root, 30*24*time.Hour, now); removed != 0 {
+	if removed, _, _ := sweepMedia(sr, 30*24*time.Hour, now); removed != 0 {
 		t.Fatalf("second sweep removed %d", removed)
 	}
-	// A missing root is reported as one failure, not a panic.
-	if _, _, failed := sweepMedia(filepath.Join(root, "nope"), time.Hour, now); failed != 1 {
-		t.Fatalf("missing root failed=%d", failed)
+	// A store that could not be opened is reported as one failure, not a panic.
+	if _, _, failed := sweepMedia(nil, time.Hour, now); failed != 1 {
+		t.Fatalf("nil root failed=%d", failed)
+	}
+}
+
+// A symlink under a chat directory must not make the sweep delete — or even
+// reach — anything outside the store. The walk half of that (a symlink is not a
+// regular file, and WalkDir never descends into one) held before this change
+// too; the assertion that only passes with the os.Root is the last one, where a
+// delete addressed through the symlinked directory is refused even though the
+// same relative path resolves out of the store for a plain os.Remove.
+func TestSweepMediaRefusesSymlinkEscape(t *testing.T) {
+	now := time.Now()
+	root, paths := seedStore(t, now)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.jpg")
+	if err := os.WriteFile(secret, []byte("secret-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-40 * 24 * time.Hour)
+	if err := os.Chtimes(secret, old, old); err != nil {
+		t.Fatal(err)
+	}
+	chat := filepath.Dir(paths["old"])
+	link := filepath.Join(chat, "linked.jpg")
+	symlinkOrSkip(t, secret, link)
+	symlinkOrSkip(t, outside, filepath.Join(chat, "elsewhere"))
+
+	sr := storeRootAt(t, root)
+	removed, freed, _ := sweepMedia(sr, 30*24*time.Hour, now)
+	if removed != 1 || freed != int64(len("old-content")) {
+		t.Fatalf("removed=%d freed=%d, want only the real old file", removed, freed)
+	}
+	// The control is the root, not the walk. The same store-relative path
+	// resolves to the file outside the store for ordinary path resolution...
+	escaping := filepath.Base(chat) + "/elsewhere/secret.jpg"
+	if _, err := os.Stat(filepath.Join(root, escaping)); err != nil {
+		t.Fatalf("the escaping path should resolve for a plain os.Stat: %v", err)
+	}
+	// ...and the root refuses it, where os.Remove would have deleted it.
+	if err := sr.Remove(escaping); err == nil {
+		t.Fatal("the store root deleted a file through a symlink out of the store")
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Fatalf("the sweep followed a symlink out of the store: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the symlink itself is not a media file and should survive: %v", err)
 	}
 }
 
@@ -100,14 +168,15 @@ func TestStoreUsageAndStats(t *testing.T) {
 	now := time.Now()
 	root, _ := seedStore(t, now)
 
-	storeBytes, mediaBytes, files := storeUsage(root)
+	sr := storeRootAt(t, root)
+	storeBytes, mediaBytes, files := storeUsage(sr)
 	wantMedia := int64(len("old-content") + len("fresh-content"))
 	wantStore := wantMedia + int64(len("db-content")+len("token-content"))
 	if storeBytes != wantStore || mediaBytes != wantMedia || files != 2 {
 		t.Fatalf("usage = %d/%d/%d, want %d/%d/2", storeBytes, mediaBytes, files, wantStore, wantMedia)
 	}
 
-	stats := newStoreStats(root)
+	stats := newStoreStats(sr)
 	if s, _, _ := stats.snapshot(now); s != wantStore {
 		t.Fatalf("snapshot = %d", s)
 	}
@@ -122,16 +191,16 @@ func TestStoreUsageAndStats(t *testing.T) {
 	if s, _, _ := stats.snapshot(now.Add(time.Minute)); s != wantStore+4 {
 		t.Fatalf("refreshed snapshot = %d, want %d", s, wantStore+4)
 	}
-	// Missing directory: zeros, no error surfaced.
-	if s, m, f := storeUsage(filepath.Join(root, "missing")); s != 0 || m != 0 || f != 0 {
-		t.Fatalf("missing dir usage = %d/%d/%d", s, m, f)
+	// No store root (it could not be opened): zeros, no error surfaced.
+	if s, m, f := storeUsage(nil); s != 0 || m != 0 || f != 0 {
+		t.Fatalf("nil root usage = %d/%d/%d", s, m, f)
 	}
 }
 
 func TestHealthReportsStoreSize(t *testing.T) {
 	root, _ := seedStore(t, time.Now())
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
-	b.storeStats = newStoreStats(root)
+	b.storeStats = newStoreStats(storeRootAt(t, root))
 	mux := b.newRESTMux(8080, "test-token-0123456789")
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/health", nil)
@@ -189,8 +258,10 @@ func TestRunMediaRetentionSweepsOnStart(t *testing.T) {
 	root, paths := seedStore(t, now)
 	t.Setenv("WHATSAPP_STORE_DIR", root)
 
+	// testBridge opens WHATSAPP_STORE_DIR as the store root, which is what the
+	// sweep deletes through.
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
-	b.storeStats = newStoreStats(root)
+	b.storeStats = newStoreStats(b.StoreRoot)
 	done := make(chan struct{})
 	go func() {
 		b.MediaRetention = 30 * 24 * time.Hour

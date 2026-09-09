@@ -29,6 +29,13 @@ type Bridge struct {
 	Store  *MessageStore
 	Log    waLog.Logger
 
+	// StoreRoot is the store directory opened as an os.Root (store_dir.go).
+	// The retention sweep, the store-size measurement and /api/media/purge do
+	// every stat and every delete through it, so the kernel — not a filepath
+	// comparison — keeps them inside the store. nil in tests that never touch
+	// the store; those paths then report "unavailable" instead of guessing.
+	StoreRoot *os.Root
+
 	// Policy restricts which chats outbound endpoints may act on (WHATSAPP_ALLOWED_CHATS).
 	Policy chatPolicy
 	// ReadOnly refuses every endpoint with a side effect (WHATSAPP_READ_ONLY,
@@ -126,12 +133,14 @@ type Bridge struct {
 }
 
 // newBridge wires the production dependencies from a live client and store.
-// bridgeToken is the REST bearer token, also attached to outbound webhooks.
-func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string) *Bridge {
+// bridgeToken is the REST bearer token, also attached to outbound webhooks;
+// storeRoot is the open store directory (main() owns opening and closing it).
+func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root) *Bridge {
 	b := &Bridge{
 		Client:              client,
 		Store:               store,
 		Log:                 logger,
+		StoreRoot:           storeRoot,
 		Policy:              loadChatPolicy(),
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
 		ForwardSelf:         getEnvBool("FORWARD_SELF", true),
@@ -150,7 +159,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		origTimes:      newOriginalTimestamps(),
 		mediaRetry:     newMediaRetryHub(),
 		startedAt:      time.Now(),
-		storeStats:     newStoreStats(storeDir()),
+		storeStats:     newStoreStats(storeRoot),
 		metrics:        newMetricsRegistry(),
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
