@@ -102,6 +102,16 @@ func main() {
 		logger.Infof("Store directory: %s", abs)
 	}
 
+	// One handle on the store for its whole lifetime. Everything that walks,
+	// measures or deletes inside it goes through this os.Root, which confines
+	// those operations to the directory at the kernel level (store_dir.go).
+	storeRoot, rootErr := openStoreRoot()
+	if rootErr != nil {
+		logger.Errorf("Failed to open store directory %q: %v", storeDir(), rootErr)
+		return
+	}
+	defer func() { _ = storeRoot.Close() }()
+
 	// Refuse to run alongside another bridge on the same store. Two processes
 	// sharing one WhatsApp session evict each other forever (StreamReplaced)
 	// and neither persists messages reliably. Must happen before the session
@@ -263,7 +273,7 @@ func main() {
 		return
 	}
 
-	bridge := newBridge(client, messageStore, logger, bridgeToken)
+	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot)
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
 	bridge.Exit = func(reason string, code int) {

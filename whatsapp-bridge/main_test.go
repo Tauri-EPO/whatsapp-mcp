@@ -571,7 +571,16 @@ func testLogger() waLog.Logger {
 // Shutdown waits for the worker.
 func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger) *Bridge {
 	t.Helper()
+	// The store root is what the sweep and /api/media/purge delete through. A
+	// test that set WHATSAPP_STORE_DIR (every test that touches media) gets one
+	// over its own temp store; the rest get nil, and those code paths then
+	// report the store as unavailable instead of falling back to raw paths.
+	storeRoot, rootErr := openStoreRoot()
+	if rootErr == nil {
+		t.Cleanup(func() { _ = storeRoot.Close() })
+	}
 	b := &Bridge{
+		StoreRoot:         storeRoot,
 		Client:            client,
 		Store:             ms,
 		Log:               logger,
@@ -586,7 +595,7 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
 		origTimes:               newOriginalTimestamps(),
 		mediaRetry:              newMediaRetryHub(),
-		storeStats:              newStoreStats(storeDir()),
+		storeStats:              newStoreStats(storeRoot),
 		metrics:                 newMetricsRegistry(),
 	}
 	t.Cleanup(func() { b.Shutdown(2 * time.Second) })

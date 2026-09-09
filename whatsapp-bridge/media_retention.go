@@ -20,8 +20,8 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,12 +77,22 @@ func isChatDir(entry os.DirEntry) bool {
 	return entry.IsDir() && strings.Contains(entry.Name(), "@")
 }
 
-// sweepMedia deletes regular files under root's chat directories whose
-// modification time is older than now-maxAge. Returns files removed and
-// bytes freed. Errors on individual files are counted, not fatal.
-func sweepMedia(root string, maxAge time.Duration, now time.Time) (removed int, freed int64, failed int) {
+// sweepMedia deletes regular files under the store root's chat directories
+// whose modification time is older than now-maxAge. Returns files removed and
+// bytes freed. Errors on individual files are counted, not fatal; a nil root
+// (the store could not be opened) counts as one failure.
+//
+// Both the walk and the delete go through the os.Root, so every path component
+// is resolved inside the store by the kernel: a symlink out of the store — or
+// one swapped in after the walk stat'd the entry — makes Remove fail instead of
+// deleting somebody else's file.
+func sweepMedia(root *os.Root, maxAge time.Duration, now time.Time) (removed int, freed int64, failed int) {
+	if root == nil {
+		return 0, 0, 1
+	}
 	cutoff := now.Add(-maxAge)
-	entries, err := os.ReadDir(root)
+	fsys := root.FS()
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return 0, 0, 1
 	}
@@ -90,8 +100,7 @@ func sweepMedia(root string, maxAge time.Duration, now time.Time) (removed int, 
 		if !isChatDir(entry) {
 			continue
 		}
-		dir := filepath.Join(root, entry.Name())
-		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		_ = fs.WalkDir(fsys, entry.Name(), func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil || d.IsDir() {
 				return nil
 			}
@@ -99,7 +108,7 @@ func sweepMedia(root string, maxAge time.Duration, now time.Time) (removed int, 
 			if statErr != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
 				return nil
 			}
-			if rmErr := os.Remove(path); rmErr != nil { //nolint:gosec // G122: the sweep walks the bridge's own store directory, which only the bridge writes; an os.Root rewrite is a separate change
+			if rmErr := root.Remove(path); rmErr != nil {
 				failed++
 				return nil
 			}
@@ -111,10 +120,14 @@ func sweepMedia(root string, maxAge time.Duration, now time.Time) (removed int, 
 	return removed, freed, failed
 }
 
-// storeUsage measures the store directory. storeBytes covers everything
-// (databases included); mediaBytes only the chat directories.
-func storeUsage(root string) (storeBytes, mediaBytes int64, mediaFiles int) {
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+// storeUsage measures the store directory through its os.Root. storeBytes
+// covers everything (databases included); mediaBytes only the chat directories.
+// A nil root measures nothing.
+func storeUsage(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int) {
+	if root == nil {
+		return 0, 0, 0
+	}
+	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
 			return nil
 		}
@@ -123,12 +136,11 @@ func storeUsage(root string) (storeBytes, mediaBytes int64, mediaFiles int) {
 			return nil
 		}
 		storeBytes += info.Size()
-		rel, relErr := filepath.Rel(root, path)
-		if relErr == nil {
-			if top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]; strings.Contains(top, "@") {
-				mediaBytes += info.Size()
-				mediaFiles++
-			}
+		// fs paths are always slash-separated and relative to the root, so the
+		// first component is the chat directory without any filepath.Rel step.
+		if top := strings.SplitN(path, "/", 2)[0]; strings.Contains(top, "@") {
+			mediaBytes += info.Size()
+			mediaFiles++
 		}
 		return nil
 	})
@@ -139,14 +151,14 @@ func storeUsage(root string) (storeBytes, mediaBytes int64, mediaFiles int) {
 // periodic health checks.
 type storeStats struct {
 	mu         sync.Mutex
-	root       string
+	root       *os.Root
 	measuredAt time.Time
 	store      int64
 	media      int64
 	files      int
 }
 
-func newStoreStats(root string) *storeStats { return &storeStats{root: root} }
+func newStoreStats(root *os.Root) *storeStats { return &storeStats{root: root} }
 
 // snapshot returns the cached usage, refreshing it when older than storeUsageTTL.
 func (s *storeStats) snapshot(now time.Time) (storeBytes, mediaBytes int64, mediaFiles int) {
@@ -174,7 +186,7 @@ func (b *Bridge) runMediaRetention() {
 		return
 	}
 	sweep := func() {
-		removed, freed, failed := sweepMedia(storeDir(), maxAge, time.Now())
+		removed, freed, failed := sweepMedia(b.StoreRoot, maxAge, time.Now())
 		b.storeStats.invalidate()
 		if removed > 0 || failed > 0 {
 			b.Log.Infof("Media retention: removed %d files (%d bytes) older than %s, %d failures", removed, freed, maxAge, failed)

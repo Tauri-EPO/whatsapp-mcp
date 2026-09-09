@@ -32,6 +32,17 @@ func storePath(elem ...string) string {
 	return filepath.Join(append([]string{storeDir()}, elem...)...)
 }
 
+// openStoreRoot opens the store directory as an os.Root. Everything that walks,
+// measures or deletes inside the store goes through that handle (Bridge.StoreRoot):
+// the kernel resolves each path component within the directory and refuses any
+// component that leaves it, including a symlink swapped in between the check and
+// the syscall. That is a control, where a filepath.Rel comparison on a name we
+// looked up earlier is only a check. The directory must already exist — main()
+// creates it first.
+func openStoreRoot() (*os.Root, error) {
+	return os.OpenRoot(storeDir())
+}
+
 // sqliteURI builds a `file:` DSN for a store file. SQLite URIs want forward
 // slashes even on Windows.
 func sqliteURI(path, query string) string {

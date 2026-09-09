@@ -292,13 +292,21 @@ func documentExt(name string) string {
 	return ext
 }
 
+// mediaFileNames lists the names a row's cached file may carry, newest naming
+// scheme first. Readers try them in order so files cached before documents kept
+// an extension stay reachable; keeping the list in one place is what stops a
+// reader (download, purge) from looking for a name another one never writes.
+func mediaFileNames(mediaType string, timestamp time.Time, messageID, originalName string) []string {
+	return []string{
+		mediaFileName(mediaType, timestamp, messageID, originalName),
+		legacyMediaFileName(mediaType, timestamp, messageID),
+	}
+}
+
 // cachedMediaPath returns the existing cached file for a row (current name
 // first, then the legacy one) or "" when nothing is cached.
 func cachedMediaPath(chatDir, mediaType string, timestamp time.Time, messageID, originalName string) string {
-	for _, name := range []string{
-		mediaFileName(mediaType, timestamp, messageID, originalName),
-		legacyMediaFileName(mediaType, timestamp, messageID),
-	} {
+	for _, name := range mediaFileNames(mediaType, timestamp, messageID, originalName) {
 		p := filepath.Join(chatDir, name)
 		if info, err := os.Stat(p); err == nil && !info.IsDir() {
 			return p
@@ -307,9 +315,17 @@ func cachedMediaPath(chatDir, mediaType string, timestamp time.Time, messageID, 
 	return ""
 }
 
+// chatMediaRel is the store-relative directory holding one chat's media: the
+// chat JID with ':' (device suffix) mapped to '_'. Callers working through the
+// store root (os.Root) need the relative form; chatMediaDir is the same
+// directory as a filesystem path.
+func chatMediaRel(chatJID string) string {
+	return strings.ReplaceAll(chatJID, ":", "_")
+}
+
 // chatMediaDir is store/<chat_jid> with ':' (device suffix) mapped to '_'.
 func chatMediaDir(chatJID string) string {
-	return storePath(strings.ReplaceAll(chatJID, ":", "_"))
+	return storePath(chatMediaRel(chatJID))
 }
 
 // downloadToPath downloads msg into localPath through a ".part" temp file and
