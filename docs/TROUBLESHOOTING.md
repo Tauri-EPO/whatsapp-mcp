@@ -254,7 +254,10 @@ the next start picks the change up and stops warning.
 
   Then put `COMPOSE_PROFILES=whisper` where the next deploy will read it (the
   manager's Environment section, or `.env` for a hand-driven stack), so it does
-  not come back at the next redeploy.
+  not come back at the next redeploy. A whisper run as its own project
+  ([Sharing one whisper between stacks](DOCKER.md#sharing-one-whisper-between-stacks))
+  cannot get into this state: it has a network of its own, not the bridge's
+  namespace.
 
   **Verify** with the post-deploy check, which fails on exactly this state and
   otherwise probes port 8178 from inside the mcp container (step 5):

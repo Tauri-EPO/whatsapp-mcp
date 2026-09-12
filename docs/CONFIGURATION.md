@@ -49,7 +49,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
 | `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)*                       | MCP server only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values, group `topic`, poll `question`) in `<untrusted>…</untrusted>` delimiters. Name fields, topics and questions are sanitised in every mode, set or not. See [Marking message content as untrusted](#marking-message-content-as-untrusted) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
-| `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (e.g. `http://127.0.0.1:8178/inference`) |
+| `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`http://127.0.0.1:8178/inference` with the `whisper` compose profile, `http://whisper:8178/inference` with the [shared whisper](DOCKER.md#sharing-one-whisper-between-stacks)) |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
 | `WHISPER_LANGUAGE`     | `pt`                                     | Default transcription language (`auto` to detect) |
 | `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
@@ -461,8 +461,8 @@ question in one call, before an agent spends a call per file:
 
 `configured: false` means "not possible here, ask the operator";
 `configured: true, reachable: false` usually means the `whisper` profile is not
-up (`docker compose --profile whisper up -d`), or that `WHISPER_URL` is no
-longer routed to it. The check costs no transcription: the server backend gets
+up (`docker compose --profile whisper up -d`), the shared whisper project is
+stopped, or that `WHISPER_URL` is no longer routed to it. The check costs no transcription: the server backend gets
 one `HEAD` on the configured URL (2 s timeout, no body sent or read —
 whisper-server only accepts `POST` there, and its `404` is proof enough that it
 is listening), the CLI backend a look at the binary and the model file on disk.
