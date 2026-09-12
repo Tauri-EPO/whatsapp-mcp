@@ -42,7 +42,7 @@ The full list with parameters is in [docs/TOOLS.md](docs/TOOLS.md).
 
 ## 60-second start
 
-Needs Docker with Compose v2 and a phone with WhatsApp. x86 and ARM hosts both work for the bridge and MCP images; the optional whisper image depends on the upstream tag supporting your architecture.
+Needs Docker with Compose v2 and a phone with WhatsApp. x86 and ARM hosts both work.
 
 ```bash
 git clone https://github.com/Tauri-EPO/whatsapp-mcp.git
@@ -147,7 +147,7 @@ Everything is an environment variable in `.env`. The ones that matter on day one
 | `WHATSAPP_READ_ONLY` | `1` hides and refuses every mutating tool (read-and-draft assistant). Set it for both services |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | The hostname clients use (your MagicDNS name) so DNS-rebinding protection stays on |
 | `WHATSAPP_DEVICE_NAME` | Label under Linked Devices. Pair-time only |
-| `WHISPER_URL` + `COMPOSE_PROFILES=whisper` | Turn on local voice-note transcription (`WHISPER_MODEL_NAME=small` is a good CPU default); add `TRANSCRIBE_ON_INGEST=1` to transcribe voice notes as they arrive |
+| `WHISPER_URL` | Turn on local voice-note transcription by pointing at a whisper.cpp server you run ([docs/DOCKER.md](docs/DOCKER.md#voice-note-transcription) has a compose for it); add `TRANSCRIBE_ON_INGEST=1` to transcribe voice notes as they arrive |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | Cap disk use on a small server; files are re-fetched on demand |
 | `WHATSAPP_LOG_LEVEL` | `INFO` by default. `DEBUG` echoes message content into the logs |
 
