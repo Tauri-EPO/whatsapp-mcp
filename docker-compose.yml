@@ -152,6 +152,9 @@ services:
       # Voice-note transcription (transcribe_audio tool). With the `whisper`
       # profile below, set WHISPER_URL=http://127.0.0.1:8178/inference in .env.
       WHATSAPP_STORE_DIR: /app/store
+      # Same value as the bridge: media_base64 uploads and ffmpeg conversions are
+      # written under /app/outbox/.uploads, which the bridge is allowed to read.
+      WHATSAPP_MEDIA_ROOTS: /app/outbox
       WHISPER_URL: ${WHISPER_URL:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
       # Background transcription of inbound voice notes as they arrive. Off by

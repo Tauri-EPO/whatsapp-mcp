@@ -1746,8 +1746,24 @@ def mark_messages_read(
 @mcp.tool()
 @tool_errors
 @mutating_tool
-def send_file(chat_jid: str, media_path: str, caption: str = "", dry_run: bool = False) -> dict[str, Any]:
+def send_file(
+    chat_jid: str,
+    media_path: str = "",
+    caption: str = "",
+    dry_run: bool = False,
+    media_base64: str = "",
+    filename: str = "",
+) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
+
+    The file comes from exactly one of two places: `media_path`, a file that
+    already exists on the server running this MCP (inside its outbox), or
+    `media_base64`, the bytes carried in this call together with `filename`.
+    Use `media_base64` when you run on another machine and have no way to put
+    a file on the server; the server writes it into the outbox for the send
+    and removes it afterwards. Inline payloads are capped (64 MiB, and the
+    HTTP transport's body limit, 4 MiB by default, before that): put bigger
+    files on the server and use `media_path`.
 
     When `caption` is provided, the file and text arrive as a single
     attachment-with-caption message (one bubble in the WA UI), instead of
@@ -1760,39 +1776,66 @@ def send_file(chat_jid: str, media_path: str, caption: str = "", dry_run: bool =
     Args:
         chat_jid: Phone number with country code (no symbols), direct-chat JID or
                   group JID
-        media_path: Absolute path to the media file (image, video, document)
+        media_path: Absolute path to the media file (image, video, document) on
+                    the server. Leave empty when sending `media_base64`.
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
         dry_run: True previews without sending (default False)
+        media_base64: The file's bytes, base64-encoded (a data: URL prefix is
+                      accepted). Requires `filename`; excludes `media_path`.
+        filename: Name the recipient sees, with the extension that decides how
+                  WhatsApp presents it (report.pdf, photo.jpg, clip.mp4). Only
+                  with `media_base64`; directories in it are dropped.
 
     Returns:
         A dictionary containing success status and a status message. With
         dry_run=true: {"success": true, "dry_run": true, "endpoint", "payload",
-        "recipient_jid", "recipient_name", "media": {"path", "exists", "bytes"}}. A
-        missing file is reported as not_found in both modes; the bridge additionally
-        confines media_path to WHATSAPP_MEDIA_ROOTS, which only a real send checks.
+        "recipient_jid", "recipient_name", "media"}, where "media" is
+        {"path", "exists", "bytes"} for a media_path and {"filename", "bytes",
+        "mime", "inline": true, "upload_dir"} for media_base64 (nothing is written
+        for a dry run). A missing file is reported as not_found in both modes, a
+        payload that is not base64 or too large as invalid_argument; the bridge
+        additionally confines media_path to WHATSAPP_MEDIA_ROOTS, which only a real
+        send checks.
     """
 
     # Call the whatsapp_send_file function
-    success, status_message, sent = whatsapp_send_file(chat_jid, media_path, caption, dry_run=dry_run)
+    success, status_message, sent = whatsapp_send_file(
+        chat_jid, media_path, caption, dry_run=dry_run, media_base64=media_base64, filename=filename
+    )
     return {"success": success, "message": status_message, **sent}
 
 
 @mcp.tool()
 @tool_errors
 @mutating_tool
-def send_audio_message(chat_jid: str, media_path: str) -> dict[str, Any]:
+def send_audio_message(
+    chat_jid: str, media_path: str = "", media_base64: str = "", filename: str = ""
+) -> dict[str, Any]:
     """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
+
+    The audio comes from exactly one of `media_path` (a file on the server, inside
+    its outbox) or `media_base64` (the bytes in this call). Anything that is not
+    already an Opus .ogg is converted with ffmpeg on the server. Use
+    `media_base64` when you run on another machine: the server writes the bytes
+    into the outbox for the send and removes them afterwards (64 MiB cap, and the
+    HTTP transport's body limit, 4 MiB by default, before that).
 
     Args:
         chat_jid: Phone number with country code (no symbols), direct-chat JID or
                   group JID
         media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+        media_base64: The audio bytes, base64-encoded (a data: URL prefix is
+                      accepted). Excludes `media_path`.
+        filename: Optional name for `media_base64`, default "voice.ogg"; the
+                  extension says whether a conversion is needed (note.wav, clip.m4a).
 
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message, sent = whatsapp_audio_voice_message(chat_jid, media_path)
+    success, status_message, sent = whatsapp_audio_voice_message(
+        chat_jid, media_path, media_base64=media_base64, filename=filename
+    )
     return {"success": success, "message": status_message, **sent}
 
 

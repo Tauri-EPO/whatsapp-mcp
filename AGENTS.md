@@ -115,6 +115,7 @@ whatsapp-mcp/
 │   ├── media_text.py           # read_media(as_text=True): PDF/DOCX/XLSX text extracted here, no OCR
 │   ├── media_image.py          # read_media images: downscaled, upright, stripped, in a format clients render
 │   ├── media_pdf.py            # read_media(as_images=True): PDF pages rendered with pypdfium2
+│   ├── media_upload.py         # send_file / send_audio_message media_base64: bytes written under <media root>/.uploads for the bridge, removed after the send
 │   ├── media_resource.py       # MediaResourceServer: the whatsapp://media/<chat>/<id> resource, and the resource_link on list_media rows
 │   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes; transcripts_fts
 │   ├── notes.py                # notes.db: versioned notes on chats/contacts/messages (media via media_notes)
@@ -271,7 +272,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB) | Inbound files larger than this are not auto-downloaded (`/api/download` still fetches them); `0` = no limit. Downloads stream to `<file>.part` then rename (`media.go`) |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset)* | Daily sweep deletes media files older than N days under `store/<chat>/`; DB rows untouched |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6` | How stale a cached group roster may get before the bridge refreshes it in the background (`group_events.go`), one group per second, only while connected. `0` turns the pass off, leaving `group_members` fed only by `/api/group/members`, group events and group messages. It is a read (`GetGroupInfo`), so it keeps running under `WHATSAPP_READ_ONLY` |
-| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files (bridge). The MCP server reads it too: `media_base64` uploads and ffmpeg voice-note conversions are written under `<first root>/.uploads` (`media_upload.py`) so the bridge may read them, and removed after the send. Set the same value for both processes; compose passes `/app/outbox` to both |
 | `WHATSAPP_EXPORT_DIR` | `$WHATSAPP_STORE_DIR/exports` | Directory `export_messages` writes NDJSON archives into (`export.py`). `out_path` is resolved under it and anything escaping it (`..`, an absolute path elsewhere, a symlink pointing out) is refused with `denied`. Compose leaves it at `/app/store/exports`, inside the `whatsapp-store` volume |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only; re-pair to change |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)* | Conversation allow-list (JIDs, bare numbers, `*@g.us` / `*@s.whatsapp.net`). MCP server filters reads and refuses writes (`chat_policy.py`); bridge returns 403 on send/react/mark-read/typing/delete/group/poll (`chat_policy.go`). Set for both processes |
