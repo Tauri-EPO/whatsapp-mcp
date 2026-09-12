@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.6.0...v2.0.0) (2026-09-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **docker:** the `whisper` compose profile is gone. A stack with COMPOSE_PROFILES=whisper fails its next `up` with an unknown service. Migration: remove COMPOSE_PROFILES from the environment, run whisper.cpp's image yourself (docs/DOCKER.md "Voice-note transcription" has a compose that attaches it to the stack's network; the old `<project>_whisper-models` volume still holds the downloaded model and can be reused), and set WHISPER_URL=http://whisper:8178/inference. WHISPER_MODEL_NAME, WHISPER_THREADS, WHISPER_MEM_LIMIT and WHISPER_CPUS belong to that project now, not to this stack.
+
+### Features
+
+* **docker:** take whisper out of the compose files; the server only knows WHISPER_URL ([#435](https://github.com/Tauri-EPO/whatsapp-mcp/issues/435)) ([154b960](https://github.com/Tauri-EPO/whatsapp-mcp/commit/154b960a5e55543d010e590fcc53fc440ec99821)), closes [#434](https://github.com/Tauri-EPO/whatsapp-mcp/issues/434)
+
 ## [1.6.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.5.1...v1.6.0) (2026-09-12)
 
 
