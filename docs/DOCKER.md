@@ -501,12 +501,14 @@ where every item of this checklist comes from.
   per account as well: a second account is a second security boundary, not a
   copy of the first `.env`.
 - **One endpoint per instance.** With `tailscale serve`, give each stack its
-  own HTTPS port: `--https=443 http://127.0.0.1:8000` for the first,
-  `--https=8443 http://127.0.0.1:8001` for the second, and the matching
+  own path on the one HTTPS port: `--https=443 --set-path /sales
+  http://127.0.0.1:8000` and `--https=443 --set-path /support
+  http://127.0.0.1:8001`. Serve strips the prefix before forwarding, so the
+  MCP server still sees `/mcp` and clients use
+  `https://box.tailnet.ts.net/sales/mcp`; `WHATSAPP_PUBLIC_URL` gets that full
+  URL. Separate ports (`--https=8443` for the second) work the same way.
   `WHATSAPP_MCP_ALLOWED_HOSTS=box.tailnet.ts.net` on both (a bare hostname
-  matches any port). Path prefixes (`--set-path /sales`) only work when the
-  proxy strips the prefix before forwarding; the MCP server serves `/mcp` and
-  nothing else.
+  matches any port).
 - **Checks and backups per project.** `scripts/smoke.sh --project wa-sales
   --url https://box.tailnet.ts.net` and `--project wa-support --url
   https://box.tailnet.ts.net:8443`; `COMPOSE_PROJECT_NAME=wa-sales
