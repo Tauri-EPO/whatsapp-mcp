@@ -473,6 +473,64 @@ docker logs "$(docker ps --filter label=com.docker.compose.project=whatsapp-mcp 
   > "deploy-$(date +%F).log" 2>&1
 ```
 
+## Several instances on one host
+
+Two WhatsApp accounts on one box are two compose projects of this repo, one
+checkout (or one manager stack) each. Nothing in the code knows about the other
+one: a bridge holds one session and one `messages.db`, an MCP server reads one
+store and talks to one bridge. What the two share is the host, and that is
+where every item of this checklist comes from.
+
+- **One directory per account, one project name.** `COMPOSE_PROJECT_NAME`
+  defaults to the directory name; set it in each `.env` anyway
+  (`COMPOSE_PROJECT_NAME=wa-sales`) so the name survives a move. It prefixes the
+  volumes (`wa-sales_whatsapp-store`), the container names and the compose
+  labels that `scripts/smoke.sh --project` and `scripts/backup.sh` resolve. It
+  prefixes nothing that is a path: `./outbox` and any other bind mount belong to
+  the directory, so two projects started from one checkout share them. One
+  checkout per account, always.
+- **Per-account values in `.env`.** `WHATSAPP_MCP_PORT`: each stack publishes
+  its own, the second `up` fails with "port is already allocated" otherwise.
+  `WHATSAPP_MCP_TOKEN`: one credential per account, so a client configured for
+  one cannot reach the other. `WHATSAPP_DEVICE_NAME`: the label in the phone's
+  Linked Devices list, applied at pair time. `WHATSAPP_PUBLIC_URL` and
+  `WHATSAPP_MCP_ALLOWED_HOSTS`: the endpoint each one is reached at.
+  `WHATSAPP_OUTBOX` when the outbox lives outside the checkout. The policy
+  variables (`WHATSAPP_ALLOWED_CHATS`, `WHATSAPP_READ_ONLY`, the tool lists) are
+  per account as well: a second account is a second security boundary, not a
+  copy of the first `.env`.
+- **One endpoint per instance.** With `tailscale serve`, give each stack its
+  own HTTPS port: `--https=443 http://127.0.0.1:8000` for the first,
+  `--https=8443 http://127.0.0.1:8001` for the second, and the matching
+  `WHATSAPP_MCP_ALLOWED_HOSTS=box.tailnet.ts.net` on both (a bare hostname
+  matches any port). Path prefixes (`--set-path /sales`) only work when the
+  proxy strips the prefix before forwarding; the MCP server serves `/mcp` and
+  nothing else.
+- **Checks and backups per project.** `scripts/smoke.sh --project wa-sales
+  --url https://box.tailnet.ts.net` and `--project wa-support --url
+  https://box.tailnet.ts.net:8443`; `COMPOSE_PROJECT_NAME=wa-sales
+  scripts/backup.sh` (or `WHATSAPP_STORE_VOLUME=wa-sales_whatsapp-store`) for
+  each. A nightly cron is one line per account. A restore goes back into the
+  project the backup came from, and onto one host only
+  ([Backup and restore](#backup-and-restore)).
+- **Pairing.** Each stack pairs its own phone: `docker compose logs -f bridge`
+  in that stack's directory shows its QR code. Two stacks paired to the same
+  phone are two linked devices of one account, which works but is rarely what
+  you meant.
+- **Whisper once.** The `whisper` profile would give every stack its own model
+  in RAM. Run one server for the host instead and point each stack at it:
+  [Sharing one whisper between stacks](#sharing-one-whisper-between-stacks).
+  Bridge and MCP are small; whisper is where a second stack costs.
+- **Managed stacks.** One Komodo (or Portainer) stack per account, its name
+  the project name, each with its own Environment section; the shared-whisper
+  override goes into each stack's file list
+  ([Managed stacks](#managed-stacks-komodo-portainer)).
+- **Not supported.** Two bridges on one store: the second refuses to start
+  (`Refusing to start: another whatsapp-bridge already holds this store`,
+  `instance_lock.go`). One MCP server for two accounts: it reads one
+  `messages.db` and calls one bridge, so an agent that needs both accounts gets
+  two MCP endpoints in its client configuration, one per stack.
+
 ## Backup and restore
 
 The `whatsapp-store` volume holds everything worth keeping: `whatsapp.db`

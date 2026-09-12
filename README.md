@@ -197,7 +197,7 @@ The full comparison and the reasoning are in [AGENTS.md](AGENTS.md) section 2.
 
 ## Documentation
 
-- [docs/DOCKER.md](docs/DOCKER.md): pairing, Tailscale and Funnel, health, updates, backups, split topology
+- [docs/DOCKER.md](docs/DOCKER.md): pairing, Tailscale and Funnel, health, updates, backups, several accounts on one host, split topology
 - [docs/TOOLS.md](docs/TOOLS.md): every tool with parameters
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every variable, transports, auth, allow-list, history backfill
 - [docs/LAPTOP.md](docs/LAPTOP.md): stdio setup for Claude Desktop / Cursor, Windows notes
