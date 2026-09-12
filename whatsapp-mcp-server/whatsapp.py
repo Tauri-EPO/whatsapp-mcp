@@ -18,6 +18,7 @@ import httpx
 
 import audio
 import endpoint_cert
+import media_upload
 import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
 from errors import ToolError
@@ -3845,8 +3846,32 @@ def send_message(
     return True, result.get("message", "Message sent"), _sent_info(result)
 
 
+def _media_source(media_path: str, media_base64: str) -> str:
+    """``"path"`` or ``"inline"``: exactly one of the two must be given."""
+    if media_path and media_base64:
+        raise ToolError("invalid_argument", "give media_path or media_base64, not both")
+    if not media_path and not media_base64:
+        raise ToolError("invalid_argument", "media_path or media_base64 must be provided")
+    return "inline" if media_base64 else "path"
+
+
+def _inline_name(filename: str, default_name: str | None) -> str:
+    if not filename and default_name is None:
+        raise ToolError(
+            "invalid_argument",
+            "filename is required with media_base64: its extension decides how WhatsApp "
+            "presents the file (report.pdf, photo.jpg, clip.mp4)",
+        )
+    return media_upload.safe_filename(filename, default_name or "file")
+
+
 def send_file(
-    recipient: str, media_path: str, caption: str = "", dry_run: bool = False
+    recipient: str,
+    media_path: str = "",
+    caption: str = "",
+    dry_run: bool = False,
+    media_base64: str = "",
+    filename: str = "",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Send a media file (image, video, document) with an optional caption.
 
@@ -3854,43 +3879,100 @@ def send_file(
     passing both in one /api/send call produces a single attachment-with-caption
     message instead of two separate messages.
 
+    The file is either ``media_path`` on this host or ``media_base64`` carried
+    in the call: those bytes are written under the outbox the bridge may read
+    (``media_upload``), sent as a ``media_path`` like any other file, and
+    removed afterwards.
+
     ``dry_run=True`` runs the same validation (recipient, allow-list, the file
-    exists) and returns the request that would have been posted.
+    exists or the payload decodes) and returns the request that would have
+    been posted; an inline payload is not written to disk for a dry run.
     """
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
-    if not media_path:
-        raise ToolError("invalid_argument", "media_path must be provided")
+    source = _media_source(media_path, media_base64)
     _require_allowed(recipient)
-    if not os.path.isfile(media_path):
-        raise ToolError("not_found", f"Media file not found: {media_path}")
-    payload = {"recipient": recipient, "media_path": media_path}
-    if caption:
-        payload["message"] = caption
+    if source == "path":
+        if not os.path.isfile(media_path):
+            raise ToolError("not_found", f"Media file not found: {media_path}")
+        payload = {"recipient": recipient, "media_path": media_path}
+        if caption:
+            payload["message"] = caption
+        if dry_run:
+            # The bridge additionally confines media_path to WHATSAPP_MEDIA_ROOTS,
+            # which only it knows; report what this side can check.
+            media = {"path": os.path.abspath(media_path), "exists": True, "bytes": os.path.getsize(media_path)}
+            return (
+                True,
+                DRY_RUN_MESSAGE,
+                _dry_run("POST /api/send", payload, media=media, **_recipient_preview(recipient)),
+            )
+        result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+        return True, result.get("message", "File sent"), _sent_info(result)
+
+    name = _inline_name(filename, default_name=None)
+    data = media_upload.decode_inline(media_base64)
     if dry_run:
-        # The bridge additionally confines media_path to WHATSAPP_MEDIA_ROOTS,
-        # which only it knows; report what this side can check.
-        media = {"path": os.path.abspath(media_path), "exists": True, "bytes": os.path.getsize(media_path)}
+        upload_dir = media_upload.upload_dir()
+        payload = {"recipient": recipient, "media_path": os.path.join(upload_dir, "<upload>", name)}
+        if caption:
+            payload["message"] = caption
+        media = {
+            "filename": name,
+            "bytes": len(data),
+            "mime": media_upload.guess_mime(name),
+            "inline": True,
+            "upload_dir": upload_dir,
+        }
         return True, DRY_RUN_MESSAGE, _dry_run("POST /api/send", payload, media=media, **_recipient_preview(recipient))
-    result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    path = media_upload.write_inline(data, name)
+    result: dict[str, Any] = {}
+    try:
+        payload = {"recipient": recipient, "media_path": path}
+        if caption:
+            payload["message"] = caption
+        result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    finally:
+        media_upload.discard(path)
     return True, result.get("message", "File sent"), _sent_info(result)
 
 
-def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str, dict[str, Any]]:
+def send_audio_message(
+    recipient: str, media_path: str = "", media_base64: str = "", filename: str = ""
+) -> tuple[bool, str, dict[str, Any]]:
+    """Send a voice note from ``media_path`` on this host or from
+    ``media_base64`` in the call. Anything that is not an ``.ogg`` is
+    converted with ffmpeg first. Both the inline upload and the converted
+    file live under the outbox the bridge may read and are removed after the
+    send; a caller's own ``media_path`` is never touched."""
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
-    if not media_path:
-        raise ToolError("invalid_argument", "media_path must be provided")
+    source = _media_source(media_path, media_base64)
     _require_allowed(recipient)
-    if not os.path.isfile(media_path):
-        raise ToolError("not_found", f"Media file not found: {media_path}")
-    if not media_path.endswith(".ogg"):
-        try:
-            media_path = audio.convert_to_opus_ogg_temp(media_path)
-        except Exception as e:
-            raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
-    payload = {"recipient": recipient, "media_path": media_path}
-    result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    cleanup: list[str] = []
+    result: dict[str, Any] = {}
+    try:
+        if source == "inline":
+            name = _inline_name(filename, default_name="voice.ogg")
+            path = media_upload.write_inline(media_upload.decode_inline(media_base64), name)
+            cleanup.append(path)
+        else:
+            path = media_path
+            if not os.path.isfile(path):
+                raise ToolError("not_found", f"Media file not found: {path}")
+        if not path.lower().endswith(".ogg"):
+            try:
+                # Into the outbox, not the system temp directory: the bridge only
+                # reads inside WHATSAPP_MEDIA_ROOTS.
+                path = audio.convert_to_opus_ogg_temp(path, directory=media_upload.upload_dir())
+            except Exception as e:
+                raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
+            cleanup.append(path)
+        payload = {"recipient": recipient, "media_path": path}
+        result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    finally:
+        for stale in cleanup:
+            media_upload.discard(stale)
     return True, result.get("message", "Audio sent"), _sent_info(result)
 
 

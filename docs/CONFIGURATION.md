@@ -24,7 +24,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6`                          | How stale a cached group roster may get before the bridge refreshes it in the background, so `get_contact_chats` can answer "which groups is this person in?" without a live call per group. One group per second, only while connected, first pass a couple of minutes after start-up. `0` turns the pass off: rosters are then only cached when `list_group_members` is called, when a group join/leave/promote/demote event arrives, and when a group message comes from someone with no row yet. Refreshing is a read, so it keeps running under `WHATSAPP_READ_ONLY` |
-| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files. Set for both processes: the MCP server writes `media_base64` uploads and voice-note conversions under `<first root>/.uploads` for the bridge to read ([Outbound media](#outbound-media)) |
 | `WHATSAPP_EXPORT_DIR`  | `$WHATSAPP_STORE_DIR/exports`            | Where `export_messages` writes NDJSON archives. `out_path` is always resolved under this directory; anything escaping it is refused (see [Export directory](#export-directory)) |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_LOG_LEVEL`   | `INFO`                                   | Bridge log level (`DEBUG`, `INFO`, `WARN`, `ERROR`) for bridge and whatsmeow client lines. `DEBUG` also echoes every stored message |
@@ -633,10 +633,24 @@ the AutoHub hub's `WHATSAPP_BRIDGE_TOKEN` must equal this bridge's token (from
 rejects unauthenticated forwards only once its `WHATSAPP_BRIDGE_TOKEN` is set
 to the matching value.
 
+### Outbound media
+
 Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+
+An agent on another machine has no way to put a file there, so both tools also
+take `media_base64` (plus `filename` for `send_file`): the MCP server decodes
+the bytes, writes them to `<first media root>/.uploads/<stamp>-<id>/<filename>`,
+sends that path through the bridge like any other file and removes it
+afterwards. Voice-note conversions (ffmpeg, anything that is not an `.ogg`) are
+written to the same directory rather than the system temp directory, because
+the bridge does not read outside its roots. This is why the MCP server reads
+`WHATSAPP_MEDIA_ROOTS` as well: give both processes the same value (compose
+passes `/app/outbox` to both). Inline payloads are refused above 64 MiB, and
+on the `http`/`sse` transports `WHATSAPP_MCP_MAX_BODY_BYTES` (4 MiB by default,
+about 3 MiB of file) cuts in first; put anything bigger on the server.
 
 ### Export directory
 

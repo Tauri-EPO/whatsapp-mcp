@@ -193,7 +193,7 @@ The sentence and the delimiters are hints; only the sanitisation above removes a
 }
 ```
 
-`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the canonical JID the bare number resolves to and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}`; the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
+`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the canonical JID the bare number resolves to and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
 
 This is what a draft-only assistant should use: preview, show the payload, send only after the human says yes. Note that `dry_run` is *not* a way around [read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant) — with `WHATSAPP_READ_ONLY=1` these tools are not offered at all, dry run or not. Read-only is the operator's setting; `dry_run` is the agent's manners.
 
@@ -984,13 +984,21 @@ Send a media file (image, video, document).
 **Parameters:**
 
 - `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
-- `file_path` (required): Path to the file
+- `media_path`: Absolute path to the file on the server, inside its outbox
+- `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` is required
+- `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories in it are dropped
 - `caption` (optional): Caption for the media
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
 
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
-additional absolute directories.
+additional absolute directories. `media_base64` is for an agent that runs on
+another machine and cannot put a file there: the server writes the bytes under
+`<first root>/.uploads`, sends them and removes them. Inline payloads are capped
+at 64 MiB, and on the HTTP transport `WHATSAPP_MCP_MAX_BODY_BYTES` (4 MiB by
+default) applies first; anything bigger goes on the server and through
+`media_path`. A payload that is not base64, empty or too large is
+`invalid_argument`.
 
 **Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
 
@@ -1002,7 +1010,9 @@ Send a voice message (automatically converts to Opus .ogg format).
 **Parameters:**
 
 - `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
-- `file_path` (required): Path to audio file
+- `media_path`: Absolute path to the audio file on the server, inside its outbox
+- `media_base64`: The audio bytes, base64-encoded. Exactly one of `media_path` / `media_base64` is required; same cap and rules as `send_file`
+- `filename` (optional, with `media_base64`): default `voice.ogg`; any other extension (`note.wav`, `clip.m4a`) means the server converts it with ffmpeg first
 
 Converted audio is sent through the same media-path confinement as
 `send_file`.

@@ -91,6 +91,7 @@ py-modules = [
     "media_read",
     "media_resource",
     "media_text",
+    "media_upload",
     "notes",
     "observability",
     "parent_watchdog",
