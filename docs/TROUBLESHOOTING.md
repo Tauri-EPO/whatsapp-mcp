@@ -272,6 +272,26 @@ the next start picks the change up and stops warning.
   while the profile dropped the container entirely — and, with `--wait`, gives a
   fresh container time to download its model before calling it unreachable.
 
+## Two accounts on one host
+
+Two compose projects of this repo on one box
+([Several instances on one host](DOCKER.md#several-instances-on-one-host)).
+
+- **`Bind for 127.0.0.1:8000 failed: port is already allocated` on the second
+  `up`**: both stacks publish the MCP endpoint on the same host port. Set a
+  different `WHATSAPP_MCP_PORT` in the second stack's `.env` (or its manager
+  Environment) and point that stack's `tailscale serve` mapping at it.
+- **A file dropped in the outbox for one account is visible to the other
+  agent**, or `send_file` from one stack finds the other's files: the two
+  projects were started from the same checkout, so `./outbox` (and any other
+  bind mount) is the same directory. `COMPOSE_PROJECT_NAME` separates volumes,
+  not paths. Give each account its own checkout, or set a distinct
+  `WHATSAPP_OUTBOX` per stack.
+- **`Refusing to start: another whatsapp-bridge already holds this store`**:
+  two bridges were pointed at one store directory; see
+  [Authentication Issues](#authentication-issues). Two accounts need two
+  stores, which two projects get by default.
+
 ## App State / LTHash Conflicts
 
 Some WhatsApp account state is managed by whatsmeow in
