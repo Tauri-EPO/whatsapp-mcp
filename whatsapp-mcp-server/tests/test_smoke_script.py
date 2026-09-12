@@ -538,3 +538,80 @@ def test_a_flag_without_its_value_exits_instead_of_spinning(stack: Stack, flag: 
 
     assert result.returncode == 1
     assert f"{flag} needs a value" in result.stderr
+
+
+# A whisper shared between stacks (docker-compose.whisper.yml) is not a container
+# of this project: step 5 follows WHISPER_URL to it instead of assuming the sidecar.
+
+
+def _with_shared_whisper(stack: Stack, **fakes: str) -> subprocess.CompletedProcess[str]:
+    """A managed stack whose WHISPER_URL names the shared server, no sidecar here."""
+    return stack.run(
+        "--project",
+        "whatsapp-mcp",
+        "--url",
+        "https://box.tailnet.ts.net",
+        FAKE_BRIDGE_CTR="whatsapp-mcp-bridge-1",
+        FAKE_MCP_CTR="whatsapp-mcp-mcp-1",
+        FAKE_BRIDGE_ID=BRIDGE_ID,
+        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
+        FAKE_WHISPER_CTR="",
+        FAKE_ENV_WHISPER_URL="http://whisper:8178/inference",
+        **fakes,
+    )
+
+
+def test_shared_whisper_is_probed_at_its_url(stack: Stack) -> None:
+    result = _with_shared_whisper(stack)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5. whisper" in result.stdout
+    assert "reachable on whisper:8178 (shared" in result.stdout
+    assert "runs no whisper container" not in result.stdout
+    calls = stack.docker_calls()
+    assert "exec whatsapp-mcp-mcp-1 python" in calls
+    assert " whisper:8178\n" in calls  # the address is an argument of the probe, not baked into it
+
+
+def test_shared_whisper_down_fails_the_check(stack: Stack) -> None:
+    """A URL that names a server nobody answers at is a broken deployment, not a skip."""
+    result = _with_shared_whisper(stack, FAKE_WHISPER_REACHABLE="no")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "the shared whisper does not answer on whisper:8178" in result.stdout
+    assert "Connection refused" in result.stdout
+    assert "docker-compose.whisper.yml" in result.stdout
+
+
+def test_compose_mode_follows_the_shared_url_from_dot_env(stack: Stack) -> None:
+    (stack.dir / ".env").write_text(
+        "WHATSAPP_BRIDGE_TOKEN=bridge-token-0123456789\nWHISPER_URL=http://whisper:8178/inference\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    result = stack.run(
+        FAKE_COMPOSE_PS="  bridge: running healthy\n  mcp: running healthy\n",
+        FAKE_BRIDGE_ID=BRIDGE_ID,
+        FAKE_COMPOSE_PROJECT="whatsapp-mcp",
+        FAKE_WHISPER_CTR="",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "reachable on whisper:8178 (shared" in result.stdout
+    assert "compose exec -T mcp python" in stack.docker_calls()
+
+
+def test_sidecar_left_running_while_the_url_points_at_the_shared_server(stack: Stack) -> None:
+    """The profile was not dropped when the stack moved to the shared whisper: say so."""
+    result = _with_whisper(
+        stack,
+        FAKE_WHISPER_NETNS="container:" + BRIDGE_ID,
+        FAKE_ENV_WHISPER_URL="http://whisper:8178/inference",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "reachable on whisper:8178 (shared; whatsapp-mcp-whisper-1 in this project is not the one in use)"
+        in result.stdout
+    )
+    assert " 127.0.0.1:8178\n" not in stack.docker_calls()

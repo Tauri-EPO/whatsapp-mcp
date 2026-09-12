@@ -244,9 +244,10 @@ first, and drop its `whisper-models` volume once the shared one has the model.
 - **Stopping it.** `docker compose -f docker-compose.whisper.yml -p whisper stop`.
   `down` also tries to remove the network the stacks are attached to and
   reports that; harmless, but `stop` says what you mean.
-- **Post-deploy check.** `scripts/smoke.sh` step 5 only knows the in-stack
-  address today and skips the shared one; issue #425 makes it follow
-  `WHISPER_URL`. Until then `bridge_status` is the check.
+- **Post-deploy check.** `scripts/smoke.sh` step 5 probes whatever
+  `WHISPER_URL` names from inside the mcp container, so it covers the shared
+  server too: a stack whose URL points at `whisper:8178` fails the check when
+  nothing answers there, and the message names the whisper project to look at.
 
 ## Health and operations
 
@@ -260,8 +261,8 @@ first, and drop its `whisper-models` volume once the shared one has the model.
 - `scripts/smoke.sh` runs the whole checklist from the host after a deploy:
   bridge `/api/health` and `/api/ready` (through the container, with the
   bridge token from `.env` or `store/.bridge-token`), MCP `/metrics`, an
-  MCP `initialize` with the bearer token, and — only when the whisper profile
-  is up — whisper on `127.0.0.1:8178` from inside the mcp container.
+  MCP `initialize` with the bearer token, and whisper at `WHISPER_URL` from
+  inside the mcp container (the sidecar or the shared server), when one is set.
   Exit 0 = paired and answering,
   2 = up but waiting for the QR scan, 1 = something to fix (the failing step
   names the variable to look at: token, `WHATSAPP_MCP_ALLOWED_HOSTS`, port).

@@ -17,8 +17,10 @@
 #   3. mcp     GET /metrics      (skipped when WHATSAPP_MCP_METRICS=false; a 404 is a
 #                                warning, not a failure: a proxy may route /mcp only)
 #   4. mcp     POST /mcp initialize with the bearer token -> 200 + mcp-session-id
-#   5. whisper on 127.0.0.1:8178 from inside the mcp container (skipped when this
-#                                deployment has no whisper sidecar and no WHISPER_URL)
+#   5. whisper at WHISPER_URL, probed from inside the mcp container: the sidecar on
+#                                127.0.0.1:8178 (compose profile) or the server shared
+#                                between stacks (docker-compose.whisper.yml). Skipped
+#                                when no WHISPER_URL is set and no sidecar runs
 #
 # Without --project the script drives `docker compose` in the repository directory.
 # With it -- or when that directory has no usable stack -- it resolves the containers
@@ -331,57 +333,85 @@ case "$code" in
 esac
 rm -f "$hdrs" "$body"
 
-# The mcp container reaches whisper over the shared namespace, so the compose
-# profile is the only thing that can serve this address. Nothing configured and
-# no container: this deployment does not transcribe, and step 5 is skipped.
+# Whisper is whatever WHISPER_URL names, probed from the mcp container: the
+# sidecar on 127.0.0.1:8178 (the compose profile, the only thing that can serve
+# a loopback address in that namespace) or a server shared between stacks
+# (docker-compose.whisper.yml, http://whisper:8178/inference). Nothing
+# configured and no container: this deployment does not transcribe, and step 5
+# is skipped. WHISPER_BIN deployments have no URL and are not probed either.
 [ -n "${WHISPER_URL:-}" ] || WHISPER_URL=$(mcp_env WHISPER_URL)
-case "${WHISPER_URL:-}" in
-  *//127.0.0.1:8178/*|*//localhost:8178/*) whisper_expected=yes ;;
-  *) whisper_expected=no ;;
+whisper_addr=""    # host[:port] of WHISPER_URL; empty when no URL is set
+if [ -n "${WHISPER_URL:-}" ]; then
+  whisper_addr=${WHISPER_URL#*://}
+  whisper_addr=${whisper_addr%%/*}
+fi
+case "$whisper_addr" in
+  ""|127.0.0.1|127.0.0.1:*|localhost|localhost:*) whisper_local=yes ;;   # this stack's sidecar
+  *) whisper_local=no ;;
 esac
 
-if [ "$WHISPER_STATE" != "absent" ] || [ "$whisper_expected" = "yes" ]; then
+probe_whisper() { # $1 host[:port] -> 0 when anything answers HTTP there; the error otherwise
+  # The mcp image is python:3.13-slim: python is the only HTTP client it has.
+  # Any HTTP answer proves the server is there; whisper-server has no health
+  # route, so the status code itself says nothing.
+  mcp_exec python -c 'import sys, urllib.error, urllib.request
+
+try:
+    urllib.request.urlopen("http://" + sys.argv[1] + "/", timeout=5)
+except urllib.error.HTTPError:
+    pass
+except Exception as exc:
+    print(exc)
+    sys.exit(1)
+' "$1" 2>&1 </dev/null
+}
+
+wait_whisper() { # $1 host[:port], $2 what answers there -> passes or fails step 5
+  if [ "$MODE" = "project" ] && [ -z "$MCP_CTR" ]; then
+    echo "  skipped: no mcp container to probe from"
+    return 0
+  fi
+  local reached=no out=""
+  while :; do
+    if out=$(probe_whisper "$1"); then
+      reached=yes
+      break
+    fi
+    # A first start downloads the ggml model before it listens at all.
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 3
+  done
+  if [ "$reached" = "yes" ]; then
+    green "  reachable on $1 ($2)"
+  elif [ "$whisper_local" = "yes" ]; then
+    fail "whisper is running but does not answer on $1 (${out:-no output})" \
+         "a first start downloads the ggml model: docker compose logs --tail 50 whisper"
+  else
+    fail "the shared whisper does not answer on $1 (${out:-no output})" \
+         "is its project up? docker compose -f docker-compose.whisper.yml -p whisper ps; a first start downloads the ggml model"
+  fi
+}
+
+if [ "$WHISPER_STATE" != "absent" ] || [ -n "$whisper_addr" ]; then
   step "5. whisper"
   case "$WHISPER_STATE" in
     orphaned)
       fail "whisper is attached to a bridge container that no longer exists; run: docker compose --profile whisper up -d --force-recreate whisper" \
            "$WHISPER_DETAIL" ;;
     absent)
-      echo "  warning: WHISPER_URL is $WHISPER_URL but this stack runs no whisper container; the profile was dropped (COMPOSE_PROFILES=whisper)" ;;
+      if [ "$whisper_local" = "yes" ]; then
+        echo "  warning: WHISPER_URL is $WHISPER_URL but this stack runs no whisper container; the profile was dropped (COMPOSE_PROFILES=whisper)"
+      else
+        wait_whisper "$whisper_addr" "shared, no whisper container in this project"
+      fi ;;
     elsewhere|unknown)
       echo "  skipped: $WHISPER_DETAIL" ;;
     *)
-      if [ "$MODE" = "project" ] && [ -z "$MCP_CTR" ]; then
-        echo "  skipped: no mcp container to probe from"
+      if [ "$whisper_local" = "yes" ]; then
+        wait_whisper "${whisper_addr:-127.0.0.1:8178}" "$WHISPER_CTR"
       else
-        # The mcp image is python:3.13-slim: python is the only HTTP client it
-        # has. Any HTTP answer proves the server is there; whisper-server has no
-        # health route, so the status code itself says nothing.
-        reached=no
-        while :; do
-          if out=$(mcp_exec python -c 'import sys, urllib.error, urllib.request
-
-try:
-    urllib.request.urlopen("http://127.0.0.1:8178/", timeout=5)
-except urllib.error.HTTPError:
-    pass
-except Exception as exc:
-    print(exc)
-    sys.exit(1)
-' 2>&1 </dev/null); then
-            reached=yes
-            break
-          fi
-          # A first start downloads the ggml model before it listens at all.
-          [ "$(date +%s)" -ge "$deadline" ] && break
-          sleep 3
-        done
-        if [ "$reached" = "yes" ]; then
-          green "  reachable on 127.0.0.1:8178 ($WHISPER_CTR)"
-        else
-          fail "whisper is running but does not answer on 127.0.0.1:8178 (${out:-no output})" \
-               "a first start downloads the ggml model: docker compose logs --tail 50 whisper"
-        fi
+        # WHISPER_URL points elsewhere: the sidecar in this project is dead weight.
+        wait_whisper "$whisper_addr" "shared; $WHISPER_CTR in this project is not the one in use"
       fi ;;
   esac
 fi
