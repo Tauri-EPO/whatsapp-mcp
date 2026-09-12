@@ -185,7 +185,7 @@ services:
     # Pinned by digest: the `main` tag moves and is amd64-only. Dependabot
     # (docker-compose ecosystem) proposes digest bumps. On ARM hosts build
     # whisper.cpp yourself and point WHISPER_URL at it.
-    image: ghcr.io/ggml-org/whisper.cpp:main@sha256:facf4359b2a138a569cb55f9aa185eb7f79550dfdd8f78f8a029278f0416da21
+    image: ghcr.io/ggml-org/whisper.cpp:main@sha256:e11bc6c18d561bce7fd6adb89a75a71aa059a601eeb1ec7e1659642265323a02
     restart: unless-stopped
     logging: *default-logging
     security_opt: ["no-new-privileges:true"]
