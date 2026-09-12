@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.6.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.5.1...v1.6.0) (2026-09-12)
+
+
+### Features
+
+* **docker:** one whisper shared by every stack on the host ([#427](https://github.com/Tauri-EPO/whatsapp-mcp/issues/427)) ([f26a203](https://github.com/Tauri-EPO/whatsapp-mcp/commit/f26a2038d903e68c4f37e12682e92667e504bde2)), closes [#424](https://github.com/Tauri-EPO/whatsapp-mcp/issues/424)
+* **mcp:** send_file / send_audio_message accept the bytes inline (media_base64) ([#433](https://github.com/Tauri-EPO/whatsapp-mcp/issues/433)) ([4511689](https://github.com/Tauri-EPO/whatsapp-mcp/commit/4511689384fbdb0437139b5754234d33d833c879)), closes [#423](https://github.com/Tauri-EPO/whatsapp-mcp/issues/423)
+
+
+### Bug fixes
+
+* **scripts:** smoke.sh probes the whisper at WHISPER_URL, not a fixed 127.0.0.1:8178 ([#429](https://github.com/Tauri-EPO/whatsapp-mcp/issues/429)) ([c92dcc0](https://github.com/Tauri-EPO/whatsapp-mcp/commit/c92dcc08945f8c15cc7e2ab4319e5502e84b9c59)), closes [#425](https://github.com/Tauri-EPO/whatsapp-mcp/issues/425)
+
+
+### Dependencies
+
+* bump ggml-org/whisper.cpp digest in both compose files ([#431](https://github.com/Tauri-EPO/whatsapp-mcp/issues/431)) ([d1cd77d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/d1cd77d4c280fb14f78e14c8c8946f8c224cdddd)), closes [#420](https://github.com/Tauri-EPO/whatsapp-mcp/issues/420)
+* Bump golang.org/x/sys ([#421](https://github.com/Tauri-EPO/whatsapp-mcp/issues/421)) ([8654adb](https://github.com/Tauri-EPO/whatsapp-mcp/commit/8654adb242f78f4a25c027bc1f327907f59cd3c3))
+* Update mcp[cli] requirement ([#422](https://github.com/Tauri-EPO/whatsapp-mcp/issues/422)) ([762612c](https://github.com/Tauri-EPO/whatsapp-mcp/commit/762612c022811b54f2652ffd0019ee6e522e77e7))
+
 ## [1.5.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v1.5.0...v1.5.1) (2026-09-09)
 
 
