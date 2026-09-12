@@ -132,6 +132,8 @@ whatsapp-mcp/
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
+├── docker-compose.whisper.yml  # one whisper for every stack on the host (own project, `whisper-shared` network)
+├── docker-compose.shared-whisper.yml  # override: the bridge joins that network; WHISPER_URL=http://whisper:8178/inference
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
@@ -344,7 +346,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
 | Add or rename an MCP tool that calls the bridge | also `endpointTools` / `unenforcedTools` in `whatsapp-bridge/tool_policy.go` (`tests/test_bridge_tool_policy.py` fails otherwise) |
 | Change how tool results are marked as untrusted | `whatsapp-mcp-server/untrusted.py` (+ the allow-list in `tests/test_untrusted_content.py`) |
-| Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` |
+| Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` and its shared twin `docker-compose.whisper.yml` (`tests/test_compose_whisper.py` keeps the two in step) |
 | Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
 | Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`, and a backfill that marks the rows it read like `mentions.go`); FTS in `fts.go` |

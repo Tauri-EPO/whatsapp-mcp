@@ -1,0 +1,26 @@
+# Layer on top of docker-compose.yml to reach the whisper started by
+# docker-compose.whisper.yml instead of running a sidecar in this stack.
+#
+#   # .env
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.shared-whisper.yml
+#   WHISPER_URL=http://whisper:8178/inference
+#   # and no COMPOSE_PROFILES=whisper
+#
+#   docker compose up -d
+#
+# Only the bridge joins the network: the mcp container shares its namespace
+# (network_mode: service:bridge), so Docker's DNS resolves `whisper` there too.
+# The network must exist first (`docker compose -f docker-compose.whisper.yml
+# -p whisper up -d` creates it); a missing network fails this stack's `up`
+# with "network whisper-shared declared as external, but could not be found".
+# docs/DOCKER.md, "Sharing one whisper between stacks".
+
+services:
+  bridge:
+    networks:
+      - default
+      - whisper-shared
+
+networks:
+  whisper-shared:
+    external: true

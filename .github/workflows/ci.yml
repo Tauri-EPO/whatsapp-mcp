@@ -131,6 +131,15 @@ jobs:
                   raise SystemExit(f"import {name} failed (traceback above)")
           print(f"imports ok: {len(modules)} modules")
           '
+      - name: Validate the optional compose files
+        # The shared whisper project and the override that attaches a stack to it
+        # (docs/DOCKER.md, "Sharing one whisper between stacks") are not started
+        # here; `config` catches a file compose would refuse.
+        run: |
+          docker compose -f docker-compose.whisper.yml config -q
+          docker network create whisper-shared
+          docker compose -f docker-compose.yml -f docker-compose.shared-whisper.yml config -q
+          docker network rm whisper-shared
       - name: Compose smoke test (unpaired stack)
         # Start the real compose topology with the images built above and run
         # the operator's post-deploy check. Exit 2 = up but waiting for a QR

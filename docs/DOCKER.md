@@ -102,7 +102,7 @@ Compose reads `.env` from the repo root (copy `.env.example`). The keys that mat
 | `WEBHOOK_URL`, `FORWARD_SELF` | | Passed through to the bridge. |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD`, `WHATSAPP_MEDIA_RETENTION_DAYS` | `true`, *(unset)* | Keep the media cache bounded: stop caching on arrival and/or expire files older than N days. `download_media` still fetches on demand; the agent can also free space on request with `purge_media` (`POST /api/media/purge`, dry run by default). |
 | `TZ` | `UTC` | Timezone for log lines and the media retention sweep in all containers. |
-| `WHISPER_MEM_LIMIT`, `WHISPER_CPUS` | `3g`, `4` | Resource cap for the whisper sidecar so a model never starves the bridge. |
+| `WHISPER_MEM_LIMIT`, `WHISPER_CPUS` | `3g`, `4` | Resource cap for the whisper sidecar so a model never starves the bridge. Read by the [shared whisper](#sharing-one-whisper-between-stacks) project too. |
 | `WHATSAPP_OUTBOX` | `./outbox` | Host directory mounted at `/app/outbox` in both containers. `send_file` / `send_audio_message` may only read from here (`WHATSAPP_MEDIA_ROOTS`). Give the MCP client paths like `/app/outbox/report.pdf`. |
 
 Paths returned by `download_media` are container paths under `/app/store/...`.
@@ -187,6 +187,66 @@ server is CPU-only in this image; set `WHISPER_THREADS` to the cores you can
 spare. Without the profile (or without `WHISPER_URL`), `transcribe_audio`
 returns a clear "no whisper backend configured" error and everything else
 works as before.
+
+### Sharing one whisper between stacks
+
+Two WhatsApp accounts on one host are two compose projects, and the profile
+above gives each its own sidecar: the same ggml model loaded twice, downloaded
+twice, and two sets of `WHISPER_THREADS` competing whenever both transcribe.
+The bridge and MCP containers are small; whisper is where the second stack
+costs RAM and CPU. Run it once instead, as a project of its own
+(`docker-compose.whisper.yml`: same image, same knobs, its own model volume,
+one listener on the private `whisper-shared` network it creates):
+
+```bash
+docker compose -f docker-compose.whisper.yml -p whisper up -d
+docker compose -f docker-compose.whisper.yml -p whisper logs -f   # first start: model download
+```
+
+Then, in each stack, layer `docker-compose.shared-whisper.yml` on the main
+file (it attaches the `bridge` service to that network; the MCP container
+shares the bridge's namespace and resolves `whisper` through it) and point
+`WHISPER_URL` at the service name. Leave the `whisper` profile off:
+
+```dotenv
+# .env of each stack
+COMPOSE_FILE=docker-compose.yml:docker-compose.shared-whisper.yml
+WHISPER_URL=http://whisper:8178/inference
+# no COMPOSE_PROFILES=whisper
+```
+
+```bash
+docker compose up -d          # picks COMPOSE_FILE up from .env
+```
+
+`bridge_status().whisper.reachable` confirms from each stack. A stack whose
+sidecar is being replaced: `docker compose --profile whisper rm -sf whisper`
+first, and drop its `whisper-models` volume once the shared one has the model.
+
+- **Knobs.** `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `WHISPER_MEM_LIMIT`,
+  `WHISPER_CPUS` and `WHISPER_LANGUAGE` are read from the directory you start
+  the whisper project in (its `.env`) or from the manager's environment; the
+  stacks' copies of those variables no longer matter.
+- **Managed stacks** ([Komodo, Portainer](#managed-stacks-komodo-portainer)):
+  one stack for `docker-compose.whisper.yml`, and in each account's stack the
+  override goes into the file list next to `docker-compose.yml` (Komodo:
+  "File paths") with `WHISPER_URL` in its Environment. Start the whisper
+  stack first: an account stack fails its `up` with "network whisper-shared
+  declared as external, but could not be found" until the network exists.
+- **One request at a time.** `whisper-server` processes requests serially, so
+  the stacks queue on it. Voice notes take seconds, `WHISPER_TIMEOUT_S` (300 s)
+  covers the wait; give each `TRANSCRIBE_ON_INGEST` worker a different
+  `TRANSCRIBE_ON_INGEST_INTERVAL_S` so their batches do not line up.
+- **No authentication.** `whisper-server` accepts any request it can reach.
+  The shared file publishes no port and the network exists only on this host;
+  keep it that way (no `ports:` on it, no `WHISPER_URL` from another machine
+  without a tunnel of your own).
+- **Stopping it.** `docker compose -f docker-compose.whisper.yml -p whisper stop`.
+  `down` also tries to remove the network the stacks are attached to and
+  reports that; harmless, but `stop` says what you mean.
+- **Post-deploy check.** `scripts/smoke.sh` step 5 only knows the in-stack
+  address today and skips the shared one; issue #425 makes it follow
+  `WHISPER_URL`. Until then `bridge_status` is the check.
 
 ## Health and operations
 

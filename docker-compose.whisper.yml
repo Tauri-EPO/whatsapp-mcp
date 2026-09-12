@@ -1,0 +1,70 @@
+# One whisper.cpp server for every whatsapp-mcp stack on this host.
+#
+# The `whisper` profile in docker-compose.yml runs a sidecar per stack, inside
+# that stack's network namespace: two accounts on one box load the same model
+# twice. This file is the alternative: its own compose project, its own model
+# volume, one listener on the private `whisper-shared` network, and each stack
+# joins that network through docker-compose.shared-whisper.yml and points
+# WHISPER_URL at http://whisper:8178/inference. docs/DOCKER.md, "Sharing one
+# whisper between stacks".
+#
+#   docker compose -f docker-compose.whisper.yml -p whisper up -d
+#   docker compose -f docker-compose.whisper.yml -p whisper logs -f   # model download
+#
+# Same knobs as the profile (WHISPER_MODEL_NAME, WHISPER_THREADS, WHISPER_MEM_LIMIT,
+# WHISPER_CPUS, WHISPER_LANGUAGE), read from this directory's .env or the
+# manager's environment. whisper-server has no authentication: the network is
+# created without a published port and must stay unreachable from outside the
+# host. whisper-server also handles one request at a time, so the stacks queue
+# on it; give each TRANSCRIBE_ON_INGEST worker its own interval.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  whisper:
+    # Keep in step with the `whisper` service in docker-compose.yml (a test
+    # compares the two). Pinned by digest; Dependabot proposes bumps.
+    image: ghcr.io/ggml-org/whisper.cpp:main@sha256:facf4359b2a138a569cb55f9aa185eb7f79550dfdd8f78f8a029278f0416da21
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${WHISPER_MEM_LIMIT:-3g}
+    cpus: ${WHISPER_CPUS:-4}
+    networks:
+      - whisper-shared
+    # No healthcheck: the image ships neither wget nor curl and whisper-server
+    # has no dedicated health route; bridge_status().whisper.reachable and
+    # scripts/smoke.sh report it from the stacks' side.
+    environment:
+      TZ: ${TZ:-UTC}
+      # tiny | base | small | medium | large-v3 | large-v3-turbo (+ ".en" variants, "-q5_1" quantised...)
+      WHISPER_MODEL_NAME: ${WHISPER_MODEL_NAME:-small}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+    volumes:
+      - whisper-models:/models
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        model="/models/ggml-$${WHISPER_MODEL_NAME}.bin"
+        if [ ! -f "$$model" ]; then
+          echo "Downloading whisper model $${WHISPER_MODEL_NAME} to /models ..."
+          /app/models/download-ggml-model.sh "$${WHISPER_MODEL_NAME}" /models
+        fi
+        exec /app/build/bin/whisper-server -m "$$model" -l "$${WHISPER_LANGUAGE}" -t "$${WHISPER_THREADS}" --host 0.0.0.0 --port 8178 --inference-path /inference
+
+volumes:
+  # ggml models; independent of every stack's whisper-models volume.
+  whisper-models:
+
+networks:
+  # Created by this project under a fixed name so the stacks can reference it
+  # as external. Stopping whisper: `stop`, not `down` (`down` tries to remove a
+  # network the stacks are still attached to).
+  whisper-shared:
+    name: whisper-shared
