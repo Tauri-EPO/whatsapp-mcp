@@ -341,7 +341,7 @@ bridge is down:
 
 Check it once before batching transcriptions instead of discovering the missing
 backend one failed call at a time. A backend that is `configured: true` but
-`reachable: false` is usually the `whisper` compose profile not being up.
+`reachable: false` usually means the whisper server `WHISPER_URL` names is down, or not on a network the bridge is on.
 
 **Published endpoint certificate.** With `WHATSAPP_PUBLIC_URL` set to the URL
 clients use (`https://host.tailnet.ts.net/mcp`), three more fields appear:
@@ -1036,8 +1036,8 @@ machine; there is no cloud fallback.
 - `force` (optional, default `false`): transcribe again and replace a stored transcript
 
 Requires a whisper backend, configured with either `WHISPER_URL` (a running
-whisper.cpp `whisper-server`, see the `whisper` profile in
-[`docs/DOCKER.md`](DOCKER.md)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
+whisper.cpp `whisper-server` you run yourself, see
+[Voice-note transcription](DOCKER.md#voice-note-transcription)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
 `whisper-cli` binary and a `ggml-*.bin` model). Whether this deployment has one
 is reported by [`bridge_status`](#bridge_status) under `whisper`: check it before
 walking a folder of voice notes, because without a backend every call here fails

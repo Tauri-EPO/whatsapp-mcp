@@ -23,10 +23,6 @@ COMPOSE_ONLY = {
     "WHATSAPP_OUTBOX",
     "WHATSAPP_IMAGE_TAG",
     "WHATSAPP_IMAGE_REGISTRY",
-    "WHISPER_MODEL_NAME",
-    "WHISPER_THREADS",
-    "WHISPER_MEM_LIMIT",
-    "WHISPER_CPUS",
 }
 # Set by the runtime or the image, never by an operator.
 INTERNAL = {"WHATSAPP_MCP_VERSION"}

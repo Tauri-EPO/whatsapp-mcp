@@ -37,12 +37,13 @@ later, but the first three save a re-pair or a token rotation):
 - `WHATSAPP_ALLOWED_CHATS`: the groups/contacts the bot may touch. Start
   narrow; widen later.
 - `WHATSAPP_MCP_ALLOWED_HOSTS`: your MagicDNS name (`box.tailnet.ts.net`) so
-  Host checking stays on. `WHISPER_URL` + `COMPOSE_PROFILES=whisper` for
-  transcription; `WHATSAPP_MEDIA_RETENTION_DAYS` on a small disk.
+  Host checking stays on. `WHISPER_URL` for transcription (a whisper.cpp server
+  you run, [below](#voice-note-transcription)); `WHATSAPP_MEDIA_RETENTION_DAYS`
+  on a small disk.
 
-`mcp` (and `whisper`) start only after the bridge healthcheck passes, i.e.
-once the REST API is up and `.bridge-token` exists, and are recreated whenever
-the bridge container is (they share its network namespace, which does not
+`mcp` starts only after the bridge healthcheck passes, i.e. once the REST API
+is up and `.bridge-token` exists, and is recreated whenever the bridge
+container is (it shares the bridge's network namespace, which does not
 survive a recreate). This needs Docker Compose v2.17 or newer. Once the phone confirms
 the link, `docker compose ps` shows `bridge` as `healthy`, `GET /api/ready`
 returns 200 and the MCP endpoint answers at `http://127.0.0.1:8000/mcp`.
@@ -102,7 +103,6 @@ Compose reads `.env` from the repo root (copy `.env.example`). The keys that mat
 | `WEBHOOK_URL`, `FORWARD_SELF` | | Passed through to the bridge. |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD`, `WHATSAPP_MEDIA_RETENTION_DAYS` | `true`, *(unset)* | Keep the media cache bounded: stop caching on arrival and/or expire files older than N days. `download_media` still fetches on demand; the agent can also free space on request with `purge_media` (`POST /api/media/purge`, dry run by default). |
 | `TZ` | `UTC` | Timezone for log lines and the media retention sweep in all containers. |
-| `WHISPER_MEM_LIMIT`, `WHISPER_CPUS` | `3g`, `4` | Resource cap for the whisper sidecar so a model never starves the bridge. Read by the [shared whisper](#sharing-one-whisper-between-stacks) project too. |
 | `WHATSAPP_OUTBOX` | `./outbox` | Host directory mounted at `/app/outbox` in both containers. `send_file` / `send_audio_message` may only read from here (`WHATSAPP_MEDIA_ROOTS`). Give the MCP client paths like `/app/outbox/report.pdf`. |
 
 Paths returned by `download_media` are container paths under `/app/store/...`.
@@ -160,94 +160,88 @@ token by changing `.env` and `docker compose up -d mcp`. An authenticating
 reverse proxy in front is still a reasonable extra layer if the client supports
 it.
 
-## Voice-note transcription (optional `whisper` profile)
+## Voice-note transcription
 
 The MCP server ships a `transcribe_audio` tool backed by
-[whisper.cpp](https://github.com/ggml-org/whisper.cpp), fully local. The
-`whisper` profile runs the official `ghcr.io/ggml-org/whisper.cpp` image as a
-`whisper-server` next to the bridge and MCP containers (same network
-namespace), downloading the chosen ggml model into the `whisper-models` volume
-on first start:
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp), fully local, and
+`TRANSCRIBE_ON_INGEST=1` transcribes voice notes as they arrive. The whisper
+server is yours to run: nothing in this compose file starts one, so it can live
+next to the stack, on a GPU box on the tailnet, or as a binary on the host.
+Two backends:
+
+- `WHISPER_URL`: a whisper.cpp `whisper-server` inference endpoint reachable
+  from the **mcp container**. That container shares the bridge's network
+  namespace, so the URL is resolved from there: `127.0.0.1` is the bridge's own
+  loopback, and a service name resolves on the networks the bridge is on
+  (`<project>_default`).
+- `WHISPER_BIN` + `WHISPER_MODEL`: a `whisper-cli` binary and a ggml model on
+  the machine the MCP server runs on (the stdio setup; the image ships neither).
+
+Without either, `transcribe_audio` returns a clear "no whisper backend
+configured" error and everything else works. `bridge_status().whisper.reachable`
+says whether the URL answers, and `scripts/smoke.sh` probes it as step 5.
+
+### Example: whisper.cpp next to the stack
+
+A compose project of its own, attached to the stack's default network so
+`whisper` resolves inside it. No published port: whisper-server has no
+authentication, and nothing outside the network needs it.
+
+```yaml
+# whisper/docker-compose.yml  -  docker compose up -d   (from that directory)
+services:
+  whisper:
+    image: ghcr.io/ggml-org/whisper.cpp:main    # pin a digest for reproducible pulls; amd64 only
+    restart: unless-stopped
+    mem_limit: 3g          # a model plus 4 threads can starve a small box
+    cpus: 4
+    networks: [whatsapp]
+    volumes:
+      - models:/models
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        [ -f /models/ggml-small.bin ] || /app/models/download-ggml-model.sh small /models
+        exec /app/build/bin/whisper-server -m /models/ggml-small.bin -l pt -t 4 --host 0.0.0.0 --port 8178 --inference-path /inference
+volumes:
+  models:
+networks:
+  whatsapp:
+    external: true
+    name: whatsapp-mcp_default    # the stack's default network: <project>_default
+```
+
+Then, in the stack's `.env`:
 
 ```dotenv
-# .env
-WHISPER_URL=http://127.0.0.1:8178/inference
-WHISPER_MODEL_NAME=small     # tiny | base | small | medium | large-v3-turbo ...
+WHISPER_URL=http://whisper:8178/inference
 WHISPER_LANGUAGE=pt          # default language for transcripts; "auto" to detect
 ```
 
-```bash
-docker compose --profile whisper up -d
-docker compose logs -f whisper      # first start: model download progress
-```
+and `docker compose up -d` in the stack. `small` (~470 MB) is a good CPU
+default for Portuguese voice notes; `medium` and `large-v3-turbo` are more
+accurate and several times slower. Start the stack before the whisper project,
+because the network must exist for the attachment; and `docker compose down`
+on the stack cannot remove that network while whisper is on it (stop the
+whisper project first, or ignore the message and restart whisper after the
+`up`, so it joins the new network).
 
-`small` (~470 MB) is a good CPU default for Portuguese voice notes;
-`medium`/`large-v3-turbo` are more accurate and several times slower. The
-server is CPU-only in this image; set `WHISPER_THREADS` to the cores you can
-spare. Without the profile (or without `WHISPER_URL`), `transcribe_audio`
-returns a clear "no whisper backend configured" error and everything else
-works as before.
+**Several stacks on one host.** One whisper container, attached to every
+stack's network (`networks: [a, b]` with one external entry per stack), and the
+same `WHISPER_URL` in each stack. whisper-server handles one request at a
+time, so the stacks queue on it; with `TRANSCRIBE_ON_INGEST` in more than one
+stack, give each a different `TRANSCRIBE_ON_INGEST_INTERVAL_S`.
 
-### Sharing one whisper between stacks
+**Managed stacks** (Komodo, Portainer): the whisper project is a stack of its
+own with the compose above; the WhatsApp stack only carries `WHISPER_URL` in
+its Environment.
 
-Two WhatsApp accounts on one host are two compose projects, and the profile
-above gives each its own sidecar: the same ggml model loaded twice, downloaded
-twice, and two sets of `WHISPER_THREADS` competing whenever both transcribe.
-The bridge and MCP containers are small; whisper is where the second stack
-costs RAM and CPU. Run it once instead, as a project of its own
-(`docker-compose.whisper.yml`: same image, same knobs, its own model volume,
-one listener on the private `whisper-shared` network it creates):
+### Example: a server elsewhere
 
-```bash
-docker compose -f docker-compose.whisper.yml -p whisper up -d
-docker compose -f docker-compose.whisper.yml -p whisper logs -f   # first start: model download
-```
-
-Then, in each stack, layer `docker-compose.shared-whisper.yml` on the main
-file (it attaches the `bridge` service to that network; the MCP container
-shares the bridge's namespace and resolves `whisper` through it) and point
-`WHISPER_URL` at the service name. Leave the `whisper` profile off:
-
-```dotenv
-# .env of each stack
-COMPOSE_FILE=docker-compose.yml:docker-compose.shared-whisper.yml
-WHISPER_URL=http://whisper:8178/inference
-# no COMPOSE_PROFILES=whisper
-```
-
-```bash
-docker compose up -d          # picks COMPOSE_FILE up from .env
-```
-
-`bridge_status().whisper.reachable` confirms from each stack. A stack whose
-sidecar is being replaced: `docker compose --profile whisper rm -sf whisper`
-first, and drop its `whisper-models` volume once the shared one has the model.
-
-- **Knobs.** `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `WHISPER_MEM_LIMIT`,
-  `WHISPER_CPUS` and `WHISPER_LANGUAGE` are read from the directory you start
-  the whisper project in (its `.env`) or from the manager's environment; the
-  stacks' copies of those variables no longer matter.
-- **Managed stacks** ([Komodo, Portainer](#managed-stacks-komodo-portainer)):
-  one stack for `docker-compose.whisper.yml`, and in each account's stack the
-  override goes into the file list next to `docker-compose.yml` (Komodo:
-  "File paths") with `WHISPER_URL` in its Environment. Start the whisper
-  stack first: an account stack fails its `up` with "network whisper-shared
-  declared as external, but could not be found" until the network exists.
-- **One request at a time.** `whisper-server` processes requests serially, so
-  the stacks queue on it. Voice notes take seconds, `WHISPER_TIMEOUT_S` (300 s)
-  covers the wait; give each `TRANSCRIBE_ON_INGEST` worker a different
-  `TRANSCRIBE_ON_INGEST_INTERVAL_S` so their batches do not line up.
-- **No authentication.** `whisper-server` accepts any request it can reach.
-  The shared file publishes no port and the network exists only on this host;
-  keep it that way (no `ports:` on it, no `WHISPER_URL` from another machine
-  without a tunnel of your own).
-- **Stopping it.** `docker compose -f docker-compose.whisper.yml -p whisper stop`.
-  `down` also tries to remove the network the stacks are attached to and
-  reports that; harmless, but `stop` says what you mean.
-- **Post-deploy check.** `scripts/smoke.sh` step 5 probes whatever
-  `WHISPER_URL` names from inside the mcp container, so it covers the shared
-  server too: a stack whose URL points at `whisper:8178` fails the check when
-  nothing answers there, and the message names the whisper project to look at.
+Any reachable `whisper-server` works, such as a GPU box on the tailnet:
+`WHISPER_URL=http://gpu.tailnet.ts.net:8178/inference`. There is no
+authentication on that endpoint, so keep it inside a network you trust.
 
 ## Health and operations
 
@@ -262,7 +256,7 @@ first, and drop its `whisper-models` volume once the shared one has the model.
   bridge `/api/health` and `/api/ready` (through the container, with the
   bridge token from `.env` or `store/.bridge-token`), MCP `/metrics`, an
   MCP `initialize` with the bearer token, and whisper at `WHISPER_URL` from
-  inside the mcp container (the sidecar or the shared server), when one is set.
+  inside the mcp container, when one is set.
   Exit 0 = paired and answering,
   2 = up but waiting for the QR scan, 1 = something to fix (the failing step
   names the variable to look at: token, `WHATSAPP_MCP_ALLOWED_HOSTS`, port).
@@ -443,17 +437,6 @@ the manager holds, so an edit made on the server works until the next deploy and
 then vanishes without a word — including `WHATSAPP_IMAGE_TAG`, which is how you
 pin or roll back an image.
 
-**Profiles are part of that environment.** `COMPOSE_PROFILES=whisper` belongs in
-the manager's Environment section next to `WHISPER_URL`, or every redeploy runs
-without the profile: compose recreates `bridge` and `mcp` and leaves the whisper
-container alone — still `Up`, still attached to the network namespace of the
-bridge container that was just replaced (`network_mode: service:bridge` is
-resolved to a *container id* when whisper is created). Nothing reaches it after
-that: `bridge_status` reports `whisper.reachable: false` and transcription stops
-while the container still looks healthy. `scripts/smoke.sh` fails on that state
-and prints the recreate command
-([Troubleshooting](TROUBLESHOOTING.md#whisper-unreachable-after-a-redeploy)).
-
 **`docker logs` only covers the container that is running now.** A redeploy
 replaces it, and everything the previous one printed is gone unless the manager
 keeps its own log history. That is fine for steady-state logs and expensive for
@@ -520,13 +503,12 @@ where every item of this checklist comes from.
   in that stack's directory shows its QR code. Two stacks paired to the same
   phone are two linked devices of one account, which works but is rarely what
   you meant.
-- **Whisper once.** The `whisper` profile would give every stack its own model
-  in RAM. Run one server for the host instead and point each stack at it:
-  [Sharing one whisper between stacks](#sharing-one-whisper-between-stacks).
-  Bridge and MCP are small; whisper is where a second stack costs.
+- **Whisper once.** One whisper.cpp server for the host, attached to every
+  stack's network, the same `WHISPER_URL` in each stack
+  ([Voice-note transcription](#voice-note-transcription)). Bridge and MCP are
+  small; whisper is where a second stack would cost.
 - **Managed stacks.** One Komodo (or Portainer) stack per account, its name
-  the project name, each with its own Environment section; the shared-whisper
-  override goes into each stack's file list
+  the project name, each with its own Environment section
   ([Managed stacks](#managed-stacks-komodo-portainer)).
 - **Not supported.** Two bridges on one store: the second refuses to start
   (`Refusing to start: another whatsapp-bridge already holds this store`,

@@ -43,7 +43,6 @@ if [ "$1" = "ps" ]; then
   case "$*" in
     *com.docker.compose.service=bridge*)  printf '%s\n' "${FAKE_BRIDGE_CTR:-}" ;;
     *com.docker.compose.service=mcp*)     printf '%s\n' "${FAKE_MCP_CTR:-}" ;;
-    *com.docker.compose.service=whisper*) printf '%s\n' "${FAKE_WHISPER_CTR:-}" ;;
     *) printf '  bridge: running (Up 3 minutes)\n  mcp: running (Up 3 minutes)\n' ;;
   esac
   exit 0
@@ -60,7 +59,6 @@ if [ "$1" = "inspect" ]; then   # inspect -f <template> <container>
           [ -n "${FAKE_NETNS_RESOLVES_TO:-}" ] || { echo "No such object: $4" >&2; exit 1; }
           printf '%s\n' "$FAKE_NETNS_RESOLVES_TO" ;;
       esac ;;
-    *HostConfig.NetworkMode*)       printf '%s\n' "${FAKE_WHISPER_NETNS:-}" ;;
     *com.docker.compose.project*)   printf '%s\n' "${FAKE_COMPOSE_PROJECT:-}" ;;
     *) echo "fake docker: unexpected inspect template: $3" >&2; exit 99 ;;
   esac
@@ -426,112 +424,6 @@ def test_project_mode_warns_about_a_missing_mcp_container(stack: Stack) -> None:
 BRIDGE_ID = "b" * 64
 
 
-def _with_whisper(stack: Stack, **fakes: str) -> subprocess.CompletedProcess[str]:
-    """A managed stack whose whisper sidecar is up (the `whisper` profile)."""
-    return stack.run(
-        "--project",
-        "whatsapp-mcp",
-        "--url",
-        "https://box.tailnet.ts.net",
-        FAKE_BRIDGE_CTR="whatsapp-mcp-bridge-1",
-        FAKE_MCP_CTR="whatsapp-mcp-mcp-1",
-        FAKE_WHISPER_CTR="whatsapp-mcp-whisper-1",
-        FAKE_BRIDGE_ID=BRIDGE_ID,
-        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
-        **fakes,
-    )
-
-
-def test_orphaned_whisper_names_the_recreate_command(stack: Stack) -> None:
-    """A redeploy without the profile leaves whisper in the old bridge namespace.
-
-    The namespace names a container docker no longer knows, so the fake refuses
-    to inspect it, exactly like the real one.
-    """
-    result = _with_whisper(stack, FAKE_WHISPER_NETNS="container:" + "d" * 64)
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "whisper is attached to a bridge container that no longer exists" in result.stdout
-    assert "docker compose --profile whisper up -d --force-recreate whisper" in result.stdout
-    assert "python" not in stack.docker_calls()  # no point probing a dead namespace
-    # An optional sidecar must not swallow the checks the operator ran this for.
-    assert "4. mcp initialize" in result.stdout
-
-
-def test_whisper_in_the_bridge_namespace_is_probed_from_the_mcp_container(stack: Stack) -> None:
-    result = _with_whisper(stack, FAKE_WHISPER_NETNS="container:" + BRIDGE_ID)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "5. whisper" in result.stdout
-    assert "reachable on 127.0.0.1:8178 (whatsapp-mcp-whisper-1)" in result.stdout
-    assert "exec whatsapp-mcp-mcp-1 python" in stack.docker_calls()
-
-
-@pytest.mark.parametrize("target", ["whatsapp-mcp-bridge-1", BRIDGE_ID[:12]])
-def test_whisper_attached_by_name_or_short_id_is_resolved_through_docker(stack: Stack, target: str) -> None:
-    """`container:<name>` and `container:<short id>` both name the live bridge."""
-    result = _with_whisper(
-        stack,
-        FAKE_WHISPER_NETNS="container:" + target,
-        FAKE_NETNS_RESOLVES_TO=BRIDGE_ID,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "FAIL" not in result.stdout
-    assert "reachable on 127.0.0.1:8178" in result.stdout
-
-
-def test_unreachable_whisper_fails(stack: Stack) -> None:
-    """The profile is active, so silence on 8178 is a broken deployment."""
-    result = _with_whisper(
-        stack,
-        FAKE_WHISPER_NETNS="container:" + BRIDGE_ID,
-        FAKE_WHISPER_REACHABLE="no",
-    )
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "does not answer on 127.0.0.1:8178" in result.stdout
-    assert "Connection refused" in result.stdout
-
-
-def test_no_whisper_container_skips_the_check(stack: Stack) -> None:
-    """The shape CI smokes: compose stack in this directory, no whisper profile."""
-    (stack.dir / ".env").write_text("WHATSAPP_BRIDGE_TOKEN=bridge-token-0123456789\n", encoding="utf-8", newline="\n")
-    result = stack.run(
-        FAKE_COMPOSE_PS="  bridge: running healthy\n  mcp: running healthy\n",
-        FAKE_BRIDGE_ID=BRIDGE_ID,
-        FAKE_COMPOSE_PROJECT="whatsapp-mcp",
-        FAKE_WHISPER_CTR="",
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "5. whisper" not in result.stdout
-    calls = stack.docker_calls()
-    assert "compose ps -q bridge" in calls  # the project name comes off the bridge
-    assert "python" not in calls
-
-
-def test_whisper_configured_but_not_running_is_reported(stack: Stack) -> None:
-    """WHISPER_URL kept, container gone: transcription is dead just the same."""
-    result = stack.run(
-        "--project",
-        "whatsapp-mcp",
-        "--url",
-        "https://box.tailnet.ts.net",
-        FAKE_BRIDGE_CTR="whatsapp-mcp-bridge-1",
-        FAKE_MCP_CTR="whatsapp-mcp-mcp-1",
-        FAKE_BRIDGE_ID=BRIDGE_ID,
-        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
-        FAKE_WHISPER_CTR="",
-        FAKE_ENV_WHISPER_URL="http://127.0.0.1:8178/inference",
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "5. whisper" in result.stdout
-    assert "runs no whisper container" in result.stdout
-    assert "COMPOSE_PROFILES=whisper" in result.stdout
-
-
 @pytest.mark.parametrize("flag", ["--project", "--url", "--wait", "--mcp-token"])
 def test_a_flag_without_its_value_exits_instead_of_spinning(stack: Stack, flag: str) -> None:
     result = stack.run(flag)
@@ -540,12 +432,12 @@ def test_a_flag_without_its_value_exits_instead_of_spinning(stack: Stack, flag: 
     assert f"{flag} needs a value" in result.stderr
 
 
-# A whisper shared between stacks (docker-compose.whisper.yml) is not a container
-# of this project: step 5 follows WHISPER_URL to it instead of assuming the sidecar.
+# Step 5: whisper is whatever WHISPER_URL names, probed from the mcp container.
+# The repo ships no whisper service; the operator runs one and points the URL at it.
 
 
-def _with_shared_whisper(stack: Stack, **fakes: str) -> subprocess.CompletedProcess[str]:
-    """A managed stack whose WHISPER_URL names the shared server, no sidecar here."""
+def _with_whisper_url(stack: Stack, url: str, **fakes: str) -> subprocess.CompletedProcess[str]:
+    """A managed stack whose mcp container carries WHISPER_URL."""
     return stack.run(
         "--project",
         "whatsapp-mcp",
@@ -555,35 +447,54 @@ def _with_shared_whisper(stack: Stack, **fakes: str) -> subprocess.CompletedProc
         FAKE_MCP_CTR="whatsapp-mcp-mcp-1",
         FAKE_BRIDGE_ID=BRIDGE_ID,
         FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
-        FAKE_WHISPER_CTR="",
-        FAKE_ENV_WHISPER_URL="http://whisper:8178/inference",
+        FAKE_ENV_WHISPER_URL=url,
         **fakes,
     )
 
 
-def test_shared_whisper_is_probed_at_its_url(stack: Stack) -> None:
-    result = _with_shared_whisper(stack)
+def test_whisper_url_is_probed_from_the_mcp_container(stack: Stack) -> None:
+    result = _with_whisper_url(stack, "http://whisper:8178/inference")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "5. whisper" in result.stdout
-    assert "reachable on whisper:8178 (shared" in result.stdout
-    assert "runs no whisper container" not in result.stdout
+    assert "reachable on whisper:8178" in result.stdout
     calls = stack.docker_calls()
     assert "exec whatsapp-mcp-mcp-1 python" in calls
     assert " whisper:8178\n" in calls  # the address is an argument of the probe, not baked into it
 
 
-def test_shared_whisper_down_fails_the_check(stack: Stack) -> None:
+def test_whisper_down_fails_the_check(stack: Stack) -> None:
     """A URL that names a server nobody answers at is a broken deployment, not a skip."""
-    result = _with_shared_whisper(stack, FAKE_WHISPER_REACHABLE="no")
+    result = _with_whisper_url(stack, "http://whisper:8178/inference", FAKE_WHISPER_REACHABLE="no")
 
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "the shared whisper does not answer on whisper:8178" in result.stdout
+    assert "whisper does not answer on whisper:8178" in result.stdout
     assert "Connection refused" in result.stdout
-    assert "docker-compose.whisper.yml" in result.stdout
+    assert "network the bridge is on" in result.stdout
 
 
-def test_compose_mode_follows_the_shared_url_from_dot_env(stack: Stack) -> None:
+def test_loopback_whisper_url_is_probed_the_same_way(stack: Stack) -> None:
+    """Something the operator runs inside the bridge namespace answers on 127.0.0.1."""
+    result = _with_whisper_url(stack, "http://127.0.0.1:8178/inference")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "reachable on 127.0.0.1:8178" in result.stdout
+
+
+def test_no_whisper_url_skips_step_5(stack: Stack) -> None:
+    """The shape CI smokes: compose stack in this directory, no transcription backend."""
+    (stack.dir / ".env").write_text("WHATSAPP_BRIDGE_TOKEN=bridge-token-0123456789\n", encoding="utf-8", newline="\n")
+    result = stack.run(
+        FAKE_COMPOSE_PS="  bridge: running healthy\n  mcp: running healthy\n",
+        FAKE_BRIDGE_ID=BRIDGE_ID,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5. whisper" not in result.stdout
+    assert "python" not in stack.docker_calls()
+
+
+def test_compose_mode_reads_whisper_url_from_dot_env(stack: Stack) -> None:
     (stack.dir / ".env").write_text(
         "WHATSAPP_BRIDGE_TOKEN=bridge-token-0123456789\nWHISPER_URL=http://whisper:8178/inference\n",
         encoding="utf-8",
@@ -592,26 +503,8 @@ def test_compose_mode_follows_the_shared_url_from_dot_env(stack: Stack) -> None:
     result = stack.run(
         FAKE_COMPOSE_PS="  bridge: running healthy\n  mcp: running healthy\n",
         FAKE_BRIDGE_ID=BRIDGE_ID,
-        FAKE_COMPOSE_PROJECT="whatsapp-mcp",
-        FAKE_WHISPER_CTR="",
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "reachable on whisper:8178 (shared" in result.stdout
+    assert "reachable on whisper:8178" in result.stdout
     assert "compose exec -T mcp python" in stack.docker_calls()
-
-
-def test_sidecar_left_running_while_the_url_points_at_the_shared_server(stack: Stack) -> None:
-    """The profile was not dropped when the stack moved to the shared whisper: say so."""
-    result = _with_whisper(
-        stack,
-        FAKE_WHISPER_NETNS="container:" + BRIDGE_ID,
-        FAKE_ENV_WHISPER_URL="http://whisper:8178/inference",
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (
-        "reachable on whisper:8178 (shared; whatsapp-mcp-whisper-1 in this project is not the one in use)"
-        in result.stdout
-    )
-    assert " 127.0.0.1:8178\n" not in stack.docker_calls()

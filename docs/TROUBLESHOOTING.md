@@ -213,64 +213,29 @@ the next start picks the change up and stops warning.
   and reissue certificates by hand, put that `openssl` line in a cron job on
   the host: nothing in this repo watches the expiry date for you.
 
-## whisper unreachable after a redeploy
+## whisper configured but not reachable
 
-- **Transcription stops silently and the whisper container looks fine**:
-  `bridge_status` answers `ok: true` with
-
-  ```json
-  "whisper": { "configured": true, "backend": "url", "reachable": false }
-  ```
-
-  and, with `TRANSCRIBE_ON_INGEST=1`, the MCP log repeats one line per round:
-
-  ```text
-  transcribe_on_ingest: the whisper backend is unavailable (whisper server request failed: ...)
-  ```
-
-  `docker ps` shows the sidecar `Up` for longer than the bridge — the tell:
-
-  ```text
-  whatsapp-mcp-bridge-1    Up 5 minutes (healthy)
-  whatsapp-mcp-mcp-1       Up 5 minutes
-  whatsapp-mcp-whisper-1   Up 7 hours
-  ```
-
-  **Cause.** The whisper service shares the bridge's network namespace
-  (`network_mode: service:bridge`), which Docker resolves to a **container id**
-  when the whisper container is created. A `docker compose up` whose `whisper`
-  profile is not active recreates the bridge and never touches whisper, so
-  whisper keeps a namespace whose container is gone: it still runs, its port
-  8178 exists in nothing, and the MCP server — which lives in the *new* bridge
-  namespace — cannot reach it. Usual trigger: `COMPOSE_PROFILES=whisper` missing
-  from the environment a stack manager deploys with
-  ([Managed stacks](DOCKER.md#managed-stacks-komodo-portainer)).
-
-  **Fix**, from the stack's directory:
+- **`bridge_status` answers `"whisper": { "configured": true, "backend": "url",
+  "reachable": false }`**, and with `TRANSCRIBE_ON_INGEST=1` the MCP log repeats
+  `transcribe_on_ingest: the whisper backend is unavailable (...)` once per
+  round. The MCP server probes `WHISPER_URL` from inside the mcp container,
+  which shares the bridge's network namespace. Check from the same place:
 
   ```bash
-  docker compose --profile whisper up -d --force-recreate whisper
+  scripts/smoke.sh --project whatsapp-mcp     # step 5 probes WHISPER_URL and names the address
+  docker compose exec mcp python -c 'import urllib.request; urllib.request.urlopen("http://whisper:8178/")'
   ```
 
-  Then put `COMPOSE_PROFILES=whisper` where the next deploy will read it (the
-  manager's Environment section, or `.env` for a hand-driven stack), so it does
-  not come back at the next redeploy. A whisper run as its own project
-  ([Sharing one whisper between stacks](DOCKER.md#sharing-one-whisper-between-stacks))
-  cannot get into this state: it has a network of its own, not the bridge's
-  namespace.
-
-  **Verify** with the post-deploy check, which fails on exactly this state and
-  otherwise probes port 8178 from inside the mcp container (step 5):
-
-  ```bash
-  scripts/smoke.sh --project whatsapp-mcp
-  # == 5. whisper
-  #   reachable on 127.0.0.1:8178 (whatsapp-mcp-whisper-1)
-  ```
-
-  Step 5 also speaks up for the neighbouring mistake — `WHISPER_URL` still set
-  while the profile dropped the container entirely — and, with `--wait`, gives a
-  fresh container time to download its model before calling it unreachable.
+  The usual causes, in order: the whisper project is not running (`docker ps`
+  from its directory); it is not on this stack's network (`docker network
+  inspect whatsapp-mcp_default` must list it; a stack recreated with `down` and
+  `up` gets a fresh network the whisper container is no longer attached to, so
+  restart the whisper project); `WHISPER_URL` names something the bridge cannot
+  reach (a service name only resolves on a shared network, and the host's own
+  loopback is not reachable from a container); or the server is still
+  downloading its model on first start (`scripts/smoke.sh --wait 120` gives it
+  time). The compose for such a server is in
+  [Voice-note transcription](DOCKER.md#voice-note-transcription).
 
 ## Two accounts on one host
 

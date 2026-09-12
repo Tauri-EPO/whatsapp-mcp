@@ -132,9 +132,7 @@ whatsapp-mcp/
 │   ├── transcribe_worker.py    # TRANSCRIBE_ON_INGEST: background thread transcribing inbound voice notes
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
-├── docker-compose.yml          # bridge + mcp (+ optional whisper profile) — docs/DOCKER.md
-├── docker-compose.whisper.yml  # one whisper for every stack on the host (own project, `whisper-shared` network)
-├── docker-compose.shared-whisper.yml  # override: the bridge joins that network; WHISPER_URL=http://whisper:8178/inference
+├── docker-compose.yml          # bridge + mcp — docs/DOCKER.md (no whisper: WHISPER_URL points at a server you run)
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
@@ -201,7 +199,6 @@ golangci-lint run                                # config in whatsapp-bridge/.go
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
 docker compose up -d --build
 docker compose logs -f bridge                    # QR code on first run
-docker compose --profile whisper up -d           # + local whisper.cpp for transcribe_audio
 ```
 
 The MCP server is a real package (issue #409): `pyproject.toml` declares `[build-system]` with setuptools, so `uv sync` installs it into the local venv as an editable install and `uv build --wheel` ships exactly the `[tool.setuptools] py-modules` list (a local check; the release artifacts stay the container images, so `version` in `pyproject.toml` remains nominal) — the image is unaffected, its `uv sync --no-install-project` still skips the project and the Dockerfile copies `*.py` itself.
@@ -310,7 +307,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)* | Let the ingest worker ask the bridge (`/api/download`, the path `transcribe_audio` uses) for audio whose bytes are not cached, instead of skipping it — what an archive with `WHATSAPP_MEDIA_AUTODOWNLOAD=false` or a retention sweep needs. `TRANSCRIBE_ON_INGEST_BATCH` bounds the attempts, failures included, and the downloaded bytes stay in the store like any other download. A file the bridge cannot send this time is skipped without a note (the next round retries it); three failures in a row end the fetching for that round. A file the bridge answers `media_unavailable` for (the sender's phone was asked to re-upload and said the media is gone, or the row carries no CDN fields to download with) gets a dated `media_unavailable` note, leaves the work list for good and costs no strike (`coverage().audio.unavailable`). Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `FFMPEG_TIMEOUT_S` | `120` | Timeout for each ffmpeg conversion (voice-note encode in `audio.py`, 16 kHz WAV prep in `transcribe.py`) |
 
-Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`, `WHISPER_MODEL_NAME`, `WHISPER_THREADS`, `COMPOSE_PROFILES`) are documented in `.env.example` and `docs/DOCKER.md`.
+Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`) are documented in `.env.example` and `docs/DOCKER.md`. The whisper server is not part of the compose file: `WHISPER_URL` names one the operator runs (`docs/DOCKER.md`, "Voice-note transcription").
 
 When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
 
@@ -347,7 +344,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 | Change the conversation allow-list | `chat_policy.py` **and** `whatsapp-bridge/chat_policy.go` |
 | Add or rename an MCP tool that calls the bridge | also `endpointTools` / `unenforcedTools` in `whatsapp-bridge/tool_policy.go` (`tests/test_bridge_tool_policy.py` fails otherwise) |
 | Change how tool results are marked as untrusted | `whatsapp-mcp-server/untrusted.py` (+ the allow-list in `tests/test_untrusted_content.py`) |
-| Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`, `whisper` profile in `docker-compose.yml` and its shared twin `docker-compose.whisper.yml` (`tests/test_compose_whisper.py` keeps the two in step) |
+| Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`; the whisper server itself is not in the repo (`docs/DOCKER.md` shows how to run one next to the stack) |
 | Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
 | Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`, and a backfill that marks the rows it read like `mentions.go`); FTS in `fts.go` |

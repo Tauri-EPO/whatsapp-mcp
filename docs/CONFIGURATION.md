@@ -445,8 +445,8 @@ What it does and does not do:
 
 Transcription is opt-in: with neither `WHISPER_URL` nor `WHISPER_BIN` set, every
 `transcribe_audio` call fails with the same "No whisper backend configured"
-error, and a stack running without the `whisper` compose profile looks exactly
-like one where nobody has transcribed anything yet. `bridge_status` answers the
+error, and a stack with no whisper server configured looks exactly like one
+where nobody has transcribed anything yet. `bridge_status` answers the
 question in one call, before an agent spends a call per file:
 
 ```jsonc
@@ -460,9 +460,10 @@ question in one call, before an agent spends a call per file:
 ```
 
 `configured: false` means "not possible here, ask the operator";
-`configured: true, reachable: false` usually means the `whisper` profile is not
-up (`docker compose --profile whisper up -d`), the shared whisper project is
-stopped, or that `WHISPER_URL` is no longer routed to it. The check costs no transcription: the server backend gets
+`configured: true, reachable: false` usually means the whisper server
+`WHISPER_URL` names is not running, not on a network the bridge is on, or the
+URL is stale ([Voice-note transcription](DOCKER.md#voice-note-transcription)).
+The check costs no transcription: the server backend gets
 one `HEAD` on the configured URL (2 s timeout, no body sent or read —
 whisper-server only accepts `POST` there, and its `404` is proof enough that it
 is listening), the CLI backend a look at the binary and the model file on disk.
@@ -502,8 +503,8 @@ What to know before turning it on:
   [the `audio` block in TOOLS.md](TOOLS.md#the-audio-block-how-much-is-left-to-transcribe).
 - **It costs CPU on this machine.** Whisper is the most expensive thing this
   server does, and the worker will chew through the whole backlog of voice notes
-  at `BATCH` files per interval. Start with the defaults on a small model; the
-  `whisper` compose profile has `WHISPER_MEM_LIMIT` / `WHISPER_CPUS` to cap it.
+  at `BATCH` files per interval. Start with the defaults on a small model, and
+  cap the whisper server's memory and CPUs where you run it.
 - **It needs a backend.** With neither `WHISPER_URL` nor `WHISPER_BIN` set, the
   worker logs a warning at startup and stays off.
 - **It is idempotent and survives restarts.** The work list is "hashes with no

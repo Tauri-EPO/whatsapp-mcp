@@ -123,7 +123,7 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
 def describe_setup_help() -> str:
     return (
         "No whisper backend configured. Set WHISPER_URL to a whisper.cpp server inference endpoint "
-        "(e.g. http://127.0.0.1:8178/inference; `docker compose --profile whisper up -d` starts one), "
+        "(e.g. http://whisper:8178/inference, a whisper.cpp server you run; docs/DOCKER.md), "
         "or WHISPER_BIN=/path/to/whisper-cli together with WHISPER_MODEL=/path/to/ggml-small.bin."
     )
 
