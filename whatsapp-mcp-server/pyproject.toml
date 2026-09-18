@@ -39,7 +39,7 @@ dependencies = [
     # this side, so a 5 MiB clinical PDF costs the agent a few dozen KB instead
     # of 7 MiB of base64 it cannot read. One small library per format, no OCR
     # and no office suite.
-    "pypdf>=6.4",
+    "pypdf>=6.18.1",
     "python-docx>=1.2",
     "openpyxl>=3.1",
     # read_media images: downscale a photo to the ~1568 px a vision model reads
