@@ -61,6 +61,49 @@ It is anchored on the oldest message already stored, arrives asynchronously, and
 the phone decides how much it returns — messages it deleted itself are gone. For
 a full backfill instead, re-pair once with `--full-history-pair`.
 
+## "The number was added to a group and the earlier messages are missing"
+
+When someone adds a number to a group, WhatsApp can offer to share the group's
+recent messages with the new member. The archive of a bridge linked to that
+number still starts at the moment it joined: the shared messages are **not**
+stored today.
+
+That share does not travel as a history sync (the companion sync at pair time,
+or the on-demand request `request_history` makes). The adder's client uploads
+the messages as one encrypted bundle and sends a message that only points at
+it. The bridge recognises that message and says so, but it does not download or
+decode the bundle yet (issue #468):
+
+```text
+Group history bundle seen in <group>@g.us (message <id>, from_me=false): 42 messages, oldest in window 1700000000, oldest in bundle 1700003600, 1 history receivers, 3 other receivers; the shared messages are not downloaded or stored
+```
+
+How to read it:
+
+- The line means a share message reached this bridge. `from_me=true` is the
+  copy of a share this account made itself; the two receiver counts say how many
+  accounts were to get the history and how many were not. The timestamps are the
+  values WhatsApp sent, as sent.
+- Every such message also increments
+  `whatsapp_bridge_group_history_shares_total` on `/metrics`. It counts
+  messages, not adds: one add can produce more than one (a bundle and a notice,
+  or a redelivery), and the counter starts again at `0` when the bridge
+  restarts.
+- **No line is weaker evidence than a line.** It needs `WHATSAPP_LOG_LEVEL` at
+  `INFO` or lower, the share has to arrive on the live connection while the
+  bridge is running (a share replayed inside a history sync is not reported),
+  and a message this device could not decrypt never gets that far.
+
+`request_history` does not fetch the bundle: it asks the account's **own
+phone** for messages older than the oldest one stored, and it cannot name a
+bundle. Whether that phone, once it has processed the share itself, returns the
+shared messages on such a request (or at a re-pair with `--full-history-pair`)
+has not been observed; do not count on it.
+
+Until the bundle is decoded, the copy that is known to exist is the archive of
+an account that was already in the group: export it there with
+`export_messages`.
+
 ## "Messages are out of order after an image rollback"
 
 Every timestamp in `messages.db` is stored in one spelling (UTC, `+00:00`, fixed

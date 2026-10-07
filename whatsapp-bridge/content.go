@@ -390,3 +390,32 @@ func extractMediaInfo(msg *waE2E.Message, msgTimestamp time.Time, msgID string) 
 
 	return "", "", "", nil, nil, nil, 0
 }
+
+// sharedGroupHistory recognises the messages WhatsApp sends when a member is
+// added to a group with "share recent messages": a messageHistoryBundle (the
+// adder's client uploaded the messages as one encrypted blob and this names
+// it) or a messageHistoryNotice. Neither carries text or media as
+// extractMessage sees them. kind is "" for every other message; meta is nil
+// when the message carries no metadata (issue #468).
+func sharedGroupHistory(msg *waE2E.Message) (kind string, meta *waE2E.MessageHistoryMetadata) {
+	if bundle := msg.GetMessageHistoryBundle(); bundle != nil {
+		return "bundle", bundle.GetMessageHistoryMetadata()
+	}
+	if notice := msg.GetMessageHistoryNotice(); notice != nil {
+		return "notice", notice.GetMessageHistoryMetadata()
+	}
+	return "", nil
+}
+
+// describeSharedGroupHistory renders that metadata for the log: how many
+// messages, the two timestamps as WhatsApp sent them, and how many accounts
+// are on each receiver list. Counts only: the lists themselves are other
+// people's identifiers and stay out of the log.
+func describeSharedGroupHistory(meta *waE2E.MessageHistoryMetadata) string {
+	if meta == nil {
+		return "no metadata"
+	}
+	return fmt.Sprintf("%d messages, oldest in window %d, oldest in bundle %d, %d history receivers, %d other receivers",
+		meta.GetMessageCount(), meta.GetOldestMessageTimestampInWindow(), meta.GetOldestMessageTimestampInBundle(),
+		len(meta.GetHistoryReceivers()), len(meta.GetNonHistoryReceivers()))
+}
