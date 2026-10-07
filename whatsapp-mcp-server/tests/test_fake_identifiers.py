@@ -132,6 +132,7 @@ FAKE_GROUPS = {
 # Tailnet hosts in examples: placeholders, never a machine of ours.
 FAKE_HOSTS = {
     "box.tailnet.ts.net",
+    "example.ts.net",
     "gpu.tailnet.ts.net",
     "host.tail1234.ts.net",
     "host.tailnet.ts.net",
