@@ -11,8 +11,11 @@ package main
 // "./store" so existing setups keep working.
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -25,6 +28,69 @@ const defaultStoreDir = "store"
 // with its own, looser default. It applies to directories created from now on;
 // one that already exists keeps the mode it has.
 const storeDirMode os.FileMode = 0o700
+
+// storeFileMode is the mode of the two SQLite databases and of the files the
+// driver keeps next to them: owner only, like the media files and the token.
+const storeFileMode os.FileMode = 0o600
+
+// privateDatabase makes the SQLite database at path owner-only before the
+// driver opens it, and says so in the log when it had to change something.
+//
+// The driver creates a database 0644 (minus the umask) and gives the
+// write-ahead log and the shared-memory file the mode the database has at that
+// moment (issue #491). So the database is created here, empty and 0600, when it
+// does not exist yet, and a database an earlier release left readable by group
+// or others is tightened together with whatever -wal / -shm / -journal a
+// previous run left behind. The directory is not touched: it keeps the mode it
+// has (storeDirMode). Both processes run as one user in the images, so the MCP
+// server reads the files as before.
+//
+// A failure is logged and startup goes on: the open that follows either works
+// or reports its own error.
+func privateDatabase(path string) {
+	tightened, err := secureDatabaseFiles(path)
+	if len(tightened) > 0 {
+		bridgeLog.Infof("Tightened %s to %04o: group or others could read it (both processes must run as the same user)", strings.Join(tightened, ", "), storeFileMode)
+	}
+	if err != nil {
+		bridgeLog.Warnf("Could not make %s owner-only: %v", path, err)
+	}
+}
+
+// secureDatabaseFiles creates path with storeFileMode when it is missing and
+// removes group and other access from it and from its SQLite siblings. It
+// returns the existing files whose mode it changed.
+func secureDatabaseFiles(path string) ([]string, error) {
+	if runtime.GOOS == "windows" {
+		// No owner/group/other bits to set there; every file would read as loose.
+		return nil, nil
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, storeFileMode) //nolint:gosec // path is the operator-configured database inside the store directory
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	var tightened []string
+	for _, name := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Stat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return tightened, err
+		}
+		if info.Mode().Perm()&^storeFileMode == 0 {
+			continue
+		}
+		if err := os.Chmod(name, storeFileMode); err != nil {
+			return tightened, err
+		}
+		tightened = append(tightened, name)
+	}
+	return tightened, nil
+}
 
 // storeDir returns the configured store directory (not cleaned or created).
 func storeDir() string {

@@ -111,14 +111,25 @@ To read those files from the host, inspect the volume
 directory instead of the named volume.
 
 The bridge creates the store directory and each chat's media directory `0700`,
-and the media files and the token `0600`, owned by the container user (uid 1000
-in both images): on a bind-mounted store, read the files as that user or as
-root. The SQLite databases get the driver's default mode (`0644` under the usual
-umask), so on a new store it is the `0700` directory that keeps them private.
-Directories an earlier release created keep the mode they had (`0750`), which
-leaves the databases readable by the group: `chmod -R go-rwx <store>` tightens
-an existing store by hand. A chat directory replaced by a symlink is not written
-to: see [the store root](./ARCHITECTURE.md#the-store-root).
+and every file it writes there `0600`, owned by the container user (uid 1000 in
+both images): the media files, the token, and the two databases `messages.db`
+and `whatsapp.db` with their `-wal` / `-shm` files. On a bind-mounted store,
+read the files as that user or as root.
+
+A store an earlier release created is tightened as far as its files go: at
+startup the bridge sets `messages.db`, `whatsapp.db` and whatever `-wal` /
+`-shm` / `-journal` sits next to them to `0600` when group or others could read
+them (they were created `0644`), and logs one `Tightened ... to 0600` line
+naming the files. Directories are not re-moded: one an earlier release created
+keeps `0750`, one you created for a bind mount keeps what `mkdir` gave it, and
+`chmod -R go-rwx <store>` tightens those by hand. Both processes therefore have
+to run as the same user, which the images and the compose file do (uid 1000, no
+`user:` override); an MCP server started under another account that relied on
+group access to `messages.db` loses it at the next bridge start. `notes.db` and
+the exports are written by the MCP server and are not covered by this.
+
+A chat directory replaced by a symlink is not written to: see
+[the store root](./ARCHITECTURE.md#the-store-root).
 
 ## Tailscale
 
@@ -544,7 +555,10 @@ scripts/backup.sh prune ./backups 7      # keep the newest 7 snapshots
 It starts a throwaway `alpine` container with the `sqlite3` CLI, copies each
 database with `.backup` (a consistent snapshot even mid-write, thanks to WAL
 mode), verifies it with `PRAGMA integrity_check`, tars the media directories
-and copies the token. A snapshot is a plain directory:
+and copies the token. Every file of the snapshot is created `0600` and handed
+to the owner of the destination directory, so the account that ran the script
+can ship it off-box and no other account on the host can read it. A snapshot is
+a plain directory:
 
 ```
 messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
