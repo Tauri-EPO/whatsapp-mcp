@@ -3362,8 +3362,10 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
     The query as a substring, as before. A query that is a phone number also
     matches with its separators dropped, and a Brazilian mobile under its
     other spelling (issue #444): that one as the whole phone JID, never as a
-    substring of somebody else's. The second list holds those extra spellings,
-    for a caller that reports which field matched.
+    substring of somebody else's. A chat WhatsApp keeps under a LID answers to
+    the number the LID map gives for it (issue #465), as that LID's whole JID.
+    The second list holds those extra spellings, for a caller that reports
+    which field matched.
     """
     patterns = ["%" + query + "%"]
     digits, alternate = _phone_spellings(query)
@@ -3372,7 +3374,40 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
         patterns.append("%" + typed_digits + "%")
     if alternate:
         patterns.append(alternate)
-    return patterns, [spelling for spelling in (typed_digits, alternate) if spelling]
+    lid_jids = _lid_jids_of_number(digits, alternate, whole="@" in query) if digits else []
+    return [*patterns, *lid_jids], [spelling for spelling in (typed_digits, alternate, *lid_jids) if spelling]
+
+
+# How many LIDs one phone-number search follows. A search page is 50 rows.
+_LID_SEARCH_LIMIT = 50
+
+
+def _lid_jids_of_number(digits: str, alternate: str | None, whole: bool) -> list[str]:
+    """The LID JIDs whose phone number, in the LID map, a phone-number search matches.
+
+    The digits match as a substring, the way they match a phone JID, unless
+    the query named a whole JID; the other spelling of a Brazilian mobile
+    matches whole. One read of whatsapp.db, and [] when it cannot be read: the
+    search then finds what it found before.
+    """
+    if not os.path.isfile(WHATSMEOW_DB_PATH):
+        return []
+    numbers = [digits if whole else f"%{digits}%"]
+    if alternate:
+        numbers.append(alternate.partition("@")[0])
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            rows = conn.execute(
+                f"SELECT lid FROM whatsmeow_lid_map WHERE {_like_any('pn', numbers)} ORDER BY lid LIMIT ?",
+                (*numbers, _LID_SEARCH_LIMIT),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.debug("lid-map search failed: %s", e)
+        return []
+    return [f"{lid}@{LID_SERVER}" for (lid,) in rows if lid]
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
@@ -3390,7 +3425,9 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
     A phone-number query is matched as digits however it was typed, and a full
     Brazilian mobile also finds the contact stored under its other spelling,
-    with or without the ninth digit (issue #444, `phone.py`).
+    with or without the ninth digit (issue #444, `phone.py`). A contact
+    WhatsApp only keeps under a LID is found by the number the LID map gives
+    for it (issue #465), and says so with `matched: "phone_number"`.
     """
     seen_jids: set[str] = set()
     # (jid, name, push name if this hit carried one, fields the query could
@@ -3489,7 +3526,10 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             jid=jid,
         )
         matched = _matched_field(query, candidates)
-        if matched is None and any(spelling in jid for spelling in other_spellings):
+        if matched is None and jid.endswith(f"@{LID_SERVER}") and jid in other_spellings:
+            # Nothing in the JID holds the digits: its phone number does.
+            matched = "phone_number"
+        elif matched is None and any(spelling in jid for spelling in other_spellings):
             matched = "jid"
         rows.append({**contact_to_dict(contact), "matched": matched})
     return rows
@@ -3874,6 +3914,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     WhatsApp registered the account with or without the ninth digit and the
     chat is stored under that one. The number as given wins when both spellings
     have a chat the allow-list admits.
+
+    A chat the store holds only under the contact's LID is found too (issue
+    #465): the LID map gives the LID for the number, in either spelling.
     """
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
@@ -3881,7 +3924,14 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         cursor = conn.cursor()
         spellings = _direct_chat_candidates(sender_phone_number)
         _, alternate = _phone_spellings(sender_phone_number)
-        lookups = [*spellings, alternate] if alternate else list(spellings)
+        # The LIDs the map pairs with the number (`_sender_aliases` asks it for
+        # both spellings): the row may exist under one of those alone.
+        mapped = [
+            alias
+            for alias in _sender_aliases(spellings[1])
+            if alias.endswith(f"@{LID_SERVER}") and alias not in spellings
+        ]
+        lookups = [*spellings, *mapped, *([alternate] if alternate else [])]
         twins = _chat_twins(cursor, only=lookups)
         candidates = [twins.listing_jid(jid) for jid in lookups]
         alternate_row = twins.listing_jid(alternate) if alternate else ""
