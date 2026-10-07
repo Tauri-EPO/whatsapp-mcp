@@ -1,7 +1,8 @@
 version: 2
 updates:
-  # "uv" updates pyproject.toml *and* uv.lock together; "pip" only touched
-  # pyproject.toml and left the lockfile (which CI and the image use) behind.
+  # "uv" updates uv.lock (and, without versioning-strategy below, the pyproject.toml
+  # floors with it); "pip" only touched pyproject.toml and left the lockfile
+  # (which CI and the image use) behind.
   #
   # Runtime and dev-tooling bumps are split into separate PRs (#278). The
   # commit prefix is per entry, not per group, and Dependabot's "uv" ecosystem
@@ -22,6 +23,17 @@ updates:
     # One slot per version-update group, plus headroom: the limit silently
     # suppresses a group's PR for the week once it is reached.
     open-pull-requests-limit: 4
+    # Bumps change uv.lock only. Without this Dependabot also raises the floors
+    # in pyproject.toml to the newest release on every bump (#438: ruff and
+    # pyright each ended up admitting exactly one published version), which
+    # breaks an install that bypasses the lock. Raise a floor by hand when a
+    # minimum really moves. Documented as supported by uv ("versioning-strategy",
+    # GitHub's Dependabot options reference), and dependabot-core's uv update
+    # checker hands the strategy to the shared Python requirements updater, which
+    # returns the requirements unchanged for lockfile-only. The cost: a release
+    # that needs a manifest change is never proposed, so the mcp<3 cap hides a 3.x
+    # until someone moves it on purpose.
+    versioning-strategy: lockfile-only
     groups:
       # The four dev-tooling lists below (twice as exclude-patterns, twice as
       # patterns) are one list written out four times: Dependabot does not
