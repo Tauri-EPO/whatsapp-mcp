@@ -363,6 +363,13 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     JID pattern matched. A push name is a cached snapshot with no date
     attached: present it as "recorded as", never as "is".
 
+    A phone number may be typed any way ("+55 (88) 98195-2753"): the `+`,
+    spaces, dashes, dots and parentheses are ignored. A full Brazilian mobile
+    (55 + area code + number) is found with or without the ninth digit after
+    the area code, whichever of the two WhatsApp registered; `matched` is
+    "jid" and the hit's `jid` is the registered spelling, the one to use from
+    then on.
+
     Args:
         query: Search term to match against contact names or phone numbers
     """
@@ -1286,6 +1293,13 @@ def get_chat(
 @untrusted_content
 def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
+
+    The number is matched whole, never as a fragment. A `+`, spaces, dashes,
+    dots and parentheses are ignored, and a Brazilian mobile is found with or
+    without the ninth digit after the area code ("5588981952753" and
+    "558881952753" are one contact): the chat's `jid` says which spelling
+    WhatsApp registered. When both spellings have a chat, the one asked for is
+    returned.
 
     Args:
         contact_jid: The contact's phone number with country code ("12025551234")

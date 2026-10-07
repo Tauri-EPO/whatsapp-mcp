@@ -95,6 +95,7 @@ py-modules = [
     "notes",
     "observability",
     "parent_watchdog",
+    "phone",
     "strict_args",
     "tool_policy",
     "transcribe",
