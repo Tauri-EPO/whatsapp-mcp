@@ -246,7 +246,7 @@ func TestResetSelfNamedChats(t *testing.T) {
 	const (
 		peerA = "5511911111111@s.whatsapp.net"
 		peerB = "5511922222222@s.whatsapp.net"
-		peerC = "231241139937355@lid"
+		peerC = "100000000000006@lid"
 		list  = "1700000000@broadcast"
 		carol = "5511933333333@s.whatsapp.net"
 	)
@@ -263,7 +263,7 @@ func TestResetSelfNamedChats(t *testing.T) {
 	want := map[string]string{
 		peerA:              "5511911111111",
 		peerB:              "5511922222222",
-		peerC:              "231241139937355",
+		peerC:              "100000000000006",
 		list:               "1700000000",
 		carol:              "Carol",
 		selfPhone.String(): selfPhone.User,

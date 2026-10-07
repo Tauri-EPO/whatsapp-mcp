@@ -1316,8 +1316,8 @@ def _sender_aliases(value: str) -> list[str]:
 
 def _sender_aliases_uncached(value: str) -> list[str]:
     # messages.sender is written inconsistently: the same contact may appear as
-    # bare phone ("13232432100"), full phone JID ("13232432100@s.whatsapp.net"),
-    # bare LID ("231241139937355"), or full LID JID ("231241139937355@lid").
+    # bare phone ("12025550101"), full phone JID ("12025550101@s.whatsapp.net"),
+    # bare LID ("100000000000006"), or full LID JID ("100000000000006@lid").
     # whatsmeow_lid_map (whatsapp.db) maps pn<->lid; we emit all four forms so
     # an IN-based filter catches every row regardless of which form was stored.
     bare = value.split("@", 1)[0]
@@ -3215,7 +3215,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     Searches both the messages.db chats table and whatsmeow's contact store
     (whatsapp.db) to find contacts. Results are deduplicated by JID, and each
     one says which field the query matched (#280), because a contact saved as
-    "Z Aa" is found by the name they gave themselves.
+    "Z Dave" is found by the name they gave themselves.
 
     Groups are not contacts, and neither is the status feed: `status@broadcast`
     is stored under the number of whoever posted last, so searching that number

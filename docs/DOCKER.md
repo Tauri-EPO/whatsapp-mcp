@@ -423,7 +423,7 @@ host, not a permission problem — see
 
 Nothing here needs a stack manager, but the compose file runs happily under one,
 and the home server this fork is written for does exactly that: Komodo owns the
-checkout in `/etc/komodo/stacks/whatsapp-mcp` and redeploys it. Three habits
+checkout in `/etc/komodo/stacks/<stack>` and redeploys it. Three habits
 change when the manager owns the stack.
 
 **The compose directory and its `.env` are root-owned.** An operator in the

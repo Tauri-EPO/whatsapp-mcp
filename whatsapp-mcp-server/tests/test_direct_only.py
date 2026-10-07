@@ -19,7 +19,7 @@ import whatsapp
 from tests.conftest import MESSAGES_SCHEMA
 
 PHONE = "5511111111111@s.whatsapp.net"  # direct
-LID = "231241139937355@lid"  # direct, anonymous alias
+LID = "100000000000006@lid"  # direct, anonymous alias
 GROUP = "120363000000000001@g.us"
 BROADCAST = "120363000000000002@broadcast"
 NEWSLETTER = "120363000000000003@newsletter"

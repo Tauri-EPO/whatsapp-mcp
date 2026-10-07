@@ -1,8 +1,8 @@
 """The spellings of one phone number, for the contact lookups (issue #444).
 
 A Brazilian mobile is written two ways: with the ninth digit that was put in
-front of every mobile subscriber number (55 88 9 8195-2753) and without it
-(55 88 8195-2753). WhatsApp registers the account under one of the two, and
+front of every mobile subscriber number (55 11 9 9999-0001) and without it
+(55 11 9999-0001). WhatsApp registers the account under one of the two, and
 the JID in the store is that one, so a lookup by the other spelling found
 nothing. People also type numbers with a `+`, spaces, dashes and parentheses,
 none of which a JID carries, and a number copied out of WhatsApp comes with a
@@ -42,7 +42,7 @@ def _is_separator(char: str) -> bool:
 def phone_digits(value: str) -> str | None:
     """The digits of a query that is a phone number and nothing else, or None.
 
-    `+55 (88) 98195-2753` is `5588981952753`. Anything holding a letter, a
+    `+55 (11) 99999-0001` is `5511999990001`. Anything holding a letter, a
     wildcard or an `@` is not a number here, and neither is anything shorter
     than seven digits, so a name search is left alone.
     """

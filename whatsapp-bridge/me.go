@@ -3,7 +3,7 @@ package main
 // GET /api/me — which account this bridge is logged in as.
 //
 // An agent triaging group traffic has to be able to recognise itself: WhatsApp
-// renders a mention as the mentioned account's LID ("@158883943301358"), which
+// renders a mention as the mentioned account's LID ("@100000000000001"), which
 // reads like a phone number and appears nowhere else in the archive, so
 // "messages that mention me" was only answerable by pasting the owner's LID
 // into a full-text search (issue #290).

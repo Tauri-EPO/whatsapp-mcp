@@ -16,7 +16,7 @@ import whatsapp
 from tests.conftest import MESSAGES_SCHEMA
 
 ALICE = "5511999999999@s.whatsapp.net"
-POSTER = "5585879144551"  # the contact whose status arrived last
+POSTER = "5511999990003"  # the contact whose status arrived last
 STATUS = "status@broadcast"
 
 

@@ -26,7 +26,7 @@ func callMe(t *testing.T, identity ownIdentity) *httptest.ResponseRecorder {
 // account it is driving, so a mention (rendered as the LID) is recognisable.
 func TestHandleMeReportsPhoneAndLID(t *testing.T) {
 	phone := types.NewJID("5511999999999", types.DefaultUserServer)
-	lid := types.NewJID("158883943301358", types.HiddenUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
 
 	rec := callMe(t, fixedIdentity(phone, lid))
 	if rec.Code != http.StatusOK {
@@ -39,10 +39,10 @@ func TestHandleMeReportsPhoneAndLID(t *testing.T) {
 	if got.PhoneJID != "5511999999999@s.whatsapp.net" || got.Phone != "5511999999999" {
 		t.Errorf("phone fields = %q / %q", got.PhoneJID, got.Phone)
 	}
-	if got.LIDJID == nil || *got.LIDJID != "158883943301358@lid" {
+	if got.LIDJID == nil || *got.LIDJID != "100000000000001@lid" {
 		t.Errorf("lid_jid = %v", got.LIDJID)
 	}
-	if got.LID == nil || *got.LID != "158883943301358" {
+	if got.LID == nil || *got.LID != "100000000000001" {
 		t.Errorf("lid = %v", got.LID)
 	}
 }

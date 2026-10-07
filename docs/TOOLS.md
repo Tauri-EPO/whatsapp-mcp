@@ -540,8 +540,8 @@ reports, so a contact WhatsApp only knows anonymously has `phone_number: null`
 unless the LID map resolves it.
 
 The search covers the [name a contact gave themselves](#name-name--push_name--name_source)
-as well as the one you saved, so somebody in your phone book as "Z Aa" is found
-by "Alena". `matched` names the field the query actually hit — `name` (the chat name this
+as well as the one you saved, so somebody in your phone book as "Z Dave" is found
+by "Carol". `matched` names the field the query actually hit — `name` (the chat name this
 account stored), `full_name`, `push_name`, `first_name` or `business_name` (the
 phone-book fields behind `name`), or `jid` — so a hit on a self-chosen name is
 never mistaken for a hit on your own record. It is `null` when none of those
@@ -549,16 +549,16 @@ fields contains the query literally, which only happens for a wildcard search
 that matched the JID pattern alone.
 
 **Phone numbers.** A query of seven or more digits and the usual separators is
-matched as the digits alone, so `+55 (88) 98195-2753`, `55 88 98195-2753` and
-`5588981952753` are the same search (a `+`, spaces, dashes, dots, parentheses
+matched as the digits alone, so `+55 (11) 99999-0001`, `55 11 99999-0001` and
+`5511999990001` are the same search (a `+`, spaces, dashes, dots, parentheses
 and the invisible marks WhatsApp puts around a displayed number are ignored).
 A Brazilian mobile has two spellings, with and
 without the ninth digit after the area code, and WhatsApp registers the account
 under one of them: a full number (`55` + two-digit area code + number) finds
-the contact under either, so `5588981952753` returns the contact stored as
-`558881952753@s.whatsapp.net` and the reverse. `matched` is `jid` on such a
+the contact under either, so `5511999990001` returns the contact stored as
+`551199990001@s.whatsapp.net` and the reverse. `matched` is `jid` on such a
 hit, and the `jid` it carries is the registered spelling — the one to pass to
-the other tools. A query that is the number's JID (`5588981952753@s.whatsapp.net`)
+the other tools. A query that is the number's JID (`5511999990001@s.whatsapp.net`)
 finds the other spelling too. The other spelling is matched as a whole number,
 never as a fragment, and only for mobiles (subscriber number beginning 6–9): a
 landline, a partial number, a number without the `55` and a number from any
@@ -578,7 +578,7 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 **Parameters:**
 
 - `identifier` (required): Phone number, LID, or full JID
-  - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
+  - Examples: `12025551234`, `100000000000004`, `12025551234@s.whatsapp.net`, `100000000000004@lid`
 
 Returns `jid`, `phone_number`, `lid`, `name`, `push_name`, `display_name`,
 `is_lid` and `resolved`. `name` is what this account knows them by and
@@ -593,7 +593,7 @@ and `lid` never holds a phone number. (An identifier that is neither, a name or
 another server's JID, is echoed back in `phone_number` as it always was.)
 `resolved` says whether a *name* was found;
 when it is `false` for a LID, `name` is `null` rather than the digits, because
-nobody named "184125298348272" exists. `status@broadcast` is refused with
+nobody named "100000000000004" exists. `status@broadcast` is refused with
 `invalid_argument`: the [status feed](#the-status-feed-statusbroadcast) is not a
 person, and its user part would otherwise be reported as the phone number
 "status".
@@ -602,7 +602,7 @@ person, and its user part would otherwise be reported as the phone number
 
 - "What's the name for phone number 5551234567?"
 - "Look up who owns this number"
-- "Who is 184125298348272@lid?"
+- "Who is 100000000000004@lid?"
 
 ## Message Operations
 
@@ -639,7 +639,7 @@ is "documents people sent me in a direct chat".
 <a id="mentions-of-you"></a>**Mentions of you.** WhatsApp records an @-mention as
 the mentioned account's identity, not as text, and it renders it in the message
 as that account's **LID** — a number that reads exactly like a phone number
-(`@158883943301358`). `mentions_me=True` matches that field against both
+(`@100000000000001`). `mentions_me=True` matches that field against both
 spellings of your own account, so you never have to know or paste either:
 
 ```python
@@ -1806,7 +1806,7 @@ says where the returned `name` came from:
 contact's own name are two different facts, and collapsing them lost the one
 you did not save: on a live archive of 1,852 contacts, 1,011 have a push name,
 809 of them are in no phone book at all, and of the 202 with both, 178 differ
-("Kassia Interna" signs herself "Dra. Kássia Timbó"). So `push_name` is
+("Acme Clinic Desk" signs herself "Dr. Carol Lima"). So `push_name` is
 returned beside `name` whatever `name_source` says — on chats, on
 [`get_contact`](#get_contact) and on message rows as `sender_push_name` — and
 `name` is unchanged from before (issue #280).
@@ -2108,8 +2108,8 @@ Find a direct message chat with a contact.
 The number is matched whole (a chat whose JID merely contains the digits is not
 an answer), with a `+`, spaces, dashes, dots and parentheses ignored. A
 Brazilian mobile is found with or without the ninth digit after the area code,
-as in [`search_contacts`](#search_contacts): `5588981952753` returns the chat
-stored as `558881952753@s.whatsapp.net`, and the returned `jid` tells you which
+as in [`search_contacts`](#search_contacts): `5511999990001` returns the chat
+stored as `551199990001@s.whatsapp.net`, and the returned `jid` tells you which
 spelling WhatsApp registered. When both spellings have a chat of their own, the
 one you asked for is returned; under `WHATSAPP_ALLOWED_CHATS`, the one the list
 admits. `not_found` when neither has one.

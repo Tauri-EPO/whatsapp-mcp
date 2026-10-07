@@ -21,7 +21,7 @@ FOREIGN_SHORT, FOREIGN_LONG = "548877776666", "5488977776666"
 LANDLINE, LANDLINE_PLUS_NINE = "551133334444", "5511933334444"
 
 
-def _add_chat(store, jid, name="Paroquia"):
+def _add_chat(store, jid, name="Acme Clinic"):
     with store.messages() as conn:
         conn.execute(
             "INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)", (jid, name, "2026-10-07 17:14:00")
@@ -74,8 +74,8 @@ class TestSpellings:
         assert phone.br_mobile_alternate(LONG) == SHORT
         assert phone.br_mobile_alternate(SHORT) == LONG
         # An eight-digit number that itself begins with 9 still gains one.
-        assert phone.br_mobile_alternate("558891952753") == "5588991952753"
-        assert phone.br_mobile_alternate("5588991952753") == "558891952753"
+        assert phone.br_mobile_alternate("551199990002") == "5511999990002"
+        assert phone.br_mobile_alternate("5511999990002") == "551199990002"
 
     @pytest.mark.parametrize(
         "digits",
@@ -116,9 +116,11 @@ class TestSearchContacts:
 
     def test_the_phone_book_is_searched_the_same_way(self, paired_dbs):
         with paired_dbs.whatsmeow() as conn:
-            conn.execute("INSERT INTO whatsmeow_contacts VALUES ('me', ?, NULL, 'Paroquia', NULL, NULL)", (SHORT_JID,))
+            conn.execute(
+                "INSERT INTO whatsmeow_contacts VALUES ('me', ?, NULL, 'Acme Clinic', NULL, NULL)", (SHORT_JID,)
+            )
         (hit,) = whatsapp.search_contacts(LONG)
-        assert (hit["jid"], hit["name"], hit["matched"]) == (SHORT_JID, "Paroquia", "jid")
+        assert (hit["jid"], hit["name"], hit["matched"]) == (SHORT_JID, "Acme Clinic", "jid")
 
     def test_a_typed_number_matches_as_its_digits(self, paired_dbs):
         (hit,) = whatsapp.search_contacts("+55 11 88888-8888")
@@ -159,8 +161,8 @@ class TestSearchContacts:
         assert _jids(whatsapp.search_contacts(LANDLINE)) == [f"{LANDLINE}@s.whatsapp.net"]
 
     def test_name_queries_and_wildcards_are_untouched(self, paired_dbs):
-        _add_chat(paired_dbs, SHORT_JID, "Paroquia 97777")
-        (by_name,) = whatsapp.search_contacts("paroquia 9")
+        _add_chat(paired_dbs, SHORT_JID, "Acme Clinic 97777")
+        (by_name,) = whatsapp.search_contacts("acme clinic 9")
         assert by_name["matched"] == "name"
         # A wildcard still reaches only the JID pattern, and still says so with null.
         (by_wildcard,) = whatsapp.search_contacts("5588_7776666")

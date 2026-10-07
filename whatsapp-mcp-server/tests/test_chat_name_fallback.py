@@ -164,15 +164,15 @@ def test_push_name_rides_along_with_the_stored_chat_name(unnamed_chats):
 def test_name_source_says_push_when_only_the_contact_named_themselves(unnamed_chats):
     with unnamed_chats.whatsmeow() as conn:
         conn.execute(
-            "INSERT INTO whatsmeow_contacts VALUES ('me', ?, NULL, NULL, 'Alena Lima', NULL)",
+            "INSERT INTO whatsmeow_contacts VALUES ('me', ?, NULL, NULL, 'Carol Lima', NULL)",
             (STRANGER,),
         )
     whatsapp._reset_name_cache()
     chat = _by_jid(whatsapp.list_chats(limit=50))[STRANGER]
 
-    assert chat["name"] == "Alena Lima"
+    assert chat["name"] == "Carol Lima"
     assert chat["name_source"] == "push"  # not the phone book: they named themselves
-    assert chat["push_name"] == "Alena Lima"
+    assert chat["push_name"] == "Carol Lima"
 
 
 def test_missing_contact_store_leaves_names_alone(unnamed_chats, monkeypatch, tmp_path):

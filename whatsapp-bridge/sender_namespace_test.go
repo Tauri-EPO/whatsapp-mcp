@@ -31,11 +31,11 @@ func TestSplitSenderJID(t *testing.T) {
 		wantServer any
 	}{
 		{"phone JID", "11234567890@s.whatsapp.net", "11234567890", "s.whatsapp.net"},
-		{"lid JID", "191134718546018@lid", "191134718546018", "lid"},
+		{"lid JID", "100000000000002@lid", "100000000000002", "lid"},
 		{"hosted phone JID", "11234567890@hosted", "11234567890", "s.whatsapp.net"},
-		{"hosted lid JID", "191134718546018@hosted.lid", "191134718546018", "lid"},
+		{"hosted lid JID", "100000000000002@hosted.lid", "100000000000002", "lid"},
 		{"bare user", "11234567890", "11234567890", nil},
-		{"group JID", "254110094043-1619359480@g.us", "254110094043-1619359480", nil},
+		{"group JID", "5511999990001-1400000000@g.us", "5511999990001-1400000000", nil},
 		{"broadcast JID", "status@broadcast", "status", nil},
 		{"empty", "", "", nil},
 	}
@@ -56,7 +56,7 @@ func TestStoredSender(t *testing.T) {
 		in   types.JID
 		want string
 	}{
-		{"lid", phoneLID, "185366493536339@lid"},
+		{"lid", phoneLID, "100000000000007@lid"},
 		{"phone", phonePN, "11234567890@s.whatsapp.net"},
 		{"device suffix dropped", types.JID{User: "11234567890", Server: types.DefaultUserServer, Device: 12},
 			"11234567890@s.whatsapp.net"},
@@ -80,7 +80,7 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	chat := "status@broadcast"
 	ts := time.Now()
 
-	if err := ms.StoreMessage("LID", chat, "191134718546018@lid", "status", ts, false,
+	if err := ms.StoreMessage("LID", chat, "100000000000002@lid", "status", ts, false,
 		"", "", "", nil, nil, nil, 0, ""); err != nil {
 		t.Fatalf("store lid message: %v", err)
 	}
@@ -93,8 +93,8 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 		t.Fatalf("store bare message: %v", err)
 	}
 
-	if sender, server := querySenderServer(t, ms, "LID", chat); sender != "191134718546018" || server != "lid" {
-		t.Errorf("lid row = (%q, %q), want (%q, %q)", sender, server, "191134718546018", "lid")
+	if sender, server := querySenderServer(t, ms, "LID", chat); sender != "100000000000002" || server != "lid" {
+		t.Errorf("lid row = (%q, %q), want (%q, %q)", sender, server, "100000000000002", "lid")
 	}
 	if sender, server := querySenderServer(t, ms, "PN", chat); sender != "11234567890" || server != "s.whatsapp.net" {
 		t.Errorf("phone row = (%q, %q), want (%q, %q)", sender, server, "11234567890", "s.whatsapp.net")
@@ -105,7 +105,7 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 
 	// An edit/replay that only knows the bare user part must not downgrade a
 	// row that already carries its namespace.
-	if err := ms.StoreMessage("LID", chat, "191134718546018", "status edited", ts, false,
+	if err := ms.StoreMessage("LID", chat, "100000000000002", "status edited", ts, false,
 		"", "", "", nil, nil, nil, 0, ""); err != nil {
 		t.Fatalf("re-store lid message: %v", err)
 	}
@@ -128,17 +128,17 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 // which writes through the prepared statement in store_batch.go.
 func TestBatchStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	ms := newTestMessageStore(t)
-	chat := "254110094043-1619359480@g.us"
+	chat := "5511999990001-1400000000@g.us"
 
 	if err := ms.Batch(func(b *messageBatch) error {
-		return b.StoreMessage("H1", chat, "191134718546018@lid", "history", time.Now(), false,
+		return b.StoreMessage("H1", chat, "100000000000002@lid", "history", time.Now(), false,
 			"", "", "", nil, nil, nil, 0, "")
 	}); err != nil {
 		t.Fatalf("batch store: %v", err)
 	}
 
-	if sender, server := querySenderServer(t, ms, "H1", chat); sender != "191134718546018" || server != "lid" {
-		t.Errorf("history row = (%q, %q), want (%q, %q)", sender, server, "191134718546018", "lid")
+	if sender, server := querySenderServer(t, ms, "H1", chat); sender != "100000000000002" || server != "lid" {
+		t.Errorf("history row = (%q, %q), want (%q, %q)", sender, server, "100000000000002", "lid")
 	}
 }
 
@@ -239,9 +239,9 @@ func TestMigrateSenderNamespaces_ClassifiesLegacyRows(t *testing.T) {
 			('chat_phone',  '5511777777777@s.whatsapp.net', '5511777777777',   'known chat',    '2026-03-01 10:02:00+00:00', 0),
 			('contact_pn',  '5511777777777@s.whatsapp.net', '5511888888888',   'known contact', '2026-03-01 10:03:00+00:00', 0),
 			('chat_lid',    '9988776655@lid',               '9988776655',      'known lid chat','2026-03-01 10:04:00+00:00', 0),
-			('long_lid',    'status@broadcast',             '191134718546018', 'unmapped lid',  '2026-03-01 10:05:00+00:00', 0),
+			('long_lid',    'status@broadcast',             '100000000000002', 'unmapped lid',  '2026-03-01 10:05:00+00:00', 0),
 			('short_phone', 'status@broadcast',             '5511666666666',   'unknown phone', '2026-03-01 10:06:00+00:00', 0),
-			('group_user',  'status@broadcast',             '254110094043-1619359480', 'group fallback', '2026-03-01 10:07:00+00:00', 0);
+			('group_user',  'status@broadcast',             '5511999990001-1400000000', 'group fallback', '2026-03-01 10:07:00+00:00', 0);
 	`); err != nil {
 		t.Fatalf("seed message store: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestMigrateSenderNamespaces_WithoutWhatsAppDB(t *testing.T) {
 			('status@broadcast',             '2026-03-01 10:00:00+00:00'),
 			('5511777777777@s.whatsapp.net', '2026-03-01 10:00:00+00:00');
 		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES
-			('long_lid',   'status@broadcast', '191134718546018', 'x', '2026-03-01 10:00:00+00:00', 0),
+			('long_lid',   'status@broadcast', '100000000000002', 'x', '2026-03-01 10:00:00+00:00', 0),
 			('chat_phone', 'status@broadcast', '5511777777777',   'y', '2026-03-01 10:01:00+00:00', 0);
 	`); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -344,7 +344,7 @@ func TestMigrateSenderNamespaces_NothingToDoSkipsAttach(t *testing.T) {
 	if _, err := ms.db.Exec(`
 		INSERT INTO chats (jid, last_message_time) VALUES ('status@broadcast', '2026-03-01 10:00:00+00:00');
 		INSERT INTO messages (id, chat_jid, sender, sender_server, content, timestamp, is_from_me)
-			VALUES ('m1', 'status@broadcast', '191134718546018', 'lid', 'x', '2026-03-01 10:00:00+00:00', 0);
+			VALUES ('m1', 'status@broadcast', '100000000000002', 'lid', 'x', '2026-03-01 10:00:00+00:00', 0);
 	`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

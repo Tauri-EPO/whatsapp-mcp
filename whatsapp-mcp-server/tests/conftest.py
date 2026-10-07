@@ -42,7 +42,7 @@ CREATE TABLE whatsmeow_contacts (
 # only exists in messages.db (Alice), one group, one decoy whose JID contains
 # Alice's digits, and one contact only whatsmeow knows (Carla, business).
 ALICE = "5511999999999@s.whatsapp.net"
-BOB_PN, BOB_LID = "5511888888888", "231241139937355"
+BOB_PN, BOB_LID = "5511888888888", "100000000000006"
 BOB = f"{BOB_PN}@s.whatsapp.net"
 FAMILY = "120363000000000001@g.us"
 DECOY = "15511999999999@s.whatsapp.net"
