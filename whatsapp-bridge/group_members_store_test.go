@@ -55,7 +55,7 @@ func TestReplaceGroupRosterUpsertsAndDropsMissing(t *testing.T) {
 	first := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
-		{JID: "5511999999999@s.whatsapp.net", PhoneNumber: "5511999999999", Name: "Enrico", IsAdmin: true, IsSuperAdmin: true},
+		{JID: "5511999999999@s.whatsapp.net", PhoneNumber: "5511999999999", Name: "Alice", IsAdmin: true, IsSuperAdmin: true},
 		{JID: "777@lid", PhoneNumber: "5511888888888", LID: "777@lid", Name: "Ana"},
 		{JID: "888@lid", LID: "888@lid"},
 	}), first); err != nil {
@@ -85,7 +85,7 @@ func TestReplaceGroupRosterUpsertsAndDropsMissing(t *testing.T) {
 	// Second roster: Ana lost her admin flag and the LID-only member left.
 	second := first.Add(time.Hour)
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
-		{JID: "5511999999999@s.whatsapp.net", PhoneNumber: "5511999999999", Name: "Enrico", IsAdmin: true, IsSuperAdmin: true},
+		{JID: "5511999999999@s.whatsapp.net", PhoneNumber: "5511999999999", Name: "Alice", IsAdmin: true, IsSuperAdmin: true},
 		{JID: "777@lid", PhoneNumber: "5511888888888", LID: "777@lid", IsAdmin: true},
 	}), second); err != nil {
 		t.Fatalf("second roster: %v", err)

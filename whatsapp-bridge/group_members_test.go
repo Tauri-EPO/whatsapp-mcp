@@ -33,7 +33,7 @@ func fakeGroup() *types.GroupInfo {
 }
 
 func TestBuildGroupMembers(t *testing.T) {
-	names := map[string]string{"5511999999999@s.whatsapp.net": "Enrico", "5511888888888@s.whatsapp.net": "Ana"}
+	names := map[string]string{"5511999999999@s.whatsapp.net": "Alice", "5511888888888@s.whatsapp.net": "Ana"}
 	resp := buildGroupMembers(fakeGroup(), func(jid types.JID) string { return names[jid.String()] }, nil)
 
 	if !resp.Success || resp.Name != "Obra Rua A" || resp.Topic != "Combinados" || resp.Participant != 3 {
@@ -43,11 +43,11 @@ func TestBuildGroupMembers(t *testing.T) {
 		t.Fatalf("owner = %q", resp.OwnerJID)
 	}
 	if resp.Owner == nil || resp.Owner.JID != "5511999999999@s.whatsapp.net" ||
-		resp.Owner.PhoneNumber != "5511999999999" || resp.Owner.Name != "Enrico" {
+		resp.Owner.PhoneNumber != "5511999999999" || resp.Owner.Name != "Alice" {
 		t.Fatalf("owner block = %+v", resp.Owner)
 	}
 	owner, ana, anon := resp.Members[0], resp.Members[1], resp.Members[2]
-	if owner.PhoneNumber != "5511999999999" || owner.Name != "Enrico" || !owner.IsAdmin || !owner.IsSuperAdmin {
+	if owner.PhoneNumber != "5511999999999" || owner.Name != "Alice" || !owner.IsAdmin || !owner.IsSuperAdmin {
 		t.Fatalf("owner = %+v", owner)
 	}
 	if ana.JID != "777@lid" || ana.PhoneNumber != "5511888888888" || ana.LID != "777@lid" || ana.Name != "Ana" || !ana.IsAdmin || ana.IsSuperAdmin {
@@ -65,7 +65,7 @@ func TestBuildGroupOwner(t *testing.T) {
 	lid := func(user string) types.JID { return types.JID{User: user, Server: types.HiddenUserServer} }
 	phone := func(user string) types.JID { return types.JID{User: user, Server: types.DefaultUserServer} }
 	names := map[string]string{
-		"5511999999999@s.whatsapp.net": "Enrico",
+		"5511999999999@s.whatsapp.net": "Alice",
 		"5511888888888@s.whatsapp.net": "Ana",
 		"5511777777777@s.whatsapp.net": "Bruno",
 	}
@@ -104,7 +104,7 @@ func TestBuildGroupOwner(t *testing.T) {
 		{
 			name:  "phone owner gains the LID from the map",
 			owner: phone("5511999999999"), wantJID: "5511999999999@s.whatsapp.net",
-			wantPhone: "5511999999999", wantLID: "111@lid", wantName: "Enrico", wantAltLookup: 1,
+			wantPhone: "5511999999999", wantLID: "111@lid", wantName: "Alice", wantAltLookup: 1,
 		},
 	}
 	for _, tc := range cases {

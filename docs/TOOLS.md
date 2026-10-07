@@ -1838,8 +1838,8 @@ says where the returned `name` came from:
 
 **`push_name` is the other half of the answer.** Your phone book and the
 contact's own name are two different facts, and collapsing them lost the one
-you did not save: on a live archive of 1,852 contacts, 1,011 have a push name,
-809 of them are in no phone book at all, and of the 202 with both, 178 differ
+you did not save: on an archive of 2,000 contacts, 1,000 have a push name,
+800 of them are in no phone book at all, and of the 200 with both, 180 differ
 ("Acme Clinic Desk" signs herself "Dr. Carol Lima"). So `push_name` is
 returned beside `name` whatever `name_source` says — on chats, on
 [`get_contact`](#get_contact) and on message rows as `sender_push_name` — and
