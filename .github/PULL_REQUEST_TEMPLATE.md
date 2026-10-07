@@ -1,7 +1,7 @@
 <!--
 Thanks for the PR! A couple of quick checks before you submit:
 
-- Read ROADMAP.md to confirm scope.
+- Read AGENTS.md §4 (the routine from issue to merged PR).
 - One concern per PR. Split anything bigger.
 - Conventional-commit title (feat/fix/chore/docs/ci/refactor/test/perf).
 -->
@@ -34,8 +34,8 @@ Thanks for the PR! A couple of quick checks before you submit:
 <!-- How did you verify this? Manual steps, new tests, screenshots/logs as needed. -->
 
 - [ ] Added or updated tests
-- [ ] Ran `uv run pytest -v` (Python changes)
-- [ ] Ran `golangci-lint run` and `go build ./...` (Go changes)
+- [ ] Ran `ruff format`, `ruff check`, `pyright` and `pytest` (Python changes)
+- [ ] Ran `go vet`, `go test`, `go test -race` and `golangci-lint run` (Go changes)
 - [ ] Manually exercised the affected code path
 
 ## Docs
@@ -43,7 +43,12 @@ Thanks for the PR! A couple of quick checks before you submit:
 - [ ] Updated `README.md` (if user-visible)
 - [ ] Updated `AGENTS.md` / `CLAUDE.md` (if contributor-visible)
 - [ ] Updated tool descriptions in `whatsapp-mcp-server/main.py` (if MCP tools changed)
-- [ ] Updated `.env.example` (if env vars changed)
+- [ ] Updated `docs/TOOLS.md` (if MCP tools changed)
+- [ ] Updated AGENTS.md §7, `docs/CONFIGURATION.md`, `.env.example` and the compose passthrough (if env vars changed)
+
+## Security
+
+<!-- Required when auth, file paths, network bind, command exec or allow-lists are touched: what changed and which test covers the deny path. Otherwise "n/a". -->
 
 ## Risk / rollback
 

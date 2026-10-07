@@ -20,7 +20,7 @@ Read top to bottom once; afterwards jump to the section you need.
 
 ## 1. What this repo is
 
-A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **Tailscale** by remote MCP clients (an AI bot on another machine, an IDE on a laptop), sharing one WhatsApp account. Two components: a Go bridge (whatsmeow) and a Python MCP server (MCP SDK v2, streamable HTTP or stdio). Deployed with Docker Compose. `README.md` → "About this fork" has the user-facing version of this story and a table of what differs from upstream.
+A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **Tailscale** by remote MCP clients (an AI bot on another machine, an IDE on a laptop), sharing one WhatsApp account. Two components: a Go bridge (whatsmeow) and a Python MCP server (MCP SDK v2, streamable HTTP or stdio). Deployed with Docker Compose. `README.md` → "Why this fork" has the user-facing version of this story and a table of what differs from upstream.
 
 - **Repo:** https://github.com/Tauri-EPO/whatsapp-mcp — remote `origin`. All PRs, issues and `gh` commands target this repo.
 - **Default branch:** `main`. `main` is the deployable state. Releases are automatic (`release.yml` + `release-cut.yml`, see §4 "Versions"): every merge updates a release PR; once a day that PR is merged, which tags `vX.Y.Z` and publishes the GitHub Release and the `latest` images.

@@ -1,7 +1,7 @@
 name: Bug report
 description: Something is broken or behaving unexpectedly.
 title: "bug: <short description>"
-labels: ["type:bug", "needs-triage"]
+labels: ["bug"]
 body:
   - type: markdown
     attributes:
@@ -48,7 +48,7 @@ body:
     id: bridge-version
     attributes:
       label: Bridge version
-      description: "`./whatsapp-bridge --version` or git SHA"
+      description: "`version` from the `bridge_status` tool or `GET /api/version` (e.g. `v2.0.0+575ee0b`), or the image tag / git SHA"
     validations:
       required: true
 
@@ -56,7 +56,7 @@ body:
     id: mcp-version
     attributes:
       label: MCP server version
-      description: From `whatsapp-mcp-server/pyproject.toml` or `pip show whatsapp-mcp-server`
+      description: "The image tag or git SHA the MCP server runs (`pyproject.toml` only carries a nominal version)"
     validations:
       required: true
 
@@ -65,6 +65,7 @@ body:
     attributes:
       label: Operating system
       options:
+        - Docker Compose (Linux host)
         - macOS
         - Linux
         - Windows (WSL)
