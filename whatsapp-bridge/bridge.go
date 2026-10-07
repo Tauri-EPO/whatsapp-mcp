@@ -72,6 +72,10 @@ type Bridge struct {
 	Connected func() bool
 	// Send performs /api/send (defaults to sendWhatsAppMessage); tests inject a fake.
 	Send sendFunc
+	// IsOnWhatsApp asks WhatsApp which number a recipient is registered under
+	// (defaults to Client.IsOnWhatsApp); /api/send asks it for a number the LID
+	// map does not know, tests inject a fake.
+	IsOnWhatsApp isOnWhatsAppFunc
 	// Exit terminates the process for conditions the bridge cannot recover from in-place
 	// (device logged out, client outdated); main() wires it to a clean os.Exit so the
 	// supervisor restarts into the pairing path. Tests inject a recorder.
@@ -187,6 +191,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
+	b.IsOnWhatsApp = client.IsOnWhatsApp
 	b.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
 		os.Exit(code)

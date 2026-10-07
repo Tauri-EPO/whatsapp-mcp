@@ -608,6 +608,15 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
+	// Every number is on WhatsApp exactly as typed unless a test says otherwise.
+	b.IsOnWhatsApp = func(_ context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {
+		answers := make([]types.IsOnWhatsAppResponse, len(phones))
+		for i, phone := range phones {
+			jid := types.NewJID(strings.TrimPrefix(phone, "+"), types.DefaultUserServer)
+			answers[i] = types.IsOnWhatsAppResponse{Query: phone, JID: jid, PhoneNumber: jid, IsIn: true}
+		}
+		return answers, nil
+	}
 	b.Exit = func(reason string, code int) { panic(fmt.Sprintf("unexpected Exit(%d): %s", code, reason)) }
 	return b
 }
