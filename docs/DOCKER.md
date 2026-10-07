@@ -612,9 +612,9 @@ container writing and another reading the same volume), with an idle writer:
 | Case | Result |
 |---|---|
 | bridge running (`messages.db-wal` and `-shm` exist), mount `:ro` | reads work, including rows still only in the `-wal` |
-| bridge running, `mcp` as another uid, directory not writable for it | reads work |
+| bridge running, `mcp` as another uid | every read fails: `unable to open database file` (the databases are `0600` since #491; with the `0644` files of earlier releases this case read) |
 | bridge stopped cleanly (no `-wal` / `-shm` left), mount `:ro` | every read fails: `unable to open database file` |
-| bridge stopped cleanly, `mcp` as another uid, directory not writable | every read fails: `attempt to write a readonly database` |
+| bridge stopped cleanly, `mcp` as another uid | every read fails: `unable to open database file` |
 | default compose layout (read-write, same uid), any state | reads work (the reader recreates `-shm` / `-wal` next to the file) |
 
 A WAL database needs its `-shm` file, and a reader that cannot create it can

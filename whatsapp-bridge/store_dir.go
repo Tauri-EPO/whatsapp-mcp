@@ -24,9 +24,8 @@ const defaultStoreDir = "store"
 
 // storeDirMode is the mode of every directory the bridge creates in the store,
 // the store itself included: owner only, because they hold the session keys and
-// the whole archive, and the SQLite files in them are created by the driver
-// with its own, looser default. It applies to directories created from now on;
-// one that already exists keeps the mode it has.
+// the whole archive. It applies to directories created from now on; one that
+// already exists keeps the mode it has.
 const storeDirMode os.FileMode = 0o700
 
 // storeFileMode is the mode of the two SQLite databases and of the files the
@@ -48,9 +47,12 @@ const storeFileMode os.FileMode = 0o600
 // A failure is logged and startup goes on: the open that follows either works
 // or reports its own error.
 func privateDatabase(path string) {
-	tightened, err := secureDatabaseFiles(path)
+	tightened, loose, err := secureDatabaseFiles(path)
 	if len(tightened) > 0 {
 		bridgeLog.Infof("Tightened %s to %04o: group or others could read it (both processes must run as the same user)", strings.Join(tightened, ", "), storeFileMode)
+	}
+	if len(loose) > 0 {
+		bridgeLog.Warnf("%s stays readable by group or others: this file system does not keep Unix permissions (a bind mount from a Windows or macOS host, CIFS, exFAT)", strings.Join(loose, ", "))
 	}
 	if err != nil {
 		bridgeLog.Warnf("Could not make %s owner-only: %v", path, err)
@@ -59,37 +61,47 @@ func privateDatabase(path string) {
 
 // secureDatabaseFiles creates path with storeFileMode when it is missing and
 // removes group and other access from it and from its SQLite siblings. It
-// returns the existing files whose mode it changed.
-func secureDatabaseFiles(path string) ([]string, error) {
+// returns the files whose mode it changed, and the ones that are still loose
+// after the chmod because the file system ignored it.
+//
+// Only regular files are touched, and nothing is opened through a name that
+// already exists: chmod and a plain create follow a symlink to wherever it
+// points, so a link or a directory under one of these names is left alone.
+func secureDatabaseFiles(path string) (tightened, loose []string, err error) {
 	if runtime.GOOS == "windows" {
 		// No owner/group/other bits to set there; every file would read as loose.
-		return nil, nil
+		return nil, nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, storeFileMode) //nolint:gosec // path is the operator-configured database inside the store directory
-	if err != nil {
-		return nil, err
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, storeFileMode) //nolint:gosec // path is the operator-configured database inside the store directory
+	switch {
+	case err == nil:
+		if err := f.Close(); err != nil {
+			return nil, nil, err
+		}
+	case !errors.Is(err, fs.ErrExist):
+		return nil, nil, err
 	}
-	if err := f.Close(); err != nil {
-		return nil, err
-	}
-	var tightened []string
 	for _, name := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		info, err := os.Stat(name)
+		info, err := os.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return tightened, err
+			return tightened, loose, err
 		}
-		if info.Mode().Perm()&^storeFileMode == 0 {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&^storeFileMode == 0 {
 			continue
 		}
 		if err := os.Chmod(name, storeFileMode); err != nil {
-			return tightened, err
+			return tightened, loose, err
+		}
+		if after, err := os.Lstat(name); err == nil && after.Mode().Perm()&^storeFileMode != 0 {
+			loose = append(loose, name)
+			continue
 		}
 		tightened = append(tightened, name)
 	}
-	return tightened, nil
+	return tightened, loose, nil
 }
 
 // storeDir returns the configured store directory (not cleaned or created).

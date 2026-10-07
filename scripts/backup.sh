@@ -67,10 +67,21 @@ cmd_backup() {
     # Media lives in per-chat directories under the store root.
     cd /store && rm -f /backup/media.tar && find . -mindepth 1 -maxdepth 1 -type d -exec tar -cf /backup/media.tar {} +
     [ -f /store/.bridge-token ] && cp /store/.bridge-token /backup/bridge-token && chmod 600 /backup/bridge-token
-    { echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "volume='"$vol"'"; ls -l /backup | tail -n +2; } > /backup/MANIFEST
     # Owner-only, and owned by whoever owns the destination: the user who ran
     # this can still read the snapshot (to ship it off-box), nobody else can.
-    chown -R "$(stat -c %u:%g /backup)" /backup
+    # Only the files written here, by name: umask does nothing for a copy that
+    # overwrote a looser file from an earlier run, and the destination may hold
+    # other things. A file system that refuses the chown (NFS with root_squash)
+    # still has a good snapshot.
+    owner="$(stat -c %u:%g /backup)"
+    seal() {
+      [ -f "/backup/$1" ] || return 0
+      chmod 600 "/backup/$1"
+      chown "$owner" "/backup/$1" 2>/dev/null || echo "note: $1 could not be handed to the owner of the destination ($owner)" >&2
+    }
+    for f in messages.db whatsapp.db notes.db media.tar bridge-token; do seal "$f"; done
+    { echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "volume='"$vol"'"; ls -l /backup | tail -n +2; } > /backup/MANIFEST
+    seal MANIFEST
     du -sh /backup | cut -f1 | sed "s/^/size: /"'
   echo "done: $dest"
 }
@@ -89,7 +100,7 @@ cmd_restore() {
     cd /store
     rm -f ./*.db-wal ./*.db-shm .bridge.lock
     for db in messages whatsapp notes; do
-      [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db
+      [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db && chmod 600 ./$db.db
     done
     [ -f /backup/media.tar ] && tar -xf /backup/media.tar -C /store
     [ -f /backup/bridge-token ] && cp /backup/bridge-token .bridge-token && chmod 600 .bridge-token
