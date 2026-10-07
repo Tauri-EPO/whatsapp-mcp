@@ -255,6 +255,31 @@ class TestConversion:
         assert meta["original_mime"] == "image/heic"
         assert (meta["width"], meta["height"], meta["resized"]) == (1568, 784, True)
 
+    def test_a_heic_is_rendered_from_its_primary_image_never_from_an_embedded_thumbnail(self, paired_dbs, monkeypatch):
+        """An embedded thumbnail is a second picture the sender chose (pillow-heif 1.8 would decode it)."""
+        pillow_heif = pytest.importorskip("pillow_heif")
+        pillow_heif.register_heif_opener()
+        # The option is process-wide: start from the library default and let
+        # monkeypatch put it back, so the order of the tests does not matter.
+        monkeypatch.setattr(pillow_heif.options, "THUMBNAILS", True)
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", chat_policy.load_chat_policy({}))
+        monkeypatch.setattr(media_image, "_heif_registered", False)
+        # Large enough for the 1.8 draft path at the default edge: a 3200 px
+        # thumbnail is more than twice 1568 on both edges.
+        heic = _photo(4000, 4000, fmt="HEIF", thumbnails=[3200])
+        assert Image.open(io.BytesIO(heic)).info["thumbnails"] == [3200], "the fixture must embed one"
+        with paired_dbs.messages() as conn:
+            _insert(conn, "HEICTHUMB", media_type="document", filename="IMG_0043.heic")
+        _cache("document_20260904_100000_HEICTHUMB.heic", heic)
+        blocks = media_read.read_media(ALICE, "HEICTHUMB")
+        assert blocks[0].type == "image"
+        meta = _meta(blocks)
+        assert (meta["width"], meta["height"], meta["resized"]) == (1568, 1568, True)
+        # What makes the primary the only possible source: once read_media has
+        # registered the plugin, an opened HEIC carries no thumbnail to draft from.
+        assert pillow_heif.options.THUMBNAILS is False
+        assert Image.open(io.BytesIO(heic)).info["thumbnails"] == []
+
     def test_the_image_cap_applies_only_where_the_conversion_happens(self):
         """A 9 MB TIFF is a photo when it is downscaled and a blob when it is not.
 

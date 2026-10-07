@@ -161,8 +161,17 @@ def _register_heif() -> None:
         import pillow_heif
     except ImportError as exc:  # pragma: no cover - the dependency is pinned in pyproject.toml
         raise ToolError("internal", f"HEIC support is not installed on this server: {exc}") from exc
-    # register_heif_opener is re-exported without `__all__`, so pyright calls it private.
-    pillow_heif.register_heif_opener()  # pyright: ignore[reportPrivateImportUsage]
+    # thumbnails=False: a HEIC can embed thumbnail items, and they are separate
+    # pictures the sender chose. From pillow-heif 1.8 on, Image.thumbnail()
+    # decodes one of them instead of the primary image whenever it is large
+    # enough (HeifImageFile.draft), so the model would be shown a picture that
+    # the bytes, the hash and every human viewer do not show, and each extra
+    # item is one more decode a single call can be made to run. With the option
+    # off the plugin never loads them and the primary image is the only source.
+    #
+    # Up to pillow-heif 1.7 register_heif_opener is re-exported without
+    # `__all__`, so pyright calls it private there.
+    pillow_heif.register_heif_opener(thumbnails=False)  # pyright: ignore[reportPrivateImportUsage]
     _heif_registered = True
 
 
@@ -255,7 +264,8 @@ def render(path: str, mime: str, max_edge: int, quality: int, passthrough: bool)
                     image = image.convert("RGBA" if _has_alpha(image) else "RGB")
                 # Before the transpose, not after: thumbnail() calls draft() on
                 # a JPEG, which decodes at a reduced DCT scale instead of full
-                # resolution. Rotating first would have forced the full decode
+                # resolution (a HEIC has no draft source: _register_heif turns
+                # its embedded thumbnails off). Rotating first would have forced the full decode
                 # plus a full-size copy — hundreds of megabytes for a photo at
                 # the MAX_PIXELS ceiling, on a box with no memory limit. The
                 # target box is square, so the order does not change the result.
