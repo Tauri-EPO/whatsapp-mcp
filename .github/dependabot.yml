@@ -1,7 +1,8 @@
 version: 2
 updates:
-  # "uv" updates pyproject.toml *and* uv.lock together; "pip" only touched
-  # pyproject.toml and left the lockfile (which CI and the image use) behind.
+  # "uv" updates uv.lock (and, without versioning-strategy below, the pyproject.toml
+  # floors with it); "pip" only touched pyproject.toml and left the lockfile
+  # (which CI and the image use) behind.
   #
   # Runtime and dev-tooling bumps are split into separate PRs (#278). The
   # commit prefix is per entry, not per group, and Dependabot's "uv" ecosystem
