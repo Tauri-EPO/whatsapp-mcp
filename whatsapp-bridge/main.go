@@ -89,7 +89,7 @@ func main() {
 	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
 	logger, clientLog, dbLog := initLogging()
 	logger.Infof("Starting WhatsApp client...")
-	logger.Infof("%s", buildInfo(false).String())
+	logger.Infof("%s", buildInfo().String())
 
 	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
 
