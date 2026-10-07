@@ -417,6 +417,20 @@ def test_coverage_audio_ignores_rows_without_a_content_hash(audio_archive):
     assert audio["messages"] == 5 and audio["backlog"] == 3
 
 
+def test_coverage_audio_leaves_the_status_feed_out(audio_archive):
+    """The ingest worker does not walk status@broadcast, so its voice notes are not a backlog (issue #447)."""
+    with audio_archive.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, file_sha256) "
+            "VALUES ('status1', ?, ?, '', '2026-08-05 13:05:00', 0, 'audio', ?)",
+            (whatsapp.STATUS_BROADCAST_JID, ALICE, bytes.fromhex("5a" * 32)),
+        )
+    audio = whatsapp.coverage()["audio"]
+    assert audio["messages"] == 5 and audio["backlog"] == 3
+    scoped = whatsapp.coverage(chat_jid=whatsapp.STATUS_BROADCAST_JID)["audio"]
+    assert scoped["messages"] == 0 and scoped["backlog"] == 0
+
+
 def test_coverage_audio_is_scoped_by_the_window(audio_archive):
     audio = whatsapp.coverage(after="2026-08-01")["audio"]
 

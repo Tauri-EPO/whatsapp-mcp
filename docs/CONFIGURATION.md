@@ -21,6 +21,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_TIMEOUT_S` | `30`                                | Timeout for each MCP → bridge call; media upload/download use 120 s. Connection errors are retried twice, read timeouts are not |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable) |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false`                     | Cache the media of status updates (`status@broadcast`) as it arrives too. Off by default: a status post is stored and listed like any message, but its image, video or audio stays on WhatsApp's servers until `download_media` / `read_media` asks for it (while the link lives, about a day), and the webhook forwards a status image without its bytes. `true` caches the status feed like any chat. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns both off. `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6`                          | How stale a cached group roster may get before the bridge refreshes it in the background, so `get_contact_chats` can answer "which groups is this person in?" without a live call per group. One group per second, only while connected, first pass a couple of minutes after start-up. `0` turns the pass off: rosters are then only cached when `list_group_members` is called, when a group join/leave/promote/demote event arrives, and when a group message comes from someone with no row yet. Refreshing is a read, so it keeps running under `WHATSAPP_READ_ONLY` |
@@ -567,7 +568,12 @@ What to know before turning it on:
   CPU. **The fetched bytes stay in the store** like any other download — the flag
   fills the media cache that `WHATSAPP_MEDIA_AUTODOWNLOAD=false` was avoiding,
   for the voice notes only; set `WHATSAPP_MEDIA_RETENTION_DAYS` if that disk use
-  matters, the transcript survives the sweep. A file the bridge cannot send *this
+  matters, the transcript survives the sweep. The status feed
+  (`status@broadcast`) is not part of this: the worker neither fetches nor
+  transcribes status voice notes, whether or not
+  `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true` had the bridge cache them, and
+  `coverage` leaves them out of the audio backlog. `transcribe_audio` on a
+  status voice note still works. A file the bridge cannot send *this
   time* (down, disconnected, a CDN link that expired but whose sender is offline)
   is skipped with a warning and gets no note, so it is asked for again when the
   walk comes round; three such failures in a row end the fetching for the newest

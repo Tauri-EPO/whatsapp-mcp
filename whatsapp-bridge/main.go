@@ -249,6 +249,12 @@ func main() {
 		return
 	}
 
+	statusMedia, statusErr := resolveStatusAutoDownload(os.Getenv(mediaAutoDownloadStatusEnv))
+	if statusErr != nil {
+		logger.Errorf("%v", statusErr)
+		return
+	}
+
 	rosterSync, rosterErr := resolveGroupRosterSync(os.Getenv(groupRosterSyncEnv))
 	if rosterErr != nil {
 		logger.Errorf("%v", rosterErr)
@@ -284,6 +290,7 @@ func main() {
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
 	bridge.MediaRetention = mediaRetention
+	bridge.MediaAutoDownloadStatus = statusMedia
 	bridge.GroupRosterSync = rosterSync
 	bridge.ReadOnly = readOnly
 	bridge.Tools = tools
@@ -306,7 +313,8 @@ func main() {
 	logger.Infof("%s", bridge.Policy.Summary())
 	logger.Infof("%s", bridge.ReadOnly.Summary())
 	logger.Infof("%s", bridge.Tools.Summary())
-	logger.Infof("Media auto-download: %v; retention: %s", bridge.MediaAutoDownload, retentionSummary(bridge.MediaRetention))
+	logger.Infof("Media auto-download: %v (status updates: %v); retention: %s", bridge.MediaAutoDownload,
+		bridge.MediaAutoDownload && bridge.MediaAutoDownloadStatus, retentionSummary(bridge.MediaRetention))
 	logger.Infof("Group roster sync: %s", groupRosterSyncSummary(bridge.GroupRosterSync))
 	go bridge.runMediaRetention()
 	go bridge.runGroupRosterSync()

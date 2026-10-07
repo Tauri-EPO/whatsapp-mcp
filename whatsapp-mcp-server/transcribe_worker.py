@@ -36,6 +36,10 @@ Properties that matter:
   round with a warning and no note, so those files are tried again next
   interval; the notes an older build wrote for such an outage are cleared when
   the worker starts (``clear_outage_failures``).
+- **The status feed is not walked.** ``status@broadcast`` is everyone's status
+  posts, not a conversation: its voice notes are neither fetched nor
+  transcribed here, cached or not, and ``coverage`` leaves them out of the
+  backlog for the same reason. ``transcribe_audio`` on one still works.
 - **Media that can never arrive is recorded once.** When the bridge answers
   ``media_unavailable`` — the sender's phone was asked to re-upload and said the
   file is gone, or the row carries no media key to decrypt it with — the hash
@@ -269,7 +273,14 @@ PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestam
 
 
 def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]:
-    """Inbound audio with no transcript, newest first, resuming just past ``after``."""
+    """Inbound audio with no transcript, newest first, resuming just past ``after``.
+
+    The status feed is left out, the way ``coverage`` counts the backlog
+    (``whatsapp._COVERAGE_AUDIO_WHERE``): the bridge keeps status media on the
+    CDN unless ``WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS`` asks for it, so a fetch
+    would fill ``store/status@broadcast/`` through the other door, and rows the
+    worker only skipped would be a backlog that never drains (issue #447).
+    """
     conn = whatsapp._connect_messages_db()
     try:
         handled_clause, handled_params = _already_handled_clause(conn)
@@ -278,6 +289,7 @@ def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]
             "m.is_from_me = 0",
             "m.file_sha256 IS NOT NULL",
             "m.deleted_at IS NULL",
+            f"m.chat_jid <> '{whatsapp.STATUS_BROADCAST_JID}'",  # a module constant, never user input
             handled_clause,
         ]
         params: list[Any] = list(handled_params)

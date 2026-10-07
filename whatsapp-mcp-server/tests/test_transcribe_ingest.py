@@ -295,6 +295,32 @@ def test_uncached_audio_is_fetched_from_the_bridge_only_with_the_flag_on(paired_
     assert media_notes.fetch_notes([SHA["AUD1"]])[SHA["AUD1"]]["transcript"] == "spoken words"
 
 
+def test_the_status_feed_is_not_walked(paired_dbs):
+    # The bridge leaves status media on the CDN unless it is told otherwise
+    # (WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS); the worker must not fill
+    # store/status@broadcast/ through /api/download instead, and rows it only
+    # skipped would be a backlog that never drains (issue #447).
+    status = whatsapp.STATUS_BROADCAST_JID
+    _add_audio(paired_dbs, "AUD2", status, cached=False)  # the newest row
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    bridge = FakeBridge()
+    backend = FakeBackend()
+
+    first = transcribe_worker.run_once(1, transcribe=backend, fetch=True, download=bridge)
+    # The status row is not on the work list: the one fetch of this batch goes
+    # to the ordinary chat behind it.
+    assert (first.pending, first.transcribed) == (1, 1)
+    assert bridge.calls == [("AUD1", ALICE)]
+    assert not os.path.exists(media_inventory.chat_media_dir(status))
+
+    # A status voice note the bridge did cache is left alone too.
+    _add_audio(paired_dbs, "AUD3", status)
+    again = transcribe_worker.run_once(10, transcribe=backend, fetch=True, download=bridge)
+    assert (again.pending, again.transcribed, again.examined) == (0, 0, 0)
+    assert bridge.calls == [("AUD1", ALICE)]
+    assert media_notes.fetch_notes([SHA["AUD2"], SHA["AUD3"]]) == {}  # no note either: nothing was tried
+
+
 def test_a_fetch_fills_a_slot_of_the_batch(paired_dbs):
     _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
     _add_audio(paired_dbs, "AUD2", ALICE, cached=False)

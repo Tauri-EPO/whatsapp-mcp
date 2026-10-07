@@ -54,6 +54,11 @@ type Bridge struct {
 	ForwardSelf bool
 	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
 	MediaAutoDownload bool
+	// MediaAutoDownloadStatus extends it to the status feed
+	// (WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS, media_retention.go). Zero value =
+	// status media is stored as a row and fetched only on demand; main() parses
+	// it and refuses to start on a value it cannot read.
+	MediaAutoDownloadStatus bool
 	// MediaMaxBytes: inbound files larger than this are not auto-downloaded
 	// (WHATSAPP_MEDIA_MAX_BYTES); /api/download still fetches them on demand.
 	MediaMaxBytes uint64
