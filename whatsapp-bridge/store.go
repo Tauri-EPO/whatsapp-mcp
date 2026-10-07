@@ -53,6 +53,7 @@ func NewMessageStore() (*MessageStore, error) {
 	// WAL lets the MCP server read messages.db while the bridge writes (a
 	// history-sync burst used to make readers hit SQLITE_BUSY), and the busy
 	// timeout makes both sides wait instead of failing on a short lock.
+	privateDatabase(messagesDBPath())
 	db, err := sql.Open("sqlite", sqliteURI(messagesDBPath(), sqliteWriterOptions))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)

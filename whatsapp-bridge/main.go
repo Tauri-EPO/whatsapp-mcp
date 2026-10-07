@@ -115,6 +115,8 @@ func main() {
 	}
 	defer lock.Release()
 
+	// The session keys live here: owner-only before whatsmeow creates or opens it.
+	privateDatabase(whatsmeowDBPath())
 	container, err := sqlstore.New(context.Background(), "sqlite", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)

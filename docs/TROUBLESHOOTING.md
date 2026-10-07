@@ -271,6 +271,12 @@ the next start picks the change up and stops warning.
   lists the store mount with `"RW": false`. Start the bridge, or give `mcp` a
   writable store (the default compose layout). The measurements
   are in [DOCKER.md](./DOCKER.md#the-store-read-only-in-the-mcp-container).
+- **Every read fails with `unable to open database file`, bridge running or
+  not, and `mcp` runs as another user than the bridge**: the bridge keeps
+  `messages.db` and `whatsapp.db` `0600` and sets them back to that at every
+  start (its log says `Tightened ... to 0600` the first time). Run both
+  processes as the same user, as the images and the compose file do (uid 1000);
+  a group that used to be able to read the files no longer can.
 
 ## `messages.db not found at <path>`
 

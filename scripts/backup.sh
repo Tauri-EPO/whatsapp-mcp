@@ -14,8 +14,9 @@
 #   messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
 #
 # The backup contains live credentials (whatsapp.db holds the WhatsApp session
-# keys, bridge-token the REST bearer). Store it like a password: encrypted at
-# rest, not in a shared drive. Restoring whatsapp.db on a second machine while
+# keys, bridge-token the REST bearer). Its files are created 0600 and handed to
+# the owner of DEST_DIR. Store it like a password: encrypted at rest, not in a
+# shared drive. Restoring whatsapp.db on a second machine while
 # the first still runs makes WhatsApp replace the stream on both — restore
 # onto one host only.
 #
@@ -46,8 +47,10 @@ resolve_volume() {
 abs() { mkdir -p "$1"; (cd "$1" && pwd -W 2>/dev/null || pwd); }
 
 run_alpine() { # $1 volume  $2 host dir  $3 script  (store mounted rw so sqlite can read WAL/-shm)
+  # umask 077: the copies hold the session keys and the archive, so they are
+  # created owner-only, in the snapshot and back in the store (issue #491).
   MSYS_NO_PATHCONV=1 docker run --rm -v "$1:/store" -v "$2:/backup" "$IMAGE" sh -euc \
-    "apk add --no-cache sqlite >/dev/null; $3"
+    "umask 077; apk add --no-cache sqlite >/dev/null; $3"
 }
 
 cmd_backup() {
@@ -64,7 +67,21 @@ cmd_backup() {
     # Media lives in per-chat directories under the store root.
     cd /store && rm -f /backup/media.tar && find . -mindepth 1 -maxdepth 1 -type d -exec tar -cf /backup/media.tar {} +
     [ -f /store/.bridge-token ] && cp /store/.bridge-token /backup/bridge-token && chmod 600 /backup/bridge-token
+    # Owner-only, and owned by whoever owns the destination: the user who ran
+    # this can still read the snapshot (to ship it off-box), nobody else can.
+    # Only the files written here, by name: umask does nothing for a copy that
+    # overwrote a looser file from an earlier run, and the destination may hold
+    # other things. A file system that refuses the chown (NFS with root_squash)
+    # still has a good snapshot.
+    owner="$(stat -c %u:%g /backup)"
+    seal() {
+      [ -f "/backup/$1" ] || return 0
+      chmod 600 "/backup/$1"
+      chown "$owner" "/backup/$1" 2>/dev/null || echo "note: $1 could not be handed to the owner of the destination ($owner)" >&2
+    }
+    for f in messages.db whatsapp.db notes.db media.tar bridge-token; do seal "$f"; done
     { echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "volume='"$vol"'"; ls -l /backup | tail -n +2; } > /backup/MANIFEST
+    seal MANIFEST
     du -sh /backup | cut -f1 | sed "s/^/size: /"'
   echo "done: $dest"
 }
@@ -83,7 +100,7 @@ cmd_restore() {
     cd /store
     rm -f ./*.db-wal ./*.db-shm .bridge.lock
     for db in messages whatsapp notes; do
-      [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db
+      [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db && chmod 600 ./$db.db
     done
     [ -f /backup/media.tar ] && tar -xf /backup/media.tar -C /store
     [ -f /backup/bridge-token ] && cp /backup/bridge-token .bridge-token && chmod 600 .bridge-token
