@@ -530,7 +530,8 @@ def get_contact(identifier: str) -> dict[str, Any]:
         # (`listed_reading`, the rule get_direct_chat_by_contact applies).
         answer = whatsapp_listed_reading(jid, candidates)
         if answer is None:
-            raise refusals[jid] if jid in refusals else next(iter(refusals.values()))
+            # get_chat refused `jid` above: that refusal is the answer.
+            raise refusals.get(jid) or ToolError("denied", f"Chat {jid!r} is not in WHATSAPP_ALLOWED_CHATS")
         jid = whatsapp_phone_book_spelling(answer)
 
     jid_user = jid.split("@", 1)[0]
