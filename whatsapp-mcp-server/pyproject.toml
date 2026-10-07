@@ -32,7 +32,7 @@ classifiers = [
 ]
 dependencies = [
     # MCP Python SDK v2 (FastMCP renamed to MCPServer, transport config on run()).
-    "mcp[cli]>=2.2.0,<3",
+    "mcp[cli]>=2.3.0,<3",
     # Bridge REST and whisper-server client; the same HTTP stack the SDK uses.
     "httpx>=0.28",
     # read_media(as_text=True): turn the documents WhatsApp carries into text on
@@ -49,12 +49,12 @@ dependencies = [
     # self-contained manylinux wheels for amd64 and arm64, so the image gains no
     # system packages.
     "pillow>=12.3",
-    "pillow-heif>=1.7",
+    "pillow-heif>=1.8.0",
     # read_media(as_images=True): render the pages of a scanned PDF here, so the
     # documents as_text cannot read (photographed paper) reach a vision model as
     # pictures (media_pdf.py). Google's PDFium, the renderer in Chrome; same
     # wheel story as above.
-    "pypdfium2>=5.13",
+    "pypdfium2>=5.14.0",
 ]
 
 [project.optional-dependencies]
