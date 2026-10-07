@@ -1,7 +1,6 @@
 name: Feature request
 description: Propose a new feature or enhancement.
-title: "feat: <short description>"
-labels: ["enhancement"]
+labels: ["enhancement", "needs-triage"]
 body:
   - type: markdown
     attributes:
@@ -9,6 +8,8 @@ body:
         Before filing, skim the README "Is this for you?" section and [`AGENTS.md`](https://github.com/Tauri-EPO/whatsapp-mcp/blob/main/AGENTS.md) §11 for the issue format (problem, fix sketch, acceptance).
 
         State the **problem**, not the solution. Solutions are easier to design once the problem is clear.
+
+        Write a plain title. A maintainer adds the priority prefix (`P0:` / `P1:` / `P2:`) and the `area:*` label at triage.
 
   - type: textarea
     id: problem
@@ -30,8 +31,9 @@ body:
   - type: dropdown
     id: scope
     attributes:
-      label: Which part does this touch?
-      description: Becomes the `area:*` label at triage.
+      label: Which parts does this touch?
+      description: Pick every one that applies. They become the `area:*` labels at triage.
+      multiple: true
       options:
         - Bridge (Go, WhatsApp connection, REST)
         - MCP server (Python, tools)
@@ -39,7 +41,9 @@ body:
         - Transcription
         - Docker / operations
         - CI / release
-        - "I'm not sure"
+        - Security (auth, allow-lists, file paths)
+        - Documentation
+        - "Something else, or I'm not sure"
     validations:
       required: true
 
