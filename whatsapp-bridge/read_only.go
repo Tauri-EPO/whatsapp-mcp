@@ -39,21 +39,29 @@ type readOnlyPolicy struct {
 // "off" because it was spelled WHATSAPP_READ_ONLY=treu. main() refuses to start
 // on the error rather than running wide open.
 func parseReadOnly(raw string) (readOnlyPolicy, error) {
+	enabled, err := parseStrictBool(readOnlyEnv, raw)
+	return readOnlyPolicy{enabled: enabled}, err
+}
+
+// parseStrictBool reads a switch that is off when unset and refuses a value it
+// cannot read, naming the variable. Shared with the other switches documented
+// as parsing like WHATSAPP_READ_ONLY (media_retention.go).
+func parseStrictBool(name, raw string) (bool, error) {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	if v == "" {
-		return readOnlyPolicy{}, nil
+		return false, nil
 	}
 	for _, t := range readOnlyTrue {
 		if v == t {
-			return readOnlyPolicy{enabled: true}, nil
+			return true, nil
 		}
 	}
 	for _, f := range readOnlyFalse {
 		if v == f {
-			return readOnlyPolicy{}, nil
+			return false, nil
 		}
 	}
-	return readOnlyPolicy{}, fmt.Errorf("%s=%q is not a boolean; use one of %s", readOnlyEnv,
+	return false, fmt.Errorf("%s=%q is not a boolean; use one of %s", name,
 		raw, strings.Join(append(append([]string{}, readOnlyTrue...), readOnlyFalse...), ", "))
 }
 

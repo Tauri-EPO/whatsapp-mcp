@@ -421,7 +421,7 @@ allow-list as the numbers above:
 
 | Field | Meaning |
 | --- | --- |
-| `messages` | Inbound voice notes stored in scope. Outbound, deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it |
+| `messages` | Inbound voice notes stored in scope. Outbound, deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it. So is the status feed (`status@broadcast`): the ingest worker does not walk it, and `transcribe_audio` on a status voice note still works |
 | `cached` | Of those, the ones whose bytes are on disk under the store directory |
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |

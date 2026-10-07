@@ -280,9 +280,15 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// For image messages that will be forwarded, download media synchronously so we
 	// can include the base64 payload in the webhook. Other media types (and images
 	// when webhook forwarding is disabled) download asynchronously for caching.
+	//
+	// Status updates are the exception to both: their media stays on the CDN
+	// unless WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS asks for it (issue #447), and
+	// the webhook then carries the image message without the payload, as it
+	// does when a download fails.
+	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
 	var imageDownloadPath string
 	var imageMimeType string
-	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward {
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && !skipStatusMedia {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, _, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
@@ -307,6 +313,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 			}
 		}
+	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && skipStatusMedia {
+		logger.Debugf("Not caching %s media of status update %s: %s is off (download_media still works)", mediaType, msg.Info.ID, mediaAutoDownloadStatusEnv)
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
 		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload {

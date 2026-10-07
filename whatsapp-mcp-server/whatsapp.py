@@ -4514,10 +4514,12 @@ COVERAGE_AUDIO_MAX_CHATS = 200
 # Inbound, undeleted voice notes that carry a content hash: exactly what a
 # transcription batch looks at (transcribe_worker._pending_rows). A row without
 # a hash cannot be keyed to a transcript note, so the worker can never drain it
-# and counting it would leave a backlog that never reaches zero.
+# and counting it would leave a backlog that never reaches zero. The status feed
+# is out for the same reason: the worker does not walk it (issue #447).
 _COVERAGE_AUDIO_WHERE = (
     "messages.media_type = 'audio' AND messages.is_from_me = 0 "
-    "AND messages.deleted_at IS NULL AND messages.file_sha256 IS NOT NULL"
+    "AND messages.deleted_at IS NULL AND messages.file_sha256 IS NOT NULL "
+    f"AND messages.chat_jid <> '{STATUS_BROADCAST_JID}'"
 )
 
 

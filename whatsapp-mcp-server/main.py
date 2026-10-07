@@ -247,7 +247,8 @@ def coverage(
 
     audio is the voice-note side of the same scope: {messages, cached,
     transcribed, errors, unavailable, backlog, backlog_cached, cached_examined} —
-    inbound voice notes stored, how many have their bytes on disk, how many
+    inbound voice notes stored (the status feed "status@broadcast" is not
+    counted: no batch walks it), how many have their bytes on disk, how many
     already have a transcript, a recorded failure (errors) or bytes no download
     brought here (unavailable: the sender's phone no longer has them, or the row
     was stored without the fields a download needs), and

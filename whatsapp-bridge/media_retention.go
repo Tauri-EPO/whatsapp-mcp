@@ -3,11 +3,16 @@ package main
 // Media storage controls (issue #60).
 //
 // Every inbound image/audio/video is downloaded into store/<chat>/ and kept
-// forever, which grows without bound on an always-on server. Three knobs:
+// forever, which grows without bound on an always-on server. Four knobs:
 //
 //   WHATSAPP_MEDIA_AUTODOWNLOAD   default true. false = only an explicit
 //                                 /api/download (MCP download_media) fetches
 //                                 files; media-retry makes late fetches work.
+//   WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS
+//                                 default false. The status feed
+//                                 (status@broadcast) is stored like any chat,
+//                                 but its media is cached on arrival only when
+//                                 this is true (issue #447).
 //   WHATSAPP_MEDIA_RETENTION_DAYS default unset. N>0 = a daily sweep deletes
 //                                 media files older than N days. Message rows
 //                                 keep their media metadata, so download_media
@@ -26,16 +31,37 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 const (
-	mediaAutoDownloadEnv = "WHATSAPP_MEDIA_AUTODOWNLOAD"
-	mediaRetentionEnv    = "WHATSAPP_MEDIA_RETENTION_DAYS"
-	mediaMaxBytesEnv     = "WHATSAPP_MEDIA_MAX_BYTES"
-	defaultMediaMaxBytes = 256 * 1024 * 1024
-	mediaSweepInterval   = 24 * time.Hour
-	storeUsageTTL        = 5 * time.Minute
+	mediaAutoDownloadEnv       = "WHATSAPP_MEDIA_AUTODOWNLOAD"
+	mediaAutoDownloadStatusEnv = "WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS"
+	mediaRetentionEnv          = "WHATSAPP_MEDIA_RETENTION_DAYS"
+	mediaMaxBytesEnv           = "WHATSAPP_MEDIA_MAX_BYTES"
+	defaultMediaMaxBytes       = 256 * 1024 * 1024
+	mediaSweepInterval         = 24 * time.Hour
+	storeUsageTTL              = 5 * time.Minute
 )
+
+// resolveStatusAutoDownload parses WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS: off
+// when unset, and an unreadable value is an error so main() fails fast instead
+// of quietly filling the disk, or quietly not caching what was asked for.
+func resolveStatusAutoDownload(value string) (bool, error) {
+	return parseStrictBool(mediaAutoDownloadStatusEnv, value)
+}
+
+// skipsStatusMedia reports whether media arriving in chat is left on the CDN
+// because the chat is the status feed and the operator did not ask for it:
+// status media needs both switches, so WHATSAPP_MEDIA_AUTODOWNLOAD=false also
+// stops the download that feeds the webhook payload. The row keeps its CDN
+// fields, so /api/download still fetches the file on demand.
+func (b *Bridge) skipsStatusMedia(chat types.JID) bool {
+	isStatus := chat.User == types.StatusBroadcastJID.User && chat.Server == types.StatusBroadcastJID.Server
+	cachedOnArrival := b.MediaAutoDownload && b.MediaAutoDownloadStatus
+	return isStatus && !cachedOnArrival
+}
 
 // resolveMediaRetention parses WHATSAPP_MEDIA_RETENTION_DAYS. Zero means
 // disabled; negative or non-numeric values are an error so main() fails fast.

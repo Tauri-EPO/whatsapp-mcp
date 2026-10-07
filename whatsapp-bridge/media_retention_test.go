@@ -7,10 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -250,6 +253,186 @@ func TestHandleMessageSkipsAutoDownloadWhenDisabled(t *testing.T) {
 	}
 	if msgs[0].MediaType != "image" {
 		t.Fatalf("media_type = %q", msgs[0].MediaType)
+	}
+}
+
+func TestResolveStatusAutoDownload(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{raw: "", want: false},
+		{raw: "  ", want: false},
+		{raw: "true", want: true},
+		{raw: " ON ", want: true},
+		{raw: "1", want: true},
+		{raw: "false", want: false},
+		{raw: "0", want: false},
+		// main() stops on these instead of guessing which way the disk goes.
+		{raw: "treu", wantErr: true},
+		{raw: "2", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := resolveStatusAutoDownload(tc.raw)
+		if tc.wantErr {
+			if err == nil || !strings.Contains(err.Error(), mediaAutoDownloadStatusEnv) {
+				t.Errorf("resolveStatusAutoDownload(%q) = %v, %v; want an error naming %s", tc.raw, got, err, mediaAutoDownloadStatusEnv)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("resolveStatusAutoDownload(%q) = %v, %v; want %v", tc.raw, got, err, tc.want)
+		}
+	}
+}
+
+// Status media is stored as a row and left on the CDN unless
+// WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS asks for it; every other chat caches as
+// before, and WHATSAPP_MEDIA_AUTODOWNLOAD=false still turns everything off
+// (issue #447).
+func TestHandleMessageStatusMediaIsOptIn(t *testing.T) {
+	cases := []struct {
+		name         string
+		chat         types.JID
+		autoDownload bool
+		status       bool
+		wantQueued   int
+	}{
+		{name: "status, default", chat: types.StatusBroadcastJID, autoDownload: true, wantQueued: 0},
+		{name: "status, flag on", chat: types.StatusBroadcastJID, autoDownload: true, status: true, wantQueued: 1},
+		{name: "status, flag on, auto-download off", chat: types.StatusBroadcastJID, status: true, wantQueued: 0},
+		{name: "ordinary chat, default", chat: phonePN, autoDownload: true, wantQueued: 1},
+		{name: "ordinary chat, flag on", chat: phonePN, autoDownload: true, status: true, wantQueued: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WEBHOOK_ENABLED", "false")
+			msg := buildImageMessage(tc.chat, phonePN, false, "")
+			msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
+			msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+
+			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+			b.MediaAutoDownload, b.MediaAutoDownloadStatus = tc.autoDownload, tc.status
+			// No workers: what handleMessage queued stays in the backlog, so
+			// the count is exact without waiting for a goroutine.
+			b.autoDownloads = newMediaJobQueue(b.ctx, 0, 4, b.runAutoDownload)
+
+			b.handleMessage(msg)
+			if got := b.autoDownloads.queued(); got != tc.wantQueued {
+				t.Fatalf("queued downloads = %d, want %d", got, tc.wantQueued)
+			}
+			// The row keeps its media metadata either way: /api/download
+			// fetches the file on demand.
+			msgs, err := b.Store.GetMessages(tc.chat.String(), 10)
+			if err != nil || len(msgs) != 1 || msgs[0].MediaType != "image" {
+				t.Fatalf("stored messages = %+v, err %v", msgs, err)
+			}
+		})
+	}
+}
+
+// The synchronous download that feeds the webhook payload is the other door:
+// a status image is forwarded without its bytes unless the flag is on, and an
+// ordinary chat keeps its payload download.
+func TestHandleMessageStatusImageSkipsWebhookDownload(t *testing.T) {
+	cases := []struct {
+		name      string
+		chat      types.JID
+		status    bool
+		noAuto    bool
+		wantCalls int32
+	}{
+		{name: "status, default", chat: types.StatusBroadcastJID, wantCalls: 0},
+		{name: "status, flag on", chat: types.StatusBroadcastJID, status: true, wantCalls: 1},
+		// WHATSAPP_MEDIA_AUTODOWNLOAD=false wins: the flag does not reopen
+		// the webhook door for the status feed.
+		{name: "status, flag on, auto-download off", chat: types.StatusBroadcastJID, status: true, noAuto: true, wantCalls: 0},
+		{name: "ordinary chat, default", chat: phonePN, wantCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, webhookCh := captureWebhook(t)
+			t.Setenv("WEBHOOK_URL", srv.URL)
+			msg := buildImageMessage(tc.chat, phonePN, false, "")
+			msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
+			msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+
+			var calls atomic.Int32
+			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+			b.MediaAutoDownload, b.MediaAutoDownloadStatus = !tc.noAuto, tc.status
+			b.autoDownloads = newMediaJobQueue(b.ctx, 0, 4, b.runAutoDownload)
+			b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
+				calls.Add(1)
+				return false, "", "", "", nil
+			}
+
+			b.handleMessage(msg)
+			// The webhook download runs inside handleMessage, and its failure
+			// falls back to the queue: a skipped status image reaches neither.
+			if got := calls.Load(); got != tc.wantCalls {
+				t.Fatalf("synchronous downloads = %d, want %d", got, tc.wantCalls)
+			}
+			if got := b.autoDownloads.queued(); got != int(tc.wantCalls) {
+				t.Fatalf("queued downloads = %d, want %d", got, tc.wantCalls)
+			}
+			select {
+			case payload := <-webhookCh:
+				if payload.MediaType != "image" || payload.MediaBase64 != "" {
+					t.Fatalf("webhook payload = %+v, want the image message without bytes", payload)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the message must still reach the webhook")
+			}
+		})
+	}
+}
+
+// End to end with the default configuration: the status image arrives, the
+// row is stored, nothing is written under store/status@broadcast/, and the
+// on-demand path (/api/download calls downloadMedia) still fetches the file.
+func TestStatusMediaIsFetchedOnDemandOnly(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	t.Setenv(storeDirEnv, t.TempDir())
+	url, key, sha, enc, length := fullMediaInfo()
+	msg := buildImageMessage(types.StatusBroadcastJID, phonePN, false, "")
+	msg.Message.ImageMessage.URL = proto.String(url)
+	msg.Message.ImageMessage.MediaKey = key
+	msg.Message.ImageMessage.FileSHA256 = sha
+	msg.Message.ImageMessage.FileEncSHA256 = enc
+	msg.Message.ImageMessage.FileLength = proto.Uint64(length)
+
+	var transfers atomic.Int32
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+		transfers.Add(1)
+		return writeLikeDownloadToPath(localPath, []byte("status image"))
+	}
+
+	// No workers: a download queued by mistake stays countable in the backlog.
+	b.autoDownloads = newMediaJobQueue(b.ctx, 0, 4, b.runAutoDownload)
+
+	b.handleMessage(msg)
+	if got := b.autoDownloads.queued(); got != 0 {
+		t.Fatalf("queued downloads = %d, want 0", got)
+	}
+	statusDir := chatMediaDir(types.StatusBroadcastJID.String())
+	if entries, err := os.ReadDir(statusDir); err == nil && len(entries) > 0 {
+		t.Fatalf("%d files cached under %s with the default configuration", len(entries), statusDir)
+	}
+	if got := transfers.Load(); got != 0 {
+		t.Fatalf("transfers on arrival = %d, want 0", got)
+	}
+
+	ok, mediaType, _, path, err := b.downloadMedia(context.Background(), msg.Info.ID, types.StatusBroadcastJID.String())
+	if !ok || err != nil || mediaType != "image" {
+		t.Fatalf("on-demand download: ok=%v type=%q err=%v", ok, mediaType, err)
+	}
+	if data, readErr := os.ReadFile(path); readErr != nil || string(data) != "status image" { //nolint:gosec // path returned by downloadMedia under t.TempDir()
+		t.Fatalf("downloaded file = %q, err %v", data, readErr)
+	}
+	if got := transfers.Load(); got != 1 {
+		t.Fatalf("transfers after the on-demand download = %d, want 1", got)
 	}
 }
 
