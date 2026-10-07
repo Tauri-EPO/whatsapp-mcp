@@ -162,8 +162,11 @@ def _connect_read_only(path: str) -> sqlite3.Connection:
 
     ``mode=ro`` and not ``immutable=1``: a WAL database the bridge has open must
     be read through its ``-wal``/``-shm`` files, or reads would miss everything
-    not yet checkpointed. With the bridge stopped the reader still works (it
-    recovers the log and may create ``-shm`` next to the file). An ATTACHed
+    not yet checkpointed. With the bridge stopped the reader recovers the log
+    and creates ``-shm`` next to the file, which needs a directory it can write:
+    on a read-only mount or as another user it only works while the bridge has
+    the database open (docs/DOCKER.md, "The store read-only in the MCP
+    container"). An ATTACHed
     database does *not* inherit the flag; :func:`attach_notes_read_only` attaches
     notes.db with its own ``mode=ro``, because every join here only reads it and
     its writers open it on their own connection.
