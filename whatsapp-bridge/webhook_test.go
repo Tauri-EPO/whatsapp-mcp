@@ -131,7 +131,7 @@ func TestSendWebhookWithMessageIDSerializesID(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("WEBHOOK_URL", srv.URL)
-	newTestWebhook().SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D")
+	newTestWebhook().SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D", true)
 
 	if payload.MessageID != "3EB0F00D" {
 		t.Fatalf("messageId = %q, want %q", payload.MessageID, "3EB0F00D")
@@ -154,7 +154,7 @@ func TestSendWebhookWithMediaDisabledSendsNothing(t *testing.T) {
 	newTestWebhook().SendWebhookWithMedia(
 		"123@s.whatsapp.net", "", "123@s.whatsapp.net", false,
 		"", "", "", nil, nil,
-		"message-id", "image", "image/jpeg", "missing.jpg", []byte("image bytes"),
+		"message-id", "image", "image/jpeg", "missing.jpg", []byte("image bytes"), true,
 	)
 
 	if received {

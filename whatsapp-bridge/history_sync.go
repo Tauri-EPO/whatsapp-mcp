@@ -183,7 +183,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 					// carry a usable ContextInfo.
 					err = persistMessage(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
 					if err != nil {
-						logger.Warnf("Failed to store history message: %v", err)
+						b.noteStoreFailure("history message", msgID, chatJID, err)
 					} else {
 						syncedCount++
 						b.metrics.historyMessages.Add(1)
@@ -202,7 +202,12 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				return nil
 			})
 			if batchErr != nil {
-				logger.Errorf("History sync: failed to commit %s: %v", chatJID, batchErr)
+				// The whole conversation rolled back: the rows counted as
+				// stored above are not there.
+				syncedCount -= storedInChat
+				b.metrics.historyMessages.Add(-int64(storedInChat))
+				b.metrics.storeFailures.Add(int64(storedInChat))
+				logger.Errorf("History sync: failed to commit %s, its %d messages are lost: %v", chatJID, storedInChat, batchErr)
 			} else {
 				logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
 			}

@@ -607,8 +607,9 @@ class Chat:
         heuristic: unread if the last message is inbound.
 
         A chat with no stored messages (`has_messages` false, so
-        `last_is_from_me is None`) has no direction to go on — protocol and
-        unsupported events advance last_message_time without storing a row —
+        `last_is_from_me is None`) has no direction to go on — history sync can
+        list a chat without storing a row, and older bridges advanced
+        last_message_time for events they did not store —
         so it is not reported as unread. Read `has_messages` to tell that
         "nothing is waiting" from "we cannot tell".
         """
@@ -1335,9 +1336,10 @@ def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = Fals
     """Deterministic single-row join to the chat's newest stored message.
 
     The row is picked by ordering the chat's messages, never by matching
-    `chats.last_message_time`: that marker is advanced by protocol and
-    unsupported events that store no message row, and history sync writes
-    second-resolution timestamps, so an equality join left the last_* fields
+    `chats.last_message_time`: that marker was advanced by older bridges for
+    protocol and unsupported events that stored no message row (the bridge now
+    moves it only with a stored row), and history sync writes the
+    conversation's own second-resolution timestamp, so an equality join left the last_* fields
     NULL for a large share of chats (issue #218).
 
     Multiple messages can share a timestamp, so `id DESC` is the tie-break —

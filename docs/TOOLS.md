@@ -1920,10 +1920,11 @@ same as before. Groups are never looked up — they have no phone-book entry.
 
 The `last_*` fields describe the chat's **newest stored message**, resolved by
 ordering that chat's rows (`timestamp DESC, id DESC`). They are not matched
-against `last_message_time`: protocol and unsupported events advance that
-marker without storing a message, and history sync writes second-resolution
-timestamps, so `last_message_time` can be newer than — or simply not equal to —
-the newest stored row's timestamp.
+against `last_message_time`: history sync stamps a chat with the conversation's
+own second-resolution time, and older bridges advanced that marker for
+protocol and unsupported events without storing a message (live messages now
+move it only when a row is written), so `last_message_time` can be newer than —
+or simply not equal to — the newest stored row's timestamp.
 
 `has_messages` says whether a stored row backs those fields:
 

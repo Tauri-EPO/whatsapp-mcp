@@ -146,6 +146,15 @@ func (store *MessageStore) RenameChat(chatJID, name string) error {
 	return nil
 }
 
+// EnsureChat makes sure the chat row exists, which a message row needs before
+// it can reference it, and records the resolved name. It never touches
+// last_message_time: that moves only when a row of the chat is actually
+// written, so a message the bridge does not store cannot make the chat look
+// active at a time nothing in it accounts for (issue #531).
+func (store *MessageStore) EnsureChat(chatJID, name string) error {
+	return store.StoreChat(chatJID, name, time.Time{})
+}
+
 // conversationName extracts the name a history-sync conversation carries.
 func conversationName(conversation *waHistorySync.Conversation) string {
 	if conversation == nil {
