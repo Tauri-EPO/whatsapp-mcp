@@ -22,6 +22,7 @@ type messageWriter interface {
 		quotedMessageId string) error
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
+	SetDirectPath(messageID, chatJID, directPath string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
 }
 
@@ -42,6 +43,9 @@ type extractedMessage struct {
 	fileLen   uint64
 	poll      *pollCreation
 
+	// directPath is the media's own direct path, "" when the message has none.
+	directPath string
+
 	quotedID, quotedSender, quotedContent string
 	mentions                              []string
 }
@@ -59,6 +63,7 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	}
 	e.content = extractTextContent(e.inner)
 	e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen = extractMediaInfo(e.inner, ts, id)
+	e.directPath = extractMediaDirectPath(e.inner)
 	if e.poll = extractPollCreation(e.inner); e.poll != nil {
 		e.content = pollContent(e.poll)
 		e.mediaType = "poll"
@@ -85,6 +90,14 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
 		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen, quotedID); err != nil {
 		return err
+	}
+	// The direct path rides in a side update too, so StoreMessage keeps its
+	// signature. It is written whenever the message says where its media is,
+	// empty included: a row must not keep the path of a url it no longer has.
+	if e.directPath != "" || e.url != "" {
+		if err := w.SetDirectPath(id, chatJID, e.directPath); err != nil {
+			logger.Warnf("Failed to store the media direct path for message %s: %v", id, err)
+		}
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of
 	// messages carry any, and the write then costs nothing on the rest

@@ -96,6 +96,11 @@ func (b *messageBatch) SetMentions(messageID, chatJID, mentions string) error {
 	return setMentionsWith(b.tx, messageID, chatJID, mentions)
 }
 
+// SetDirectPath is MessageStore.SetDirectPath inside the batch.
+func (b *messageBatch) SetDirectPath(messageID, chatJID, directPath string) error {
+	return setDirectPathWith(b.tx, messageID, chatJID, directPath)
+}
+
 // StorePoll is MessageStore.StorePoll inside the batch.
 func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error {
 	return storePollWith(b.tx, messageID, chatJID, p, createdAt)

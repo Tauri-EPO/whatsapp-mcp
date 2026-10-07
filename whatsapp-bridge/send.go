@@ -431,6 +431,7 @@ func persistOutbound(client *whatsmeow.Client, messageStore *MessageStore, stora
 // text-only send.
 type outboundMedia struct {
 	mediaType, filename, url            string
+	directPath                          string
 	mediaKey, fileSHA256, fileEncSHA256 []byte
 	fileLength                          uint64
 }
@@ -442,10 +443,11 @@ type outboundMedia struct {
 // the encrypted one, the waE2E literals in buildMediaMessage set them the
 // other way round.
 //
-// The row keeps the URL, as inbound rows do (the download derives the direct
-// path from it); an upload that answered with a direct path only is stored in
-// the same URL form a media retry uses. The filename is the one the recipient
-// was shown (outboundFileName), not whatever the host calls the path.
+// The row keeps the upload's direct path, which is what a download asks for,
+// and its URL as inbound rows do; an upload that answered with a direct path
+// only gets the URL form a media retry uses, so the url column is never empty
+// for a file that can be fetched. The filename is the one the recipient was
+// shown (outboundFileName), not whatever the host calls the path.
 func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) outboundMedia {
 	if mediaPath == "" {
 		return outboundMedia{}
@@ -459,6 +461,7 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 		mediaType:     mediaType,
 		filename:      outboundFileName(mediaPath),
 		url:           url,
+		directPath:    upload.DirectPath,
 		mediaKey:      upload.MediaKey,
 		fileSHA256:    upload.FileSHA256,
 		fileEncSHA256: upload.FileEncSHA256,
@@ -468,10 +471,21 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 
 // store persists the outbound row with these media columns.
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
-	return messageStore.StoreMessage(
+	if err := messageStore.StoreMessage(
 		id, chatJID, senderJID, content, timestamp, true,
 		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID,
-	)
+	); err != nil {
+		return err
+	}
+	// The upload's direct path is the one the recipients were sent
+	// (buildMediaMessage), so it is the one this row downloads by. The row is
+	// stored either way: without the path the download uses the url's.
+	if m.directPath != "" {
+		if err := messageStore.SetDirectPath(id, chatJID, m.directPath); err != nil {
+			bridgeLog.Warnf("failed to store the media direct path of outbound message %s: %v", id, err)
+		}
+	}
+	return nil
 }
 
 // buildMediaMessage wraps an upload result in the waE2E message for its

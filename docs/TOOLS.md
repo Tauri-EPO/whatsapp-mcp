@@ -1165,12 +1165,24 @@ documents kept an extension are still found under their old name. On a server yo
 what is missing. `/api/health` reports `store_bytes`, `media_bytes` and
 `media_files` so you can watch the cache grow.
 
-WhatsApp CDN URLs expire after a few days. When a stored URL answers 403/404/410
-(typical for history-synced or forwarded media), the bridge automatically asks
-the **sender's phone** to re-upload the file via WhatsApp's media-retry protocol,
-downloads it from the refreshed path, and persists that path for next time. The
-sender's phone must be online; the bridge waits up to 30 seconds before giving
-up with a clear error. Media the phone no longer has cannot be recovered, and
+WhatsApp CDN links expire after a few days. When the CDN answers 403/404/410
+for a message more than six hours old (typical for history-synced media, or a
+file that sat unread), the bridge automatically asks the **sender's phone** to
+re-upload the file via WhatsApp's media-retry protocol, downloads it from the
+refreshed path, and persists that path for next time. The sender's phone must
+be online; the bridge waits up to 30 seconds before giving up with a clear
+error.
+
+A message younger than six hours is different: its link cannot have expired
+(unless the link itself is stamped as expired, which is then treated as above),
+so a refusal says the request failed, not that the file is gone. The answer is
+`bridge_unavailable` with the status in it ("the WhatsApp CDN refused the
+request (HTTP 403) for a message only 4m old … try again later"); the sender's
+phone is not asked and nothing is recorded about the file. Try again later; if
+it keeps failing, the bridge log has what the operator needs
+([TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-recent-file-cannot-be-downloaded)).
+
+Media the phone no longer has cannot be recovered, and
 says so with its own code: `media_unavailable` means "do not ask again", where
 `bridge_unavailable` means "try later". A message stored without the CDN fields
 a download needs (`incomplete media information`: history-sync stubs, some
