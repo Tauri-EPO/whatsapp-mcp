@@ -49,6 +49,7 @@ FAKE_NUMBERS = {
     "5511777777777",
     "5511888888888",
     "5511999999999",
+    "551199999999",  # the same number without the ninth digit (docs/CONFIGURATION.md)
     "551133333333",
     "551188888888",
     "5511999990004",
