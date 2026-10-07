@@ -258,6 +258,42 @@ class TestPdf:
         with pytest.raises(MemoryError):
             media_read.read_media(ALICE, "PDF1", as_text=True)
 
+    def test_a_failure_to_find_the_page_is_an_unreadable_page_too(self, documents, monkeypatch):
+        """The page tree can fail at pages[index], before extract_text is reached."""
+        from pypdf._page import _VirtualList
+
+        real = _VirtualList.__getitem__
+
+        def getitem(self, index):
+            if index == 1:
+                raise KeyError("fake-secret-text quoted by the parser")
+            return real(self, index)
+
+        monkeypatch.setattr(_VirtualList, "__getitem__", getitem)
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True)
+        assert _meta(blocks)["pages_failed"] == [2] and len(_texts(blocks)) == 3
+        assert "2 (KeyError)" in _texts(blocks)[-1]
+        assert "fake-secret-text" not in json.dumps([block.model_dump() for block in blocks])
+
+    def test_an_unreadable_page_and_the_text_ceiling_both_show(self, documents, monkeypatch):
+        monkeypatch.setattr(media_text, "MAX_TEXT_CHARS", 40)
+        self._failing_pages(monkeypatch, {1})
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True)
+        meta = _meta(blocks)
+        assert meta["truncated"] is True and meta["pages_failed"] == [2]
+
+    def test_a_pdf_that_cannot_be_opened_never_quotes_the_parser(self, documents, monkeypatch):
+        import pypdf
+
+        def refuse(*args, **kwargs):
+            raise ValueError("fake-secret-text quoted by the parser")
+
+        monkeypatch.setattr(pypdf, "PdfReader", refuse)
+        with pytest.raises(ToolError) as exc:
+            media_read.read_media(ALICE, "PDF1", as_text=True)
+        assert exc.value.code == "invalid_argument" and "ValueError" in exc.value.message
+        assert "fake-secret-text" not in exc.value.message
+
 
 class TestBounds:
     """Every cap that drops content has to show up as truncated: an agent that

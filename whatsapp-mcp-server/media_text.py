@@ -165,7 +165,14 @@ def _pdf(path: str, wanted: int) -> Extracted:
     except Exception as exc:  # noqa: BLE001 - a malformed file is bad input, not a server fault
         # pypdf raises PyPdfError subclasses for a broken file, but also
         # KeyError/ValueError from deep inside the parser on a truncated one.
-        raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}: {exc}") from exc
+        # The class only, like the per-page failures below: a parser message can
+        # quote the file, and the file is whatever a stranger sent.
+        raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}") from exc
+    # No failure budget on purpose (issue #533): the attempts are bounded by
+    # max_pages (500 at most) and by the 64 MiB the file may weigh, and a page
+    # that fails costs what the same page costs when it reads, so stopping after
+    # N failures would bound a case no larger than the healthy one while making
+    # pages_failed and pages_total mean "not attempted" as well as "unreadable".
     # Page by page: one page pypdf refuses (a font with an oversized /Widths, a
     # stream that trips its recovery limit) must not cost the pages around it.
     texts: list[tuple[int, str]] = []
