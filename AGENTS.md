@@ -83,6 +83,7 @@ whatsapp-mcp/
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
 │   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS
+│   ├── env_bool.go             # the one boolean parser (a value it cannot read stops the bridge) + the four default-on switches
 │   ├── media_retention.go      # WHATSAPP_MEDIA_AUTODOWNLOAD / _RETENTION_DAYS, store size
 │   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
@@ -267,7 +268,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)* | Extra `Host` values accepted by the bridge (`host` any port, `host:port` exact, `*` any). Same semantics as `WHATSAPP_MCP_ALLOWED_HOSTS`; loopback spellings always included; a non-loopback bind without it stays loopback-only (403) |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge listens on |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls; also signed onto outbound webhooks |
-| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true` | Cache inbound media on arrival; `false` = fetch only on `/api/download` (`media_retention.go`) |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true` | Cache inbound media on arrival; `false` = fetch only on `/api/download` (`media_retention.go`). `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge (`env_bool.go`) |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false` | Cache the media of status updates (`status@broadcast`) on arrival too. Off by default: the row is stored with its CDN fields, nothing is written under `store/status@broadcast/`, the webhook carries a status image without its bytes, and `/api/download` still fetches a file on demand (`skipsStatusMedia` in `media_retention.go`, issue #447). `true` caches the status feed like any chat; `WHATSAPP_MEDIA_AUTODOWNLOAD=false` wins over it, on the webhook path too. Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB) | Inbound files larger than this are not auto-downloaded (`/api/download` still fetches them); `0` = no limit. Downloads stream to `<file>.part` then rename (`media.go`) |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset)* | Daily sweep deletes media files older than N days under `store/<chat>/`; DB rows untouched |
@@ -282,7 +283,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)* | MCP-server-only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values, group `topic`, poll `question`) in `<untrusted>…</untrusted>` delimiters, so a model that skipped the tool description still sees a boundary (`untrusted.py`). JIDs, IDs, timestamps and cursors are untouched. Name fields are never wrapped in either mode: they are sanitised instead, always (control, zero-width and bidi characters stripped, capped at 200 characters, issue #273); `topic` and `question` are sanitised too, keeping their line breaks and capped at 4096 characters (issue #332). Same strict boolean parse as `WHATSAPP_READ_ONLY`. A hint, not a control — the enforced mitigations are `WHATSAPP_READ_ONLY` and `WHATSAPP_ALLOWED_CHATS` |
 | `WHATSAPP_LOG_LEVEL` | `INFO` | Bridge log level (`DEBUG`/`INFO`/`WARN`/`ERROR`), applied to the bridge logger and the whatsmeow client. `DEBUG` echoes each stored message |
 | `WHATSAPP_LOG_FORMAT` | `text` | `json` switches the bridge (and whatsmeow) log lines to one JSON object per line (`ts`, `level`, `module`, `msg`) (`logging_json.go`) |
-| `WHATSAPP_METRICS` | `true` | Serve `GET /metrics` on the bridge (Prometheus text, unauthenticated like `/api/version`: counters and connection state only, `metrics.go`); `false` removes the route |
+| `WHATSAPP_METRICS` | `true` | Serve `GET /metrics` on the bridge (Prometheus text, unauthenticated like `/api/version`: counters and connection state only, `metrics.go`); `false` removes the route. Anything that is not a boolean stops the bridge |
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO` | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text` | `json` switches the MCP server stderr log to one JSON object per line (`observability.py`) |
 | `WHATSAPP_MCP_METRICS` | `true` | Serve `GET /metrics` on the `http`/`sse` transports (tool calls/errors/seconds per tool, the `whatsapp_mcp_tool_duration_seconds` histogram, HTTP requests by status class); `false` disables it |
@@ -297,8 +298,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MCP_TOKEN` | bridge token when bound off-loopback; none on loopback | Static bearer token enforced on the `http`/`sse` transports (`http_auth.resolve_http_token`, min 16 chars). Unset + non-loopback bind → reuses the bridge token (env or `.bridge-token`); `off` disables auth explicitly. stdio unaffected |
 | `WHATSAPP_PUBLIC_URL` | *(unset)* | MCP-server-only: the URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`; a bare `host` / `host:port` also works). Set it and `bridge_status` reports `endpoint_cert_expires_at` / `endpoint_cert_days_left` for that endpoint's certificate, and `endpoint_cert_error` when the handshake fails (`endpoint_cert.py`: one outbound TLS handshake, no HTTP request, 3 s, chain verified with the default context, result cached an hour). Unset = no fields, no probe |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty falls back to this default) |
-| `WEBHOOK_ENABLED` | `true` (compose: `false`) | Set to `false` to disable outbound webhooks entirely |
-| `FORWARD_SELF` | `true` (compose: `false`) | Whether self-sent messages are forwarded to the webhook |
+| `WEBHOOK_ENABLED` | `true` (compose: `false`) | Set to `false` to disable outbound webhooks entirely. Anything that is not a boolean stops the bridge |
+| `FORWARD_SELF` | `true` (compose: `false`) | Whether self-sent messages are forwarded to the webhook. Anything that is not a boolean stops the bridge |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds) |
 | `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`transcribe.py`). Wins over `WHISPER_BIN` |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |

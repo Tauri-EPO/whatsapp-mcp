@@ -54,6 +54,8 @@ type Bridge struct {
 	DownloadMedia mediaDownloader
 	// ForwardSelf forwards self-sent messages to the webhook (FORWARD_SELF).
 	ForwardSelf bool
+	// MetricsEnabled serves GET /metrics (WHATSAPP_METRICS, metrics.go).
+	MetricsEnabled bool
 	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
 	MediaAutoDownload bool
 	// MediaAutoDownloadStatus extends it to the status feed
@@ -150,7 +152,7 @@ type Bridge struct {
 // newBridge wires the production dependencies from a live client and store.
 // bridgeToken is the REST bearer token, also attached to outbound webhooks;
 // storeRoot is the open store directory (main() owns opening and closing it).
-func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root) *Bridge {
+func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root, switches bridgeSwitches) *Bridge {
 	b := &Bridge{
 		Client:              client,
 		Store:               store,
@@ -158,10 +160,11 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		StoreRoot:           storeRoot,
 		Policy:              loadChatPolicy(),
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
-		ForwardSelf:         getEnvBool("FORWARD_SELF", true),
-		MediaAutoDownload:   getEnvBool(mediaAutoDownloadEnv, true),
+		ForwardSelf:         switches.ForwardSelf,
+		MetricsEnabled:      switches.Metrics,
+		MediaAutoDownload:   switches.MediaAutoDownload,
 		MediaMaxBytes:       resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
-		Webhook:             newWebhookSender(bridgeToken),
+		Webhook:             newWebhookSender(bridgeToken, switches.WebhookEnabled),
 		RESTBind:            defaultBridgeBind,
 		GroupRosterSync:     groupRosterSyncInterval,
 		StreamReplacedDelay: defaultStreamReplacedDelay,

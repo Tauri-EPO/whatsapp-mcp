@@ -53,7 +53,9 @@ type webhookSender struct {
 // operator-configured endpoint, not a browsable URL, and following a 3xx
 // would forward X-Bridge-Token to whatever host the redirect names — Go only
 // strips Authorization/Cookie on cross-origin redirects, not custom headers.
-func newWebhookSender(token string) *webhookSender {
+//
+// enabled is WEBHOOK_ENABLED as main() resolved it (env_bool.go).
+func newWebhookSender(token string, enabled bool) *webhookSender {
 	return &webhookSender{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -63,7 +65,7 @@ func newWebhookSender(token string) *webhookSender {
 		},
 		token:      token,
 		defaultURL: defaultWebhookURL,
-		enabled:    webhooksEnabled(),
+		enabled:    enabled,
 		url:        os.Getenv("WEBHOOK_URL"),
 	}
 }
@@ -93,14 +95,6 @@ type WebhookPayload struct {
 	ReactionToMessageID string  `json:"reactionToMessageId,omitempty"`
 	ReactionEmoji       *string `json:"reactionEmoji,omitempty"`
 	ReactionRemoved     *bool   `json:"reactionRemoved,omitempty"`
-}
-
-// webhooksEnabled reports whether webhook processing is enabled. Keep this
-// separate from sendWebhookPayload so media callers can avoid their webhook-only
-// file work when delivery is disabled.
-// webhooksEnabled reads WEBHOOK_ENABLED; call it at startup only (newWebhookSender, main).
-func webhooksEnabled() bool {
-	return getEnvBool("WEBHOOK_ENABLED", true)
 }
 
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
