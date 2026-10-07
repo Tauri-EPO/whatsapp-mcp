@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -140,20 +141,15 @@ func formatContactContent(displayName, vcard string) string {
 // formatCoordinates renders a latitude/longitude pair as "(-23.550520,
 // -46.633308)": strconv with a fixed six decimals (~0.1 m), so the text does
 // not depend on the machine's locale and the same point always reads the same.
-// Returns "" when the message carried neither coordinate.
+// Returns "" unless both coordinates are present, finite and in range: the
+// sender controls these doubles, and a half-filled pair would otherwise print
+// an invented 0.000000 for the missing one, or NaN for a hostile one.
 func formatCoordinates(lat, lng *float64) string {
-	if lat == nil && lng == nil {
+	if lat == nil || lng == nil || math.IsNaN(*lat) || math.IsNaN(*lng) || math.Abs(*lat) > 90 || math.Abs(*lng) > 180 {
 		return ""
 	}
-	var la, lo float64
-	if lat != nil {
-		la = *lat
-	}
-	if lng != nil {
-		lo = *lng
-	}
 	return fmt.Sprintf("(%s, %s)",
-		strconv.FormatFloat(la, 'f', 6, 64), strconv.FormatFloat(lo, 'f', 6, 64))
+		strconv.FormatFloat(*lat, 'f', 6, 64), strconv.FormatFloat(*lng, 'f', 6, 64))
 }
 
 // formatLocationContent renders a shared location as searchable text:

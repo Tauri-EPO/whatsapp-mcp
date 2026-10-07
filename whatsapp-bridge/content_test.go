@@ -238,3 +238,29 @@ func TestHandleMessage_StoresSharedLocation(t *testing.T) {
 		}
 	}
 }
+
+// extractMessage is the one path live events and history sync share, and a
+// quoted location is read through extractTextContent too: both must see the
+// location text, and a location must not count as an empty message.
+func TestExtractMessage_LocationIsNotEmpty(t *testing.T) {
+	loc := &waE2E.LocationMessage{
+		DegreesLatitude:  proto.Float64(-23.55052),
+		DegreesLongitude: proto.Float64(-46.633308),
+		Name:             proto.String("Padaria Estrela"),
+	}
+	e := extractMessage(&waE2E.Message{LocationMessage: loc}, time.Now(), "L1")
+	if e.empty() || e.mediaType != "" || !strings.Contains(e.content, "Padaria Estrela") {
+		t.Errorf("location extraction = %+v", e)
+	}
+	reply := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: proto.String("é aqui?"),
+		ContextInfo: &waE2E.ContextInfo{
+			StanzaID:      proto.String("L1"),
+			Participant:   proto.String("5511888888888@s.whatsapp.net"),
+			QuotedMessage: &waE2E.Message{LocationMessage: loc},
+		},
+	}}
+	if got := extractMessage(reply, time.Now(), "R1"); got.content != "é aqui?" || !strings.Contains(got.quotedContent, "Padaria Estrela") {
+		t.Errorf("quoted location: content %q, quoted %q", got.content, got.quotedContent)
+	}
+}

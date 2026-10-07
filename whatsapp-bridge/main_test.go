@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1533,6 +1534,32 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 				},
 			},
 			want: "📍 MASP — Av. Paulista, 1578 (-23.561400, -46.655900) — https://maps.example/masp — entrada pela Paulista",
+		},
+		{
+			name: "LocationMessage with one coordinate missing drops the pair, keeps the label",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude: proto.Float64(12.345),
+					Name:            proto.String("Bar do Zé"),
+				},
+			},
+			want: "📍 Bar do Zé",
+		},
+		{
+			name: "LocationMessage with out-of-range or NaN coordinates is not printed",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(math.NaN()),
+					DegreesLongitude: proto.Float64(200),
+					Name:             proto.String("Lugar"),
+				},
+			},
+			want: "📍 Lugar",
+		},
+		{
+			name: "LocationMessage with a half-filled pair and nothing else returns empty",
+			msg:  &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLongitude: proto.Float64(1)}},
+			want: "",
 		},
 		{
 			name: "LocationMessage with nothing in it returns empty (no placeholder row)",
