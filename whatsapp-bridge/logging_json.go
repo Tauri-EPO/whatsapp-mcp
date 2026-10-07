@@ -72,5 +72,5 @@ func newLoggerSet(level string, jsonFormat bool) (bridge, client, db waLog.Logge
 	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		color = true
 	}
-	return waLog.Stdout("Bridge", level, color), waLog.Stdout("Client", level, color), waLog.Stdout("Database", "INFO", color)
+	return newTextLogger("Bridge", level, color), newTextLogger("Client", level, color), newTextLogger("Database", "INFO", color)
 }
