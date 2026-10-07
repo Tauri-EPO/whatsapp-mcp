@@ -47,7 +47,9 @@ for name in upstream lharries; do
   [[ "$mode" == "--all" ]] && since=""
   range="${since:+$since..}$name/main"
   echo "=================================================================="
-  echo "$name (${REPOS[$name]}) — commits ${since:+since $since}${since:-vs our main} touching the bridge/server"
+  scope="vs our main"
+  [[ -n "$since" ]] && scope="since $since"
+  echo "$name (${REPOS[$name]}) — commits $scope touching the bridge/server"
   echo "=================================================================="
   if [[ -n "$since" ]]; then
     git log --no-merges --date=short --format='%h %ad %s' "$range" -- whatsapp-bridge whatsapp-mcp-server || true
