@@ -283,7 +283,7 @@ def _notes_exists_clause(conn: sqlite3.Connection, has_notes: bool) -> str | Non
     """
     annotated = None
     if os.path.exists(media_notes.notes_db_path()):
-        conn.execute("ATTACH DATABASE ? AS notesdb", (media_notes.notes_db_path(),))
+        whatsapp.attach_notes_read_only(conn, media_notes.notes_db_path())
         annotated = conn.execute(
             "SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'"
         ).fetchone()

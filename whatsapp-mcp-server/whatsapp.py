@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import os.path
+import pathlib
 import re
 import sqlite3
 import threading
@@ -146,12 +147,75 @@ def decode_cursor(cursor: str | None, expected_kind: str) -> dict[str, Any] | No
     return payload
 
 
+def _read_only_uri(path: str) -> str:
+    """``file:`` URI that opens ``path`` read-only, whatever characters the path holds.
+
+    ``Path.as_uri`` percent-encodes spaces, ``?`` and ``#`` and turns a Windows
+    ``C:\\dir with space\\x.db`` into ``file:///C:/dir%20with%20space/x.db``;
+    pasting the raw path after ``file:`` would cut it at the first ``?`` or ``#``.
+    """
+    return pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=ro"
+
+
+def _connect_read_only(path: str) -> sqlite3.Connection:
+    """A connection that cannot write to the database at ``path`` and never creates it.
+
+    ``mode=ro`` and not ``immutable=1``: a WAL database the bridge has open must
+    be read through its ``-wal``/``-shm`` files, or reads would miss everything
+    not yet checkpointed. With the bridge stopped the reader still works (it
+    recovers the log and may create ``-shm`` next to the file). An ATTACHed
+    database does *not* inherit the flag; :func:`attach_notes_read_only` attaches
+    notes.db with its own ``mode=ro``, because every join here only reads it and
+    its writers open it on their own connection.
+    """
+    return sqlite3.connect(_read_only_uri(path), timeout=SQLITE_BUSY_TIMEOUT_S, uri=True)
+
+
+class MessagesDbNotFoundError(ToolError, sqlite3.OperationalError):
+    """messages.db is not where this server was told to look.
+
+    Both things on purpose: a tool that lets it escape answers with the failure
+    envelope (a ToolError), while the helpers written to tolerate an archive
+    they cannot read (``except sqlite3.Error``: the read-receipt routing, the
+    sender-namespace lookup) keep tolerating it, as they did when a missing
+    file was an empty one.
+    """
+
+
+def attach_notes_read_only(conn: sqlite3.Connection, path: str) -> None:
+    """``ATTACH`` notes.db to a read connection as ``notesdb``, read-only.
+
+    The file: URI form is honoured because the connections come from
+    :func:`_connect_read_only` (``uri=True``); on any other connection SQLite
+    would take the URI for a file name, so pass only connections from
+    :func:`_connect_messages_db`. A join through it can read the agent's notes
+    but never write them.
+    """
+    conn.execute("ATTACH DATABASE ? AS notesdb", (_read_only_uri(path),))
+
+
 def _connect_messages_db() -> sqlite3.Connection:
-    return sqlite3.connect(MESSAGES_DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_S)
+    """messages.db, read-only (the bridge owns it). A wrong path is an error, not an empty database."""
+    if not os.path.isfile(MESSAGES_DB_PATH):
+        # Opening it read-write would have created an empty file here, and every
+        # tool would then answer "no such table" or an empty list.
+        raise MessagesDbNotFoundError(
+            "internal",
+            f"messages.db not found at {os.path.abspath(MESSAGES_DB_PATH)}: the bridge has not created it "
+            "there, or the path is wrong. The path comes from WHATSAPP_DB_PATH, or from "
+            "WHATSAPP_STORE_DIR/messages.db when that is unset",
+        )
+    return _connect_read_only(MESSAGES_DB_PATH)
 
 
 def _connect_whatsmeow_db() -> sqlite3.Connection:
-    return sqlite3.connect(WHATSMEOW_DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_S)
+    """whatsapp.db, read-only: whatsmeow's session store is opaque to this server.
+
+    A missing file raises ``sqlite3.OperationalError``, as an unreadable one
+    always has; every caller that tolerates an absent phone book catches
+    ``sqlite3.Error`` (or checks ``os.path.isfile`` first).
+    """
+    return _connect_read_only(WHATSMEOW_DB_PATH)
 
 
 # --- Full-text search -------------------------------------------------------
@@ -3266,6 +3330,8 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 seen_jids.add(jid)
                 # No push name on a chats-table row; the phone book below has it.
                 found.append((jid, name, None, [("name", name)]))
+    except MessagesDbNotFoundError:
+        raise  # a wrong path is the caller's answer, not an empty contact list
     except sqlite3.Error as e:
         logger.error("Database error (messages.db): %s", e)
     finally:
@@ -4622,7 +4688,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     transcribed_expr = error_expr = unavailable_expr = "0"
     notes_path = media_notes.notes_db_path()
     if os.path.exists(notes_path):
-        cur.execute("ATTACH DATABASE ? AS notesdb", (notes_path,))
+        attach_notes_read_only(cur.connection, notes_path)
         if cur.execute("SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'").fetchone():
             note_exists = (
                 "EXISTS (SELECT 1 FROM notesdb.media_notes n "
