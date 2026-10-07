@@ -1674,7 +1674,8 @@ Returns `dry_run`, `message`, `matched`, `purged_files`, `purged_bytes`,
 `truncated`, `remaining`, `scan_truncated`, `unreachable` and `items`
 (`purged`, `bytes`, `file`, `reason` such as `not cached`,
 `not a media message`, `message not found`, denied chat); `items` is absent
-with `summary_only`. `matched` is the number of files the call selected.
+with `summary_only`. `matched` is the number of cached files the criteria form
+selected; on the `items` form it is the number of named rows that exist.
 Every deleted path is built by the bridge from a message row (`chat_jid`,
 `media_type`, `timestamp`, `id`), never from a client-supplied path, and is
 confined to the store directory. `WHATSAPP_ALLOWED_CHATS` applies (the MCP
@@ -1702,7 +1703,15 @@ repeat the same walk, so narrow the criteria (`media_type`, `min_bytes`,
 `older_than_days`) instead. `unreachable` counts matching rows whose cached path
 the store root refuses (a symlink out of the store, a chat directory moved to
 another disk); the first 50 are listed in `items` with their reason, none of
-them uses a slot. `remaining`, `scan_truncated` and `unreachable` belong to the
+them uses a slot. `failed` counts selected files that could not be removed (a read-only
+directory, an immutable file); when a real call removes nothing and `failed`,
+`truncated` is `false` and the message says so, because repeating cannot help.
+Denied chats are skipped before they are probed and do not use the 100000-row
+ceiling. A criteria call keeps counting `remaining` after it has its 500 files,
+so it stats the rest of the matching rows too; it stops if the client
+disconnects. `unreachable` is also what a row with a corrupted chat path
+reports. Drop `summary_only` to see which rows and why. `remaining`,
+`scan_truncated`, `unreachable` and `failed` belong to the
 criteria form; the `items` form still takes the first 500 entries you name and
 reports `truncated` if you named more.
 

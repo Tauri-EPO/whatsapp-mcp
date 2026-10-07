@@ -107,16 +107,17 @@ def test_bridge_errors_are_surfaced(monkeypatch):
 
 
 def test_criteria_totals_carry_the_paging_fields(monkeypatch):
-    payload = {**BRIDGE_OK, "truncated": True, "remaining": 700, "scan_truncated": False, "unreachable": 2}
+    payload = {**BRIDGE_OK, "truncated": True, "remaining": 700, "scan_truncated": False, "unreachable": 2, "failed": 1}
     _bridge(monkeypatch, payload)
     out = main.purge_media(chat_jid=CHAT, dry_run=False)
     assert out["truncated"] is True and out["remaining"] == 700
-    assert out["scan_truncated"] is False and out["unreachable"] == 2
+    assert out["scan_truncated"] is False and out["unreachable"] == 2 and out["failed"] == 1
 
     # A bridge from before the fields answers without them.
     _bridge(monkeypatch, BRIDGE_OK)
     out = main.purge_media(chat_jid=CHAT)
     assert out["remaining"] == 0 and out["scan_truncated"] is False and out["unreachable"] == 0
+    assert out["failed"] == 0
 
 
 def test_summary_only_drops_the_item_list_and_keeps_the_totals(monkeypatch):

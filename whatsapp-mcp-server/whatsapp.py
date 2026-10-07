@@ -4160,6 +4160,7 @@ def purge_media(
         "remaining": int(payload.get("remaining") or 0),
         "scan_truncated": bool(payload.get("scan_truncated", False)),
         "unreachable": int(payload.get("unreachable") or 0),
+        "failed": int(payload.get("failed") or 0),
     }
     if not summary_only:
         result["items"] = payload.get("items") or []

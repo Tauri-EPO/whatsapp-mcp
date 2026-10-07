@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -454,5 +455,57 @@ func TestMediaPurge_CriteriaRespectsAllowListInRemaining(t *testing.T) {
 	}
 	if code, _ := purgeCall(t, b, `{"chat_jid": "`+purgeGroup+`", "dry_run": false}`); code != http.StatusForbidden {
 		t.Errorf("denied chat_jid = %d, want 403", code)
+	}
+}
+
+// A selected file the real call cannot remove stays cached and would head the
+// next call again; that must not read as "repeat while truncated".
+func TestMediaPurge_CriteriaFailedRemovalIsNotAnEndlessLoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block deletes on Windows")
+	}
+	b := criteriaFixture(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeChat, "RO", 3, base, true)
+	dir := chatMediaDir(purgeChat)
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // a directory needs the x bit; read-only is what makes the removal fail
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // restore the directory so t.TempDir can delete it
+	// Running as root, permissions do not apply and the removal would succeed.
+	if f, err := os.CreateTemp(dir, "probe"); err == nil {
+		_ = f.Close()
+		t.Skip("directory permissions are not enforced for this user")
+	}
+
+	_, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if resp.PurgedFiles != 0 || resp.Failed != 3 || resp.Truncated || !strings.Contains(resp.Message, "could not be removed") {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
+// Rows of a denied chat are not probed, so they do not use the scan ceiling.
+func TestMediaPurge_CriteriaDeniedRowsDoNotUseTheScanBudget(t *testing.T) {
+	b := criteriaFixture(t)
+	b.PurgeScanLimit = 50
+	b.Policy = parseChatPolicy(purgeChat)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeGroup, "NO", 200, base, true)
+	seedPurgeRows(t, b, purgeChat, "OK", 5, base.Add(time.Hour), true)
+
+	_, resp := purgeCall(t, b, `{"media_type": "image", "dry_run": false}`)
+	if resp.PurgedFiles != 5 || resp.ScanTruncated || resp.Truncated {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
+// Without a store directory every probe would fail the same way; say so once.
+func TestMediaPurge_CriteriaWithoutStoreRootFailsFast(t *testing.T) {
+	b := criteriaFixture(t)
+	seedPurgeRows(t, b, purgeChat, "ROW", 3, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), true)
+	b.StoreRoot = nil
+	code, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if code != http.StatusInternalServerError || resp.Success || !strings.Contains(resp.Message, "Store directory unavailable") {
+		t.Fatalf("%d %+v", code, resp)
 	}
 }

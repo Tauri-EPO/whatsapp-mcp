@@ -2219,6 +2219,7 @@ def purge_media(
     while `truncated` is true** — `remaining` says how many matching cached
     files are left. If `scan_truncated` is true and `purged_files` is 0, the
     bridge stopped looking before it reached a cached file: narrow the criteria.
+    `truncated` is false when a call removed nothing because removals failed.
 
     Args:
         items: Explicit list of {"message_id", "chat_jid"} (from list_media)
@@ -2232,12 +2233,14 @@ def purge_media(
 
     Returns:
         {"dry_run", "message", "matched", "purged_files", "purged_bytes", "truncated",
-         "remaining", "scan_truncated", "unreachable",
+         "remaining", "scan_truncated", "unreachable", "failed",
          "items": [{message_id, chat_jid, purged, bytes, file, reason}]} where reason explains
         skipped entries (not cached, not a media message, message not found, denied chat);
         `items` is absent with summary_only. `matched` is the number of files this call
-        selected; on the criteria form `remaining` counts the matching cached files it
-        left for the next call and `unreachable` the rows whose path the purge cannot touch
+        selected (criteria form: cached files; items form: named rows that exist); on the
+        criteria form `remaining` counts the matching cached files it left for the next
+        call, `unreachable` the rows whose path the purge cannot touch (drop summary_only
+        to see which) and `failed` the selected files it could not remove
     """
     return whatsapp_purge_media(
         items=items,
