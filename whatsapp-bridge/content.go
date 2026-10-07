@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,20 @@ func extractTextContent(msg *waE2E.Message) string {
 			if len(names) > 0 {
 				return fmt.Sprintf("📇 %d contacts shared: %s", len(names), strings.Join(names, "; "))
 			}
+		}
+	}
+
+	// Shared locations carry only coordinates, a label and a JPEG thumbnail
+	// (no CDN payload), so like contact cards they were dropped at the "no
+	// content and no media" gate. Text only: the thumbnail is not stored.
+	if loc := msg.GetLocationMessage(); loc != nil {
+		if body := formatLocationContent(loc); body != "" {
+			return body
+		}
+	}
+	if live := msg.GetLiveLocationMessage(); live != nil {
+		if body := formatLiveLocationContent(live); body != "" {
+			return body
 		}
 	}
 
@@ -120,6 +135,74 @@ func formatContactContent(displayName, vcard string) string {
 		return fmt.Sprintf("%s (%s)", displayName, strings.Join(phones, ", "))
 	}
 	return displayName
+}
+
+// formatCoordinates renders a latitude/longitude pair as "(-23.550520,
+// -46.633308)": strconv with a fixed six decimals (~0.1 m), so the text does
+// not depend on the machine's locale and the same point always reads the same.
+// Returns "" when the message carried neither coordinate.
+func formatCoordinates(lat, lng *float64) string {
+	if lat == nil && lng == nil {
+		return ""
+	}
+	var la, lo float64
+	if lat != nil {
+		la = *lat
+	}
+	if lng != nil {
+		lo = *lng
+	}
+	return fmt.Sprintf("(%s, %s)",
+		strconv.FormatFloat(la, 'f', 6, 64), strconv.FormatFloat(lo, 'f', 6, 64))
+}
+
+// formatLocationContent renders a shared location as searchable text:
+// "📍 <name> — <address> (<lat>, <lng>)", then the place URL and the comment
+// when present, all joined with " — ". With neither name nor address the
+// coordinates stand alone. Returns "" when the message carries nothing at all.
+func formatLocationContent(loc *waE2E.LocationMessage) string {
+	var parts []string
+	var label []string
+	for _, s := range []string{loc.GetName(), loc.GetAddress()} {
+		if s = strings.TrimSpace(s); s != "" {
+			label = append(label, s)
+		}
+	}
+	head := strings.Join(label, " — ")
+	if coords := formatCoordinates(loc.DegreesLatitude, loc.DegreesLongitude); coords != "" {
+		head = strings.TrimSpace(head + " " + coords)
+	}
+	if head != "" {
+		parts = append(parts, head)
+	}
+	for _, s := range []string{loc.GetURL(), loc.GetComment()} {
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "📍 " + strings.Join(parts, " — ")
+}
+
+// formatLiveLocationContent renders the first position of a live share:
+// "📍 Live location (<lat>, <lng>)" plus the caption. Later position updates
+// are not tracked, so the row records where the share started.
+func formatLiveLocationContent(live *waE2E.LiveLocationMessage) string {
+	coords := formatCoordinates(live.DegreesLatitude, live.DegreesLongitude)
+	caption := strings.TrimSpace(live.GetCaption())
+	if coords == "" && caption == "" {
+		return ""
+	}
+	out := "📍 Live location"
+	if coords != "" {
+		out += " " + coords
+	}
+	if caption != "" {
+		out += " — " + caption
+	}
+	return out
 }
 
 // extractVCardPhones returns the values of all TEL lines in a vCard blob,
