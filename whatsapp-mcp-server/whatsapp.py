@@ -3193,6 +3193,22 @@ def _like_any(column: str, patterns: list[str]) -> str:
     return "(" + " OR ".join(f"{column} LIKE ?" for _ in patterns) + ")"
 
 
+def _phone_spellings(value: str) -> tuple[str | None, str | None]:
+    """What a phone-number input also stands for (issue #444, `phone.py`).
+
+    Its digits, and the phone JID of the other spelling when it is a Brazilian
+    mobile; each is None when there is none. The input is the number however
+    it was typed, or its phone JID. A LID is not a phone number, so an input
+    naming one has neither.
+    """
+    user, _, server = (value or "").strip().partition("@")
+    if server not in ("", DEFAULT_USER_SERVER):
+        return None, None
+    digits = phone_digits(user)
+    alternate = br_mobile_alternate(digits) if digits else None
+    return digits, f"{alternate}@{DEFAULT_USER_SERVER}" if alternate else None
+
+
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
@@ -3219,14 +3235,14 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     jid_patterns = ["%" + query + "%"]
     # A query that is a phone number also matches with its separators dropped,
     # and a Brazilian mobile under its other spelling (issue #444): that one as
-    # the whole number, never as a substring of somebody else's.
-    digits = phone_digits(query)
-    alternate = br_mobile_alternate(digits) if digits else None
-    if digits and digits != query:
-        jid_patterns.append("%" + digits + "%")
+    # the whole phone JID, never as a substring of somebody else's.
+    digits, alternate = _phone_spellings(query)
+    typed_digits = digits if digits and digits != query and "@" not in query else None
+    other_spellings = [spelling for spelling in (typed_digits, alternate) if spelling]
+    if typed_digits:
+        jid_patterns.append("%" + typed_digits + "%")
     if alternate:
-        jid_patterns.append(f"{alternate}@{DEFAULT_USER_SERVER}")
-    other_spellings = [pattern.strip("%") for pattern in jid_patterns[1:]]
+        jid_patterns.append(alternate)
 
     # 1) Search messages.db chats table (existing behavior)
     try:
@@ -3670,20 +3686,6 @@ def _direct_chat_candidates(value: str) -> tuple[str, str, str]:
     return raw, f"{bare}@s.whatsapp.net", f"{bare}@lid"
 
 
-def _direct_chat_alternate(value: str) -> str | None:
-    """The phone JID of a Brazilian mobile's other spelling, or None (issue #444).
-
-    WhatsApp registered the account with or without the ninth digit, and the
-    chat is stored under that spelling alone. A LID is not a phone number, so
-    an input that names one has no alternate.
-    """
-    user, _, server = (value or "").strip().partition("@")
-    if server not in ("", DEFAULT_USER_SERVER):
-        return None
-    alternate = br_mobile_alternate(phone_digits(user) or "")
-    return f"{alternate}@{DEFAULT_USER_SERVER}" if alternate else None
-
-
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number (exact match on the number's JID forms).
 
@@ -3691,15 +3693,17 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     candidate spelling is mapped to the row that lists for it, so the answer is
     the row carrying the conversation whichever of the two holds it.
 
-    A Brazilian mobile is also looked up under its other spelling (issue #444).
-    The number as given wins when both spellings have a chat.
+    A Brazilian mobile is also looked up under its other spelling (issue #444):
+    WhatsApp registered the account with or without the ninth digit and the
+    chat is stored under that one. The number as given wins when both spellings
+    have a chat the allow-list admits.
     """
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
         spellings = _direct_chat_candidates(sender_phone_number)
-        alternate = _direct_chat_alternate(sender_phone_number)
+        _, alternate = _phone_spellings(sender_phone_number)
         lookups = [*spellings, alternate] if alternate else list(spellings)
         twins = _chat_twins(cursor, only=lookups)
         candidates = [twins.listing_jid(jid) for jid in lookups]
@@ -3733,7 +3737,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         chat_data = cursor.fetchone()
 
         if not chat_data:
-            for candidate in _direct_chat_candidates(sender_phone_number):
+            for candidate in spellings:
                 _require_allowed(candidate)
             return None
 

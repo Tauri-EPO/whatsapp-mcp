@@ -42,13 +42,30 @@ class TestSpellings:
             "55 88 9 7777 6666",
             "55.88.97777.6666",
             " 55\u00a088 97777-6666 ",
+            # As copied out of WhatsApp: directional marks and a non-breaking hyphen.
+            "\u202a+55 88 97777\u20116666\u202c",
+            "55 88 97777\u20136666",
         ],
     )
     def test_separators_are_dropped(self, typed):
         assert phone.phone_digits(typed) == LONG
 
     @pytest.mark.parametrize(
-        "typed", ["", "  ", "+", "bob", "bob 55", "5588977776666@s.whatsapp.net", "55%", "55_8", "٥٥٨٨"]
+        "typed",
+        [
+            "",
+            "  ",
+            "+",
+            "1.5",
+            "(11)",
+            "555-12",
+            "bob",
+            "bob 55",
+            "5588977776666@s.whatsapp.net",
+            "55%",
+            "55_8",
+            "٥٥٨٨",
+        ],
     )
     def test_anything_else_is_not_a_number(self, typed):
         assert phone.phone_digits(typed) is None
@@ -106,6 +123,22 @@ class TestSearchContacts:
     def test_a_typed_number_matches_as_its_digits(self, paired_dbs):
         (hit,) = whatsapp.search_contacts("+55 11 88888-8888")
         assert (hit["name"], hit["matched"]) == ("Bob", "jid")
+        (partial,) = whatsapp.search_contacts("8888-8888")
+        assert partial["name"] == "Bob"
+
+    def test_the_phone_jid_is_a_number_too(self, paired_dbs):
+        _add_chat(paired_dbs, SHORT_JID)
+        (hit,) = whatsapp.search_contacts(LONG_JID)
+        assert (hit["jid"], hit["matched"]) == (SHORT_JID, "jid")
+        # The other spelling is still a whole number, and a LID has none.
+        _add_chat(paired_dbs, f"1{SHORT}@s.whatsapp.net", "Longer number")
+        assert _jids(whatsapp.search_contacts(LONG_JID)) == [SHORT_JID]
+        assert whatsapp.search_contacts(f"{LONG}@lid") == []
+
+    @pytest.mark.parametrize("query", ["1.5", "(11)", "55-11", "99 99"])
+    def test_a_short_numeric_query_is_not_a_phone_number(self, paired_dbs, query):
+        # Every JID in the store contains these digits; none contains the query as typed.
+        assert whatsapp.search_contacts(query) == []
 
     def test_the_other_spelling_is_a_whole_number_not_a_fragment(self, paired_dbs):
         _add_chat(paired_dbs, f"1{SHORT}@s.whatsapp.net", "Longer number")
@@ -167,6 +200,12 @@ class TestDirectChat:
     def test_still_a_whole_number(self, paired_dbs):
         _add_chat(paired_dbs, f"1{SHORT}@s.whatsapp.net")
         assert whatsapp.get_direct_chat_by_contact(LONG) is None
+
+    def test_under_an_allow_list_the_admitted_spelling_answers(self, paired_dbs, monkeypatch):
+        _add_chat(paired_dbs, SHORT_JID)
+        _add_chat(paired_dbs, LONG_JID)
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([SHORT_JID]))
+        assert whatsapp.get_direct_chat_by_contact(LONG)["jid"] == SHORT_JID
 
     def test_the_allow_list_decides_on_the_stored_spelling(self, paired_dbs, monkeypatch):
         _add_chat(paired_dbs, SHORT_JID)
