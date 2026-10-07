@@ -583,7 +583,11 @@ def _extracted_blocks(path: str, mime: str, max_pages: int) -> tuple[list[Conten
         # untrusted envelope, and an empty answer never reads like an empty
         # document.
         blocks.append(TextContent(type="text", text=result.note))
-    return blocks, {"pages_total": result.units_total, "truncated": result.truncated}
+    extra: dict[str, Any] = {"pages_total": result.units_total, "truncated": result.truncated}
+    if result.unreadable:
+        # Only when something failed, so a healthy document's metadata is unchanged.
+        extra["unreadable_pages"] = result.unreadable
+    return blocks, extra
 
 
 class ResolvedMedia(NamedTuple):

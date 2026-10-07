@@ -77,6 +77,9 @@ class Extracted:
     units_total: int = 0
     truncated: bool = False
     note: str | None = None
+    # PDF pages whose text could not be extracted: {"page": 2, "error": "LimitReachedError"}.
+    # The error class only, never the message: a parser message can quote the file.
+    unreadable: list[dict[str, object]] = field(default_factory=list)
 
 
 def page_limit(max_pages: int | None) -> int:
@@ -157,22 +160,52 @@ def _pdf(path: str, wanted: int) -> Extracted:
         reader = PdfReader(path)
         pages = reader.pages
         total = len(pages)
-        texts = [(index, (pages[index].extract_text() or "").strip()) for index in range(min(total, wanted))]
     except Exception as exc:  # noqa: BLE001 - a malformed file is bad input, not a server fault
         # pypdf raises PyPdfError subclasses for a broken file, but also
         # KeyError/ValueError from deep inside the parser on a truncated one.
         raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}: {exc}") from exc
+    # Page by page: one page pypdf refuses (a font with an oversized /Widths, a
+    # stream that trips its recovery limit) must not cost the pages around it.
+    texts: list[tuple[int, str]] = []
+    unreadable: list[dict[str, object]] = []
+    for index in range(min(total, wanted)):
+        try:
+            texts.append((index, (pages[index].extract_text() or "").strip()))
+        except Exception as exc:  # noqa: BLE001 - same as above, per page
+            unreadable.append({"page": index + 1, "error": type(exc).__name__})
+    if unreadable and not texts:
+        raise ToolError(
+            "invalid_argument",
+            f"this PDF could not be read as text: {_unreadable_sentence(unreadable)}",
+        )
     out = _collect((f"--- page {index + 1} of {total} ---\n{text}\n" for index, text in texts if text), total, wanted)
+    out.unreadable = unreadable
+    notes = []
     if not out.sections:
         # Empty because there is nothing to read, or empty because the pages we
         # were allowed to read happen to be the image-only ones: telling a
         # 300-page report to go and ask the sender for the original would be wrong.
-        out.note = (
-            NO_TEXT_LAYER
-            if total <= wanted
-            else f"no text in the first {wanted} of {total} pages; raise max_pages to look further"
-        )
+        if unreadable:
+            notes.append(f"the {len(texts)} page(s) that could be read hold no text.")
+        else:
+            notes.append(
+                NO_TEXT_LAYER
+                if total <= wanted
+                else f"no text in the first {wanted} of {total} pages; raise max_pages to look further"
+            )
+    if unreadable:
+        notes.append(_unreadable_sentence(unreadable))
+    out.note = " ".join(notes) or None
     return out
+
+
+def _unreadable_sentence(unreadable: list[dict[str, object]]) -> str:
+    """Which pages failed, and the way to read them anyway (written here, not by the sender)."""
+    detail = ", ".join(f"{item['page']} ({item['error']})" for item in unreadable)
+    return (
+        f"page(s) {detail} could not be extracted as text; "
+        "read them with read_media(as_images=true) (first_page selects where to start)"
+    )
 
 
 def _docx(path: str, wanted: int) -> Extracted:
