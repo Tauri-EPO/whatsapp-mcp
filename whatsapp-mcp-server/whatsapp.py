@@ -3351,9 +3351,30 @@ def phone_book_spelling(jid: str) -> str:
         return jid
     if not CHAT_POLICY.allows(jid):
         return other
-    if get_sender_name(jid) == jid and get_sender_name(other) != other:
+
+    def name(spelling: str) -> str:
+        listed = allow_listed_contact_name(spelling)
+        return listed if listed is not None else get_sender_name(spelling)
+
+    if name(jid) == jid and name(other) != other:
         return other
     return jid
+
+
+def allow_listed_contact_name(jid: str) -> str | None:
+    """Under an allow-list, the name get_contact falls back to (or the JID back); None without one.
+
+    `get_sender_name` also reads `chats.name` under the same digits on the
+    other server, with no allow-list clause. That is right for naming who sent
+    a message in an allowed chat, and wrong for a caller that asks about a JID:
+    it could be told the name of a chat the list does not name. So under an
+    allow-list the fallback is the phone book alone, which the list does not
+    filter (`search_contacts`); the chat row was already asked, by get_chat.
+    Without one the caller keeps using `get_sender_name`.
+    """
+    if not CHAT_POLICY.restricted:
+        return None
+    return _contact_names([jid]).get(jid) or jid
 
 
 def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
@@ -3962,8 +3983,18 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         chat_data = cursor.fetchone()
 
         if not chat_data:
-            for candidate in spellings:
-                _require_allowed(candidate)
+            # "No chat" is an answer only about a number the list names. The
+            # input can mean more than one JID (a bare number is tried as a
+            # phone and as a LID), and it is refused only when the list names
+            # none of them (issue #466): it used to be refused unless it named
+            # them all, so an allow-listed number without a chat was "denied".
+            # A number outside the list gets this same refusal whether or not
+            # a chat exists for it: the query above never saw its row.
+            typed, phone_jid, lid_jid = spellings
+            server = typed.rpartition("@")[2].lower() if "@" in typed else ""
+            meant = [jid for jid in (phone_jid, lid_jid) if not server or jid.endswith(f"@{server}")] or [typed]
+            if not any(_readable(jid) for jid in meant):
+                raise ToolError("denied", CHAT_POLICY.denial_message(typed))
             return None
 
         chat = Chat(
@@ -4068,11 +4099,16 @@ def _require_readable(jid: str | None) -> None:
     JIDs the list admits, by the SQL policy clause of each query. Writes keep
     `_require_allowed`: the bridge decides which number a send reaches.
     """
-    if CHAT_POLICY.allows(jid):
-        return
-    alternate = other_phone_spelling(jid or "")
-    if alternate is None or not CHAT_POLICY.allows(alternate):
+    if not _readable(jid):
         raise ToolError("denied", CHAT_POLICY.denial_message(jid))
+
+
+def _readable(jid: str | None) -> bool:
+    """Does the allow-list name this chat, in either spelling of a Brazilian mobile?"""
+    if CHAT_POLICY.allows(jid):
+        return True
+    alternate = other_phone_spelling(jid or "")
+    return alternate is not None and CHAT_POLICY.allows(alternate)
 
 
 DRY_RUN_MESSAGE = "Dry run: nothing was sent. Show this to the user and call again with dry_run=false to send."

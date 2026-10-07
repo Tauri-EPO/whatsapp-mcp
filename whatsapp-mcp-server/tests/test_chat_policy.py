@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+import main
 import whatsapp
 from chat_policy import ChatPolicy, load_chat_policy, normalize_chat_entry
 from errors import ToolError
@@ -177,3 +178,126 @@ class TestWritesAreRefused:
         with pytest.raises(ToolError) as exc:
             whatsapp.download_media("m1", DM_B)
         assert exc.value.code == "denied"
+
+
+# One Brazilian mobile, both spellings (fake), and a number nobody has a chat with.
+SHORT, LONG = "558877776666", "5588977776666"
+SHORT_JID, LONG_JID = f"{SHORT}@s.whatsapp.net", f"{LONG}@s.whatsapp.net"
+NO_CHAT = "5511777777777"
+NO_CHAT_LID = "290000000000001"
+
+
+def _allow(monkeypatch, *entries):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(list(entries)))
+
+
+def _denial(call):
+    with pytest.raises(ToolError) as exc:
+        call()
+    assert exc.value.code == "denied"
+    return exc.value.message
+
+
+class TestNoChatIsNotDenied:
+    """ "Not allowed" and "allowed, no chat stored" are different answers (issue #466).
+
+    get_direct_chat_by_contact tries a bare number as a phone and as a LID. It
+    used to refuse unless the list named every one of those, so a number on
+    the list answered `denied` until it had a chat.
+    """
+
+    @pytest.mark.parametrize("asked", [NO_CHAT, f"{NO_CHAT}@s.whatsapp.net", f"+{NO_CHAT}"])
+    def test_an_allowed_number_without_a_chat_is_not_found(self, restricted_db, monkeypatch, asked):
+        _allow(monkeypatch, NO_CHAT)
+        assert whatsapp.get_direct_chat_by_contact(asked) is None
+        assert main.get_direct_chat_by_contact(asked)["error"]["code"] == "not_found"
+
+    @pytest.mark.parametrize("asked", [f"{NO_CHAT_LID}@lid", NO_CHAT_LID])
+    def test_an_allowed_lid_without_a_chat_is_not_found(self, restricted_db, monkeypatch, asked):
+        _allow(monkeypatch, f"{NO_CHAT_LID}@lid")
+        assert whatsapp.get_direct_chat_by_contact(asked) is None
+
+    @pytest.mark.parametrize("asked", [SHORT, LONG, SHORT_JID, LONG_JID])
+    @pytest.mark.parametrize("listed", [SHORT, LONG])
+    def test_either_spelling_of_an_allowed_mobile_is_not_found(self, restricted_db, monkeypatch, asked, listed):
+        _allow(monkeypatch, listed)
+        assert whatsapp.get_direct_chat_by_contact(asked) is None
+
+    @pytest.mark.parametrize("asked", [SHORT, LONG, SHORT_JID, LONG_JID])
+    def test_a_blocked_number_is_denied_with_or_without_a_chat(self, restricted_db, monkeypatch, asked):
+        _allow(monkeypatch, DM_A)
+        without_chat = _denial(lambda: whatsapp.get_direct_chat_by_contact(asked))
+        with sqlite3.connect(restricted_db) as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Hidden')", (SHORT_JID,))
+        with_chat = _denial(lambda: whatsapp.get_direct_chat_by_contact(asked))
+        # The refusal says nothing about whether the number has a chat.
+        assert with_chat == without_chat
+        assert "Hidden" not in with_chat and asked in with_chat
+
+    def test_the_rows_from_before_are_still_denied(self, restricted_db):
+        _denial(lambda: whatsapp.get_direct_chat_by_contact("5511888888888"))  # blocked, has a chat
+        _denial(lambda: whatsapp.get_direct_chat_by_contact("5511666666666"))  # blocked, no chat
+
+    @pytest.mark.parametrize("asked", [SHORT, LONG, NO_CHAT])
+    def test_a_wildcard_for_groups_still_denies_a_direct_chat(self, restricted_db, monkeypatch, asked):
+        _allow(monkeypatch, "*@g.us")
+        _denial(lambda: whatsapp.get_direct_chat_by_contact(asked))
+
+    def test_a_jid_is_checked_in_the_namespace_it_names(self, restricted_db, monkeypatch):
+        # The list names the phone number; the same digits as a LID are somebody else.
+        _allow(monkeypatch, NO_CHAT)
+        _denial(lambda: whatsapp.get_direct_chat_by_contact(f"{NO_CHAT}@lid"))
+        _allow(monkeypatch, f"{NO_CHAT_LID}@lid")
+        _denial(lambda: whatsapp.get_direct_chat_by_contact(f"{NO_CHAT_LID}@s.whatsapp.net"))
+
+    def test_a_chat_the_list_does_not_name_stays_hidden_behind_not_found(self, restricted_db, monkeypatch):
+        # The number is allowed as a phone; its only row is under a LID the list does not name.
+        with sqlite3.connect(restricted_db) as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Hidden')", (f"{NO_CHAT}@lid",))
+        _allow(monkeypatch, NO_CHAT)
+        assert whatsapp.get_direct_chat_by_contact(NO_CHAT) is None
+
+
+class TestGetContactWithoutAChat:
+    """get_contact tries a bare number under two spellings as well (issue #466)."""
+
+    def test_an_allowed_number_without_a_chat_is_answered(self, restricted_db, monkeypatch):
+        _allow(monkeypatch, NO_CHAT)
+        contact = main.get_contact(NO_CHAT)
+        assert "error" not in contact
+        assert (contact["jid"], contact["resolved"]) == (f"{NO_CHAT}@s.whatsapp.net", False)
+
+    @pytest.mark.parametrize("asked", ["5511888888888", "5511666666666", SHORT, LONG])
+    def test_a_blocked_number_is_denied(self, restricted_db, asked):
+        assert main.get_contact(asked)["error"]["code"] == "denied"
+
+    def test_an_allowed_lid_is_answered_as_a_lid(self, restricted_db, monkeypatch):
+        _allow(monkeypatch, f"{NO_CHAT_LID}@lid")
+        contact = main.get_contact(NO_CHAT_LID)
+        assert "error" not in contact
+        assert contact["jid"] == f"{NO_CHAT_LID}@lid"
+
+    def test_the_lid_guess_is_not_taken_when_the_list_does_not_name_it(self, restricted_db, monkeypatch):
+        # Fourteen digits nobody has seen read as a LID (#375), but the list
+        # names them as a phone number: the answer stays about that spelling.
+        digits = "12345678901234"
+        _allow(monkeypatch, digits)
+        contact = main.get_contact(digits)
+        assert "error" not in contact
+        assert contact["jid"] == f"{digits}@s.whatsapp.net"
+
+    @pytest.mark.parametrize("asked", [NO_CHAT, f"{NO_CHAT}@s.whatsapp.net"])
+    def test_the_name_of_an_unlisted_row_does_not_come_back(self, restricted_db, monkeypatch, asked):
+        # The same digits under the other server: a row the list does not name.
+        with sqlite3.connect(restricted_db) as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Hidden row')", (f"{NO_CHAT}@lid",))
+        _allow(monkeypatch, NO_CHAT)
+        contact = main.get_contact(asked)
+        assert "Hidden row" not in str(contact)
+        assert (contact["jid"], contact["resolved"]) == (f"{NO_CHAT}@s.whatsapp.net", False)
+
+    def test_without_an_allow_list_the_name_lookup_is_what_it_was(self, restricted_db, monkeypatch):
+        with sqlite3.connect(restricted_db) as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Same digits')", (f"{NO_CHAT}@lid",))
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.unrestricted())
+        assert main.get_contact(f"{NO_CHAT}@s.whatsapp.net")["name"] == "Same digits"

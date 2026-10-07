@@ -2213,6 +2213,12 @@ well, through the LID map; the returned `jid` is then the `…@lid` one. Under
 `WHATSAPP_ALLOWED_CHATS` that LID JID has to be on the list itself: the list
 does not expand a phone number to its LID.
 
+Errors: `not_found` when the number is one the allow-list names (in either
+spelling of a Brazilian mobile, or as the LID you passed) and no chat with it
+is stored; `denied` when the list does not name it. A number outside the list
+gets the same `denied` whether or not a chat exists for it. `get_contact`
+follows the same rule for an identifier that has no chat.
+
 ### `get_contact_chats`
 
 Every chat a contact is attached to — the ones they talk in *and* the groups
