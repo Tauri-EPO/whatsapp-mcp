@@ -161,7 +161,7 @@ def render_pages(path: str, first: int, wanted: int, max_edge: int, quality: int
         except pypdfium2.PdfiumError as exc:
             raise ToolError("invalid_argument", f"this PDF could not be opened: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - a malformed file is bad input, not a server fault
-            raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}: {exc}") from exc
+            raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}") from exc
         try:
             total = len(document)
             if first > total:

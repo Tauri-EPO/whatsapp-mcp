@@ -260,16 +260,27 @@ class TestPdf:
 
     def test_a_failure_to_find_the_page_is_an_unreadable_page_too(self, documents, monkeypatch):
         """The page tree can fail at pages[index], before extract_text is reached."""
-        from pypdf._page import _VirtualList
+        import pypdf
 
-        real = _VirtualList.__getitem__
+        real_reader = pypdf.PdfReader
 
-        def getitem(self, index):
-            if index == 1:
-                raise KeyError("fake-secret-text quoted by the parser")
-            return real(self, index)
+        class Pages:
+            def __init__(self, pages):
+                self._pages = pages
 
-        monkeypatch.setattr(_VirtualList, "__getitem__", getitem)
+            def __len__(self):
+                return len(self._pages)
+
+            def __getitem__(self, index):
+                if index == 1:
+                    raise KeyError("fake-secret-text quoted by the parser")
+                return self._pages[index]
+
+        class Reader:
+            def __init__(self, path):
+                self.pages = Pages(real_reader(path).pages)
+
+        monkeypatch.setattr(pypdf, "PdfReader", Reader)
         blocks = media_read.read_media(ALICE, "PDF1", as_text=True)
         assert _meta(blocks)["pages_failed"] == [2] and len(_texts(blocks)) == 3
         assert "2 (KeyError)" in _texts(blocks)[-1]
@@ -281,6 +292,24 @@ class TestPdf:
         blocks = media_read.read_media(ALICE, "PDF1", as_text=True)
         meta = _meta(blocks)
         assert meta["truncated"] is True and meta["pages_failed"] == [2]
+        # The note is the server's own sentence: the text ceiling does not cut it.
+        assert "2 (LimitReachedError)" in _texts(blocks)[-1] and "as_images=true" in _texts(blocks)[-1]
+
+    @pytest.mark.parametrize("message", ["DOCX", "XLSX"])
+    def test_an_office_file_that_cannot_be_read_never_quotes_the_parser(self, documents, monkeypatch, message):
+        import docx
+        import openpyxl
+
+        def refuse(*args, **kwargs):
+            raise ValueError("fake-secret-text quoted by the parser")
+
+        monkeypatch.setattr(docx, "Document", refuse)
+        monkeypatch.setattr(openpyxl, "load_workbook", refuse)
+        msg_id = "DOC1" if message == "DOCX" else "XLS1"
+        with pytest.raises(ToolError) as exc:
+            media_read.read_media(ALICE, msg_id, as_text=True)
+        assert exc.value.code == "invalid_argument" and "ValueError" in exc.value.message
+        assert "fake-secret-text" not in exc.value.message
 
     def test_a_pdf_that_cannot_be_opened_never_quotes_the_parser(self, documents, monkeypatch):
         import pypdf
