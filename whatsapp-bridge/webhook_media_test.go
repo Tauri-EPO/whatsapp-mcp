@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -278,7 +279,6 @@ func TestHandleMessage_WebhookImageComesFromTheStoreRoot(t *testing.T) {
 
 			rec := installRecordingLogger(t)
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
-			b.MediaAutoDownload = false
 			// The download "succeeds" and names the cached file; what the name
 			// leads to changes right after, as someone with the store would do it.
 			var downloads int
@@ -328,5 +328,35 @@ func TestHandleMessage_WebhookImageComesFromTheStoreRoot(t *testing.T) {
 				t.Errorf("an ordinary image logged a warning:\n%s", rec.String())
 			}
 		})
+	}
+}
+
+// A status image reaches the webhook with its bytes when the operator asked
+// for both: the feed on the webhook and status media cached on arrival.
+func TestHandleMessage_ForwardedStatusImageCarriesItsBytes(t *testing.T) {
+	chat := types.StatusBroadcastJID.String()
+	webhookMediaStore(t, chat)
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+	msg := buildImageMessage(types.StatusBroadcastJID, phonePN, false, "")
+	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
+	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+	msg.Message.ImageMessage.FileSHA256 = sha256Of(webhookTestPNG)
+	msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
+
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.ForwardStatus, b.MediaAutoDownloadStatus = true, true
+	b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
+		return true, "image", webhookTestName, filepath.Join(chatMediaDir(chat), webhookTestName), nil
+	}
+	b.handleMessage(msg)
+
+	select {
+	case payload := <-webhookCh:
+		if payload.ChatJID != chat || payload.MediaBase64 != base64.StdEncoding.EncodeToString(webhookTestPNG) {
+			t.Fatalf("webhook payload = %+v, want the status image with its bytes", payload)
+		}
+	default:
+		t.Fatal("the status image must reach the webhook when both switches are on")
 	}
 }

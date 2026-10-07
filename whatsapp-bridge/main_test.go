@@ -588,6 +588,7 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 		Store:             ms,
 		Log:               logger,
 		ForwardSelf:       switches.ForwardSelf,
+		ForwardStatus:     switches.ForwardStatus,
 		MediaAutoDownload: switches.MediaAutoDownload,
 		MetricsEnabled:    switches.Metrics,
 		Webhook:           newWebhookSender("", switches.WebhookEnabled),
@@ -625,9 +626,9 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	return b
 }
 
-// testSwitches reads the four on/off switches the way main() does, for the
-// tests that steer one with t.Setenv before building a bridge. TestMain clears
-// them, so a test that sets none gets the defaults (all on).
+// testSwitches reads the on/off switches the way main() does, for the tests
+// that steer one with t.Setenv before building a bridge. TestMain clears them,
+// so a test that sets none gets the defaults.
 func testSwitches() bridgeSwitches {
 	switches, err := loadBridgeSwitches()
 	if err != nil {
@@ -1949,7 +1950,7 @@ func TestWebhookStartupMessage(t *testing.T) {
 	}
 
 	t.Setenv("WEBHOOK_ENABLED", "true")
-	if got, want := webhookStartupMessage(testSwitches()), "FORWARD_SELF enabled: forwarding self messages to webhook"; got != want {
+	if got, want := webhookStartupMessage(testSwitches()), "FORWARD_SELF enabled: forwarding self messages to webhook; status updates are not forwarded (WEBHOOK_FORWARD_STATUS)"; got != want {
 		t.Errorf("enabled startup message = %q, want %q", got, want)
 	}
 }

@@ -52,15 +52,19 @@ func resolveStatusAutoDownload(value string) (bool, error) {
 	return parseBoolEnv(mediaAutoDownloadStatusEnv, value, false)
 }
 
+// isStatusChat reports whether chat is the status feed (status@broadcast),
+// where every contact's status posts arrive.
+func isStatusChat(chat types.JID) bool {
+	return chat.User == types.StatusBroadcastJID.User && chat.Server == types.StatusBroadcastJID.Server
+}
+
 // skipsStatusMedia reports whether media arriving in chat is left on the CDN
 // because the chat is the status feed and the operator did not ask for it:
-// status media needs both switches, so WHATSAPP_MEDIA_AUTODOWNLOAD=false also
-// stops the download that feeds the webhook payload. The row keeps its CDN
-// fields, so /api/download still fetches the file on demand.
+// status media needs both switches. The row keeps its CDN fields, so
+// /api/download still fetches the file on demand.
 func (b *Bridge) skipsStatusMedia(chat types.JID) bool {
-	isStatus := chat.User == types.StatusBroadcastJID.User && chat.Server == types.StatusBroadcastJID.Server
 	cachedOnArrival := b.MediaAutoDownload && b.MediaAutoDownloadStatus
-	return isStatus && !cachedOnArrival
+	return isStatusChat(chat) && !cachedOnArrival
 }
 
 // resolveMediaRetention parses WHATSAPP_MEDIA_RETENTION_DAYS. Zero means

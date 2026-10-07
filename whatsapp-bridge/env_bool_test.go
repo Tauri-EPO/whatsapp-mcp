@@ -94,6 +94,28 @@ func TestParseBridgeSwitches(t *testing.T) {
 		}
 	}
 
+	// The fifth switch is off unless asked for, and just as strict. It moves
+	// alone: the four above stay on, and none of them turns it on.
+	for _, on := range boolTrue {
+		sw, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: on}))
+		if err != nil || sw != (bridgeSwitches{ForwardSelf: true, MediaAutoDownload: true, WebhookEnabled: true, Metrics: true, ForwardStatus: true}) {
+			t.Errorf("%s=%s = %+v, %v; want it on and nothing else changed", webhookForwardStatusEnv, on, sw, err)
+		}
+	}
+	for _, off := range boolFalse {
+		if sw, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: off})); err != nil || sw != all {
+			t.Errorf("%s=%s = %+v, %v; want the defaults", webhookForwardStatusEnv, off, sw, err)
+		}
+	}
+	for _, name := range names {
+		if sw, err := parseBridgeSwitches(env(map[string]string{name: "off"})); err != nil || sw.ForwardStatus {
+			t.Errorf("%s=off turned status forwarding on: %+v, %v", name, sw, err)
+		}
+	}
+	if _, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: "treu"})); err == nil || !strings.Contains(err.Error(), webhookForwardStatusEnv+"=") {
+		t.Errorf("%s=treu: error %v, want one naming the variable", webhookForwardStatusEnv, err)
+	}
+
 	// Two typos are reported together.
 	_, err = parseBridgeSwitches(env(map[string]string{forwardSelfEnv: "flase", metricsEnv: "ture"}))
 	if err == nil || !strings.Contains(err.Error(), forwardSelfEnv+"=") || !strings.Contains(err.Error(), metricsEnv+"=") {
@@ -109,6 +131,7 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 		"media auto-download": {MediaAutoDownload: true},
 		"webhook":             {WebhookEnabled: true},
 		"metrics":             {Metrics: true},
+		"forward status":      {ForwardStatus: true},
 		"none":                {},
 	}
 	for name, switches := range cases {
@@ -119,6 +142,7 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 			MediaAutoDownload: b.MediaAutoDownload,
 			WebhookEnabled:    b.Webhook.Enabled(),
 			Metrics:           b.MetricsEnabled,
+			ForwardStatus:     b.ForwardStatus,
 		}
 		if got != switches {
 			t.Errorf("%s: the bridge runs with %+v, want %+v", name, got, switches)

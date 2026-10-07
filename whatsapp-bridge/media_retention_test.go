@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -336,23 +339,36 @@ func TestHandleMessageStatusMediaIsOptIn(t *testing.T) {
 	}
 }
 
-// The synchronous download that feeds the webhook payload is the other door:
-// a status image is forwarded without its bytes unless the flag is on, and an
-// ordinary chat keeps its payload download.
-func TestHandleMessageStatusImageSkipsWebhookDownload(t *testing.T) {
+// What an image does on its way to the webhook, per switch. The status feed
+// is not forwarded at all unless WEBHOOK_FORWARD_STATUS asks (issue #482), and
+// the download that feeds the payload only runs when media is cached on
+// arrival: WHATSAPP_MEDIA_AUTODOWNLOAD for every chat (issue #484), plus
+// WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS for the status feed (issue #447). Without
+// the download the event still goes out, without bytes.
+func TestHandleMessageImageWebhookFollowsTheSwitches(t *testing.T) {
 	cases := []struct {
-		name      string
-		chat      types.JID
-		status    bool
-		noAuto    bool
-		wantCalls int32
+		name          string
+		chat          types.JID
+		noAuto        bool   // WHATSAPP_MEDIA_AUTODOWNLOAD=false
+		statusMedia   bool   // WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true
+		forwardStatus bool   // WEBHOOK_FORWARD_STATUS=true
+		maxBytes      uint64 // WHATSAPP_MEDIA_MAX_BYTES; the image says it is 5 MiB
+		noLength      bool   // ... or says nothing about its length
+		wantWebhook   bool
+		wantDownloads int32
+		wantQueued    int // background caching, when the payload download did not run or failed
 	}{
-		{name: "status, default", chat: types.StatusBroadcastJID, wantCalls: 0},
-		{name: "status, flag on", chat: types.StatusBroadcastJID, status: true, wantCalls: 1},
-		// WHATSAPP_MEDIA_AUTODOWNLOAD=false wins: the flag does not reopen
-		// the webhook door for the status feed.
-		{name: "status, flag on, auto-download off", chat: types.StatusBroadcastJID, status: true, noAuto: true, wantCalls: 0},
-		{name: "ordinary chat, default", chat: phonePN, wantCalls: 1},
+		{name: "ordinary chat, default", chat: phonePN, wantWebhook: true, wantDownloads: 1, wantQueued: 1},
+		{name: "ordinary chat, auto-download off", chat: phonePN, noAuto: true, wantWebhook: true},
+		{name: "ordinary chat, image above the size limit", chat: phonePN, maxBytes: 1024 * 1024, wantWebhook: true},
+		{name: "ordinary chat, image under the size limit", chat: phonePN, maxBytes: 8 * 1024 * 1024, wantWebhook: true, wantDownloads: 1, wantQueued: 1},
+		{name: "ordinary chat, no length to hold against the limit", chat: phonePN, maxBytes: 8 * 1024 * 1024, noLength: true, wantWebhook: true},
+		{name: "ordinary chat, no length and no limit", chat: phonePN, noLength: true, wantWebhook: true, wantDownloads: 1, wantQueued: 1},
+		{name: "status, default: not forwarded, not cached", chat: types.StatusBroadcastJID},
+		{name: "status, media on: cached, still not forwarded", chat: types.StatusBroadcastJID, statusMedia: true, wantQueued: 1},
+		{name: "status forwarded, media off: event without bytes", chat: types.StatusBroadcastJID, forwardStatus: true, wantWebhook: true},
+		{name: "status forwarded, media on", chat: types.StatusBroadcastJID, forwardStatus: true, statusMedia: true, wantWebhook: true, wantDownloads: 1, wantQueued: 1},
+		{name: "status forwarded, media on, auto-download off", chat: types.StatusBroadcastJID, forwardStatus: true, statusMedia: true, noAuto: true, wantWebhook: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -363,32 +379,93 @@ func TestHandleMessageStatusImageSkipsWebhookDownload(t *testing.T) {
 			msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
 			msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
 			msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
+			if !tc.noLength {
+				msg.Message.ImageMessage.FileLength = proto.Uint64(5 * 1024 * 1024)
+			}
 
 			var calls atomic.Int32
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
-			b.MediaAutoDownload, b.MediaAutoDownloadStatus = !tc.noAuto, tc.status
+			b.MediaAutoDownload, b.MediaAutoDownloadStatus, b.ForwardStatus = !tc.noAuto, tc.statusMedia, tc.forwardStatus
+			b.MediaMaxBytes = tc.maxBytes
 			b.autoDownloads = newMediaJobQueue(b.ctx, 0, 4, b.runAutoDownload)
 			b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
 				calls.Add(1)
-				return false, "", "", "", nil
+				return false, "", "", "", nil // fails, so the fallback to the queue shows too
 			}
 
 			b.handleMessage(msg)
-			// The webhook download runs inside handleMessage, and its failure
-			// falls back to the queue: a skipped status image reaches neither.
-			if got := calls.Load(); got != tc.wantCalls {
-				t.Fatalf("synchronous downloads = %d, want %d", got, tc.wantCalls)
+			if got := calls.Load(); got != tc.wantDownloads {
+				t.Errorf("downloads for the payload = %d, want %d", got, tc.wantDownloads)
 			}
-			if got := b.autoDownloads.queued(); got != int(tc.wantCalls) {
-				t.Fatalf("queued downloads = %d, want %d", got, tc.wantCalls)
+			if got := b.autoDownloads.queued(); got != tc.wantQueued {
+				t.Errorf("queued downloads = %d, want %d", got, tc.wantQueued)
 			}
 			select {
 			case payload := <-webhookCh:
-				if payload.MediaType != "image" || payload.MediaBase64 != "" {
-					t.Fatalf("webhook payload = %+v, want the image message without bytes", payload)
+				if !tc.wantWebhook {
+					t.Fatalf("nothing should reach the webhook, got %+v", payload)
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("the message must still reach the webhook")
+				if payload.MediaType != "image" || payload.MediaBase64 != "" || payload.ChatJID != tc.chat.String() {
+					t.Errorf("webhook payload = %+v, want the image message without bytes", payload)
+				}
+			default:
+				// Delivery is synchronous inside handleMessage: nothing in
+				// the channel means nothing was sent.
+				if tc.wantWebhook {
+					t.Fatal("the message must reach the webhook")
+				}
+			}
+			// The row is there either way: on demand is always possible.
+			if msgs, err := b.Store.GetMessages(tc.chat.String(), 10); err != nil || len(msgs) != 1 {
+				t.Errorf("stored messages = %d, err %v", len(msgs), err)
+			}
+		})
+	}
+}
+
+// Text and reactions on the status feed follow the same switch; a conversation
+// is untouched by it.
+func TestStatusFeedReachesTheWebhookOnlyWhenAsked(t *testing.T) {
+	text := func(chat types.JID) *events.Message {
+		return buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "a status caption")
+	}
+	reaction := func(chat types.JID) *events.Message {
+		msg := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "")
+		msg.Info.ID = "REACT1"
+		msg.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+			Key: &waCommon.MessageKey{ID: proto.String("TARGET1")}, Text: proto.String("+1"),
+		}}
+		return msg
+	}
+	cases := []struct {
+		name          string
+		msg           *events.Message
+		forwardStatus bool
+		want          bool
+	}{
+		{name: "status text, default", msg: text(types.StatusBroadcastJID), want: false},
+		{name: "status text, asked for", msg: text(types.StatusBroadcastJID), forwardStatus: true, want: true},
+		{name: "status reaction, default", msg: reaction(types.StatusBroadcastJID), want: false},
+		{name: "status reaction, asked for", msg: reaction(types.StatusBroadcastJID), forwardStatus: true, want: true},
+		{name: "conversation text, default", msg: text(phonePN), want: true},
+		{name: "conversation reaction, default", msg: reaction(phonePN), want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, webhookCh := captureWebhook(t)
+			t.Setenv("WEBHOOK_URL", srv.URL)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+			b.ForwardStatus = tc.forwardStatus
+			b.handleMessage(tc.msg)
+			select {
+			case payload := <-webhookCh:
+				if !tc.want {
+					t.Fatalf("nothing should reach the webhook, got %+v", payload)
+				}
+			default:
+				if tc.want {
+					t.Fatal("the event must reach the webhook")
+				}
 			}
 		})
 	}
