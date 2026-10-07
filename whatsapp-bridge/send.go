@@ -242,6 +242,9 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 	}
 
 	var msg *waE2E.Message
+	// What the upload returned, kept for the stored row: nothing else ever
+	// carries the key of a file this bridge sent (issue #449).
+	var upload whatsmeow.UploadResponse
 
 	// Check if we have media to send
 	if mediaPath != "" {
@@ -254,13 +257,14 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
 
 		// Upload media to WhatsApp servers
-		resp, err := client.Upload(ctx, mediaData, mediaType)
+		upload, err = client.Upload(ctx, mediaData, mediaType)
 		if err != nil {
 			return false, fmt.Sprintf("Error uploading media: %v", err), sentMessage{}
 		}
-		bridgeLog.Debugf("Media uploaded (%d bytes)", resp.FileLength)
+		// The length only: the response carries the media key.
+		bridgeLog.Debugf("Media uploaded (%d bytes)", upload.FileLength)
 
-		msg, err = buildMediaMessage(mediaType, mimeType, mediaPath, mediaData, resp, message)
+		msg, err = buildMediaMessage(mediaType, mimeType, mediaPath, mediaData, upload, message)
 		if err != nil {
 			return false, err.Error(), sentMessage{}
 		}
@@ -315,27 +319,58 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		senderJID := storedSender(client.Store.ID.ToNonAD())
 		timestamp := sent.Timestamp
 
-		var mediaType, filename string
-		if mediaPath != "" {
-			filename = filepath.Base(mediaPath)
-			_, _, mediaType = classifyMediaPath(mediaPath)
-		}
-
 		// Pass empty name so StoreChat preserves any existing resolved
 		// contact/group name; we don't have one available here and
 		// must not clobber names from inbound handling or history sync.
 		if chatErr := messageStore.StoreChat(chatJID, "", timestamp); chatErr != nil {
 			bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
 		}
-		if storeErr := messageStore.StoreMessage(
-			resp.ID, chatJID, senderJID, message, timestamp, true,
-			mediaType, filename, "", nil, nil, nil, 0, quotedMsgID,
-		); storeErr != nil {
+		media := outboundMediaColumns(mediaPath, upload)
+		if storeErr := media.store(messageStore, resp.ID, chatJID, senderJID, message, timestamp, quotedMsgID); storeErr != nil {
 			bridgeLog.Warnf("failed to persist outbound message: %v", storeErr)
 		}
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient), sent
+}
+
+// outboundMedia is the media half of an outbound row: the columns
+// StoreMessage takes for a file this bridge uploaded. The zero value is a
+// text-only send.
+type outboundMedia struct {
+	mediaType, filename, url            string
+	mediaKey, fileSHA256, fileEncSHA256 []byte
+	fileLength                          uint64
+}
+
+// outboundMediaColumns maps an upload to the columns of its row. whatsmeow
+// never echoes our own sends back as events.Message, so what is not stored
+// here is gone, and the file could never be downloaded again (issue #449).
+// Fields are matched by name: StoreMessage takes the plaintext hash before
+// the encrypted one, the waE2E literals in buildMediaMessage set them the
+// other way round.
+func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) outboundMedia {
+	if mediaPath == "" {
+		return outboundMedia{}
+	}
+	_, _, mediaType := classifyMediaPath(mediaPath)
+	return outboundMedia{
+		mediaType:     mediaType,
+		filename:      filepath.Base(mediaPath),
+		url:           upload.URL,
+		mediaKey:      upload.MediaKey,
+		fileSHA256:    upload.FileSHA256,
+		fileEncSHA256: upload.FileEncSHA256,
+		fileLength:    upload.FileLength,
+	}
+}
+
+// store persists the outbound row with these media columns.
+func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
+	return messageStore.StoreMessage(
+		id, chatJID, senderJID, content, timestamp, true,
+		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID,
+	)
 }
 
 // buildMediaMessage wraps an upload result in the waE2E message for its

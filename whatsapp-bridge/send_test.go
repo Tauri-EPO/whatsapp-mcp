@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -194,6 +196,150 @@ func TestBuildMediaMessage(t *testing.T) {
 	mp3, err := buildMediaMessage(whatsmeow.MediaAudio, "audio/mpeg", "/out/n.mp3", []byte("id3"), up, "")
 	if err != nil || mp3.AudioMessage == nil || mp3.AudioMessage.GetSeconds() != 30 || mp3.AudioMessage.GetWaveform() != nil {
 		t.Errorf("non-ogg audio should fall back to 30 s and no waveform: %v %v", err, mp3)
+	}
+}
+
+// outboundUpload is an upload response whose every field has a value of its
+// own, so a column that received a neighbouring field is told apart from the
+// right one (the two hashes are the same type and the same length).
+func outboundUpload() whatsmeow.UploadResponse {
+	return whatsmeow.UploadResponse{
+		URL:           "https://mmg.whatsapp.net/v/t62.7119-24/out_n.enc?ccb=11-4&oh=a&oe=b&mms3=true",
+		DirectPath:    "/v/t62.7119-24/out_n.enc?ccb=11-4&oh=a&oe=b&mms3=true",
+		MediaKey:      bytes.Repeat([]byte{0x11}, 32),
+		FileEncSHA256: bytes.Repeat([]byte{0x22}, 32),
+		FileSHA256:    bytes.Repeat([]byte{0x33}, 32),
+		FileLength:    4321,
+	}
+}
+
+func TestOutboundMediaColumns(t *testing.T) {
+	up := outboundUpload()
+
+	got := outboundMediaColumns("/srv/outbox/Report Q3.pdf", up)
+	if got.mediaType != "document" || got.filename != "Report Q3.pdf" {
+		t.Errorf("type/filename = %q / %q", got.mediaType, got.filename)
+	}
+	if got.url != up.URL {
+		t.Errorf("url = %q, want %q", got.url, up.URL)
+	}
+	if !bytes.Equal(got.mediaKey, up.MediaKey) {
+		t.Errorf("mediaKey = %x, want %x", got.mediaKey, up.MediaKey)
+	}
+	if !bytes.Equal(got.fileSHA256, up.FileSHA256) {
+		t.Errorf("fileSHA256 = %x, want the plaintext hash %x", got.fileSHA256, up.FileSHA256)
+	}
+	if !bytes.Equal(got.fileEncSHA256, up.FileEncSHA256) {
+		t.Errorf("fileEncSHA256 = %x, want the encrypted hash %x", got.fileEncSHA256, up.FileEncSHA256)
+	}
+	if got.fileLength != up.FileLength {
+		t.Errorf("fileLength = %d, want %d", got.fileLength, up.FileLength)
+	}
+
+	for path, want := range map[string]string{"/o/a.png": "image", "/o/n.ogg": "audio", "/o/c.mp4": "video"} {
+		if c := outboundMediaColumns(path, up); c.mediaType != want {
+			t.Errorf("%s: mediaType = %q, want %q", path, c.mediaType, want)
+		}
+	}
+
+	// A text-only send has no upload: the row keeps the empty media columns
+	// it always had, whatever the response variable holds.
+	if text := outboundMediaColumns("", up); !reflect.DeepEqual(text, outboundMedia{}) {
+		t.Errorf("text-only send must store no media columns, got %+v", text)
+	}
+}
+
+// The row of a file the bridge sent holds, column by column, what the upload
+// returned, and that is enough for /api/download to fetch it again (#449).
+func TestOutboundMediaStore_RowCarriesTheUploadFields(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms := newTestMessageStore(t)
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
+	up := outboundUpload()
+	ts := time.Date(2026, 10, 7, 12, 0, 0, 0, time.Local)
+
+	if err := ms.StoreChat(mediaTestChat, "", ts); err != nil {
+		t.Fatal(err)
+	}
+	media := outboundMediaColumns("/srv/outbox/Report Q3.pdf", up)
+	if err := media.store(ms, "OUT1", mediaTestChat, "5511888888888@s.whatsapp.net", "see attached", ts, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	var mediaType, filename, url string
+	var key, sha, enc []byte
+	var length uint64
+	var fromMe bool
+	if err := ms.db.QueryRow(
+		"SELECT media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, is_from_me FROM messages WHERE id = ? AND chat_jid = ?",
+		"OUT1", mediaTestChat,
+	).Scan(&mediaType, &filename, &url, &key, &sha, &enc, &length, &fromMe); err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "document" || filename != "Report Q3.pdf" || !fromMe {
+		t.Errorf("row = type %q, filename %q, from_me %v", mediaType, filename, fromMe)
+	}
+	if url != up.URL {
+		t.Errorf("url column = %q, want %q", url, up.URL)
+	}
+	if !bytes.Equal(key, up.MediaKey) {
+		t.Errorf("media_key column = %x, want %x", key, up.MediaKey)
+	}
+	if !bytes.Equal(sha, up.FileSHA256) {
+		t.Errorf("file_sha256 column = %x, want the plaintext hash %x", sha, up.FileSHA256)
+	}
+	if !bytes.Equal(enc, up.FileEncSHA256) {
+		t.Errorf("file_enc_sha256 column = %x, want the encrypted hash %x", enc, up.FileEncSHA256)
+	}
+	if length != up.FileLength {
+		t.Errorf("file_length column = %d, want %d", length, up.FileLength)
+	}
+
+	// The download path accepts the row (no "incomplete media information")
+	// and hands whatsmeow the same fields the message was sent with.
+	var asked *MediaDownloader
+	b.mediaTransfer = func(_ context.Context, msg whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+		asked, _ = msg.(*MediaDownloader)
+		return writeLikeDownloadToPath(localPath, []byte("pdf bytes"))
+	}
+	ok, gotType, _, _, err := b.downloadMedia(context.Background(), "OUT1", mediaTestChat)
+	if err != nil || !ok || gotType != "document" {
+		t.Fatalf("downloadMedia: ok=%v type=%q err=%v", ok, gotType, err)
+	}
+	if asked == nil {
+		t.Fatal("the transfer was never asked for")
+	}
+	if asked.DirectPath != up.DirectPath || asked.MediaType != whatsmeow.MediaDocument || asked.FileLength != up.FileLength {
+		t.Errorf("downloader = path %q, type %v, length %d", asked.DirectPath, asked.MediaType, asked.FileLength)
+	}
+	if !bytes.Equal(asked.MediaKey, up.MediaKey) || !bytes.Equal(asked.FileSHA256, up.FileSHA256) || !bytes.Equal(asked.FileEncSHA256, up.FileEncSHA256) {
+		t.Errorf("downloader key/hashes differ from the upload: %x %x %x", asked.MediaKey, asked.FileSHA256, asked.FileEncSHA256)
+	}
+}
+
+// A text-only send stores the row it always did: no media columns at all.
+func TestOutboundMediaStore_TextOnlyRowHasNoMediaColumns(t *testing.T) {
+	ms := newTestMessageStore(t)
+	ts := time.Date(2026, 10, 7, 12, 0, 0, 0, time.Local)
+	if err := ms.StoreChat(mediaTestChat, "", ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := outboundMediaColumns("", whatsmeow.UploadResponse{}).store(ms, "TXT1", mediaTestChat, "5511888888888@s.whatsapp.net", "hi", ts, "QUOTED"); err != nil {
+		t.Fatal(err)
+	}
+	mediaType, filename, url, key, sha, enc, length, err := ms.GetMediaInfo("TXT1", mediaTestChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "" || filename != "" || url != "" || len(key) != 0 || len(sha) != 0 || len(enc) != 0 || length != 0 {
+		t.Errorf("text row carries media columns: %q %q %q %x %x %x %d", mediaType, filename, url, key, sha, enc, length)
+	}
+	var content, quoted string
+	if err := ms.db.QueryRow("SELECT content, quoted_message_id FROM messages WHERE id = ? AND chat_jid = ?", "TXT1", mediaTestChat).Scan(&content, &quoted); err != nil {
+		t.Fatal(err)
+	}
+	if content != "hi" || quoted != "QUOTED" {
+		t.Errorf("text row = content %q, quoted %q", content, quoted)
 	}
 }
 
