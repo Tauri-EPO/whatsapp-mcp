@@ -201,11 +201,13 @@ func TestBuildMediaMessage(t *testing.T) {
 
 // outboundUpload is an upload response whose every field has a value of its
 // own, so a column that received a neighbouring field is told apart from the
-// right one (the two hashes are the same type and the same length).
+// right one (the two hashes are the same type and the same length). The URL
+// is not the direct path behind a host: it carries a parameter of its own, so
+// a test cannot pass by reading one where the other was meant.
 func outboundUpload() whatsmeow.UploadResponse {
 	return whatsmeow.UploadResponse{
 		URL:           "https://mmg.whatsapp.net/v/t62.7119-24/out_n.enc?ccb=11-4&oh=a&oe=b&mms3=true",
-		DirectPath:    "/v/t62.7119-24/out_n.enc?ccb=11-4&oh=a&oe=b&mms3=true",
+		DirectPath:    "/v/t62.7119-24/out_n.enc?ccb=11-4&oh=a&oe=b",
 		MediaKey:      bytes.Repeat([]byte{0x11}, 32),
 		FileEncSHA256: bytes.Repeat([]byte{0x22}, 32),
 		FileSHA256:    bytes.Repeat([]byte{0x33}, 32),
@@ -240,6 +242,20 @@ func TestOutboundMediaColumns(t *testing.T) {
 		if c := outboundMediaColumns(path, up); c.mediaType != want {
 			t.Errorf("%s: mediaType = %q, want %q", path, c.mediaType, want)
 		}
+	}
+
+	// The stored name is the one the recipient was shown, whatever separator
+	// the path came with.
+	if c := outboundMediaColumns(`C:\Users\someone\outbox\file.zip`, up); c.filename != "file.zip" {
+		t.Errorf("filename = %q, want the base name the recipient saw", c.filename)
+	}
+
+	// An upload that answered with a direct path only still gives the row a
+	// URL the download can use.
+	pathOnly := up
+	pathOnly.URL = ""
+	if c := outboundMediaColumns("/o/a.png", pathOnly); c.url != mediaCDNHost+up.DirectPath {
+		t.Errorf("url from a direct path = %q", c.url)
 	}
 
 	// A text-only send has no upload: the row keeps the empty media columns
@@ -309,8 +325,13 @@ func TestOutboundMediaStore_RowCarriesTheUploadFields(t *testing.T) {
 	if asked == nil {
 		t.Fatal("the transfer was never asked for")
 	}
-	if asked.DirectPath != up.DirectPath || asked.MediaType != whatsmeow.MediaDocument || asked.FileLength != up.FileLength {
-		t.Errorf("downloader = path %q, type %v, length %d", asked.DirectPath, asked.MediaType, asked.FileLength)
+	// The direct path is derived from the stored URL, exactly as it is for an
+	// inbound row: the CDN auth parameters of the upload have to survive.
+	if asked.URL != up.URL || asked.DirectPath != extractDirectPathFromURL(up.URL) || !strings.HasPrefix(asked.DirectPath, up.DirectPath) {
+		t.Errorf("downloader = url %q, path %q; upload answered path %q", asked.URL, asked.DirectPath, up.DirectPath)
+	}
+	if asked.MediaType != whatsmeow.MediaDocument || asked.FileLength != up.FileLength {
+		t.Errorf("downloader = type %v, length %d", asked.MediaType, asked.FileLength)
 	}
 	if !bytes.Equal(asked.MediaKey, up.MediaKey) || !bytes.Equal(asked.FileSHA256, up.FileSHA256) || !bytes.Equal(asked.FileEncSHA256, up.FileEncSHA256) {
 		t.Errorf("downloader key/hashes differ from the upload: %x %x %x", asked.MediaKey, asked.FileSHA256, asked.FileEncSHA256)

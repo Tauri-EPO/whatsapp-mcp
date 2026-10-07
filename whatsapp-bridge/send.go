@@ -349,15 +349,24 @@ type outboundMedia struct {
 // Fields are matched by name: StoreMessage takes the plaintext hash before
 // the encrypted one, the waE2E literals in buildMediaMessage set them the
 // other way round.
+//
+// The row keeps the URL, as inbound rows do (the download derives the direct
+// path from it); an upload that answered with a direct path only is stored in
+// the same URL form a media retry uses. The filename is the one the recipient
+// was shown (outboundFileName), not whatever the host calls the path.
 func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) outboundMedia {
 	if mediaPath == "" {
 		return outboundMedia{}
 	}
 	_, _, mediaType := classifyMediaPath(mediaPath)
+	url := upload.URL
+	if url == "" && upload.DirectPath != "" {
+		url = mediaURLFromDirectPath(upload.DirectPath)
+	}
 	return outboundMedia{
 		mediaType:     mediaType,
-		filename:      filepath.Base(mediaPath),
-		url:           upload.URL,
+		filename:      outboundFileName(mediaPath),
+		url:           url,
 		mediaKey:      upload.MediaKey,
 		fileSHA256:    upload.FileSHA256,
 		fileEncSHA256: upload.FileEncSHA256,
