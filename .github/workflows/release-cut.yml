@@ -14,9 +14,10 @@ name: Release cut
 # release dispatch failed after the PR was merged - then it is the only build,
 # not a second one.
 #
-# Merging the release PR by hand earlier still works; the job then finds no PR
-# and exits. It also refuses to merge while CI on main is running (the PR is
-# not up to date yet) and fails loudly when CI on main is red.
+# To cut earlier, run this workflow by hand (`gh workflow run release-cut.yml`):
+# the release PR's head carries no check of its own, and the ruleset on main
+# requires them, so a bare `gh pr merge` on it is refused. The job refuses to
+# merge while CI on main is running and fails loudly when CI on main is red.
 
 on:
   schedule:
@@ -80,40 +81,62 @@ jobs:
           echo "CI on main@$head is green."
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      # The ruleset on main requires the CI jobs on the head being merged
-      # (issue #545). The release PR is opened by github-actions[bot], whose
-      # pull_request runs wait for an approval nobody gives, so its head
-      # carries no check at all. workflow_dispatch is the documented exception
-      # to "GITHUB_TOKEN events start no workflow": run CI on the release
-      # branch here and wait for it. The checks land on the head commit, which
-      # is what the ruleset looks at.
-      - name: Run CI on the release PR head
-        id: prci
+      # The ruleset on main requires the CI jobs green on a head that is up to
+      # date with main (issue #545). Two things stand between the release PR
+      # and that rule. It is opened by github-actions[bot], whose pull_request
+      # runs wait for an approval nobody gives, so its head carries no check;
+      # and release-please only rewrites the branch when the notes change, so
+      # after a docs: / ci: / test: / chore: merge it sits behind main.
+      # Hence the loop: bring the branch up to date, run CI on that head
+      # (workflow_dispatch is the documented exception to "GITHUB_TOKEN events
+      # start no workflow"; the checks land on the head commit, which is what
+      # the ruleset reads), merge exactly that commit, and go round again if
+      # main moved meanwhile.
+      - name: Merge the release PR
+        id: merge
         if: steps.ci.outputs.ready == 'true'
         env:
           PR: ${{ steps.pr.outputs.number }}
           BRANCH: release-please--branches--main
         run: |
-          sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-          gh workflow run ci.yml --ref "$BRANCH"
-          run=""
-          for _ in $(seq 1 36); do
-            run=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 5 \
-              --json databaseId,headSha --jq "[.[] | select(.headSha == \"$sha\")][0].databaseId // empty")
-            [ -n "$run" ] && break
-            sleep 5
+          for attempt in 1 2 3; do
+            behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by)
+            if [ "$behind" != "0" ]; then
+              echo "attempt $attempt: the release branch is $behind commit(s) behind main; updating it"
+              gh pr update-branch "$PR"
+              sleep 10
+            fi
+            sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+            since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            gh workflow run ci.yml --ref "$BRANCH"
+            run=""
+            for _ in $(seq 1 36); do
+              # Only a run created by this dispatch: an earlier cut may have
+              # left a finished run on the same head.
+              run=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 10 \
+                --json databaseId,headSha,createdAt \
+                --jq "[.[] | select(.headSha == \"$sha\" and .createdAt >= \"$since\")][0].databaseId // empty")
+              [ -n "$run" ] && break
+              sleep 5
+            done
+            if [ -z "$run" ]; then
+              echo "::error::CI was dispatched on $BRANCH but no run for $sha appeared; not cutting a release."
+              exit 1
+            fi
+            echo "attempt $attempt: CI run $run on the release PR head $sha"
+            if ! gh run watch "$run" --exit-status --interval 20; then
+              echo "::error::CI failed on the release PR head $sha (run $run); not cutting a release."
+              exit 1
+            fi
+            if gh pr merge "$PR" --squash --delete-branch --match-head-commit "$sha"; then
+              echo "Release PR #$PR merged at $sha."
+              exit 0
+            fi
+            echo "::notice::attempt $attempt: the merge was refused (main or the release branch moved during CI); going round again."
+            sleep 10
           done
-          if [ -z "$run" ]; then
-            echo "::error::CI was dispatched on $BRANCH but no run for $sha appeared; not cutting a release."
-            exit 1
-          fi
-          echo "CI run $run on the release PR head $sha"
-          gh run watch "$run" --exit-status --interval 20
-
-      - name: Merge the release PR
-        id: merge
-        if: steps.ci.outputs.ready == 'true'
-        run: gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
+          echo "::error::The release PR could not be merged in 3 attempts: main keeps moving. Run this workflow again."
+          exit 1
 
       - name: Dispatch release.yml to tag and publish
         if: steps.ci.outputs.ready == 'true'
