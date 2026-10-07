@@ -20,7 +20,7 @@ Read top to bottom once; afterwards jump to the section you need.
 
 ## 1. What this repo is
 
-A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **Tailscale** by remote MCP clients (an AI bot on another machine, an IDE on a laptop), sharing one WhatsApp account. Two components: a Go bridge (whatsmeow) and a Python MCP server (MCP SDK v2, streamable HTTP or stdio). Deployed with Docker Compose. `README.md` → "About this fork" has the user-facing version of this story and a table of what differs from upstream.
+A WhatsApp ↔ MCP bridge tuned for an **always-on home server** reached over **Tailscale** by remote MCP clients (an AI bot on another machine, an IDE on a laptop), sharing one WhatsApp account. Two components: a Go bridge (whatsmeow) and a Python MCP server (MCP SDK v2, streamable HTTP or stdio). Deployed with Docker Compose. `README.md` → "Why this fork" has the user-facing version of this story and a table of what differs from upstream.
 
 - **Repo:** https://github.com/Tauri-EPO/whatsapp-mcp — remote `origin`. All PRs, issues and `gh` commands target this repo.
 - **Default branch:** `main`. `main` is the deployable state. Releases are automatic (`release.yml` + `release-cut.yml`, see §4 "Versions"): every merge updates a release PR; once a day that PR is merged, which tags `vX.Y.Z` and publishes the GitHub Release and the `latest` images.
@@ -150,7 +150,7 @@ Compose topology: the `mcp` container joins the bridge's network namespace (`net
 
 This is how every change in this repo has been shipped; follow it unless the user says otherwise.
 
-1. **Start from an issue.** Bugs and features have one. If none exists, open it (§11): one problem per issue, with a "Fix" sketch and acceptance boxes. The plan is the open backlog, read by priority: `gh issue list --repo Tauri-EPO/whatsapp-mcp --label P0`, then the same with `--label P1` and `--label P2`. The one open epic is #339 (manual verification of the September round on the home server — server work, not a coding checklist). The hardening and media epics #64, #138 and #99 all closed on 2026-09-04: read them for the history behind a design, never as a to-do list.
+1. **Start from an issue.** Bugs and features have one. If none exists, open it (§11): one problem per issue, with a "Fix" sketch and acceptance boxes. The plan is the open backlog, read by priority: `gh issue list --repo Tauri-EPO/whatsapp-mcp --label P0`, then the same with `--label P1` and `--label P2`. Issues filed through the forms arrive as `needs-triage` with no priority, so read `--label needs-triage` first and triage them (§11). The one open epic is #339 (manual verification of the September round on the home server — server work, not a coding checklist). The hardening and media epics #64, #138 and #99 all closed on 2026-09-04: read them for the history behind a design, never as a to-do list.
 2. **Branch from current `main`:** `git fetch origin && git checkout -b <type>/<slug> origin/main` when the clone is yours alone, `git worktree add` when it is not ("Working in parallel" below). Types: `fix`, `feat`, `perf`, `refactor`, `docs`, `ci`, `chore`, `test`.
 3. **One concern per PR, small.** Target under ~300 changed lines of code (docs and tests excluded). Split refactors into pure-move PRs. If a change needs another open PR, stack the branch on it, say "Stacked on #N" in the body, and retarget to `main` after that merges.
 4. **Tests with the change.** Python: `tests/` (pytest, real SQLite files in `tmp_path`, `monkeypatch` for `requests`/policy/env). Go: table tests, `httptest`, fakes injected as functions (see `group_members.go`, `delete_message.go`, `polls.go`), `newTestMessageStore`. No test may need a paired phone.
@@ -366,6 +366,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 ## 11. Issues
 
 - One problem per issue. Title prefixed with priority (`P0:`, `P1:`, `P2:`); body with **Problem**, **Fix** (sketch sized for one PR) and **Acceptance** checkboxes. Labels: priority + `area:*` (+ `type:refactor`, `type:security`, `bug`, `documentation`, `upstream` when it mirrors an upstream item).
+- An issue filed through the forms (`.github/ISSUE_TEMPLATE/`) carries `needs-triage` and a plain title. Triage is: add the priority prefix and label, the `area:*` label, and remove `needs-triage`.
 - Larger efforts get an `epic` issue holding the checklist; §4 step 1 names the open one and the closed ones.
 - Bugs from operation: include bridge log lines, `docker compose ps`, the tool call and its result; redact phone numbers.
 - "Won't do" is a valid outcome; close with a sentence explaining why.

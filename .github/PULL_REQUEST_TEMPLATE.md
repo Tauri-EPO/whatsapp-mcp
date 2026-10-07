@@ -1,9 +1,9 @@
 <!--
 Thanks for the PR! A couple of quick checks before you submit:
 
-- Read ROADMAP.md to confirm scope.
+- Read AGENTS.md §4 (the routine from issue to merged PR).
 - One concern per PR. Split anything bigger.
-- Conventional-commit title (feat/fix/chore/docs/ci/refactor/test/perf).
+- Conventional-commit title: it becomes the squash commit and decides the release (feat / fix / perf / refactor / deps / docs / ci / test / chore).
 -->
 
 ## Summary
@@ -14,10 +14,11 @@ Thanks for the PR! A couple of quick checks before you submit:
 
 ## Type of change
 
-- [ ] `fix` — bug fix
-- [ ] `feat` — new feature
-- [ ] `chore` / `docs` / `ci` / `refactor` / `test` / `perf`
-- [ ] Breaking change (`!` in commit, or `BREAKING CHANGE:` in body)
+- [ ] `feat` — new feature (minor release)
+- [ ] `fix` / `perf` / `refactor` — bug fix, speed-up or code change (patch release)
+- [ ] `deps` — dependency or base-image bump that changes the shipped images (patch release)
+- [ ] `docs` / `ci` / `test` / `chore` — no release
+- [ ] Breaking change (`!` in the title, or `BREAKING CHANGE:` in the body)
 
 ## Scope check
 
@@ -34,16 +35,21 @@ Thanks for the PR! A couple of quick checks before you submit:
 <!-- How did you verify this? Manual steps, new tests, screenshots/logs as needed. -->
 
 - [ ] Added or updated tests
-- [ ] Ran `uv run pytest -v` (Python changes)
-- [ ] Ran `golangci-lint run` and `go build ./...` (Go changes)
+- [ ] Ran `ruff format`, `ruff check`, `pyright` and `pytest` (Python changes)
+- [ ] Ran `go vet`, `go test`, `go test -race` and `golangci-lint run` (Go changes)
+- [ ] Ran `docker compose up -d --build` and `scripts/smoke.sh` (Dockerfile or compose changes)
 - [ ] Manually exercised the affected code path
 
 ## Docs
 
 - [ ] Updated `README.md` (if user-visible)
-- [ ] Updated `AGENTS.md` / `CLAUDE.md` (if contributor-visible)
-- [ ] Updated tool descriptions in `whatsapp-mcp-server/main.py` (if MCP tools changed)
-- [ ] Updated `.env.example` (if env vars changed)
+- [ ] Updated `AGENTS.md` (if contributor-visible: §3 tree for a new module, §7 for an env var, §9 for a new place to change)
+- [ ] Updated the tool docstring in `whatsapp-mcp-server/main.py` and `docs/TOOLS.md` (if MCP tools changed)
+- [ ] Updated `docs/CONFIGURATION.md`, `.env.example` and the compose passthrough (if env vars changed)
+
+## Security
+
+<!-- Required when auth, file paths, network bind, command exec or allow-lists are touched: what changed and which test covers the deny path. Otherwise "n/a". -->
 
 ## Risk / rollback
 

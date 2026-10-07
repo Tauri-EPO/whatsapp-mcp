@@ -1,12 +1,13 @@
 name: Bug report
 description: Something is broken or behaving unexpectedly.
-title: "bug: <short description>"
-labels: ["type:bug", "needs-triage"]
+labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for taking the time to file a bug. Please fill out the sections below — issues without a clear reproduction often can't be acted on.
+
+        Write a plain title. A maintainer adds the priority prefix (`P0:` / `P1:` / `P2:`) and the `area:*` label at triage ([`AGENTS.md`](https://github.com/Tauri-EPO/whatsapp-mcp/blob/main/AGENTS.md) §11).
 
   - type: textarea
     id: summary
@@ -21,10 +22,10 @@ body:
     id: reproduction
     attributes:
       label: Steps to reproduce
-      description: Exact, minimal steps. Include commands, tool calls, or curl invocations.
+      description: Exact, minimal steps. Include commands, tool calls and their results, or curl invocations.
       placeholder: |
-        1. Start the bridge: `go run .`
-        2. From Claude Desktop, call `send_message` with `{...}`
+        1. Stack running with `docker compose up -d` (or: bridge with `go run .`, MCP server with `uv run main.py`)
+        2. From the MCP client, call `send_message` with `{...}`
         3. Observe ...
     validations:
       required: true
@@ -44,29 +45,42 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How is it running?
+      options:
+        - Docker Compose (this repository's compose file)
+        - Docker Compose under a stack manager (Komodo, Portainer)
+        - Bare processes (`go run .` and `uv run main.py`, e.g. stdio on a laptop)
+        - Other
+    validations:
+      required: true
+
   - type: input
     id: bridge-version
     attributes:
-      label: Bridge version
-      description: "`./whatsapp-bridge --version` or git SHA"
+      label: Bridge build
+      description: "`version` and `commit` from the `bridge_status` tool (inside its `version` object), or from `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`. Example: `v2.0.0`, commit `575ee0b`."
     validations:
       required: true
 
   - type: input
     id: mcp-version
     attributes:
-      label: MCP server version
-      description: From `whatsapp-mcp-server/pyproject.toml` or `pip show whatsapp-mcp-server`
+      label: MCP server build
+      description: "The `whatsapp-mcp-server <version>+<sha>` line of its startup log (`docker compose logs mcp`), or `serverInfo.version` in the `initialize` response. An image tag such as `latest` does not identify a build."
     validations:
       required: true
 
   - type: dropdown
     id: os
     attributes:
-      label: Operating system
+      label: Operating system of the host
       options:
-        - macOS
         - Linux
+        - macOS
+        - Windows
         - Windows (WSL)
         - Other
     validations:
@@ -76,7 +90,7 @@ body:
     id: client
     attributes:
       label: AI client
-      description: e.g. Claude Desktop 0.x, Cursor 1.x, custom MCP client
+      description: e.g. Claude Code 2.x, Claude Desktop 0.x, Cursor 1.x, custom MCP client
     validations:
       required: true
 
@@ -84,7 +98,7 @@ body:
     id: logs
     attributes:
       label: Relevant logs
-      description: Paste bridge / MCP server logs. Wrap in triple backticks. Redact phone numbers.
+      description: "Paste bridge / MCP server logs (`docker compose logs bridge`, `docker compose logs mcp`) and, for a compose deployment, the output of `docker compose ps`. Redact phone numbers."
       render: shell
 
   - type: checkboxes
