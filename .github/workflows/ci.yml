@@ -152,16 +152,51 @@ jobs:
       - name: Compose down
         if: always()
         run: docker compose down -v --remove-orphans || true
+
+  bridge-arm64:
+    name: Bridge arm64 (QEMU)
+    # The linux/arm64 bridge is published on every merge, and modernc.org/sqlite
+    # carries architecture-specific generated libc code that nothing else here
+    # runs on arm64 (issue #470). This job builds the image, starts it under
+    # QEMU like the amd64 smoke, and runs the whole Go test suite as an arm64
+    # binary in that image. Expect about four to six minutes, in parallel with
+    # the other jobs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          cache-dependency-path: whatsapp-bridge/go.sum
       - name: Build bridge image for arm64
-        # Raspberry Pi / ARM VPS users build this themselves; make sure the pure-Go
-        # build keeps cross-compiling. Not loaded or smoke-tested (QEMU is slow).
         uses: docker/build-push-action@v7
         with:
           context: whatsapp-bridge
           platforms: linux/arm64
           push: false
+          load: true
+          tags: whatsapp-mcp-bridge:ci-arm64
           build-args: |
             GIT_SHA=${{ github.sha }}
             VERSION=ci
           cache-from: type=gha,scope=bridge-arm64
           cache-to: type=gha,scope=bridge-arm64,mode=max
+      - name: Smoke test the arm64 image
+        run: |
+          # A silent fallback to amd64 would make everything below prove nothing.
+          arch=$(docker run --rm --platform linux/arm64 --entrypoint uname whatsapp-mcp-bridge:ci-arm64 -m)
+          [ "$arch" = "aarch64" ] || { echo "image runs as '$arch', expected aarch64"; exit 1; }
+          # Same check as the amd64 smoke: the binary starts, creates the store, reports the FTS state.
+          docker run --rm --platform linux/arm64 --entrypoint sh whatsapp-mcp-bridge:ci-arm64 -c 'cd /tmp && mkdir -p store && (timeout 30 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); cat /tmp/out; grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
+      - name: Go tests as an arm64 binary
+        run: |
+          # Compiled natively (CGO_ENABLED=0 cross-compiles), executed under QEMU in
+          # the arm64 image, which has tzdata for the zone the tests ask for.
+          cd whatsapp-bridge
+          CGO_ENABLED=0 GOARCH=arm64 go test -c -o "$RUNNER_TEMP/bridge-arm64.test" .
+          docker run --rm --platform linux/arm64 --entrypoint /t/bridge-arm64.test \
+            -v "$RUNNER_TEMP:/t:ro" -v "$PWD:/src:ro" -w /src whatsapp-mcp-bridge:ci-arm64
