@@ -393,6 +393,14 @@ and carries every tag, so right after a release `main`, `latest` and `v1.2.3`
 are the same digest and all three report `v1.2.3+<sha>`; `main` goes back to
 `main+<sha>` on the next merge.
 
+**What runs on arm64.** The `linux/arm64` images are built for every merge and
+release, and CI executes the bridge on arm64 under QEMU (job "Bridge arm64
+(QEMU)"): the image starts, creates its store and reports the FTS5 state, and
+the whole Go test suite runs as an arm64 binary inside it. That covers the
+pure-Go SQLite (`modernc.org/sqlite`), whose libc is architecture-specific.
+Not exercised on arm64: the MCP server image (built, never run), the compose
+smoke (`scripts/smoke.sh`), real hardware and real WhatsApp traffic.
+
 The compose file names those images, so you choose per host:
 
 - **Pull mode** (no Go or Python build on the server):
