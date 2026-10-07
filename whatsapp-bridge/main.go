@@ -215,6 +215,15 @@ func main() {
 		return
 	}
 
+	// Chats an older bridge named after our own number get their placeholder
+	// back, so the normal resolution names them (chat_names.go, issue #448).
+	// Names only: a failure is logged and the bridge starts anyway.
+	if renamed, err := messageStore.ResetSelfNamedChats(ownUsers(client)); err != nil {
+		logger.Warnf("%v", err)
+	} else if renamed > 0 {
+		logger.Infof("Reset %d chats that were named after our own number", renamed)
+	}
+
 	// Resolve the REST API port. Pure env parsing with no dependency on the
 	// WhatsApp connection, so it's safe to do this early alongside the token
 	// load below — and failing fast here means we don't run a QR-pairing

@@ -540,6 +540,35 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	return nil
 }
 
+// ResetSelfNamedChats renames the chats an older bridge named after our own
+// number (issue #448) back to the user part of their JID, the placeholder the
+// normal resolution (chat_names.go) improves when the next message arrives and
+// the MCP server already reads through to the phone book. The chat with
+// ourselves keeps its name and groups are never looked at. One statement over
+// the chats table, no message row touched, and a second run matches nothing,
+// so it is safe on every startup. It returns how many chats it renamed.
+func (store *MessageStore) ResetSelfNamedChats(self selfUsers) (int64, error) {
+	if self.phone == "" {
+		return 0, nil // not paired yet: no chat can be named after us
+	}
+	lid := self.lid
+	if lid == "" {
+		lid = self.phone // a session with no LID: the same value fills both binds
+	}
+	res, err := store.db.Exec(
+		`UPDATE chats SET name = substr(jid, 1, instr(jid, '@') - 1)
+		 WHERE name IN (?, ?)
+		   AND jid NOT LIKE '%@g.us'
+		   AND instr(jid, '@') > 1
+		   AND substr(jid, 1, instr(jid, '@') - 1) NOT IN (?, ?)`,
+		self.phone, lid, self.phone, lid,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reset chats named after our own number: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // MigrateLegacyLIDSendersToPhones rewrites the `sender` column for any
 // message whose stored value is a LID user-part for which whatsmeow has a
 // known phone-number mapping. This is the row-level analogue of the

@@ -159,10 +159,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, true, logger)
 
 	// If contact resolution fails (common for LIDs), PushName is often the best available display name.
-	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user.
+	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user,
+	// in the namespace the chat arrived in or the one it was resolved to.
 	if !msg.Info.IsFromMe && msg.Info.Chat.Server != "g.us" && strings.TrimSpace(msg.Info.PushName) != "" {
 		pushName := strings.TrimSpace(msg.Info.PushName)
-		if name == "" || name == msg.Info.Chat.User {
+		if name == "" || name == msg.Info.Chat.User || name == resolvedChat.User {
 			logger.Infof("Updating chat name from PushName for %s: %s -> %s", chatJID, name, pushName)
 			name = pushName
 		}
