@@ -258,8 +258,12 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
+	stored := true
 	if err := persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
-		logger.Warnf("Failed to store message: %v", err)
+		// This write is lost to every reader: an error, and named so the
+		// message can be found again (ID and chat only, never the content).
+		stored = false
+		logger.Errorf("Failed to store message %s in %s: %v", msg.Info.ID, chatJID, err)
 	} else {
 		b.metrics.messagesStored.Add(1)
 	}
@@ -287,9 +291,14 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// the webhook then carries the image message without the payload, as it
 	// does when a download fails.
 	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
+	// A message that was not stored has no row for downloadMedia to find: a
+	// download could only fail a second time and bury the store error under
+	// "failed to find message" (issue #454). The webhook below still goes out,
+	// or the text would be lost downstream too.
+	downloadable := stored && url != "" && len(mediaKey) > 0
 	var imageDownloadPath string
 	var imageMimeType string
-	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && !skipStatusMedia {
+	if mediaType == "image" && downloadable && shouldForward && !skipStatusMedia {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, _, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
@@ -314,11 +323,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 			}
 		}
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && skipStatusMedia {
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload && skipStatusMedia {
 		logger.Debugf("Not caching %s media of status update %s: %s is off (download_media still works)", mediaType, msg.Info.ID, mediaAutoDownloadStatusEnv)
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
 		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload {
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload {
 		// Media that is not included in a webhook payload: cached in the
 		// background by the bounded pool (media_budget.go), so a burst cannot
 		// start one transfer per message and shutdown can stop them all.
@@ -345,7 +354,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		}
 	}
 
-	if err == nil {
+	if stored {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
