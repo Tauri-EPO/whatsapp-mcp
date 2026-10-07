@@ -74,8 +74,8 @@ class TestSpellings:
         assert phone.br_mobile_alternate(LONG) == SHORT
         assert phone.br_mobile_alternate(SHORT) == LONG
         # An eight-digit number that itself begins with 9 still gains one.
-        assert phone.br_mobile_alternate("558891952753") == "5588991952753"
-        assert phone.br_mobile_alternate("5588991952753") == "558891952753"
+        assert phone.br_mobile_alternate("558899998888") == "5588999998888"
+        assert phone.br_mobile_alternate("5588999998888") == "558899998888"
 
     @pytest.mark.parametrize(
         "digits",

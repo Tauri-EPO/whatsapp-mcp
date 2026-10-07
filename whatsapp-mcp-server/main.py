@@ -365,7 +365,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     attached: present it as "recorded as", never as "is".
 
     A phone number of seven digits or more may be typed any way
-    ("+55 (88) 98195-2753"): the `+`, spaces, dashes, dots and parentheses are
+    ("+55 (88) 97777-6666"): the `+`, spaces, dashes, dots and parentheses are
     ignored. A full Brazilian mobile
     (55 + area code + number) is found with or without the ninth digit after
     the area code, whichever of the two WhatsApp registered; `matched` is
@@ -1298,8 +1298,8 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
 
     The number is matched whole, never as a fragment. A `+`, spaces, dashes,
     dots and parentheses are ignored, and a Brazilian mobile is found with or
-    without the ninth digit after the area code ("5588981952753" and
-    "558881952753" are one contact): the chat's `jid` says which spelling
+    without the ninth digit after the area code ("5588977776666" and
+    "558877776666" are one contact): the chat's `jid` says which spelling
     WhatsApp registered. When both spellings have a chat, the one asked for is
     returned (under an allow-list, the one it admits).
 
