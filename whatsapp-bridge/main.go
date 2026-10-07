@@ -103,8 +103,9 @@ func main() {
 	}
 
 	// One handle on the store for its whole lifetime. Everything that walks,
-	// measures or deletes inside it goes through this os.Root, which confines
-	// those operations to the directory at the kernel level (store_dir.go).
+	// measures, deletes, writes media or reads it back for the webhook goes
+	// through this os.Root, which confines those operations to the directory at
+	// the kernel level (store_dir.go).
 	storeRoot, rootErr := openStoreRoot()
 	if rootErr != nil {
 		logger.Errorf("Failed to open store directory %q: %v", storeDir(), rootErr)
