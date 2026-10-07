@@ -335,7 +335,8 @@ func extractMentionedJIDs(msg *waE2E.Message) []string {
 // Extract media info from a message. Filenames embed the message ID so that
 // two messages arriving in the same second do not collide on a single file.
 func extractMediaInfo(msg *waE2E.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
-	if msg == nil {
+	kind, part := mediaPartOf(msg)
+	if part == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
 
@@ -350,45 +351,73 @@ func extractMediaInfo(msg *waE2E.Message, msgTimestamp time.Time, msgID string) 
 		suffix = tsStr + "_" + msgID
 	}
 
-	// Check for image message
-	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + suffix + ".jpg",
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
-	}
-
-	// Check for video message
-	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + suffix + ".mp4",
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
-	}
-
-	// Check for audio message
-	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + suffix + ".ogg",
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
-	}
-
-	// Check for document message
-	if doc := msg.GetDocumentMessage(); doc != nil {
-		filename := doc.GetFileName()
-		if filename == "" {
-			filename = "document_" + suffix
+	var name string
+	switch kind {
+	case "image":
+		name = "image_" + suffix + ".jpg"
+	case "video":
+		name = "video_" + suffix + ".mp4"
+	case "audio":
+		name = "audio_" + suffix + ".ogg"
+	case "sticker":
+		name = "sticker_" + suffix + ".webp"
+	default: // a document keeps the sender's own name when it has one
+		if name = msg.GetDocumentMessage().GetFileName(); name == "" {
+			name = "document_" + suffix
 		}
-		return "document", filename,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
+	// One line for every kind: the plaintext hash before the encrypted one.
+	return kind, name, part.GetURL(), part.GetMediaKey(), part.GetFileSHA256(), part.GetFileEncSHA256(), part.GetFileLength()
+}
 
+// cdnMedia is what every media sub-message a download can fetch exposes.
+type cdnMedia interface {
+	GetURL() string
+	GetDirectPath() string
+	GetMediaKey() []byte
+	GetFileSHA256() []byte
+	GetFileEncSHA256() []byte
+	GetFileLength() uint64
+}
+
+// mediaPartOf returns the media sub-message of msg and the kind the archive
+// stores it under, or "" and nil when it has none. It is the one place that
+// decides which sub-message is "the media": extractMediaInfo and
+// extractMediaDirectPath both read what it returns, so a kind added here
+// reaches every column at once.
+func mediaPartOf(msg *waE2E.Message) (string, cdnMedia) {
+	switch {
+	case msg == nil:
+		return "", nil
+	case msg.GetImageMessage() != nil:
+		return "image", msg.GetImageMessage()
+	case msg.GetVideoMessage() != nil:
+		return "video", msg.GetVideoMessage()
+	case msg.GetAudioMessage() != nil:
+		return "audio", msg.GetAudioMessage()
+	case msg.GetDocumentMessage() != nil:
+		return "document", msg.GetDocumentMessage()
 	// Sticker message: WebP image, no caption, same URL+MediaKey+SHA shape as other media.
 	// On the wire stickers surface as type="media" with an <enc mediatype="sticker"> payload, e.g.:
 	//   <message id="..." type="media">
 	//     <enc mediatype="sticker" type="msg" v="2"><!-- 660 bytes --></enc>
 	//   </message>
-	if stk := msg.GetStickerMessage(); stk != nil {
-		return "sticker", "sticker_" + suffix + ".webp",
-			stk.GetURL(), stk.GetMediaKey(), stk.GetFileSHA256(), stk.GetFileEncSHA256(), stk.GetFileLength()
+	case msg.GetStickerMessage() != nil:
+		return "sticker", msg.GetStickerMessage()
 	}
+	return "", nil
+}
 
-	return "", "", "", nil, nil, nil, 0
+// extractMediaDirectPath returns the direct path of the media of msg, or ""
+// when the message carries none. whatsmeow downloads by this field alone. The
+// url next to it names the same object for the official clients, but nothing
+// in the protocol says it must, so the bridge keeps the field itself instead
+// of cutting a path out of the url (issue #452).
+func extractMediaDirectPath(msg *waE2E.Message) string {
+	if _, part := mediaPartOf(msg); part != nil {
+		return part.GetDirectPath()
+	}
+	return ""
 }
 
 // sharedGroupHistory recognises the messages WhatsApp sends when a member is

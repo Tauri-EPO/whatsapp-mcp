@@ -127,6 +127,10 @@ type Bridge struct {
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc
+	// mediaRetryDownload asks the sender's phone to re-upload a file and
+	// downloads it (nil = downloadViaMediaRetry); tests inject a recorder
+	// (see Bridge.retryMedia).
+	mediaRetryDownload mediaRetryFunc
 	// autoDownloads is the bounded pool that caches inbound media; a full
 	// queue drops the download instead of growing (see media_budget.go).
 	autoDownloads *mediaJobQueue

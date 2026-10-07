@@ -102,10 +102,10 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 
 // Function to download media from a message
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
-	client, messageStore := b.Client, b.Store
+	messageStore := b.Store
 	// Query the database for the message including timestamp
 	var mediaType, url string
-	var originalName sql.NullString
+	var originalName, storedDirectPath sql.NullString
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
 	var fileLength uint64
 	var timestamp time.Time
@@ -113,9 +113,9 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 
 	// Get media info AND timestamp from the database
 	err = messageStore.db.QueryRow(
-		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp, filename FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp, filename, direct_path FROM messages WHERE id = ? AND chat_jid = ?",
 		messageID, chatJID,
-	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp, &originalName)
+	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp, &originalName, &storedDirectPath)
 
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to find message: %v", err)
@@ -183,8 +183,15 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 
 	b.Log.Debugf("Attempting to download media for message %s in chat %s...", messageID, chatJID)
 
-	// Extract direct path from URL
-	directPath := extractDirectPathFromURL(url)
+	// whatsmeow downloads by direct path alone. The message's own one is used
+	// when the row has it; a row written before the column existed, or for a
+	// message that carried none, keeps the path cut out of the URL.
+	directPath, pathSource := storedDirectPath.String, pathFromMessage
+	if directPath == "" {
+		directPath, pathSource = extractDirectPathFromURL(url), pathFromURL
+	} else if !strings.HasPrefix(directPath, "/") {
+		directPath = "/" + directPath
+	}
 
 	// Create a downloader that implements DownloadableMessage
 	var waMediaType whatsmeow.MediaType
@@ -230,12 +237,40 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		ctx, cancel := transferContext(b.ctx, ctx)
 		defer cancel()
 		written, err := b.transferMedia(ctx, downloader, relPath)
-		if isExpiredMediaError(err) {
-			// The CDN token in the stored URL has expired (old history, forwards).
-			// Ask the sender's phone to re-upload and download from the fresh path.
-			// See media_retry.go.
-			b.Log.Warnf("Media URL expired for %s (%v); requesting media retry from sender's phone...", messageID, err)
-			written, err = downloadViaMediaRetry(ctx, client, messageStore, b.mediaRetry, messageID, chatJID, downloader, root, relPath)
+		if status := cdnRefusalStatus(err); status != 0 {
+			// What the next report has to be read from: the status, how old
+			// the message is and the shape of what was asked, never a token.
+			age := time.Since(timestamp)
+			b.Log.Warnf("CDN refused media for message %s with HTTP %d: message age %s, %s", messageID, status,
+				age.Round(time.Second), mediaRequestShape(url, directPath, pathSource, mediaKey, fileSHA256, fileEncSHA256))
+			// The path this bridge asked for before it kept the message's own
+			// one. Tried once when it names something else, so nothing that
+			// downloaded then fails now, and the log says which of the two works.
+			if alt := extractDirectPathFromURL(url); pathSource == pathFromMessage && alt != directPath && strings.HasPrefix(alt, "/") {
+				viaURL := *downloader
+				viaURL.DirectPath = alt
+				if n, altErr := b.transferMedia(ctx, &viaURL, relPath); altErr == nil {
+					b.Log.Warnf("Message %s was downloaded through the path cut out of its url after its direct path was refused", messageID)
+					written, err = n, nil
+				}
+			}
+			switch {
+			case err == nil:
+			case age < cdnFreshWindow && !linkExpired(directPath, time.Now()):
+				// Too young for its link to have expired, and the link does
+				// not say it has: the request itself is what the CDN refuses,
+				// so the sender's phone is not asked for a new upload and
+				// nothing is concluded about the file.
+				b.metrics.mediaDownloadFails.Add(1)
+				return 0, &cdnRefusedError{status: status, age: age}
+			default:
+				// Old enough for the link to have expired (old history, a file
+				// that sat unread), or a link stamped as expired: ask the
+				// sender's phone to re-upload and download from the fresh
+				// path. See media_retry.go.
+				b.Log.Warnf("Requesting a media retry from the sender's phone for message %s...", messageID)
+				written, err = b.retryMedia(ctx, messageID, chatJID, downloader, root, relPath)
+			}
 		}
 		if err != nil {
 			b.metrics.mediaDownloadFails.Add(1)
@@ -260,6 +295,16 @@ func (b *Bridge) transferMedia(ctx context.Context, msg whatsmeow.DownloadableMe
 		return b.mediaTransfer(ctx, msg, relPath)
 	}
 	return downloadToPath(ctx, b.StoreRoot, b.Client, msg, relPath)
+}
+
+// retryMedia asks the sender's phone to re-upload the file and downloads it
+// from the fresh path. Tests override Bridge.mediaRetryDownload to record the
+// call instead.
+func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, downloader *MediaDownloader, root *os.Root, relPath string) (int64, error) {
+	if b.mediaRetryDownload != nil {
+		return b.mediaRetryDownload(ctx, messageID, chatJID, downloader, root, relPath)
+	}
+	return downloadViaMediaRetry(ctx, b.Client, b.Store, b.mediaRetry, messageID, chatJID, downloader, root, relPath)
 }
 
 // checkMediaPathComponents refuses a chat directory or a media file name that
@@ -485,6 +530,14 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			code := errorCode(http.StatusInternalServerError)
 			if errors.Is(err, errMediaUnavailable) {
 				code = "media_unavailable"
+			}
+			// The CDN turning down a recent message is the other end failing,
+			// and worth another try: 502, which the MCP server reads as
+			// bridge_unavailable (issue #452).
+			var refused *cdnRefusedError
+			if errors.As(err, &refused) {
+				writeError(w, http.StatusBadGateway, "Failed to download media: "+errMsg)
+				return
 			}
 			writeErrorCode(w, http.StatusInternalServerError, code, "Failed to download media: "+errMsg)
 			return

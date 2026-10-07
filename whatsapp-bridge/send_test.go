@@ -325,9 +325,10 @@ func TestOutboundMediaStore_RowCarriesTheUploadFields(t *testing.T) {
 	if asked == nil {
 		t.Fatal("the transfer was never asked for")
 	}
-	// The direct path is derived from the stored URL, exactly as it is for an
-	// inbound row: the CDN auth parameters of the upload have to survive.
-	if asked.URL != up.URL || asked.DirectPath != extractDirectPathFromURL(up.URL) || !strings.HasPrefix(asked.DirectPath, up.DirectPath) {
+	// The download asks for the upload's own direct path, the one the
+	// recipients were sent, not for a path cut out of the URL (which differs
+	// in this fixture).
+	if asked.URL != up.URL || asked.DirectPath != up.DirectPath || asked.DirectPath == extractDirectPathFromURL(up.URL) {
 		t.Errorf("downloader = url %q, path %q; upload answered path %q", asked.URL, asked.DirectPath, up.DirectPath)
 	}
 	if asked.MediaType != whatsmeow.MediaDocument || asked.FileLength != up.FileLength {

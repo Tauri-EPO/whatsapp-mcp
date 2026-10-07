@@ -119,6 +119,7 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			quoted_message_id TEXT,
 			mentions TEXT,
 			sender_server TEXT,
+			direct_path TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);

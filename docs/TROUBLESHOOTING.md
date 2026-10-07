@@ -338,6 +338,60 @@ Two compose projects of this repo on one box
   control character). The message row is stored as usual; only its file is not
   cached, by design.
 
+## A recent file cannot be downloaded
+
+`download_media` / `read_media` answer `bridge_unavailable` with **"the WhatsApp
+CDN refused the request (HTTP 403) for a message only 4m old; its link cannot
+have expired yet, so this is not a lost file: try again later"** (404 and 410
+read the same way).
+
+The bridge downloads a file by the message's own direct path
+(`messages.direct_path`; rows stored before that column existed use the path
+cut out of `url`). When the CDN refuses that path and the `url` names something
+else, the url's path is tried once as well, which is what the bridge asked for
+before it kept the direct path. If both are refused: WhatsApp's CDN keeps a
+file for days, so for a message less than six hours old the request is what
+failed. The bridge then does not ask the sender's phone to re-upload, and does
+not mark the file `media_unavailable`: the next call tries again. Past six
+hours, or when the link itself is stamped as expired, the media retry runs as
+it always did.
+
+Each refusal leaves one WARN line in the bridge log (`docker compose logs
+bridge | grep "CDN refused media"`):
+
+```
+CDN refused media for message <message-id> with HTTP 403: message age 4m12s, asked for the message's direct path: /v/ (3 segments, query ccb,oh,oe,_nc_sid, expiry stamp in the future), same object as the url's path, other parameters; url host mmg.whatsapp.net; key 32, sha256 32, enc sha256 32 bytes
+```
+
+How to read it:
+
+- **`asked for the message's direct path` / `the path cut out of the stored
+  url`**: which of the two the request used. The second means the row has no
+  `direct_path` (an older row, or a message that carried none).
+- **`/v/ (3 segments, query ccb,oh,oe,_nc_sid, …)`**: the first segment of the
+  path, how deep it is, and the names of its query parameters. `no query` is a
+  path the CDN cannot authorise; a `?` in the list is a piece that was not
+  `name=value`.
+- **`expiry stamp in the future` / `in the past` / `no expiry stamp`**: what
+  the link's own `oe` parameter says. `in the past` on a recent message is an
+  old upload sent again, and goes to the media retry.
+- **`same as the url's path`**, **`same object as the url's path, other
+  parameters`** (the ordinary case: clients add a parameter of their own to
+  the url) or **`another object than the url's path`**: how the message's
+  `url` relates to its direct path. Only the last one means the two disagree.
+- **`url host …`**: the host of the stored url, or `not a plain host name`.
+- **`key 32, sha256 32, enc sha256 32 bytes`**: the sizes of the media key and
+  the two hashes the row holds. Anything but 32 is a row that was stored wrong.
+
+A second line, `Message <message-id> was downloaded through the path cut out of
+its url after its direct path was refused`, means the file arrived anyway. The
+pair is still worth reporting: it says which of the two paths the CDN accepts.
+
+The line carries no token, file name or hash, only the shape above, so it can
+be attached to a report once the message ID is replaced by a placeholder. A
+file that keeps failing with this line while the phone opens it is a bug worth
+reporting with it.
+
 ## App State / LTHash Conflicts
 
 Some WhatsApp account state is managed by whatsmeow in

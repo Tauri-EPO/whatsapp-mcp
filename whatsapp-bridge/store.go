@@ -216,6 +216,12 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "mentions", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.mentions column: %w", err)
 	}
+	// direct_path: the media's own direct path, which is what a download asks
+	// the CDN for. NULL on rows an older bridge wrote and on messages that
+	// carried none; those keep the path cut out of `url` (media.go, issue #452).
+	if err := ensureColumn(db, "messages", "direct_path", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.direct_path column: %w", err)
+	}
 	// sender_server: the namespace messages.sender lives in ("s.whatsapp.net"
 	// or "lid"), NULL when it is unknown — rows an older bridge wrote, and
 	// senders that are not user JIDs at all (sender_namespace.go).
@@ -1124,6 +1130,17 @@ func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fil
 		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = ? WHERE id = ? AND chat_jid = ?",
 		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, id, chatJID,
 	)
+	return err
+}
+
+// SetDirectPath records the direct path of a stored message's media. An empty
+// path clears the column, so the download falls back to the one in `url`.
+func (store *MessageStore) SetDirectPath(messageID, chatJID, directPath string) error {
+	return setDirectPathWith(store.db, messageID, chatJID, directPath)
+}
+
+func setDirectPathWith(ex sqlExecer, messageID, chatJID, directPath string) error {
+	_, err := ex.Exec(`UPDATE messages SET direct_path = NULLIF(?, '') WHERE id = ? AND chat_jid = ?`, directPath, messageID, chatJID)
 	return err
 }
 
