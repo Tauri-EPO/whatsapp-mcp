@@ -623,6 +623,8 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 - `identifier` (required): Phone number, LID, or full JID
   - Examples: `12025551234`, `100000000000004`, `12025551234@s.whatsapp.net`, `100000000000004@lid`
   - A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings): `jid` and `phone_number` report the spelling the archive holds, `identifier` echoes what was asked
+  - A number whose chat WhatsApp keeps under the contact's LID is found too, through the LID map: `jid` is then the `…@lid` one, with `phone_number` and `lid` both filled
+  - Under `WHATSAPP_ALLOWED_CHATS` the identifier is classified first, the way it is without a list, and the list has to name the JID that comes out: `denied` otherwise, whether or not a chat exists
 
 Returns `jid`, `phone_number`, `lid`, `name`, `push_name`, `display_name`,
 `is_lid` and `resolved`. `name` is what this account knows them by and
@@ -2213,6 +2215,12 @@ A chat stored only under the contact's LID is found by the phone number as
 well, through the LID map; the returned `jid` is then the `…@lid` one. Under
 `WHATSAPP_ALLOWED_CHATS` that LID JID has to be on the list itself: the list
 does not expand a phone number to its LID.
+
+Errors: `not_found` when the allow-list names the number (in either spelling
+of a Brazilian mobile, as the LID you passed, or as the LID the map pairs it
+with) and no chat with it is stored under a JID the list names; `denied` when
+the list does not name it. A number outside the list gets the same `denied`
+whether or not a chat exists for it.
 
 ### `get_contact_chats`
 
