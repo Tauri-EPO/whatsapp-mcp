@@ -27,7 +27,7 @@ def dbs(tmp_path, monkeypatch):
         )
     with sqlite3.connect(wdb) as c:
         c.executescript(WHATSMEOW_SCHEMA)
-        c.execute("INSERT INTO whatsmeow_lid_map VALUES ('231241139937355', '5511888888888')")
+        c.execute("INSERT INTO whatsmeow_lid_map VALUES ('100000000000006', '5511888888888')")
         c.execute(
             "INSERT INTO whatsmeow_contacts VALUES ('me', '5511888888888@s.whatsapp.net', 'Bob', 'Bob Silva', 'bobby', NULL)"
         )
@@ -64,7 +64,7 @@ def test_exact_match_does_not_pick_a_jid_that_merely_contains_the_digits(dbs):
 
 def test_lid_resolves_through_one_whatsmeow_connection(dbs, monkeypatch):
     counts = _count_connections(monkeypatch)
-    assert whatsapp.get_sender_name("231241139937355@lid") == "Bob Silva"
+    assert whatsapp.get_sender_name("100000000000006@lid") == "Bob Silva"
     assert counts["whatsmeow"] == 1, counts
 
 
@@ -72,7 +72,7 @@ def test_repeated_senders_hit_the_cache(dbs, monkeypatch):
     counts = _count_connections(monkeypatch)
     for _ in range(50):
         whatsapp.get_sender_name("5511999999999@s.whatsapp.net")
-        whatsapp.get_sender_name("231241139937355@lid")
+        whatsapp.get_sender_name("100000000000006@lid")
         whatsapp._sender_aliases("5511888888888")
     assert counts["messages"] == 2, counts  # one per distinct sender
     assert counts["whatsmeow"] <= 3, counts  # LID name once, aliases once (+ at most one miss path)
@@ -108,8 +108,8 @@ def test_msg_to_dict_list_resolves_each_sender_once(dbs, monkeypatch):
 
 def test_get_sender_name_reuses_the_batched_contact_lookup(dbs, monkeypatch):
     """One phone-book cache for chat pages and senders alike (#257)."""
-    whatsapp._contact_names(["231241139937355@lid"])  # as a page of chats would
+    whatsapp._contact_names(["100000000000006@lid"])  # as a page of chats would
     counts = _count_connections(monkeypatch)
-    assert whatsapp.get_sender_name("231241139937355@lid") == "Bob Silva"
+    assert whatsapp.get_sender_name("100000000000006@lid") == "Bob Silva"
     assert counts["whatsmeow"] == 0, counts  # already resolved, no second lookup
     assert counts["messages"] == 1, counts  # chats.name is still tried first

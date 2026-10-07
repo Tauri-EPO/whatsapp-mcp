@@ -22,7 +22,7 @@ ALICE = "5511111111111@s.whatsapp.net"
 BOB = "5511222222222@s.whatsapp.net"
 CARLA = "5511333333333@s.whatsapp.net"
 VIVO = "5511444444444@s.whatsapp.net"  # the service notice nobody is waiting on
-BOB_LID = "231241139937355@lid"  # the LID of PAIRED_BOB in the paired store
+BOB_LID = "100000000000006@lid"  # the LID of PAIRED_BOB in the paired store
 
 
 def _stamp(**delta):

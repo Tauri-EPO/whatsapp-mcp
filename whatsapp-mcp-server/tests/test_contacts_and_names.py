@@ -7,7 +7,7 @@ import whatsapp
 from tests.conftest import ALICE, BOB, BOB_LID, BOB_PN, CARLA, DECOY, FAMILY
 
 # A LID nobody mapped: too long to be an E.164 number, so its shape gives it away.
-UNKNOWN_LID = "1171581346817350"
+UNKNOWN_LID = "1000000000000030"
 
 
 def _jids(rows):
@@ -50,15 +50,15 @@ def test_search_contacts_keeps_lids_out_of_phone_number(paired_dbs):
 
 
 def test_search_contacts_finds_the_name_a_contact_gave_themselves(paired_dbs):
-    """A contact saved as "Z Aa" is still found by "Alena" (#280)."""
+    """A contact saved as "Z Dave" is still found by "Carol" (#280)."""
     with paired_dbs.whatsmeow() as c:
         c.execute(
-            "UPDATE whatsmeow_contacts SET full_name = 'Z Aa', push_name = 'Alena Lima' WHERE their_jid = ?", (BOB,)
+            "UPDATE whatsmeow_contacts SET full_name = 'Z Dave', push_name = 'Carol Lima' WHERE their_jid = ?", (BOB,)
         )
-    (row,) = whatsapp.search_contacts("alena")
+    (row,) = whatsapp.search_contacts("carol")
     assert row["jid"] == BOB
-    assert row["name"] == "Z Aa"  # what this account saved them as, unchanged
-    assert row["push_name"] == "Alena Lima"
+    assert row["name"] == "Z Dave"  # what this account saved them as, unchanged
+    assert row["push_name"] == "Carol Lima"
     assert row["matched"] == "push_name"
 
 
@@ -183,7 +183,7 @@ def test_msg_to_dict_never_reports_an_unresolved_lid_as_a_phone_or_a_name(paired
     row = whatsapp.msg_to_dict(_lid_message(UNKNOWN_LID))
     assert row["sender_phone"] is None  # grouping by sender_phone gets no ghost contact
     assert row["sender_lid"] == UNKNOWN_LID
-    assert row["sender_name"] is None  # nobody is called "1171581346817350"
+    assert row["sender_name"] is None  # nobody is called "1000000000000030"
     assert row["sender_display"] == f"{UNKNOWN_LID}@lid"
 
 

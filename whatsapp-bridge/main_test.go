@@ -672,7 +672,7 @@ func queryMessageCount(ms *MessageStore, chatJID string) int {
 // --- Test fixtures ---
 
 var (
-	phoneLID = types.JID{User: "185366493536339", Server: types.HiddenUserServer}
+	phoneLID = types.JID{User: "100000000000007", Server: types.HiddenUserServer}
 	phonePN  = types.JID{User: "11234567890", Server: types.DefaultUserServer}
 )
 
@@ -1056,8 +1056,8 @@ func TestMigrateLegacyLIDSendersToPhones_MissingWhatsAppDBIsNoOp(t *testing.T) {
 // where the participant JID is LID-only and the per-message SenderAlt is
 // empty. Resolution must come from the LID store.
 func TestHandleMessage_GroupParticipantLID_ResolvedViaStore(t *testing.T) {
-	groupJID := types.JID{User: "254110094043-1619359480", Server: types.GroupServer}
-	participantLID := types.JID{User: "261391827087520", Server: types.HiddenUserServer}
+	groupJID := types.JID{User: "5511999990004-1400000000", Server: types.GroupServer}
+	participantLID := types.JID{User: "100000000000008", Server: types.HiddenUserServer}
 	participantPhone := types.JID{User: "31612345678", Server: types.DefaultUserServer}
 
 	client := newTestClient(&mockLIDStore{
@@ -1422,12 +1422,12 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 			name: "ContactMessage with iPhone-style grouped TEL property",
 			msg: &waE2E.Message{
 				ContactMessage: &waE2E.ContactMessage{
-					DisplayName: proto.String("Adie Taxi"),
-					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Adie Taxi\n" +
-						"item1.TEL;waid=6281338417222:+62 813-3841-7222\nitem1.X-ABLabel:Mobil\nEND:VCARD"),
+					DisplayName: proto.String("Bob Taxi"),
+					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Bob Taxi\n" +
+						"item1.TEL;waid=6281300000001:+62 813-0000-0001\nitem1.X-ABLabel:Mobil\nEND:VCARD"),
 				},
 			},
-			want: "📇 Adie Taxi (+62 813-3841-7222)",
+			want: "📇 Bob Taxi (+62 813-0000-0001)",
 		},
 		{
 			name: "ContactMessage with multiple TEL lines keeps every number",
@@ -3020,13 +3020,13 @@ func TestExtractMentionedJIDs_ExtendedText(t *testing.T) {
 	msg := &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			ContextInfo: &waE2E.ContextInfo{
-				MentionedJID: []string{"491742555497@s.whatsapp.net"},
+				MentionedJID: []string{"491510000001@s.whatsapp.net"},
 			},
 		},
 	}
 
 	got := extractMentionedJIDs(msg)
-	if len(got) != 1 || got[0] != "491742555497@s.whatsapp.net" {
+	if len(got) != 1 || got[0] != "491510000001@s.whatsapp.net" {
 		t.Errorf("mentioned JIDs = %#v", got)
 	}
 }

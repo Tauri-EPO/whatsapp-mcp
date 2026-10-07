@@ -59,8 +59,8 @@ def test_ok_when_paired_and_connected(monkeypatch):
                     {
                         "phone_jid": "5511999999999@s.whatsapp.net",
                         "phone": "5511999999999",
-                        "lid_jid": "158883943301358@lid",
-                        "lid": "158883943301358",
+                        "lid_jid": "100000000000001@lid",
+                        "lid": "100000000000001",
                     },
                 ),
             }
@@ -74,7 +74,7 @@ def test_ok_when_paired_and_connected(monkeypatch):
     assert out["owner"] == {
         "jid": "5511999999999@s.whatsapp.net",
         "phone": "5511999999999",
-        "lid": "158883943301358",
+        "lid": "100000000000001",
     }
 
 

@@ -3,7 +3,7 @@ package main
 // Who a message addressed: messages.mentions.
 //
 // WhatsApp puts the mentioned accounts in ContextInfo.MentionedJID and renders
-// them in the text as "@<user>" — usually the LID user ("@158883943301358"),
+// them in the text as "@<user>" — usually the LID user ("@100000000000001"),
 // which reads like a phone number. extractMentionedJIDs has pulled that list
 // out for a long time, but only the webhook ever saw it, so "who was addressed
 // in this group" was not answerable from messages.db: an agent had to paste its

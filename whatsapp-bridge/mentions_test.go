@@ -16,9 +16,9 @@ func TestMentionsColumn(t *testing.T) {
 		want string
 	}{
 		{"none", nil, ""},
-		{"lid", []string{"158883943301358@lid"}, "158883943301358"},
+		{"lid", []string{"100000000000001@lid"}, "100000000000001"},
 		{"phone", []string{"5511999999999@s.whatsapp.net"}, "5511999999999"},
-		{"two forms of two people", []string{"158883943301358@lid", "5511999999999@s.whatsapp.net"}, "158883943301358,5511999999999"},
+		{"two forms of two people", []string{"100000000000001@lid", "5511999999999@s.whatsapp.net"}, "100000000000001,5511999999999"},
 		{"duplicates collapse", []string{"1588@lid", "1588@lid", "1588@s.whatsapp.net"}, "1588"},
 		{"device suffix dropped", []string{"5511999999999:12@s.whatsapp.net"}, "5511999999999"},
 		{"bare user", []string{"5511999999999"}, "5511999999999"},
@@ -43,16 +43,16 @@ func TestPersistMessageStoresMentions(t *testing.T) {
 	}
 
 	mentioning := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-		Text: proto.String("Lucas chegou! @158883943301358"),
+		Text: proto.String("Alice chegou! @100000000000001"),
 		ContextInfo: &waE2E.ContextInfo{
-			MentionedJID: []string{"158883943301358@lid", "5511888888888@s.whatsapp.net"},
+			MentionedJID: []string{"100000000000001@lid", "5511888888888@s.whatsapp.net"},
 		},
 	}}
 	ex := extractMessage(mentioning, time.Now(), "M1")
 	if err := persistMessage(ms, "M1", chat, "5511777777777", time.Now(), false, ex, true, testLogger()); err != nil {
 		t.Fatal(err)
 	}
-	if got := queryMentions(t, ms, "M1"); got != "158883943301358,5511888888888" {
+	if got := queryMentions(t, ms, "M1"); got != "100000000000001,5511888888888" {
 		t.Fatalf("mentions = %q", got)
 	}
 
@@ -77,7 +77,7 @@ func TestPersistMessageStoresMentions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := queryMentions(t, ms, "M3"); got != "158883943301358,5511888888888" {
+	if got := queryMentions(t, ms, "M3"); got != "100000000000001,5511888888888" {
 		t.Fatalf("batch mentions = %q", got)
 	}
 }
@@ -93,9 +93,9 @@ func queryMentions(t *testing.T, ms *MessageStore, id string) string {
 
 func TestMentionsFromText(t *testing.T) {
 	cases := map[string]string{
-		"o que acha desse, @158883943301358 ?":        "158883943301358",
-		"@158883943301358 @5511888888888":             "158883943301358,5511888888888",
-		"@158883943301358 e de novo @158883943301358": "158883943301358",
+		"o que acha desse, @100000000000001 ?":        "100000000000001",
+		"@100000000000001 @5511888888888":             "100000000000001,5511888888888",
+		"@100000000000001 e de novo @100000000000001": "100000000000001",
 		"nothing here":          "",
 		"mail@example.com":      "", // no digits after the @
 		"@123":                  "", // too short to be a number
@@ -126,7 +126,7 @@ func TestMigrateMentionsBackfill(t *testing.T) {
 	const chat = "120363000000000000@g.us"
 	seedLegacyRow(t, db, `INSERT INTO chats (jid, name) VALUES (?, 'Team')`, chat)
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-		VALUES ('OLD1', ?, 's', 'Lucas chegou! @158883943301358', '2026-08-08 12:00:00+00:00', 0)`, chat)
+		VALUES ('OLD1', ?, 's', 'Alice chegou! @100000000000001', '2026-08-08 12:00:00+00:00', 0)`, chat)
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		VALUES ('OLD2', ?, 's', 'bom dia a todos', '2026-08-08 12:01:00+00:00', 0)`, chat)
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
@@ -139,7 +139,7 @@ func TestMigrateMentionsBackfill(t *testing.T) {
 	}
 
 	for id, want := range map[string]string{
-		"OLD1": "158883943301358",
+		"OLD1": "100000000000001",
 		"OLD2": "",
 		"OLD3": "",
 		"NEW1": "5511888888888",
@@ -168,11 +168,11 @@ func TestMigrateMentionsBackfill(t *testing.T) {
 		t.Errorf("second pass filled %d row(s) (err %v), want 0", filled, err)
 	}
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-		VALUES ('OLD4', ?, 's', 'e o @158883943301358 ?', '2026-08-08 12:04:00+00:00', 0)`, chat)
+		VALUES ('OLD4', ?, 's', 'e o @100000000000001 ?', '2026-08-08 12:04:00+00:00', 0)`, chat)
 	if err := migrateMentionsBackfill(db); err != nil {
 		t.Fatal(err)
 	}
-	if got := queryMentions(t, ms, "OLD4"); got != "158883943301358" {
+	if got := queryMentions(t, ms, "OLD4"); got != "100000000000001" {
 		t.Errorf("OLD4 mentions = %q after a later boot", got)
 	}
 }

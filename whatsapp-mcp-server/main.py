@@ -354,7 +354,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     anonymously has phone_number null and its LID in `lid`.
 
     `name` is what this account knows them by, `push_name` the name they gave
-    themselves, so someone saved as "Z Aa" is found by searching "Alena".
+    themselves, so someone saved as "Z Dave" is found by searching "Carol".
     `matched` names the field the query hit: "name" (the chat name this account
     stored), "full_name", "push_name", "first_name" or "business_name" (the
     phone-book fields behind `name`), or "jid". The three that are not returned
@@ -365,7 +365,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     attached: present it as "recorded as", never as "is".
 
     A phone number of seven digits or more may be typed any way
-    ("+55 (88) 98195-2753"): the `+`, spaces, dashes, dots and parentheses are
+    ("+55 (88) 97777-6666"): the `+`, spaces, dashes, dots and parentheses are
     ignored. A full Brazilian mobile
     (55 + area code + number) is found with or without the ninth digit after
     the area code, whichever of the two WhatsApp registered; `matched` is
@@ -405,9 +405,9 @@ def get_contact(identifier: str) -> dict[str, Any]:
     Args:
         identifier: Phone number, LID, or full JID. Examples:
                     - "12025551234" (phone number)
-                    - "35047067385985" (LID - numeric)
+                    - "10000000000005" (LID - numeric)
                     - "12025551234@s.whatsapp.net" (phone JID)
-                    - "184125298348272@lid" (LID JID)
+                    - "100000000000004@lid" (LID JID)
 
     Returns:
         Dictionary with jid, phone_number, lid, name, push_name, display_name,
@@ -484,7 +484,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
         resolved = display_name not in (jid, jid_user, identifier)
 
     # Echoing the identifier back as a name invents a contact called
-    # "117158134681735"; a LID nobody can name has none, unless the map gave us
+    # "100000000000003"; a LID nobody can name has none, unless the map gave us
     # the number behind it (what a phone identifier falls back to as well).
     # `display_name` still says who this is, the way message rows do.
     fallback_name = identity.phone if is_lid else jid_user
@@ -1298,8 +1298,8 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
 
     The number is matched whole, never as a fragment. A `+`, spaces, dashes,
     dots and parentheses are ignored, and a Brazilian mobile is found with or
-    without the ninth digit after the area code ("5588981952753" and
-    "558881952753" are one contact): the chat's `jid` says which spelling
+    without the ninth digit after the area code ("5588977776666" and
+    "558877776666" are one contact): the chat's `jid` says which spelling
     WhatsApp registered. When both spellings have a chat, the one asked for is
     returned (under an allow-list, the one it admits).
 

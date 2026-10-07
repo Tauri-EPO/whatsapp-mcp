@@ -360,13 +360,13 @@ func TestSendWebhookSerializesNativeMentionAndQuotedOrigin(t *testing.T) {
 	newTestWebhook().SendWebhook(
 		"123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false,
 		"quoted-id", "456@s.whatsapp.net", "[🤖] prior response",
-		quotedOrigin, []string{"491742555497@s.whatsapp.net"},
+		quotedOrigin, []string{"491510000001@s.whatsapp.net"},
 	)
 
 	if payload.QuotedIsFromMe == nil || !*payload.QuotedIsFromMe {
 		t.Fatalf("quotedIsFromMe = %v, want true", payload.QuotedIsFromMe)
 	}
-	if len(payload.MentionedJIDs) != 1 || payload.MentionedJIDs[0] != "491742555497@s.whatsapp.net" {
+	if len(payload.MentionedJIDs) != 1 || payload.MentionedJIDs[0] != "491510000001@s.whatsapp.net" {
 		t.Fatalf("mentionedJids = %#v", payload.MentionedJIDs)
 	}
 }
