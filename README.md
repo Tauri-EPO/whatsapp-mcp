@@ -100,7 +100,10 @@ from mcp.client.streamable_http import streamable_http_client
 
 transport = streamable_http_client(
     "https://box.tailnet.ts.net/mcp",
-    http_client=httpx2.AsyncClient(headers={"Authorization": "Bearer TOKEN"}),
+    http_client=httpx2.AsyncClient(headers={"Authorization": "Bearer TOKEN"}, timeout=120),
+    # read_media answers with one SSE event as large as the file it returns
+    # (up to ~22 MiB, docs/TOOLS.md); the SDK caps an event at 1 MiB by default.
+    max_sse_event_size=None,
 )
 async with Client(transport) as client:
     chats = await client.call_tool("list_chats", {"limit": 5})

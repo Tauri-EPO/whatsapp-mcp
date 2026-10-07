@@ -1239,6 +1239,29 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
 
+<a id="how-large-one-result-can-get"></a>**How large one result can get.** The whole answer is one JSON-RPC
+message, sent as a single `text/event-stream` event on the streamable-HTTP
+transport, so the largest result is the largest event a client must accept:
+
+| Call | Ceiling of the answer on the wire |
+|---|---|
+| `max_edge=0` on a JPEG/PNG/GIF/WebP (the stored bytes) | **~21.5 MiB**: 16 MiB of file (`MAX_IMAGE_BYTES`) as base64 |
+| `as_images=true` on a PDF | ~10.7 MiB: at most 8 MiB of rendered pages (`media_pdf.MAX_TOTAL_BYTES`) as base64, whatever `max_pages` (20 at most) |
+| audio, or any other file as a resource | ~2.7 MiB: 2 MiB (`MAX_BASE64_BYTES`) as base64 |
+| a downscaled image (the default) | a few hundred KiB to ~1 MiB at 1568 px, more with a larger `max_edge` |
+| `as_text=true`, or a text-ish file | text: 200 000 characters at most (`as_text`), 1 MB (text files) |
+
+Measured against this server (mcp 2.3.0, a local HTTP stack with a 12.7 MB photo
+and a six-page noise "scan"): `max_edge=0` came back as one 16.9 MB event, and
+`as_images` on the scan as 13 blocks of 7.8 MiB. A client that caps one event
+below those numbers (the Python SDK exposes it as `max_sse_event_size`, default
+1 MiB) must raise or remove the cap: the README example passes
+`max_sse_event_size=None`. In that run the SDK's default client did not refuse
+the 16.9 MB event, with the cap at its default, at 1 MiB or even at 100 KB, so
+the cap did not bite there; other clients, proxies that re-frame the stream, or
+a later SDK may, which is why the example removes it. `max_bytes` lowers any of
+these ceilings per call.
+
 The 16 MB in the first row is the size **of the file**, not of the answer: what
 travels is the downscaled copy. It covers TIFF, BMP and HEIC only on the path
 that converts them — with `max_edge=0`, or through `resources/read`, those three
