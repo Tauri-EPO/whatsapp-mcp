@@ -91,8 +91,8 @@ list_messages(exclude_chat_jid="120363000000000009@g.us", after="2026-09-07")
 Rules:
 
 - **A list is an array, never a joined string.** `chat_jid="a@s.whatsapp.net,b@g.us"` is refused with `invalid_argument` naming the list form. It used to return an empty page, which reads as "nothing happened in those chats" (issue #289).
-- **Both spellings of a conversation match.** A direct chat is stored under the phone JID or under the same person's `@lid` depending on when the row was written, so either form — or the bare phone number — finds it, in `chat_jid` and in `exclude_chat_jid` alike.
-- **`WHATSAPP_ALLOWED_CHATS` applies to every entry.** One chat outside the allow-list refuses the whole call with `denied`, naming it, instead of quietly answering for the rest. Exclusions are not checked: leaving out a chat the server cannot read is a no-op. The allow-list itself matches JIDs literally — it does not expand phone ↔ `@lid` — so a restricted deployment should list both spellings of a direct chat it wants readable.
+- **Both spellings of a conversation match.** A direct chat is stored under the phone JID or under the same person's `@lid` depending on when the row was written, so either form — or the bare phone number — finds it, in `chat_jid` and in `exclude_chat_jid` alike. A Brazilian mobile also matches [with or without the ninth digit](#one-number-two-spellings).
+- **`WHATSAPP_ALLOWED_CHATS` applies to every entry.** One chat outside the allow-list refuses the whole call with `denied`, naming it, instead of quietly answering for the rest. Exclusions are not checked: leaving out a chat the server cannot read is a no-op. The allow-list itself matches JIDs literally — it does not expand phone ↔ `@lid` — so a restricted deployment should list both spellings of a direct chat it wants readable. The one equivalence a read applies is the ninth digit of a Brazilian mobile: an entry is refused only when the list names neither spelling, and the rows returned are still those of the chats the list names.
 - **An empty list is refused** (`chat_jid=[]` matches nothing); omit the argument to cover every allowed chat.
 - Exclusion wins: a JID in both lists is dropped.
 
@@ -565,6 +565,39 @@ landline, a partial number, a number without the `55` and a number from any
 other country are searched exactly as typed. Name searches are unaffected, and
 so is a short numeric query such as `1.5` or `(11)`.
 
+#### One number, two spellings
+
+The two spellings are one contact in the tools that look a contact or a
+conversation up, because they resolve it in one place: `get_contact`,
+`get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`,
+`get_last_interaction`, the `sender_jid` and `chat_jid` filters of
+`list_messages` and of the tools that share them (`message_stats`,
+`list_unread`, `list_unanswered`, `list_media`, `export_messages`), and the
+`query` of `list_chats`. Ask with `5511999990001` or with `551199990001` and
+the answer is the same rows; each row carries the JID it is stored under.
+
+Only `search_contacts`, `get_direct_chat_by_contact` and `list_chats(query=…)`
+also accept the number typed with its separators. Everywhere else it is the
+digits, bare or as a JID (`get_chat` takes a JID, as it always did).
+
+What is not covered:
+
+- A number without the `55`, a landline, a number from any other country, and a
+  LID (it has one spelling).
+- The tools that work on one message or one stored row and take its `chat_jid`:
+  `get_message_context`, `read_media`, `download_media`, `transcribe_audio`,
+  `get_poll_results` and the like. Pass the `chat_jid` the row came with.
+- Notes and triage marks (`annotate`, `get_notes`, `mark_handled`, `snooze`):
+  they are kept under the JID given, so use the stored spelling, the `jid` on
+  the chat or contact row.
+- The tools that act on WhatsApp (`send_message` and the rest) pass the
+  recipient to the bridge as given.
+
+Under [`WHATSAPP_ALLOWED_CHATS`](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch)
+a read is refused with `denied` only when the list names neither spelling. When
+it names one, the rows returned are those of the chats the list names and
+nothing else; the write tools still compare the recipient literally.
+
 **Natural Language Examples:**
 
 - "Find contacts named John"
@@ -579,6 +612,7 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 - `identifier` (required): Phone number, LID, or full JID
   - Examples: `12025551234`, `100000000000004`, `12025551234@s.whatsapp.net`, `100000000000004@lid`
+  - A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings): `jid` and `phone_number` report the spelling the archive holds, `identifier` echoes what was asked
 
 Returns `jid`, `phone_number`, `lid`, `name`, `push_name`, `display_name`,
 `is_lid` and `resolved`. `name` is what this account knows them by and
@@ -2093,7 +2127,7 @@ Get specific chat metadata by JID.
 
 **Parameters:**
 
-- `chat_jid` (required): Chat JID
+- `chat_jid` (required): Chat JID. A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings); the row's `jid` is the stored spelling, and the JID as given wins when both have a chat
 - `include_last_message` (optional): Include `last_message` / `last_sender` (default `true`)
 - `fields`, `omit_nulls`, `max_content_chars` (optional): as in `list_chats`, applied to the single row
 
@@ -2122,7 +2156,7 @@ see whether the same conversation is also running in a group you share.
 
 **Parameters:**
 
-- `contact_jid` (required): The contact's JID or phone number
+- `contact_jid` (required): The contact's JID or phone number ([either spelling](#one-number-two-spellings) of a Brazilian mobile)
 - `limit` (optional): Chats per page (default 20, max 200)
 - `page` (optional): Page number (default 0); ignored when `cursor` is set
 - `cursor` (optional): `next_cursor` from the previous page
@@ -2167,7 +2201,7 @@ Get the last message exchanged with a contact.
 
 **Parameters:**
 
-- `contact_jid` (required): The contact's JID or phone number
+- `contact_jid` (required): The contact's JID or phone number ([either spelling](#one-number-two-spellings) of a Brazilian mobile). The contact's own chat is searched under every spelling, so the answer can be a message this account sent
 
 ### `list_group_members`
 

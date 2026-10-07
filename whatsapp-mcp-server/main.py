@@ -155,6 +155,12 @@ from whatsapp import (
     message_stats as whatsapp_message_stats,
 )
 from whatsapp import (
+    other_phone_spelling as whatsapp_other_phone_spelling,
+)
+from whatsapp import (
+    phone_book_spelling as whatsapp_phone_book_spelling,
+)
+from whatsapp import (
     purge_media as whatsapp_purge_media,
 )
 from whatsapp import (
@@ -402,6 +408,10 @@ def get_contact(identifier: str) -> dict[str, Any]:
     contact gave themselves, a cached snapshot with no date attached — present
     it as "recorded as", never as "is".
 
+    A Brazilian mobile is found with or without the ninth digit after the area
+    code: `jid` and `phone_number` report the spelling the archive holds, and
+    `identifier` echoes what was asked.
+
     Args:
         identifier: Phone number, LID, or full JID. Examples:
                     - "12025551234" (phone number)
@@ -457,12 +467,23 @@ def get_contact(identifier: str) -> dict[str, Any]:
     if bare_numeric_digits:
         candidates.append(f"{bare_numeric_digits}@lid")
 
+    # A Brazilian mobile has a second spelling, with or without the ninth
+    # digit (issue #475), and the store holds the one WhatsApp registered:
+    # get_chat finds the chat under either, and a contact with no chat of its
+    # own is still known to the phone book under one of them.
+    other_spelling = whatsapp_other_phone_spelling(jid)
+
     chat = None
     for candidate_jid in candidates:
         chat = whatsapp_get_chat(candidate_jid, include_last_message=False)
         if chat:
             jid = candidate_jid
+            if other_spelling and chat["jid"] == other_spelling:
+                jid = other_spelling
             break
+
+    if chat is None:
+        jid = whatsapp_phone_book_spelling(jid)
 
     if chat is None and bare_numeric_digits and unknown_lid_digits(bare_numeric_digits):
         # Nothing here has ever seen this number: no chat under either
@@ -634,12 +655,14 @@ def list_messages(
                (e.g., "2026-01-01" or "2026-01-01T09:00:00")
         before: ISO-8601 upper bound, same convention (e.g., "2026-01-09T18:00:00")
         sender_jid: Only messages from this sender: phone number with country code
-               ("12025551234") or JID ("12025551234@s.whatsapp.net")
+               ("12025551234") or JID ("12025551234@s.whatsapp.net"). A Brazilian
+               mobile matches with or without the ninth digit
         chat_jid: One chat, or a list of them: "12025551234@s.whatsapp.net", a group
                JID, or ["a@s.whatsapp.net", "120363...@g.us"] to read a hand-picked
                set in one call. Phone and @lid spellings of the same conversation
-               both match. Several JIDs joined into one string is an error, not an
-               empty page.
+               both match, and so do the two spellings of a Brazilian mobile (with
+               or without the ninth digit). Several JIDs joined into one string is
+               an error, not an empty page.
         exclude_chat_jid: Same shape, dropped from the result — the way to read
                everything except a few noisy chats
         query: Search term to filter messages by content. Accent-insensitive and
@@ -1202,7 +1225,9 @@ def list_chats(
     with fields / omit_nulls / max_content_chars, or ask for count_only first.
 
     Args:
-        query: Search term to filter chats by name or JID
+        query: Search term to filter chats by name or JID. A phone number may be
+               typed with its separators, and a full Brazilian mobile finds the
+               chat with or without the ninth digit (as in search_contacts)
         limit: Max chats to return (default 50, max 200)
         page: Page number for pagination (default 0); ignored when cursor is set
         cursor: next_cursor from the previous page
@@ -1270,7 +1295,8 @@ def get_chat(
     """Get WhatsApp chat metadata by JID.
 
     Args:
-        chat_jid: The JID of the chat to retrieve
+        chat_jid: The JID of the chat to retrieve. A Brazilian mobile is found with
+                  or without the ninth digit; the row's `jid` is the stored spelling
         include_last_message: Whether to include the last message (default True)
         fields: Keep only these keys on the row (same names as list_chats); an
                 unknown name is an error listing the valid ones
@@ -1338,7 +1364,8 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: 
     membership-only groups follow, most recently confirmed membership first.
 
     Args:
-        contact_jid: The contact's JID or phone number
+        contact_jid: The contact's JID or phone number (a Brazilian mobile with or
+                     without the ninth digit: both find the same chats)
         limit: Maximum number of chats to return (default 20, max 200)
         page: Page number for pagination (default 0)
         cursor: next_cursor from the previous page
@@ -1354,7 +1381,8 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
     Args:
-        contact_jid: The contact's JID or phone number
+        contact_jid: The contact's JID or phone number (a Brazilian mobile with or
+                     without the ninth digit: both find the same message)
 
     Returns:
         Message dictionary with id, timestamp, sender, content, etc. or empty dict if not found.

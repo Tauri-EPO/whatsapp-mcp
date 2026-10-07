@@ -96,10 +96,18 @@ def test_search_contacts_survives_broken_databases(paired_dbs, caplog):
 def test_sender_aliases_from_phone_lid_and_unknown(paired_dbs):
     assert whatsapp._sender_aliases(BOB_PN) == [BOB_PN, BOB, BOB_LID, f"{BOB_LID}@lid"]
     assert whatsapp._sender_aliases(f"{BOB_LID}@lid") == [BOB_PN, BOB, BOB_LID, f"{BOB_LID}@lid"]
+    assert whatsapp._sender_aliases("12025550100@s.whatsapp.net") == [
+        "12025550100",
+        "12025550100@s.whatsapp.net",
+        "12025550100@lid",
+    ]
+    # An unmapped Brazilian mobile also comes with its other spelling (issue #475).
     assert whatsapp._sender_aliases("5599999999999@s.whatsapp.net") == [
         "5599999999999",
         "5599999999999@s.whatsapp.net",
         "5599999999999@lid",
+        "559999999999",
+        "559999999999@s.whatsapp.net",
     ]
 
 

@@ -151,6 +151,15 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 
 - Bare numbers mean the direct chat with that number (`@s.whatsapp.net`).
 - `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
+- Entries are compared literally, with one exception, for reads only: a
+  Brazilian mobile is the same number with or without the ninth digit after
+  the area code (`5511999999999` and `551199999999`), and WhatsApp registers
+  the account under one of the two. A read tool given the spelling the list
+  does not name answers when the list names the other one, and is refused
+  with `denied` when it names neither. What it returns is still limited to the
+  chats the list names. Write tools and the bridge compare the recipient as
+  given: list the spelling the chat is stored under (`search_contacts` reports
+  it) for a contact the agent must be able to write to.
 - The MCP server filters `list_chats`, `list_messages`, `get_chat`,
   `get_message_context`, `get_direct_chat_by_contact`, `get_contact_chats` and
   `get_last_interaction`, and refuses `send_*`, `send_reaction`,
