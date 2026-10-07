@@ -156,7 +156,7 @@ class TestStoredSenderNamespace:
 class TestUnknownLidDigits:
     def test_only_the_ambiguous_lengths_qualify(self, paired_dbs):
         assert whatsapp.unknown_lid_digits(STATUS_LID) is True  # 15 digits, unknown
-        assert whatsapp.unknown_lid_digits("3504706738598") is False  # 13: a plausible number
+        assert whatsapp.unknown_lid_digits("1000000000000") is False  # 13: a plausible number
         assert whatsapp.unknown_lid_digits("1000000000000030") is False  # 16: already a LID
         assert whatsapp.unknown_lid_digits("10000000000005x") is False  # not digits
 

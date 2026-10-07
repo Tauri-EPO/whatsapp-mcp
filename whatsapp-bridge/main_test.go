@@ -1056,7 +1056,7 @@ func TestMigrateLegacyLIDSendersToPhones_MissingWhatsAppDBIsNoOp(t *testing.T) {
 // where the participant JID is LID-only and the per-message SenderAlt is
 // empty. Resolution must come from the LID store.
 func TestHandleMessage_GroupParticipantLID_ResolvedViaStore(t *testing.T) {
-	groupJID := types.JID{User: "5511999990001-1400000000", Server: types.GroupServer}
+	groupJID := types.JID{User: "5511999990004-1400000000", Server: types.GroupServer}
 	participantLID := types.JID{User: "100000000000008", Server: types.HiddenUserServer}
 	participantPhone := types.JID{User: "31612345678", Server: types.DefaultUserServer}
 

@@ -62,7 +62,7 @@ def rostered(paired_dbs):
     with paired_dbs.messages() as c:
         c.executescript(GROUP_MEMBERS_SCHEMA)
         add_group(c, ALPHA, "Project Alpha", "2026-08-01 08:00:00")
-        add_group(c, BETA, "Project Alpha | Beta", "2026-08-02 08:00:00")
+        add_group(c, BETA, "Team Beta", "2026-08-02 08:00:00")
         spoke(c, FAMILY, BOB_PN, "F1")
         add_member(c, FAMILY, BOB_PN, phone=BOB_PN, is_admin=0, last_seen="2026-09-07 12:00:00")
         add_member(c, ALPHA, BOB_PN, phone=BOB_PN, is_admin=1, last_seen="2026-09-07 11:00:00")
@@ -245,7 +245,7 @@ def test_table_created_after_the_first_read_is_picked_up(paired_dbs):
     assert whatsapp.get_contact_chats_page(BOB, limit=50).items is not None
     with paired_dbs.messages() as c:
         c.executescript(GROUP_MEMBERS_SCHEMA)
-        add_group(c, BETA, "Project Alpha | Beta")
+        add_group(c, BETA, "Team Beta")
         add_member(c, BETA, BOB_PN, phone=BOB_PN)
     items = by_jid(whatsapp.get_contact_chats_page(BOB, limit=50).items)
     assert items[BETA]["membership"] == "member"

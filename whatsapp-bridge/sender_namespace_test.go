@@ -35,7 +35,7 @@ func TestSplitSenderJID(t *testing.T) {
 		{"hosted phone JID", "11234567890@hosted", "11234567890", "s.whatsapp.net"},
 		{"hosted lid JID", "100000000000002@hosted.lid", "100000000000002", "lid"},
 		{"bare user", "11234567890", "11234567890", nil},
-		{"group JID", "5511999990001-1400000000@g.us", "5511999990001-1400000000", nil},
+		{"group JID", "5511999990004-1400000000@g.us", "5511999990004-1400000000", nil},
 		{"broadcast JID", "status@broadcast", "status", nil},
 		{"empty", "", "", nil},
 	}
@@ -128,7 +128,7 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 // which writes through the prepared statement in store_batch.go.
 func TestBatchStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	ms := newTestMessageStore(t)
-	chat := "5511999990001-1400000000@g.us"
+	chat := "5511999990004-1400000000@g.us"
 
 	if err := ms.Batch(func(b *messageBatch) error {
 		return b.StoreMessage("H1", chat, "100000000000002@lid", "history", time.Now(), false,
@@ -241,7 +241,7 @@ func TestMigrateSenderNamespaces_ClassifiesLegacyRows(t *testing.T) {
 			('chat_lid',    '9988776655@lid',               '9988776655',      'known lid chat','2026-03-01 10:04:00+00:00', 0),
 			('long_lid',    'status@broadcast',             '100000000000002', 'unmapped lid',  '2026-03-01 10:05:00+00:00', 0),
 			('short_phone', 'status@broadcast',             '5511666666666',   'unknown phone', '2026-03-01 10:06:00+00:00', 0),
-			('group_user',  'status@broadcast',             '5511999990001-1400000000', 'group fallback', '2026-03-01 10:07:00+00:00', 0);
+			('group_user',  'status@broadcast',             '5511999990004-1400000000', 'group fallback', '2026-03-01 10:07:00+00:00', 0);
 	`); err != nil {
 		t.Fatalf("seed message store: %v", err)
 	}

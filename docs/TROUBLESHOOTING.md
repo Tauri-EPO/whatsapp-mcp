@@ -115,7 +115,7 @@ the next start picks the change up and stops warning.
 
   ```bash
   docker logout ghcr.io                        # drop the stale credential
-  cd /etc/komodo/stacks/<stack>                # wherever the stack lives
+  cd /path/to/stack                            # wherever the stack lives
   docker compose pull                          # anonymous pull; public package
   ```
 
