@@ -1371,47 +1371,75 @@ def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = Fals
     """
 
 
-def _sender_aliases(value: str) -> list[str]:
-    hit, cached = _cache_get("aliases", value)
+def _sender_aliases(value: str, both_spellings: bool = True) -> list[str]:
+    key = value if both_spellings else f"{value}|one"
+    hit, cached = _cache_get("aliases", key)
     if hit:
         return list(cached)
-    return list(_cache_put("aliases", value, _sender_aliases_uncached(value)))
+    return list(_cache_put("aliases", key, _sender_aliases_uncached(value, both_spellings)))
 
 
-def _sender_aliases_uncached(value: str) -> list[str]:
+def _sender_aliases_uncached(value: str, both_spellings: bool = True) -> list[str]:
     # messages.sender is written inconsistently: the same contact may appear as
     # bare phone ("12025550101"), full phone JID ("12025550101@s.whatsapp.net"),
     # bare LID ("100000000000006"), or full LID JID ("100000000000006@lid").
     # whatsmeow_lid_map (whatsapp.db) maps pn<->lid; we emit all four forms so
     # an IN-based filter catches every row regardless of which form was stored.
-    bare = value.split("@", 1)[0]
-    pn: str | None = None
-    lid: str | None = None
+    #
+    # A Brazilian mobile has a second spelling, with or without the ninth digit
+    # (issue #475, `phone.py`), and WhatsApp registered only one of them: the
+    # map is asked for both and both are emitted, so every tool that resolves
+    # a contact through here finds it whichever way the number was written, and
+    # whichever identifier named the contact. The digits are taken as given: no
+    # separator is dropped here, this set also decides what a filter reads.
+    # `both_spellings=False` is the answer from before the second spelling, for
+    # the callers that key their own rows by the JID (notes.py).
+    bare, _, server = value.partition("@")
+
+    def spellings_of(number: str) -> list[str]:
+        other = br_mobile_alternate(number) if both_spellings else None
+        return [number, other] if other else [number]
+
+    # A LID is not a phone number: only the number the map gives for it has
+    # a second spelling.
+    numbers = [] if server == LID_SERVER else spellings_of(bare)
+    lids: dict[str, str] = {}  # number -> the LID the map pairs it with
     if os.path.isfile(WHATSMEOW_DB_PATH):
         try:
             conn = _connect_whatsmeow_db()
             try:
-                row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)).fetchone()
-                if row:
-                    pn, lid = bare, row[0]
-                else:
+
+                def lids_of(candidates: list[str]) -> dict[str, str]:
+                    found: dict[str, str] = {}
+                    for number in candidates:
+                        row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (number,)).fetchone()
+                        if row:
+                            found[number] = row[0]
+                    return found
+
+                lids = lids_of(numbers)
+                if not lids:
                     row = conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)).fetchone()
                     if row:
-                        lid, pn = bare, row[0]
+                        # Every spelling is asked, not the first that answers:
+                        # the set must not depend on which one was typed.
+                        numbers = spellings_of(row[0])
+                        lids = {row[0]: bare, **lids_of(numbers[1:])}
             finally:
                 conn.close()
         except sqlite3.Error:
             pass
 
     aliases: list[str] = []
-    if pn:
-        aliases += [pn, f"{pn}@s.whatsapp.net"]
-    if lid:
-        aliases += [lid, f"{lid}@lid"]
+    for number in numbers:
+        if number in lids:
+            aliases += [number, f"{number}@s.whatsapp.net", lids[number], f"{lids[number]}@lid"]
     if not aliases:
         # No mapping found; emit the bare form plus both possible suffixes so
         # we still match whichever form the bridge happened to store.
         aliases = [bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
+    for number in numbers:
+        aliases += [alias for alias in (number, f"{number}@s.whatsapp.net") if alias not in aliases]
     return aliases
 
 
@@ -1697,6 +1725,18 @@ class ChatTwins:
             listed
             for listed, twin in self.by_listed.items()
             if (twin.name and needle in twin.name.casefold()) or needle in twin.absorbed.casefold()
+        )
+
+    def absorbing(self, spelling: str) -> list[str]:
+        """Listing rows whose hidden twin is stored under this number.
+
+        A JID is compared whole, digits as a substring: the two extra shapes a
+        `list_chats` query takes when it is a phone number (`_jid_search_patterns`).
+        """
+        return sorted(
+            listed
+            for listed, twin in self.by_listed.items()
+            if (twin.absorbed == spelling if "@" in spelling else spelling in twin.absorbed)
         )
 
     def cte(self, name: str = "chat_twin") -> tuple[str, list[str]]:
@@ -2110,8 +2150,9 @@ def _chat_jid_aliases(jid: str) -> list[str]:
     if f"@{server}" not in DIRECT_JID_SUFFIXES:
         return [normalized]
     # _sender_aliases also emits the bare user forms, which the chat_jid column
-    # never holds; keep the JIDs.
-    return [alias for alias in _sender_aliases(user) if "@" in alias]
+    # never holds; keep the JIDs. It is given the whole JID: only a phone JID
+    # has a second spelling (issue #475), a LID never does.
+    return [alias for alias in _sender_aliases(normalized) if "@" in alias]
 
 
 def chat_jid_filter(
@@ -2141,7 +2182,7 @@ def chat_jid_filter(
                 f'pass {argument}=["a@s.whatsapp.net", "b@g.us"] (got {entry!r})',
             )
         if require_allowed:
-            _require_allowed(entry)
+            _require_readable(entry)
         for alias in _chat_jid_aliases(entry):
             if alias not in aliases:
                 aliases.append(alias)
@@ -3045,11 +3086,15 @@ def _chat_filter(query: str | None, twins: ChatTwins = NO_CHAT_TWINS) -> tuple[l
         # The searched name is the one the row shows (#379), so the status feed
         # answers to "Status updates" and not to the last poster's number.
         name = _chat_name_expr()
-        clause = f"instr(LOWER({name}), LOWER(?)) > 0 OR instr({name}, ?) > 0 OR chats.jid LIKE ?"
-        params.extend([query, query, f"%{query}%"])
+        jid_patterns, other_spellings = _jid_search_patterns(query)
+        clause = f"instr(LOWER({name}), LOWER(?)) > 0 OR instr({name}, ?) > 0 OR {_like_any('chats.jid', jid_patterns)}"
+        params.extend([query, query, *jid_patterns])
         # A merged row answers to its twin's name and spelling too, and those
         # are folded in only after this runs.
-        if matched := twins.matching(query):
+        matched = set(twins.matching(query))
+        for spelling in other_spellings:
+            matched.update(twins.absorbing(spelling))
+        if matched := sorted(matched):
             clause = f"{clause} OR {_chat_jid_clause('chats.jid', matched)}"
             params.extend(matched)
         clauses.append(f"({clause})")
@@ -3273,6 +3318,60 @@ def _phone_spellings(value: str) -> tuple[str | None, str | None]:
     return digits, f"{alternate}@{DEFAULT_USER_SERVER}" if alternate else None
 
 
+def other_phone_spelling(jid: str) -> str | None:
+    """The phone JID of a Brazilian mobile's other spelling, or None.
+
+    Strict where `_phone_spellings` is tolerant: the input is a phone JID or
+    bare digits, written the way a stored JID or an allow-list entry is. No
+    separator is dropped, because this one also decides who may read
+    (`_require_readable`): a formatted number must not be admitted or refused
+    depending on which spelling the list happens to name.
+    """
+    user, _, server = normalize_chat_entry(jid).rpartition("@")
+    if server != DEFAULT_USER_SERVER:
+        return None
+    alternate = br_mobile_alternate(user)
+    return f"{alternate}@{DEFAULT_USER_SERVER}" if alternate else None
+
+
+def phone_book_spelling(jid: str) -> str:
+    """The spelling of a Brazilian mobile to answer about when it has no chat of its own.
+
+    The phone book knows one spelling only, so the one it can name wins. The
+    name lookup carries no allow-list clause of its own, which makes this the
+    place that keeps it honest: a spelling the list does not name is never
+    looked up, and a contact admitted through its other spelling
+    (`_require_readable`) is answered about under the spelling the list names.
+    """
+    other = other_phone_spelling(jid)
+    if other is None or not CHAT_POLICY.allows(other):
+        return jid
+    if not CHAT_POLICY.allows(jid):
+        return other
+    if get_sender_name(jid) == jid and get_sender_name(other) != other:
+        return other
+    return jid
+
+
+def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
+    """The LIKE patterns a search binds against a JID column, and what the extra ones stand for.
+
+    The query as a substring, as before. A query that is a phone number also
+    matches with its separators dropped, and a Brazilian mobile under its
+    other spelling (issue #444): that one as the whole phone JID, never as a
+    substring of somebody else's. The second list holds those extra spellings,
+    for a caller that reports which field matched.
+    """
+    patterns = ["%" + query + "%"]
+    digits, alternate = _phone_spellings(query)
+    typed_digits = digits if digits and digits != query and "@" not in query else None
+    if typed_digits:
+        patterns.append("%" + typed_digits + "%")
+    if alternate:
+        patterns.append(alternate)
+    return patterns, [spelling for spelling in (typed_digits, alternate) if spelling]
+
+
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
@@ -3296,17 +3395,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     found: list[tuple[str, str | None, str | None, list[tuple[str, str | None]]]] = []
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
-    jid_patterns = ["%" + query + "%"]
-    # A query that is a phone number also matches with its separators dropped,
-    # and a Brazilian mobile under its other spelling (issue #444): that one as
-    # the whole phone JID, never as a substring of somebody else's.
-    digits, alternate = _phone_spellings(query)
-    typed_digits = digits if digits and digits != query and "@" not in query else None
-    other_spellings = [spelling for spelling in (typed_digits, alternate) if spelling]
-    if typed_digits:
-        jid_patterns.append("%" + typed_digits + "%")
-    if alternate:
-        jid_patterns.append(alternate)
+    jid_patterns, other_spellings = _jid_search_patterns(query)
 
     # 1) Search messages.db chats table (existing behavior)
     try:
@@ -3648,22 +3737,27 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
 
         aliases = _sender_aliases(jid)
         placeholders = ",".join("?" * len(aliases))
+        # The contact's own chat under every spelling a chat_jid filter would
+        # bind, not only the one typed: what this account sent there has no
+        # sender to match on. A group JID stays itself.
+        chats = list(dict.fromkeys([jid, *_chat_jid_aliases(jid)]))
         cursor.execute(
             f"""
             SELECT {message_columns(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE (messages.sender IN ({placeholders}) OR chats.jid = ?) AND {policy_clause}
+            WHERE (messages.sender IN ({placeholders}) OR {_chat_jid_clause("chats.jid", chats)})
+              AND {policy_clause}
             ORDER BY messages.timestamp DESC
             LIMIT 1
         """,
-            (*aliases, jid, *policy_params),
+            (*aliases, *chats, *policy_params),
         )
 
         msg_data = cursor.fetchone()
 
         if not msg_data:
-            _require_allowed(jid)
+            _require_readable(jid)
             return None
 
         return msg_to_dict(_row_to_message(msg_data))
@@ -3676,20 +3770,32 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
             conn.close()
 
 
-def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any] | None:
+def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: bool = True) -> dict[str, Any] | None:
     """Get chat metadata by JID.
 
     Either spelling of a merged phone/LID pair (issue #337) returns the same
-    merged row, reported under the phone JID with both in `aliases`.
+    merged row, reported under the phone JID with both in `aliases`. A
+    Brazilian mobile is also found under its other spelling, with or without
+    the ninth digit (issue #475); the JID as given wins when both have a chat.
+    `both_spellings=False` is the literal lookup and the literal allow-list
+    check, for a caller on the way to a write.
 
     Returns:
         Chat dictionary or None if not found
     """
     try:
-        _require_allowed(chat_jid)
+        if both_spellings:
+            _require_readable(chat_jid)
+        else:
+            _require_allowed(chat_jid)
+        policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
-        twins = _chat_twins(cursor, only=[chat_jid])
+        # A chat is asked for by JID here; a bare number is not one.
+        alternate = other_phone_spelling(chat_jid) if both_spellings and "@" in chat_jid else None
+        lookups = [chat_jid, alternate] if alternate else [chat_jid]
+        twins = _chat_twins(cursor, only=lookups)
+        rows = [twins.listing_jid(jid) for jid in lookups]
 
         # See list_chats: the last message is always joined for is_from_me,
         # and the result tuple shape stays stable across the branch.
@@ -3709,10 +3815,12 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
                 m.id IS NOT NULL as has_messages
             FROM chats c
             {_last_message_join("c", "m")}
-            WHERE c.jid = ?
+            WHERE {_chat_jid_clause("c.jid", rows)} AND {policy_clause}
+            ORDER BY CASE WHEN c.jid = ? THEN 0 ELSE 1 END
+            LIMIT 1
         """
 
-        cursor.execute(query, (twins.listing_jid(chat_jid),))
+        cursor.execute(query, (*rows, *policy_params, rows[0]))
         chat_data = cursor.fetchone()
 
         if not chat_data:
@@ -3900,13 +4008,33 @@ def _require_allowed(jid: str | None) -> None:
         raise ToolError("denied", denied)
 
 
+def _require_readable(jid: str | None) -> None:
+    """The allow-list check of every read that names a chat or a contact.
+
+    A Brazilian mobile has two spellings (`phone.py`) and the list names one of
+    them, so a read is refused only when it admits neither. That decides
+    whether to answer at all: what comes back is still limited to the stored
+    JIDs the list admits, by the SQL policy clause of each query. Writes keep
+    `_require_allowed`: the bridge decides which number a send reaches.
+    """
+    if CHAT_POLICY.allows(jid):
+        return
+    alternate = other_phone_spelling(jid or "")
+    if alternate is None or not CHAT_POLICY.allows(alternate):
+        raise ToolError("denied", CHAT_POLICY.denial_message(jid))
+
+
 DRY_RUN_MESSAGE = "Dry run: nothing was sent. Show this to the user and call again with dry_run=false to send."
 
 
 def _chat_name(jid: str) -> str | None:
-    """Best-effort display name for a dry-run preview; never fails the preview."""
+    """Best-effort display name for a dry-run preview; never fails the preview.
+
+    The chat stored under the recipient exactly as given: the bridge decides
+    which number a send reaches, so the preview must not name another row.
+    """
     try:
-        chat = get_chat(jid, include_last_message=False)
+        chat = get_chat(jid, include_last_message=False, both_spellings=False)
     except ToolError:
         return None
     return (chat or {}).get("name")

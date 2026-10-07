@@ -102,7 +102,10 @@ def _jid_spellings(jid: str) -> list[str]:
     if server not in _ALIASED_SERVERS or not user:
         return [raw]
     spellings = {raw}
-    for alias in whatsapp._sender_aliases(user):
+    # The LID map only. The second spelling of a Brazilian mobile (issue #475)
+    # is left out on purpose: a note is written under the JID given, so reading
+    # it under both would give one note two current values.
+    for alias in whatsapp._sender_aliases(user, both_spellings=False):
         # A different user part is what proves the map confirmed a pair. Its
         # fallback repeats the same digits under both servers, and reading a
         # LID's notes because a phone number happens to share its digits would
@@ -122,7 +125,7 @@ def _canonical_jid(jid: str) -> str:
     user, _, server = raw.rpartition("@")
     if server != "lid" or not user:
         return raw
-    for alias in whatsapp._sender_aliases(user):
+    for alias in whatsapp._sender_aliases(user, both_spellings=False):
         # A different user part means the LID map resolved this to a phone.
         if alias.endswith("@s.whatsapp.net") and alias.split("@", 1)[0] != user:
             return alias
