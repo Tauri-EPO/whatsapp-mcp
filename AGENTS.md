@@ -176,7 +176,7 @@ Rules that stay true across all steps:
   - `git reset --hard`, `git checkout <other-branch>` and `git clean` belong to the directory you created. Elsewhere they wipe uncommitted work that exists nowhere else.
   - The stash stack is shared across worktrees: tag your entries (`git stash push -u -m <tag>`) and restore them by hash (`git stash apply <sha>`). Bare `git stash pop` takes whatever another session pushed last.
   - Give a review subagent your worktree path as its target; it otherwise starts in the coordinator's checkout and reviews the wrong diff.
-  - Run the Docker-based Go gates (§5) one session at a time: every one of them mounts the same host Go module cache, and `go vet`/`go test` also share the `wamcp-gobuild` build-cache volume.
+  - Run the Docker-based Go gates (§5) one session at a time **with the default commands**: every one of them mounts the same host Go module cache, `go vet`/`go test` also share the `wamcp-gobuild` build-cache volume, and the gofmt check writes an LF copy of the tree. Sessions that run in parallel use the per-session variant in §5 instead (their own module-cache and build-cache volumes and their own LF directory), which shares none of the three.
   - After a crash, confirm the worktree still exists (`git worktree list`) before running anything in it.
 - **No new top-level dependencies** without a sentence of justification in the PR.
 - **Fake identifiers only.** The repository is public: examples, docstrings and fixtures use made-up phone numbers, JIDs, LIDs, names and hosts (`5511999999999`, `120363000000000001@g.us`, `example.ts.net`, Alice/Bob), never a value copied from a live archive. `whatsapp-mcp-server/tests/test_fake_identifiers.py` fails the Python job on a `55`-prefixed number, a user or group JID or a `*.ts.net` host that is not on its allow-list; a new fake is added there in the same PR (the failure does not print the value).
@@ -224,18 +224,32 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/p
   -w /src golangci/golangci-lint:v2.13.2 golangci-lint run
 ```
 
-**gofmt on Windows.** `golangci-lint run` fails on a file `gofmt` would rewrite (the `gofmt` formatter in `.golangci.yml`), and `gofmt` also rewrites line endings — so running it on this CRLF working copy reports every file and would commit whole-file churn. Check it on an LF copy of the tree instead, and apply what it reports with an editor, not with `gofmt -w` on the working copy:
+**gofmt on Windows.** `golangci-lint run` fails on a file `gofmt` would rewrite (the `gofmt` formatter in `.golangci.yml`), and `gofmt` also rewrites line endings — so running it on this CRLF working copy reports every file and would commit whole-file churn. Check it on an LF copy of the tree instead, and apply what it reports with an editor, not with `gofmt -w` on the working copy. The copy goes to a directory named after the worktree and is rebuilt from scratch on every run, so two worktrees side by side never share it and a file deleted or renamed in the branch cannot be linted from an earlier run:
 
 ```bash
-# LF export of HEAD into a directory Docker Desktop can mount (not /tmp)
-LF=../lf-check && mkdir -p "$LF"
-git -c core.autocrlf=false -c core.eol=lf archive --format=tar HEAD whatsapp-bridge | tar -x -C "$LF"
-# with uncommitted work, copy the tracked files and strip the CRs instead:
-# git ls-files -z whatsapp-bridge | while IFS= read -r -d '' f; do
-#   mkdir -p "$LF/$(dirname "$f")" && tr -d '\r' < "$f" > "$LF/$f"; done
+# LF copy of the working tree (committed, modified and new-but-untracked files; .gitignore respected),
+# in a directory Docker Desktop can mount (not /tmp), one per worktree
+LF="../lf-check-$(basename "$PWD")" && rm -rf "$LF" && mkdir -p "$LF"
+git ls-files -z --cached --others --exclude-standard whatsapp-bridge | while IFS= read -r -d '' f; do
+  [ -e "$f" ] && mkdir -p "$LF/$(dirname "$f")" && tr -d '\r' < "$f" > "$LF/$f"; done
 MSYS_NO_PATHCONV=1 docker run --rm -v "$(cd "$LF" && pwd -W)/whatsapp-bridge:/src" \
   -w /src golang:1.27-alpine gofmt -s -l .
 ```
+
+(`[ -e "$f" ]` skips a tracked file you deleted and have not committed yet. To check exactly what is committed, use `git -c core.autocrlf=false -c core.eol=lf archive --format=tar HEAD whatsapp-bridge | tar -x -C "$LF"` instead of the loop.)
+
+**Several sessions at once.** The commands above share the host module cache and the `wamcp-gobuild` volume, so two sessions at the same time would write the same cache. Give each session its own volumes and its own LF directory (the lane or branch name in them) and nothing is shared:
+
+```bash
+S=mylane   # any name unique to this session
+docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "wamcp-gomod-$S:/go/pkg/mod" \
+  -v "wamcp-gobuild-$S:/root/.cache/go-build" -w /src golang:1.27-alpine \
+  sh -c 'go vet ./... && go test ./...'
+# the -race run and golangci-lint take the same two -v options in place of the host cache
+# and the shared build volume; run golangci-lint on the LF copy above, not on the CRLF tree
+```
+
+The price is a cold module download the first time a session uses its volumes; remove them when the session ends (`docker volume rm "wamcp-gomod-$S" "wamcp-gobuild-$S"`).
 
 `-s` matters: golangci-lint's `gofmt` formatter simplifies by default, so a plain `gofmt -l` can be silent on a file the Go Build job rejects.
 
