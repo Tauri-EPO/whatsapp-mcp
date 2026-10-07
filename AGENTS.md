@@ -252,7 +252,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every module in `py-modules` imports inside the image (the arm64 bridge has the next row) |
-| Bridge arm64 (QEMU) | the arm64 bridge image starts under QEMU and reports the FTS state; the whole Go test suite runs as an arm64 binary in that image (about 7 minutes cold, parallel to the other jobs); QEMU actions are on the allowed list (`docker/setup-qemu-action`) |
+| Bridge arm64 (QEMU) | the arm64 bridge image starts under QEMU and reports the FTS state; the whole Go test suite runs as an arm64 binary in that image (about 10 minutes cold, parallel to the other jobs; the image build compiles under emulation); QEMU actions are on the allowed list (`docker/setup-qemu-action`) |
 
 `publish.yml` pushes the `main` and `sha-<7>` images to GHCR on every merge to `main` except the release commit (§4); `release.yml` (release-please) maintains the release PR and, when it merges, builds that commit once and tags it `vX.Y.Z` / `X.Y` / `latest` / `main` / `sha-<7>` through the reusable `build-push.yml`; `release-cut.yml` merges that PR once a day. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 

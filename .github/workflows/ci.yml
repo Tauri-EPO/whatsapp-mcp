@@ -84,7 +84,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Build bridge image
         uses: docker/build-push-action@v7
@@ -159,9 +158,10 @@ jobs:
     # carries architecture-specific generated libc code that nothing else here
     # runs on arm64 (issue #470). This job builds the image, starts it under
     # QEMU like the amd64 smoke, and runs the whole Go test suite as an arm64
-    # binary in that image. Expect about four to six minutes, in parallel with
-    # the other jobs.
+    # binary in that image. About ten minutes on a cold cache (the image build
+    # compiles under emulation), in parallel with the other jobs.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
@@ -188,15 +188,32 @@ jobs:
       - name: Smoke test the arm64 image
         run: |
           # A silent fallback to amd64 would make everything below prove nothing.
+          image_arch=$(docker image inspect --format '{{.Architecture}}' whatsapp-mcp-bridge:ci-arm64)
+          [ "$image_arch" = "arm64" ] || { echo "image is '$image_arch', expected arm64"; exit 1; }
           arch=$(docker run --rm --platform linux/arm64 --entrypoint uname whatsapp-mcp-bridge:ci-arm64 -m)
           [ "$arch" = "aarch64" ] || { echo "image runs as '$arch', expected aarch64"; exit 1; }
-          # Same check as the amd64 smoke: the binary starts, creates the store, reports the FTS state.
-          docker run --rm --platform linux/arm64 --entrypoint sh whatsapp-mcp-bridge:ci-arm64 -c 'cd /tmp && mkdir -p store && (timeout 30 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); cat /tmp/out; grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
+          # Same check as the amd64 smoke: the binary starts, creates the store, reports the
+          # FTS state. Poll for the line (QEMU start-up speed varies) instead of a fixed wait.
+          docker run --rm --platform linux/arm64 --entrypoint sh whatsapp-mcp-bridge:ci-arm64 -c '
+            cd /tmp && mkdir -p store
+            timeout 120 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 &
+            pid=$!
+            for i in $(seq 120); do
+              grep -qE "Full-text search index|SQLite built without FTS5" /tmp/out && break
+              sleep 1
+            done
+            kill $pid 2>/dev/null; wait $pid 2>/dev/null
+            cat /tmp/out
+            grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
       - name: Go tests as an arm64 binary
         run: |
           # Compiled natively (CGO_ENABLED=0 cross-compiles), executed under QEMU in
           # the arm64 image, which has tzdata for the zone the tests ask for.
           cd whatsapp-bridge
           CGO_ENABLED=0 GOARCH=arm64 go test -c -o "$RUNNER_TEMP/bridge-arm64.test" .
-          docker run --rm --platform linux/arm64 --entrypoint /t/bridge-arm64.test \
-            -v "$RUNNER_TEMP:/t:ro" -v "$PWD:/src:ro" -w /src whatsapp-mcp-bridge:ci-arm64
+          # `env -i` drops the image's own ENV (store dir, media roots, port): the tests
+          # must see what they see on the amd64 runner. The source is mounted writable,
+          # like the checkout `go test` runs in there, as the same user.
+          docker run --rm --platform linux/arm64 --user "$(id -u):$(id -g)" --entrypoint env \
+            -v "$RUNNER_TEMP:/t:ro" -v "$PWD:/src" -w /src whatsapp-mcp-bridge:ci-arm64 \
+            -i PATH=/usr/bin:/bin HOME=/tmp /t/bridge-arm64.test -test.timeout=25m
