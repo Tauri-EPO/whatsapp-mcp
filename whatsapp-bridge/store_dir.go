@@ -176,6 +176,17 @@ func boundPool(db *sql.DB, conns int) {
 	db.SetMaxIdleConns(conns)
 }
 
+// openSessionDB opens whatsmeow's session database (whatsapp.db) with its pool
+// bounded; main hands it to sqlstore.NewWithDB.
+func openSessionDB() (*sql.DB, error) {
+	db, err := sql.Open("sqlite", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions))
+	if err != nil {
+		return nil, err
+	}
+	boundPool(db, sessionPoolConns)
+	return db, nil
+}
+
 func whatsmeowDBPath() string  { return storePath("whatsapp.db") }
 func messagesDBPath() string   { return storePath("messages.db") }
 func tokenFilePath() string    { return storePath(".bridge-token") }

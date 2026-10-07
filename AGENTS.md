@@ -75,7 +75,7 @@ whatsapp-mcp/
 │   ├── chat_actions.go         # /api/react, /api/typing
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
-│   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution
+│   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution; DSN options and connection-pool bounds (boundPool)
 │   ├── store_batch.go          # one transaction per conversation for the history-sync backfill
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text
@@ -336,6 +336,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 14. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.
 15. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 16. **One timestamp spelling.** Every TIMESTAMP column the bridge writes holds `YYYY-MM-DD HH:MM:SS+00:00` (UTC, seconds, fixed width) — `dbTime()` in `store_time.go`, never a bound `time.Time`, or the driver stamps the machine's local offset and `ORDER BY timestamp` starts sorting by wall clock. Read with `parseDBTime` / `anchorTime`, which also accept the legacy spellings. A new time column goes in `canonicalTimeColumns` (and bumps `messagesDBUserVersion` so the rewrite runs again). Bounds compared against such a column must be rendered the same way on both sides.
+17. **Every database handle has a pool bound.** `database/sql` opens one connection per concurrent goroutine unless told not to, and SQLite has one WAL writer, so extra connections cost memory and `SQLITE_BUSY` (issue #471). Each production `sql.Open` is followed by `boundPool` (`store_dir.go`: 4 for `messages.db` and the whatsmeow session store, 2 for the read-only contacts handle; `store_pool_test.go` scans for a missing call). A rows cursor held while the loop writes needs a second connection, a cursor plus a transaction a third in the worst case: drain a cursor before opening a transaction, and keep a cursor from living across a slow callback.
 
 ## 9. Where to make changes
 
