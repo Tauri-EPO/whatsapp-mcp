@@ -2408,9 +2408,10 @@ def read_media(
 
     Returns:
         A list of content blocks: the file (or its text, or its pages), then the JSON
-        metadata block, which carries `pages_total` and `truncated` with as_text, and
-        those plus `first_page`, `pages_rendered`, `image_bytes` and (for a page the
-        renderer could not draw) `pages_failed` with as_images.
+        metadata block, which carries `pages_total` and `truncated` with as_text (plus
+        `pages_failed` for PDF pages whose text could not be extracted; read those
+        with as_images), and those plus `first_page`, `pages_rendered`, `image_bytes`
+        and (for a page the renderer could not draw) `pages_failed` with as_images.
     """
     return media_read_bytes(
         chat_jid,

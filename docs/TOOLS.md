@@ -1284,6 +1284,20 @@ The metadata block then also carries `pages_total` (pages, tables or sheets the
 document really has) and `truncated` (`max_pages`, 500 rows per sheet, or the
 200 000-character ceiling on the whole answer cut it short).
 
+**A page the parser refuses does not cost the others.** A PDF is extracted page
+by page. If one page raises (pypdf 6.18+ refuses a font whose `/Widths` list is
+oversized, and a stream that trips its recovery limit), the other pages are
+returned as usual, the metadata block gains
+`pages_failed: [2]` (the name `as_images` uses for pages it could not draw), and
+a closing note names each page with its exception class — class only, never text
+from the file; past 20 pages it says how many more — and says those pages can be
+read with
+[`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures)
+(`first_page=<the first failing page>` is spelled out). `pages_total` still
+counts every page. `pages_failed` is absent when every page extracted. When *every* page that
+was attempted fails the call is one `invalid_argument` error that names
+`as_images=true` instead.
+
 **There is no OCR.** A scanned PDF has no text layer, and the answer says so in
 as many words instead of coming back empty — and names
 [`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures), which reads it

@@ -181,6 +181,83 @@ class TestPdf:
         assert _meta(blocks)["truncated"] is True
         assert sum(len(text) for text in _texts(blocks)) <= 40
 
+    @staticmethod
+    def _failing_pages(monkeypatch, failing: set[int]):
+        """pypdf raising from extract_text() on the given 0-based pages, as 6.18.1+ does
+        for a font with an oversized /Widths. The message quotes document text on
+        purpose: it must never reach the result."""
+        from pypdf import PageObject
+        from pypdf.errors import LimitReachedError
+
+        real = PageObject.extract_text
+
+        def extract_text(self, *args, **kwargs):
+            if self.page_number in failing:
+                raise LimitReachedError("fake-secret-text quoted by the parser")
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(PageObject, "extract_text", extract_text)
+
+    def test_one_unreadable_page_does_not_fail_the_document(self, documents, monkeypatch):
+        self._failing_pages(monkeypatch, {1})
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True)
+        meta = _meta(blocks)
+        pages = _texts(blocks)
+        assert "Laudo do paciente" in pages[0] and pages[0].startswith("--- page 1 of 3 ---")
+        assert "Terceira" in pages[1] and pages[1].startswith("--- page 3 of 3 ---")
+        assert meta["pages_total"] == 3 and meta["truncated"] is False
+        assert meta["pages_failed"] == [2]
+        note = pages[2]
+        assert "2 (LimitReachedError)" in note and "as_images=true, first_page=2" in note
+        assert "fake-secret-text" not in json.dumps([block.model_dump() for block in blocks])
+
+    def test_a_healthy_pdf_reports_no_failed_pages(self, documents):
+        meta = _meta(media_read.read_media(ALICE, "PDF1", as_text=True))
+        assert "pages_failed" not in meta
+
+    def test_pages_past_max_pages_are_not_attempted(self, documents, monkeypatch):
+        self._failing_pages(monkeypatch, {2})
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True, max_pages=2)
+        assert "pages_failed" not in _meta(blocks) and len(_texts(blocks)) == 2
+
+    def test_a_document_where_every_page_fails_names_as_images(self, documents, monkeypatch):
+        self._failing_pages(monkeypatch, {0, 1, 2})
+        with pytest.raises(ToolError) as exc:
+            media_read.read_media(ALICE, "PDF1", as_text=True)
+        assert exc.value.code == "invalid_argument"
+        assert "as_images=true" in exc.value.message and "LimitReachedError" in exc.value.message
+        assert "fake-secret-text" not in exc.value.message
+
+    def test_unreadable_pages_are_not_mistaken_for_a_scan(self, documents, monkeypatch):
+        _cache("document_20260904_100000_PDF1.pdf", make_pdf(["", "x", ""]))
+        self._failing_pages(monkeypatch, {1})
+        note = _texts(media_read.read_media(ALICE, "PDF1", as_text=True))[0]
+        assert "OCR" not in note and "hold no text" in note and "2 (LimitReachedError)" in note
+
+    def test_unreadable_pages_do_not_hide_that_the_rest_was_not_read(self, documents, monkeypatch):
+        _cache("document_20260904_100000_PDF1.pdf", make_pdf(["", "x", "later"]))
+        self._failing_pages(monkeypatch, {1})
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True, max_pages=2)
+        assert "raise max_pages" in _texts(blocks)[0]
+
+    def test_a_long_list_of_failures_is_summarised_in_the_note(self, documents, monkeypatch):
+        count = media_text.MAX_UNREADABLE_LISTED + 5
+        _cache("document_20260904_100000_PDF1.pdf", make_pdf(["ok"] + ["x"] * count))
+        self._failing_pages(monkeypatch, set(range(1, count + 1)))
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True, max_pages=count + 1)
+        assert "and 5 more" in _texts(blocks)[-1]
+        assert len(_meta(blocks)["pages_failed"]) == count
+
+    def test_a_memory_error_is_not_swallowed_as_an_unreadable_page(self, documents, monkeypatch):
+        from pypdf import PageObject
+
+        def boom(self, *args, **kwargs):
+            raise MemoryError
+
+        monkeypatch.setattr(PageObject, "extract_text", boom)
+        with pytest.raises(MemoryError):
+            media_read.read_media(ALICE, "PDF1", as_text=True)
+
 
 class TestBounds:
     """Every cap that drops content has to show up as truncated: an agent that
