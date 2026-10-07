@@ -160,6 +160,15 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
   reach a chat you did not enable. Set the variable for **both** processes
   (the compose file passes it to both containers).
+- A send to a bare number goes to the number WhatsApp has registered, which
+  is not always spelled like the one typed (a Brazilian mobile with or
+  without its ninth digit). The bridge checks the list twice: on the number
+  as typed, before it asks WhatsApp anything, and on the registered number
+  before it sends. So list the number the way WhatsApp has it — the
+  `chat_jid` its messages are stored under — and add the other spelling
+  only if agents should be able to type it. Listing one spelling never
+  opens the other, and when WhatsApp does not answer which number is
+  registered the send is refused instead of going out unchecked.
 - Contact search (`search_contacts`) is not filtered: it reads the address
   book, not conversations.
 

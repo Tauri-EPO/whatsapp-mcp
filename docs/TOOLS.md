@@ -116,7 +116,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 
 | `code` | Meaning | What to do |
 | --- | --- | --- |
-| `not_found` | The chat, message, contact or file is not in the archive | Check the JID/ID (both come from `list_messages` / `list_chats` rows) |
+| `not_found` | The chat, message, contact or file is not in the archive; or a send went to a number that has no WhatsApp account | Check the JID/ID (both come from `list_messages` / `list_chats` rows), or the number |
 | `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
 | `invalid_argument` | Missing or malformed input | Fix the call |
 | `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
@@ -193,7 +193,7 @@ The sentence and the delimiters are hints; only the sanitisation above removes a
 }
 ```
 
-`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the canonical JID the bare number resolves to and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
+`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the JID the bare number reads as (a dry run asks WhatsApp nothing, so this is the number as typed: a real send goes to the number [WhatsApp has registered](#phone-numbers), which can be spelled differently) and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
 
 This is what a draft-only assistant should use: preview, show the payload, send only after the human says yes. Note that `dry_run` is *not* a way around [read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant) — with `WHATSAPP_READ_ONLY=1` these tools are not offered at all, dry run or not. Read-only is the operator's setting; `dry_run` is the agent's manners.
 
@@ -831,7 +831,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code (digits only — see [Phone numbers](#phone-numbers)), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
@@ -840,6 +840,17 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs).
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
+
+#### Phone numbers
+
+This applies to `send_message`, `send_file` and `send_audio_message` alike.
+
+- **Format.** A bare number is digits only, country code first: `5511999999999`. A leading `+`, spaces, dashes or parentheses are not accepted (`invalid_argument`). A full JID (`5511999999999@s.whatsapp.net`) works too; group and `@lid` JIDs are used as they are.
+- **The number does not have to be spelled the way WhatsApp registered it.** For a number the bridge has never exchanged a message with, it asks WhatsApp which number is registered — the question the phone app asks when you type one — and sends there. A Brazilian mobile typed with its ninth digit (`55 11 9XXXX-XXXX`) reaches the account registered without it, and the other way round. It is not specific to Brazil.
+- **The `chat_jid` in the result is the registered one.** That is the JID the conversation is stored under: use it for the follow-up calls (`list_messages`, `send_reaction`, …), not the number as typed.
+- **A number with no WhatsApp account** fails with `not_found` ("… is not on WhatsApp") and nothing is sent. That answer is only given when WhatsApp said so.
+- **When WhatsApp does not answer the question** (it gets 10 seconds), nothing is concluded about the number. With `WHATSAPP_ALLOWED_CHATS` set the send is refused with `bridge_unavailable` ("could not check the number with WhatsApp …; nothing was sent"), because the bridge cannot tell which number the message would go to; that refusal is safe to try again. Without an allow-list the message goes to the number exactly as typed, as it did before this check existed.
+- **With `WHATSAPP_ALLOWED_CHATS`**, the number as typed and the number it is registered under both have to be on the list (`denied` otherwise, naming the one that is missing). See [Restricting which chats the agent can touch](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
 
 **Natural Language Examples:**
 
