@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -57,7 +56,43 @@ func TestVersionEndpointIsUnauthenticated(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil || info.Version == "" || info.Go == "" {
 		t.Fatalf("bad body %s (err %v)", rec.Body.String(), err)
 	}
-	if !strings.Contains(buildInfo(true).String(), "fts5=on") {
-		t.Fatal("String() should mention the FTS state")
+}
+
+// The startup line is logged before the store is open, so it carries the build
+// identity and nothing else: it used to say fts5=off on every build, next to
+// the store line and /api/version saying the opposite (issue #499).
+func TestStartupLineIsTheBuildIdentity(t *testing.T) {
+	info := buildInfo()
+	want := "whatsapp-bridge " + info.Version + ", commit " + info.Commit + ", " + info.Go + ", whatsmeow " + info.Whatsmeow
+	for _, v := range []VersionInfo{info, info.withFTS(true)} {
+		if got := v.String(); got != want {
+			t.Errorf("startup line = %q, want %q", got, want)
+		}
+	}
+	if info.Version == "" || info.Commit == "" || info.Go == "" || info.Whatsmeow == "" {
+		t.Errorf("a field of the identity is empty: %+v", info)
+	}
+	if info.FTS5 {
+		t.Error("the identity alone must not claim an FTS index")
+	}
+}
+
+// /api/version is where the FTS5 state is reported, from the open store.
+func TestVersionEndpointReportsTheStoreFTSState(t *testing.T) {
+	for _, fts := range []bool{false, true} {
+		ms := newTestMessageStore(t)
+		ms.fts = fts
+		mux := testBridge(t, nil, ms, installRecordingLogger(t)).newRESTMux(8080, "test-token-0123456789")
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/version", nil)
+		req.Host = "127.0.0.1:8080"
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("bad body %s: %v", rec.Body.String(), err)
+		}
+		if got, ok := body["fts5"].(bool); !ok || got != fts {
+			t.Errorf("store fts=%v: /api/version says fts5=%v (%s)", fts, body["fts5"], rec.Body.String())
+		}
 	}
 }
