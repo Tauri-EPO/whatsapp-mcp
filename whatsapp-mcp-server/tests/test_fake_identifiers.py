@@ -72,6 +72,7 @@ FAKE_NUMBERS = {
     "5588999998888",
     "5599000000000",
     "5599999999999",
+    "559999999999",  # the same number without the ninth digit (issue #475)
     "15511999999999",
     # Other countries: NANP 555 numbers and counting sequences
     "1234567890",

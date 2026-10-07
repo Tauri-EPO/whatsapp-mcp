@@ -573,7 +573,7 @@ conversation up, because they resolve it in one place: `get_contact`,
 `get_last_interaction`, the `sender_jid` and `chat_jid` filters of
 `list_messages` and of the tools that share them (`message_stats`,
 `list_unread`, `list_unanswered`, `list_media`, `export_messages`), and the
-`query` of `list_chats`. Ask with `5511999990001` or with `551199990001` and
+`query` of `list_chats`. Ask with `5588977776666` or with `558877776666` and
 the answer is the same rows; each row carries the JID it is stored under.
 
 Only `search_contacts`, `get_direct_chat_by_contact` and `list_chats(query=…)`

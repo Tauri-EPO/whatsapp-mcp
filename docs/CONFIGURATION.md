@@ -153,7 +153,7 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 - `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
 - Entries are compared literally, with one exception, for reads only: a
   Brazilian mobile is the same number with or without the ninth digit after
-  the area code (`5511999999999` and `551199999999`), and WhatsApp registers
+  the area code (`5588977776666` and `558877776666`), and WhatsApp registers
   the account under one of the two. A read tool given the spelling the list
   does not name answers when the list names the other one, and is refused
   with `denied` when it names neither. What it returns is still limited to the
