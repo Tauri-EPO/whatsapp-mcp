@@ -216,7 +216,9 @@ the next start picks the change up and stops warning.
 ## `messages.db not found at <path>`
 
 - **Every read tool answers `internal: messages.db not found at <path>: the
-  bridge has not created it there, or the path is wrong`.** The MCP server only
+  bridge has not created it there, or the path is wrong. The path comes from
+  WHATSAPP_DB_PATH, ...`** (a tool that wraps database errors prefixes it with
+  `database error:`). The MCP server only
   *reads* `messages.db` (the bridge owns and writes it) and opens it read-only,
   so a path where nothing exists is an error instead of a new empty database
   that answers every query with "no such table" or an empty list. The path in
@@ -227,8 +229,9 @@ the next start picks the change up and stops warning.
   the `whatsapp-store` volume at `/app/store`) and that the bridge has started
   at least once. `bridge_status` keeps working without the file, and
   `whatsapp.db` (`WHATSMEOW_DB_PATH`) is opened the same way but its absence is
-  tolerated by the tools that use it. No file is created in the wrong place, so
-  there is nothing to delete once the path is fixed.
+  tolerated by the tools that use it. No `messages.db` is created in the wrong place, so
+  there is nothing to delete once the path is fixed. (Reading a database that
+  does exist may still create its `-shm` file next to it.)
 
 ## whisper configured but not reachable
 

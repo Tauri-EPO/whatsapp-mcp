@@ -38,6 +38,12 @@ def test_a_tool_over_a_missing_messages_db_answers_with_the_envelope(tmp_path, m
     assert not missing.exists()
 
 
+def test_search_contacts_does_not_turn_a_wrong_path_into_an_empty_list(paired_dbs, tmp_path, monkeypatch):
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "wrong" / "messages.db"))
+    out = main.search_contacts("Bob")
+    assert out["error"]["code"] == "internal" and "messages.db not found" in out["error"]["message"]
+
+
 def test_helpers_that_tolerate_an_unreadable_archive_still_do(tmp_path, monkeypatch):
     """The missing-file error is also a sqlite3.Error, so `except sqlite3.Error` keeps working."""
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "messages.db"))

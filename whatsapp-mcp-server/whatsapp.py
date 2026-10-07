@@ -186,8 +186,10 @@ def attach_notes_read_only(conn: sqlite3.Connection, path: str) -> None:
     """``ATTACH`` notes.db to a read connection as ``notesdb``, read-only.
 
     The file: URI form is honoured because the connections come from
-    :func:`_connect_read_only` (``uri=True``). A join through it can read the
-    agent's notes but never write them.
+    :func:`_connect_read_only` (``uri=True``); on any other connection SQLite
+    would take the URI for a file name, so pass only connections from
+    :func:`_connect_messages_db`. A join through it can read the agent's notes
+    but never write them.
     """
     conn.execute("ATTACH DATABASE ? AS notesdb", (_read_only_uri(path),))
 
@@ -3328,6 +3330,8 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 seen_jids.add(jid)
                 # No push name on a chats-table row; the phone book below has it.
                 found.append((jid, name, None, [("name", name)]))
+    except MessagesDbNotFoundError:
+        raise  # a wrong path is the caller's answer, not an empty contact list
     except sqlite3.Error as e:
         logger.error("Database error (messages.db): %s", e)
     finally:
