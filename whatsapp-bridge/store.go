@@ -703,7 +703,14 @@ func (store *MessageStore) Close() error {
 // names set by inbound handling or history sync. last_message_time is
 // merged monotonically so out-of-order delivery (history sync, backfill)
 // can't move it backwards.
+//
+// A zero lastMessageTime binds NULL, which the merge reads as "no news":
+// the row is created or renamed and its time is left alone (EnsureChat).
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+	var seen any
+	if !lastMessageTime.IsZero() {
+		seen = dbTime(lastMessageTime)
+	}
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
 		VALUES (?, ?, ?)
@@ -715,7 +722,7 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 				WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
 				ELSE chats.last_message_time
 			END`,
-		jid, name, dbTime(lastMessageTime),
+		jid, name, seen,
 	)
 	return err
 }

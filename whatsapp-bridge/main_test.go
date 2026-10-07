@@ -597,6 +597,7 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
 		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
 		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
+		StoreRetryDelays:        defaultStoreRetryDelays(),
 		origTimes:               newOriginalTimestamps(),
 		mediaRetry:              newMediaRetryHub(),
 		storeStats:              newStoreStats(storeRoot),

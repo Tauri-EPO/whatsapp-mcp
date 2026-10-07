@@ -91,6 +91,10 @@ type WebhookPayload struct {
 	MimeType      string `json:"mimeType,omitempty"`
 	MediaFilename string `json:"mediaFilename,omitempty"`
 	MediaBase64   string `json:"mediaBase64,omitempty"`
+	// Stored is only ever sent as false: the bridge could not write this
+	// message, so its ID resolves to nothing (download_media, a quote). Absent
+	// means stored (issue #518).
+	Stored *bool `json:"stored,omitempty"`
 	// Reaction fields - populated when EventType is "reaction".
 	ReactionToMessageID string  `json:"reactionToMessageId,omitempty"`
 	ReactionEmoji       *string `json:"reactionEmoji,omitempty"`
@@ -158,12 +162,20 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 // should use SendWebhookWithMessageID so receiver-side idempotency can identify
 // repeated WhatsApp events; this wrapper remains for compatibility.
 func (w *webhookSender) SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string) {
-	w.SendWebhookWithMessageID(sender, content, chatJID, isFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, "")
+	w.SendWebhookWithMessageID(sender, content, chatJID, isFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, "", true)
+}
+
+// storedField renders WebhookPayload.Stored: nothing for a stored message.
+func storedField(stored bool) *bool {
+	if stored {
+		return nil
+	}
+	return &stored
 }
 
 // SendWebhookWithMessageID sends a text-only message and preserves the native
 // WhatsApp message ID in the payload for downstream idempotency.
-func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string, messageID string) {
+func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string, messageID string, stored bool) {
 	w.sendPayload(WebhookPayload{
 		Sender:          sender,
 		Content:         content,
@@ -175,6 +187,7 @@ func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string
 		QuotedIsFromMe:  quotedIsFromMe,
 		MentionedJIDs:   mentionedJIDs,
 		MessageID:       messageID,
+		Stored:          storedField(stored),
 	})
 }
 
@@ -287,7 +300,7 @@ func (w *webhookSender) SendWebhookWithMedia(
 	isFromMe bool,
 	quotedMessageId, quotedSender, quotedContent string,
 	quotedIsFromMe *bool, mentionedJIDs []string,
-	messageID, mediaType, mimeType, mediaFilename string, media []byte,
+	messageID, mediaType, mimeType, mediaFilename string, media []byte, stored bool,
 ) {
 	if !w.enabled {
 		return
@@ -313,11 +326,12 @@ func (w *webhookSender) SendWebhookWithMedia(
 		MimeType:        mimeType,
 		MediaFilename:   mediaFilename,
 		MediaBase64:     mediaBase64,
+		Stored:          storedField(stored),
 	})
 }
 
 // SendReactionWebhook sends a typed reaction event to the webhook endpoint.
-func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, reactionToMessageID, emoji string) {
+func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, reactionToMessageID, emoji string, stored bool) {
 	removed := emoji == ""
 	w.sendPayload(WebhookPayload{
 		EventType:           "reaction",
@@ -328,6 +342,7 @@ func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe boo
 		MessageID:           messageID,
 		MediaType:           "reaction",
 		ReactionToMessageID: reactionToMessageID,
+		Stored:              storedField(stored),
 		ReactionEmoji:       &emoji,
 		ReactionRemoved:     &removed,
 	})

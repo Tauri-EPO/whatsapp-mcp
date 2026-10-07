@@ -177,10 +177,26 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		msgTimestamp = orig
 	}
 
-	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msgTimestamp)
-	if err != nil {
-		logger.Warnf("Failed to store chat: %v", err)
+	// storeRow writes one row of this message together with what it needs and
+	// implies: the chat row it references (and that row's name) before, the
+	// chat's last message time after. The first two share one retry, so a new
+	// chat that meets a busy database is not lost to the foreign key on the
+	// second attempt; the time moves only once the row is in, so a message that
+	// is dropped below, or that fails to store, is not activity (issues #519,
+	// #531).
+	storeRow := func(kind string, write func() error) bool {
+		if !b.storeLive(kind, msg.Info.ID, chatJID, func() error {
+			if err := messageStore.EnsureChat(chatJID, name); err != nil {
+				return err
+			}
+			return write()
+		}) {
+			return false
+		}
+		if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, "", msgTimestamp) }); err != nil {
+			logger.Warnf("Failed to update the last message time of %s: %v", chatJID, err)
+		}
+		return true
 	}
 
 	// A group sender we have no roster row for is a member we know about
@@ -204,9 +220,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Poll votes arrive as PollUpdateMessage stanzas: decrypt, map to option
 	// names, keep a structured copy for /api/poll and a message row with the
 	// poll's ID in `filename` (same convention as reactions). See polls.go.
-	if handled, pollID, voteContent := handlePollVote(context.Background(), b.PollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
+	if handled, pollID, voteContent := b.handlePollVote(context.Background(), msg, chatJID, sender, msgTimestamp); handled {
 		if voteContent != "" {
-			messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+			storeRow("poll vote", func() error {
+				return messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+			})
 		}
 		return
 	}
@@ -224,17 +242,20 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		}
 		if reactedToID != "" {
 			emoji := reaction.GetText()
-			if err := messageStore.StoreMessage(
-				msg.Info.ID, chatJID, storedSenderJID, emoji,
-				msgTimestamp, msg.Info.IsFromMe,
-				"reaction", reactedToID, "", nil, nil, nil, 0, "",
-			); err != nil {
-				logger.Warnf("Failed to store reaction: %v", err)
-			} else if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
-				logger.Warnf("Failed to set reaction target: %v", err)
+			stored := storeRow("reaction", func() error {
+				return messageStore.StoreMessage(
+					msg.Info.ID, chatJID, storedSenderJID, emoji,
+					msgTimestamp, msg.Info.IsFromMe,
+					"reaction", reactedToID, "", nil, nil, nil, 0, "",
+				)
+			})
+			if stored {
+				if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
+					logger.Warnf("Failed to set reaction target: %v", err)
+				}
 			}
 			if b.ForwardSelf || !msg.Info.IsFromMe {
-				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
+				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
 			}
 		}
 		return
@@ -269,13 +290,13 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
-	stored := true
-	if err := persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
-		// This write is lost to every reader: an error, and named so the
-		// message can be found again (ID and chat only, never the content).
-		stored = false
-		logger.Errorf("Failed to store message %s in %s: %v", msg.Info.ID, chatJID, err)
-	} else {
+	// A busy database is tried again a bounded number of times; a write that is
+	// given up is one ERROR naming the message (ID and chat only, never the
+	// content) and a count on /metrics (store_failures.go).
+	stored := storeRow("message", func() error {
+		return persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+	})
+	if stored {
 		b.metrics.messagesStored.Add(1)
 	}
 
@@ -305,7 +326,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// A message that was not stored has no row for downloadMedia to find: a
 	// download could only fail a second time and bury the store error under
 	// "failed to find message" (issue #454). The webhook below still goes out,
-	// or the text would be lost downstream too.
+	// or the text would be lost downstream too, and says "stored": false so the
+	// receiver does not look the message up (issue #518).
 	downloadable := stored && url != "" && len(mediaKey) > 0
 	var imageData []byte
 	var imageMimeType string
@@ -349,10 +371,10 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			b.Webhook.SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
-				msg.Info.ID, mediaType, imageMimeType, filename, imageData,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageData, stored,
 			)
 		} else {
-			b.Webhook.SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID)
+			b.Webhook.SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID, stored)
 		}
 	}
 

@@ -30,7 +30,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_LOG_LEVEL`   | `INFO`                                   | Bridge log level (`DEBUG`, `INFO`, `WARN`, `ERROR`) for bridge and whatsmeow client lines. `DEBUG` also echoes every stored message |
 | `WHATSAPP_LOG_FORMAT`  | `text`                                   | `json` writes bridge log lines as JSON objects (`ts`, `level`, `module`, `msg`) for Loki/Elastic/journald |
-| `WHATSAPP_METRICS`     | `true`                                   | `GET /metrics` on the bridge, Prometheus text: connection/pairing gauges, store and media sizes, messages stored/sent, download and webhook failures, reconnects, requests by status class. Unauthenticated (counts only); `false` removes it. A boolean; anything else stops the bridge |
+| `WHATSAPP_METRICS`     | `true`                                   | `GET /metrics` on the bridge, Prometheus text: connection/pairing gauges, store and media sizes, messages stored/sent, download, store and webhook failures, reconnects, requests by status class. Unauthenticated (counts only); `false` removes it. A boolean; anything else stops the bridge |
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO`                                 | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text`                                | `json` writes MCP server log lines as JSON objects (`ts`, `level`, `logger`, `msg`) |
 | `WHATSAPP_MCP_METRICS` | `true`                                   | `GET /metrics` on the `http`/`sse` transports: tool calls, errors by code and seconds per tool, the per-tool latency histogram `whatsapp_mcp_tool_duration_seconds` (see [Health and operations](DOCKER.md#health-and-operations) for the tail-latency query), HTTP requests by status class; `false` disables it |
@@ -663,6 +663,22 @@ the AutoHub hub's `WHATSAPP_BRIDGE_TOKEN` must equal this bridge's token (from
 `Authorization: Bearer`. The bridge always sends the token it has; the hub
 rejects unauthenticated forwards only once its `WHATSAPP_BRIDGE_TOKEN` is set
 to the matching value.
+
+### What the webhook receives
+
+Every forwarded message is one `POST` with a JSON body: `sender`, `content`,
+`chatJID`, `isFromMe`, `messageId`, the `quoted*` fields and `mentionedJids`
+when the message has them, and for an image `mediaType`, `mimeType`,
+`mediaFilename` and `mediaBase64`. Reactions arrive as their own event
+([TOOLS.md](TOOLS.md#send_reaction)).
+
+`"stored": false` is added, to a message and to a reaction event alike, when
+the bridge could not write it to its
+database (it says so at ERROR and counts it in
+`whatsapp_bridge_message_store_failures_total`). The webhook is still sent so
+the text is not lost, but that `messageId` resolves to nothing: do not call
+`download_media`, `get_message_context` or quote it. The field is absent on
+every message that was stored.
 
 ### Outbound media
 

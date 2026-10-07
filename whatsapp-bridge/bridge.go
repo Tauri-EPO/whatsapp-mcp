@@ -113,6 +113,10 @@ type Bridge struct {
 	// reason as the three timings above (issue #382): a test shortening a shared
 	// variable races the goroutine reading it.
 	HistoryVoteRetryDelays []time.Duration
+	// StoreRetryDelays paces the retries of a live write that found the
+	// database busy, and its length is how many retries it gets
+	// (store_failures.go); empty means a busy write is lost at once.
+	StoreRetryDelays []time.Duration
 	// PurgeScanLimit bounds how many message rows one criteria purge examines
 	// (media_purge.go); 0 means purgeMaxScan. On the Bridge so a test can shrink
 	// it without a shared variable.
@@ -134,6 +138,9 @@ type Bridge struct {
 	// downloads it (nil = downloadViaMediaRetry); tests inject a recorder
 	// (see Bridge.retryMedia).
 	mediaRetryDownload mediaRetryFunc
+	// storeRetryWait waits before a store retry (nil = a timer that Shutdown
+	// interrupts); tests use it to act between two attempts.
+	storeRetryWait func(time.Duration) bool
 	// autoDownloads is the bounded pool that caches inbound media; a full
 	// queue drops the download instead of growing (see media_budget.go).
 	autoDownloads *mediaJobQueue
@@ -176,6 +183,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
 		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
 		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
+		StoreRetryDelays:        defaultStoreRetryDelays(),
 
 		rosterFailures: newRosterFailures(),
 		origTimes:      newOriginalTimestamps(),

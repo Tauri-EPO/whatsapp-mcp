@@ -1262,8 +1262,9 @@ def list_chats(
         whatever `name` ended up being: a cached snapshot with no date attached, so
         present it as "recorded as", never as "is".
         The last_* fields describe the chat's newest stored message, which can be older
-        than last_message_time (protocol and unsupported events move that marker
-        without storing a message). `has_messages` is false only when the chat has no
+        than last_message_time (history sync stamps a chat with the conversation's own
+        time, and older bridges moved that marker for events they did not store).
+        `has_messages` is false only when the chat has no
         stored messages at all: last_is_from_me is then null and `unread` is false
         because there is no direction to judge, not because nothing is waiting.
         `last_read_time` is how far the chat has been read on any device (null if never

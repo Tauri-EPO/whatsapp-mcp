@@ -13,6 +13,7 @@ func TestRenderMetrics_ExposesCountersAndGauges(t *testing.T) {
 	b.metrics.messagesStored.Add(3)
 	b.metrics.sendFailures.Add(1)
 	b.metrics.groupHistoryShares.Add(2)
+	b.metrics.storeFailures.Add(4)
 	b.metrics.recordRequest(200)
 	b.metrics.recordRequest(204)
 	b.metrics.recordRequest(404)
@@ -24,6 +25,7 @@ func TestRenderMetrics_ExposesCountersAndGauges(t *testing.T) {
 		"whatsapp_bridge_messages_stored_total 3\n",
 		"whatsapp_bridge_send_failures_total 1\n",
 		"# TYPE whatsapp_bridge_group_history_shares_total counter\nwhatsapp_bridge_group_history_shares_total 2\n",
+		"# TYPE whatsapp_bridge_message_store_failures_total counter\nwhatsapp_bridge_message_store_failures_total 4\n",
 		"whatsapp_bridge_messages_sent_total 0\n",
 		"whatsapp_bridge_http_requests_total{class=\"2xx\"} 2\n",
 		"whatsapp_bridge_http_requests_total{class=\"4xx\"} 1\n",

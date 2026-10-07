@@ -240,39 +240,43 @@ func pollVoteContent(names []string) string {
 // the selection to option names and stores the structured vote. Returns
 // (handled, pollID, content) — handled=false means evt is not a poll vote;
 // an empty content with handled=true means the vote was recorded as
-// undecodable and no message row should be written.
-func handlePollVote(ctx context.Context, decrypt pollVoteDecrypter, store *MessageStore, evt *events.Message, chatJID, sender string, ts time.Time, logger waLog.Logger) (handled bool, pollID string, content string) {
+// undecodable and no message row should be written. Both writes go through
+// storeLive: what /api/poll reads is retried, counted and named like the
+// message row is (store_failures.go).
+func (b *Bridge) handlePollVote(ctx context.Context, evt *events.Message, chatJID, sender string, ts time.Time) (handled bool, pollID string, content string) {
 	if evt.Message.GetPollUpdateMessage() == nil {
 		return false, "", ""
 	}
-	pollID, names, err := decodePollVote(ctx, decrypt, store, evt, chatJID, logger)
+	pollID, names, err := decodePollVote(ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
 	if pollID == "" {
 		return true, "", ""
 	}
 	if err != nil {
-		logger.Warnf("Could not decrypt poll vote for %s in %s: %v", pollID, chatJID, err)
-		if serr := store.StoreUndecodablePollVote(pollID, chatJID, sender, ts); serr != nil {
-			logger.Warnf("Failed to record undecodable poll vote: %v", serr)
-		}
+		b.Log.Warnf("Could not decrypt poll vote for %s in %s: %v", pollID, chatJID, err)
+		b.storeLive("undecodable vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+			return b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, ts)
+		})
 		return true, pollID, ""
 	}
-	if err := store.StorePollVote(pollID, chatJID, sender, names, ts); err != nil {
-		logger.Warnf("Failed to store poll vote: %v", err)
-	}
+	b.storeLive("vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+		return b.Store.StorePollVote(pollID, chatJID, sender, names, ts)
+	})
 	return true, pollID, pollVoteContent(names)
 }
 
 // storePollVoteMessage writes the message row for a decoded vote (media_type
 // poll_vote, target = the poll's message ID), shared by live and history
-// paths. sender is the voter's full resolved JID (see StoreMessage).
-func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) {
+// paths. sender is the voter's full resolved JID (see StoreMessage). The error
+// is the row's: the caller reports it (store_failures.go), with a retry on the
+// live path.
+func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) error {
 	if err := store.StoreMessage(id, chatJID, sender, content, ts, fromMe, "poll_vote", pollID, "", nil, nil, nil, 0, ""); err != nil {
-		logger.Warnf("Failed to store poll vote: %v", err)
-		return
+		return err
 	}
 	if err := store.SetTargetMessageID(id, chatJID, pollID); err != nil {
 		logger.Warnf("Failed to set poll vote target: %v", err)
 	}
+	return nil
 }
 
 // defaultHistoryVoteRetryDelays paces retries while whatsmeow is still writing
@@ -309,11 +313,14 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 				break
 			}
 			if derr == nil {
-				if serr := b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp); serr != nil {
-					b.Log.Warnf("Failed to store history poll vote: %v", serr)
-				}
-				b.Store.storePollVoteMessage(evt.Info.ID, chatJID, storedSender(resolvedSender),
-					pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
+				// A background goroutine, so the retry costs the event path nothing.
+				b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+					return b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp)
+				})
+				b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
+					return b.Store.storePollVoteMessage(evt.Info.ID, chatJID, storedSender(resolvedSender),
+						pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
+				})
 				break
 			}
 			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(b.HistoryVoteRetryDelays) {
@@ -321,9 +328,9 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 				continue
 			}
 			b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)
-			if serr := b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, evt.Info.Timestamp); serr != nil {
-				b.Log.Warnf("Failed to record undecodable poll vote: %v", serr)
-			}
+			b.storeLive("undecodable history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+				return b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, evt.Info.Timestamp)
+			})
 			break
 		}
 	}

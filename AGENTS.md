@@ -57,6 +57,7 @@ whatsapp-mcp/
 │   ├── events.go               # whatsmeow event dispatch, handleMessage, calls, reconnect loop
 │   ├── history_sync.go         # handleHistorySync (phone replays at pair time / on demand)
 │   ├── persist.go              # one extraction + storage path shared by live messages and history sync
+│   ├── store_failures.go       # a row that cannot be written: bounded retry on a busy database, one ERROR with ID + chat, a counter
 │   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
 │   ├── view_once.go            # view-once envelopes unwrapped and archived; the phone keeps its one view
 │   ├── jid.go                  # phone <-> LID resolution helpers
