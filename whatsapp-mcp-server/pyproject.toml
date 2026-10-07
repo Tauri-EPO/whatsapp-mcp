@@ -62,8 +62,8 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.0.0",
-    "pyright>=1.1.400",
-    "ruff>=0.15.15",
+    "pyright>=1.1.414",
+    "ruff>=0.16.10",
 ]
 
 [project.urls]
