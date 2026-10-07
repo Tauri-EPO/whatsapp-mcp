@@ -314,9 +314,10 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			// One read through the store root gives the sniffed MIME type and
-			// the bytes for the payload (webhook.go).
-			imageMimeType, imageData = b.webhookMedia(chatJID, dlName)
-			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
+			// the bytes for the payload, which must hash to what the message
+			// declared (webhook.go).
+			imageMimeType, imageData = b.webhookMedia(chatJID, dlName, ex.fileSHA)
+			logger.Infof("✅ Image downloaded: %s (%s, %d bytes for the webhook)", dlPath, imageMimeType, len(imageData))
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to a background download so media is cached for future MCP tool calls

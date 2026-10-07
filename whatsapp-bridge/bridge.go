@@ -30,11 +30,12 @@ type Bridge struct {
 	Log    waLog.Logger
 
 	// StoreRoot is the store directory opened as an os.Root (store_dir.go).
-	// The retention sweep, the store-size measurement, /api/media/purge and the
-	// inbound media download do every stat, write and delete through it, so the
-	// kernel — not a filepath comparison — keeps them inside the store. nil in
-	// tests that never touch the store; those paths then report "unavailable"
-	// instead of guessing.
+	// The retention sweep, the store-size measurement, /api/media/purge, the
+	// inbound media download and the webhook's read of an image do every stat,
+	// read, write and delete through it, so the kernel — not a filepath
+	// comparison — keeps them inside the store. nil in tests that never touch
+	// the store; those paths then report "unavailable" instead of guessing (a
+	// webhook then goes out without its image).
 	StoreRoot *os.Root
 
 	// Policy restricts which chats outbound endpoints may act on (WHATSAPP_ALLOWED_CHATS).

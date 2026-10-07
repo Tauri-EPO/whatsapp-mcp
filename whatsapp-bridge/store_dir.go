@@ -40,8 +40,9 @@ func storePath(elem ...string) string {
 }
 
 // openStoreRoot opens the store directory as an os.Root. Everything that walks,
-// measures or deletes inside the store, and the inbound media write path, goes
-// through that handle (Bridge.StoreRoot):
+// measures or deletes inside the store, the inbound media write path and the
+// read that feeds an image to the webhook go through that handle
+// (Bridge.StoreRoot):
 // the kernel resolves each path component within the directory and refuses any
 // component that leaves it, including a symlink swapped in between the check and
 // the syscall. That is a control, where a filepath.Rel comparison on a name we

@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"sync/atomic"
 	"time"
 )
@@ -194,40 +194,57 @@ func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string
 // name, and opened through the store root. The absolute path downloadMedia
 // returns was checked when the file was written, which is not a control at the
 // read: a component swapped for a symlink in between would have had another
-// file encoded into the payload and sent to WEBHOOK_URL (issue #493). Nothing
-// here follows a link, not even one that stays inside the store: the chat
-// directory must be a directory, the file a regular file, and the handle that
-// is read must be the file that was checked.
-func (b *Bridge) webhookMedia(chatJID, filename string) (mimeType string, data []byte) {
-	const unknown = "application/octet-stream"
+// file encoded into the payload and sent to WEBHOOK_URL (issue #493). Two
+// things stand in the way now. Nothing is followed, not even a link that stays
+// inside the store (openStoreMedia). And the bytes must be the ones the message
+// declared: their SHA-256 is compared with wantSHA256, the message's own
+// file_sha256, because a hard link or a rename can put another regular file of
+// the store (the token, a database) under the cached name without any link.
+// Without a hash to compare with, nothing is sent.
+func (b *Bridge) webhookMedia(chatJID, filename string, wantSHA256 []byte) (mimeType string, data []byte) {
 	f, size, err := openStoreMedia(b.StoreRoot, chatMediaRel(chatJID), filename)
 	if err != nil {
 		b.Log.Warnf("Could not open media file for the webhook: %v", err)
-		return unknown, nil
+		return sniffMIME(nil), nil
 	}
 	defer func() { _ = f.Close() }()
 	if size > maxMediaBase64Bytes {
 		b.Log.Warnf("Media file too large for base64 encoding (%d bytes), skipping MediaBase64", size)
 		head := make([]byte, 512)
 		n, _ := io.ReadFull(f, head)
-		return http.DetectContentType(head[:n]), nil
+		return sniffMIME(head[:n]), nil
 	}
-	// The cap is on the handle being read: a file that grows after the Stat
-	// still cannot put more than the limit in memory.
-	data, err = io.ReadAll(io.LimitReader(f, maxMediaBase64Bytes+1))
-	if err != nil || len(data) > maxMediaBase64Bytes {
-		b.Log.Warnf("Could not read media file for base64 encoding (%d bytes read): %v", len(data), err)
-		return unknown, nil
+	// The cap is on the handle being read: exactly the size it reported, so a
+	// file that grows afterwards cannot put more than the limit in memory.
+	data = make([]byte, size)
+	if _, err := io.ReadFull(f, data); err != nil {
+		b.Log.Warnf("Could not read media file for base64 encoding: %v", err)
+		return sniffMIME(nil), nil
 	}
-	return http.DetectContentType(data), data
+	if sum := sha256.Sum256(data); len(wantSHA256) == 0 || !bytes.Equal(sum[:], wantSHA256) {
+		b.Log.Warnf("Cached media is not the file the message declared (SHA-256 differs or is unknown); sending the webhook without it")
+		return sniffMIME(nil), nil
+	}
+	return sniffMIME(data), data
+}
+
+// sniffMIME is the content type of a file from its first bytes, and
+// application/octet-stream when there are none to look at.
+func sniffMIME(head []byte) string {
+	if len(head) == 0 {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(head)
 }
 
 // openStoreMedia opens store/<chatDir>/<name> for reading without following a
 // symlink at either component, and returns its size. os.Root keeps the open
-// inside the store but does follow a link that stays inside it, so both
-// components are checked with Lstat first, and the opened handle is compared
-// with what Lstat saw: a name swapped for a link between the two is a
-// different file and is refused.
+// inside the store but does follow a link that stays inside it, so each
+// component is checked with Lstat, opened, and the handle compared with what
+// Lstat saw: a name swapped for a link between the two is a different file and
+// is refused. The directory is opened first and the file is named inside that
+// handle, never by the full path again, so swapping the directory after its
+// check changes nothing.
 func openStoreMedia(root *os.Root, chatDir, name string) (*os.File, int64, error) {
 	if root == nil {
 		return nil, 0, errors.New("store directory unavailable")
@@ -235,18 +252,27 @@ func openStoreMedia(root *os.Root, chatDir, name string) (*os.File, int64, error
 	if err := checkMediaPathComponents(chatDir, name); err != nil {
 		return nil, 0, err
 	}
-	if dir, err := root.Lstat(chatDir); err != nil || !dir.IsDir() {
-		return nil, 0, errors.New("chat directory is not a real directory inside the store")
+	notADir := errors.New("chat directory is not a real directory inside the store")
+	seenDir, err := root.Lstat(chatDir)
+	if err != nil || !seenDir.IsDir() {
+		return nil, 0, notADir
 	}
-	rel := path.Join(chatDir, name)
-	seen, err := root.Lstat(rel)
+	dir, err := root.OpenRoot(chatDir)
+	if err != nil {
+		return nil, 0, notADir
+	}
+	defer func() { _ = dir.Close() }()
+	if pinned, err := dir.Stat("."); err != nil || !os.SameFile(seenDir, pinned) {
+		return nil, 0, errors.New("chat directory changed while it was being opened")
+	}
+	seen, err := dir.Lstat(name)
 	if err != nil {
 		return nil, 0, err
 	}
 	if !seen.Mode().IsRegular() {
 		return nil, 0, errors.New("cached media is not a regular file")
 	}
-	f, err := root.Open(rel)
+	f, err := dir.Open(name)
 	if err != nil {
 		return nil, 0, err
 	}
