@@ -2200,6 +2200,7 @@ def purge_media(
     min_bytes: int = 0,
     media_type: str = "",
     dry_run: bool = True,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """Free disk space by dropping cached media bytes; message rows, hashes and notes stay.
 
@@ -2213,7 +2214,11 @@ def purge_media(
 
     Either name the files (`items`) or describe them (any of chat_jid,
     older_than_days, min_bytes, media_type); the bridge caps one call at 500
-    files and reports `truncated` when more matched.
+    files. Only files that are still cached count: rows already purged are
+    stepped over, so to clear a large set **repeat the same call (dry_run=false)
+    while `truncated` is true** — `remaining` says how many matching cached
+    files are left. If `scan_truncated` is true and `purged_files` is 0, the
+    bridge stopped looking before it reached a cached file: narrow the criteria.
 
     Args:
         items: Explicit list of {"message_id", "chat_jid"} (from list_media)
@@ -2222,11 +2227,17 @@ def purge_media(
         min_bytes: Criteria form: only files at least this large
         media_type: Criteria form: image | video | audio | document | sticker
         dry_run: true (default) reports without deleting; false deletes
+        summary_only: true leaves `items` out and returns only the totals (use it
+            on criteria calls that match hundreds of files)
 
     Returns:
         {"dry_run", "message", "matched", "purged_files", "purged_bytes", "truncated",
+         "remaining", "scan_truncated", "unreachable",
          "items": [{message_id, chat_jid, purged, bytes, file, reason}]} where reason explains
-        skipped entries (not cached, not a media message, message not found, denied chat)
+        skipped entries (not cached, not a media message, message not found, denied chat);
+        `items` is absent with summary_only. `matched` is the number of files this call
+        selected; on the criteria form `remaining` counts the matching cached files it
+        left for the next call and `unreachable` the rows whose path the purge cannot touch
     """
     return whatsapp_purge_media(
         items=items,
@@ -2235,6 +2246,7 @@ def purge_media(
         min_bytes=min_bytes,
         media_type=media_type,
         dry_run=dry_run,
+        summary_only=summary_only,
     )
 
 

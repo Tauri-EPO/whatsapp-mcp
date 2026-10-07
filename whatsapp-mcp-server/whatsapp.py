@@ -4101,8 +4101,14 @@ def purge_media(
     min_bytes: int = 0,
     media_type: str = "",
     dry_run: bool = True,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
-    """Ask the bridge to drop cached media bytes (rows untouched); dry run unless told otherwise."""
+    """Ask the bridge to drop cached media bytes (rows untouched); dry run unless told otherwise.
+
+    `summary_only` leaves the per-file `items` list out of the result: a criteria
+    call over hundreds of files otherwise returns tens of kilobytes the caller
+    does not read.
+    """
     chat_jid = (chat_jid or "").strip()
     media_type = (media_type or "").strip()
     normalized: list[dict[str, str]] = []
@@ -4140,7 +4146,7 @@ def purge_media(
     payload = _bridge_json(_bridge_request("POST", "/media/purge", json=body))
     if not dry_run:
         _forget_media_listing(None)  # any chat may have lost files
-    return {
+    result: dict[str, Any] = {
         "success": True,
         "dry_run": bool(payload.get("dry_run", dry_run)),
         "message": payload.get("message") or "",
@@ -4148,8 +4154,16 @@ def purge_media(
         "purged_files": int(payload.get("purged_files") or 0),
         "purged_bytes": int(payload.get("purged_bytes") or 0),
         "truncated": bool(payload.get("truncated", False)),
-        "items": payload.get("items") or [],
+        # Criteria form: cached files left for the next identical call, whether
+        # the bridge's scan stopped early, and rows it cannot reach. A bridge
+        # from before these fields answers without them: 0 / false.
+        "remaining": int(payload.get("remaining") or 0),
+        "scan_truncated": bool(payload.get("scan_truncated", False)),
+        "unreachable": int(payload.get("unreachable") or 0),
     }
+    if not summary_only:
+        result["items"] = payload.get("items") or []
+    return result
 
 
 def _read_receipt_targets(chat_jid: str, message_ids: list[str] | None) -> list[tuple[str, list[str] | None]]:

@@ -100,6 +100,10 @@ type Bridge struct {
 	// reason as the three timings above (issue #382): a test shortening a shared
 	// variable races the goroutine reading it.
 	HistoryVoteRetryDelays []time.Duration
+	// PurgeScanLimit bounds how many message rows one criteria purge examines
+	// (media_purge.go); 0 means purgeMaxScan. On the Bridge so a test can shrink
+	// it without a shared variable.
+	PurgeScanLimit int
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps

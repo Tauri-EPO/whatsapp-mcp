@@ -104,3 +104,27 @@ def test_bridge_errors_are_surfaced(monkeypatch):
 
     _bridge(monkeypatch, None, status=503, text="bridge down")
     assert main.purge_media(chat_jid=CHAT)["error"]["code"] == "bridge_unavailable"
+
+
+def test_criteria_totals_carry_the_paging_fields(monkeypatch):
+    payload = {**BRIDGE_OK, "truncated": True, "remaining": 700, "scan_truncated": False, "unreachable": 2}
+    _bridge(monkeypatch, payload)
+    out = main.purge_media(chat_jid=CHAT, dry_run=False)
+    assert out["truncated"] is True and out["remaining"] == 700
+    assert out["scan_truncated"] is False and out["unreachable"] == 2
+
+    # A bridge from before the fields answers without them.
+    _bridge(monkeypatch, BRIDGE_OK)
+    out = main.purge_media(chat_jid=CHAT)
+    assert out["remaining"] == 0 and out["scan_truncated"] is False and out["unreachable"] == 0
+
+
+def test_summary_only_drops_the_item_list_and_keeps_the_totals(monkeypatch):
+    calls = _bridge(monkeypatch, {**BRIDGE_OK, "remaining": 3})
+    full = main.purge_media(chat_jid=CHAT)
+    brief = main.purge_media(chat_jid=CHAT, summary_only=True)
+    assert "items" in full and "items" not in brief
+    assert {k: v for k, v in full.items() if k != "items"} == brief
+    assert brief["purged_files"] == 1 and brief["purged_bytes"] == 4096 and brief["remaining"] == 3
+    # The flag is for the caller only: the bridge request is the same.
+    assert calls[0][1] == calls[1][1] == {"dry_run": True, "chat_jid": CHAT}
