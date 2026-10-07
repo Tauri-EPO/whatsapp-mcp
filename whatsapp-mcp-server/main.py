@@ -363,7 +363,8 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     themselves, so someone saved as "Z Dave" is found by searching "Carol".
     `matched` names the field the query hit: "name" (the chat name this account
     stored), "full_name", "push_name", "first_name" or "business_name" (the
-    phone-book fields behind `name`), or "jid". The three that are not returned
+    phone-book fields behind `name`), "jid", or "phone_number" when the digits
+    are those of a contact WhatsApp keeps under a LID. The three that are not returned
     as keys are still reported by name, so "found by their business name" is
     not mistaken for "found by the name you saved". It is null when nothing in
     those fields contains the query literally — a wildcard search that only the
@@ -1226,8 +1227,10 @@ def list_chats(
 
     Args:
         query: Search term to filter chats by name or JID. A phone number may be
-               typed with its separators, and a full Brazilian mobile finds the
-               chat with or without the ninth digit (as in search_contacts)
+               typed with its separators, a full Brazilian mobile finds the
+               chat with or without the ninth digit, and a whole number finds
+               the chat WhatsApp keeps under that contact's LID (as in
+               search_contacts)
         limit: Max chats to return (default 50, max 200)
         page: Page number for pagination (default 0); ignored when cursor is set
         cursor: next_cursor from the previous page
@@ -1327,7 +1330,9 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     without the ninth digit after the area code ("5588977776666" and
     "558877776666" are one contact): the chat's `jid` says which spelling
     WhatsApp registered. When both spellings have a chat, the one asked for is
-    returned (under an allow-list, the one it admits).
+    returned (under an allow-list, the one it admits). A chat stored only under
+    the contact's LID is found by the phone number as well; its `jid` is then
+    the `...@lid` one.
 
     Args:
         contact_jid: The contact's phone number with country code ("12025551234")

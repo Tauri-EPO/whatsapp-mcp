@@ -543,7 +543,7 @@ The search covers the [name a contact gave themselves](#name-name--push_name--na
 as well as the one you saved, so somebody in your phone book as "Z Dave" is found
 by "Carol". `matched` names the field the query actually hit — `name` (the chat name this
 account stored), `full_name`, `push_name`, `first_name` or `business_name` (the
-phone-book fields behind `name`), or `jid` — so a hit on a self-chosen name is
+phone-book fields behind `name`), `jid`, or `phone_number` (below) — so a hit on a self-chosen name is
 never mistaken for a hit on your own record. It is `null` when none of those
 fields contains the query literally, which only happens for a wildcard search
 that matched the JID pattern alone.
@@ -564,6 +564,16 @@ never as a fragment, and only for mobiles (subscriber number beginning 6–9): a
 landline, a partial number, a number without the `55` and a number from any
 other country are searched exactly as typed. Name searches are unaffected, and
 so is a short numeric query such as `1.5` or `(11)`.
+
+**Contacts kept under a LID.** WhatsApp stores some direct chats under the
+contact's LID (`…@lid`) and never under the phone number. A query that is the
+whole number (in either spelling of a Brazilian mobile) finds those too,
+through the LID map: the hit's `jid` is the LID one, `phone_number` and `lid`
+are both filled, and `matched` is `phone_number`, because the digits are in the
+number behind the JID and not in the JID. A fragment of a number is not
+followed to a LID, and a contact that has a row under the number as well is
+returned once, as that row. `list_chats(query=…)` follows a whole number to its
+LID chat the same way.
 
 #### One number, two spellings
 
@@ -2160,6 +2170,11 @@ stored as `558877776666@s.whatsapp.net`, and the returned `jid` tells you which
 spelling WhatsApp registered. When both spellings have a chat of their own, the
 one you asked for is returned; under `WHATSAPP_ALLOWED_CHATS`, the one the list
 admits. `not_found` when neither has one.
+
+A chat stored only under the contact's LID is found by the phone number as
+well, through the LID map; the returned `jid` is then the `…@lid` one. Under
+`WHATSAPP_ALLOWED_CHATS` that LID JID has to be on the list itself: the list
+does not expand a phone number to its LID.
 
 ### `get_contact_chats`
 

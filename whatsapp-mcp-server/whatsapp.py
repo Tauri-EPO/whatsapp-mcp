@@ -3362,8 +3362,10 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
     The query as a substring, as before. A query that is a phone number also
     matches with its separators dropped, and a Brazilian mobile under its
     other spelling (issue #444): that one as the whole phone JID, never as a
-    substring of somebody else's. The second list holds those extra spellings,
-    for a caller that reports which field matched.
+    substring of somebody else's. A chat WhatsApp keeps under a LID answers to
+    the whole number the LID map pairs it with (issue #465), as that LID's
+    whole JID. The second list holds those extra spellings, for a caller that
+    reports which field matched.
     """
     patterns = ["%" + query + "%"]
     digits, alternate = _phone_spellings(query)
@@ -3372,7 +3374,35 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
         patterns.append("%" + typed_digits + "%")
     if alternate:
         patterns.append(alternate)
-    return patterns, [spelling for spelling in (typed_digits, alternate) if spelling]
+    lid_jids = _lid_jids_of_number(digits, alternate)
+    return [*patterns, *lid_jids], [spelling for spelling in (typed_digits, alternate, *lid_jids) if spelling]
+
+
+def _lid_jids_of_number(digits: str | None, alternate: str | None) -> list[str]:
+    """The LID JIDs the LID map pairs with a phone number, in either spelling of a Brazilian mobile.
+
+    The whole number, never a fragment of one: the map holds everybody ever
+    seen in a group, so a fragment would match hundreds of LIDs that have no
+    chat. Every LID of the number comes back (only `lid` is unique in the map),
+    and both lookups that follow a number to its LID ask here, so they agree.
+    One read of whatsapp.db, uncached, and [] when it cannot be read: the
+    lookup then finds what it found before.
+    """
+    numbers = [number for number in (digits, alternate.partition("@")[0] if alternate else None) if number]
+    if not numbers or not os.path.isfile(WHATSMEOW_DB_PATH):
+        return []
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            rows = conn.execute(
+                f"SELECT lid FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(numbers)}) ORDER BY lid", numbers
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.debug("lid-map lookup failed: %s", e)
+        return []
+    return [f"{lid}@{LID_SERVER}" for (lid,) in rows if lid]
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
@@ -3390,7 +3420,9 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
     A phone-number query is matched as digits however it was typed, and a full
     Brazilian mobile also finds the contact stored under its other spelling,
-    with or without the ninth digit (issue #444, `phone.py`).
+    with or without the ninth digit (issue #444, `phone.py`). A contact
+    WhatsApp only keeps under a LID is found by the number the LID map gives
+    for it (issue #465), and says so with `matched: "phone_number"`.
     """
     seen_jids: set[str] = set()
     # (jid, name, push name if this hit carried one, fields the query could
@@ -3488,8 +3520,16 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             push_name=push_name,
             jid=jid,
         )
+        led_by_number = jid.endswith(f"@{LID_SERVER}") and jid in other_spellings
+        if led_by_number and f"{identities[jid].phone}@{DEFAULT_USER_SERVER}" in seen_jids:
+            # The number led to this LID row and to the phone row of the same
+            # contact: one hit, the phone one.
+            continue
         matched = _matched_field(query, candidates)
-        if matched is None and any(spelling in jid for spelling in other_spellings):
+        if matched is None and led_by_number:
+            # Nothing in the JID holds the digits: its phone number does.
+            matched = "phone_number"
+        elif matched is None and any(spelling in jid for spelling in other_spellings):
             matched = "jid"
         rows.append({**contact_to_dict(contact), "matched": matched})
     return rows
@@ -3874,14 +3914,22 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     WhatsApp registered the account with or without the ninth digit and the
     chat is stored under that one. The number as given wins when both spellings
     have a chat the allow-list admits.
+
+    A chat the store holds only under the contact's LID is found too (issue
+    #465): the LID map gives the LID for the number, in either spelling. A
+    phone row, under the spelling given or the other one, comes before any LID
+    row.
     """
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
         spellings = _direct_chat_candidates(sender_phone_number)
-        _, alternate = _phone_spellings(sender_phone_number)
-        lookups = [*spellings, alternate] if alternate else list(spellings)
+        digits, alternate = _phone_spellings(sender_phone_number)
+        # The LIDs the map pairs with the number, in either spelling: the row
+        # may exist under one of those alone.
+        mapped = [jid for jid in _lid_jids_of_number(digits, alternate) if jid not in spellings]
+        lookups = [*spellings, *mapped, *([alternate] if alternate else [])]
         twins = _chat_twins(cursor, only=lookups)
         candidates = [twins.listing_jid(jid) for jid in lookups]
         alternate_row = twins.listing_jid(alternate) if alternate else ""
@@ -3902,9 +3950,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             WHERE c.jid IN ({_placeholders(candidates)}) AND {policy_clause}
             ORDER BY CASE
                 WHEN c.jid = ? THEN 0
-                WHEN c.jid = ? THEN 3
+                WHEN c.jid = ? THEN 2
                 WHEN c.jid LIKE '%@s.whatsapp.net' THEN 1
-                ELSE 2
+                ELSE 3
             END
             LIMIT 1
         """,
