@@ -271,16 +271,40 @@ class TestNoChatIsNotDenied:
         without_chat = _denial(lambda: whatsapp.get_direct_chat_by_contact(NO_CHAT))
         _add_chat(paired_dbs, NO_CHAT_JID)
         assert _denial(lambda: whatsapp.get_direct_chat_by_contact(NO_CHAT)) == without_chat
-        # A number at the length of a LID may be one, and that LID is on the list.
-        assert whatsapp.get_direct_chat_by_contact(SOME_LID) is None
+        # A LID is admitted when it is named as one, or when the map knows it as one.
+        assert whatsapp.get_direct_chat_by_contact(SOME_LID_JID) is None
+        assert whatsapp.get_direct_chat_by_contact(BOB_LID) is None
+        # Bare digits nothing knows are a phone number until shown otherwise.
+        _denial(lambda: whatsapp.get_direct_chat_by_contact(SOME_LID))
+
+    def test_a_wildcard_for_lids_says_nothing_about_the_lid_map(self, paired_dbs, monkeypatch):
+        # Bob's number is in the LID map and the other one is not: under `*@lid`
+        # neither is named, and the refusal is the same for both.
+        with paired_dbs.messages() as conn:
+            conn.execute("DELETE FROM chats WHERE jid = ?", (BOB,))
+        _allow(monkeypatch, "*@lid")
+        mapped = _denial(lambda: whatsapp.get_direct_chat_by_contact(BOB_PN))
+        unmapped = _denial(lambda: whatsapp.get_direct_chat_by_contact(NO_CHAT))
+        assert mapped.replace(BOB_PN, "<number>") == unmapped.replace(NO_CHAT, "<number>")
+
+    def test_a_short_lid_the_map_knows_is_read_as_a_lid(self, paired_dbs, monkeypatch):
+        short_lid = "1234567890123"
+        with paired_dbs.whatsmeow() as conn:
+            conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (short_lid, NO_CHAT))
+        whatsapp._reset_name_cache()
+        _allow(monkeypatch, f"{short_lid}@lid")
+        assert whatsapp.get_direct_chat_by_contact(short_lid) is None
 
     def test_a_wildcard_answer_does_not_depend_on_a_hidden_row(self, paired_dbs, monkeypatch):
-        # Fifteen digits under `*@s.whatsapp.net`: allowed as a phone number.
-        # A row under the same digits as a LID changes nothing in the answer.
+        # Fifteen digits nothing has seen read as a LID (#375), and
+        # `*@s.whatsapp.net` does not name a LID. A row under that LID changes
+        # nothing in the answer.
         _allow(monkeypatch, "*@s.whatsapp.net")
-        assert whatsapp.get_direct_chat_by_contact(SOME_LID) is None
+        without_row = _denial(lambda: whatsapp.get_direct_chat_by_contact(SOME_LID))
         _add_chat(paired_dbs, SOME_LID_JID)
-        assert whatsapp.get_direct_chat_by_contact(SOME_LID) is None
+        assert _denial(lambda: whatsapp.get_direct_chat_by_contact(SOME_LID)) == without_row
+        # Named as a phone JID, it is the phone number the wildcard admits.
+        assert whatsapp.get_direct_chat_by_contact(f"{SOME_LID}@s.whatsapp.net") is None
 
     def test_a_jid_is_checked_in_the_namespace_it_names(self, paired_dbs, monkeypatch):
         # The list names the phone number; the same digits as a LID are somebody else.
@@ -336,14 +360,37 @@ class TestGetContactWithoutAChat:
         assert main.get_contact(BOB_PN)["error"]["code"] == "denied"  # a phone with a chat
         assert main.get_contact(NO_CHAT)["error"]["code"] == "denied"  # a phone without one
 
-    def test_a_long_number_nothing_has_seen_reads_as_a_lid_whatever_the_list_says(self, paired_dbs, monkeypatch):
-        # Fourteen unknown digits are a LID to get_contact (#375). Listing them
-        # as a phone number does not change what they are, so the answer is a
-        # refusal for the LID, as it was before this change.
+    def test_a_long_number_listed_as_a_phone_number_is_answered_as_one(self, paired_dbs, monkeypatch):
+        # Fourteen unknown digits read as a LID (#375), which the list does not
+        # name. It names them exactly as a phone number, and that is an answer:
+        # the refusal used to name `<digits>@lid`, a JID nobody wrote.
         digits = "12345678901234"
         _allow(monkeypatch, digits)
-        refusal = main.get_contact(digits)["error"]
-        assert refusal["code"] == "denied" and f"{digits}@lid" in refusal["message"]
+        contact = main.get_contact(digits)
+        assert "error" not in contact
+        assert (contact["jid"], contact["is_lid"]) == (f"{digits}@s.whatsapp.net", False)
+        assert whatsapp.get_direct_chat_by_contact(digits) is None
+
+    def test_a_long_phone_number_with_a_hidden_chat_is_not_made_a_lid(self, paired_dbs, monkeypatch):
+        # Under `*@lid` the phone spelling cannot be looked up, so "nothing has
+        # seen this number" is not known and the #375 rule does not apply.
+        digits = "12345678901234"
+        _add_chat(paired_dbs, f"{digits}@s.whatsapp.net")
+        _allow(monkeypatch, "*@lid")
+        assert main.get_contact(digits)["error"]["code"] == "denied"
+        _denial(lambda: whatsapp.get_direct_chat_by_contact(digits))
+
+    def test_a_contact_listed_by_its_lid_is_answered_by_its_number(self, paired_dbs, monkeypatch):
+        # No chat yet. get_direct_chat_by_contact says not_found for this
+        # (test above); get_contact answers about the listed LID.
+        with paired_dbs.whatsmeow() as conn:
+            conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (SOME_LID, SHORT))
+        whatsapp._reset_name_cache()
+        _allow(monkeypatch, SOME_LID_JID)
+        for asked in (SHORT, LONG):
+            contact = main.get_contact(asked)
+            assert "error" not in contact, asked
+            assert (contact["jid"], contact["phone_number"], contact["lid"]) == (SOME_LID_JID, SHORT, SOME_LID)
 
     @pytest.mark.parametrize("asked", [NO_CHAT, NO_CHAT_JID])
     def test_the_name_of_an_unlisted_row_does_not_come_back(self, paired_dbs, monkeypatch, asked):
@@ -354,14 +401,16 @@ class TestGetContactWithoutAChat:
         assert "Hidden row" not in str(contact)
         assert (contact["jid"], contact["resolved"]) == (NO_CHAT_JID, False)
 
-    def test_a_jid_names_its_own_row_with_or_without_a_list(self, paired_dbs):
-        # The same digits under the other server are somebody else.
+    def test_under_a_list_a_jid_names_its_own_row_only(self, paired_dbs, monkeypatch):
         _add_chat(paired_dbs, f"{NO_CHAT}@lid", "Same digits")
+        # Without a list the lookup is what it was: the digits under both servers.
+        assert whatsapp.get_sender_name(NO_CHAT_JID) == "Same digits"
+        _allow(monkeypatch, NO_CHAT)
+        whatsapp._reset_name_cache()
         assert whatsapp.get_sender_name(NO_CHAT_JID) == NO_CHAT_JID
-        assert whatsapp.get_sender_name(f"{NO_CHAT}@lid") == "Same digits"
-        # A bare sender does not say which namespace it is in: both are tried.
+        # A bare sender, which is how a message row stores one, does not say
+        # which namespace it is in: both are still tried.
         assert whatsapp.get_sender_name(NO_CHAT) == "Same digits"
-        assert main.get_contact(NO_CHAT_JID)["resolved"] is False
 
     def test_a_chat_under_the_contacts_lid_is_found_by_the_number(self, paired_dbs, monkeypatch):
         # As get_direct_chat_by_contact does (#465): the map pairs the LID with the number.

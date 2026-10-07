@@ -1983,16 +1983,18 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
-        # Exact match, never LIKE '%number%': it scanned the table and could
-        # match an unrelated JID containing the digits. A bare sender does not
-        # say which namespace it is in, so its digits are tried under both
-        # servers. A full JID names its own row: the same digits under the
-        # other server are somebody else, and under an allow-list possibly a
-        # chat the list does not name (issue #466).
-        if "@" in sender_jid:
+        # Exact match on the JID as stored, then on the other spellings of the
+        # same number (bare, phone JID, LID JID). No LIKE '%number%': it scanned
+        # the table and could match an unrelated JID containing the digits.
+        bare = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
+        candidates = [sender_jid, bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
+        if "@" in sender_jid and CHAT_POLICY.restricted:
+            # Under an allow-list a full JID names its own row and no other:
+            # the same digits under the other server may be a chat the list
+            # does not name, and get_contact would hand its name out (issue
+            # #466). A bare sender, which is how a message row stores one,
+            # still does not say which namespace it is in.
             candidates = [sender_jid]
-        else:
-            candidates = [sender_jid, f"{sender_jid}@s.whatsapp.net", f"{sender_jid}@lid"]
         cursor.execute(
             f"""
             SELECT name
@@ -3983,19 +3985,16 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             typed, phone_jid, lid_jid = spellings
             server = typed.rpartition("@")[2].lower() if "@" in typed else ""
             if server:
-                # A JID is checked in the namespace it names.
-                meant = [jid for jid in (phone_jid, lid_jid) if jid.endswith(f"@{server}")] or [typed]
+                # A JID is read in the namespace it names.
+                primary = next((jid for jid in (phone_jid, lid_jid) if jid.endswith(f"@{server}")), typed)
+                readings = [primary]
             else:
-                # A bare number is a phone number. It is also read as a LID
-                # only at the length a LID has: a `*@lid` entry must not turn
-                # every phone number into "allowed, no chat".
-                digits = lid_jid.partition("@")[0]
-                could_be_lid = digits.isdigit() and len(digits) >= min(AMBIGUOUS_LID_DIGITS)
-                meant = [phone_jid, lid_jid] if could_be_lid else [phone_jid]
+                primary = lid_jid if _reads_as_lid(lid_jid.partition("@")[0]) else phone_jid
+                readings = [phone_jid, lid_jid]
             if server in ("", DEFAULT_USER_SERVER):
                 # The contact may be on the list as the LID the map pairs it with.
-                meant += mapped
-            if not any(_readable(jid) for jid in meant):
+                readings += mapped
+            if listed_reading(primary, readings) is None:
                 raise ToolError("denied", CHAT_POLICY.denial_message(typed))
             return None
 
@@ -4111,6 +4110,47 @@ def _readable(jid: str | None) -> bool:
         return True
     alternate = other_phone_spelling(jid or "")
     return alternate is not None and CHAT_POLICY.allows(alternate)
+
+
+def _named_exactly(jid: str) -> bool:
+    """Does an entry of the allow-list name this JID itself, not a server wildcard?"""
+    spellings = [jid, other_phone_spelling(jid)]
+    return any(normalize_chat_entry(spelling) in CHAT_POLICY.exact for spelling in spellings if spelling)
+
+
+def listed_reading(primary: str, readings: Sequence[str]) -> str | None:
+    """Which JID to answer about for an identifier that has no chat the list admits, or None: refuse.
+
+    The one rule get_direct_chat_by_contact and get_contact share for "allowed,
+    no chat stored" against "not allowed" (issue #466). `primary` is what the
+    identifier is taken to be; `readings` is everything it could be: the other
+    namespace of a bare number, the LIDs the map pairs with a number.
+
+    The list admits the primary reading the way it admits any read: by an entry
+    or by a server wildcard, in either spelling of a Brazilian mobile. Another
+    reading counts only when an entry names it exactly. A wildcard must not:
+    `*@lid` would turn every phone number into "allowed, no chat", make a LID
+    out of a phone number, and tell a number the LID map knows from one it does
+    not. Without an allow-list the primary reading is always the answer.
+    """
+    if _readable(primary):
+        return primary
+    return next((jid for jid in readings if _named_exactly(jid)), None)
+
+
+def _reads_as_lid(bare: str) -> bool:
+    """Is a bare number a LID and not a phone number, as far as this store can tell?
+
+    What get_contact asks, in the same order: the namespace the archive or the
+    LID map gives it, then the 14-15 digit rule (#375). That last one presumes
+    the chats table came up empty for the number, which is only known when the
+    list lets its phone reading be looked up.
+    """
+    if not bare.isdigit():
+        return False
+    if sender_identity(bare, stored_sender_namespace(bare)).lid is not None:
+        return True
+    return _readable(f"{bare}@{DEFAULT_USER_SERVER}") and unknown_lid_digits(bare)
 
 
 DRY_RUN_MESSAGE = "Dry run: nothing was sent. Show this to the user and call again with dry_run=false to send."

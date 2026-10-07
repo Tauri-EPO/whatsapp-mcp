@@ -146,6 +146,9 @@ from whatsapp import (
     list_unread as whatsapp_list_unread,
 )
 from whatsapp import (
+    listed_reading as whatsapp_listed_reading,
+)
+from whatsapp import (
     manage_group_participants as whatsapp_manage_group_participants,
 )
 from whatsapp import (
@@ -470,9 +473,6 @@ def get_contact(identifier: str) -> dict[str, Any]:
     candidates = [jid]
     if bare_numeric_digits:
         candidates.append(f"{bare_numeric_digits}@lid")
-    # The chat may be stored under the LID the map pairs the number with, and
-    # nowhere else (issue #465): get_direct_chat_by_contact looks there too.
-    candidates += [lid_jid for lid_jid in whatsapp_lid_jids_of_contact(jid) if lid_jid not in candidates]
 
     # A Brazilian mobile has a second spelling, with or without the ninth
     # digit (issue #475), and the store holds the one WhatsApp registered:
@@ -481,39 +481,57 @@ def get_contact(identifier: str) -> dict[str, Any]:
     other_spelling = whatsapp_other_phone_spelling(jid)
 
     # A bare number is tried under two spellings, and the allow-list may name
-    # one of them only. A refusal for the spelling the identifier does not turn
-    # out to be must not fail the call (issue #466): the allow-list is asked
-    # about the JID the identifier resolves to, below, once that is known.
+    # one of them only. A refusal for a spelling the identifier does not turn
+    # out to be must not fail the call (issue #466): the list is asked once,
+    # below, about what the identifier resolves to.
     chat = None
     refusals: dict[str, ToolError] = {}
-    for candidate_jid in candidates:
+    pending = list(candidates)
+    followed_lid_map = False
+    while pending:
+        candidate_jid = pending.pop(0)
         try:
             found = whatsapp_get_chat(candidate_jid, include_last_message=False)
         except ToolError as exc:
             if exc.code != "denied":
                 raise
             refusals[candidate_jid] = exc
-            continue
+            found = None
         if found:
             chat = found
             jid = candidate_jid
             if other_spelling and chat["jid"] == other_spelling:
                 jid = other_spelling
             break
+        if not pending and not followed_lid_map:
+            # Last resort: the chat may be stored under the LID the map pairs
+            # the number with, and nowhere else (issue #465), where
+            # get_direct_chat_by_contact looks too.
+            followed_lid_map = True
+            pending = [lid_jid for lid_jid in whatsapp_lid_jids_of_contact(jid) if lid_jid not in candidates]
+            candidates += pending
 
-    if chat is None and bare_numeric_digits and unknown_lid_digits(bare_numeric_digits):
+    if (
+        chat is None
+        and bare_numeric_digits
+        and candidates[0] not in refusals
+        and unknown_lid_digits(bare_numeric_digits)
+    ):
         # Nothing here has ever seen this number: no chat under either
         # spelling, no message row, no phone-book entry, and the LID map said
         # nothing above. At 14-15 digits that is a LID whose mapping we never
-        # learned, not a phone number nobody has written to (#375).
+        # learned, not a phone number nobody has written to (#375). "No chat"
+        # is only known when the phone spelling was not refused above.
         jid = f"{bare_numeric_digits}@lid"
 
     if chat is None:
-        # The classification above never looked at the allow-list. The answer
-        # is about `jid`, so that is the JID the list has to name.
-        if jid in refusals:
-            raise refusals[jid]
-        jid = whatsapp_phone_book_spelling(jid)
+        # The classification above did not look at the allow-list. The list
+        # has to admit the JID it produced, or name another reading exactly
+        # (`listed_reading`, the rule get_direct_chat_by_contact applies).
+        answer = whatsapp_listed_reading(jid, candidates)
+        if answer is None:
+            raise refusals[jid] if jid in refusals else next(iter(refusals.values()))
+        jid = whatsapp_phone_book_spelling(answer)
 
     jid_user = jid.split("@", 1)[0]
     identity = sender_identity(jid)
