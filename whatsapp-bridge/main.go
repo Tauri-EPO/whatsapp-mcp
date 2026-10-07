@@ -94,7 +94,7 @@ func main() {
 	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
 
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll(storeDir(), 0o750); err != nil {
+	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {
 		logger.Errorf("Failed to create store directory %q: %v", storeDir(), err)
 		return
 	}

@@ -257,6 +257,24 @@ Two compose projects of this repo on one box
   [Authentication Issues](#authentication-issues). Two accounts need two
   stores, which two projects get by default.
 
+## Media downloads fail for one chat
+
+- **`download_media` answers `Failed to download media: failed to create chat
+  directory inside the store: ...` or `... chat directory is not a real
+  directory inside the store`**, and the bridge log repeats it for every
+  inbound photo of that chat: `store/<chat_jid>/` is a symlink. The bridge
+  writes media through a handle on the store directory and follows no link on
+  the way, so a chat directory linked onto another disk no longer receives
+  files, and the files behind the link are no longer served. Mount the other
+  disk at that path instead (a volume or a bind mount on
+  `/app/store/<chat_jid>`), or move the whole store with `WHATSAPP_STORE_DIR`;
+  the reasoning is in [the store root](ARCHITECTURE.md#the-store-root).
+- **`Refusing to cache media for message ...: refusing media path`** (WARN in
+  the bridge log, and the same text from `download_media`): the chat JID or the
+  message ID of that row is not a plain file name (a path separator, `..` or a
+  control character). The message row is stored as usual; only its file is not
+  cached, by design.
+
 ## App State / LTHash Conflicts
 
 Some WhatsApp account state is managed by whatsmeow in

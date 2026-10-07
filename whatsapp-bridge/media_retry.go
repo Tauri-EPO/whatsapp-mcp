@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -173,7 +174,8 @@ func mediaRetryDirectPath(evt *events.MediaRetry, mediaKey []byte) (string, erro
 // downloadViaMediaRetry asks the sender's phone to re-upload the media behind
 // (messageID, chatJID) and downloads it from the refreshed direct path. On
 // success the new URL is persisted so the next download skips the retry.
-func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader, localPath string) (int64, error) {
+// relPath is the destination relative to root, the store root.
+func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader, root *os.Root, relPath string) (int64, error) {
 	var sender string
 	var isFromMe bool
 	if err := messageStore.db.QueryRow(
@@ -209,7 +211,7 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 		refreshed := *downloader
 		refreshed.DirectPath = directPath
 		refreshed.URL = mediaURLFromDirectPath(directPath)
-		written, err := downloadToPath(ctx, client, &refreshed, localPath)
+		written, err := downloadToPath(ctx, root, client, &refreshed, relPath)
 		if err != nil {
 			return 0, fmt.Errorf("download after media retry: %w", err)
 		}

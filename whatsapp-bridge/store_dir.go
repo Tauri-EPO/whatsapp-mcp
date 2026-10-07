@@ -19,6 +19,13 @@ import (
 const storeDirEnv = "WHATSAPP_STORE_DIR"
 const defaultStoreDir = "store"
 
+// storeDirMode is the mode of every directory the bridge creates in the store,
+// the store itself included: owner only, because they hold the session keys and
+// the whole archive, and the SQLite files in them are created by the driver
+// with its own, looser default. It applies to directories created from now on;
+// one that already exists keeps the mode it has.
+const storeDirMode os.FileMode = 0o700
+
 // storeDir returns the configured store directory (not cleaned or created).
 func storeDir() string {
 	if v := strings.TrimSpace(os.Getenv(storeDirEnv)); v != "" {
@@ -33,7 +40,8 @@ func storePath(elem ...string) string {
 }
 
 // openStoreRoot opens the store directory as an os.Root. Everything that walks,
-// measures or deletes inside the store goes through that handle (Bridge.StoreRoot):
+// measures or deletes inside the store, and the inbound media write path, goes
+// through that handle (Bridge.StoreRoot):
 // the kernel resolves each path component within the directory and refuses any
 // component that leaves it, including a symlink swapped in between the check and
 // the syscall. That is a control, where a filepath.Rel comparison on a name we

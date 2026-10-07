@@ -45,7 +45,7 @@ type ChatEphemeralSettings struct {
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll(storeDir(), 0o750); err != nil {
+	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {
 		return nil, fmt.Errorf("failed to create store directory %q: %v", storeDir(), err)
 	}
 
