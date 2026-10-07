@@ -41,7 +41,7 @@ class TestSpellings:
             "+55 (88) 97777-6666",
             "55 88 9 7777 6666",
             "55.88.97777.6666",
-            " 55 88 97777-6666 ",
+            " 55\u00a088 97777-6666 ",
         ],
     )
     def test_separators_are_dropped(self, typed):
