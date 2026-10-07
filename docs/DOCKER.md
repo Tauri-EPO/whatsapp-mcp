@@ -110,13 +110,15 @@ To read those files from the host, inspect the volume
 (`docker volume inspect whatsapp-mcp_whatsapp-store`) or bind-mount a host
 directory instead of the named volume.
 
-The bridge creates the store directory and each chat's media directory `0700`
-and every file in them `0600`, owned by the container user (uid 1000 in both
-images): on a bind-mounted store, read the files as that user or as root.
-Directories an earlier release created keep the mode they had (`0750`);
-`chmod -R go-rwx <store>` tightens an existing store by hand. A chat directory
-replaced by a symlink onto another disk is not written to: see
-[the store root](./ARCHITECTURE.md#the-store-root).
+The bridge creates the store directory and each chat's media directory `0700`,
+and the media files and the token `0600`, owned by the container user (uid 1000
+in both images): on a bind-mounted store, read the files as that user or as
+root. The SQLite databases get the driver's default mode (`0644` under the usual
+umask), so on a new store it is the `0700` directory that keeps them private.
+Directories an earlier release created keep the mode they had (`0750`), which
+leaves the databases readable by the group: `chmod -R go-rwx <store>` tightens
+an existing store by hand. A chat directory replaced by a symlink is not written
+to: see [the store root](./ARCHITECTURE.md#the-store-root).
 
 ## Tailscale
 

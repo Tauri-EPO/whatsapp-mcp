@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"go.mau.fi/whatsmeow"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // DownloadMediaRequest represents the request body for the download media API
@@ -143,9 +145,14 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	}
 
 	// Create directory for the chat if it doesn't exist. A chat directory that
-	// is a symlink out of the store fails here instead of receiving the file.
+	// is a symlink out of the store fails here instead of receiving the file;
+	// one that links to another directory of the store passes MkdirAll, and a
+	// chat's media belongs in a directory of its own, so that is refused next.
 	if err := root.MkdirAll(chatDir, storeDirMode); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to create chat directory inside the store: %v", err)
+	}
+	if info, err := root.Lstat(chatDir); err != nil || !info.IsDir() {
+		return false, "", "", "", errors.New("chat directory is not a real directory inside the store")
 	}
 
 	// The file's path relative to the store root, and the absolute one callers get
@@ -156,7 +163,7 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	}
 
 	// Check if file already exists (under the current or the legacy name)
-	if cached, _, _ := cachedMediaRel(root, chatDir, mediaType, timestamp, messageID, originalName.String); cached != "" {
+	if cached := cachedMediaPath(root, chatDir, mediaType, timestamp, messageID, originalName.String); cached != "" {
 		absPath = filepath.Join(filepath.Dir(absPath), path.Base(cached))
 		b.Log.Debugf("📁 File already exists: %s", absPath)
 		return true, mediaType, filepath.Base(absPath), absPath, nil
@@ -257,13 +264,14 @@ func (b *Bridge) transferMedia(ctx context.Context, msg whatsmeow.DownloadableMe
 
 // checkMediaPathComponents refuses a chat directory or a media file name that
 // is not exactly one path component: empty, or carrying a separator, a ".." or
-// a NUL. The store root already keeps a write inside the store; this keeps it
-// inside the one directory of its chat, under the one name of its message,
-// which containment alone cannot express (purgeOne applies the same rule to the
-// directory it deletes from). The names of ordinary messages never trip it.
+// a control character (NUL, a line break). The store root already keeps a write
+// inside the store; this keeps it inside the one directory of its chat, under
+// the one name of its message, which containment alone cannot express (purgeOne
+// has a narrower check of its own for the directory it deletes from). The names
+// of ordinary messages never trip it.
 func checkMediaPathComponents(chatDir, filename string) error {
 	for _, c := range []struct{ what, name string }{{"chat JID", chatDir}, {"message ID", filename}} {
-		if c.name == "" || c.name == "." || strings.Contains(c.name, "..") || strings.ContainsAny(c.name, "/\\\x00") {
+		if c.name == "" || c.name == "." || strings.Contains(c.name, "..") || strings.ContainsAny(c.name, `/\`) || strings.ContainsFunc(c.name, unicode.IsControl) {
 			return fmt.Errorf("refusing media path: the %s does not name a single file inside the store directory", c.what)
 		}
 	}
@@ -330,6 +338,22 @@ func mediaFileNames(mediaType string, timestamp time.Time, messageID, originalNa
 	}
 }
 
+// cachedMediaPath returns the store-relative path of the existing cached file
+// for a row (current name first, then the legacy one) or "" when nothing is
+// cached. It looks through the store root and does not follow a link: only a
+// regular file is a cache hit, so a name someone replaced with a symlink — to a
+// file outside the store or to another file inside it — is never served as the
+// media; it is downloaded again and the rename replaces the link.
+func cachedMediaPath(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) string {
+	for _, name := range mediaFileNames(mediaType, timestamp, messageID, originalName) {
+		p := path.Join(chatDir, name)
+		if info, err := root.Lstat(p); err == nil && info.Mode().IsRegular() {
+			return p
+		}
+	}
+	return ""
+}
+
 // chatMediaRel is the store-relative directory holding one chat's media: the
 // chat JID with ':' (device suffix) mapped to '_'. Callers working through the
 // store root (os.Root) need the relative form; chatMediaDir is the same
@@ -353,14 +377,23 @@ func downloadToPath(ctx context.Context, root *os.Root, client *whatsmeow.Client
 
 // writeMediaFile creates relPath inside the store through a ".part" temp file
 // that fill writes and an atomic rename. Create, cleanup and rename all go
-// through the store root: a temp name or a directory that is a symlink out of
-// the store is refused by the kernel instead of being written through.
+// through the store root, so a directory that is a symlink out of the store is
+// refused by the kernel instead of being written through.
+//
+// The bytes only ever land in a file this call created: whatever sits under the
+// temp name is removed first (a leftover from a crash, or a symlink, which
+// Remove unlinks without following) and O_EXCL refuses anything that reappears
+// there, where O_TRUNC would follow a link and truncate its target. Nobody else
+// owns that name: one transfer per destination runs at a time (media_inflight.go).
 func writeMediaFile(root *os.Root, relPath string, fill func(*os.File) error) (int64, error) {
 	if root == nil {
 		return 0, errors.New("create media file: store directory unavailable")
 	}
 	tmpPath := relPath + ".part"
-	f, err := root.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err := root.Remove(tmpPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, fmt.Errorf("create media file: %w", err)
+	}
+	f, err := root.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("create media file: %w", err)
 	}

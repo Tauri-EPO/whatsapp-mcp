@@ -69,7 +69,7 @@ func TestCheckMediaPathComponents(t *testing.T) {
 			}
 		}
 	}
-	bad := []string{"", ".", "..", "a/b", `a\b`, "/abs", "../up", `..\up`, "a..b", "a\x00b", "a/../b"}
+	bad := []string{"", ".", "..", "a/b", `a\b`, "/abs", "../up", `..\up`, "a..b", "a/../b", "a\x00b", "a\nb", "a\rb", "a\tb", "a\x7fb"}
 	for _, name := range bad {
 		if err := checkMediaPathComponents(name, okFile); err == nil || !strings.Contains(err.Error(), "chat JID") {
 			t.Errorf("chat directory %q: err = %v, want a refusal naming the chat JID", name, err)
@@ -97,6 +97,7 @@ func TestDownloadMedia_RefusesUnsafePathComponents(t *testing.T) {
 		{"message ID that is dot-dot", mediaTestChat, ".."},
 		{"message ID with an inner dot-dot", mediaTestChat, "ID..ID"},
 		{"message ID with a nested path", mediaTestChat, "sub/ID"},
+		{"message ID with a line break", mediaTestChat, "ID\n[INFO] forged"},
 		{"chat JID with a slash", "../escape@s.whatsapp.net", "ID1"},
 		{"chat JID with a backslash", `..\escape@s.whatsapp.net`, "ID2"},
 		{"chat JID naming a nested path", "other@g.us/5511999999999@s.whatsapp.net", "ID3"},
@@ -132,19 +133,24 @@ func TestDownloadMedia_RefusesUnsafePathComponents(t *testing.T) {
 	}
 }
 
-// A chat directory that is a symlink out of the store does not receive the
-// file: the store root refuses to resolve it, where os.MkdirAll and os.OpenFile
-// followed the link and wrote wherever it pointed.
+// A chat directory that is a symlink does not receive the file. Out of the
+// store, the root refuses to resolve it, where os.MkdirAll and os.OpenFile
+// followed the link and wrote wherever it pointed; into another directory of
+// the store the root would follow it, so downloadMedia refuses the link itself.
 func TestDownloadMedia_SymlinkedChatDirDoesNotReceiveFile(t *testing.T) {
 	for _, tc := range []struct{ name, target string }{
-		{"absolute link", ""}, // filled in below: the outside directory itself
-		{"relative link", "../outside"},
+		{"absolute link out of the store", ""}, // filled in below: the outside directory itself
+		{"relative link out of the store", "../outside"},
+		{"link to another directory of the store", "elsewhere"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scratch := storeInScratch(t)
 			outside := filepath.Join(scratch, "outside")
-			if err := os.Mkdir(outside, 0o700); err != nil {
-				t.Fatal(err)
+			elsewhere := storePath("elsewhere")
+			for _, dir := range []string{outside, elsewhere} {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			target := tc.target
 			if target == "" {
@@ -163,8 +169,10 @@ func TestDownloadMedia_SymlinkedChatDirDoesNotReceiveFile(t *testing.T) {
 			if ok || path != "" || err == nil {
 				t.Fatalf("ok=%v path=%q err=%v, want the download refused", ok, path, err)
 			}
-			if got := treeEntries(t, outside); len(got) != 0 {
-				t.Fatalf("the download followed the symlink out of the store: %v", got)
+			for _, dir := range []string{outside, elsewhere} {
+				if got := treeEntries(t, dir); len(got) != 0 {
+					t.Fatalf("the download followed the symlink into %s: %v", dir, got)
+				}
 			}
 			if got := transfers.Load(); got != 0 {
 				t.Errorf("transfers = %d, want 0", got)
@@ -176,31 +184,81 @@ func TestDownloadMedia_SymlinkedChatDirDoesNotReceiveFile(t *testing.T) {
 	}
 }
 
+// A cached name that is a symlink is not a cache hit, wherever it points: the
+// old os.Stat followed it and handed the target back as the media (which the
+// webhook then reads and sends). The file is downloaded again and the rename
+// replaces the link; the target is neither served nor written.
+func TestDownloadMedia_SymlinkedCacheFileIsNotServed(t *testing.T) {
+	for _, tc := range []struct{ name, target string }{
+		{"link out of the store", ""}, // filled in below: the file outside
+		{"link to another file of the store", "../victim.db"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := storeInScratch(t)
+			victims := []string{filepath.Join(scratch, "outside.db"), storePath("victim.db")}
+			for _, v := range victims {
+				if err := os.WriteFile(v, []byte("victim-content"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ms := newConcurrentTestStore(t)
+			b := testBridge(t, nil, ms, installRecordingLogger(t))
+			var transfers atomic.Int32
+			b.mediaTransfer = countingTransfer(&transfers)
+			dest := seedMediaRowIn(t, ms, mediaTestChat, "IMG1")
+			if err := os.Mkdir(filepath.Dir(dest), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := tc.target
+			if target == "" {
+				target = victims[0]
+			}
+			symlinkOrSkip(t, target, dest)
+
+			ok, _, _, path, err := b.downloadMedia(context.Background(), "IMG1", mediaTestChat)
+			if !ok || err != nil || path != dest {
+				t.Fatalf("ok=%v path=%q err=%v, want a fresh download to %q", ok, path, err, dest)
+			}
+			if got := transfers.Load(); got != 1 {
+				t.Errorf("transfers = %d, want 1: the link must not count as a cache hit", got)
+			}
+			for _, v := range victims {
+				if got, err := os.ReadFile(v); err != nil || string(got) != "victim-content" { //nolint:gosec // path built by the test under t.TempDir()
+					t.Errorf("%s was written through the link: %q, %v", v, got, err)
+				}
+			}
+			info, err := os.Lstat(dest)
+			if err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("the cached name should be a regular file now: info=%v err=%v", info, err)
+			}
+			if got, _ := os.ReadFile(dest); string(got) != "media bytes" { //nolint:gosec // path built by the test under t.TempDir()
+				t.Errorf("content = %q", got)
+			}
+		})
+	}
+}
+
 func TestWriteMediaFile(t *testing.T) {
 	payload := []byte("decrypted media bytes")
 	fill := func(f *os.File) error {
 		_, err := f.Write(payload)
 		return err
 	}
-	// newStore returns a store with one chat directory, its root, and a file
-	// outside the store that no write may reach.
-	newStore := func(t *testing.T) (string, *os.Root, string) {
+	// newStore returns a store with one chat directory, its root, and two files
+	// no media write may reach: one outside the store, one inside it.
+	newStore := func(t *testing.T) (string, *os.Root, []string) {
 		t.Helper()
 		scratch := storeInScratch(t)
 		if err := os.Mkdir(storePath("chat"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		secret := filepath.Join(scratch, "secret.bin")
-		if err := os.WriteFile(secret, []byte("secret-content"), 0o600); err != nil {
-			t.Fatal(err)
+		victims := []string{filepath.Join(scratch, "outside.db"), storePath("victim.db")}
+		for _, v := range victims {
+			if err := os.WriteFile(v, []byte("victim-content"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
-		return storePath("chat"), storeRootAt(t, storeDir()), secret
-	}
-	assertSecretIntact := func(t *testing.T, secret string) {
-		t.Helper()
-		if got, err := os.ReadFile(secret); err != nil || string(got) != "secret-content" { //nolint:gosec // path built by the test under t.TempDir()
-			t.Fatalf("the write reached the file outside the store: %q, %v", got, err)
-		}
+		return storePath("chat"), storeRootAt(t, storeDir()), victims
 	}
 
 	t.Run("writes through the temp file", func(t *testing.T) {
@@ -217,6 +275,19 @@ func TestWriteMediaFile(t *testing.T) {
 		}
 		if info, err := os.Stat(filepath.Join(chat, "file.jpg")); runtime.GOOS != "windows" && (err != nil || info.Mode().Perm() != 0o600) {
 			t.Errorf("file mode = %v, %v, want 0600", info.Mode().Perm(), err)
+		}
+	})
+
+	t.Run("a leftover temp file is replaced, not appended to", func(t *testing.T) {
+		chat, root, _ := newStore(t)
+		if err := os.WriteFile(filepath.Join(chat, "file.jpg.part"), []byte("half a download from before the crash, longer than the payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeMediaFile(root, "chat/file.jpg", fill); err != nil {
+			t.Fatalf("writeMediaFile: %v", err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(chat, "file.jpg")); string(got) != string(payload) { //nolint:gosec // path built by the test under t.TempDir()
+			t.Errorf("content = %q", got)
 		}
 	})
 
@@ -237,38 +308,42 @@ func TestWriteMediaFile(t *testing.T) {
 		}
 	})
 
-	// os.OpenFile followed a ".part" that was a symlink and truncated its
-	// target; the root refuses to open it.
-	t.Run("a temp name that is a symlink out of the store is refused", func(t *testing.T) {
-		chat, root, secret := newStore(t)
-		symlinkOrSkip(t, secret, filepath.Join(chat, "file.jpg.part"))
-		if _, err := writeMediaFile(root, "chat/file.jpg", fill); err == nil {
-			t.Fatal("expected the write to be refused")
-		}
-		assertSecretIntact(t, secret)
-		if _, err := os.Lstat(filepath.Join(chat, "file.jpg")); !os.IsNotExist(err) {
-			t.Errorf("final file must not exist: %v", err)
-		}
-	})
+	// os.OpenFile with O_TRUNC followed a ".part" that was a symlink and
+	// truncated its target, and so does the root when the target is inside the
+	// store. Whatever sits under the temp or the final name is replaced by a
+	// file this call created; the link's target is never written.
+	for _, linked := range []string{"file.jpg.part", "file.jpg"} {
+		for i, where := range []string{"out of the store", "to another file of the store"} {
+			t.Run(linked+" is a symlink "+where, func(t *testing.T) {
+				chat, root, victims := newStore(t)
+				target := victims[i]
+				if i == 1 {
+					target = "../victim.db" // relative: the form the root would follow
+				}
+				symlinkOrSkip(t, target, filepath.Join(chat, linked))
 
-	// A symlink planted under the final name is replaced by the rename, never
-	// written through.
-	t.Run("a final name that is a symlink out of the store is replaced", func(t *testing.T) {
-		chat, root, secret := newStore(t)
-		final := filepath.Join(chat, "file.jpg")
-		symlinkOrSkip(t, secret, final)
-		if _, err := writeMediaFile(root, "chat/file.jpg", fill); err != nil {
-			t.Fatalf("writeMediaFile: %v", err)
+				if _, err := writeMediaFile(root, "chat/file.jpg", fill); err != nil {
+					t.Fatalf("writeMediaFile: %v", err)
+				}
+				for _, v := range victims {
+					if got, err := os.ReadFile(v); err != nil || string(got) != "victim-content" { //nolint:gosec // path built by the test under t.TempDir()
+						t.Fatalf("%s was written through the link: %q, %v", v, got, err)
+					}
+				}
+				final := filepath.Join(chat, "file.jpg")
+				info, err := os.Lstat(final)
+				if err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("final name should be a regular file: info=%v err=%v", info, err)
+				}
+				if got, _ := os.ReadFile(final); string(got) != string(payload) { //nolint:gosec // path built by the test under t.TempDir()
+					t.Errorf("content = %q", got)
+				}
+				if got := treeEntries(t, chat); !slices.Equal(got, []string{"file.jpg"}) {
+					t.Errorf("chat directory = %v, want only the finished file", got)
+				}
+			})
 		}
-		assertSecretIntact(t, secret)
-		info, err := os.Lstat(final)
-		if err != nil || !info.Mode().IsRegular() {
-			t.Fatalf("final name should be a regular file now: info=%v err=%v", info, err)
-		}
-		if got, _ := os.ReadFile(final); string(got) != string(payload) { //nolint:gosec // path built by the test under t.TempDir()
-			t.Errorf("content = %q", got)
-		}
-	})
+	}
 }
 
 // Directories the bridge creates in the store are owner-only; one that already

@@ -20,9 +20,10 @@ const storeDirEnv = "WHATSAPP_STORE_DIR"
 const defaultStoreDir = "store"
 
 // storeDirMode is the mode of every directory the bridge creates in the store,
-// the store itself included: owner only, like the 0o600 files in it — they hold
-// the session keys and the whole archive. It applies to directories created
-// from now on; one that already exists keeps the mode it has.
+// the store itself included: owner only, because they hold the session keys and
+// the whole archive, and the SQLite files in them are created by the driver
+// with its own, looser default. It applies to directories created from now on;
+// one that already exists keeps the mode it has.
 const storeDirMode os.FileMode = 0o700
 
 // storeDir returns the configured store directory (not cleaned or created).

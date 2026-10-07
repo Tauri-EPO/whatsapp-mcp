@@ -91,11 +91,11 @@ func startDownload(ctx context.Context, b *Bridge, id, chat string) <-chan downl
 // blockingTransfer is a fake transfer that reports when it starts, waits for
 // release and then writes payload through the real ".part" dance.
 func blockingTransfer(started chan<- struct{}, release <-chan struct{}, payload []byte, runs *atomic.Int32) mediaTransferFunc {
-	return func(_ context.Context, _ whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+	return func(_ context.Context, _ whatsmeow.DownloadableMessage, relPath string) (int64, error) {
 		runs.Add(1)
 		started <- struct{}{}
 		<-release
-		return writeLikeDownloadToPath(localPath, payload)
+		return writeLikeDownloadToPath(relPath, payload)
 	}
 }
 
@@ -228,9 +228,9 @@ func TestDownloadMediaPropagatesTransferFailure(t *testing.T) {
 		t.Fatal("a failed transfer must not leave a cached file")
 	}
 	// The key is released, so a later call transfers again.
-	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, relPath string) (int64, error) {
 		transfers.Add(1)
-		return writeLikeDownloadToPath(localPath, []byte("ok"))
+		return writeLikeDownloadToPath(relPath, []byte("ok"))
 	}
 	if ok, _, _, _, err := b.downloadMedia(context.Background(), "IMG3", mediaTestChat); !ok || err != nil {
 		t.Fatalf("retry after failure: ok=%v err=%v", ok, err)
@@ -252,7 +252,7 @@ func TestDownloadMediaKeepsChatsIndependent(t *testing.T) {
 
 	both := make(chan struct{})
 	var transfers atomic.Int32
-	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, localPath string) (int64, error) {
+	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, relPath string) (int64, error) {
 		// Neither transfer can finish until the other one has started: they
 		// deadlock (and the test fails on timeout) if the group serialises them.
 		if transfers.Add(1) == 2 {
@@ -263,7 +263,7 @@ func TestDownloadMediaKeepsChatsIndependent(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			return 0, errors.New("the other chat never started its transfer")
 		}
-		return writeLikeDownloadToPath(localPath, []byte("data"))
+		return writeLikeDownloadToPath(relPath, []byte("data"))
 	}
 
 	dm := startDownload(context.Background(), b, "IMG4", mediaTestChat)
@@ -292,8 +292,8 @@ func TestDownloadMediaSurvivesAPanickingTransfer(t *testing.T) {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 	// The key is released, so the next call is a normal transfer.
-	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, localPath string) (int64, error) {
-		return writeLikeDownloadToPath(localPath, []byte("ok"))
+	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, relPath string) (int64, error) {
+		return writeLikeDownloadToPath(relPath, []byte("ok"))
 	}
 	if ok, _, _, _, err := b.downloadMedia(context.Background(), "IMG5", mediaTestChat); !ok || err != nil {
 		t.Fatalf("after the panic: ok=%v err=%v", ok, err)
