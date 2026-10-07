@@ -33,7 +33,8 @@ classifiers = [
 dependencies = [
     # MCP Python SDK v2 (FastMCP renamed to MCPServer, transport config on run()).
     "mcp[cli]>=2.3.0,<3",
-    # Bridge REST and whisper-server client; the same HTTP stack the SDK uses.
+    # Bridge REST and whisper-server client (whatsapp.py, transcribe.py). Not the
+    # SDK's HTTP stack: mcp brings its own client, httpx2, and uv.lock carries both.
     "httpx>=0.28",
     # read_media(as_text=True): turn the documents WhatsApp carries into text on
     # this side, so a 5 MiB clinical PDF costs the agent a few dozen KB instead
