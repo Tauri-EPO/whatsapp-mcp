@@ -5,6 +5,7 @@ empty database (every tool then answered "no such table" or an empty list) and
 let a stray write reach the bridge's archive or whatsmeow's session store.
 """
 
+import os
 import sqlite3
 import sys
 
@@ -163,6 +164,66 @@ class TestWal:
             assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
         finally:
             conn.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX directory permissions that root ignores",
+)
+class TestReadOnlyDirectory:
+    """The store mounted read-only (or not writable by the MCP user): issue #534.
+
+    Measured in Docker with the server image: a reader that cannot write the
+    directory works while the bridge has the WAL files open and fails once the
+    bridge has closed cleanly. The same holds for a plain read-write connect, so
+    #529 did not change it; these tests pin the boundary.
+    """
+
+    @staticmethod
+    def _freeze(directory):
+        directory.chmod(0o555)
+
+    @staticmethod
+    def _thaw(directory):
+        directory.chmod(0o755)
+
+    def test_reads_work_while_the_writer_holds_the_wal_files(self, tmp_path, monkeypatch):
+        path = tmp_path / "messages.db"
+        writer = TestWal._wal_db(path)
+        try:
+            self._freeze(tmp_path)
+            monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+            conn = whatsapp._connect_messages_db()
+            try:
+                assert [r[0] for r in conn.execute("SELECT id FROM messages ORDER BY id")] == ["1", "2"]
+            finally:
+                conn.close()
+        finally:
+            self._thaw(tmp_path)
+            writer.close()
+
+    def test_a_cleanly_closed_wal_database_cannot_be_read_from_a_directory_it_cannot_write(self, tmp_path, monkeypatch):
+        path = tmp_path / "messages.db"
+        TestWal._wal_db(path).close()
+        assert not (tmp_path / "messages.db-wal").exists() and not (tmp_path / "messages.db-shm").exists()
+        try:
+            self._freeze(tmp_path)
+            monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+            conn = whatsapp._connect_messages_db()
+            try:
+                with pytest.raises(sqlite3.OperationalError):
+                    conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+            finally:
+                conn.close()
+            # The default compose layout (a writable directory) reads the same file.
+            self._thaw(tmp_path)
+            conn = whatsapp._connect_messages_db()
+            try:
+                assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+            finally:
+                conn.close()
+        finally:
+            self._thaw(tmp_path)
 
 
 class TestPathsSurviveTheUri:

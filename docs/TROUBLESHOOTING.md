@@ -256,6 +256,18 @@ the next start picks the change up and stops warning.
   and reissue certificates by hand, put that `openssl` line in a cron job on
   the host: nothing in this repo watches the expiry date for you.
 
+## The MCP server cannot read `messages.db` on a read-only store
+
+- **Reads fail with `database error: unable to open database file` or
+  `attempt to write a readonly database` although the file exists**, and you
+  mounted the store `:ro` into `mcp` (or run it as a different user). SQLite
+  must create `messages.db-shm` to read a WAL database; when the bridge is
+  running it has already created it and the reader only attaches, but once the
+  bridge has stopped cleanly the `-wal` / `-shm` files are gone and a reader
+  that cannot write the directory has nothing to attach to. Start the bridge, or
+  give `mcp` a writable store (the default compose layout). The measurements
+  are in [DOCKER.md](./DOCKER.md#the-store-read-only-in-the-mcp-container).
+
 ## `messages.db not found at <path>`
 
 - **Every read tool answers `internal: messages.db not found at <path>: the

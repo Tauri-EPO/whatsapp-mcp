@@ -583,6 +583,32 @@ To move to a new server, restore the snapshot into the fresh volume before the
 first `docker compose up`, and keep the same `WHATSAPP_BRIDGE_TOKEN` in `.env`
 if you had set one (otherwise the restored `.bridge-token` is used).
 
+### The store read-only in the MCP container
+
+The default compose file mounts `whatsapp-store` read-write into both services,
+as the same user (uid 1000), and that layout reads `messages.db` in every state
+of the bridge. The MCP server only reads the databases (it opens them with
+`mode=ro`), so mounting the volume `:ro` into `mcp`, or running `mcp` as a
+user that cannot write the store directory, looks like a free hardening step.
+It works **only while the bridge has the database open**, and was measured
+with the real server image (SQLite 3.46.1 in its python:3.13-slim base, one container writing and another reading the same volume):
+
+| Case | Result |
+|---|---|
+| bridge running (`messages.db-wal` and `-shm` exist), mount `:ro` | reads work, including rows still only in the `-wal` |
+| bridge running, `mcp` as another uid, directory not writable for it | reads work |
+| bridge stopped cleanly (no `-wal` / `-shm` left), mount `:ro` | every read fails: `unable to open database file` |
+| bridge stopped cleanly, `mcp` as another uid, directory not writable | every read fails: `attempt to write a readonly database` |
+| default compose layout (read-write, same uid), any state | reads work (the reader recreates `-shm` / `-wal` next to the file) |
+
+A WAL database needs its `-shm` file, and a reader that cannot create it can
+only use one the writer left behind. Before the server opened the files
+read-only (#529) the same two cases failed in exactly the same way, so this is
+SQLite's rule and not something the server added. Keep the store read-write for
+`mcp` unless the bridge is always up; if you mount it read-only anyway, expect
+the errors above whenever the bridge is down (see
+[Troubleshooting](./TROUBLESHOOTING.md#the-mcp-server-cannot-read-messagesdb-on-a-read-only-store)).
+
 ## Split topology (MCP server on another container or host)
 
 The default compose file keeps the bridge loopback-only and puts the MCP
