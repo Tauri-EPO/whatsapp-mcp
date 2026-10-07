@@ -1288,12 +1288,13 @@ document really has) and `truncated` (`max_pages`, 500 rows per sheet, or the
 by page. If one page raises (pypdf 6.18+ refuses a font whose `/Widths` list is
 oversized, and a stream that trips its recovery limit), the other pages are
 returned as usual, the metadata block gains
-`unreadable_pages: [{"page": 2, "error": "LimitReachedError"}]` — the page number
-and the exception class only, never text from the file — and a closing note
-says those pages can be read with
+`pages_failed: [2]` (the name `as_images` uses for pages it could not draw), and
+a closing note names each page with its exception class — class only, never text
+from the file; past 20 pages it says how many more — and says those pages can be
+read with
 [`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures)
-(`first_page` picks where to start). `pages_total` still counts every page.
-`unreadable_pages` is absent when every page extracted. When *every* page that
+(`first_page=<the first failing page>` is spelled out). `pages_total` still
+counts every page. `pages_failed` is absent when every page extracted. When *every* page that
 was attempted fails the call is one `invalid_argument` error that names
 `as_images=true` instead.
 

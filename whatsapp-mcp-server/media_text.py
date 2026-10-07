@@ -53,6 +53,8 @@ MAX_PAGES_LIMIT = 500
 MAX_ROWS_PER_SHEET = 500
 # A cell holding a whole paragraph is a note, not a value.
 MAX_CELL_CHARS = 500
+# How many unreadable pages the note spells out; the rest are counted.
+MAX_UNREADABLE_LISTED = 20
 
 TRUNCATION_NOTE = "[truncated: the rest of this document was not read]"
 NO_TEXT_LAYER = (
@@ -171,6 +173,8 @@ def _pdf(path: str, wanted: int) -> Extracted:
     for index in range(min(total, wanted)):
         try:
             texts.append((index, (pages[index].extract_text() or "").strip()))
+        except MemoryError:
+            raise  # a server fault, not a page the parser refuses: do not go on to the next one
         except Exception as exc:  # noqa: BLE001 - same as above, per page
             unreadable.append({"page": index + 1, "error": type(exc).__name__})
     if unreadable and not texts:
@@ -186,7 +190,14 @@ def _pdf(path: str, wanted: int) -> Extracted:
         # were allowed to read happen to be the image-only ones: telling a
         # 300-page report to go and ask the sender for the original would be wrong.
         if unreadable:
-            notes.append(f"the {len(texts)} page(s) that could be read hold no text.")
+            notes.append(
+                f"the {len(texts)} page(s) that could be read hold no text"
+                + (
+                    f" (the first {wanted} of {total} pages were looked at; raise max_pages to look further)."
+                    if total > wanted
+                    else "."
+                )
+            )
         else:
             notes.append(
                 NO_TEXT_LAYER
@@ -201,10 +212,12 @@ def _pdf(path: str, wanted: int) -> Extracted:
 
 def _unreadable_sentence(unreadable: list[dict[str, object]]) -> str:
     """Which pages failed, and the way to read them anyway (written here, not by the sender)."""
-    detail = ", ".join(f"{item['page']} ({item['error']})" for item in unreadable)
+    shown = ", ".join(f"{item['page']} ({item['error']})" for item in unreadable[:MAX_UNREADABLE_LISTED])
+    if len(unreadable) > MAX_UNREADABLE_LISTED:
+        shown += f" and {len(unreadable) - MAX_UNREADABLE_LISTED} more"
     return (
-        f"page(s) {detail} could not be extracted as text; "
-        "read them with read_media(as_images=true) (first_page selects where to start)"
+        f"page(s) {shown} could not be extracted as text; "
+        f"read them with read_media(as_images=true, first_page={unreadable[0]['page']})"
     )
 
 
