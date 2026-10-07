@@ -82,7 +82,9 @@ func newTextLogger(module, level string, color bool) waLog.Logger {
 // oneLine returns s with every character that could end the line, drive the
 // terminal or reorder the text replaced by its Go escape (\n, \x1b, \u202e),
 // and every byte that is not UTF-8 by \xNN. Ordinary text, accents, emoji and
-// right-to-left scripts included, comes back unchanged; so does a tab.
+// right-to-left scripts with their directional marks included, comes back
+// unchanged; so does a tab. A backslash is not doubled, so the output is for
+// reading, not for decoding: it cannot be turned back into the original bytes.
 func oneLine(s string) string {
 	if utf8.ValidString(s) && strings.IndexFunc(s, unsafeInLogLine) < 0 {
 		return s
@@ -105,14 +107,22 @@ func oneLine(s string) string {
 }
 
 // unsafeInLogLine: control characters (line breaks, ESC, NUL, the C1 range
-// with its own "next line"), the Unicode line and paragraph separators, and
-// the bidirectional controls that make a terminal show text in another order
-// than it was written.
+// with its own "next line"), the Unicode line and paragraph separators
+// (U+2028, U+2029), and the bidirectional controls that reorder what follows.
 func unsafeInLogLine(r rune) bool {
 	if r == '\t' {
 		return false
 	}
-	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Bidi_Control, r)
+	return unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || reordersText(r)
+}
+
+// reordersText: the bidirectional embeddings, overrides and isolates
+// (U+202A to U+202E, U+2066 to U+2069), which make a terminal show text in
+// another order than it was written. The directional marks ordinary
+// right-to-left text carries (U+200E, U+200F, U+061C) are not among them: they
+// are invisible hints next to a word, not a way to display other text.
+func reordersText(r rune) bool {
+	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // initLogging creates the bridge, client and database loggers at the

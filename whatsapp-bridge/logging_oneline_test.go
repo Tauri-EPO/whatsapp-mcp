@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
@@ -30,6 +31,9 @@ func TestOneLine(t *testing.T) {
 		"日本語のグループ",
 		"a\ttabbed\tline",
 		`a Windows path C:\store\messages.db and a literal \n`,
+		// The directional marks right-to-left keyboards put next to a word.
+		"name" + string(rune(0x200F)),
+		string(rune(0x200E)) + "name" + string(rune(0x061C)),
 	}
 	for _, s := range unchanged {
 		if got := oneLine(s); got != s {
@@ -50,6 +54,8 @@ func TestOneLine(t *testing.T) {
 		"é\nü":                     `é\nü`, // the text around an escape is kept as it is
 		forgedName:                 `x\n12:00:00.000 [Bridge ERROR] the store was wiped`,
 	}
+	// An embedded run, the way some clients wrap a phone number: U+202A ... U+202C.
+	escaped[string(rune(0x202A))+"+00 0000"+string(rune(0x202C))] = "\\u202a+00 0000\\u202c"
 	for in, want := range escaped {
 		got := oneLine(in)
 		if got != want {
@@ -61,7 +67,13 @@ func TestOneLine(t *testing.T) {
 	}
 }
 
-const textLoggerHelperEnv = "WAMCP_TEXT_LOGGER_HELPER"
+const (
+	textLoggerHelperEnv = "WAMCP_TEXT_LOGGER_HELPER"
+	// The child prints these around its log calls, so whatever else a test
+	// binary writes to stdout (TestMain, the PASS line) is not counted.
+	textLoggerBegin = "=== text logger output begins"
+	textLoggerEnd   = "=== text logger output ends"
+)
 
 // TestTextLoggerHelperProcess is not a test of its own: it is the child
 // TestTextLoggerPrintsOneLinePerCall starts, so the real text loggers write to
@@ -71,6 +83,8 @@ func TestTextLoggerHelperProcess(t *testing.T) {
 	if os.Getenv(textLoggerHelperEnv) != "1" {
 		return
 	}
+	fmt.Println(textLoggerBegin)
+	defer fmt.Println(textLoggerEnd)
 	bridge, client, db := newLoggerSet("INFO", false)
 	bridge.Infof("Updating chat name from PushName for %s: %s -> %s", "sender@lid", "Old Name", forgedName)
 	bridge.Warnf("Media URL expired for %s (%v); requesting media retry", forgedID, "403")
@@ -83,19 +97,23 @@ func TestTextLoggerHelperProcess(t *testing.T) {
 var textLogLine = regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} \[(Bridge|Client/Socket|Database) (INFO|WARN|ERROR)\] `)
 
 func TestTextLoggerPrintsOneLinePerCall(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestTextLoggerHelperProcess$") //nolint:gosec // the test binary re-running one of its own tests
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestTextLoggerHelperProcess$") //nolint:gosec // the test binary re-running one of its own tests
 	cmd.Env = append(os.Environ(), textLoggerHelperEnv+"=1")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("helper process: %v\n%s", err, out)
 	}
-	var lines []string
-	for _, line := range strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n") {
-		if line == "" || line == "PASS" || strings.HasPrefix(line, "coverage:") {
-			continue // what `go test` itself prints
-		}
-		lines = append(lines, line)
+	text := strings.ReplaceAll(string(out), "\r\n", "\n")
+	_, text, begun := strings.Cut(text, textLoggerBegin+"\n")
+	text, _, ended := strings.Cut(text, textLoggerEnd+"\n")
+	if !begun || !ended {
+		t.Fatalf("the helper did not print both markers:\n%s", out)
 	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 	if len(lines) != 5 {
 		t.Fatalf("five calls at or above INFO must print five lines, got %d:\n%s", len(lines), out)
 	}
@@ -131,6 +149,35 @@ func TestJSONLoggerKeepsTheMessageAsItIs(t *testing.T) {
 		t.Fatalf("not JSON: %v", err)
 	}
 	if want := "Updating chat name from PushName for sender@lid: " + forgedName; line["msg"] != want {
+		t.Errorf("msg = %q, want %q", line["msg"], want)
+	}
+}
+
+// json.Marshal leaves DEL, the C1 controls and the bidirectional controls as
+// they are. The JSON logger writes them as JSON escapes: the same message once
+// decoded, and nothing in the line a terminal would act on.
+func TestJSONLoggerLineCarriesNoTerminalControl(t *testing.T) {
+	hostile := "name" + string(rune(0x7F)) + string(rune(0x85)) + string(rune(0x9B)) + "31m" + string(rune(0x202E)) + "gpj.exe" + string(rune(0x2066))
+	ordinary := "Jo" + string(rune(0xE3)) + "o " + string(rune(0x200F))
+	var buf bytes.Buffer
+	l := newJSONLogger("bridge", "INFO", &buf)
+	l.Infof("%s / %s", hostile, ordinary)
+	if n := strings.Count(buf.String(), "\n"); n != 1 {
+		t.Fatalf("one call must print one line, got %d: %q", n, buf.String())
+	}
+	for _, r := range buf.String() {
+		if r == 0x7F || (r >= 0x80 && r <= 0x9F) || reordersText(r) {
+			t.Errorf("the line carries U+%04X as it is: %q", r, buf.String())
+		}
+	}
+	if !strings.Contains(buf.String(), ordinary) {
+		t.Errorf("ordinary text must stay readable in the line: %q", buf.String())
+	}
+	var line map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if want := hostile + " / " + ordinary; line["msg"] != want {
 		t.Errorf("msg = %q, want %q", line["msg"], want)
 	}
 }
