@@ -49,7 +49,7 @@ const (
 // when unset, and an unreadable value is an error so main() fails fast instead
 // of quietly filling the disk, or quietly not caching what was asked for.
 func resolveStatusAutoDownload(value string) (bool, error) {
-	return parseStrictBool(mediaAutoDownloadStatusEnv, value)
+	return parseBoolEnv(mediaAutoDownloadStatusEnv, value, false)
 }
 
 // skipsStatusMedia reports whether media arriving in chat is left on the CDN

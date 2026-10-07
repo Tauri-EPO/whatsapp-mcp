@@ -580,14 +580,16 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	if rootErr == nil {
 		t.Cleanup(func() { _ = storeRoot.Close() })
 	}
+	switches := testSwitches()
 	b := &Bridge{
 		StoreRoot:         storeRoot,
 		Client:            client,
 		Store:             ms,
 		Log:               logger,
-		ForwardSelf:       true,
-		MediaAutoDownload: true,
-		Webhook:           newWebhookSender(""),
+		ForwardSelf:       switches.ForwardSelf,
+		MediaAutoDownload: switches.MediaAutoDownload,
+		MetricsEnabled:    switches.Metrics,
+		Webhook:           newWebhookSender("", switches.WebhookEnabled),
 		// The production timings; a test that times one of them shortens it on
 		// its own Bridge (issues #351, #382).
 		StreamReplacedDelay:     defaultStreamReplacedDelay,
@@ -619,6 +621,17 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	}
 	b.Exit = func(reason string, code int) { panic(fmt.Sprintf("unexpected Exit(%d): %s", code, reason)) }
 	return b
+}
+
+// testSwitches reads the four on/off switches the way main() does, for the
+// tests that steer one with t.Setenv before building a bridge. TestMain clears
+// them, so a test that sets none gets the defaults (all on).
+func testSwitches() bridgeSwitches {
+	switches, err := loadBridgeSwitches()
+	if err != nil {
+		panic(err)
+	}
+	return switches
 }
 
 // buildTextMessage constructs an events.Message with the given source fields.
@@ -1927,12 +1940,12 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 
 func TestWebhookStartupMessage(t *testing.T) {
 	t.Setenv("WEBHOOK_ENABLED", "false")
-	if got, want := webhookStartupMessage(true), "WEBHOOK_ENABLED=false: outbound webhooks disabled"; got != want {
+	if got, want := webhookStartupMessage(testSwitches()), "WEBHOOK_ENABLED=false: outbound webhooks disabled"; got != want {
 		t.Errorf("disabled startup message = %q, want %q", got, want)
 	}
 
 	t.Setenv("WEBHOOK_ENABLED", "true")
-	if got, want := webhookStartupMessage(true), "FORWARD_SELF enabled: forwarding self messages to webhook"; got != want {
+	if got, want := webhookStartupMessage(testSwitches()), "FORWARD_SELF enabled: forwarding self messages to webhook"; got != want {
 		t.Errorf("enabled startup message = %q, want %q", got, want)
 	}
 }

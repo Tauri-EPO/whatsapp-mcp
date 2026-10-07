@@ -15,7 +15,11 @@ import (
 // that exercise webhook delivery. Individual tests set WEBHOOK_ENABLED when
 // they need to cover an enabled or disabled value.
 func TestMain(m *testing.M) {
-	_ = os.Unsetenv("WEBHOOK_ENABLED")
+	// testBridge reads the four switches the way main() does (testSwitches),
+	// so none of them may leak in from the shell or a compose env file.
+	for _, name := range []string{webhookEnabledEnv, forwardSelfEnv, mediaAutoDownloadEnv, metricsEnv} {
+		_ = os.Unsetenv(name)
+	}
 	os.Exit(m.Run())
 }
 
@@ -62,7 +66,7 @@ func setDefaultWebhookURL(t *testing.T, url string) {
 // newTestWebhook builds a sender with the production HTTP client and the
 // test-scoped token/default URL.
 func newTestWebhook() *webhookSender {
-	w := newWebhookSender(testWebhookToken)
+	w := newWebhookSender(testWebhookToken, testSwitches().WebhookEnabled)
 	if testDefaultWebhookURL != "" {
 		w.defaultURL = testDefaultWebhookURL
 	}

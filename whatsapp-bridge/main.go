@@ -23,31 +23,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Whether to forward messages sent by self via webhook.
-// Defaults to true. Override with env FORWARD_SELF=false.
-
 // CLI flag: request a full history sync at pair time.
 // Only meaningful on a fresh pair (whatsapp.db deleted). See the usage block
 // near NewClient for the full rationale and caveats.
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
-
-// getEnvBool reads a boolean env var with a default.
-// Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
-func getEnvBool(key string, def bool) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if v == "" {
-		return def
-	}
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return def
-	}
-}
 
 // resolveDeviceName returns the operator-configured linked-device label from
 // WHATSAPP_DEVICE_NAME, trimmed of surrounding whitespace. An empty or unset
@@ -70,11 +50,11 @@ func printQRCode(out io.Writer, code string, index int) {
 	_, _ = fmt.Fprintln(out, "\nWaiting for QR code scan... (a new code is printed each time WhatsApp rotates it)")
 }
 
-func webhookStartupMessage(forwardSelf bool) string {
-	if !webhooksEnabled() {
+func webhookStartupMessage(switches bridgeSwitches) string {
+	if !switches.WebhookEnabled {
 		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
 	}
-	if forwardSelf {
+	if switches.ForwardSelf {
 		return "FORWARD_SELF enabled: forwarding self messages to webhook"
 	}
 	return "FORWARD_SELF disabled: self messages will NOT be forwarded"
@@ -91,7 +71,17 @@ func main() {
 	logger.Infof("Starting WhatsApp client...")
 	logger.Infof("%s", buildInfo().String())
 
-	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
+	// The on/off switches, read strictly before anything is opened: a value
+	// that is not a boolean stops the bridge here instead of silently meaning
+	// the default (env_bool.go).
+	switches, swErr := loadBridgeSwitches()
+	if swErr != nil {
+		// Nothing is open yet, so there is nothing to release: exit non-zero
+		// and let the supervisor see a failed start.
+		logger.Errorf("Refusing to start: %v", swErr)
+		os.Exit(1)
+	}
+	logger.Infof("%s", webhookStartupMessage(switches))
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {
@@ -289,7 +279,7 @@ func main() {
 		return
 	}
 
-	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot)
+	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, switches)
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
 	bridge.Exit = func(reason string, code int) {
