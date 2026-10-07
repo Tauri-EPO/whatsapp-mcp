@@ -31,7 +31,7 @@ A full page is built for a human reading a conversation: 20 keys per message, mo
 | `omit_nulls` (default `false`) | Drop keys that carry nothing: `null`, `false`, empty text, empty `notes` |
 | `max_content_chars` (default unset) | Cut the row's long text to N characters and set `content_truncated: true` on that row |
 
-Measured on a 500-message text page (269,890 bytes as returned today): `omit_nulls` alone brings it to 154,640 bytes (**-43%**), `fields=["timestamp","sender_phone","content"]` to 64,640 bytes (**-76%**). The two combine; `max_content_chars` is on top of both.
+On a 500-message text page of about 270 KB, `omit_nulls` alone brings it to about 155 KB (**-43%**), `fields=["timestamp","sender_phone","content"]` to about 65 KB (**-76%**); the exact sizes depend on the chat. The two combine; `max_content_chars` is on top of both.
 
 Rules worth knowing:
 
@@ -1838,8 +1838,9 @@ says where the returned `name` came from:
 
 **`push_name` is the other half of the answer.** Your phone book and the
 contact's own name are two different facts, and collapsing them lost the one
-you did not save: on an archive of 2,000 contacts, 1,000 have a push name,
-800 of them are in no phone book at all, and of the 200 with both, 180 differ
+you did not save: in an archive of 2,000 contacts, say, about half have a push
+name, most of those are in no phone book at all, and of the ones with both a
+large share differ
 ("Acme Clinic Desk" signs herself "Dr. Carol Lima"). So `push_name` is
 returned beside `name` whatever `name_source` says — on chats, on
 [`get_contact`](#get_contact) and on message rows as `sender_push_name` — and
