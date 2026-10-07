@@ -117,8 +117,15 @@ func main() {
 
 	// The session keys live here: owner-only before whatsmeow creates or opens it.
 	privateDatabase(whatsmeowDBPath())
-	container, err := sqlstore.New(context.Background(), "sqlite", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions), dbLog)
+	sessionDB, err := sql.Open("sqlite", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions))
 	if err != nil {
+		logger.Errorf("Failed to connect to database: %v", err)
+		return
+	}
+	boundPool(sessionDB, sessionPoolConns)
+	container := sqlstore.NewWithDB(sessionDB, "sqlite", dbLog)
+	if err = container.Upgrade(context.Background()); err != nil {
+		_ = container.Close()
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}

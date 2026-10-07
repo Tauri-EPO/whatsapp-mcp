@@ -11,6 +11,7 @@ package main
 // "./store" so existing setups keep working.
 
 import (
+	"database/sql"
 	"errors"
 	"io/fs"
 	"os"
@@ -151,6 +152,29 @@ const (
 	sqliteWriterOptions   = "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
 	sqliteReadOnlyOptions = "mode=ro&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
 )
+
+// Connection-pool bounds for every handle the bridge opens (issue #471).
+// database/sql opens one connection per concurrent goroutine without a bound;
+// each carries its own page cache, and SQLite has one WAL writer, so extra
+// connections buy memory and SQLITE_BUSY, not throughput. Measured on an
+// on-disk WAL store with 32 goroutines storing 150 messages each plus 8
+// readers: unbounded peaked at 40 open connections and failed 300 to 2,300 of
+// 4,800 writes with SQLITE_BUSY; 8 connections failed up to 153; 1 to 4
+// failed none or a couple, and finished no slower. The floor is 2 (a rows
+// cursor held while the loop writes, as the startup backfills do) and the
+// choice is 4, which leaves room for a cursor, a transaction and a reader.
+const (
+	messagesPoolConns = 4 // messages.db, read and written by the bridge
+	sessionPoolConns  = 4 // whatsapp.db, whatsmeow's own store
+	contactsPoolConns = 2 // whatsapp.db opened read-only for contact lookups
+)
+
+// boundPool caps the open connections of db and keeps as many idle, so they
+// are reused instead of closed and reopened.
+func boundPool(db *sql.DB, conns int) {
+	db.SetMaxOpenConns(conns)
+	db.SetMaxIdleConns(conns)
+}
 
 func whatsmeowDBPath() string  { return storePath("whatsapp.db") }
 func messagesDBPath() string   { return storePath("messages.db") }

@@ -58,6 +58,7 @@ func NewMessageStore() (*MessageStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
+	boundPool(db, messagesPoolConns)
 
 	// Create tables if they don't exist
 	_, err = db.Exec(`
@@ -164,6 +165,7 @@ func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	boundPool(db, contactsPoolConns)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
