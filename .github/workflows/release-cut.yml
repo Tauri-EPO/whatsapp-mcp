@@ -80,6 +80,36 @@ jobs:
           echo "CI on main@$head is green."
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
+      # The ruleset on main requires the CI jobs on the head being merged
+      # (issue #545). The release PR is opened by github-actions[bot], whose
+      # pull_request runs wait for an approval nobody gives, so its head
+      # carries no check at all. workflow_dispatch is the documented exception
+      # to "GITHUB_TOKEN events start no workflow": run CI on the release
+      # branch here and wait for it. The checks land on the head commit, which
+      # is what the ruleset looks at.
+      - name: Run CI on the release PR head
+        id: prci
+        if: steps.ci.outputs.ready == 'true'
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          BRANCH: release-please--branches--main
+        run: |
+          sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          gh workflow run ci.yml --ref "$BRANCH"
+          run=""
+          for _ in $(seq 1 36); do
+            run=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 5 \
+              --json databaseId,headSha --jq "[.[] | select(.headSha == \"$sha\")][0].databaseId // empty")
+            [ -n "$run" ] && break
+            sleep 5
+          done
+          if [ -z "$run" ]; then
+            echo "::error::CI was dispatched on $BRANCH but no run for $sha appeared; not cutting a release."
+            exit 1
+          fi
+          echo "CI run $run on the release PR head $sha"
+          gh run watch "$run" --exit-status --interval 20
+
       - name: Merge the release PR
         id: merge
         if: steps.ci.outputs.ready == 'true'
