@@ -1903,6 +1903,8 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 	msg := buildImageMessage(phonePN, phonePN, false, "")
 	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+	msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
+	msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
 
 	downloadStarted := make(chan struct{})
 	releaseDownload := make(chan struct{})

@@ -1199,7 +1199,13 @@ says so with its own code: `media_unavailable` means "do not ask again", where
 `bridge_unavailable` means "try later". A message stored without the CDN fields
 a download needs (`incomplete media information`: history-sync stubs, some
 forwards) answers `media_unavailable` too — a media retry hands back a fresh
-path, never the key the file has to be decrypted with. The
+path, never the key the file has to be decrypted with. What counts as missing
+is the media key, either of the two hashes, or anywhere to ask (neither a
+direct path nor a url); an empty file (0 bytes) and a message that names its
+media by direct path alone are complete, and download. One difference on
+arrival: while `WHATSAPP_MEDIA_MAX_BYTES` is set (it is by default), a file
+whose message declares no length, or 0, is not cached automatically, because
+there is nothing to check against the cap; `download_media` fetches it. The
 `TRANSCRIBE_ON_INGEST` worker turns that answer into a `media_unavailable` note
 on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.

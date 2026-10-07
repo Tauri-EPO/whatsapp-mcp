@@ -177,7 +177,7 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	// is a later history sync storing the same message with its media info; the
 	// caller clears its note to ask again then, exactly as it does for a phone
 	// that restored a backup.
-	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
+	if !mediaComplete(url, storedDirectPath.String, mediaKey, fileSHA256, fileEncSHA256) {
 		return false, "", "", "", permanentMediaError("incomplete media information for download")
 	}
 
@@ -295,6 +295,15 @@ func (b *Bridge) transferMedia(ctx context.Context, msg whatsmeow.DownloadableMe
 		return b.mediaTransfer(ctx, msg, relPath)
 	}
 	return downloadToPath(ctx, b.StoreRoot, b.Client, msg, relPath)
+}
+
+// mediaComplete reports whether a message carries what a download needs:
+// somewhere to ask (its direct path, or a url to cut one out of), the media key
+// and the two hashes. Not the length: an empty file is a file, and its length
+// is 0 (issue #474). The download gate and the automatic download on arrival
+// both decide on this, so they cannot disagree about a row.
+func mediaComplete(url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte) bool {
+	return (url != "" || directPath != "") && len(mediaKey) > 0 && len(fileSHA256) > 0 && len(fileEncSHA256) > 0
 }
 
 // retryMedia asks the sender's phone to re-upload the file and downloads it

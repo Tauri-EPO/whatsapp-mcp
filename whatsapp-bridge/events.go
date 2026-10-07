@@ -266,7 +266,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// timestamp must be the retry-corrected one stored below: downloadMedia
 	// rebuilds the on-disk filename from the stored row.
 	ex := extractMessage(original, msgTimestamp, msg.Info.ID)
-	content, mediaType, filename, url, mediaKey, fileLength := ex.content, ex.mediaType, ex.filename, ex.url, ex.mediaKey, ex.fileLen
+	content, mediaType, filename, fileLength := ex.content, ex.mediaType, ex.filename, ex.fileLen
 	quotedMessageId, quotedSender, quotedContent := ex.quotedID, ex.quotedSender, ex.quotedContent
 	mentionedJIDs := ex.mentions
 
@@ -328,7 +328,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// "failed to find message" (issue #454). The webhook below still goes out,
 	// or the text would be lost downstream too, and says "stored": false so the
 	// receiver does not look the message up (issue #518).
-	downloadable := stored && url != "" && len(mediaKey) > 0
+	downloadable := stored && mediaComplete(ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc)
 	var imageData []byte
 	var imageMimeType string
 	if mediaType == "image" && downloadable && shouldForward && !skipStatusMedia {
@@ -349,6 +349,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		}
 	} else if mediaType != "" && downloadable && b.MediaAutoDownload && skipStatusMedia {
 		logger.Debugf("Not caching %s media of status update %s: %s is off (download_media still works)", mediaType, msg.Info.ID, mediaAutoDownloadStatusEnv)
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength == 0 {
+		// An empty file, or a message that did not say how long its file is:
+		// there is nothing to hold against the cap, so it is not fetched
+		// unasked. Asked for, it downloads like any other (issue #474).
+		logger.Infof("Skipping auto-download of %s media for message %s: no length declared to check against WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, b.MediaMaxBytes)
 	} else if mediaType != "" && downloadable && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
 		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
 	} else if mediaType != "" && downloadable && b.MediaAutoDownload {

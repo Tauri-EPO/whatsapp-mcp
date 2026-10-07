@@ -50,6 +50,8 @@ func TestHandleMessageSkipsAutoDownloadAboveMaxBytes(t *testing.T) {
 	msg := buildImageMessage(phonePN, phonePN, false, "")
 	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+	msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
+	msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
 	msg.Message.ImageMessage.FileLength = proto.Uint64(50 * 1024 * 1024)
 
 	var calls atomic.Int32

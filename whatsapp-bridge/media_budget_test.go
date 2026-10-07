@@ -168,6 +168,8 @@ func buildQueuedMediaMessage(id string) *events.Message {
 	msg := buildImageMessage(phonePN, phonePN, false, "")
 	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+	msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
+	msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
 	msg.Info.ID = id
 	return msg
 }
