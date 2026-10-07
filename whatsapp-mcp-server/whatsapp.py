@@ -358,8 +358,8 @@ BRIDGE_RETRY_BACKOFF_S = 0.5
 class _BridgeHTTP:
     """The httpx client behind ``get``/``post``, created on first use.
 
-    httpx is already the MCP SDK's HTTP stack, so the bridge client rides on it
-    instead of a second library. Tests monkeypatch ``bridge_http.get`` /
+    This is httpx, the project's own dependency (the MCP SDK brings a different
+    client, httpx2; see pyproject.toml). Tests monkeypatch ``bridge_http.get`` /
     ``bridge_http.post`` with fakes returning objects that have ``status_code``,
     ``json()`` and ``text``.
     """
