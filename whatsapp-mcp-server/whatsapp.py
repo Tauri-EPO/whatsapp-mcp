@@ -22,6 +22,7 @@ import media_upload
 import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
 from errors import ToolError
+from phone import br_mobile_alternate, phone_digits
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
 # transport stdout is the MCP protocol channel and stray output breaks it.
@@ -3187,6 +3188,27 @@ def _matched_field(query: str, candidates: list[tuple[str, str | None]]) -> str 
     return None
 
 
+def _like_any(column: str, patterns: list[str]) -> str:
+    """`column LIKE ?` once per pattern, OR-ed; the patterns themselves are bound."""
+    return "(" + " OR ".join(f"{column} LIKE ?" for _ in patterns) + ")"
+
+
+def _phone_spellings(value: str) -> tuple[str | None, str | None]:
+    """What a phone-number input also stands for (issue #444, `phone.py`).
+
+    Its digits, and the phone JID of the other spelling when it is a Brazilian
+    mobile; each is None when there is none. The input is the number however
+    it was typed, or its phone JID. A LID is not a phone number, so an input
+    naming one has neither.
+    """
+    user, _, server = (value or "").strip().partition("@")
+    if server not in ("", DEFAULT_USER_SERVER):
+        return None, None
+    digits = phone_digits(user)
+    alternate = br_mobile_alternate(digits) if digits else None
+    return digits, f"{alternate}@{DEFAULT_USER_SERVER}" if alternate else None
+
+
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
@@ -3199,6 +3221,10 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     is stored under the number of whoever posted last, so searching that number
     used to answer with a "contact" whose phone number was the word "status"
     (issue #379).
+
+    A phone-number query is matched as digits however it was typed, and a full
+    Brazilian mobile also finds the contact stored under its other spelling,
+    with or without the ninth digit (issue #444, `phone.py`).
     """
     seen_jids: set[str] = set()
     # (jid, name, push name if this hit carried one, fields the query could
@@ -3206,7 +3232,17 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     found: list[tuple[str, str | None, str | None, list[tuple[str, str | None]]]] = []
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
-    jid_pattern = "%" + query + "%"
+    jid_patterns = ["%" + query + "%"]
+    # A query that is a phone number also matches with its separators dropped,
+    # and a Brazilian mobile under its other spelling (issue #444): that one as
+    # the whole phone JID, never as a substring of somebody else's.
+    digits, alternate = _phone_spellings(query)
+    typed_digits = digits if digits and digits != query and "@" not in query else None
+    other_spellings = [spelling for spelling in (typed_digits, alternate) if spelling]
+    if typed_digits:
+        jid_patterns.append("%" + typed_digits + "%")
+    if alternate:
+        jid_patterns.append(alternate)
 
     # 1) Search messages.db chats table (existing behavior)
     try:
@@ -3217,13 +3253,13 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             SELECT DISTINCT jid, name
             FROM chats
             WHERE
-                (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR jid LIKE ?)
+                (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR {_like_any("jid", jid_patterns)})
                 AND jid NOT LIKE '%@g.us'
                 AND jid <> '{STATUS_BROADCAST_JID}'
             ORDER BY name, jid
             LIMIT 50
         """,
-            (query, query, jid_pattern),
+            (query, query, *jid_patterns),
         )
         for jid, name in cursor.fetchall():
             if jid not in seen_jids:
@@ -3242,7 +3278,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             conn2 = _connect_whatsmeow_db()
             cursor2 = conn2.cursor()
             cursor2.execute(
-                """
+                f"""
                 SELECT their_jid, full_name, push_name, first_name, business_name
                 FROM whatsmeow_contacts
                 WHERE
@@ -3250,10 +3286,10 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                     OR instr(LOWER(push_name), LOWER(?)) > 0 OR instr(push_name, ?) > 0
                     OR instr(LOWER(first_name), LOWER(?)) > 0 OR instr(first_name, ?) > 0
                     OR instr(LOWER(business_name), LOWER(?)) > 0 OR instr(business_name, ?) > 0
-                    OR their_jid LIKE ?
+                    OR {_like_any("their_jid", jid_patterns)}
                 LIMIT 50
             """,
-                (query, query, query, query, query, query, query, query, jid_pattern),
+                (query, query, query, query, query, query, query, query, *jid_patterns),
             )
             for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
                 if their_jid not in seen_jids:
@@ -3294,7 +3330,10 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             push_name=push_name,
             jid=jid,
         )
-        rows.append({**contact_to_dict(contact), "matched": _matched_field(query, candidates)})
+        matched = _matched_field(query, candidates)
+        if matched is None and any(spelling in jid for spelling in other_spellings):
+            matched = "jid"
+        rows.append({**contact_to_dict(contact), "matched": matched})
     return rows
 
 
@@ -3642,7 +3681,8 @@ def _direct_chat_candidates(value: str) -> tuple[str, str, str]:
     that could return an unrelated chat whose JID merely contains the digits.
     """
     raw = (value or "").strip()
-    bare = raw.split("@", 1)[0].lstrip("+").replace(" ", "").replace("-", "")
+    user = raw.split("@", 1)[0]
+    bare = phone_digits(user) or user.lstrip("+").replace(" ", "").replace("-", "")
     return raw, f"{bare}@s.whatsapp.net", f"{bare}@lid"
 
 
@@ -3652,14 +3692,22 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     A merged phone/LID pair answers as one chat here too (issue #337): each
     candidate spelling is mapped to the row that lists for it, so the answer is
     the row carrying the conversation whichever of the two holds it.
+
+    A Brazilian mobile is also looked up under its other spelling (issue #444):
+    WhatsApp registered the account with or without the ninth digit and the
+    chat is stored under that one. The number as given wins when both spellings
+    have a chat the allow-list admits.
     """
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
         spellings = _direct_chat_candidates(sender_phone_number)
-        twins = _chat_twins(cursor, only=spellings)
-        candidates = [twins.listing_jid(jid) for jid in spellings]
+        _, alternate = _phone_spellings(sender_phone_number)
+        lookups = [*spellings, alternate] if alternate else list(spellings)
+        twins = _chat_twins(cursor, only=lookups)
+        candidates = [twins.listing_jid(jid) for jid in lookups]
+        alternate_row = twins.listing_jid(alternate) if alternate else ""
 
         cursor.execute(
             f"""
@@ -3674,17 +3722,22 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 m.id IS NOT NULL as has_messages
             FROM chats c
             {_last_message_join("c", "m")}
-            WHERE c.jid IN (?, ?, ?) AND {policy_clause}
-            ORDER BY CASE WHEN c.jid = ? THEN 0 WHEN c.jid LIKE '%@s.whatsapp.net' THEN 1 ELSE 2 END
+            WHERE c.jid IN ({_placeholders(candidates)}) AND {policy_clause}
+            ORDER BY CASE
+                WHEN c.jid = ? THEN 0
+                WHEN c.jid = ? THEN 3
+                WHEN c.jid LIKE '%@s.whatsapp.net' THEN 1
+                ELSE 2
+            END
             LIMIT 1
         """,
-            (*candidates, *policy_params, sender_phone_number),
+            (*candidates, *policy_params, sender_phone_number, alternate_row),
         )
 
         chat_data = cursor.fetchone()
 
         if not chat_data:
-            for candidate in _direct_chat_candidates(sender_phone_number):
+            for candidate in spellings:
                 _require_allowed(candidate)
             return None
 

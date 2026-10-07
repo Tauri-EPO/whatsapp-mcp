@@ -548,6 +548,23 @@ never mistaken for a hit on your own record. It is `null` when none of those
 fields contains the query literally, which only happens for a wildcard search
 that matched the JID pattern alone.
 
+**Phone numbers.** A query of seven or more digits and the usual separators is
+matched as the digits alone, so `+55 (88) 98195-2753`, `55 88 98195-2753` and
+`5588981952753` are the same search (a `+`, spaces, dashes, dots, parentheses
+and the invisible marks WhatsApp puts around a displayed number are ignored).
+A Brazilian mobile has two spellings, with and
+without the ninth digit after the area code, and WhatsApp registers the account
+under one of them: a full number (`55` + two-digit area code + number) finds
+the contact under either, so `5588981952753` returns the contact stored as
+`558881952753@s.whatsapp.net` and the reverse. `matched` is `jid` on such a
+hit, and the `jid` it carries is the registered spelling — the one to pass to
+the other tools. A query that is the number's JID (`5588981952753@s.whatsapp.net`)
+finds the other spelling too. The other spelling is matched as a whole number,
+never as a fragment, and only for mobiles (subscriber number beginning 6–9): a
+landline, a partial number, a number without the `55` and a number from any
+other country are searched exactly as typed. Name searches are unaffected, and
+so is a short numeric query such as `1.5` or `(11)`.
+
 **Natural Language Examples:**
 
 - "Find contacts named John"
@@ -2021,7 +2038,16 @@ Find a direct message chat with a contact.
 
 **Parameters:**
 
-- `contact_jid` (required): The contact's phone number or JID
+- `contact_jid` (required): The contact's phone number with country code, or its JID
+
+The number is matched whole (a chat whose JID merely contains the digits is not
+an answer), with a `+`, spaces, dashes, dots and parentheses ignored. A
+Brazilian mobile is found with or without the ninth digit after the area code,
+as in [`search_contacts`](#search_contacts): `5588981952753` returns the chat
+stored as `558881952753@s.whatsapp.net`, and the returned `jid` tells you which
+spelling WhatsApp registered. When both spellings have a chat of their own, the
+one you asked for is returned; under `WHATSAPP_ALLOWED_CHATS`, the one the list
+admits. `not_found` when neither has one.
 
 ### `get_contact_chats`
 
