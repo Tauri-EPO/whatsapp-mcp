@@ -1240,27 +1240,41 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
 
 <a id="how-large-one-result-can-get"></a>**How large one result can get.** The whole answer is one JSON-RPC
-message, sent as a single `text/event-stream` event on the streamable-HTTP
-transport, so the largest result is the largest event a client must accept:
+message, in one HTTP response body, so the largest result is the largest message
+a client has to accept. Sizes on the wire (base64 is 4/3 of the bytes):
 
-| Call | Ceiling of the answer on the wire |
+| Call | Ceiling of the answer |
 |---|---|
 | `max_edge=0` on a JPEG/PNG/GIF/WebP (the stored bytes) | **~21.5 MiB**: 16 MiB of file (`MAX_IMAGE_BYTES`) as base64 |
 | `as_images=true` on a PDF | ~10.7 MiB: at most 8 MiB of rendered pages (`media_pdf.MAX_TOTAL_BYTES`) as base64, whatever `max_pages` (20 at most) |
 | audio, or any other file as a resource | ~2.7 MiB: 2 MiB (`MAX_BASE64_BYTES`) as base64 |
-| a downscaled image (the default) | a few hundred KiB to ~1 MiB at 1568 px, more with a larger `max_edge` |
-| `as_text=true`, or a text-ish file | text: 200 000 characters at most (`as_text`), 1 MB (text files) |
+| an image with the default `max_edge` | a few hundred KiB at 1568 px; **up to ~1.4 MiB** when the stored file is 1 MiB or less and already fits (it is sent as it is), more with a larger `max_edge` |
+| `as_text=true`, or a text-ish file | 200 000 characters at most (`as_text`); 1 MiB of file (text files), a little more once JSON has escaped quotes, newlines and non-ASCII |
 
-Measured against this server (mcp 2.3.0, a local HTTP stack with a 12.7 MB photo
-and a six-page noise "scan"): `max_edge=0` came back as one 16.9 MB event, and
-`as_images` on the scan as 13 blocks of 7.8 MiB. A client that caps one event
-below those numbers (the Python SDK exposes it as `max_sse_event_size`, default
-1 MiB) must raise or remove the cap: the README example passes
-`max_sse_event_size=None`. In that run the SDK's default client did not refuse
-the 16.9 MB event, with the cap at its default, at 1 MiB or even at 100 KB, so
-the cap did not bite there; other clients, proxies that re-frame the stream, or
-a later SDK may, which is why the example removes it. `max_bytes` lowers any of
-these ceilings per call.
+**What a client must accept depends on how the server frames the answer.** On
+the streamable-HTTP transport the Python SDK's server answers a request with a
+plain `application/json` body when the call finishes quickly and emits no
+notification (the newer protocol revision), and with one `text/event-stream`
+event when it speaks an earlier revision or the call is still running after 15 s.
+The SDK client caps one SSE event (`max_sse_event_size`, default 1 MiB) and
+does not cap a JSON body, so the same photo can arrive either way. Measured on
+this server (mcp 2.3.0, a local HTTP stack with a 12.7 MB photo and a six-page
+noise "scan"):
+
+- the SDK 2.3.0 client (newer revision) received `max_edge=0` (16.1 MiB of
+  base64) and `as_images` (13 blocks, 7.8 MiB of base64) as JSON, with the
+  default cap, with 1 MiB and with 100 KB;
+- a session on the earlier revision (`protocolVersion` `2025-03-26`) got the same
+  photo as one 16.9 MB `text/event-stream` event, and the SDK's own SSE parser
+  with its default cap refused it (`Server-sent event exceeded the 1048576 byte
+  limit`), while `max_sse_event_size=None` received it whole.
+
+A client that can be answered with SSE (the earlier revision, or a call slower than
+15 s) must therefore lift the cap above the ceilings
+above; the README example passes `max_sse_event_size=None`. `max_bytes` caps the
+size of the **stored file** a call will read, so it lowers the first and
+third rows and the file behind `as_text`, but not the rendered pages of
+`as_images` (use `max_pages`) or a downscaled image (use `max_edge` / `quality`).
 
 The 16 MB in the first row is the size **of the file**, not of the answer: what
 travels is the downscaled copy. It covers TIFF, BMP and HEIC only on the path
