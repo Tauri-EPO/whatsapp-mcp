@@ -1983,11 +1983,16 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
         conn = _connect_messages_db()
         cursor = conn.cursor()
 
-        # Exact match on the JID as stored, then on the other spellings of the
-        # same number (bare, phone JID, LID JID). No LIKE '%number%': it scanned
-        # the table and could match an unrelated JID containing the digits.
-        bare = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
-        candidates = [sender_jid, bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
+        # Exact match, never LIKE '%number%': it scanned the table and could
+        # match an unrelated JID containing the digits. A bare sender does not
+        # say which namespace it is in, so its digits are tried under both
+        # servers. A full JID names its own row: the same digits under the
+        # other server are somebody else, and under an allow-list possibly a
+        # chat the list does not name (issue #466).
+        if "@" in sender_jid:
+            candidates = [sender_jid]
+        else:
+            candidates = [sender_jid, f"{sender_jid}@s.whatsapp.net", f"{sender_jid}@lid"]
         cursor.execute(
             f"""
             SELECT name
@@ -3337,6 +3342,12 @@ def other_phone_spelling(jid: str) -> str | None:
     return f"{alternate}@{DEFAULT_USER_SERVER}" if alternate else None
 
 
+def lid_jids_of_contact(jid: str) -> list[str]:
+    """The LID JIDs the map pairs with a phone number or phone JID, in either spelling (`_lid_jids_of_number`)."""
+    digits, alternate = _phone_spellings(jid)
+    return _lid_jids_of_number(digits, alternate)
+
+
 def phone_book_spelling(jid: str) -> str:
     """The spelling of a Brazilian mobile to answer about when it has no chat of its own.
 
@@ -3351,30 +3362,9 @@ def phone_book_spelling(jid: str) -> str:
         return jid
     if not CHAT_POLICY.allows(jid):
         return other
-
-    def name(spelling: str) -> str:
-        listed = allow_listed_contact_name(spelling)
-        return listed if listed is not None else get_sender_name(spelling)
-
-    if name(jid) == jid and name(other) != other:
+    if get_sender_name(jid) == jid and get_sender_name(other) != other:
         return other
     return jid
-
-
-def allow_listed_contact_name(jid: str) -> str | None:
-    """Under an allow-list, the name get_contact falls back to (or the JID back); None without one.
-
-    `get_sender_name` also reads `chats.name` under the same digits on the
-    other server, with no allow-list clause. That is right for naming who sent
-    a message in an allowed chat, and wrong for a caller that asks about a JID:
-    it could be told the name of a chat the list does not name. So under an
-    allow-list the fallback is the phone book alone, which the list does not
-    filter (`search_contacts`); the chat row was already asked, by get_chat.
-    Without one the caller keeps using `get_sender_name`.
-    """
-    if not CHAT_POLICY.restricted:
-        return None
-    return _contact_names([jid]).get(jid) or jid
 
 
 def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
@@ -3992,7 +3982,19 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             # a chat exists for it: the query above never saw its row.
             typed, phone_jid, lid_jid = spellings
             server = typed.rpartition("@")[2].lower() if "@" in typed else ""
-            meant = [jid for jid in (phone_jid, lid_jid) if not server or jid.endswith(f"@{server}")] or [typed]
+            if server:
+                # A JID is checked in the namespace it names.
+                meant = [jid for jid in (phone_jid, lid_jid) if jid.endswith(f"@{server}")] or [typed]
+            else:
+                # A bare number is a phone number. It is also read as a LID
+                # only at the length a LID has: a `*@lid` entry must not turn
+                # every phone number into "allowed, no chat".
+                digits = lid_jid.partition("@")[0]
+                could_be_lid = digits.isdigit() and len(digits) >= min(AMBIGUOUS_LID_DIGITS)
+                meant = [phone_jid, lid_jid] if could_be_lid else [phone_jid]
+            if server in ("", DEFAULT_USER_SERVER):
+                # The contact may be on the list as the LID the map pairs it with.
+                meant += mapped
             if not any(_readable(jid) for jid in meant):
                 raise ToolError("denied", CHAT_POLICY.denial_message(typed))
             return None

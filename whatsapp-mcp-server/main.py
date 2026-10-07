@@ -71,9 +71,6 @@ from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
 )
 from whatsapp import (
-    allow_listed_contact_name as whatsapp_allow_listed_contact_name,
-)
-from whatsapp import (
     bridge_status as whatsapp_bridge_status,
 )
 from whatsapp import (
@@ -132,6 +129,9 @@ from whatsapp import (
 )
 from whatsapp import (
     leave_group as whatsapp_leave_group,
+)
+from whatsapp import (
+    lid_jids_of_contact as whatsapp_lid_jids_of_contact,
 )
 from whatsapp import (
     list_chats_page as whatsapp_list_chats,
@@ -470,6 +470,9 @@ def get_contact(identifier: str) -> dict[str, Any]:
     candidates = [jid]
     if bare_numeric_digits:
         candidates.append(f"{bare_numeric_digits}@lid")
+    # The chat may be stored under the LID the map pairs the number with, and
+    # nowhere else (issue #465): get_direct_chat_by_contact looks there too.
+    candidates += [lid_jid for lid_jid in whatsapp_lid_jids_of_contact(jid) if lid_jid not in candidates]
 
     # A Brazilian mobile has a second spelling, with or without the ninth
     # digit (issue #475), and the store holds the one WhatsApp registered:
@@ -478,38 +481,39 @@ def get_contact(identifier: str) -> dict[str, Any]:
     other_spelling = whatsapp_other_phone_spelling(jid)
 
     # A bare number is tried under two spellings, and the allow-list may name
-    # one of them only: the identifier is refused when it names neither, not
-    # when it does not name both (issue #466). What follows only ever talks
-    # about a spelling that was admitted.
+    # one of them only. A refusal for the spelling the identifier does not turn
+    # out to be must not fail the call (issue #466): the allow-list is asked
+    # about the JID the identifier resolves to, below, once that is known.
     chat = None
-    refused: ToolError | None = None
-    admitted: list[str] = []
+    refusals: dict[str, ToolError] = {}
     for candidate_jid in candidates:
         try:
-            chat = whatsapp_get_chat(candidate_jid, include_last_message=False)
+            found = whatsapp_get_chat(candidate_jid, include_last_message=False)
         except ToolError as exc:
             if exc.code != "denied":
                 raise
-            refused = refused or exc
+            refusals[candidate_jid] = exc
             continue
-        admitted.append(candidate_jid)
-        if chat:
+        if found:
+            chat = found
             jid = candidate_jid
             if other_spelling and chat["jid"] == other_spelling:
                 jid = other_spelling
             break
-    if refused and not admitted:
-        raise refused
-    if chat is None:
-        jid = whatsapp_phone_book_spelling(admitted[0])
 
-    lid_guess = f"{bare_numeric_digits}@lid" if bare_numeric_digits else None
-    if chat is None and bare_numeric_digits and lid_guess in admitted and unknown_lid_digits(bare_numeric_digits):
+    if chat is None and bare_numeric_digits and unknown_lid_digits(bare_numeric_digits):
         # Nothing here has ever seen this number: no chat under either
         # spelling, no message row, no phone-book entry, and the LID map said
         # nothing above. At 14-15 digits that is a LID whose mapping we never
         # learned, not a phone number nobody has written to (#375).
-        jid = lid_guess
+        jid = f"{bare_numeric_digits}@lid"
+
+    if chat is None:
+        # The classification above never looked at the allow-list. The answer
+        # is about `jid`, so that is the JID the list has to name.
+        if jid in refusals:
+            raise refusals[jid]
+        jid = whatsapp_phone_book_spelling(jid)
 
     jid_user = jid.split("@", 1)[0]
     identity = sender_identity(jid)
@@ -520,9 +524,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
         resolved = display_name not in (jid, jid_user)
     else:
         # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
-        # Under an allow-list the name comes from the phone book alone.
-        listed_name = whatsapp_allow_listed_contact_name(jid)
-        display_name = listed_name if listed_name is not None else whatsapp_get_sender_name(jid)
+        display_name = whatsapp_get_sender_name(jid)
         resolved = display_name not in (jid, jid_user, identifier)
 
     # Echoing the identifier back as a name invents a contact called
@@ -1354,9 +1356,10 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     the contact's LID is found by the phone number as well; its `jid` is then
     the `...@lid` one.
 
-    Errors: `not_found` means the number is allowed and has no chat stored;
-    `denied` means WHATSAPP_ALLOWED_CHATS does not name it, and says nothing
-    about whether a chat exists.
+    Errors: `not_found` means the number is allowed and no chat with it is
+    stored under a JID the allow-list names; `denied` means
+    WHATSAPP_ALLOWED_CHATS does not name it, and says nothing about whether a
+    chat exists.
 
     Args:
         contact_jid: The contact's phone number with country code ("12025551234")
