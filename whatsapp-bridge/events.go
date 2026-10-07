@@ -8,8 +8,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -309,25 +307,15 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// "failed to find message" (issue #454). The webhook below still goes out,
 	// or the text would be lost downstream too.
 	downloadable := stored && url != "" && len(mediaKey) > 0
-	var imageDownloadPath string
+	var imageData []byte
 	var imageMimeType string
 	if mediaType == "image" && downloadable && shouldForward && !skipStatusMedia {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, _, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
+		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
-			imageDownloadPath = dlPath
-			// Detect MIME type by sniffing the actual file bytes rather than
-			// trusting the generated filename extension (always .jpg).
-			if f, openErr := os.Open(dlPath); openErr == nil { //nolint:gosec // dlPath is built by downloadMedia under the store directory
-				buf := make([]byte, 512)
-				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
-					imageMimeType = http.DetectContentType(buf[:n])
-				}
-				_ = f.Close()
-			}
-			if imageMimeType == "" {
-				imageMimeType = "application/octet-stream"
-			}
+			// One read through the store root gives the sniffed MIME type and
+			// the bytes for the payload (webhook.go).
+			imageMimeType, imageData = b.webhookMedia(chatJID, dlName)
 			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
@@ -360,7 +348,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			b.Webhook.SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
-				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageData,
 			)
 		} else {
 			b.Webhook.SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID)

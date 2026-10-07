@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"os"
+	"path"
 	"sync/atomic"
 	"time"
 )
@@ -181,32 +184,98 @@ func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string
 	})
 }
 
-// SendWebhookWithMedia sends a message to the webhook endpoint including base64-encoded
-// image data read from localPath. If localPath is empty or unreadable the webhook is
-// still sent – just without the MediaBase64 field so the text caption is not lost.
+// webhookMedia reads a cached media file for the webhook: the MIME type sniffed
+// from its first bytes (never the generated extension, which is always .jpg for
+// an image) and, when the file fits maxMediaBase64Bytes, its content. On any
+// failure it says why at WARN and returns no bytes, so the webhook still goes
+// out with the caption.
+//
+// The file is named the way downloadMedia named it, chat directory and file
+// name, and opened through the store root. The absolute path downloadMedia
+// returns was checked when the file was written, which is not a control at the
+// read: a component swapped for a symlink in between would have had another
+// file encoded into the payload and sent to WEBHOOK_URL (issue #493). Nothing
+// here follows a link, not even one that stays inside the store: the chat
+// directory must be a directory, the file a regular file, and the handle that
+// is read must be the file that was checked.
+func (b *Bridge) webhookMedia(chatJID, filename string) (mimeType string, data []byte) {
+	const unknown = "application/octet-stream"
+	f, size, err := openStoreMedia(b.StoreRoot, chatMediaRel(chatJID), filename)
+	if err != nil {
+		b.Log.Warnf("Could not open media file for the webhook: %v", err)
+		return unknown, nil
+	}
+	defer func() { _ = f.Close() }()
+	if size > maxMediaBase64Bytes {
+		b.Log.Warnf("Media file too large for base64 encoding (%d bytes), skipping MediaBase64", size)
+		head := make([]byte, 512)
+		n, _ := io.ReadFull(f, head)
+		return http.DetectContentType(head[:n]), nil
+	}
+	// The cap is on the handle being read: a file that grows after the Stat
+	// still cannot put more than the limit in memory.
+	data, err = io.ReadAll(io.LimitReader(f, maxMediaBase64Bytes+1))
+	if err != nil || len(data) > maxMediaBase64Bytes {
+		b.Log.Warnf("Could not read media file for base64 encoding (%d bytes read): %v", len(data), err)
+		return unknown, nil
+	}
+	return http.DetectContentType(data), data
+}
+
+// openStoreMedia opens store/<chatDir>/<name> for reading without following a
+// symlink at either component, and returns its size. os.Root keeps the open
+// inside the store but does follow a link that stays inside it, so both
+// components are checked with Lstat first, and the opened handle is compared
+// with what Lstat saw: a name swapped for a link between the two is a
+// different file and is refused.
+func openStoreMedia(root *os.Root, chatDir, name string) (*os.File, int64, error) {
+	if root == nil {
+		return nil, 0, errors.New("store directory unavailable")
+	}
+	if err := checkMediaPathComponents(chatDir, name); err != nil {
+		return nil, 0, err
+	}
+	if dir, err := root.Lstat(chatDir); err != nil || !dir.IsDir() {
+		return nil, 0, errors.New("chat directory is not a real directory inside the store")
+	}
+	rel := path.Join(chatDir, name)
+	seen, err := root.Lstat(rel)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !seen.Mode().IsRegular() {
+		return nil, 0, errors.New("cached media is not a regular file")
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, 0, err
+	}
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(seen, opened) {
+		_ = f.Close()
+		return nil, 0, errors.New("cached media changed while it was being opened")
+	}
+	return f, opened.Size(), nil
+}
+
+// SendWebhookWithMedia sends a message to the webhook endpoint including the
+// base64-encoded image bytes in media (Bridge.webhookMedia reads them). With no
+// bytes the webhook is still sent – just without the MediaBase64 field, so the
+// text caption is not lost.
 func (w *webhookSender) SendWebhookWithMedia(
 	sender, content, chatJID string,
 	isFromMe bool,
 	quotedMessageId, quotedSender, quotedContent string,
 	quotedIsFromMe *bool, mentionedJIDs []string,
-	messageID, mediaType, mimeType, mediaFilename, localPath string,
+	messageID, mediaType, mimeType, mediaFilename string, media []byte,
 ) {
 	if !w.enabled {
 		return
 	}
 
 	var mediaBase64 string
-	if localPath != "" {
-		info, statErr := os.Stat(localPath)
-		if statErr != nil {
-			bridgeLog.Warnf("Could not stat media file for base64 encoding: %v", statErr)
-		} else if info.Size() > maxMediaBase64Bytes {
-			bridgeLog.Warnf("Media file too large for base64 encoding (%d bytes), skipping MediaBase64", info.Size())
-		} else if data, err := os.ReadFile(localPath); err == nil { //nolint:gosec // localPath comes from downloadMedia inside the store directory
-			mediaBase64 = base64.StdEncoding.EncodeToString(data)
-		} else {
-			bridgeLog.Warnf("Could not read media file for base64 encoding: %v", err)
-		}
+	if len(media) > 0 {
+		mediaBase64 = base64.StdEncoding.EncodeToString(media)
 	}
 
 	w.sendPayload(WebhookPayload{

@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -136,7 +134,10 @@ func TestSendWebhookWithMessageIDSerializesID(t *testing.T) {
 	}
 }
 
-func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
+// A disabled sender delivers nothing, media or not. The bytes are read by the
+// caller (Bridge.webhookMedia), which handleMessage only reaches when a webhook
+// will go out.
+func TestSendWebhookWithMediaDisabledSendsNothing(t *testing.T) {
 	var received bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received = true
@@ -146,32 +147,14 @@ func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
 
 	t.Setenv("WEBHOOK_ENABLED", "false")
 	t.Setenv("WEBHOOK_URL", srv.URL)
-	missingPath := filepath.Join(t.TempDir(), "missing.jpg")
-
-	readEnd, writeEnd, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdout pipe: %v", err)
-	}
-	previousStdout := os.Stdout
-	os.Stdout = writeEnd
 	newTestWebhook().SendWebhookWithMedia(
 		"123@s.whatsapp.net", "", "123@s.whatsapp.net", false,
 		"", "", "", nil, nil,
-		"message-id", "image", "image/jpeg", "missing.jpg", missingPath,
+		"message-id", "image", "image/jpeg", "missing.jpg", []byte("image bytes"),
 	)
-	_ = writeEnd.Close()
-	os.Stdout = previousStdout
-	output, err := io.ReadAll(readEnd)
-	if err != nil {
-		t.Fatalf("read captured stdout: %v", err)
-	}
-	_ = readEnd.Close()
 
 	if received {
 		t.Fatal("webhook was delivered despite WEBHOOK_ENABLED=false")
-	}
-	if strings.Contains(string(output), "Could not stat media file") {
-		t.Fatalf("disabled webhook still touched media path: %s", output)
 	}
 }
 
