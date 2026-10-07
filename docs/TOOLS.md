@@ -1680,17 +1680,57 @@ removed; call again with `dry_run=false` to delete. Check the `notes` field of
 
 - `items`: explicit `[{"message_id", "chat_jid"}]` from `list_media`
 - `chat_jid`, `older_than_days`, `min_bytes`, `media_type`: criteria resolved
-  by the bridge from `messages.db`; the bridge caps one call at 500 files and
-  reports `truncated` when more matched
+  by the bridge from `messages.db`; the bridge removes at most 500 files per
+  call (see [Purging a large set](#purging-a-large-set))
 - `dry_run` (default `true`)
+- `summary_only` (default `false`): leave `items` out and return the totals
+  only. A criteria call that matches 500 files otherwise answers with about
+  70 KB of per-file rows
 
 Returns `dry_run`, `message`, `matched`, `purged_files`, `purged_bytes`,
-`truncated` and `items` (`purged`, `bytes`, `file`, `reason` such as
-`not cached`, `not a media message`, `message not found`, denied chat).
+`truncated`, `remaining`, `scan_truncated`, `unreachable` and `items`
+(`purged`, `bytes`, `file`, `reason` such as `not cached`,
+`not a media message`, `message not found`, denied chat); `items` is absent
+with `summary_only`. `matched` is the number of cached files the criteria form
+selected; on the `items` form it is the number of named rows that exist.
 Every deleted path is built by the bridge from a message row (`chat_jid`,
 `media_type`, `timestamp`, `id`), never from a client-supplied path, and is
 confined to the store directory. `WHATSAPP_ALLOWED_CHATS` applies (the MCP
 server refuses denied chats, the bridge answers 403 and skips denied rows).
+
+<a id="purging-a-large-set"></a>**Purging a large set.** The criteria form
+looks at the rows that match oldest first and counts only those whose file is
+**still cached**: a row whose bytes an earlier purge, the retention sweep or a
+cache wipe already removed costs a stat, not one of the 500 slots. So the same
+call, repeated, makes progress, and the loop ends by itself:
+
+1. `purge_media(chat_jid="status@broadcast", summary_only=true)` — the dry run:
+   `purged_files` / `purged_bytes` are what the first real call removes
+   (exactly that set), `remaining` how many more matching cached files wait
+   behind it.
+2. `purge_media(chat_jid="status@broadcast", dry_run=false, summary_only=true)`,
+   **repeated while `truncated` is `true`**. `remaining` falls by up to 500 per
+   call; the call with `truncated: false` removed the last of them, and one more
+   reports `matched: 0`.
+
+A call scans at most 100000 matching rows (the stats of the uncached ones are
+the cost). If it reaches that before finding a cached file, `scan_truncated` is
+`true`, `truncated` stays `true` and `purged_files` is 0 — repeating would
+repeat the same walk, so narrow the criteria (`media_type`, `min_bytes`,
+`older_than_days`) instead. `unreachable` counts matching rows whose cached path
+the store root refuses (a symlink out of the store, a chat directory moved to
+another disk); the first 50 are listed in `items` with their reason, none of
+them uses a slot. `failed` counts selected files that could not be removed (a read-only
+directory, an immutable file); when a real call removes nothing and `failed`,
+`truncated` is `false` and the message says so, because repeating cannot help.
+Denied chats are skipped before they are probed and do not use the 100000-row
+ceiling. A criteria call keeps counting `remaining` after it has its 500 files,
+so it stats the rest of the matching rows too; it stops if the client
+disconnects. `unreachable` is also what a row with a corrupted chat path
+reports. Drop `summary_only` to see which rows and why. `remaining`,
+`scan_truncated`, `unreachable` and `failed` belong to the
+criteria form; the `items` form still takes the first 500 entries you name and
+reports `truncated` if you named more.
 
 **Natural Language Examples:**
 

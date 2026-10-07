@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -263,5 +266,246 @@ func TestMediaPurge_InvalidatesStoreStats(t *testing.T) {
 	after, mediaAfter, _ := b.storeStats.snapshot(time.Now())
 	if after >= before || mediaAfter >= mediaBefore {
 		t.Errorf("store stats not refreshed: %d/%d -> %d/%d", before, mediaBefore, after, mediaAfter)
+	}
+}
+
+// criteriaFixture is a bridge with its own store directory and no seeded rows;
+// seedPurgeRows adds them.
+func criteriaFixture(t *testing.T) *Bridge {
+	t.Helper()
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms := newTestMessageStore(t)
+	return testBridge(t, nil, ms, installRecordingLogger(t))
+}
+
+// seedPurgeRows stores n image rows in chat, one second apart from base, and
+// writes the cached file of each when cached is true. It returns the ids.
+func seedPurgeRows(t *testing.T, b *Bridge, chat, prefix string, n int, base time.Time, cached bool) []string {
+	t.Helper()
+	if err := b.Store.StoreChat(chat, "", base); err != nil {
+		t.Fatal(err)
+	}
+	dir := chatMediaDir(chat)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%s%04d", prefix, i)
+		ts := base.Add(time.Duration(i) * time.Second)
+		if err := b.Store.StoreMessage(id, chat, "x", "", ts, false, "image", "", "u", []byte("k"), []byte("s"), []byte("e"), 1024, ""); err != nil {
+			t.Fatal(err)
+		}
+		if cached {
+			if err := os.WriteFile(filepath.Join(dir, mediaFileName("image", ts, id, "")), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func cachedCount(t *testing.T, chat string) int {
+	t.Helper()
+	entries, err := os.ReadDir(chatMediaDir(chat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
+}
+
+func purgedIDs(resp MediaPurgeResponse) []string {
+	var ids []string
+	for _, it := range resp.Items {
+		if it.Purged {
+			ids = append(ids, it.MessageID)
+		}
+	}
+	return ids
+}
+
+// Issue #445: the criteria form took the first 500 matching rows whether or not
+// their file was still cached, so once those were purged the same call matched
+// the same rows again and removed nothing. 300 uncached rows sit in front of
+// 1200 cached ones; identical calls must walk past them, drain the chat in
+// three real calls and then say there is nothing left.
+func TestMediaPurge_CriteriaConvergesPastTheCap(t *testing.T) {
+	b := criteriaFixture(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeChat, "GONE", 300, base, false)
+	seedPurgeRows(t, b, purgeChat, "KEEP", 1200, base.Add(time.Hour), true)
+	body := `{"chat_jid": "` + purgeChat + `", "media_type": "image", "dry_run": false}`
+	dry := `{"chat_jid": "` + purgeChat + `", "media_type": "image"}`
+
+	// dry_run reports the set the next real call removes.
+	_, preview := purgeCall(t, b, dry)
+	if !preview.DryRun || preview.Matched != 500 || preview.PurgedFiles != 500 || preview.Remaining != 700 || !preview.Truncated || cachedCount(t, purgeChat) != 1200 {
+		t.Fatalf("dry run = %+v", preview)
+	}
+
+	wantPurged := []int{500, 500, 200}
+	wantRemaining := []int{700, 200, 0}
+	for i := range wantPurged {
+		code, resp := purgeCall(t, b, body)
+		if code != http.StatusOK || resp.PurgedFiles != wantPurged[i] || resp.Matched != wantPurged[i] || resp.Remaining != wantRemaining[i] || resp.Truncated != (wantRemaining[i] > 0) || resp.ScanTruncated {
+			t.Fatalf("call %d: %d %+v", i+1, code, resp)
+		}
+		if i == 0 {
+			got, want := purgedIDs(resp), purgedIDs(preview)
+			if !slices.Equal(got, want) {
+				t.Errorf("the real call removed a different set than its dry run (%d vs %d ids)", len(got), len(want))
+			}
+			if !strings.Contains(resp.Message, "700 more") {
+				t.Errorf("message does not say how many are left: %q", resp.Message)
+			}
+		}
+	}
+	code, resp := purgeCall(t, b, body)
+	if code != http.StatusOK || resp.Matched != 0 || resp.PurgedFiles != 0 || resp.Remaining != 0 || resp.Truncated || resp.ScanTruncated || len(resp.Items) != 0 {
+		t.Fatalf("fourth call = %d %+v", code, resp)
+	}
+	if n := cachedCount(t, purgeChat); n != 0 {
+		t.Errorf("%d files still cached", n)
+	}
+	var rows int
+	if err := b.Store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE chat_jid = ?`, purgeChat).Scan(&rows); err != nil || rows != 1500 {
+		t.Errorf("rows = %d, %v; the purge must keep every row", rows, err)
+	}
+}
+
+// The scan has a ceiling so a huge archive cannot turn one call into an
+// unbounded walk of the disk; reaching it is reported, not hidden behind a
+// plain "nothing matched".
+func TestMediaPurge_CriteriaScanIsBounded(t *testing.T) {
+	b := criteriaFixture(t)
+	b.PurgeScanLimit = 100
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeChat, "GONE", 250, base, false)
+	seedPurgeRows(t, b, purgeChat, "KEEP", 10, base.Add(time.Hour), true)
+
+	_, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if resp.PurgedFiles != 0 || !resp.ScanTruncated || !resp.Truncated || !strings.Contains(resp.Message, "narrow the criteria") {
+		t.Fatalf("scan limit not reported: %+v", resp)
+	}
+	// With the default ceiling the same call walks past the uncached rows.
+	b.PurgeScanLimit = 0
+	_, resp = purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if resp.PurgedFiles != 10 || resp.ScanTruncated || resp.Truncated {
+		t.Fatalf("default limit = %+v", resp)
+	}
+}
+
+// A cached name the store root refuses is neither purged nor a slot in the
+// budget: it is counted and listed so the operator sees why it stays, and the
+// files behind it are still reached.
+func TestMediaPurge_CriteriaCountsUnreachableRows(t *testing.T) {
+	b := criteriaFixture(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ids := seedPurgeRows(t, b, purgeChat, "ROW", 3, base, true)
+	dir := chatMediaDir(purgeChat)
+	linked := filepath.Join(dir, mediaFileName("image", base, ids[0], ""))
+	outside := filepath.Join(t.TempDir(), "secret.bin")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(linked); err != nil {
+		t.Fatal(err)
+	}
+	symlinkOrSkip(t, outside, linked)
+
+	_, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if resp.PurgedFiles != 2 || resp.Matched != 2 || resp.Unreachable != 1 || resp.Truncated {
+		t.Fatalf("response = %+v", resp)
+	}
+	var listed bool
+	for _, it := range resp.Items {
+		if it.MessageID == ids[0] && !it.Purged && it.Reason == purgeReasonNotResolvable {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Errorf("the refused row is not explained in items: %+v", resp.Items)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("the purge followed the symlink out of the store: %v", err)
+	}
+}
+
+// Deny path: rows of a chat outside WHATSAPP_ALLOWED_CHATS are not examined,
+// not counted in remaining and their files are never touched, however many of
+// them match.
+func TestMediaPurge_CriteriaRespectsAllowListInRemaining(t *testing.T) {
+	b := criteriaFixture(t)
+	b.Policy = parseChatPolicy(purgeChat)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeChat, "OK", 520, base, true)
+	seedPurgeRows(t, b, purgeGroup, "NO", 600, base, true)
+
+	_, resp := purgeCall(t, b, `{"media_type": "image", "dry_run": false}`)
+	if resp.PurgedFiles != 500 || resp.Remaining != 20 || !resp.Truncated {
+		t.Fatalf("first call = %+v", resp)
+	}
+	_, resp = purgeCall(t, b, `{"media_type": "image", "dry_run": false}`)
+	if resp.PurgedFiles != 20 || resp.Remaining != 0 || resp.Truncated {
+		t.Fatalf("second call = %+v", resp)
+	}
+	if n := cachedCount(t, purgeGroup); n != 600 {
+		t.Errorf("denied chat lost files: %d left of 600", n)
+	}
+	if code, _ := purgeCall(t, b, `{"chat_jid": "`+purgeGroup+`", "dry_run": false}`); code != http.StatusForbidden {
+		t.Errorf("denied chat_jid = %d, want 403", code)
+	}
+}
+
+// A selected file the real call cannot remove stays cached and would head the
+// next call again; that must not read as "repeat while truncated".
+func TestMediaPurge_CriteriaFailedRemovalIsNotAnEndlessLoop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block deletes on Windows")
+	}
+	b := criteriaFixture(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeChat, "RO", 3, base, true)
+	dir := chatMediaDir(purgeChat)
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // a directory needs the x bit; read-only is what makes the removal fail
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // restore the directory so t.TempDir can delete it
+	// Running as root, permissions do not apply and the removal would succeed.
+	if f, err := os.CreateTemp(dir, "probe"); err == nil {
+		_ = f.Close()
+		t.Skip("directory permissions are not enforced for this user")
+	}
+
+	_, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if resp.PurgedFiles != 0 || resp.Failed != 3 || resp.Truncated || !strings.Contains(resp.Message, "could not be removed") {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
+// Rows of a denied chat are not probed, so they do not use the scan ceiling.
+func TestMediaPurge_CriteriaDeniedRowsDoNotUseTheScanBudget(t *testing.T) {
+	b := criteriaFixture(t)
+	b.PurgeScanLimit = 50
+	b.Policy = parseChatPolicy(purgeChat)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedPurgeRows(t, b, purgeGroup, "NO", 200, base, true)
+	seedPurgeRows(t, b, purgeChat, "OK", 5, base.Add(time.Hour), true)
+
+	_, resp := purgeCall(t, b, `{"media_type": "image", "dry_run": false}`)
+	if resp.PurgedFiles != 5 || resp.ScanTruncated || resp.Truncated {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
+// Without a store directory every probe would fail the same way; say so once.
+func TestMediaPurge_CriteriaWithoutStoreRootFailsFast(t *testing.T) {
+	b := criteriaFixture(t)
+	seedPurgeRows(t, b, purgeChat, "ROW", 3, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), true)
+	b.StoreRoot = nil
+	code, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
+	if code != http.StatusInternalServerError || resp.Success || !strings.Contains(resp.Message, "Store directory unavailable") {
+		t.Fatalf("%d %+v", code, resp)
 	}
 }
