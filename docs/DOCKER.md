@@ -590,8 +590,10 @@ as the same user (uid 1000), and that layout reads `messages.db` in every state
 of the bridge. The MCP server only reads the databases (it opens them with
 `mode=ro`), so mounting the volume `:ro` into `mcp`, or running `mcp` as a
 user that cannot write the store directory, looks like a free hardening step.
-It works **only while the bridge has the database open**, and was measured
-with the real server image (SQLite 3.46.1 in its python:3.13-slim base, one container writing and another reading the same volume):
+It works **only while the bridge has the database open**, and the bridge is
+stopped on every deploy, `docker compose up -d --build` and crash. Measured with
+the real server image (SQLite 3.46.1 in its `python:3.13-slim` base; one
+container writing and another reading the same volume), with an idle writer:
 
 | Case | Result |
 |---|---|
@@ -603,10 +605,15 @@ with the real server image (SQLite 3.46.1 in its python:3.13-slim base, one cont
 
 A WAL database needs its `-shm` file, and a reader that cannot create it can
 only use one the writer left behind. Before the server opened the files
-read-only (#529) the same two cases failed in exactly the same way, so this is
-SQLite's rule and not something the server added. Keep the store read-write for
-`mcp` unless the bridge is always up; if you mount it read-only anyway, expect
-the errors above whenever the bridge is down (see
+read-only (#529) the same two cases failed in exactly the same way (checked in
+the same Docker setup with a plain `sqlite3.connect`), so this is SQLite's rule
+and not something the server added. The "reads work" rows were measured with an
+idle writer: a reader that can neither write nor lock `-shm` was not tried
+against a checkpoint happening during its query.
+
+**Do not mount the store `:ro` into `mcp`.** The default layout is the supported
+one, and with a read-only mount every read tool, `coverage` included, fails
+whenever the bridge is down (see
 [Troubleshooting](./TROUBLESHOOTING.md#the-mcp-server-cannot-read-messagesdb-on-a-read-only-store)).
 
 ## Split topology (MCP server on another container or host)

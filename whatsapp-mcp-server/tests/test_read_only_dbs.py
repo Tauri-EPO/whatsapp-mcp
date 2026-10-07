@@ -182,6 +182,15 @@ class TestReadOnlyDirectory:
     @staticmethod
     def _freeze(directory):
         directory.chmod(0o555)
+        # chmod is not enough everywhere (CAP_DAC_OVERRIDE, filesystems that
+        # ignore modes): skip unless the directory really refuses a new file.
+        try:
+            (directory / "probe").touch()
+        except OSError:
+            return
+        (directory / "probe").unlink()
+        directory.chmod(0o755)
+        pytest.skip("this environment ignores directory permissions")
 
     @staticmethod
     def _thaw(directory):
@@ -211,10 +220,17 @@ class TestReadOnlyDirectory:
             monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
             conn = whatsapp._connect_messages_db()
             try:
-                with pytest.raises(sqlite3.OperationalError):
+                with pytest.raises(sqlite3.OperationalError, match="unable to open database file|readonly"):
                     conn.execute("SELECT COUNT(*) FROM messages").fetchone()
             finally:
                 conn.close()
+            # Not something #529 introduced: the read-write connection it replaced fails the same way.
+            old = sqlite3.connect(path, timeout=1)
+            try:
+                with pytest.raises(sqlite3.OperationalError, match="unable to open database file|readonly"):
+                    old.execute("SELECT COUNT(*) FROM messages").fetchone()
+            finally:
+                old.close()
             # The default compose layout (a writable directory) reads the same file.
             self._thaw(tmp_path)
             conn = whatsapp._connect_messages_db()

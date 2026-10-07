@@ -264,8 +264,12 @@ the next start picks the change up and stops warning.
   must create `messages.db-shm` to read a WAL database; when the bridge is
   running it has already created it and the reader only attaches, but once the
   bridge has stopped cleanly the `-wal` / `-shm` files are gone and a reader
-  that cannot write the directory has nothing to attach to. Start the bridge, or
-  give `mcp` a writable store (the default compose layout). The measurements
+  that cannot write the directory has nothing to attach to. To confirm: the
+  error is `unable to open database file` although `messages.db` exists (a
+  missing file says `messages.db not found` instead), `ls` of the store shows no
+  `messages.db-wal` / `messages.db-shm`, and `docker inspect <mcp container>`
+  lists the store mount with `"RW": false`. Start the bridge, or give `mcp` a
+  writable store (the default compose layout). The measurements
   are in [DOCKER.md](./DOCKER.md#the-store-read-only-in-the-mcp-container).
 
 ## `messages.db not found at <path>`
