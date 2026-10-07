@@ -30,6 +30,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 # The lock files hold hashes and URLs with long digit runs, never an example.
+OWN_PATH = "whatsapp-mcp-server/tests/test_fake_identifiers.py"
 NOT_SCANNED = {"CHANGELOG.md", "whatsapp-bridge/go.sum", "whatsapp-mcp-server/uv.lock"}
 
 # Phone numbers and the user part of `@s.whatsapp.net` / `@lid` JIDs. Patterned
@@ -48,6 +49,8 @@ FAKE_NUMBERS = {
     "5511777777777",
     "5511888888888",
     "5511999999999",
+    "551133333333",
+    "551188888888",
     "5511999990004",
     "551188887777",
     "5511900000000",
@@ -143,48 +146,80 @@ FAKE_HOSTS = {
 
 # (shape, pattern, allow-list); the first group of the pattern is the value. A user JID
 # shorter than eight digits ("111@s.whatsapp.net") cannot be a phone number or a LID,
-# so it is a stand-in and needs no entry.
+# so it is a stand-in and needs no entry. A linked-device suffix (`:12@lid`) and the
+# `hosted` servers carry the same user part.
 SHAPES = (
     ("a Brazilian phone number", re.compile(r"(?<!\d)(55\d{10,11})(?!\d)"), FAKE_NUMBERS),
-    ("a user JID", re.compile(r"(?<!\d)(\d{8,})@(?:s\.whatsapp\.net|lid)(?!\w)"), FAKE_NUMBERS),
-    ("a group JID", re.compile(r"(?<!\d)(\d+(?:-\d+)?)@g\.us(?!\w)"), FAKE_GROUPS),
-    ("a *.ts.net host", re.compile(r"(?<![\w.-])((?:[A-Za-z0-9-]+\.)+ts\.net)(?![\w-])"), FAKE_HOSTS),
+    (
+        "a user JID",
+        re.compile(r"(?<!\d)(\d{8,})(?::\d+)?@(?:s\.whatsapp\.net|lid|hosted(?:\.lid)?)(?!\w)", re.I),
+        FAKE_NUMBERS,
+    ),
+    ("a group JID", re.compile(r"(?<!\d)(\d+(?:-\d+)?)@g\.us(?!\w)", re.I), FAKE_GROUPS),
+    ("a *.ts.net host", re.compile(r"(?<![\w.-])((?:[A-Za-z0-9-]+\.)+ts\.net)(?![\w-])", re.I), FAKE_HOSTS),
+)
+
+# The same Brazilian number as people write it, with spaces, dashes and parentheses.
+# Its digits are compared with the allow-list like a compact one.
+FORMATTED_PHONE = (
+    "a Brazilian phone number",
+    re.compile(r"(?<![\w.])\+?55[ .-]*\(?[1-9]\d\)?[ .-]*9?[ .-]*\d{4}[ .-]?\d{4}(?!\d)"),
 )
 
 
 def unlisted(text: str) -> list[tuple[int, str]]:
-    """(line number, shape) of every identifier in `text` that is not allow-listed."""
+    """(line number, shape) of every identifier in `text` that is not allow-listed, once per value."""
     found = []
     for number, line in enumerate(text.splitlines(), start=1):
+        seen = set()
         for shape, pattern, allowed in SHAPES:
             for match in pattern.finditer(line):
-                if match.group(1).lower() not in allowed:
+                value = match.group(1).lower()
+                if value not in allowed and (shape, value) not in seen:
+                    seen.add((shape, value))
                     found.append((number, shape))
+        shape, pattern = FORMATTED_PHONE
+        for match in pattern.finditer(line):
+            digits = re.sub(r"\D", "", match.group(0))
+            if digits != match.group(0).lstrip("+") and digits not in FAKE_NUMBERS and (shape, digits) not in seen:
+                seen.add((shape, digits))
+                found.append((number, shape))
     return found
 
 
+def describe(name: str, number: int, shape: str) -> str:
+    """The line a failure prints: where and what shape, never the value."""
+    return f"{name}:{number}: {shape}"
+
+
 def tracked_files() -> list[str]:
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True, timeout=30
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        pytest.skip("not a git checkout: nothing tracked to scan")
+    if not (ROOT / ".git").exists():
+        pytest.skip("not a git checkout (sdist, tarball): nothing tracked to scan")
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True, timeout=30).stdout
     return [name for name in out.decode("utf-8").split("\0") if name and name not in NOT_SCANNED]
 
 
-def test_tracked_files_carry_only_fake_identifiers():
-    files = tracked_files()
-    assert len(files) >= 100, files  # sanity: git still lists the tree
-    problems = []
-    for name in files:
+@pytest.fixture(scope="module")
+def corpus() -> dict[str, str]:
+    """Text of every scanned tracked file, by repository-relative path (binary files left out)."""
+    texts = {}
+    for name in tracked_files():
         path = ROOT / name
         if not path.is_file():  # deleted in the working copy, or a submodule
             continue
         data = path.read_bytes()
-        if b"\0" in data:
-            continue
-        problems += [f"{name}:{number}: {shape}" for number, shape in unlisted(data.decode("utf-8", "replace"))]
+        if b"\0" not in data:
+            texts[name] = data.decode("utf-8", "replace")
+    return texts
+
+
+def test_tracked_files_carry_only_fake_identifiers(corpus):
+    assert len(corpus) >= 100, list(corpus)  # sanity: git still lists the tree
+    problems = []
+    for name, text in corpus.items():
+        # a path is text too: media lives under store/<chat_jid>/
+        problems += [describe(name, number, shape) for number, shape in unlisted(name.replace("\n", " "))]
+        problems += [describe(name, number, shape) for number, shape in unlisted(text)]
     assert not problems, (
         "a real identifier may have come in. Use a made-up one, or if the value is a fake, add it to the matching "
         "allow-list in tests/test_fake_identifiers.py (values are not printed, the repository is public):\n"
@@ -202,13 +237,19 @@ DIGITS = "".join(str(n % 10) for n in range(1, 12))
     [
         (f"call 55{DIGITS}", "a Brazilian phone number"),
         (f"call 55{DIGITS[:10]} now", "a Brazilian phone number"),
+        (f"call +55 (21) 9{DIGITS[:4]}-{DIGITS[4:8]}", "a Brazilian phone number"),
+        (f"call 55 21 9{DIGITS[:4]} {DIGITS[4:8]}", "a Brazilian phone number"),
         (f"{DIGITS}@s.whatsapp.net", "a user JID"),
         (f"ends a sentence: {DIGITS}@lid.", "a user JID"),
         (f"user={DIGITS}@lid,", "a user JID"),
+        (f"{DIGITS}:12@lid", "a user JID"),
+        (f"{DIGITS}@S.WhatsApp.net", "a user JID"),
+        (f"{DIGITS}@hosted.lid", "a user JID"),
         (f"{DIGITS}@g.us", "a group JID"),
         (f"{DIGITS[:4]}-{DIGITS}@g.us", "a group JID"),
         ("see " + "tail" + DIGITS[:4] + ".ts.net.", "a *.ts.net host"),
         ("http://" + "my-box.tailnet" + ".ts.net:8000/mcp", "a *.ts.net host"),
+        ("HTTP://" + "MY-BOX.TAILNET" + ".TS.NET/x", "a *.ts.net host"),
     ],
 )
 def test_scanner_flags_an_identifier_that_is_not_allow_listed(line, shape):
@@ -219,39 +260,44 @@ def test_scanner_flags_an_identifier_that_is_not_allow_listed(line, shape):
     "line",
     [
         "5511999999999 and 5511999999999@s.whatsapp.net",
-        "120363000000000001@g.us, 100000000000001@lid",
+        "120363000000000001@g.us, 100000000000001@lid, 100000000000001:3@lid",
         "mcp.example.ts.net:8000",
         "`*.ts.net` and `.ts.net` name no host",
         "a media id 13812002_698058036224062_3424455886509161511_n.enc",
         "ids are digits: 5511999999999999 is longer than a number",
         "someone@example.com",
+        "+55 (88) 97777-6666 and 55 88 97777-6666",
+        "dated 2026-10-07 55 minutes, 1234 5678",
     ],
 )
 def test_scanner_leaves_fakes_and_other_shapes_alone(line):
     assert unlisted(line) == []
 
 
-def test_scanner_message_does_not_carry_the_value():
+def test_a_real_identifier_in_a_tracked_path_is_caught():
+    assert unlisted(f"whatsapp-bridge/store/{DIGITS}@s.whatsapp.net/img.jpg") == [(1, "a user JID")]
+
+
+def test_scanner_reports_one_finding_per_value_per_line():
+    assert unlisted(f"{DIGITS}@lid and again {DIGITS}@lid") == [(1, "a user JID")]
+
+
+def test_failure_lines_do_not_carry_the_value():
     line = f"x {DIGITS}@lid"
     ((number, shape),) = unlisted(line)
-    assert (number, shape) == (1, "a user JID")
-    assert DIGITS not in f"f:{number}: {shape}"
+    assert DIGITS not in describe("some/file", number, shape)
+    assert describe("some/file", number, shape) == "some/file:1: a user JID"
 
 
-def test_allow_lists_have_no_stale_entries():
+def test_allow_lists_have_no_stale_entries(corpus):
     """A fake nobody uses any more is a hole left open for a real value to move into."""
-    corpus = ""
-    for name in tracked_files():
-        path = ROOT / name
-        if path.is_file():
-            data = path.read_bytes()
-            if b"\0" not in data:
-                corpus += data.decode("utf-8", "replace") + "\n"
-    own = (ROOT / "whatsapp-mcp-server" / "tests" / "test_fake_identifiers.py").read_text(encoding="utf-8")
-    elsewhere = corpus.replace(own, "")
-    stale = sorted(
-        entry
-        for entry in FAKE_NUMBERS | FAKE_GROUPS | FAKE_HOSTS
-        if re.search(rf"(?<![\w.-]){re.escape(entry)}(?!\w)", elsewhere) is None
-    )
+    elsewhere = "\n".join(text for name, text in corpus.items() if name != OWN_PATH)
+
+    def used(entry: str) -> bool:
+        # a number may be used spelled with separators ("+55 11 3333-3333")
+        spelled = r"[ .()-]*".join(entry) if entry in FAKE_NUMBERS else re.escape(entry)
+        return re.search(rf"(?<![\w.-]){spelled}(?!\w)", elsewhere) is not None
+
+    stale = sorted(entry for entry in FAKE_NUMBERS | FAKE_GROUPS | FAKE_HOSTS if not used(entry))
+    # the entries are the fakes the repository already publishes, so naming them is fine
     assert not stale, f"allow-listed but not used by any other tracked file: {len(stale)} entries, e.g. {stale[:3]}"
