@@ -1227,8 +1227,10 @@ def list_chats(
 
     Args:
         query: Search term to filter chats by name or JID. A phone number may be
-               typed with its separators, and a full Brazilian mobile finds the
-               chat with or without the ninth digit (as in search_contacts)
+               typed with its separators, a full Brazilian mobile finds the
+               chat with or without the ninth digit, and a whole number finds
+               the chat WhatsApp keeps under that contact's LID (as in
+               search_contacts)
         limit: Max chats to return (default 50, max 200)
         page: Page number for pagination (default 0); ignored when cursor is set
         cursor: next_cursor from the previous page

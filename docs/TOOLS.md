@@ -566,11 +566,14 @@ other country are searched exactly as typed. Name searches are unaffected, and
 so is a short numeric query such as `1.5` or `(11)`.
 
 **Contacts kept under a LID.** WhatsApp stores some direct chats under the
-contact's LID (`…@lid`) and never under the phone number. A phone-number query
-finds those too, through the LID map: the hit's `jid` is the LID one,
-`phone_number` and `lid` are both filled, and `matched` is `phone_number`,
-because the digits are in the number behind the JID and not in the JID. Up to
-50 LIDs are followed per search.
+contact's LID (`…@lid`) and never under the phone number. A query that is the
+whole number (in either spelling of a Brazilian mobile) finds those too,
+through the LID map: the hit's `jid` is the LID one, `phone_number` and `lid`
+are both filled, and `matched` is `phone_number`, because the digits are in the
+number behind the JID and not in the JID. A fragment of a number is not
+followed to a LID, and a contact that has a row under the number as well is
+returned once, as that row. `list_chats(query=…)` follows a whole number to its
+LID chat the same way.
 
 #### One number, two spellings
 

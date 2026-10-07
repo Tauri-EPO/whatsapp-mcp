@@ -43,8 +43,7 @@ class TestDirectChat:
     def test_found_by_the_phone_number(self, lid_only, asked):
         assert whatsapp.get_direct_chat_by_contact(asked)["jid"] == LID_JID
 
-    def test_the_phone_row_wins_when_there_is_one(self, lid_only):
-        # No message on either side, so nothing merges the two rows.
+    def test_a_pair_with_both_rows_is_still_the_merged_row(self, lid_only):
         with lid_only.messages() as conn:
             conn.execute(
                 "INSERT INTO chats (jid, name, last_message_time) VALUES (?, 'Phone row', '2026-10-07 18:00:00')",
@@ -52,14 +51,44 @@ class TestDirectChat:
             )
         assert whatsapp.get_direct_chat_by_contact(SHORT)["aliases"] == [SHORT_JID, LID_JID]
 
+    @pytest.mark.parametrize("asked", [SHORT, LONG])
+    def test_a_phone_row_comes_before_a_lid_row(self, lid_only, monkeypatch, asked):
+        # The two rows unmerged (as past the pair cap): the ranking alone decides,
+        # and it must not depend on the spelling asked.
+        with lid_only.messages() as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Phone row')", (SHORT_JID,))
+        monkeypatch.setattr(whatsapp, "_chat_twins", lambda cursor, only=None: whatsapp.NO_CHAT_TWINS)
+        assert whatsapp.get_direct_chat_by_contact(asked)["jid"] == SHORT_JID
+
+    def test_every_lid_of_the_number_is_tried(self, lid_only):
+        # Only `lid` is unique in the map: the chat may be under the second LID.
+        second = "290000000000005"
+        with lid_only.whatsmeow() as conn:
+            conn.execute("DELETE FROM whatsmeow_lid_map WHERE lid = ?", (LID,))
+            conn.executemany("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", [("290000000000000", SHORT), (LID, SHORT)])
+        assert second not in LID_JID
+        assert whatsapp.get_direct_chat_by_contact(SHORT)["jid"] == LID_JID
+        assert [hit["jid"] for hit in whatsapp.search_contacts(SHORT)] == [LID_JID]
+
+    def test_a_chat_that_appears_later_is_found_at_once(self, paired_dbs):
+        # Nothing is cached on the way: "not found" must not outlive the first message.
+        assert whatsapp.get_direct_chat_by_contact(SHORT) is None
+        with paired_dbs.whatsmeow() as conn:
+            conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (LID, SHORT))
+        with paired_dbs.messages() as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Acme Clinic')", (LID_JID,))
+        assert whatsapp.get_direct_chat_by_contact(SHORT)["jid"] == LID_JID
+
     def test_a_number_the_map_does_not_know_finds_nothing(self, lid_only):
-        assert whatsapp.get_direct_chat_by_contact("5588966665555") is None
+        assert whatsapp.get_direct_chat_by_contact("5511977776666") is None
         assert whatsapp.get_direct_chat_by_contact("548877776667") is None
 
     def test_the_lid_must_be_on_the_allow_list_itself(self, lid_only, monkeypatch):
-        # The list names the LID: the number, in either spelling, reaches it.
-        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([LID_JID, SHORT_JID, f"{SHORT}@lid"]))
-        assert whatsapp.get_direct_chat_by_contact(SHORT)["jid"] == LID_JID
+        # The list names the LID, and nothing else: the number, in either
+        # spelling, reaches that allowed chat (its rows state the number anyway).
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([LID_JID]))
+        for asked in (SHORT, LONG):
+            assert whatsapp.get_direct_chat_by_contact(asked)["jid"] == LID_JID
         # The list names the phone number only (in every form the lookup tries):
         # it does not expand to the LID, so the row stays hidden.
         monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([SHORT_JID, f"{SHORT}@lid"]))
@@ -78,7 +107,7 @@ class TestDirectChat:
 
 
 class TestSearchContacts:
-    @pytest.mark.parametrize("query", [SHORT, LONG, SHORT_JID, LONG_JID, "+55 (88) 7777-6666", "7777-6666"])
+    @pytest.mark.parametrize("query", [SHORT, LONG, SHORT_JID, LONG_JID, "+55 (88) 7777-6666"])
     def test_found_by_the_phone_number(self, lid_only, query):
         (hit,) = whatsapp.search_contacts(query)
         assert (hit["jid"], hit["phone_number"], hit["lid"]) == (LID_JID, SHORT, LID)
@@ -95,15 +124,27 @@ class TestSearchContacts:
         (hit,) = whatsapp.search_contacts(LONG)
         assert (hit["jid"], hit["phone_number"], hit["matched"]) == (LID_JID, SHORT, "phone_number")
 
-    def test_a_whole_jid_is_not_a_fragment(self, lid_only):
-        # The digits of a JID query name that number, not every number holding them.
+    @pytest.mark.parametrize("fragment", ["7777-6666", "88777766", "5588777766"])
+    def test_a_fragment_is_not_followed_to_a_lid(self, lid_only, fragment):
+        # The map holds everybody ever seen in a group: only a whole number is looked up.
+        assert whatsapp.search_contacts(fragment) == []
+        assert whatsapp.list_chats(query=fragment) == []
+
+    def test_the_whole_number_not_a_longer_one(self, lid_only):
+        other = "290000000000002"
         with lid_only.whatsmeow() as conn:
-            conn.execute("INSERT INTO whatsmeow_lid_map VALUES ('290000000000002', ?)", (f"1{SHORT}",))
+            conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (other, f"1{SHORT}"))
         with lid_only.messages() as conn:
-            conn.execute("INSERT INTO chats (jid, name) VALUES ('290000000000002@lid', 'Longer number')")
-        assert [hit["jid"] for hit in whatsapp.search_contacts(SHORT_JID)] == [LID_JID]
-        # As bare digits it is a substring search, as it is against a phone JID.
-        assert len(whatsapp.search_contacts(SHORT)) == 2
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Longer number')", (f"{other}@lid",))
+        for query in (SHORT, SHORT_JID, LONG):
+            assert [hit["jid"] for hit in whatsapp.search_contacts(query)] == [LID_JID]
+
+    def test_a_contact_with_both_rows_is_one_hit(self, lid_only):
+        with lid_only.messages() as conn:
+            conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Acme Clinic')", (SHORT_JID,))
+        for query in (SHORT, LONG):
+            (hit,) = whatsapp.search_contacts(query)
+            assert (hit["jid"], hit["matched"]) == (SHORT_JID, "jid")
 
     def test_a_foreign_number_has_one_spelling(self, lid_only):
         with lid_only.messages() as conn:

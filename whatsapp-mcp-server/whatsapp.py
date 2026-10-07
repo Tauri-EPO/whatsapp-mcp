@@ -3363,9 +3363,9 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
     matches with its separators dropped, and a Brazilian mobile under its
     other spelling (issue #444): that one as the whole phone JID, never as a
     substring of somebody else's. A chat WhatsApp keeps under a LID answers to
-    the number the LID map gives for it (issue #465), as that LID's whole JID.
-    The second list holds those extra spellings, for a caller that reports
-    which field matched.
+    the whole number the LID map pairs it with (issue #465), as that LID's
+    whole JID. The second list holds those extra spellings, for a caller that
+    reports which field matched.
     """
     patterns = ["%" + query + "%"]
     digits, alternate = _phone_spellings(query)
@@ -3374,38 +3374,33 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
         patterns.append("%" + typed_digits + "%")
     if alternate:
         patterns.append(alternate)
-    lid_jids = _lid_jids_of_number(digits, alternate, whole="@" in query) if digits else []
+    lid_jids = _lid_jids_of_number(digits, alternate)
     return [*patterns, *lid_jids], [spelling for spelling in (typed_digits, alternate, *lid_jids) if spelling]
 
 
-# How many LIDs one phone-number search follows. A search page is 50 rows.
-_LID_SEARCH_LIMIT = 50
+def _lid_jids_of_number(digits: str | None, alternate: str | None) -> list[str]:
+    """The LID JIDs the LID map pairs with a phone number, in either spelling of a Brazilian mobile.
 
-
-def _lid_jids_of_number(digits: str, alternate: str | None, whole: bool) -> list[str]:
-    """The LID JIDs whose phone number, in the LID map, a phone-number search matches.
-
-    The digits match as a substring, the way they match a phone JID, unless
-    the query named a whole JID; the other spelling of a Brazilian mobile
-    matches whole. One read of whatsapp.db, and [] when it cannot be read: the
-    search then finds what it found before.
+    The whole number, never a fragment of one: the map holds everybody ever
+    seen in a group, so a fragment would match hundreds of LIDs that have no
+    chat. Every LID of the number comes back (only `lid` is unique in the map),
+    and both lookups that follow a number to its LID ask here, so they agree.
+    One read of whatsapp.db, uncached, and [] when it cannot be read: the
+    lookup then finds what it found before.
     """
-    if not os.path.isfile(WHATSMEOW_DB_PATH):
+    numbers = [number for number in (digits, alternate.partition("@")[0] if alternate else None) if number]
+    if not numbers or not os.path.isfile(WHATSMEOW_DB_PATH):
         return []
-    numbers = [digits if whole else f"%{digits}%"]
-    if alternate:
-        numbers.append(alternate.partition("@")[0])
     try:
         conn = _connect_whatsmeow_db()
         try:
             rows = conn.execute(
-                f"SELECT lid FROM whatsmeow_lid_map WHERE {_like_any('pn', numbers)} ORDER BY lid LIMIT ?",
-                (*numbers, _LID_SEARCH_LIMIT),
+                f"SELECT lid FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(numbers)}) ORDER BY lid", numbers
             ).fetchall()
         finally:
             conn.close()
     except sqlite3.Error as e:
-        logger.debug("lid-map search failed: %s", e)
+        logger.debug("lid-map lookup failed: %s", e)
         return []
     return [f"{lid}@{LID_SERVER}" for (lid,) in rows if lid]
 
@@ -3525,8 +3520,13 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             push_name=push_name,
             jid=jid,
         )
+        led_by_number = jid.endswith(f"@{LID_SERVER}") and jid in other_spellings
+        if led_by_number and f"{identities[jid].phone}@{DEFAULT_USER_SERVER}" in seen_jids:
+            # The number led to this LID row and to the phone row of the same
+            # contact: one hit, the phone one.
+            continue
         matched = _matched_field(query, candidates)
-        if matched is None and jid.endswith(f"@{LID_SERVER}") and jid in other_spellings:
+        if matched is None and led_by_number:
             # Nothing in the JID holds the digits: its phone number does.
             matched = "phone_number"
         elif matched is None and any(spelling in jid for spelling in other_spellings):
@@ -3916,21 +3916,19 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     have a chat the allow-list admits.
 
     A chat the store holds only under the contact's LID is found too (issue
-    #465): the LID map gives the LID for the number, in either spelling.
+    #465): the LID map gives the LID for the number, in either spelling. A
+    phone row, under the spelling given or the other one, comes before any LID
+    row.
     """
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
         cursor = conn.cursor()
         spellings = _direct_chat_candidates(sender_phone_number)
-        _, alternate = _phone_spellings(sender_phone_number)
-        # The LIDs the map pairs with the number (`_sender_aliases` asks it for
-        # both spellings): the row may exist under one of those alone.
-        mapped = [
-            alias
-            for alias in _sender_aliases(spellings[1])
-            if alias.endswith(f"@{LID_SERVER}") and alias not in spellings
-        ]
+        digits, alternate = _phone_spellings(sender_phone_number)
+        # The LIDs the map pairs with the number, in either spelling: the row
+        # may exist under one of those alone.
+        mapped = [jid for jid in _lid_jids_of_number(digits, alternate) if jid not in spellings]
         lookups = [*spellings, *mapped, *([alternate] if alternate else [])]
         twins = _chat_twins(cursor, only=lookups)
         candidates = [twins.listing_jid(jid) for jid in lookups]
@@ -3952,9 +3950,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             WHERE c.jid IN ({_placeholders(candidates)}) AND {policy_clause}
             ORDER BY CASE
                 WHEN c.jid = ? THEN 0
-                WHEN c.jid = ? THEN 3
+                WHEN c.jid = ? THEN 2
                 WHEN c.jid LIKE '%@s.whatsapp.net' THEN 1
-                ELSE 2
+                ELSE 3
             END
             LIMIT 1
         """,
