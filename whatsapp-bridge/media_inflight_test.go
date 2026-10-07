@@ -43,17 +43,19 @@ func seedMediaRowIn(t *testing.T, ms *MessageStore, chat, id string) string {
 }
 
 // writeLikeDownloadToPath finishes a fake transfer the way the real one does:
-// through the shared "<file>.part" temp file and an atomic rename. Two
-// transfers running at once for the same destination would truncate it.
-func writeLikeDownloadToPath(localPath string, payload []byte) (int64, error) {
-	tmp := localPath + ".part"
-	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+// through the store root, the shared "<file>.part" temp file and an atomic
+// rename (writeMediaFile). Two transfers running at once for the same
+// destination would truncate it.
+func writeLikeDownloadToPath(relPath string, payload []byte) (int64, error) {
+	root, err := openStoreRoot()
+	if err != nil {
 		return 0, err
 	}
-	if err := os.Rename(tmp, localPath); err != nil {
-		return 0, err
-	}
-	return int64(len(payload)), nil
+	defer func() { _ = root.Close() }()
+	return writeMediaFile(root, relPath, func(f *os.File) error {
+		_, err := f.Write(payload)
+		return err
+	})
 }
 
 // awaitCallers blocks until want callers are parked on the transfer for key.

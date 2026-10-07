@@ -33,7 +33,7 @@ func TestDownloadToPathLeavesNoPartFileOnFailure(t *testing.T) {
 	// A nil client fails (ErrClientIsNil) before any bytes are written: the
 	// temp file must be removed and the final name must not exist.
 	var client *whatsmeow.Client
-	_, err := downloadToPath(t.Context(), client, &MediaDownloader{DirectPath: "/v/t62/x.enc", MediaType: whatsmeow.MediaVideo}, target)
+	_, err := downloadToPath(t.Context(), storeRootAt(t, dir), client, &MediaDownloader{DirectPath: "/v/t62/x.enc", MediaType: whatsmeow.MediaVideo}, "video.mp4")
 	if err == nil {
 		t.Fatal("expected an error from a nil client")
 	}

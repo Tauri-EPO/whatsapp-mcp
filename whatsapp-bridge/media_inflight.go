@@ -28,9 +28,10 @@ import (
 	"go.mau.fi/whatsmeow"
 )
 
-// mediaTransferFunc streams one media file into localPath and reports the
-// bytes written: downloadToPath in production, a fake in tests.
-type mediaTransferFunc func(ctx context.Context, msg whatsmeow.DownloadableMessage, localPath string) (int64, error)
+// mediaTransferFunc streams one media file into relPath, a path relative to
+// the store root, and reports the bytes written: downloadToPath in production,
+// a fake in tests.
+type mediaTransferFunc func(ctx context.Context, msg whatsmeow.DownloadableMessage, relPath string) (int64, error)
 
 // errTransferAbandoned is what callers see when the transfer never published a
 // result (it panicked): a failed download beats a bogus success.
