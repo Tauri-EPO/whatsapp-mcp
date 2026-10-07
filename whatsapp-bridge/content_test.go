@@ -1,11 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -174,5 +176,91 @@ func TestExtractChatEphemeralFromMessage_AllCarriers(t *testing.T) {
 	}
 	if got := extractChatEphemeralFromMessage(nil); got.Expiration != 0 {
 		t.Errorf("nil: %+v", got)
+	}
+}
+
+// A shared location has no CDN payload, so before the location branch it
+// extracted to no content and no media and handleMessage dropped it at the
+// "no content and no media" gate. End to end: it must now be stored, counted
+// and found by the FTS index through the place name.
+func TestHandleMessage_StoresSharedLocation(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	if on, err := ensureMessagesFTS(ms.db); err != nil || !on {
+		t.Fatalf("ensureMessagesFTS = %v, %v", on, err)
+	}
+	b := testBridge(t, client, ms, testLogger())
+
+	for id, m := range map[string]*waE2E.Message{
+		"LOC1": {LocationMessage: &waE2E.LocationMessage{
+			DegreesLatitude:  proto.Float64(-23.55052),
+			DegreesLongitude: proto.Float64(-46.633308),
+			Name:             proto.String("Padaria Estrela"),
+			Address:          proto.String("Rua das Flores, 10"),
+		}},
+		"LIVE1": {LiveLocationMessage: &waE2E.LiveLocationMessage{
+			DegreesLatitude:  proto.Float64(-22.9068),
+			DegreesLongitude: proto.Float64(-43.1729),
+			Caption:          proto.String("saindo do escritório"),
+		}},
+	} {
+		msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "")
+		msg.Info.ID = id
+		msg.Message = m
+		b.handleMessage(msg)
+	}
+
+	if got := b.metrics.messagesStored.Load(); got != 2 {
+		t.Errorf("messagesStored = %d, want 2", got)
+	}
+	var content string
+	var mediaType sql.NullString
+	if err := ms.db.QueryRow(`SELECT content, media_type FROM messages WHERE id = 'LOC1' AND chat_jid = ?`, phonePN.String()).
+		Scan(&content, &mediaType); err != nil {
+		t.Fatalf("location row not stored: %v", err)
+	}
+	if want := "📍 Padaria Estrela — Rua das Flores, 10 (-23.550520, -46.633308)"; content != want {
+		t.Errorf("content = %q, want %q", content, want)
+	}
+	if mediaType.String != "" {
+		t.Errorf("a location carries no file, media_type = %q", mediaType.String)
+	}
+	if n := queryMessageCount(ms, phonePN.String()); n != 2 {
+		t.Errorf("stored rows = %d, want 2", n)
+	}
+	for _, q := range []string{"padaria", "escritorio"} {
+		var n int
+		if err := ms.db.QueryRow(`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?`, q).Scan(&n); err != nil {
+			t.Fatalf("FTS MATCH %q: %v", q, err)
+		}
+		if n != 1 {
+			t.Errorf("FTS match %q = %d rows, want 1", q, n)
+		}
+	}
+}
+
+// extractMessage is the one path live events and history sync share, and a
+// quoted location is read through extractTextContent too: both must see the
+// location text, and a location must not count as an empty message.
+func TestExtractMessage_LocationIsNotEmpty(t *testing.T) {
+	loc := &waE2E.LocationMessage{
+		DegreesLatitude:  proto.Float64(-23.55052),
+		DegreesLongitude: proto.Float64(-46.633308),
+		Name:             proto.String("Padaria Estrela"),
+	}
+	e := extractMessage(&waE2E.Message{LocationMessage: loc}, time.Now(), "L1")
+	if e.empty() || e.mediaType != "" || !strings.Contains(e.content, "Padaria Estrela") {
+		t.Errorf("location extraction = %+v", e)
+	}
+	reply := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: proto.String("é aqui?"),
+		ContextInfo: &waE2E.ContextInfo{
+			StanzaID:      proto.String("L1"),
+			Participant:   proto.String("5511888888888@s.whatsapp.net"),
+			QuotedMessage: &waE2E.Message{LocationMessage: loc},
+		},
+	}}
+	if got := extractMessage(reply, time.Now(), "R1"); got.content != "é aqui?" || !strings.Contains(got.quotedContent, "Padaria Estrela") {
+		t.Errorf("quoted location: content %q, quoted %q", got.content, got.quotedContent)
 	}
 }

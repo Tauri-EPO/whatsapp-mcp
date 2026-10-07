@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1475,6 +1476,120 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 					DisplayName: proto.String("0 contacts"),
 				},
 			},
+			want: "",
+		},
+		{
+			name: "LocationMessage with name and address",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(-23.55052),
+					DegreesLongitude: proto.Float64(-46.633308),
+					Name:             proto.String("Praça da Sé"),
+					Address:          proto.String("Praça da Sé, São Paulo"),
+				},
+			},
+			want: "📍 Praça da Sé — Praça da Sé, São Paulo (-23.550520, -46.633308)",
+		},
+		{
+			name: "LocationMessage with coordinates only",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(48.8584),
+					DegreesLongitude: proto.Float64(2.2945),
+				},
+			},
+			want: "📍 (48.858400, 2.294500)",
+		},
+		{
+			name: "LocationMessage at 0,0 is a real point, not an empty message",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(0),
+					DegreesLongitude: proto.Float64(0),
+				},
+			},
+			want: "📍 (0.000000, 0.000000)",
+		},
+		{
+			name: "LocationMessage with name only keeps the coordinates",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(1.5),
+					DegreesLongitude: proto.Float64(-2.25),
+					Name:             proto.String("Casa"),
+				},
+			},
+			want: "📍 Casa (1.500000, -2.250000)",
+		},
+		{
+			name: "LocationMessage with url and comment",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(-23.5614),
+					DegreesLongitude: proto.Float64(-46.6559),
+					Name:             proto.String("MASP"),
+					Address:          proto.String("Av. Paulista, 1578"),
+					URL:              proto.String("https://maps.example/masp"),
+					Comment:          proto.String("entrada pela Paulista"),
+				},
+			},
+			want: "📍 MASP — Av. Paulista, 1578 (-23.561400, -46.655900) — https://maps.example/masp — entrada pela Paulista",
+		},
+		{
+			name: "LocationMessage with one coordinate missing drops the pair, keeps the label",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude: proto.Float64(12.345),
+					Name:            proto.String("Bar do Zé"),
+				},
+			},
+			want: "📍 Bar do Zé",
+		},
+		{
+			name: "LocationMessage with out-of-range or NaN coordinates is not printed",
+			msg: &waE2E.Message{
+				LocationMessage: &waE2E.LocationMessage{
+					DegreesLatitude:  proto.Float64(math.NaN()),
+					DegreesLongitude: proto.Float64(200),
+					Name:             proto.String("Lugar"),
+				},
+			},
+			want: "📍 Lugar",
+		},
+		{
+			name: "LocationMessage with a half-filled pair and nothing else returns empty",
+			msg:  &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLongitude: proto.Float64(1)}},
+			want: "",
+		},
+		{
+			name: "LocationMessage with nothing in it returns empty (no placeholder row)",
+			msg:  &waE2E.Message{LocationMessage: &waE2E.LocationMessage{}},
+			want: "",
+		},
+		{
+			name: "LiveLocationMessage with caption",
+			msg: &waE2E.Message{
+				LiveLocationMessage: &waE2E.LiveLocationMessage{
+					DegreesLatitude:  proto.Float64(-22.9068),
+					DegreesLongitude: proto.Float64(-43.1729),
+					Caption:          proto.String("chegando em 10 min"),
+				},
+			},
+			want: "📍 Live location (-22.906800, -43.172900) — chegando em 10 min",
+		},
+		{
+			name: "LiveLocationMessage without caption",
+			msg: &waE2E.Message{
+				LiveLocationMessage: &waE2E.LiveLocationMessage{
+					DegreesLatitude:  proto.Float64(10),
+					DegreesLongitude: proto.Float64(20),
+				},
+			},
+			want: "📍 Live location (10.000000, 20.000000)",
+		},
+		{
+			name: "LiveLocationMessage with nothing in it returns empty",
+			msg:  &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{}},
 			want: "",
 		},
 		{

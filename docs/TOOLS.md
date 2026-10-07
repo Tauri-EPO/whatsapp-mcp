@@ -650,6 +650,8 @@ Two caveats worth knowing:
   [`list_unanswered(include_group_mentions=True)`](#list_unanswered), which only
   keeps mentions newer than your own last word in the chat.
 
+**Shared locations read as text.** A location has no file, so it is stored as a message whose `content` is the place and `media_type` is empty: `📍 Padaria Estrela — Rua das Flores, 10 (-23.550520, -46.633308)`, followed by ` — <url>` and ` — <comment>` when the sender attached them. With no name or address the coordinates stand alone (`📍 (48.858400, 2.294500)`). A live location reads `📍 Live location (-22.906800, -43.172900) — <caption>` and records where the share *started*; later position updates are not tracked. Coordinates always carry six decimals and a `.` separator, whatever the machine's locale; a pair with a missing, non-numeric or out-of-range half is left out and the label alone is kept. `query` finds the place name, address or caption like any other text. Only the text is kept: the map thumbnail is not stored, so `has_media` and `media_type` do not see a location.
+
 **`query` searches stored transcripts too.** A voice note has no `content`, so
 the bridge's index cannot see what was said in it — but a transcript that is
 already in `notes.db` can be searched, and `query` matches it. So
