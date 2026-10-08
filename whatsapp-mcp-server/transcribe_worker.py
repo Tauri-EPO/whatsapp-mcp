@@ -301,10 +301,9 @@ def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]
             # result and would shift every offset under the walk.
             clauses.append("(m.timestamp < ? OR (m.timestamp = ? AND (m.id > ? OR (m.id = ? AND m.chat_jid > ?))))")
             params.extend([after.timestamp, after.timestamp, after.message_id, after.message_id, after.chat_jid])
-        if CHAT_POLICY.restricted:
-            clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
-            clauses.append(clause)
-            params.extend(clause_params)
+        clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
+        clauses.append(clause)
+        params.extend(clause_params)
         rows = conn.execute(
             f"""
             SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp
@@ -548,10 +547,9 @@ def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
     """
     clauses = ["file_sha256 = ?"]
     params: list[Any] = [bytes.fromhex(sha256)]
-    if CHAT_POLICY.restricted:
-        clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
-        clauses.append(clause)
-        params.extend(clause_params)
+    clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
+    clauses.append(clause)
+    params.extend(clause_params)
     try:
         conn = whatsapp._connect_messages_db()
         try:

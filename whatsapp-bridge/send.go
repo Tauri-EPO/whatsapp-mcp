@@ -923,6 +923,9 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
 			return
 		}
+		if target, parseErr := parseRecipientJID(req.Recipient); parseErr == nil && rejectByChatPolicy(w, b.Policy, target.String()) {
+			return
+		}
 
 		if req.Message == "" && req.MediaPath == "" {
 			writeError(w, http.StatusBadRequest, "Message or media path is required")

@@ -66,6 +66,9 @@ func parseChatAndMessage(w http.ResponseWriter, policy chatPolicy, rawChat, rawI
 		writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "chat_jid and message_id are required"})
 		return types.EmptyJID, "", false
 	}
+	if rejectAmbiguousChat(w, policy, rawChat) {
+		return types.EmptyJID, "", false
+	}
 	chat, err := types.ParseJID(rawChat)
 	if err != nil || chat.User == "" {
 		writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "Invalid chat_jid: " + rawChat})
@@ -154,6 +157,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			return
 		}
 		if rejectByChatPolicy(w, policy, to) {
+			return
+		}
+		if target, parseErr := parseRecipientJID(to); parseErr == nil && rejectByChatPolicy(w, policy, target.String()) {
 			return
 		}
 		content, mediaType, found, err := deps.lookup(id, chat.String())

@@ -30,7 +30,7 @@ class TestPolicyParsing:
         policy = load_chat_policy({})
         assert not policy.restricted
         assert policy.allows("anything@g.us")
-        assert policy.sql_clause("c.jid") == ("1=1", [])
+        assert policy.sql_clause("c.jid")[1] == []
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -58,7 +58,6 @@ class TestPolicyParsing:
     def test_sql_clause_matches_allows(self):
         policy = ChatPolicy.from_entries([DM_A, "*@g.us"])
         clause, params = policy.sql_clause("chats.jid")
-        assert clause == "(chats.jid IN (?) OR chats.jid LIKE ?)"
         assert params == [DM_A, "%@g.us"]
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE TABLE chats (jid TEXT)")

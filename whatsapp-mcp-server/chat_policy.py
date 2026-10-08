@@ -30,6 +30,9 @@ def normalize_chat_entry(raw: str) -> str:
     value = (raw or "").strip()
     if not value:
         return ""
+    # Keep invalid entries literal: ignoring them could make the policy unrestricted.
+    if value.count("@") > 1:
+        return value
     if "@" not in value:
         return f"{value}@{DEFAULT_USER_SERVER}"
     user, _, server = value.rpartition("@")
@@ -66,6 +69,8 @@ class ChatPolicy:
         return cls(exact=frozenset(exact), servers=frozenset(servers), restricted=True)
 
     def allows(self, jid: str | None) -> bool:
+        if (jid or "").count("@") > 1:
+            return False
         if not self.restricted:
             return True
         normalized = normalize_chat_entry(jid or "")
@@ -78,10 +83,11 @@ class ChatPolicy:
     def sql_clause(self, column: str) -> tuple[str, list[str]]:
         """SQL predicate restricting ``column`` (a chat JID column) to allowed chats.
 
-        Returns ("1=1", []) when unrestricted so callers can always AND it in.
+        Ambiguous JIDs are refused even when the allow-list is unset.
         """
+        unambiguous = f"(length({column}) - length(replace({column}, '@', '')) <= 1)"
         if not self.restricted:
-            return "1=1", []
+            return unambiguous, []
         parts: list[str] = []
         params: list[str] = []
         if self.exact:
@@ -90,7 +96,7 @@ class ChatPolicy:
         for server in sorted(self.servers):
             parts.append(f"{column} LIKE ?")
             params.append(f"%@{server}")
-        return "(" + " OR ".join(parts) + ")", params
+        return unambiguous + " AND (" + " OR ".join(parts) + ")", params
 
     def denial_message(self, jid: str | None) -> str:
         return f"Chat {jid!r} is not in {ENV_VAR}; this server is restricted to an allow-list of conversations"

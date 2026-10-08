@@ -243,6 +243,9 @@ func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altO
 			_ = json.NewEncoder(w).Encode(GroupMembersResponse{Success: false, Message: "group JID is required (?jid=...@g.us)"})
 			return
 		}
+		if rejectAmbiguousChat(w, policy, raw) {
+			return
+		}
 		jid, err := types.ParseJID(raw)
 		if err != nil || jid.Server != types.GroupServer {
 			w.WriteHeader(http.StatusBadRequest)

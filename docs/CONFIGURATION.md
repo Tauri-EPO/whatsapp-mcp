@@ -165,6 +165,10 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   from configuration. A formatted entry such as `+55 11 99999-9999` does not
   allow its digits-only number; it fails closed.
 - `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
+- A target containing more than one `@` is always refused, including when
+  the allow-list is unset. Invalid configuration entries remain restrictive;
+  they never authorize a shorter JID or turn the policy into unrestricted access.
+  Read queries also omit such ambiguous stored JIDs.
 - Entries are compared literally, with one exception, for reads only: a
   Brazilian mobile is the same number with or without the ninth digit after
   the area code (`5511999999999` and `551199999999`), and WhatsApp registers

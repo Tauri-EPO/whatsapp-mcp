@@ -89,7 +89,7 @@ func markReadHandler(deps markReadDeps) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "chat_jid is required")
 			return
 		}
-		if rejectByChatPolicy(w, deps.policy, req.ChatJID) {
+		if rejectAmbiguousChat(w, deps.policy, req.ChatJID) {
 			return
 		}
 
@@ -99,6 +99,10 @@ func markReadHandler(deps markReadDeps) http.HandlerFunc {
 		chatJID, err := types.ParseJID(req.ChatJID)
 		if err != nil || chatJID.User == "" || chatJID.Server == "" {
 			writeError(w, http.StatusBadRequest, "Invalid chat_jid")
+			return
+		}
+
+		if rejectByChatPolicy(w, deps.policy, chatJID.String()) {
 			return
 		}
 

@@ -22,12 +22,15 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "recipient, message_id, and emoji are required")
 			return
 		}
-		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
+		if rejectAmbiguousChat(w, b.Policy, req.Recipient) {
 			return
 		}
 		chatJID, err := types.ParseJID(req.Recipient)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid recipient JID: %v", err))
+			return
+		}
+		if rejectByChatPolicy(w, b.Policy, chatJID.String()) {
 			return
 		}
 		var senderJID types.JID
@@ -86,7 +89,7 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return
 		}
-		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
+		if rejectAmbiguousChat(w, b.Policy, req.Recipient) {
 			return
 		}
 
@@ -111,6 +114,10 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 				User:   req.Recipient,
 				Server: "s.whatsapp.net",
 			}
+		}
+
+		if rejectByChatPolicy(w, b.Policy, recipientJID.String()) {
+			return
 		}
 
 		// Determine the chat presence state

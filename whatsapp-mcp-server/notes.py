@@ -141,6 +141,8 @@ def _allowed(jid: str) -> bool:
     both refuse chats every read tool allows and accept chats they hide, so
     every spelling of the identity has a say.
     """
+    if jid.count("@") > 1:
+        return False
     if not CHAT_POLICY.restricted:
         return True
     return any(CHAT_POLICY.allows(spelling) for spelling in _jid_spellings(jid))

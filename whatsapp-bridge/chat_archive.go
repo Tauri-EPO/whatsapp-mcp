@@ -98,6 +98,9 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			return
 		}
 		req.ChatJID = strings.TrimSpace(req.ChatJID)
+		if rejectAmbiguousChat(w, deps.policy, req.ChatJID) {
+			return
+		}
 		chat, err := types.ParseJID(req.ChatJID)
 		if err != nil || chat.User == "" || chat.Server == "" || req.Archived == nil {
 			writeError(w, http.StatusBadRequest, "Valid chat_jid and archived boolean are required")
@@ -107,7 +110,7 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Only direct chats and groups can be archived")
 			return
 		}
-		if rejectByChatPolicy(w, deps.policy, req.ChatJID) {
+		if rejectByChatPolicy(w, deps.policy, chat.String()) {
 			return
 		}
 		if !deps.connected() {

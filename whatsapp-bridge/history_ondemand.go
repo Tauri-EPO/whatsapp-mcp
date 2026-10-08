@@ -95,7 +95,7 @@ func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe
 }
 
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
-func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore) {
+func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -111,6 +111,9 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 		}
 		if req.ChatJID == "" {
 			writeError(w, http.StatusBadRequest, "chat_jid is required")
+			return
+		}
+		if rejectAmbiguousChat(w, policy, req.ChatJID) {
 			return
 		}
 		count := clampHistoryCount(req.Count)

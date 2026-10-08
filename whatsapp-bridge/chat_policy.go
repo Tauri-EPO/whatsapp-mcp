@@ -35,6 +35,11 @@ func normalizeChatEntry(raw string) string {
 	if raw == "" {
 		return ""
 	}
+	// Retain an invalid configuration entry so it cannot disappear into an
+	// unrestricted policy, or be rewritten into a valid exact entry.
+	if strings.Count(raw, "@") > 1 {
+		return raw
+	}
 	if !strings.Contains(raw, "@") {
 		return raw + "@" + types.DefaultUserServer
 	}
@@ -71,6 +76,11 @@ func loadChatPolicy() chatPolicy {
 // Allows reports whether the policy permits acting on target (a JID or a bare
 // phone number as accepted by the REST API).
 func (p chatPolicy) Allows(target string) bool {
+	// whatsmeow parses the first two @-separated parts. A policy must never
+	// authorize a different server from the one the client will address.
+	if strings.Count(target, "@") > 1 {
+		return false
+	}
 	if !p.restricted {
 		return true
 	}
@@ -83,6 +93,11 @@ func (p chatPolicy) Allows(target string) bool {
 	}
 	_, ok := p.servers[n[strings.LastIndex(n, "@")+1:]]
 	return ok
+}
+
+// Reject before parsing can discard an extra @ and hide an ambiguous target.
+func rejectAmbiguousChat(w http.ResponseWriter, policy chatPolicy, target string) bool {
+	return strings.Count(target, "@") > 1 && rejectByChatPolicy(w, policy, target)
 }
 
 // Summary is a one-line description for the startup log.

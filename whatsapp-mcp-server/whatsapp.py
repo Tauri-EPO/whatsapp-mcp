@@ -2310,10 +2310,9 @@ class MessageFilters:
         if self.exclude_groups:
             clauses.append(_direct_only_clause("messages.chat_jid"))
 
-        if CHAT_POLICY.restricted:
-            clause, clause_params = CHAT_POLICY.sql_clause("messages.chat_jid")
-            clauses.append(clause)
-            params.extend(clause_params)
+        clause, clause_params = CHAT_POLICY.sql_clause("messages.chat_jid")
+        clauses.append(clause)
+        params.extend(clause_params)
 
         if not self.include_deleted:
             clauses.append("messages.deleted_at IS NULL")
@@ -3110,10 +3109,9 @@ def _chat_filter(query: str | None, twins: ChatTwins = NO_CHAT_TWINS) -> tuple[l
             clause = f"{clause} OR {_chat_jid_clause('chats.jid', matched)}"
             params.extend(matched)
         clauses.append(f"({clause})")
-    if CHAT_POLICY.restricted:
-        clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
-        clauses.append(clause)
-        params.extend(clause_params)
+    clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
+    clauses.append(clause)
+    params.extend(clause_params)
     return clauses, params
 
 
@@ -4137,6 +4135,8 @@ def _readable(jid: str | None) -> bool:
 
 def _named_exactly(jid: str) -> bool:
     """Does an entry of the allow-list name this JID itself, not a server wildcard?"""
+    if jid.count("@") > 1:
+        return False
     spellings = [jid, other_phone_spelling(jid)]
     return any(normalize_chat_entry(spelling) in CHAT_POLICY.exact for spelling in spellings if spelling)
 
@@ -6416,6 +6416,8 @@ def list_unanswered_page(
 
 def _group_jid(value: str) -> str:
     jid = (value or "").strip()
+    if jid.count("@") > 1:
+        _require_allowed(jid)
     if not jid.endswith("@g.us"):
         raise ToolError("invalid_argument", f"Not a group JID: {jid!r} (expected ...@g.us)")
     _require_allowed(jid)
