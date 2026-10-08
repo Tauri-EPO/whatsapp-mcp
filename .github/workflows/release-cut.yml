@@ -22,7 +22,8 @@ name: Release cut
 # `gh workflow run release-cut.yml -f dry_run=true` does everything but the
 # merge and the dispatch: it gets the release PR's checks running, waits for
 # them and says whether the ruleset would let the PR in. Use it after a change
-# to this file or to the ruleset; it cuts nothing.
+# to this file or to the ruleset. It cuts nothing, but it is not free of
+# effects: it brings the release branch up to date and approves its runs.
 
 on:
   schedule:
@@ -54,8 +55,13 @@ jobs:
       - name: Find the release PR
         id: pr
         run: |
-          number=$(gh pr list --state open --head release-please--branches--main \
-            --json number --jq '.[0].number // empty')
+          # The branch name alone is not an identity: `gh pr list --head` also
+          # returns a fork's pull request from a branch of that name. Only the
+          # one release.yml opened from this repository is the release PR; the
+          # job approves its runs and merges it.
+          number=$(gh pr list --state open --base main --head release-please--branches--main \
+            --json number,isCrossRepository,author \
+            --jq '[.[] | select(.isCrossRepository == false and .author.login == "app/github-actions")][0].number // empty')
           if [ -z "$number" ]; then
             echo "No open release PR: nothing releasable since the last tag."
             echo "number=" >> "$GITHUB_OUTPUT"
@@ -114,26 +120,54 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run == true }}
         run: |
           for attempt in 1 2 3; do
+            sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
             behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by)
             if [ "$behind" != "0" ]; then
               echo "attempt $attempt: the release branch is $behind commit(s) behind main; updating it"
-              gh pr update-branch "$PR"
-              sleep 10
+              before=$sha
+              if ! gh pr update-branch "$PR"; then
+                echo "::error::The release branch could not be brought up to date with main (the workflow token cannot push a merge that changes workflow files). Run 'gh pr update-branch $PR' from an account of your own, or wait for the next releasable merge, which rebuilds the branch."
+                exit 1
+              fi
+              # The update is asynchronous: wait for the head to move rather
+              # than approve and test the old one.
+              for _ in $(seq 1 12); do
+                sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+                [ "$sha" != "$before" ] && break
+                sleep 5
+              done
+              if [ "$sha" = "$before" ]; then
+                echo "::error::update-branch did not move the release PR head within a minute; not cutting a release."
+                exit 1
+              fi
             fi
-            sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
             run=""
+            approved=""
             for _ in $(seq 1 36); do
-              # Every pull_request run of this head: the ones still waiting
-              # get their approval (Security too, so nothing is left pending on
-              # the PR), and the CI one is the run to wait for. A head an
-              # earlier attempt already approved shows its run as it stands.
-              runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=30" \
-                --jq '.workflow_runs[] | "\(.id) \(.path) \(.conclusion // .status)"')
+              # The pull_request runs of this head, from this repository's own
+              # release branch only (a fork can open a pull request on the same
+              # commit; its runs are not ours to approve), oldest first so the
+              # newest CI run is the one kept. A run still waiting gets its
+              # approval once (Security too, so nothing is left pending on the
+              # PR) and is not picked yet: the approval starts a new attempt of
+              # the same run a moment later, and until then the run still reads
+              # as finished with action_required, which `gh run watch` would
+              # take for a failure. A failed poll is simply tried again.
+              runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$sha&event=pull_request&branch=$BRANCH&per_page=100" \
+                --jq '[.workflow_runs[] | select(.head_repository.full_name == env.GH_REPO and .head_branch == env.BRANCH)] | sort_by(.created_at) | .[] | "\(.id) \(.path) \(.conclusion // .status)"') || runs=""
               while read -r id path state; do
                 [ -n "$id" ] || continue
                 if [ "$state" = "action_required" ]; then
-                  echo "attempt $attempt: approving run $id ($path) on the release PR head"
-                  gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null
+                  case " $approved " in
+                    *" $id "*) ;;
+                    *)
+                      echo "attempt $attempt: approving run $id ($path) on the release PR head"
+                      gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null \
+                        || echo "::warning::could not approve run $id; if it is still waiting the cut stops below"
+                      approved="$approved $id"
+                      ;;
+                  esac
+                  continue
                 fi
                 if [ "$path" = ".github/workflows/ci.yml" ]; then
                   run=$id
@@ -143,27 +177,36 @@ jobs:
               sleep 5
             done
             if [ -z "$run" ]; then
-              echo "::error::No pull_request CI run appeared for the release PR head $sha; not cutting a release."
+              echo "::error::No approved pull_request CI run appeared for the release PR head $sha within three minutes; not cutting a release."
               exit 1
             fi
             echo "attempt $attempt: CI run $run on the release PR head $sha"
             if ! gh run watch "$run" --exit-status --interval 20; then
-              echo "::error::CI failed on the release PR head $sha (run $run); not cutting a release."
+              now=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+              if [ "$now" != "$sha" ]; then
+                echo "::notice::attempt $attempt: the release branch moved during CI; going round again."
+                continue
+              fi
+              echo "::error::CI run $run on the release PR head $sha did not succeed; not cutting a release."
               exit 1
             fi
             if [ "$DRY_RUN" = "true" ]; then
+              # The merge state can lag the last check by a few seconds.
               state=UNKNOWN
               for _ in $(seq 1 12); do
                 state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus)
-                [ "$state" != "UNKNOWN" ] && break
-                sleep 5
+                case "$state" in UNKNOWN | BLOCKED) sleep 5 ;; *) break ;; esac
               done
-              if [ "$state" = "BLOCKED" ] || [ "$state" = "BEHIND" ] || [ "$state" = "UNKNOWN" ] || [ "$state" = "DIRTY" ]; then
-                echo "::error::Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would not merge it."
-                exit 1
-              fi
-              echo "Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would merge it. Nothing was merged."
-              exit 0
+              case "$state" in
+                CLEAN | UNSTABLE | HAS_HOOKS)
+                  echo "Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would merge it. Nothing was merged."
+                  exit 0
+                  ;;
+                *)
+                  echo "::error::Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would not merge it."
+                  exit 1
+                  ;;
+              esac
             fi
             if gh pr merge "$PR" --squash --delete-branch --match-head-commit "$sha"; then
               echo "Release PR #$PR merged at $sha."
