@@ -125,7 +125,10 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 			location := extractMessage(latestMsg.Message.GetMessage(), timestamp, latestMsg.Message.GetKey().GetID()).location
 			locationMarkers := !preserveExisting && location != nil && location.Live
-			markersCommitted := false
+			var locationInitial map[string]time.Time
+			if locationMarkers {
+				locationInitial = historyLocationInitialTimes(messages, timestamp)
+			}
 			markRead := conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
 			if err := retry(func() error {
@@ -167,12 +170,12 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			storedInBatch := 0
 			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
-				if locationMarkers && !markersCommitted {
+				if locationMarkers {
 					// Read ownership and activity after acquiring the same IMMEDIATE
 					// lock as the position update. A live original may have arrived
 					// since conversation setup, before this history transaction.
 					if err := batch.write(func() error {
-						stamp, err := b.historyLocationActivityTime(ctx, batch.tx, messages, chatJID, timestamp)
+						stamp, err := b.historyLocationActivityTime(ctx, batch.tx, chunk, chatJID, timestamp, locationInitial)
 						if err != nil {
 							return err
 						}
@@ -294,7 +297,6 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				})
 			}
 			countCommitted := func() {
-				markersCommitted = true
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))

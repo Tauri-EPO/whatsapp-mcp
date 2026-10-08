@@ -166,14 +166,7 @@ func (b *messageBatch) UpdateLiveLocation(id, chat, sender string, fromMe bool, 
 // A history position update is not fresh conversation activity. Only the
 // location case changes the usual newest-first timestamp rule; other history
 // chunks keep their existing marker and retry behavior.
-func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locationAuthorReader, rows []*waHistorySync.HistorySyncMsg, chat string, fallback time.Time) (time.Time, error) {
-	if len(rows) == 0 {
-		return fallback, nil
-	}
-	first := extractMessage(rows[0].GetMessage().GetMessage(), fallback, rows[0].GetMessage().GetKey().GetID()).location
-	if first == nil || !first.Live {
-		return fallback, nil
-	}
+func historyLocationInitialTimes(rows []*waHistorySync.HistorySyncMsg, fallback time.Time) map[string]time.Time {
 	initial := make(map[string]time.Time)
 	for _, row := range rows {
 		info := row.GetMessage()
@@ -186,6 +179,12 @@ func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locatio
 			}
 		}
 	}
+	return initial
+}
+
+// The reader owns the current bounded chunk's IMMEDIATE transaction. Initial
+// timestamps were collected without a write lock to support later chunks.
+func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locationAuthorReader, rows []*waHistorySync.HistorySyncMsg, chat string, fallback time.Time, initial map[string]time.Time) (time.Time, error) {
 	var latest time.Time
 	for _, row := range rows {
 		info := row.GetMessage()
