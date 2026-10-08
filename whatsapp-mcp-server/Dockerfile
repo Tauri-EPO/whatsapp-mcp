@@ -75,7 +75,8 @@ EXPOSE 8000
 
 # Any HTTP answer on /mcp (even 4xx for a session-less GET) means the ASGI
 # server is up; only a connection failure marks the container unhealthy.
+# Probe loopback directly: an inherited proxy must not mask a dead server.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "import os,urllib.request,urllib.error;\nu='http://127.0.0.1:%s/mcp'%os.environ.get('WHATSAPP_MCP_PORT','8000')\ntry:\n    urllib.request.urlopen(u,timeout=4)\nexcept urllib.error.HTTPError:\n    pass"]
+    CMD ["python", "-c", "import os,urllib.request,urllib.error;\nu='http://127.0.0.1:%s/mcp'%os.environ.get('WHATSAPP_MCP_PORT','8000')\ntry:\n    urllib.request.build_opener(urllib.request.ProxyHandler({})).open(u,timeout=4)\nexcept urllib.error.HTTPError:\n    pass"]
 
 CMD ["python", "main.py"]
