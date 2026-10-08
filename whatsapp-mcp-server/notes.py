@@ -25,7 +25,9 @@ existing notes, transcripts and ``annotate_media`` keep working unchanged. The
 only difference an agent sees is that media notes have a single history entry.
 
 Targets are spelled canonically: a contact known as both ``<phone>@s.whatsapp.net``
-and ``<lid>@lid`` is stored under the phone form, and reads look under every
+and ``<lid>@lid`` is stored under the phone form. Brazilian mobile spellings
+share a deterministic 13-digit phone key, including the ninth digit,
+regardless of which archive rows exist. Authorization checks the caller's spelling. Reads look under admitted
 spelling ``whatsapp._sender_aliases`` knows, so a note written before the LID
 map learned the pair is still found afterwards. A message target is
 ``"<chat_jid>/<message_id>"`` because message IDs are unique per chat only.
@@ -63,7 +65,22 @@ CREATE TABLE IF NOT EXISTS notes (
     version INTEGER NOT NULL,
     PRIMARY KEY (target_type, target_id, key, version)
 );
+CREATE TABLE IF NOT EXISTS note_origins (
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    spelling TEXT NOT NULL,
+    PRIMARY KEY (target_type, target_id, key, version)
+);
 """
+
+# Old rows authorize by their stored spelling. New canonical rows retain the
+# spelling whose authorization admitted the write, including after policy changes.
+_ORIGIN_SQL = (
+    "COALESCE((SELECT spelling FROM note_origins o WHERE o.target_type = notes.target_type"
+    " AND o.target_id = notes.target_id AND o.key = notes.key AND o.version = notes.version), notes.target_id)"
+)
 
 
 def _connect(create: bool) -> sqlite3.Connection | None:
@@ -88,64 +105,25 @@ def _connect(create: bool) -> sqlite3.Connection | None:
 # --- Targets ---------------------------------------------------------------
 
 
-# Only these two servers spell the same person two ways. Groups, newsletters,
-# broadcasts and anything else WhatsApp adds later are left exactly as given:
-# rewriting "<id>@newsletter" to "<id>@s.whatsapp.net" would collide with the DM
-# of a phone number that is not the same conversation.
-_ALIASED_SERVERS = ("s.whatsapp.net", "lid")
-
-
 def _jid_spellings(jid: str) -> list[str]:
-    """Every form this user or group JID may have been stored under."""
+    """Every confirmed form this note identity may have been stored under."""
     raw = normalize_chat_entry(jid)
-    user, _, server = raw.rpartition("@")
-    if server not in _ALIASED_SERVERS or not user:
-        return [raw]
-    spellings = {raw}
-    # The LID map only. The second spelling of a Brazilian mobile (issue #475)
-    # is left out on purpose: a note is written under the JID given, so reading
-    # it under both would give one note two current values.
-    for alias in whatsapp._sender_aliases(user, both_spellings=False):
-        # A different user part is what proves the map confirmed a pair. Its
-        # fallback repeats the same digits under both servers, and reading a
-        # LID's notes because a phone number happens to share its digits would
-        # hand one person's notes to another.
-        if "@" in alias and alias.split("@", 1)[0] != user:
-            spellings.add(alias)
-    return sorted(spellings)
+    return whatsapp.note_jid_spellings([raw])[raw]
 
 
 def _canonical_jid(jid: str) -> str:
-    """The one spelling notes are written under: the phone JID when it is known.
+    """The note key: a Brazilian mobile always includes the ninth digit.
 
     An unmapped LID stays a LID — guessing ``<lid>@s.whatsapp.net`` would invent
     a phone number that belongs to somebody else.
     """
     raw = normalize_chat_entry(jid)
-    user, _, server = raw.rpartition("@")
-    if server != "lid" or not user:
-        return raw
-    for alias in whatsapp._sender_aliases(user, both_spellings=False):
-        # A different user part means the LID map resolved this to a phone.
-        if alias.endswith("@s.whatsapp.net") and alias.split("@", 1)[0] != user:
-            return alias
-    return raw
+    return whatsapp.canonical_note_jids([raw])[raw]
 
 
 def _allowed(jid: str) -> bool:
-    """Is any spelling of this conversation in the allow-list?
-
-    WHATSAPP_ALLOWED_CHATS is matched literally, so a DM the archive only knows
-    as ``<lid>@lid`` is listed under that spelling — while a note about it is
-    stored under the phone form. Checking the canonical spelling alone would
-    both refuse chats every read tool allows and accept chats they hide, so
-    every spelling of the identity has a say.
-    """
-    if jid.count("@") > 1:
-        return False
-    if not CHAT_POLICY.restricted:
-        return True
-    return any(CHAT_POLICY.allows(spelling) for spelling in _jid_spellings(jid))
+    """Authorize the supplied spelling; a storage key never grants access."""
+    return jid.count("@") <= 1 and CHAT_POLICY.allows(normalize_chat_entry(jid))
 
 
 def _require_allowed(jid: str) -> None:
@@ -160,10 +138,10 @@ def resolve_target(target_type: str, target_id: str) -> tuple[str, str, list[str
 
     The target is not checked for existence: a chat the agent just listed, a
     contact that only ever appears as a sender, and a message it read in the
-    same call are all legitimate targets, and three extra lookups per note would
-    buy little. ``WHATSAPP_ALLOWED_CHATS`` is checked: a contact JID is spelled
-    exactly like its direct chat, and ``search_contacts`` already filters on it,
-    so a note about a person outside the allow-list is out of reach too.
+    same call are all legitimate targets. Batched read-only metadata selects
+    the canonical spelling without creating an archive row. ``WHATSAPP_ALLOWED_CHATS`` is checked: a contact JID is spelled
+    exactly like its direct chat. Contact search also reads the address book
+    outside that list, but a note requires the supplied spelling to be allowed.
     """
     ttype = (target_type or "").strip().lower()
     if ttype not in TARGET_TYPES:
@@ -184,17 +162,19 @@ def resolve_target(target_type: str, target_id: str) -> tuple[str, str, list[str
             )
         _require_allowed(chat_raw)
         chat = _canonical_jid(chat_raw)
-        return ttype, f"{chat}/{message_id}", [f"{s}/{message_id}" for s in _jid_spellings(chat_raw)]
+        return ttype, f"{chat}/{message_id}", _listing_ids(ttype, f"{chat_raw}/{message_id}")
     _require_allowed(raw)
-    return ttype, _canonical_jid(raw), _jid_spellings(raw)
+    canonical = _canonical_jid(raw)
+    return ttype, canonical, _listing_ids(ttype, raw)
 
 
-def _canonical_target(target_type: str, target_id: str) -> str:
+def _canonical_target(target_type: str, target_id: str, canonical_jids: dict[str, str] | None = None) -> str:
     """The spelling ``resolve_target`` would have written this stored id under."""
     if target_type == "media":
         return target_id
     chat, separator, message_id = target_id.partition("/")
-    canonical = _canonical_jid(chat)
+    chat = normalize_chat_entry(chat)
+    canonical = canonical_jids[chat] if canonical_jids is not None else _canonical_jid(chat)
     return f"{canonical}{separator}{message_id}" if separator else canonical
 
 
@@ -307,16 +287,17 @@ def _versioned_current(
     canonical id always outranks anything stored under an older spelling.
     """
     rows = conn.execute(
-        "SELECT target_id, value, updated_at, MAX(version) FROM notes"
+        f"SELECT target_id, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
         f" WHERE target_type = ? AND key = ? AND target_id IN ({','.join('?' * len(ids))})"
         " GROUP BY target_id",
         [ttype, key, *ids],
     ).fetchall()
     if not rows:
         return None, 0
-    best = max(rows, key=lambda row: (row[0] == tid, row[2], row[0]))
+    visible = [row for row in rows if _visible(ttype, row[4])]
+    best = max(visible, key=lambda row: (row[0] == tid, row[2], row[0])) if visible else None
     # An empty stored value is a tombstone: there is nothing to replace.
-    previous = (best[1], best[2]) if best[1] else None
+    previous = (best[1], best[2]) if best and best[1] else None
     return previous, max(int(row[3]) for row in rows)
 
 
@@ -373,6 +354,25 @@ def annotate(
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (ttype, tid, key, stored, now, "delete" if deleting else source, version + 1),
             )
+            origin = normalize_chat_entry(target_id.partition("/")[0])
+            conn.execute("INSERT INTO note_origins VALUES (?, ?, ?, ?, ?)", (ttype, tid, key, version + 1, origin))
+            # Move the current value to its canonical key in this transaction.
+            # Original rows remain in the shared history; alias tombstones
+            # close their current values without overwriting that history.
+            aliases = conn.execute(
+                "SELECT target_id, value, MAX(version) FROM notes"
+                f" WHERE target_type = ? AND key = ? AND target_id IN ({','.join('?' * len(ids))}) AND target_id <> ?"
+                " GROUP BY target_id HAVING value <> ''",
+                [ttype, key, *ids, tid],
+            ).fetchall()
+            conn.executemany(
+                "INSERT INTO notes VALUES (?, ?, ?, '', ?, 'alias', ?)",
+                [(ttype, alias, key, now, version + 1) for alias, *_ in aliases],
+            )
+            conn.executemany(
+                "INSERT INTO note_origins VALUES (?, ?, ?, ?, ?)",
+                [(ttype, alias, key, version + 1, origin) for alias, *_ in aliases],
+            )
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -393,14 +393,17 @@ def _current_rows(conn: sqlite3.Connection, ttype: str, tid: str, ids: list[str]
     whatever the clock says.
     """
     rows = conn.execute(
-        "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
+        f"SELECT target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
         f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(ids))})"
         " GROUP BY target_id, key",
         [ttype, *ids],
     ).fetchall()
     best: dict[str, tuple[str, str, str]] = {}
-    for target_id, key, value, updated_at, _version in sorted(rows, key=lambda row: (row[0] == tid, row[3], row[0])):
-        best[key] = (key, value, updated_at)
+    for target_id, key, value, updated_at, _version, origin in sorted(
+        rows, key=lambda row: (row[0] == tid, row[3], row[0])
+    ):
+        if _visible(ttype, origin):
+            best[key] = (key, value, updated_at)
     return [row for row in best.values() if row[1]]
 
 
@@ -419,13 +422,15 @@ def compact(target_type: str, target_id: str, key: str, value: str) -> dict[str,
     return annotate(target_type, target_id, key, value, mode="set", source="compact")
 
 
-def _listing_ids(target_type: str, target_id: str) -> list[str]:
+def _listing_ids(
+    target_type: str,
+    target_id: str,
+    canonical_jids: dict[str, str] | None = None,
+    aliases: dict[str, list[str]] | None = None,
+) -> list[str]:
     """The spellings a listing reads one target under: as given, plus the canonical one.
 
-    Deliberately not the full ``_jid_spellings`` set: that asks the LID map about
-    every row, and a page of fifty chats would pay fifty lookups for a case
-    ``get_notes`` still covers — notes written under a LID before the map learned
-    its phone number.
+    The page supplies one batched alias map instead of looking up each row.
     """
     raw = (target_id or "").strip()
     if not raw:
@@ -434,17 +439,25 @@ def _listing_ids(target_type: str, target_id: str) -> list[str]:
         chat, separator, message_id = raw.partition("/")
         if not separator or not message_id:
             return []
-        canonical = f"{_canonical_jid(chat)}{separator}{message_id}"
+        chat = normalize_chat_entry(chat)
     else:
         raw = normalize_chat_entry(raw)
-        canonical = _canonical_jid(raw)
-    return [raw] if raw == canonical else [raw, canonical]
+        chat, separator, message_id = raw, "", ""
+    canonical_chat = canonical_jids[chat] if canonical_jids is not None else _canonical_jid(chat)
+    spellings = aliases[chat] if aliases is not None else _jid_spellings(chat)
+    # Canonical last: it must shadow every legacy value, including tombstones.
+    ids = [
+        f"{jid}{separator}{message_id}"
+        for jid in dict.fromkeys(spellings)
+        if jid and jid != canonical_chat and _allowed(jid)
+    ]
+    return [*ids, f"{canonical_chat}{separator}{message_id}"]
 
 
 def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, dict[str, str]]:
-    """Current notes for many targets in one query: ``{target_id as given: {key: value}}``.
+    """Current notes with batched identity and bounded queries: ``{target_id as given: {key: value}}``.
 
-    This is what puts ``notes`` on a listing row without an N+1: one query per
+    This puts ``notes`` on a listing row without an N+1: bounded batches per
     page, keyed by the id the caller passed, so a row looks its own notes up.
     Targets with nothing recorded are absent from the result.
 
@@ -453,9 +466,10 @@ def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, di
     resolves an identifier of its own, and a note must not be the one place a
     blocked conversation shows through.
     """
-    spellings = {
-        tid: _listing_ids(target_type, tid) for tid in dict.fromkeys(target_ids) if tid and _visible(target_type, tid)
-    }
+    visible = [tid for tid in dict.fromkeys(target_ids) if tid and _visible(target_type, tid)]
+    canonical = whatsapp.canonical_note_jids([tid.partition("/")[0] for tid in visible])
+    aliases = whatsapp.note_jid_spellings([tid.partition("/")[0] for tid in visible], canonical)
+    spellings = {tid: _listing_ids(target_type, tid, canonical, aliases) for tid in visible}
     lookup = sorted({spelling for ids in spellings.values() for spelling in ids})
     if not lookup:
         return {}
@@ -463,24 +477,35 @@ def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, di
     if conn is None:
         return {}
     try:
-        rows = conn.execute(
-            "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
-            f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(lookup))})"
-            " GROUP BY target_id, key",
-            [target_type, *lookup],
-        ).fetchall()
+        # Every chunk sees the same snapshot, like the former single SELECT.
+        conn.execute("BEGIN")
+        size = max(1, min(whatsapp._SQL_IN_CHUNK, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - 1))
+        rows = []
+        for chunk in whatsapp._in_chunks(lookup, size):
+            rows.extend(
+                conn.execute(
+                    f"SELECT target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
+                    f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(chunk))})"
+                    " GROUP BY target_id, key",
+                    [target_type, *chunk],
+                ).fetchall()
+            )
     finally:
         conn.close()
     by_id: dict[str, dict[str, tuple[str, str]]] = {}
-    for target_id, key, value, updated_at, _version in rows:
-        by_id.setdefault(target_id, {})[key] = (value, updated_at)
+    for target_id, key, value, updated_at, _version, origin in rows:
+        if _visible(target_type, origin):
+            by_id.setdefault(target_id, {})[key] = (value, updated_at)
     out: dict[str, dict[str, str]] = {}
     for tid, ids in spellings.items():
         merged: dict[str, tuple[str, str]] = {}
-        # _listing_ids puts the canonical spelling last, and that is where writes
-        # land, so it overwrites anything left under an older one.
-        for spelling in ids:
-            merged.update(by_id.get(spelling, {}))
+        # Use the same winning row as _current_rows: canonical first, then
+        # update time and JID among legacy aliases, including tombstones.
+        candidates = [
+            (spelling, key, value, at) for spelling in ids for key, (value, at) in by_id.get(spelling, {}).items()
+        ]
+        for spelling, key, value, at in sorted(candidates, key=lambda row: (row[0] == ids[-1], row[3], row[0])):
+            merged[key] = (value, at)
         current = {key: value for key, (value, _at) in merged.items() if value}
         if current:
             out[tid] = current
@@ -494,7 +519,7 @@ def attach_notes(
     field: str = "notes",
     only_when_present: bool = False,
 ) -> None:
-    """Put each row's notes on it, from one query for the whole page.
+    """Put each row's notes on it, from batched queries for the whole page.
 
     ``only_when_present`` leaves unnoted rows untouched — right for message rows,
     where most of a page never carries a note and an empty mapping per row is
@@ -528,12 +553,13 @@ def get_notes(target_type: str, target_id: str, include_history: bool = False) -
         if include_history:
             view["history"] = [
                 {"key": key, "value": value, "updated_at": updated_at, "source": source, "version": version}
-                for key, value, updated_at, source, version in conn.execute(
-                    "SELECT key, value, updated_at, source, version FROM notes"
+                for key, value, updated_at, source, version, origin in conn.execute(
+                    f"SELECT key, value, updated_at, source, version, {_ORIGIN_SQL} FROM notes"
                     f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(ids))})"
                     " ORDER BY updated_at DESC, version DESC",
                     [ttype, *ids],
                 )
+                if _visible(ttype, origin)
             ]
     finally:
         conn.close()
@@ -591,8 +617,8 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
         # Group first, filter after: matching an older version whose replacement
         # no longer contains the needle would report a value nobody can read.
         rows = conn.execute(
-            "SELECT target_type, target_id, key, value, updated_at FROM ("
-            "  SELECT target_type, target_id, key, value, updated_at, MAX(version)"
+            "SELECT target_type, target_id, key, value, updated_at, origin FROM ("
+            f"  SELECT target_type, target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} AS origin"
             f"  FROM notes WHERE {' AND '.join(inner)} GROUP BY target_type, target_id, key"
             ") WHERE value <> '' AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0)"
             " ORDER BY updated_at DESC",
@@ -610,18 +636,27 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
             batch = rows.fetchmany(media_notes.SEARCH_BATCH)
             if not batch:
                 break
-            for ttype, tid, hit_key, value, updated_at in batch:
-                if not _visible(ttype, tid):
+            canonical_jids = whatsapp.canonical_note_jids(
+                [tid.partition("/")[0] for ttype, tid, *_rest in batch if ttype != "media"]
+            )
+            for ttype, tid, hit_key, value, updated_at, origin in batch:
+                if not _visible(ttype, origin):
                     continue
-                canonical = _canonical_target(ttype, tid)
-                if canonical != tid and _has_note(conn, ttype, canonical, hit_key):
-                    continue
+                canonical = _canonical_target(ttype, tid, canonical_jids)
+                if canonical != tid:
+                    chat, separator, message_id = tid.partition("/")
+                    aliases = [f"{jid}{separator}{message_id}" for jid in _jid_spellings(chat)]
+                    current = _current_rows(conn, ttype, canonical, list(dict.fromkeys([canonical, *aliases])))
+                    if (hit_key, value, updated_at) not in current:
+                        continue
                 slot = (ttype, canonical, hit_key)
                 if slot in best:
                     continue
+                _, separator, message_id = tid.partition("/")
+                visible_id = f"{origin.partition('/')[0]}{separator}{message_id}" if separator else origin
                 best[slot] = {
                     "target_type": ttype,
-                    "target_id": canonical,
+                    "target_id": canonical if canonical == origin or _visible(ttype, canonical) else visible_id,
                     "key": hit_key,
                     "value": value,
                     "updated_at": updated_at,
@@ -631,18 +666,3 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
     finally:
         conn.close()
     return list(best.values())
-
-
-def _has_note(conn: sqlite3.Connection, ttype: str, tid: str, key: str) -> bool:
-    """Is anything (a value or a tombstone) stored under this exact spelling?
-
-    Only asked about hits that carry a non-canonical spelling, which the LID map
-    makes rare: in the usual store this query never runs.
-    """
-    return (
-        conn.execute(
-            "SELECT 1 FROM notes WHERE target_type = ? AND target_id = ? AND key = ? LIMIT 1",
-            (ttype, tid, key),
-        ).fetchone()
-        is not None
-    )

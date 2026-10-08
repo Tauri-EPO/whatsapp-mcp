@@ -85,3 +85,14 @@ def br_mobile_alternate(digits: str) -> str | None:
         return None
     area, ninth, subscriber = match.groups()
     return f"55{area}{'' if ninth else '9'}{subscriber}"
+
+
+def br_national_mobile_alternate(digits: str) -> str | None:
+    """Search-only country-coded alternate of a complete Brazilian national mobile.
+
+    A national number may also name a foreign subscriber; callers deliberately
+    add only this whole Brazilian JID, leaving the ordinary search intact.
+    """
+    if len(digits) not in (10, 11):
+        return None
+    return br_mobile_alternate("55" + digits)

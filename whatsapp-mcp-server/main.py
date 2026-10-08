@@ -393,8 +393,11 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     ignored. A full Brazilian mobile
     (55 + area code + number) is found with or without the ninth digit after
     the area code, whichever of the two WhatsApp registered; `matched` is
-    "jid" and the hit's `jid` is the registered spelling, the one to use from
-    then on.
+    "jid" and the hit's `jid` identifies the contact in the archive. Sends resolve
+    the registered number themselves. National Brazilian mobile queries also try the whole alternate
+    phone JID; other lookup tools retain the country-code requirement. When
+    both phone spellings have allowed archive rows, the hit carries one
+    canonical phone jid and all merged `aliases`.
 
     Args:
         query: Search term to match against contact names or phone numbers
@@ -1324,7 +1327,11 @@ def list_chats(
         that marker, so chats already read on the phone are not reported as unread.
         One person is one row: when WhatsApp stored a direct chat under both a phone
         JID and that person's `@lid`, the two are merged and `aliases` carries both
-        spellings, `jid` being the phone one. The other tools accept either.
+        spellings, `jid` being the phone one. Stored Brazilian mobile phone
+        spellings also merge, using the shorter phone JID, and may share that
+        row with one mapped LID. Every merged spelling must be allowed.
+        A locally resolved placeholder name is searchable through query.
+        The other tools accept any merged spelling.
     """
     if count_only:
         _reject_count_only_extras(fields, cursor, page)
@@ -2224,6 +2231,12 @@ def annotate(
         message: "<chat_jid>/<message_id>" — message IDs are unique per chat only
         media: the sha256 from list_media / list_messages (same store as annotate_media)
 
+    Brazilian mobile spellings and confirmed LIDs share the 13-digit phone note
+    key with the ninth digit, regardless of which chats exist.
+    The spelling supplied must be allowed; the canonical storage key grants no
+    access to other spellings. Legacy notes under refused aliases stay hidden.
+    The returned target_id is the write key, not an authorization grant.
+
     Conventional keys — use these before inventing your own:
         label: what this is (patient, supplier, family, marketing...)
         importance: 1-5, 5 being "answer today"
@@ -2257,7 +2270,10 @@ def get_notes(target_type: str, target_id: str, include_history: bool = False) -
 
     Read this before annotating the same key: `set` replaces the whole value, so the
     merge has to happen here. The `updated_at` of a note is what `annotate(...,
-    if_unchanged_since=...)` expects.
+    if_unchanged_since=...)` expects. Brazilian mobile spellings and confirmed
+    LIDs include admitted legacy notes; the canonical key wins, including
+    tombstones. The supplied spelling must be allowed, and stored write origins
+    are checked against the current policy.
 
     Args:
         target_type: "chat", "contact", "message" or "media"

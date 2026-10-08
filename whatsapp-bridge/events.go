@@ -536,6 +536,19 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// Process history sync events
 		b.handleHistorySync(v)
 
+	case *events.Contact:
+		name := v.Action.GetFullName()
+		if strings.TrimSpace(name) == "" {
+			name = v.Action.GetFirstName()
+		}
+		b.refreshContactChatName(v.JID, types.EmptyJID, name)
+
+	case *events.PushName:
+		b.refreshContactChatName(v.JID, v.JIDAlt, v.NewPushName)
+
+	case *events.BusinessName:
+		b.refreshContactChatName(v.JID, types.EmptyJID, v.NewBusinessName)
+
 	case *events.MediaRetry:
 		// The sender's phone answered a media-retry request issued by
 		// downloadMedia (see media_retry.go); route it to the waiting call.

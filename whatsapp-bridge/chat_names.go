@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"sync"
@@ -144,6 +145,75 @@ func (store *MessageStore) RenameChat(chatJID, name string) error {
 	}
 	store.names.put(chatJID, name)
 	return nil
+}
+
+// RenamePlaceholderChat updates only the name inspected by the caller. A
+// concurrent real rename wins, and contact metadata never advances activity.
+func (store *MessageStore) RenamePlaceholderChat(chatJID, expected, name string) error {
+	result, err := store.db.Exec(`UPDATE chats SET name = ? WHERE jid = ? AND COALESCE(name, '') = ?`, name, chatJID, expected)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed > 0 {
+		store.names.put(chatJID, name)
+	} else {
+		store.names.invalidate(chatJID)
+	}
+	return nil
+}
+
+// refreshContactChatName consumes the already-local contact store and the
+// event's name. No network request or chat creation is needed. Refresh both
+// stored phone/LID rows when the SDK confirms the alternate identity.
+func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
+	if b.Store == nil || b.Store.db == nil {
+		return
+	}
+	primary, err := normalizedUserJID(jid.String())
+	if err != nil || (primary.Server != types.DefaultUserServer && primary.Server != types.HiddenUserServer) {
+		return
+	}
+	targets := map[string]types.JID{}
+	add := func(candidate types.JID) {
+		normal, err := normalizedUserJID(candidate.String())
+		if err == nil && (normal.Server == types.DefaultUserServer || normal.Server == types.HiddenUserServer) {
+			normal = normal.ToNonAD()
+			targets[normal.String()] = normal
+		}
+	}
+	add(primary)
+	add(hint)
+	if alt, err := lookupAltJID(context.Background(), b.Client, primary.ToNonAD()); err == nil {
+		add(alt)
+	}
+	self := ownUsers(b.Client)
+	for chatJID, target := range targets {
+		b.storeLive("contact name", "", chatJID, func() error {
+			var existing string
+			if err := b.Store.db.QueryRow(`SELECT COALESCE(name, '') FROM chats WHERE jid = ?`, chatJID).Scan(&existing); err != nil {
+				if err == sql.ErrNoRows {
+					return nil
+				}
+				return err
+			}
+			if strings.TrimSpace(existing) != "" && !isPlaceholderName(strings.TrimSpace(existing), target, self) {
+				return nil
+			}
+			b.Store.names.invalidate(chatJID)
+			name := GetChatName(b.Client, b.Store, target, chatJID, nil, "", false, b.Log)
+			if strings.TrimSpace(name) == "" || isPlaceholderName(name, target, self) {
+				name = strings.TrimSpace(eventName)
+			}
+			if name == "" || isPlaceholderName(name, target, self) {
+				return nil
+			}
+			return b.Store.RenamePlaceholderChat(chatJID, existing, name)
+		})
+	}
 }
 
 // EnsureChat makes sure the chat row exists, which a message row needs before

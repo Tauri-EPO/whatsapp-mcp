@@ -149,10 +149,11 @@ class TestEveryTool:
     def test_get_chat_still_takes_a_jid_not_a_bare_number(self, clinic, asked):
         assert whatsapp.get_chat(asked) is None
 
-    def test_get_chat_prefers_the_spelling_asked_for(self, clinic):
+    def test_get_chat_merges_both_allowed_archive_spellings(self, clinic):
         _add_chat(clinic, LONG_JID, "Second row")
-        assert whatsapp.get_chat(LONG_JID)["jid"] == LONG_JID
+        assert whatsapp.get_chat(LONG_JID) == whatsapp.get_chat(SHORT_JID)
         assert whatsapp.get_chat(SHORT_JID)["jid"] == SHORT_JID
+        assert whatsapp.get_chat(LONG_JID)["aliases"] == [SHORT_JID, LONG_JID]
 
     @BOTH
     def test_get_contact_reports_the_stored_spelling(self, clinic, asked):
@@ -180,12 +181,10 @@ class TestEveryTool:
             assert len(whatsapp.list_chats(query=query)) == 1, query
             assert whatsapp.count_chats(query=query) == 1, query
 
-    def test_a_note_stays_under_the_jid_it_was_written_for(self, clinic):
-        # Notes are keyed by the JID given: read under both spellings, one note
-        # would have two current values.
+    def test_a_note_uses_one_archive_key_whichever_spelling_wrote_it(self, clinic):
         notes.annotate("contact", LONG_JID, "role", "typed spelling")
         notes.annotate("contact", SHORT_JID, "role", "stored spelling")
-        assert notes.get_notes("contact", LONG_JID)["notes"]["role"]["value"] == "typed spelling"
+        assert notes.get_notes("contact", LONG_JID)["notes"]["role"]["value"] == "stored spelling"
         assert notes.get_notes("contact", SHORT_JID)["notes"]["role"]["value"] == "stored spelling"
 
 
@@ -311,10 +310,12 @@ class TestAllowList:
         _denied(lambda: whatsapp.list_messages(chat_jid="+5588977776666", include_context=False))
         _denied(lambda: whatsapp.list_messages(chat_jid="+558877776666", include_context=False))
 
-    def test_notes_and_triage_keep_the_literal_comparison(self, clinic, monkeypatch):
+    def test_notes_require_typed_spelling_and_write_the_ninth_digit_key(self, clinic, monkeypatch):
         _allow(monkeypatch, SHORT_JID)
         _denied(lambda: notes.get_notes("contact", LONG_JID))
         _denied(lambda: notes.annotate("chat", LONG_JID, "role", "x"))
+        assert notes.annotate("chat", SHORT_JID, "role", "x")["target_id"] == LONG_JID
+        assert notes.get_notes("chat", SHORT_JID)["notes"]["role"]["value"] == "x"
         assert notes.get_notes("contact", SHORT_JID)["notes"] == {}
 
     def test_a_send_preview_names_the_recipient_as_given(self, clinic):

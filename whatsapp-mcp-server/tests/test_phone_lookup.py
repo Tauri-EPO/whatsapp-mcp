@@ -180,11 +180,13 @@ class TestDirectChat:
         _add_chat(paired_dbs, LONG_JID)
         assert whatsapp.get_direct_chat_by_contact(asked)["jid"] == LONG_JID
 
-    def test_the_spelling_asked_for_wins_when_both_have_a_chat(self, paired_dbs):
+    def test_both_stored_spellings_return_the_same_merged_chat(self, paired_dbs):
         _add_chat(paired_dbs, SHORT_JID)
         _add_chat(paired_dbs, LONG_JID)
-        assert whatsapp.get_direct_chat_by_contact(LONG)["jid"] == LONG_JID
-        assert whatsapp.get_direct_chat_by_contact(SHORT)["jid"] == SHORT_JID
+        short = whatsapp.get_direct_chat_by_contact(SHORT)
+        assert short == whatsapp.get_direct_chat_by_contact(LONG)
+        assert short["jid"] == SHORT_JID
+        assert short["aliases"] == [SHORT_JID, LONG_JID]
 
     def test_a_foreign_number_is_looked_up_as_typed(self, paired_dbs):
         _add_chat(paired_dbs, f"{FOREIGN_SHORT}@s.whatsapp.net")

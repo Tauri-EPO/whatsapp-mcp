@@ -224,7 +224,7 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   Startup logs warn about invalid entry positions without printing their values.
   Restricted read queries also omit ambiguous stored JIDs; an unrestricted
   deployment reads its archive without per-row identity filtering.
-- Entries are compared literally, with one exception, for reads only: a
+- Entries are compared literally, with the Brazilian read and note exceptions below: a
   Brazilian mobile is the same number with or without the ninth digit after
   the area code (`5511999999999` and `551199999999`), and WhatsApp registers
   the account under one of the two. A read tool given the spelling the list
@@ -233,6 +233,15 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   chats the list names. Send tools and forwarding strip supported separators
   from bare numbers before comparison: list the spelling the chat is stored under (`search_contacts` reports
   it) for a contact the agent must be able to write to.
+- Notes and triage (`annotate`, `get_notes`, `mark_handled`, `snooze`) authorize
+  the spelling the caller supplies. Brazilian note keys always use the 13-digit
+  phone spelling with the ninth digit, independent of archive rows. That key
+  grants no access: writes retain the admitted spelling, checked against the
+  current policy on reads. Legacy notes under unlisted aliases stay hidden.
+  Foreign numbers, landlines and unmapped LIDs retain one key. Chat listings
+  merge stored phone spellings and a mapped LID only when **every** merged
+  spelling is allowed; this never imports hidden messages. Send checks below
+  still require both the typed and registered number.
 - The MCP server filters `list_chats`, `list_messages`, `get_chat`,
   `get_message_context`, `get_direct_chat_by_contact`, `get_contact_chats` and
   `get_last_interaction`, and refuses `send_*`, `send_reaction`,
