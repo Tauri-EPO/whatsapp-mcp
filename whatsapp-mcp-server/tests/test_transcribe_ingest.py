@@ -403,6 +403,53 @@ def test_media_the_phone_no_longer_has_is_recorded_and_never_asked_for_again(pai
     assert third.calls == [("AUD1", ALICE)]
 
 
+def test_unsafe_identities_are_skipped_per_row_without_starving_other_copies(paired_dbs):
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    # A valid copy of the refused audio is uncached too: per-hash notes would hide it.
+    _add_audio(paired_dbs, "AUD4", BOB, cached=False)
+    with paired_dbs.messages() as conn:
+        conn.execute("UPDATE messages SET timestamp = '2026-09-05 08:00:00' WHERE id = 'AUD4' AND chat_jid = ?", (BOB,))
+    refused = {("AUD4", ALICE), ("AUD3", ALICE), ("AUD2", ALICE)}
+    bridge = FakeBridge()
+
+    def fetch(message_id, chat_jid):
+        if (message_id, chat_jid) in refused:
+            bridge.calls.append((message_id, chat_jid))
+            raise ToolError("media_refused", "unsafe message identity")
+        return bridge(message_id, chat_jid)
+
+    result = transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=fetch)
+    assert result.transcribed == 2  # valid AUD4 copy and AUD1, after three refusals
+    assert refused.issubset(set(bridge.calls))
+    assert ("AUD1", ALICE) in bridge.calls and ("AUD4", BOB) in bridge.calls
+    assert all("media_unavailable" not in n for n in media_notes.fetch_notes(list(SHA.values())).values())
+    bridge.calls.clear()
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=fetch).pending == 0
+    assert bridge.calls == []
+
+    audio = whatsapp.coverage()["audio"]
+    assert audio["refused"] == 3 and audio["unavailable"] == 0 and audio["backlog"] == 0
+    assert whatsapp.coverage(chat_jid=BOB)["audio"]["refused"] == 0
+
+
+def test_media_refusal_write_failure_keeps_fetches_bounded(paired_dbs, monkeypatch):
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    calls = []
+
+    def fetch(message_id, chat_jid):
+        calls.append((message_id, chat_jid))
+        raise ToolError("media_refused", "unsafe message identity")
+
+    def unwritable(*args):
+        raise ToolError("internal", "notes.db unwritable")
+
+    monkeypatch.setattr(media_notes, "record_media_refusal", unwritable)
+    transcribe_worker.find_pending(10, fetch=True, download=fetch)
+    assert len(calls) == transcribe_worker.MAX_FETCH_FAILURES
+
+
 def test_media_rows_without_cdn_fields_are_recorded_like_a_definitive_miss(paired_dbs):
     """Issue #392: a row with no media key can never be downloaded either."""
     keyless = ("AUD1", "AUD2", "AUD3", "AUD4")

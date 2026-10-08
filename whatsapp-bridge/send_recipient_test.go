@@ -380,7 +380,7 @@ func TestSendWhenTheRegisteredNumberCannotBeChecked(t *testing.T) {
 }
 
 func TestSendRefusesARecipientItCannotRead(t *testing.T) {
-	for _, recipient := range []string{"123:notadevice@s.whatsapp.net", "+55 11 98888-7777"} {
+	for _, recipient := range []string{"123:notadevice@s.whatsapp.net", "+55 11 98888-7777x"} {
 		ask := &fakeIsOnWhatsApp{}
 		_, mux, sentTo := sendRecipientBridge(t, &mockLIDStore{}, ask)
 		rec := postSend(mux, recipient)

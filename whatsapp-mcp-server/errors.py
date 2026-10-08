@@ -10,6 +10,8 @@ codes: ``not_found`` (the chat/message/contact does not exist in the archive),
 ``media_unavailable`` (the bytes are not cached here and nothing can fetch them:
 the sender's phone no longer has them, or the message was stored without the CDN
 fields — retrying will not help),
+``media_refused`` (the message identity cannot safely name a cache file;
+retrying this row will not help, but other copies remain fetchable),
 ``invalid_argument`` (bad input), ``conflict`` (the target changed since the
 caller read it; re-read and retry), ``too_large`` (the answer would not fit: the
 payload carries the real size and the limit that was applied), ``internal``
@@ -27,11 +29,14 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+MEDIA_REFUSED_CODE = "media_refused"
+
 ERROR_CODES = (
     "not_found",
     "denied",
     "bridge_unavailable",
     "media_unavailable",
+    MEDIA_REFUSED_CODE,
     "invalid_argument",
     "conflict",
     "too_large",
@@ -43,6 +48,9 @@ logger = logging.getLogger("whatsapp_mcp")
 
 class ToolError(Exception):
     """Raised anywhere below a tool to produce the error envelope."""
+
+    # Internal fetch receipt, never serialized: None means not attempted.
+    _media_refusal_recorded: bool | None = None
 
     def __init__(self, code: str, message: str, **extra: Any) -> None:
         if code not in ERROR_CODES:

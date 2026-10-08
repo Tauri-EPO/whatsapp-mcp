@@ -77,6 +77,7 @@ def test_codes_are_documented():
         "denied",
         "bridge_unavailable",
         "media_unavailable",
+        "media_refused",
         "invalid_argument",
         "conflict",
         "too_large",

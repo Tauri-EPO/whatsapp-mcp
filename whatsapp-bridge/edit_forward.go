@@ -144,7 +144,11 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 		if !ok {
 			return
 		}
-		to := strings.TrimSpace(req.ToChatJID)
+		to, err := normalizePhoneRecipient(strings.TrimSpace(req.ToChatJID))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if to == "" {
 			writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "to_chat_jid is required"})
 			return
@@ -180,6 +184,10 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 				msg := "media is not available to forward"
 				if dlErr != nil {
 					msg += ": " + dlErr.Error()
+				}
+				if code := permanentMediaCode(dlErr); code != "" {
+					writeErrorCode(w, http.StatusInternalServerError, code, msg)
+					return
 				}
 				writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: msg})
 				return

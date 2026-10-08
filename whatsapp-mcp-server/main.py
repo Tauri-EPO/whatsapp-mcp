@@ -16,12 +16,15 @@ from http_auth import (
     resolve_http_token,
     resolve_max_body_bytes,
     resolve_rate_limit,
+    resolve_upload_max_bytes,
 )
+from http_upload import UploadApp
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
 from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY
 from media_notes import annotate_media as notes_annotate_media
+from media_notes import clear_media_refusal as notes_clear_media_refusal
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
@@ -261,12 +264,13 @@ def coverage(
     nothing at all then, not that your contacts were silent.
 
     audio is the voice-note side of the same scope: {messages, cached,
-    transcribed, errors, unavailable, backlog, backlog_cached, cached_examined} —
+    transcribed, errors, unavailable, refused, backlog, backlog_cached, cached_examined} —
     inbound voice notes stored (the status feed "status@broadcast" is not
     counted: no batch walks it), how many have their bytes on disk, how many
     already have a transcript, a recorded failure (errors) or bytes no download
     brought here (unavailable: the sender's phone no longer has them, or the row
-    was stored without the fields a download needs), and
+    was stored without the fields a download needs), or an unsafe row identity
+    (refused: per message, leaving other copies of its hash fetchable), and
     backlog = the rest, what transcribe_audio or TRANSCRIBE_ON_INGEST would
     still work through. Ask
     it before starting a batch: backlog - backlog_cached is how many of those
@@ -1519,7 +1523,8 @@ def send_message(
     dry_run=false to actually send.
 
     Args:
-        chat_jid: Where to send: a phone number with country code and no symbols
+        chat_jid: Where to send: a phone number with country code (a leading +
+                  and the separators listed in docs/TOOLS.md are accepted)
                   ("123456789"), a direct-chat JID ("123456789@s.whatsapp.net") or
                   a group JID ("123456789@g.us")
         message: The message text to send
@@ -1806,11 +1811,16 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
     Text is re-sent as is; media is re-uploaded from the local cache (fetched first
     if needed) together with its caption. The copy arrives as a fresh message
     (no "Forwarded" label). Both chats must pass WHATSAPP_ALLOWED_CHATS.
+    Media failures are media_refused (unsafe cache identity) or media_unavailable
+    (missing bytes or download fields), which should not be retried;
+    bridge_unavailable is a temporary bridge/CDN failure worth retrying later.
 
     Args:
         chat_jid: Chat containing the original message
         message_id: ID of the message to forward
-        to_chat_jid: Destination: phone number, direct-chat JID or group JID
+        to_chat_jid: Destination: country-code phone number (a leading + and the
+                     separators listed in docs/TOOLS.md are accepted), direct-chat
+                     JID or group JID; outer whitespace is trimmed
 
     Returns:
         {"success": true, "message_id": ..., "chat_jid": ..., "timestamp": ...} of the new message
@@ -1878,17 +1888,20 @@ def send_file(
     dry_run: bool = False,
     media_base64: str = "",
     filename: str = "",
+    upload_id: str = "",
 ) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
-    The file comes from exactly one of two places: `media_path`, a file that
+    The file comes from exactly one of three places: `media_path`, a file that
     already exists on the server running this MCP (inside its outbox), or
-    `media_base64`, the bytes carried in this call together with `filename`.
+    `media_base64`, the bytes carried in this call together with `filename`,
+    or `upload_id`, the opaque ID returned by POST /upload on http/sse.
     Use `media_base64` when you run on another machine and have no way to put
     a file on the server; the server writes it into the outbox for the send
     and removes it afterwards. Inline payloads are capped (64 MiB, and the
     HTTP transport's body limit, 4 MiB by default, before that): put bigger
-    files on the server and use `media_path`.
+    files through POST /upload and use `upload_id` (64 MiB default upload cap,
+    one-hour expiry), or put them on the server and use `media_path`.
 
     When `caption` is provided, the file and text arrive as a single
     attachment-with-caption message (one bubble in the WA UI), instead of
@@ -1899,8 +1912,8 @@ def send_file(
     the request that would be sent, without contacting WhatsApp.
 
     Args:
-        chat_jid: Phone number with country code (no symbols), direct-chat JID or
-                  group JID
+        chat_jid: Phone number with country code (leading + and the separators
+                  listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: Absolute path to the media file (image, video, document) on
                     the server. Leave empty when sending `media_base64`.
         caption: Optional text rendered with the file as a caption. Omit for a
@@ -1911,6 +1924,9 @@ def send_file(
         filename: Name the recipient sees, with the extension that decides how
                   WhatsApp presents it (report.pdf, photo.jpg, clip.mp4). Only
                   with `media_base64`; directories in it are dropped.
+        upload_id: HTTP upload ID, exclusive with both other sources. Removed
+                   after a successful send; failures/dry_run preserve it until expiry. Refused on stdio.
+                   Do not pass filename: its name was fixed at upload.
 
     Returns:
         A dictionary containing success status and a status message. With
@@ -1926,7 +1942,13 @@ def send_file(
 
     # Call the whatsapp_send_file function
     success, status_message, sent = whatsapp_send_file(
-        chat_jid, media_path, caption, dry_run=dry_run, media_base64=media_base64, filename=filename
+        chat_jid,
+        media_path,
+        caption,
+        dry_run=dry_run,
+        media_base64=media_base64,
+        filename=filename,
+        upload_id=upload_id,
     )
     return {"success": success, "message": status_message, **sent}
 
@@ -1935,31 +1957,35 @@ def send_file(
 @tool_errors
 @mutating_tool
 def send_audio_message(
-    chat_jid: str, media_path: str = "", media_base64: str = "", filename: str = ""
+    chat_jid: str, media_path: str = "", media_base64: str = "", filename: str = "", upload_id: str = ""
 ) -> dict[str, Any]:
     """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
 
     The audio comes from exactly one of `media_path` (a file on the server, inside
-    its outbox) or `media_base64` (the bytes in this call). Anything that is not
+    its outbox), `media_base64` (the bytes in this call), or `upload_id` from
+    POST /upload on http/sse (64 MiB default, one-hour expiry). Anything that is not
     already an Opus .ogg is converted with ffmpeg on the server. Use
     `media_base64` when you run on another machine: the server writes the bytes
     into the outbox for the send and removes them afterwards (64 MiB cap, and the
     HTTP transport's body limit, 4 MiB by default, before that).
 
     Args:
-        chat_jid: Phone number with country code (no symbols), direct-chat JID or
-                  group JID
+        chat_jid: Phone number with country code (leading + and the separators
+                  listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
         media_base64: The audio bytes, base64-encoded (a data: URL prefix is
                       accepted). Excludes `media_path`.
         filename: Optional name for `media_base64`, default "voice.ogg"; the
                   extension says whether a conversion is needed (note.wav, clip.m4a).
+        upload_id: HTTP upload ID, exclusive with both other sources; removed
+                   after a successful send; failures preserve it until expiry. Refused on stdio.
+                   Do not pass filename: its name was fixed at upload.
 
     Returns:
         A dictionary containing success status and a status message
     """
     success, status_message, sent = whatsapp_audio_voice_message(
-        chat_jid, media_path, media_base64=media_base64, filename=filename
+        chat_jid, media_path, media_base64=media_base64, filename=filename, upload_id=upload_id
     )
     return {"success": success, "message": status_message, **sent}
 
@@ -2019,6 +2045,8 @@ def list_media(
         and with as_text=true is not bound by that limit.
         After interpreting a file with has_notes=false, store what you understood with
         annotate_media(sha256, "summary", ...) so the next pass does not redo the work.
+        A refused row also carries media_refusal ({reason, updated_at}); use
+        clear_media_refusal to permit another try after a bridge path-rule change.
     """
     result = list_media_page(
         chat_jid=_optional_chats(chat_jid),
@@ -2104,10 +2132,25 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
 
     Returns:
         {"sha256", "notes": {key: {"value", "updated_at"}}, "messages": [{message_id, chat_jid,
-        chat_name, timestamp, media_type, filename, bytes}]} restricted to allowed chats; not_found
+        chat_name, timestamp, media_type, filename, bytes, media_refusal?}]} restricted to allowed chats; not_found
         when no visible message carries the hash
     """
     return notes_get_media_notes(sha256)
+
+
+@mcp.tool()
+@tool_errors
+def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """Remove a message's recorded media_refused error so ingest may try it again.
+
+    list_media and get_media_notes show media_refusal with reason and updated_at.
+    Clear it after a bridge upgrade changes the cache path rule; an unchanged
+    rule will refuse the next fetch again. Only a message in an allowed chat
+    can be cleared; other copies of its hash are unaffected.
+
+    Returns: {success, chat_jid, message_id, deleted}.
+    """
+    return notes_clear_media_refusal(chat_jid, message_id)
 
 
 @mcp.tool()
@@ -2400,7 +2443,10 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     the sender's phone to re-upload it. When that phone answers that it no longer
     has the file — or when the message was stored without the CDN fields a
     download needs — this fails with `media_unavailable`: that file is gone for
-    good, so do not retry it; `bridge_unavailable` is the one worth retrying.
+    good, so do not retry it. `media_refused` means this row cannot safely name a
+    cache file: it is recorded per message, so other copies remain usable.
+    list_media shows the dated refusal; clear_media_refusal allows another try
+    after the bridge's path rule changes. Retry `bridge_unavailable` later.
 
     Args:
         chat_jid: The JID of the chat containing the message
@@ -2651,7 +2697,12 @@ def shutdown_handler(signum, frame):
 
 
 def build_http_app(
-    server: MCPServer, transport: str, token: str | None, rate_limit_per_minute: int = 0, **app_kwargs: Any
+    server: MCPServer,
+    transport: str,
+    token: str | None,
+    rate_limit_per_minute: int = 0,
+    upload_max_bytes: int = 64 * 1024 * 1024,
+    **app_kwargs: Any,
 ):
     """Build the ASGI app for the http/sse transports.
 
@@ -2659,10 +2710,16 @@ def build_http_app(
     our middleware can sit in front of the SDK's own DNS-rebinding middleware:
     rate limit (outermost, throttles credential guessing too) → bearer auth → SDK.
     """
+    # Share the SDK's loopback defaults with the raw upload route. Custom routes
+    # do not pass through the SDK transport's Host/Origin validator or body cap.
+    security = app_kwargs["transport_security"] = app_kwargs.get("transport_security") or build_transport_security(
+        app_kwargs.get("host", "127.0.0.1"), None
+    )
     if transport == "sse":
         app = server.sse_app(**app_kwargs)
     else:
         app = server.streamable_http_app(**app_kwargs)
+    app = UploadApp(app, security, upload_max_bytes)
     if token:
         app = BearerTokenMiddleware(app, token)
     if rate_limit_per_minute > 0:
@@ -2739,6 +2796,7 @@ if __name__ == "__main__":
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
         rate_limit = resolve_rate_limit(os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None)
+        upload_max_bytes = resolve_upload_max_bytes(os.getenv("WHATSAPP_MCP_UPLOAD_MAX_BYTES"))
         app_kwargs: dict[str, Any] = {
             "host": host,
             "max_request_body_size": resolve_max_body_bytes(os.getenv("WHATSAPP_MCP_MAX_BODY_BYTES")),
@@ -2751,14 +2809,13 @@ if __name__ == "__main__":
             os.getenv("WHATSAPP_MCP_ALLOWED_HOSTS"),
             os.getenv("WHATSAPP_MCP_ALLOWED_ORIGINS"),
         )
-        if security is not None:
-            app_kwargs["transport_security"] = security
-            if not security.enable_dns_rebinding_protection:
-                print(
-                    "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
-                    "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
-                    file=sys.stderr,
-                )
+        app_kwargs["transport_security"] = security
+        if not security.enable_dns_rebinding_protection:
+            print(
+                "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
+                "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
+                file=sys.stderr,
+            )
         if token is None and token_source == "none":
             print(
                 "WARNING: no WHATSAPP_MCP_TOKEN set and no bridge token found; anyone who can reach "
@@ -2780,7 +2837,9 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        build_http_app(mcp, transport, token, rate_limit_per_minute=rate_limit, **app_kwargs),
+        build_http_app(
+            mcp, transport, token, rate_limit_per_minute=rate_limit, upload_max_bytes=upload_max_bytes, **app_kwargs
+        ),
         host=host,
         port=port,
         log_level="info",

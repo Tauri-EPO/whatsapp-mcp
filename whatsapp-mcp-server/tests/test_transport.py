@@ -113,7 +113,9 @@ class TestBuildTransportSecurity:
     """Tests for build_transport_security()."""
 
     def test_loopback_without_allowlist_keeps_sdk_default(self):
-        assert build_transport_security("127.0.0.1", None) is None
+        security = build_transport_security("127.0.0.1", None)
+        assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        assert security.allowed_origins == ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
     def test_non_loopback_without_allowlist_disables_protection(self):
         security = build_transport_security("0.0.0.0", None)

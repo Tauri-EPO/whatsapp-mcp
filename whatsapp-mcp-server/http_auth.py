@@ -31,6 +31,22 @@ DISABLE_VALUES = ("off", "none", "disabled")
 # Requests per minute per client when a token is enforced and nothing is configured.
 DEFAULT_RATE_LIMIT_PER_MINUTE = 120
 DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024  # the SDK's own default
+MAX_UPLOAD_ENV = "WHATSAPP_MCP_UPLOAD_MAX_BYTES"
+
+
+def resolve_upload_max_bytes(value: str | None) -> int:
+    """Parse the independent raw-upload ceiling before starting HTTP/SSE."""
+    from media_upload import MAX_INLINE_BYTES, MAX_OUTBOX_BYTES
+
+    try:
+        size = int((value or "").strip() or MAX_INLINE_BYTES)
+    except ValueError:
+        raise ValueError(f"{MAX_UPLOAD_ENV} must be a positive integer") from None
+    if size <= 0:
+        raise ValueError(f"{MAX_UPLOAD_ENV} must be a positive integer")
+    if size > MAX_OUTBOX_BYTES:
+        raise ValueError(f"{MAX_UPLOAD_ENV}={size} exceeds the shared outbox budget {MAX_OUTBOX_BYTES} bytes")
+    return size
 
 
 def resolve_mcp_token(value: str | None) -> str | None:

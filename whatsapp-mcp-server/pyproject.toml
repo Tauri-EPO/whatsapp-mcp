@@ -83,6 +83,7 @@ py-modules = [
     "errors",
     "export",
     "http_auth",
+    "http_upload",
     "main",
     "mcp_config",
     "media_image",

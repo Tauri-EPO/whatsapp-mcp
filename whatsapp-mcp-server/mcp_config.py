@@ -126,15 +126,18 @@ def build_transport_security(host: str, allowed_hosts_env: str | None, allowed_o
     operator's allow-list on top so a non-loopback bind (Tailscale, Docker,
     reverse proxy) can keep the protection on instead of turning it off.
 
-    Returns None when the SDK default for the given host should be kept,
-    otherwise a ``TransportSecuritySettings`` instance.
+    Return explicit settings so the transport and additional routes share
+    the SDK's loopback defaults as well as the operator's allow-list.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
     allowed_hosts = resolve_allowed_hosts(allowed_hosts_env)
     if allowed_hosts is None:
         if host in LOOPBACK_BIND_ADDRESSES:
-            return None
+            return TransportSecuritySettings(
+                allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+                allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+            )
         # Bound to a non-loopback address without an allow-list: any Host is
         # accepted (explicitly, so the intent is visible). main.py warns on stderr.
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)

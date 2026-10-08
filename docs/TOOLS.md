@@ -123,6 +123,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 | `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit`, or `pixels` and `limit` for an image too big to decode | Read a smaller file, or `download_media` when the client shares the filesystem |
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
 | `media_unavailable` | The bytes are not cached here and no request can bring them: the sender's phone answered that it no longer has them (WhatsApp media expires from its CDN after a few days), or the message was stored without the CDN fields a download needs (`incomplete media information`, typical of history-sync stubs) | Do not retry: that file is gone. Work from the message text, or ask the sender to send it again |
+| `media_refused` | The row's chat JID or message ID cannot safely name a cache file | Do not retry this row; another copy of the same file can still be downloaded |
 | `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
 
 An unreadable database is reported as `internal`, never as an empty result, so an empty list really means "nothing matched".
@@ -193,7 +194,7 @@ The sentence and the delimiters are hints; only the sanitisation above removes a
 }
 ```
 
-`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the JID the bare number reads as (a dry run asks WhatsApp nothing, so this is the number as typed: a real send goes to the number [WhatsApp has registered](#phone-numbers), which can be spelled differently) and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
+`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the JID the bare number reads as (a dry run asks WhatsApp nothing, so this is the number after separator removal at the request boundary: a real send goes to the number [WhatsApp has registered](#phone-numbers), which can be spelled differently) and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
 
 This is what a draft-only assistant should use: preview, show the payload, send only after the human says yes. Note that `dry_run` is *not* a way around [read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant) — with `WHATSAPP_READ_ONLY=1` these tools are not offered at all, dry run or not. Read-only is the operator's setting; `dry_run` is the agent's manners.
 
@@ -426,7 +427,8 @@ allow-list as the numbers above:
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |
 | `unavailable` | Rows whose hash carries a `media_unavailable` note: the bytes are not here and no download can ever bring them back — the sender's phone answered that it no longer has them, or the row was stored without the CDN fields |
-| `backlog` | `messages` minus the rows carrying any of those three notes — what is actually left to do |
+| `refused` | Rows whose exact `(chat_jid, message_id)` has a recorded `media_refused`; these leave the backlog while other copies of the hash remain eligible |
+| `backlog` | `messages` minus rows carrying any of those three notes or a recorded refusal — what is actually left to do |
 | `backlog_cached` | How many of the backlog have their bytes on disk. `backlog - backlog_cached` is what a batch would download first (`TRANSCRIBE_ON_INGEST_FETCH=1`, or `transcribe_audio`, which fetches on demand) |
 | `cached_examined` | How many rows the two cached counts looked at |
 
@@ -600,13 +602,14 @@ What is not covered:
 - Notes and triage marks (`annotate`, `get_notes`, `mark_handled`, `snooze`):
   they are kept under the JID given, so use the stored spelling, the `jid` on
   the chat or contact row.
-- The tools that act on WhatsApp (`send_message` and the rest) pass the
-  recipient to the bridge as given.
+- Send tools and `forward_message` strip the [supported recipient separators](#phone-numbers)
+  from bare numbers before the allow-list check and bridge call. They do not
+  choose the Brazilian alternate spelling locally.
 
 Under [`WHATSAPP_ALLOWED_CHATS`](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch)
 a read is refused with `denied` only when the list names neither spelling. When
 it names one, the rows returned are those of the chats the list names and
-nothing else; the write tools still compare the recipient literally.
+nothing else; send tools and forwarding compare the number after separator removal.
 
 **Natural Language Examples:**
 
@@ -877,7 +880,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (digits only — see [Phone numbers](#phone-numbers)), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
@@ -889,14 +892,15 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 
 #### Phone numbers
 
-This applies to `send_message`, `send_file` and `send_audio_message` alike.
+The formatting rule applies to `send_message`, `send_file`, `send_audio_message` and the destination of `forward_message`. The registered-number lookup below applies to the three send tools.
 
-- **Format.** A bare number is digits only, country code first: `5511999999999`. A leading `+`, spaces, dashes or parentheses are not accepted (`invalid_argument`). A full JID (`5511999999999@s.whatsapp.net`) works too; group and `@lid` JIDs are used as they are.
+- **Format.** Use the country code first: `5511999999999`. A bare number of 7–15 ASCII digits may contain one leading `+`, ASCII space/tab, `-`, `.`, `(`, `)`, spaces U+00A0/U+202F/U+2007/U+2009, format marks U+200B/U+200E/U+200F/U+202A/U+202C/U+2066/U+2067/U+2068/U+2069/U+FEFF, and dashes U+2010/U+2011/U+2012/U+2013/U+2014. Only those separators are removed before the allow-list check and send; other characters are not accepted as separators. Letters and wildcards are not phone numbers. A normalized number longer than 15 digits is refused with `invalid_argument`; use a full JID for a legacy group ID. Existing short digit-only recipients are still checked with WhatsApp. Digit-like strings such as `192.168.1.100` and `2026-10-07` normalize to digits and are also checked with WhatsApp.
+- **Full JIDs keep their internal spelling.** Forward destinations have their outer whitespace trimmed, as before. This includes formatted full phone JIDs such as `+55 11 99999-9999@s.whatsapp.net`, whose separators are not stripped even though contact lookup accepts that formatting. Prefer a digits-only phone JID; group and `@lid` JIDs retain their spelling. Configuration entries also remain literal: list digits or full JIDs, without recipient separators.
 - **The number does not have to be spelled the way WhatsApp registered it.** For a number the bridge has never exchanged a message with, it asks WhatsApp which number is registered — the question the phone app asks when you type one — and sends there. A Brazilian mobile typed with its ninth digit (`55 11 9XXXX-XXXX`) reaches the account registered without it, and the other way round. It is not specific to Brazil.
 - **The `chat_jid` in the result is the registered one.** That is the JID the conversation is stored under: use it for the follow-up calls (`list_messages`, `send_reaction`, …), not the number as typed.
 - **A number with no WhatsApp account** fails with `not_found` ("… is not on WhatsApp") and nothing is sent. That answer is only given when WhatsApp said so.
-- **When WhatsApp does not answer the question** (it gets 10 seconds), nothing is concluded about the number. With `WHATSAPP_ALLOWED_CHATS` set the send is refused with `bridge_unavailable` ("could not check the number with WhatsApp …; nothing was sent"), because the bridge cannot tell which number the message would go to; that refusal is safe to try again. Without an allow-list the message goes to the number exactly as typed, as it did before this check existed.
-- **With `WHATSAPP_ALLOWED_CHATS`**, the number as typed and the number it is registered under both have to be on the list (`denied` otherwise, naming the one that is missing). See [Restricting which chats the agent can touch](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
+- **When WhatsApp does not answer the question** (it gets 10 seconds), nothing is concluded about the number. With `WHATSAPP_ALLOWED_CHATS` set the send is refused with `bridge_unavailable` ("could not check the number with WhatsApp …; nothing was sent"), because the bridge cannot tell which number the message would go to; that refusal is safe to try again. Without an allow-list the message goes to the number after separator removal at the request boundary.
+- **With `WHATSAPP_ALLOWED_CHATS`**, the number after separator removal and the number it is registered under both have to be on the list (`denied` otherwise, naming the one that is missing). See [Restricting which chats the agent can touch](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
 
 **Natural Language Examples:**
 
@@ -1003,6 +1007,10 @@ Edit the text of a message this account sent (WhatsApp accepts edits for about 1
 
 Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
 
+An unsafe media identity answers `media_refused`; missing bytes or download
+fields answer `media_unavailable`. Do not retry those permanent media failures.
+`bridge_unavailable` remains the temporary bridge/CDN failure to retry later.
+
 ### `mark_messages_read`
 
 Send WhatsApp read receipts (the blue ticks). This is a visible side effect on
@@ -1089,9 +1097,10 @@ Send a media file (image, video, document).
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `media_path`: Absolute path to the file on the server, inside its outbox
-- `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` is required
+- `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` / `upload_id` is required
+- `upload_id`: Opaque ID returned by `POST /upload` on the HTTP/SSE server; avoids putting file bytes in the tool call. Unavailable on stdio
 - `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories in it are dropped
 - `caption` (optional): Caption for the media
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
@@ -1102,9 +1111,57 @@ additional absolute directories. `media_base64` is for an agent that runs on
 another machine and cannot put a file there: the server writes the bytes under
 `<first root>/.uploads`, sends them and removes them. Inline payloads are capped
 at 64 MiB, and on the HTTP transport `WHATSAPP_MCP_MAX_BODY_BYTES` (4 MiB by
-default) applies first; anything bigger goes on the server and through
-`media_path`. A payload that is not base64, empty or too large is
+default) applies first; use the upload flow below when your client's tool-input
+channel refuses large inline arguments. A payload that is not base64, empty or too large is
 `invalid_argument`.
+
+Upload a file from another machine with a raw HTTP request, then pass only the
+returned `upload_id` to the MCP tool. The upload endpoint is `/upload` on the
+same server as `/mcp` (or `/sse`), using the same bearer token, Host/Origin
+allow-lists and rate limiter:
+
+```bash
+curl --fail-with-body https://example.ts.net/upload \
+  -H 'Authorization: Bearer TOKEN' \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'X-Filename: report.pdf' \
+  --data-binary @report.pdf
+```
+
+The response is `{upload_id, filename, bytes, sha256, expires_at}`. `filename`
+is sanitised (directory components are dropped, controls removed, capped at
+200 UTF-8 bytes). `X-Filename` is required and must leave a usable basename; percent-encode UTF-8 names, for example
+`X-Filename: relat%C3%B3rio.pdf`. Send raw bytes; multipart/form-data is refused
+with `415` to avoid storing the multipart envelope as a file. Call
+`send_file(chat_jid="5511999999999@s.whatsapp.net", upload_id="<returned upload_id>", caption="Report")`
+through your usual MCP client; the server hands the stored path to the bridge
+and removes the upload after a successful send. Failed sends keep the ID
+for retry until expiry; a timeout can leave the send outcome uncertain, so
+check the chat before retrying to avoid a duplicate.
+`dry_run=true` validates it and keeps the upload for a later send. Do not pass
+`filename` with `upload_id`: the name was fixed at upload, and the combination
+returns `invalid_argument`. An ID already being sent returns `conflict`: retry
+the same ID shortly rather than uploading another copy.
+
+The streamed upload limit is `WHATSAPP_MCP_UPLOAD_MAX_BYTES` (64 MiB by default,
+a positive integer at most 268435456 bytes / 256 MiB),
+independent of the JSON-RPC body limit; overflow answers `413` and removes the
+partial file. An oversized Content-Length is rejected before the body is read,
+and the streamed check also catches absent or false lengths. Upload writes
+share a fixed 256 MiB budget across stored and receiving files in `.uploads`;
+a full outbox also answers `413`, preserving earlier uploads. `media_base64` sends
+share this budget with uploads retained after failed sends, so an inline send
+can return `too_large` until existing uploads are sent or expire. Only owned
+timestamp upload folders (current and legacy) and lone `tmp*.ogg` conversion
+files count; unrelated files are neither charged nor removed. Before every
+write, including stdio inline sends, expired owned leftovers are swept. IDs expire after
+one hour; expired uploads are swept at startup, on new uploads and every minute
+while the HTTP/SSE server is running. Busy receiving/sending files are skipped.
+Upload validation/storage errors use `{"error": {"code", "message"}}`
+(with `limit_bytes` for size errors); auth and Host/Origin middleware retain
+their existing responses. Unknown, expired or already consumed IDs return `not_found`.
+Read-only servers, or policies that offer neither sending tool, refuse uploads
+with `403`. Stdio has no upload route: use `media_base64` or a server path there.
 
 **Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
 
@@ -1115,13 +1172,16 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `media_path`: Absolute path to the audio file on the server, inside its outbox
-- `media_base64`: The audio bytes, base64-encoded. Exactly one of `media_path` / `media_base64` is required; same cap and rules as `send_file`
+- `media_base64`: The audio bytes, base64-encoded. Exactly one of `media_path` / `media_base64` / `upload_id` is required; same cap and rules as `send_file`
+- `upload_id`: The ID returned by the HTTP upload flow above; the uploaded name's extension decides whether ffmpeg conversion is needed
 - `filename` (optional, with `media_base64`): default `voice.ogg`; any other extension (`note.wav`, `clip.m4a`) means the server converts it with ffmpeg first
 
 Converted audio is sent through the same media-path confinement as
-`send_file`.
+`send_file`. Conversion output also shares the 256 MiB outbox budget, even
+with `media_path`: `too_large` can mean retained uploads have filled it,
+although this caller never uploaded a file.
 
 **Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
 
@@ -1239,6 +1299,26 @@ there is nothing to check against the cap; `download_media` fetches it. The
 `TRANSCRIBE_ON_INGEST` worker turns that answer into a `media_unavailable` note
 on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.
+
+An unsafe chat JID or message ID answers `media_refused`, before any transfer.
+Manual download, read, transcription and forwarding calls, as well as the ingest
+worker, remember it in `notes.db`'s `media_refusals`, keyed by the exact
+`(chat_jid, message_id)`, and the worker spends no failure strike once recorded.
+This does not write a per-hash `media_unavailable` note: a forwarded copy with
+a safe identity remains fetchable. The synchronous image path does not queue
+a second attempt after either permanent code. `/metrics` counts identity
+refusals in `whatsapp_bridge_media_refusals_total`.
+
+### `clear_media_refusal`
+
+`list_media` and each message in `get_media_notes` show `media_refusal` with
+`reason` and `updated_at` when recorded. **`clear_media_refusal(chat_jid,
+message_id)`** removes one refusal and returns `{success, chat_jid, message_id,
+deleted}`; only messages in allowed chats can be cleared. Use it after a bridge
+upgrade changes the path rule. A rule that still rejects the identity records
+the refusal again on the next fetch; other copies remain unaffected.
+`updated_at` is when the row was last refused. A later successful media fetch
+clears the refusal automatically, so cached audio can be transcribed again.
 
 ### `read_media`
 
