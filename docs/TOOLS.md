@@ -718,6 +718,23 @@ Two caveats worth knowing:
 
 **Shared locations read as text.** A location has no file, so it is stored as a message whose `content` is the place and `media_type` is empty: `📍 Padaria Estrela — Rua das Flores, 10 (-23.550520, -46.633308)`, followed by ` — <url>` and ` — <comment>` when the sender attached them. With no name or address the coordinates stand alone (`📍 (48.858400, 2.294500)`). A live location reads `📍 Live location (-22.906800, -43.172900) — <caption>` and records where the share *started*; later position updates are not tracked. Coordinates always carry six decimals and a `.` separator, whatever the machine's locale; a pair with a missing, non-numeric or out-of-range half is left out and the label alone is kept. `query` finds the place name, address or caption like any other text. Only the text is kept: the map thumbnail is not stored, so `has_media` and `media_type` do not see a location.
 
+**Other message kinds.** The bridge stores these in `content`, so text searches
+find their labels and the fields the sender supplied; a sparse envelope still
+keeps its type label. Thumbnails are not archived for these text-only kinds.
+
+| Kind | How it reads |
+| --- | --- |
+| Event invitation | `Event` (or `Event canceled`), name, description, location, UTC start/end timestamps and join link |
+| Group invite | `Group invite`, group name, caption, group JID, direct invitation token and UTC expiration; the token is not a public join URL (the row's sender identifies the inviter) |
+| Product | `Product`, title, description, body, footer, price and product URL |
+| Order | `Order`, title, message, order ID, item count and total; the opaque order token is omitted |
+| Sent payment | `Payment sent` and the note; opaque transaction data is omitted |
+| Payment request | `Payment request`, note and amount. `Amount1000` renders exact thousandths (for example `USD 1.500`); native `Money` retains its currency, integer `value` and `offset` without interpreting that scale |
+| List reply | `List reply`, title, description and selected row ID |
+| Interactive reply | `Interactive reply`, displayed text, native flow name and its response JSON |
+| Button reply | Selected display text, or a button-reply label plus selected ID when display text is absent (regular and template buttons) |
+| Round video note | A normal `video` media row with its caption, direct path and download metadata; `has_media` sees it |
+
 **`query` searches stored transcripts too.** A voice note has no `content`, so
 the bridge's index cannot see what was said in it — but a transcript that is
 already in `notes.db` can be searched, and `query` matches it. So

@@ -32,7 +32,7 @@ func extractTextContent(msg *waE2E.Message) string {
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetCaption()
 	}
-	if vid := msg.GetVideoMessage(); vid != nil {
+	if vid := videoMessageOf(msg); vid != nil {
 		return vid.GetCaption()
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
@@ -77,6 +77,81 @@ func extractTextContent(msg *waE2E.Message) string {
 		}
 	}
 
+	// These envelopes contain text/metadata, not a downloadable attachment.
+	// Keep a type label even for a sparse envelope so it survives persist.go.
+	if event := msg.GetEventMessage(); event != nil {
+		label := "Event"
+		if event.GetIsCanceled() {
+			label += " canceled"
+		}
+		var starts, ends string
+		if event.StartTime != nil {
+			starts = "starts " + time.Unix(event.GetStartTime(), 0).UTC().Format(time.RFC3339)
+		}
+		if event.EndTime != nil {
+			ends = "ends " + time.Unix(event.GetEndTime(), 0).UTC().Format(time.RFC3339)
+		}
+		location := ""
+		if event.GetLocation() != nil {
+			location = formatLocationContent(event.GetLocation())
+		}
+		return describeMessage(label, event.GetName(), event.GetDescription(), location, starts, ends, event.GetJoinLink())
+	}
+	if invite := msg.GetGroupInviteMessage(); invite != nil {
+		group, token, expires := "", "", ""
+		if invite.GetGroupJID() != "" {
+			group = "group " + invite.GetGroupJID()
+		}
+		if invite.GetInviteCode() != "" {
+			// A direct invitation token requires the group, inviter and expiry;
+			// it is not a public chat.whatsapp.com join-link code.
+			token = "invitation token " + invite.GetInviteCode()
+		}
+		if invite.InviteExpiration != nil {
+			expires = "expires " + time.Unix(invite.GetInviteExpiration(), 0).UTC().Format(time.RFC3339)
+		}
+		return describeMessage("Group invite", invite.GetGroupName(), invite.GetCaption(), group, token, expires)
+	}
+	if product := msg.GetProductMessage(); product != nil {
+		p := product.GetProduct()
+		price := ""
+		if p != nil && p.PriceAmount1000 != nil {
+			price = formatAmount1000(strconv.FormatInt(p.GetPriceAmount1000(), 10), p.GetCurrencyCode())
+		}
+		return describeMessage("Product", p.GetTitle(), p.GetDescription(), product.GetBody(), product.GetFooter(), price, p.GetURL())
+	}
+	if order := msg.GetOrderMessage(); order != nil {
+		count, amount := "", ""
+		if order.ItemCount != nil {
+			count = fmt.Sprintf("%d items", order.GetItemCount())
+		}
+		if order.TotalAmount1000 != nil {
+			amount = formatAmount1000(strconv.FormatInt(order.GetTotalAmount1000(), 10), order.GetTotalCurrencyCode())
+		}
+		return describeMessage("Order", order.GetOrderTitle(), order.GetMessage(), order.GetOrderID(), count, amount)
+	}
+	if payment := msg.GetSendPaymentMessage(); payment != nil {
+		// TransactionData is opaque; never turn it into display text.
+		return describeMessage("Payment sent", extractTextContent(payment.GetNoteMessage()))
+	}
+	if payment := msg.GetRequestPaymentMessage(); payment != nil {
+		amount := ""
+		if payment.Amount1000 != nil {
+			amount = formatAmount1000(strconv.FormatUint(payment.GetAmount1000(), 10), payment.GetCurrencyCodeIso4217())
+		}
+		if money := payment.GetAmount(); money != nil {
+			// Retain the native units without guessing the Money offset scale.
+			amount = fmt.Sprintf("%s value=%d offset=%d", money.GetCurrencyCode(), money.GetValue(), money.GetOffset())
+		}
+		return describeMessage("Payment request", extractTextContent(payment.GetNoteMessage()), amount)
+	}
+	if reply := msg.GetListResponseMessage(); reply != nil {
+		return describeMessage("List reply", reply.GetTitle(), reply.GetDescription(), reply.GetSingleSelectReply().GetSelectedRowID())
+	}
+	if reply := msg.GetInteractiveResponseMessage(); reply != nil {
+		return describeMessage("Interactive reply", reply.GetBody().GetText(), reply.GetNativeFlowResponseMessage().GetName(), reply.GetNativeFlowResponseMessage().GetParamsJSON())
+	}
+
 	// WhatsApp Business templates arrive hydrated — body lives in
 	// HydratedTemplate.HydratedContentText. Without this branch every
 	// template-sent message (e.g. WABA Connect Hrms_* notifications)
@@ -112,14 +187,50 @@ func extractTextContent(msg *waE2E.Message) string {
 		if t := br.GetSelectedDisplayText(); t != "" {
 			return t
 		}
+		return describeMessage("Button reply", br.GetSelectedButtonID())
 	}
 	if tbr := msg.GetTemplateButtonReplyMessage(); tbr != nil {
 		if t := tbr.GetSelectedDisplayText(); t != "" {
 			return t
 		}
+		return describeMessage("Template button reply", tbr.GetSelectedID())
 	}
 
 	return ""
+}
+
+// describeMessage joins only fields the sender supplied; labels also keep
+// empty metadata envelopes from vanishing. Thumbnails and opaque tokens stay out.
+func describeMessage(label string, values ...string) string {
+	parts := []string{label}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, " — ")
+}
+
+// Amount1000 is explicitly thousandths on the wire. String arithmetic keeps
+// all int64/uint64 values exact, including their extrema and negative subunits.
+func formatAmount1000(digits, currency string) string {
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign = "-"
+		digits = strings.TrimPrefix(digits, "-")
+	}
+	if len(digits) < 4 {
+		digits = strings.Repeat("0", 4-len(digits)) + digits
+	}
+	return strings.TrimSpace(currency + " " + sign + digits[:len(digits)-3] + "." + digits[len(digits)-3:])
+}
+
+// Round video notes use the same VideoMessage payload under PtvMessage.
+func videoMessageOf(msg *waE2E.Message) *waE2E.VideoMessage {
+	if video := msg.GetVideoMessage(); video != nil {
+		return video
+	}
+	return msg.GetPtvMessage()
 }
 
 // formatContactContent renders a shared contact card as searchable text:
@@ -247,8 +358,8 @@ func extractChatEphemeralFromMessage(msg *waE2E.Message) ChatEphemeralSettings {
 		ctx = msg.ImageMessage.GetContextInfo()
 	case msg.AudioMessage != nil:
 		ctx = msg.AudioMessage.GetContextInfo()
-	case msg.VideoMessage != nil:
-		ctx = msg.VideoMessage.GetContextInfo()
+	case videoMessageOf(msg) != nil:
+		ctx = videoMessageOf(msg).GetContextInfo()
 	case msg.DocumentMessage != nil:
 		ctx = msg.DocumentMessage.GetContextInfo()
 	case msg.StickerMessage != nil:
@@ -276,7 +387,7 @@ func extractQuotedMessageInfo(msg *waE2E.Message) (quotedMessageId string, quote
 		contextInfo = extText.GetContextInfo()
 	} else if img := msg.GetImageMessage(); img != nil {
 		contextInfo = img.GetContextInfo()
-	} else if vid := msg.GetVideoMessage(); vid != nil {
+	} else if vid := videoMessageOf(msg); vid != nil {
 		contextInfo = vid.GetContextInfo()
 	} else if doc := msg.GetDocumentMessage(); doc != nil {
 		contextInfo = doc.GetContextInfo()
@@ -317,7 +428,7 @@ func extractMentionedJIDs(msg *waE2E.Message) []string {
 		contextInfo = extText.GetContextInfo()
 	} else if img := msg.GetImageMessage(); img != nil {
 		contextInfo = img.GetContextInfo()
-	} else if vid := msg.GetVideoMessage(); vid != nil {
+	} else if vid := videoMessageOf(msg); vid != nil {
 		contextInfo = vid.GetContextInfo()
 	} else if doc := msg.GetDocumentMessage(); doc != nil {
 		contextInfo = doc.GetContextInfo()
@@ -391,8 +502,8 @@ func mediaPartOf(msg *waE2E.Message) (string, cdnMedia) {
 		return "", nil
 	case msg.GetImageMessage() != nil:
 		return "image", msg.GetImageMessage()
-	case msg.GetVideoMessage() != nil:
-		return "video", msg.GetVideoMessage()
+	case videoMessageOf(msg) != nil:
+		return "video", videoMessageOf(msg)
 	case msg.GetAudioMessage() != nil:
 		return "audio", msg.GetAudioMessage()
 	case msg.GetDocumentMessage() != nil:
