@@ -158,6 +158,9 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 ```
 
 - Bare numbers mean the direct chat with that number (`@s.whatsapp.net`).
+  Use digits or full JIDs in entries: recipient separators are not stripped
+  from configuration. A formatted entry such as `+55 11 99999-9999` does not
+  allow its digits-only number; it fails closed.
 - `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
 - Entries are compared literally, with one exception, for reads only: a
   Brazilian mobile is the same number with or without the ninth digit after
@@ -165,8 +168,8 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   the account under one of the two. A read tool given the spelling the list
   does not name answers when the list names the other one, and is refused
   with `denied` when it names neither. What it returns is still limited to the
-  chats the list names. Write tools and the bridge compare the recipient as
-  given: list the spelling the chat is stored under (`search_contacts` reports
+  chats the list names. Send tools and forwarding strip supported separators
+  from bare numbers before comparison: list the spelling the chat is stored under (`search_contacts` reports
   it) for a contact the agent must be able to write to.
 - The MCP server filters `list_chats`, `list_messages`, `get_chat`,
   `get_message_context`, `get_direct_chat_by_contact`, `get_contact_chats` and
@@ -180,7 +183,7 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 - A send to a bare number goes to the number WhatsApp has registered, which
   is not always spelled like the one typed (a Brazilian mobile with or
   without its ninth digit). The bridge checks the list twice: on the number
-  as typed, before it asks WhatsApp anything, and on the registered number
+  after separator removal, before it asks WhatsApp anything, and on the registered number
   before it sends. So list the number the way WhatsApp has it — the
   `chat_jid` its messages are stored under — and add the other spelling
   only if agents should be able to type it. Listing one spelling never

@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // SendMessageResponse represents the response for the send message API
@@ -138,31 +137,37 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 // phone number means a personal chat, anything with an "@" is a full JID.
 func parseRecipientJID(recipient string) (types.JID, error) {
 	if !strings.Contains(recipient, "@") {
-		recipient = normalizePhoneRecipient(recipient)
 		return types.JID{User: recipient, Server: types.DefaultUserServer}, nil
 	}
 	return types.ParseJID(recipient)
 }
 
-// normalizePhoneRecipient mirrors phone.phone_digits: seven or more ASCII
-// digits, an optional leading +, spaces, Unicode dashes/format marks, dots
-// and parentheses. Invalid spellings stay unchanged, never gaining an alias.
-// Existing short digit-only recipients and full JIDs are left untouched.
-func normalizePhoneRecipient(raw string) string {
+// recipientSeparators is the explicit contract shared with phone.py; Unicode
+// category tables differ between the Go and Python runtimes. Never extend it
+// without adding each character to the shared spelling fixture.
+const recipientSeparators = " \t-().\u00a0\u202f\u200b\u200e\u200f\u2010\u2011\u2013\u2014"
+
+// normalizePhoneRecipient runs once at a send/forward boundary, before policy.
+// Full JIDs and invalid spellings stay as given, without gaining an alias.
+// Existing short digit-only recipients keep their behavior.
+func normalizePhoneRecipient(raw string) (string, error) {
 	if strings.Contains(raw, "@") {
-		return raw
+		return raw, nil
 	}
 	compact := strings.Map(func(r rune) rune {
-		if strings.ContainsRune("().", r) || unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f) || unicode.Is(unicode.Pd, r) || unicode.Is(unicode.Cf, r) {
+		if strings.ContainsRune(recipientSeparators, r) {
 			return -1
 		}
 		return r
 	}, raw)
 	compact = strings.TrimPrefix(compact, "+")
 	if len(compact) >= 7 && isPhoneDigits(compact) {
-		return compact
+		if len(compact) > 15 {
+			return "", errors.New("phone recipient exceeds 15 digits; use a full JID for a group")
+		}
+		return compact, nil
 	}
-	return raw
+	return raw, nil
 }
 
 // isOnWhatsAppFunc asks WhatsApp whether phone numbers ("+" and digits) have
@@ -211,7 +216,7 @@ func canonicalRecipientJID(ctx context.Context, lidForPN lidForPNFunc, isOnWhats
 		return jid, nil
 	}
 	if !isPhoneDigits(jid.User) {
-		return types.EmptyJID, fmt.Errorf("%q is not a phone number: digits only, country code first", jid.User)
+		return types.EmptyJID, fmt.Errorf("%q is not a phone number: use a country code and digits, optionally formatted with supported separators", jid.User)
 	}
 	// The answers are read before the error: whatsmeow returns both when the
 	// query worked and only its own write of the LID mapping failed.
@@ -851,7 +856,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):
 		b.metrics.sendFailures.Add(1)
-		writeError(w, http.StatusNotFound, recipient+" is not on WhatsApp: no account is registered under that number (country code first, digits only)")
+		writeError(w, http.StatusNotFound, recipient+" is not on WhatsApp: no account is registered under that number (country code first; supported formatting is accepted)")
 		return "", false
 	case errors.Is(err, errRecipientLookup) && b.Policy.restricted:
 		b.metrics.sendFailures.Add(1)
@@ -886,7 +891,12 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 
 		// Validate request
-		req.Recipient = normalizePhoneRecipient(req.Recipient)
+		var err error
+		req.Recipient, err = normalizePhoneRecipient(req.Recipient)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if req.Recipient == "" {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return

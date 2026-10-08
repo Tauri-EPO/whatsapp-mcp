@@ -116,7 +116,7 @@ whatsapp-mcp/
 │   ├── strict_args.py          # StrictArgumentServer: call_tool refuses arguments no tool declares
 │   ├── errors.py               # the one failure envelope: {"error": {"code", "message"}} and its codes
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
-│   ├── phone.py                # phone-number spellings for the contact lookups: separators dropped, Brazilian ninth digit
+│   ├── phone.py                # phone spellings for lookups (Brazilian ninth digit) and outbound recipient separators
 │   ├── export.py               # export_messages: NDJSON archive under WHATSAPP_EXPORT_DIR, path not rows
 │   ├── media_inventory.py      # list_media / get_media_stats: sizes, sha256 copies, cache scan of store/<chat>/
 │   ├── media_read.py           # read_media: the bytes as MCP content blocks instead of a server path

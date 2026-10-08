@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -14,14 +15,70 @@ func TestRecipientSpellingContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cases []struct{ Raw, Normalized string }
+	var cases []struct {
+		Raw, Normalized string
+		Invalid         bool
+	}
 	if err := json.Unmarshal(data, &cases); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range cases {
-		if got := normalizePhoneRecipient(tc.Raw); got != tc.Normalized {
-			t.Errorf("normalize %q = %q, want %q", tc.Raw, got, tc.Normalized)
+		got, err := normalizePhoneRecipient(tc.Raw)
+		if (err != nil) != tc.Invalid || (!tc.Invalid && got != tc.Normalized) {
+			t.Errorf("normalize %q = %q, %v; want %q invalid=%v", tc.Raw, got, err, tc.Normalized, tc.Invalid)
 		}
+	}
+}
+
+func TestFormattedForwardPolicyBeforeSend(t *testing.T) {
+	const source = "120363000000000001@g.us"
+	for _, entry := range []string{"5511999999999", "5511888888888", "+55 11 99999-9999"} {
+		lookedUp, sent := 0, 0
+		deps := forwardDeps{
+			lookup: func(_, _ string) (string, string, bool, error) {
+				lookedUp++
+				return "hello", "", true, nil
+			},
+			send: func(_ context.Context, to, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
+				sent++
+				if to != "5511999999999" {
+					t.Fatalf("forward target %q differs from the checked number", to)
+				}
+				return true, "sent", sentMessage{}
+			},
+		}
+		h := handleForwardMessage(deps, parseChatPolicy(source+","+entry))
+		code, _ := efPost(t, h, `{"chat_jid":"`+source+`","message_id":"MSG1","to_chat_jid":"+55 11 99999-9999"}`)
+		if entry == "5511999999999" {
+			if code != http.StatusOK || sent != 1 || lookedUp != 1 {
+				t.Fatalf("allowed forward: status=%d lookup=%d send=%d", code, lookedUp, sent)
+			}
+		} else if code != http.StatusForbidden || sent != 0 || lookedUp != 0 {
+			t.Fatalf("denied forward: status=%d lookup=%d send=%d", code, lookedUp, sent)
+		}
+	}
+}
+
+func TestInvalidLongRecipientBeforeEffects(t *testing.T) {
+	ask := &fakeIsOnWhatsApp{}
+	b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
+	b.Policy = parseChatPolicy("")
+	if rec := postSend(mux, "12025551234-1612345678"); rec.Code != http.StatusBadRequest || len(*sent) != 0 || len(ask.calls) != 0 {
+		t.Fatalf("long send: status=%d sent=%v lookup=%v", rec.Code, *sent, ask.calls)
+	}
+	h := handleForwardMessage(forwardDeps{}, parseChatPolicy(""))
+	code, _ := efPost(t, h, `{"chat_jid":"120363000000000001@g.us","message_id":"MSG1","to_chat_jid":"12025551234-1612345678"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("long forward: status=%d", code)
+	}
+}
+
+func TestFormattedAllowListEntryDoesNotGainAnAlias(t *testing.T) {
+	ask := &fakeIsOnWhatsApp{}
+	b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
+	b.Policy = parseChatPolicy("+55 11 99999-9999")
+	if rec := postSend(mux, "+55 11 99999-9999"); rec.Code != http.StatusForbidden || len(*sent) != 0 || len(ask.calls) != 0 {
+		t.Fatalf("literal configuration: status=%d sent=%v lookup=%v", rec.Code, *sent, ask.calls)
 	}
 }
 

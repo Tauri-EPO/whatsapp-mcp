@@ -1,4 +1,4 @@
-"""The spellings of one phone number, for the contact lookups (issue #444).
+"""Phone spellings for contact lookups and outbound recipients (issues #444/#502).
 
 A Brazilian mobile is written two ways: with the ninth digit that was put in
 front of every mobile subscriber number (55 88 9 7777-6666) and without it
@@ -9,7 +9,7 @@ none of which a JID carries, and a number copied out of WhatsApp comes with a
 non-breaking hyphen and directional marks around it.
 
 Pure string work: no database, no bridge call. The callers bind what comes out
-of here as SQL parameters.
+of here as SQL parameters or check normalized recipients before sending.
 """
 
 from __future__ import annotations
@@ -17,9 +17,14 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from errors import ToolError
+
 # Below a local number, digits and punctuation are not a phone number: "1.5"
 # and "(11)" stay the name searches they were.
 MIN_PHONE_DIGITS = 7
+
+# Same explicit characters as send.go, independent of runtime Unicode tables.
+RECIPIENT_SEPARATORS = " \t-().\u00a0\u202f\u200b\u200e\u200f\u2010\u2011\u2013\u2014"
 
 # 55, a two-digit area code (DDD, never a zero in it), the optional ninth digit
 # and the eight-digit subscriber number. Only a subscriber number beginning
@@ -60,7 +65,12 @@ def normalize_recipient(value: str) -> str:
     value = value or ""
     if "@" in value:
         return value
-    return phone_digits(value) or value
+    compact = "".join(char for char in value if char not in RECIPIENT_SEPARATORS).removeprefix("+")
+    if len(compact) >= MIN_PHONE_DIGITS and compact.isascii() and compact.isdigit():
+        if len(compact) > 15:
+            raise ToolError("invalid_argument", "phone recipient exceeds 15 digits; use a full JID for a group")
+        return compact
+    return value
 
 
 def br_mobile_alternate(digits: str) -> str | None:

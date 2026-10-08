@@ -602,13 +602,14 @@ What is not covered:
 - Notes and triage marks (`annotate`, `get_notes`, `mark_handled`, `snooze`):
   they are kept under the JID given, so use the stored spelling, the `jid` on
   the chat or contact row.
-- The tools that act on WhatsApp (`send_message` and the rest) pass the
-  recipient to the bridge as given.
+- Send tools and `forward_message` strip the [supported recipient separators](#phone-numbers)
+  from bare numbers before the allow-list check and bridge call. They do not
+  choose the Brazilian alternate spelling locally.
 
 Under [`WHATSAPP_ALLOWED_CHATS`](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch)
 a read is refused with `denied` only when the list names neither spelling. When
 it names one, the rows returned are those of the chats the list names and
-nothing else; the write tools still compare the recipient literally.
+nothing else; send tools and forwarding compare the number after separator removal.
 
 **Natural Language Examples:**
 
@@ -879,7 +880,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (digits only — see [Phone numbers](#phone-numbers)), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
@@ -891,14 +892,15 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 
 #### Phone numbers
 
-This applies to `send_message`, `send_file` and `send_audio_message` alike.
+The formatting rule applies to `send_message`, `send_file`, `send_audio_message` and the destination of `forward_message`. The registered-number lookup below applies to the three send tools.
 
-- **Format.** Use the country code first: `5511999999999`. As with the lookup tools, a bare number of seven or more digits may contain a leading `+`, spaces, Unicode dashes, dots, parentheses and format marks; these are removed before the allow-list check and send. Letters and wildcards are not phone numbers. The Brazilian alternate spelling is never substituted locally: the bridge checks the registered number. A full JID (`5511999999999@s.whatsapp.net`) works too; group and `@lid` JIDs are used as they are.
+- **Format.** Use the country code first: `5511999999999`. A bare number of 7–15 ASCII digits may contain one leading `+`, ASCII space/tab, `-`, `.`, `(`, `)`, nonbreaking spaces U+00A0/U+202F, zero-width space U+200B, direction marks U+200E/U+200F, and dashes U+2010/U+2011/U+2013/U+2014. Only those separators are removed before the allow-list check and send; other characters are not accepted as separators. Letters and wildcards are not phone numbers. A normalized number longer than 15 digits is refused with `invalid_argument`; use a full JID for a legacy group ID. Existing short digit-only recipients are still checked with WhatsApp. Digit-like strings such as `192.168.1.100` and `2026-10-07` normalize to digits and are also checked with WhatsApp.
+- **Full JIDs stay as given.** This includes formatted full phone JIDs such as `+55 11 99999-9999@s.whatsapp.net`, whose separators are not stripped even though contact lookup accepts that formatting. Prefer a digits-only phone JID; group and `@lid` JIDs retain their spelling. Configuration entries also remain literal: list digits or full JIDs, without recipient separators.
 - **The number does not have to be spelled the way WhatsApp registered it.** For a number the bridge has never exchanged a message with, it asks WhatsApp which number is registered — the question the phone app asks when you type one — and sends there. A Brazilian mobile typed with its ninth digit (`55 11 9XXXX-XXXX`) reaches the account registered without it, and the other way round. It is not specific to Brazil.
 - **The `chat_jid` in the result is the registered one.** That is the JID the conversation is stored under: use it for the follow-up calls (`list_messages`, `send_reaction`, …), not the number as typed.
 - **A number with no WhatsApp account** fails with `not_found` ("… is not on WhatsApp") and nothing is sent. That answer is only given when WhatsApp said so.
 - **When WhatsApp does not answer the question** (it gets 10 seconds), nothing is concluded about the number. With `WHATSAPP_ALLOWED_CHATS` set the send is refused with `bridge_unavailable` ("could not check the number with WhatsApp …; nothing was sent"), because the bridge cannot tell which number the message would go to; that refusal is safe to try again. Without an allow-list the message goes to the number exactly as typed, as it did before this check existed.
-- **With `WHATSAPP_ALLOWED_CHATS`**, the number as typed and the number it is registered under both have to be on the list (`denied` otherwise, naming the one that is missing). See [Restricting which chats the agent can touch](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
+- **With `WHATSAPP_ALLOWED_CHATS`**, the number after separator removal and the number it is registered under both have to be on the list (`denied` otherwise, naming the one that is missing). See [Restricting which chats the agent can touch](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
 
 **Natural Language Examples:**
 
@@ -1095,7 +1097,7 @@ Send a media file (image, video, document).
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `media_path`: Absolute path to the file on the server, inside its outbox
 - `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` is required
 - `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories in it are dropped
@@ -1121,7 +1123,7 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `media_path`: Absolute path to the audio file on the server, inside its outbox
 - `media_base64`: The audio bytes, base64-encoded. Exactly one of `media_path` / `media_base64` is required; same cap and rules as `send_file`
 - `filename` (optional, with `media_base64`): default `voice.ogg`; any other extension (`note.wav`, `clip.m4a`) means the server converts it with ffmpeg first
