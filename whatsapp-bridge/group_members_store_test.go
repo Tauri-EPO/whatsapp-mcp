@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,6 +251,10 @@ func TestResolveGroupRosterSync(t *testing.T) {
 	}{
 		{"", groupRosterSyncInterval, false},
 		{" 12 ", 12 * time.Hour, false},
+		{"8760", 8760 * time.Hour, false},
+		{"8761", 0, true},
+		{"9999999", 0, true},
+		{"5124096", 0, true},
 		{"0", 0, false},
 		{"-1", 0, true},
 		{"six", 0, true},
@@ -261,6 +266,11 @@ func TestResolveGroupRosterSync(t *testing.T) {
 		}
 		if err == nil && got != tc.want {
 			t.Fatalf("resolveGroupRosterSync(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+		if err != nil && (tc.in == "8761" || tc.in == "9999999" || tc.in == "5124096") {
+			if !strings.Contains(err.Error(), groupRosterSyncEnv) || !strings.Contains(err.Error(), "8760") {
+				t.Fatalf("error must name the variable and limit: %v", err)
+			}
 		}
 	}
 	if s := groupRosterSyncSummary(0); s != "off" {
