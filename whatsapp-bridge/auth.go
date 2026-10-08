@@ -48,14 +48,21 @@ const tokenFileMode = 0o600
 // generate and leaves zero margin for guessing attacks.
 const tokenByteLen = 32
 
+func validateBridgeToken(raw string) error {
+	if token := strings.TrimSpace(raw); token != "" && len(token) < 16 {
+		return errors.New("WHATSAPP_BRIDGE_TOKEN is too short (need at least 16 chars)")
+	}
+	return nil
+}
+
 // loadOrCreateBridgeToken returns the persisted token, generating one if
 // the file does not exist yet. A WHATSAPP_BRIDGE_TOKEN env var, if set,
 // always wins — useful for ephemeral containers where you want to inject
 // the token from outside instead of mounting the file.
 func loadOrCreateBridgeToken() (token string, freshlyGenerated bool, err error) {
 	if env := strings.TrimSpace(os.Getenv("WHATSAPP_BRIDGE_TOKEN")); env != "" {
-		if len(env) < 16 {
-			return "", false, errors.New("WHATSAPP_BRIDGE_TOKEN is too short (need at least 16 chars)")
+		if err := validateBridgeToken(env); err != nil {
+			return "", false, err
 		}
 		return env, false, nil
 	}

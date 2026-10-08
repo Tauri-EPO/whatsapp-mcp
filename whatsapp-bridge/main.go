@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -69,28 +68,28 @@ const shutdownTimeout = 10 * time.Second
 
 func main() {
 	flag.Parse()
+	cfg, err := loadBridgeConfig()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Refusing to start: %s\n", oneLine(err.Error()))
+		os.Exit(1)
+	}
+	os.Exit(runBridge(cfg))
+}
+
+func runBridge(cfg bridgeConfig) int {
 
 	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
-	logger, clientLog, dbLog := initLogging()
+	logger, clientLog, dbLog := newLoggerSet(cfg.LogLevel, cfg.JSONLogs)
+	bridgeLog = logger
 	logger.Infof("Starting WhatsApp client...")
 	logger.Infof("%s", buildInfo().String())
 
-	// The on/off switches, read strictly before anything is opened: a value
-	// that is not a boolean stops the bridge here instead of silently meaning
-	// the default (env_bool.go).
-	switches, swErr := loadBridgeSwitches()
-	if swErr != nil {
-		// Nothing is open yet, so there is nothing to release: exit non-zero
-		// and let the supervisor see a failed start.
-		logger.Errorf("Refusing to start: %v", swErr)
-		os.Exit(1)
-	}
-	logger.Infof("%s", webhookStartupMessage(switches))
+	logger.Infof("%s", webhookStartupMessage(cfg.Switches))
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {
 		logger.Errorf("Failed to create store directory %q: %v", storeDir(), err)
-		return
+		return 1
 	}
 	if abs, err := filepath.Abs(storeDir()); err == nil {
 		logger.Infof("Store directory: %s", abs)
@@ -103,7 +102,7 @@ func main() {
 	storeRoot, rootErr := openStoreRoot()
 	if rootErr != nil {
 		logger.Errorf("Failed to open store directory %q: %v", storeDir(), rootErr)
-		return
+		return 1
 	}
 	defer func() { _ = storeRoot.Close() }()
 
@@ -115,7 +114,7 @@ func main() {
 	if lockErr != nil {
 		logger.Errorf("Refusing to start: %v", lockErr)
 		logger.Errorf("Stop the other bridge (or point this one at a different store directory) and retry.")
-		os.Exit(1)
+		return 1
 	}
 	defer lock.Release()
 
@@ -124,13 +123,13 @@ func main() {
 	sessionDB, err := openSessionDB()
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
-		return
+		return 1
 	}
 	container := sqlstore.NewWithDB(sessionDB, "sqlite", dbLog)
+	defer func() { _ = container.Close() }()
 	if err = container.Upgrade(context.Background()); err != nil {
-		_ = container.Close()
 		logger.Errorf("Failed to upgrade the session database: %v", err)
-		return
+		return 1
 	}
 
 	// Get device store - This contains session information
@@ -142,7 +141,7 @@ func main() {
 			logger.Infof("Created new device")
 		} else {
 			logger.Errorf("Failed to get device: %v", err)
-			return
+			return 1
 		}
 	}
 
@@ -180,7 +179,7 @@ func main() {
 	// change it, re-pair. The platform icon (DeviceProps.PlatformType) is left
 	// at whatsmeow's default on purpose: this is a labelling convenience, not a
 	// way to impersonate an official WhatsApp client.
-	if name := resolveDeviceName(); name != "" {
+	if name := cfg.DeviceName; name != "" {
 		store.DeviceProps.Os = proto.String(name)
 		logger.Infof("Linked-device name set to %q (WHATSAPP_DEVICE_NAME)", name)
 	}
@@ -189,33 +188,34 @@ func main() {
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
-		return
+		return 1
 	}
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()
 	if err != nil {
 		logger.Errorf("Failed to initialize message store: %v", err)
-		return
+		return 1
 	}
 	messageStore.groupInfo = client.GetGroupInfo
 	defer func() { _ = messageStore.Close() }()
+	defer client.Disconnect()
 
 	if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs(whatsmeowDBPath(), logger); err != nil {
 		logger.Errorf("Failed to migrate legacy LID chat rows: %v", err)
-		return
+		return 1
 	}
 
 	if err := messageStore.MigrateLegacyLIDSendersToPhones(whatsmeowDBPath(), logger); err != nil {
 		logger.Errorf("Failed to migrate legacy LID sender rows: %v", err)
-		return
+		return 1
 	}
 
 	// Runs last: it classifies the senders the rewrite above could not turn
 	// into phone numbers (sender_namespace.go).
 	if err := messageStore.MigrateSenderNamespaces(whatsmeowDBPath(), logger); err != nil {
 		logger.Errorf("Failed to backfill sender namespaces: %v", err)
-		return
+		return 1
 	}
 
 	// Chats an older bridge named after our own number get their placeholder
@@ -227,77 +227,25 @@ func main() {
 		logger.Infof("Reset %d chats that were named after our own number", renamed)
 	}
 
-	// Resolve the REST API port. Pure env parsing with no dependency on the
-	// WhatsApp connection, so it's safe to do this early alongside the token
-	// load below — and failing fast here means we don't run a QR-pairing
-	// flow only to error out on an invalid port afterwards.
-	port := 8080
-	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
-		v, err := strconv.Atoi(p)
-		if err != nil || v < 1 || v > 65535 {
-			logger.Errorf("Invalid WHATSAPP_BRIDGE_PORT=%q, must be 1-65535", p)
-			return
-		}
-		port = v
-	}
-
-	restBind, restAllowedHosts, bindErr := loadRESTBindConfig()
-	if bindErr != nil {
-		logger.Errorf("%v", bindErr)
-		return
-	}
-
-	// Load (or generate on first run) the bearer token used to authenticate
-	// REST callers; the Bridge attaches it to outbound webhook POSTs too.
+	// Only filesystem operations remain: all environment values were checked.
 	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
 	if tokErr != nil {
 		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
-		return
+		return 1
+	}
+	mediaRoots, err := resolveMediaRootsValue(cfg.MediaRoots, false)
+	if err != nil {
+		logger.Errorf("Failed to resolve media roots: %v", err)
+		return 1
 	}
 
-	mediaRetention, retErr := resolveMediaRetention(os.Getenv(mediaRetentionEnv))
-	if retErr != nil {
-		logger.Errorf("%v", retErr)
-		return
-	}
-
-	statusMedia, statusErr := resolveStatusAutoDownload(os.Getenv(mediaAutoDownloadStatusEnv))
-	if statusErr != nil {
-		logger.Errorf("%v", statusErr)
-		return
-	}
-
-	rosterSync, rosterErr := resolveGroupRosterSync(os.Getenv(groupRosterSyncEnv))
-	if rosterErr != nil {
-		logger.Errorf("%v", rosterErr)
-		return
-	}
-
-	sessionKeepalive, keepaliveErr := resolveSessionKeepalive(os.Getenv(sessionKeepaliveEnv))
-	if keepaliveErr != nil {
-		logger.Errorf("%v", keepaliveErr)
-		return
-	}
-
-	// Operation-level access control (read_only.go). Parsed before the REST
-	// server starts; a value we cannot read stops the bridge instead of
-	// leaving the mutating endpoints open.
-	readOnly, roErr := loadReadOnlyPolicy()
-	if roErr != nil {
-		logger.Errorf("%v", roErr)
-		return
-	}
-
-	// Per-tool allow/deny (tool_policy.go), narrowing read-only further. An
-	// unknown tool name stops the bridge here rather than running with a list
-	// that silently covers less than the operator wrote.
-	tools, tpErr := loadToolPolicy()
-	if tpErr != nil {
-		logger.Errorf("%v", tpErr)
-		return
-	}
-
-	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, switches)
+	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	bridge.RESTBind, bridge.RESTAllowedHosts = cfg.Bind, cfg.AllowedHosts
+	bridge.MediaRetention, bridge.MediaAutoDownloadStatus = cfg.MediaRetention, cfg.StatusMedia
+	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
+	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools
+	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
+	defer bridge.Shutdown(shutdownTimeout)
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
 	bridge.Exit = func(reason string, code int) {
@@ -306,29 +254,16 @@ func main() {
 		lock.Release()
 		os.Exit(code)
 	}
-	bridge.RESTBind, bridge.RESTAllowedHosts = restBind, restAllowedHosts
-	bridge.MediaRetention = mediaRetention
-	bridge.MediaAutoDownloadStatus = statusMedia
-	bridge.GroupRosterSync = rosterSync
-	bridge.SessionKeepalive = sessionKeepalive
-	bridge.ReadOnly = readOnly
-	bridge.Tools = tools
-
-	// Resolve the allow-listed roots that media_path values in /api/send must
-	// live under. See media_path.go for the rationale.
-	allowedMediaRoots, mrErr := resolveMediaRoots()
-	if mrErr != nil {
-		logger.Errorf("Failed to resolve media roots: %v", mrErr)
-		return
-	}
-	bridge.MediaRoots = allowedMediaRoots
-	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
+	logger.Infof("Allowed media roots: %v", bridge.MediaRoots)
 
 	// Serve the REST API before pairing/connecting: /api/health answers as soon
 	// as the process is up (a container waiting for its QR scan is alive, not
 	// broken), /api/ready reports the WhatsApp connection, and endpoints that
 	// need WhatsApp check client.IsConnected() themselves.
-	bridge.startRESTServer(port, bridgeToken)
+	if err := bridge.startRESTServer(cfg.Port, bridgeToken); err != nil {
+		logger.Errorf("Failed to start REST API: %v", err)
+		return 1
+	}
 	logger.Infof("%s", bridge.Policy.Summary())
 	logger.Infof("%s", bridge.ReadOnly.Summary())
 	logger.Infof("%s", bridge.Tools.Summary())
@@ -348,7 +283,7 @@ func main() {
 	// user — and loadOrCreateBridgeToken() would report fresh=false on every
 	// later run, so the banner would never get a second chance to print it.
 	if fresh {
-		printTokenBanner(bridgeToken, port)
+		printTokenBanner(bridgeToken, cfg.Port)
 	}
 
 	// Channel to signal reconnection needs
@@ -368,7 +303,7 @@ func main() {
 		log:            logger,
 	}); err != nil {
 		logger.Errorf("%v", err)
-		return
+		return 1
 	}
 	bridgeLog.Infof("Successfully connected and authenticated!")
 
@@ -377,7 +312,7 @@ func main() {
 
 	if !client.IsConnected() {
 		logger.Errorf("Failed to establish stable connection")
-		return
+		return 1
 	}
 
 	bridgeLog.Infof("Connected to WhatsApp! Type 'help' for commands.")
@@ -395,6 +330,5 @@ func main() {
 	<-exitChan
 
 	bridgeLog.Infof("Shutting down: draining REST, stopping loops, disconnecting...")
-	bridge.Shutdown(shutdownTimeout)
-	client.Disconnect()
+	return 0
 }

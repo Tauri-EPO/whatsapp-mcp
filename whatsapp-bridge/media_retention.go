@@ -78,20 +78,23 @@ func resolveMediaRetention(value string) (time.Duration, error) {
 	if err != nil || days < 0 {
 		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of days", mediaRetentionEnv, value)
 	}
+	if int64(days) > int64((1<<63-1)/(24*time.Hour)) {
+		return 0, fmt.Errorf("invalid %s=%q: duration overflows (at most %d days)", mediaRetentionEnv, value, (1<<63-1)/(24*time.Hour))
+	}
 	return time.Duration(days) * 24 * time.Hour, nil
 }
 
 // resolveMediaMaxBytes parses WHATSAPP_MEDIA_MAX_BYTES (default 256 MiB; 0 = no limit).
-func resolveMediaMaxBytes(value string) uint64 {
+func resolveMediaMaxBytes(value string) (uint64, error) {
 	v := strings.TrimSpace(value)
 	if v == "" {
-		return defaultMediaMaxBytes
+		return defaultMediaMaxBytes, nil
 	}
 	n, err := strconv.ParseUint(v, 10, 64)
 	if err != nil {
-		return defaultMediaMaxBytes
+		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative integer of bytes", mediaMaxBytesEnv, value)
 	}
-	return n
+	return n, nil
 }
 
 // retentionSummary renders the retention setting for the startup log.

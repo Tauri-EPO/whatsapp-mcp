@@ -13,17 +13,19 @@ import (
 )
 
 func TestResolveMediaMaxBytes(t *testing.T) {
-	if got := resolveMediaMaxBytes(""); got != defaultMediaMaxBytes {
-		t.Fatalf("default = %d", got)
-	}
-	if got := resolveMediaMaxBytes(" 1048576 "); got != 1048576 {
-		t.Fatalf("explicit = %d", got)
-	}
-	if got := resolveMediaMaxBytes("0"); got != 0 {
-		t.Fatalf("zero (unlimited) = %d", got)
-	}
-	if got := resolveMediaMaxBytes("lots"); got != defaultMediaMaxBytes {
-		t.Fatalf("garbage should fall back, got %d", got)
+	for _, tc := range []struct {
+		value string
+		want  uint64
+		bad   bool
+	}{
+		{"", defaultMediaMaxBytes, false}, {" 1048576 ", 1048576, false}, {"0", 0, false},
+		{"lots", 0, true}, {"50MB", 0, true}, {"-1", 0, true}, {"+1", 0, true},
+		{"18446744073709551616", 0, true},
+	} {
+		got, err := resolveMediaMaxBytes(tc.value)
+		if (err != nil) != tc.bad || got != tc.want {
+			t.Errorf("resolveMediaMaxBytes(%q) = %d, %v; want %d, bad=%v", tc.value, got, err, tc.want, tc.bad)
+		}
 	}
 }
 

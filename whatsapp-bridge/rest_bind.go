@@ -23,7 +23,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"os"
 	"strings"
 )
 
@@ -120,14 +119,4 @@ func (l hostAllowList) allows(host string) bool {
 	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
 	_, ok := l.hosts[name]
 	return ok
-}
-
-// loadRESTBindConfig reads the two env vars; the error names the offending
-// variable so main() can fail fast before pairing.
-func loadRESTBindConfig() (bind, allowedHosts string, err error) {
-	bind, err = resolveBridgeBind(os.Getenv(bridgeBindEnv))
-	if err != nil {
-		return "", "", err
-	}
-	return bind, os.Getenv(bridgeAllowedHostsEnv), nil
 }

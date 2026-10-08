@@ -35,7 +35,13 @@ const defaultOutboxSubpath = ".local/share/whatsapp-mcp/outbox"
 // possible so a later prefix check is meaningful even if the user pointed
 // the env var at a symlinked location.
 func resolveMediaRoots() ([]string, error) {
-	if env := strings.TrimSpace(os.Getenv("WHATSAPP_MEDIA_ROOTS")); env != "" {
+	return resolveMediaRootsValue(os.Getenv("WHATSAPP_MEDIA_ROOTS"), false)
+}
+
+// validateOnly checks the environment without touching the filesystem.
+// Normal startup creates the default outbox and resolves symlinks afterwards.
+func resolveMediaRootsValue(value string, validateOnly bool) ([]string, error) {
+	if env := strings.TrimSpace(value); env != "" {
 		var roots []string
 		for _, raw := range strings.Split(env, string(os.PathListSeparator)) {
 			raw = strings.TrimSpace(raw)
@@ -44,6 +50,10 @@ func resolveMediaRoots() ([]string, error) {
 			}
 			if !filepath.IsAbs(raw) {
 				return nil, fmt.Errorf("WHATSAPP_MEDIA_ROOTS entries must be absolute paths, got %q", raw)
+			}
+			if validateOnly {
+				roots = append(roots, filepath.Clean(raw))
+				continue
 			}
 			resolved, err := canonicalizePath(raw)
 			if err != nil {
@@ -59,9 +69,12 @@ func resolveMediaRoots() ([]string, error) {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, fmt.Errorf("determine home directory: %w", err)
+		return nil, fmt.Errorf("WHATSAPP_MEDIA_ROOTS: determine home directory: %w", err)
 	}
 	def := filepath.Join(home, defaultOutboxSubpath)
+	if validateOnly {
+		return []string{def}, nil
+	}
 	if mkErr := os.MkdirAll(def, 0o700); mkErr != nil {
 		return nil, fmt.Errorf("create default outbox %q: %w", def, mkErr)
 	}

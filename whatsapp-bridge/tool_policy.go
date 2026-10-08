@@ -27,7 +27,6 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 )
@@ -138,9 +137,11 @@ func sortedNames(names map[string]bool) []string {
 }
 
 // newToolPolicy parses both lists and rejects names that are not tools.
+
 func newToolPolicy(allowRaw, denyRaw string) (toolPolicy, error) {
 	p := toolPolicy{allow: parseToolList(allowRaw), deny: parseToolList(denyRaw)}
 	known := knownTools()
+	var problems []string
 	for _, list := range []struct {
 		env   string
 		names map[string]bool
@@ -152,15 +153,14 @@ func newToolPolicy(allowRaw, denyRaw string) (toolPolicy, error) {
 			}
 		}
 		if len(unknown) > 0 {
-			return toolPolicy{}, fmt.Errorf("%s lists unknown tool(s): %s. Valid names: %s",
-				list.env, strings.Join(unknown, ", "), strings.Join(sortedNames(known), ", "))
+			problems = append(problems, fmt.Sprintf("%s lists unknown tool(s): %s",
+				list.env, strings.Join(unknown, ", ")))
 		}
 	}
+	if len(problems) > 0 {
+		return toolPolicy{}, fmt.Errorf("%s. Valid names: %s", strings.Join(problems, "; "), strings.Join(sortedNames(known), ", "))
+	}
 	return p, nil
-}
-
-func loadToolPolicy() (toolPolicy, error) {
-	return newToolPolicy(os.Getenv(allowToolsEnv), os.Getenv(denyToolsEnv))
 }
 
 // restricted reports whether either list is set (unset = allow everything).
