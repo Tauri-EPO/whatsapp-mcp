@@ -159,3 +159,19 @@ func TestConnectOrPair_ParentContextCancelStops(t *testing.T) {
 		t.Fatal("cancellation should return promptly")
 	}
 }
+
+func TestNonPasskeyQRFailureKeepsDiagnosticCause(t *testing.T) {
+	for _, cause := range []string{"client outdated", "unexpected event", "scanned without multidevice"} {
+		var output bytes.Buffer
+		opt := fastOpts(&bytes.Buffer{})
+		opt.attempts = 1
+		opt.log = newJSONLogger("pairing-test", "INFO", &output)
+		client := &fakePairingClient{scripts: [][]whatsmeow.QRChannelItem{{{Event: "error", Error: errors.New(cause)}}}}
+		if err := connectOrPair(context.Background(), client, false, opt); err == nil {
+			t.Fatal("QR failure reported success")
+		}
+		if !strings.Contains(output.String(), cause) {
+			t.Fatalf("missing pairing cause: %s", &output)
+		}
+	}
+}

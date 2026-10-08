@@ -639,8 +639,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		if !v.OnConnect && code == 0 {
 			code = 401
 		}
-		b.recordConnectionProblem(code, 0, 0)
-		p, _ := b.connectionSnapshot()
+		p := b.recordConnectionProblem(code, 0, 0)
 		b.notifyConnection("logged_out", p.Kind, true, true)
 		if code != 401 {
 			return
@@ -662,8 +661,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.ConnectFailure:
-		b.recordConnectionProblem(int(v.Reason), 0, 0)
-		p, _ := b.connectionSnapshot()
+		p := b.recordConnectionProblem(int(v.Reason), 0, 0)
 		b.notifyConnection("disconnected", p.Kind, true, false)
 		// Signal reconnection needed
 		select {

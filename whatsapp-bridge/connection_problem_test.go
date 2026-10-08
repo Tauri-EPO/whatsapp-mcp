@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -244,6 +245,49 @@ func TestTransientProblemCannotEraseRestriction(t *testing.T) {
 	p, _ := b.connectionSnapshot()
 	if p.Kind != "banned" {
 		t.Fatalf("restriction replaced: %+v", p)
+	}
+}
+
+func TestConcurrentConnectedDoesNotAbortLogoutOrFailure(t *testing.T) {
+	for _, event := range []any{&events.LoggedOut{Reason: 401}, &events.ConnectFailure{Reason: 503}} {
+		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+		var exits, panics atomic.Int64
+		b.Exit = func(string, int) { exits.Add(1) }
+		const count = 10000
+		reconnect := make(chan bool, count)
+		var workers sync.WaitGroup
+		start := make(chan struct{})
+		workers.Go(func() {
+			<-start
+			for range count {
+				b.handleEvent(&events.Connected{}, reconnect)
+			}
+		})
+		workers.Go(func() {
+			<-start
+			for range count {
+				func() {
+					defer func() {
+						if recover() != nil {
+							panics.Add(1)
+						}
+					}()
+					b.handleEvent(event, reconnect)
+				}()
+			}
+		})
+		close(start)
+		workers.Wait()
+		if panics.Load() != 0 {
+			t.Fatalf("%T panicked %d times during recovery", event, panics.Load())
+		}
+		if _, logout := event.(*events.LoggedOut); logout {
+			if exits.Load() != count {
+				t.Fatalf("logout exits=%d want=%d", exits.Load(), count)
+			}
+		} else if len(reconnect) != count {
+			t.Fatalf("failure reconnects=%d want=%d", len(reconnect), count)
+		}
 	}
 }
 

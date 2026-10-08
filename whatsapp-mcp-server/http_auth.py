@@ -203,7 +203,7 @@ def _default_route_gateway() -> ipaddress.IPv4Network:
             metric = min(candidate[0] for candidate in candidates)
             gateways = {address for cost, address in candidates if cost == metric}
             if len(gateways) == 1:
-                return ipaddress.ip_network(f"{gateways.pop()}/32")
+                return ipaddress.IPv4Network(f"{gateways.pop()}/32")
     except (OSError, UnicodeError, ValueError):
         pass
     raise ValueError(

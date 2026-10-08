@@ -96,13 +96,13 @@ func (b *Bridge) connectionNow() time.Time {
 }
 
 // Serialise state changes and persistence; a restart must never forget a ban.
-func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration) {
+func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration) *ConnectionProblem {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
 	next := classifyConnectionProblem(code, reason, expire, b.connectionNow())
 	// A transient failure cannot erase an account restriction received earlier.
 	if !next.restrictsAccount() && b.connectionProblem.restrictsAccount() {
-		return
+		return b.connectionProblem
 	}
 	b.connectionProblem = next
 	if code == 402 && b.metrics != nil {
@@ -122,6 +122,7 @@ func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration)
 	if b.StoreRoot != nil {
 		b.persistConnectionProblemLocked()
 	}
+	return b.connectionProblem
 }
 
 func (b *Bridge) persistConnectionProblemLocked() {
