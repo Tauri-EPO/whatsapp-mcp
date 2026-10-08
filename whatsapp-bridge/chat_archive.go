@@ -1,7 +1,7 @@
 package main
 
 // Chat filing uses app state, not a message. The archive anchor is read with
-// the storage JID; only the patch target is rewritten PN -> LID, like mark-read.
+// permitted storage twins; the patch target is rewritten PN -> LID, like mark-read.
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/types"
@@ -19,6 +20,10 @@ import (
 )
 
 type appStateSendFunc func(context.Context, appstate.PatchInfo) error
+
+// Finish before the MCP HTTP client's default 30-second read timeout.
+const archiveDeadline = 20 * time.Second
+
 type appStateNotSentError struct{ error }
 
 func (e appStateNotSentError) Unwrap() error { return e.error }
@@ -38,6 +43,8 @@ type archiveDeps struct {
 
 // archiveAnchor selects one complete row, including a deterministic tie-break
 // by insertion order for messages sharing a second. MAX(timestamp) loses the key.
+// History batches can insert newest-first, so same-second history order is only
+// an approximation; the stored schema has no finer chronological discriminator.
 func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*waCommon.MessageKey, time.Time, error) {
 	var id, chat string
 	var sender, server sql.NullString
@@ -80,7 +87,7 @@ func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*
 
 func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := requestContext(r, actionDeadline)
+		ctx, cancel := requestContext(r, archiveDeadline)
 		defer cancel()
 		var req struct {
 			ChatJID  string `json:"chat_jid"`
@@ -109,7 +116,7 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 		}
 		target, err := deps.resolve(ctx, req.ChatJID)
 		if ctx.Err() != nil {
-			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent")
+			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
 			return
 		}
 		if err != nil || target.User == "" || target.Server == "" {
@@ -149,6 +156,10 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 		key.RemoteJID = proto.String(target.String())
 		if key.GetParticipant() != "" {
 			sender, err := deps.resolve(ctx, key.GetParticipant())
+			if ctx.Err() != nil {
+				writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
+				return
+			}
 			if err != nil || sender.User == "" || sender.Server == "" {
 				writeError(w, http.StatusBadRequest, "Cannot resolve latest message sender")
 				return
@@ -156,13 +167,13 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			key.Participant = proto.String(sender.String())
 		}
 		if ctx.Err() != nil {
-			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent")
+			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
 			return
 		}
 		if err := deps.send(ctx, appstate.BuildArchive(target, *req.Archived, ts, key)); err != nil {
 			var notSent appStateNotSentError
 			if errors.As(err, &notSent) {
-				writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired waiting for writer; nothing sent")
+				writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired waiting for writer; nothing sent; safe to retry")
 				return
 			}
 			// At the pinned whatsmeow version this prefix is produced only after
@@ -170,6 +181,11 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			if strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:") {
 				writeJSON(w, http.StatusOK, map[string]any{"success": true, "archived": *req.Archived, "sent": true, "confirmed": false,
 					"warning": "Patch accepted; app-state confirmation failed. Do not retry automatically."})
+				return
+			}
+			if errors.Is(err, whatsmeow.ErrAppStateUpdate) || errors.Is(err, whatsmeow.ErrNotConnected) ||
+				err.Error() == "no app state keys found, creating app state keys is not yet supported" {
+				writeErrorCode(w, http.StatusServiceUnavailable, "bridge_unavailable", "Chat archive was not applied; safe to retry after resolving the bridge error: "+err.Error())
 				return
 			}
 			writeError(w, http.StatusBadGateway, "Chat archive outcome is unknown; do not retry automatically: "+err.Error())
@@ -182,7 +198,6 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 // One app-state writer per bridge: the library reads a collection version
 // before sending without holding its sync lock. Waiting also obeys the request.
 func (b *Bridge) sendAppState(ctx context.Context, patch appstate.PatchInfo) error {
-	b.appStateOnce.Do(func() { b.appStateGate = make(chan struct{}, 1) })
 	select {
 	case b.appStateGate <- struct{}{}:
 	case <-ctx.Done():
@@ -192,9 +207,5 @@ func (b *Bridge) sendAppState(ctx context.Context, patch appstate.PatchInfo) err
 	if err := ctx.Err(); err != nil {
 		return appStateNotSentError{err}
 	}
-	send := b.SendAppState
-	if send == nil {
-		send = b.Client.SendAppState
-	}
-	return send(ctx, patch)
+	return b.SendAppState(ctx, patch)
 }

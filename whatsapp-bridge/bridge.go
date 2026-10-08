@@ -81,7 +81,6 @@ type Bridge struct {
 	Send sendFunc
 	// SendAppState is the raw client call; sendAppState serializes writers.
 	SendAppState appStateSendFunc
-	appStateOnce sync.Once
 	appStateGate chan struct{}
 	// IsOnWhatsApp asks WhatsApp which number a recipient is registered under
 	// (defaults to Client.IsOnWhatsApp); /api/send asks it for a number the LID
@@ -192,6 +191,8 @@ type Bridge struct {
 func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root, switches bridgeSwitches) *Bridge {
 	b := &Bridge{
 		Client:              client,
+		SendAppState:        client.SendAppState,
+		appStateGate:        make(chan struct{}, 1),
 		Store:               store,
 		Log:                 logger,
 		StoreRoot:           storeRoot,

@@ -1696,7 +1696,10 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
     deleted messages. New messages may unarchive it according to phone settings.
     Unknown group senders/invalid anchors return invalid_argument; statuses,
     broadcasts and newsletters are unsupported. On an unknown send outcome or
-    confirmation warning, inspect the phone before retrying.
+    confirmation warning, inspect the phone before retrying. HTTP 408 means nothing
+    was sent and retrying is safe. A definite bridge rejection also says the patch
+    was not applied and is safe to retry after resolving that bridge error.
+    Same-second history anchors use insertion order, which may not be chronological.
 
     Args:
         chat_jid: Full direct-chat or group JID from list_chats

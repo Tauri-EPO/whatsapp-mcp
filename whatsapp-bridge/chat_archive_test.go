@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -45,8 +47,8 @@ func TestArchivePatch(t *testing.T) {
 				},
 				send: func(ctx context.Context, patch appstate.PatchInfo) error {
 					calls++
-					if _, ok := ctx.Deadline(); !ok {
-						t.Error("unbounded send")
+					if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 20*time.Second {
+						t.Error("send must finish before the MCP 30-second read timeout")
 					}
 					act := patch.Mutations[0].Value.GetArchiveChatAction()
 					rangeMsg := act.GetMessageRange()
@@ -276,10 +278,74 @@ func TestArchiveResolutionDeadline(t *testing.T) {
 	}
 }
 
+func TestArchiveParticipantCancellation(t *testing.T) {
+	store := newTestMessageStore(t)
+	group := "120363000000000001@g.us"
+	if err := store.StoreMessage("M1", group, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := archiveDeps{store: store, connected: func() bool { return true },
+		resolve: func(_ context.Context, raw string) (types.JID, error) {
+			if raw == archiveTestChat {
+				cancel()
+				return types.EmptyJID, context.Canceled
+			}
+			return types.ParseJID(raw)
+		}, send: func(context.Context, appstate.PatchInfo) error { t.Fatal("late send"); return nil },
+	}
+	rec := httptest.NewRecorder()
+	handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+group+`","archived":true}`)).WithContext(ctx))
+	if rec.Code != 408 || !strings.Contains(rec.Body.String(), "nothing sent; safe to retry") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestArchiveDefiniteRejections(t *testing.T) {
+	for _, failure := range []error{whatsmeow.ErrAppStateUpdate, whatsmeow.ErrNotConnected,
+		errors.New("no app state keys found, creating app state keys is not yet supported")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			store := newTestMessageStore(t)
+			if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				t.Fatal(err)
+			}
+			deps := archiveDeps{store: store, connected: func() bool { return true },
+				resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
+				send:    func(context.Context, appstate.PatchInfo) error { return failure },
+			}
+			rec := httptest.NewRecorder()
+			handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`)))
+			if rec.Code != 503 || !strings.Contains(rec.Body.String(), "not applied; safe to retry") || strings.Contains(rec.Body.String(), "unknown") {
+				t.Fatal(rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestArchiveAcceptedPatchDisconnectedConfirmation(t *testing.T) {
+	store := newTestMessageStore(t)
+	if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	deps := archiveDeps{store: store, connected: func() bool { return true },
+		resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
+		send: func(context.Context, appstate.PatchInfo) error {
+			return fmt.Errorf("failed to fetch app state after sending update: %w", whatsmeow.ErrNotConnected)
+		},
+	}
+	rec := httptest.NewRecorder()
+	handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`)))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"sent":true`) || !strings.Contains(rec.Body.String(), "Do not retry automatically") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
 func TestAppStateWriterSerializesAndCancelsWait(t *testing.T) {
 	var calls atomic.Int32
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	b := &Bridge{SendAppState: func(ctx context.Context, _ appstate.PatchInfo) error {
+	b := testBridge(t, nil, newTestMessageStore(t), testLogger())
+	b.SendAppState = func(ctx context.Context, _ appstate.PatchInfo) error {
 		if calls.Add(1) == 1 {
 			close(entered)
 		}
@@ -289,7 +355,7 @@ func TestAppStateWriterSerializesAndCancelsWait(t *testing.T) {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-	}}
+	}
 	go func() { done <- b.sendAppState(context.Background(), appstate.PatchInfo{}) }()
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

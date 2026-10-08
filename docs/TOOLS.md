@@ -933,7 +933,8 @@ group sender returns `invalid_argument` (HTTP 422). Status, broadcast and
 newsletter targets return `invalid_argument`.
 
 The newest permitted phone/LID twin row anchors a merged chat. Same-second rows
-use insertion order. Archiving also removes the chat's pin, as WhatsApp's patch
+use insertion order, which can be reversed in newest-first history batches; the
+stored schema has no finer chronological discriminator. Archiving also removes the chat's pin, as WhatsApp's patch
 does. Local messages remain available; no reply or read receipt is sent. The
 phone's settings decide whether a new message unarchives the conversation.
 
@@ -941,8 +942,15 @@ Returns `{"success": true, "archived": true, "sent": true, "confirmed": false}`:
 `archived` is the requested state, **not confirmation from the phone**. The local
 archive may lag the phone, omit message kinds, or have locally deleted rows.
 A warning means the server accepted the patch but its subsequent app-state fetch
-failed. Other send failures have an unknown outcome; inspect the phone before
+failed. HTTP 408 means nothing was sent and retrying is safe. A definite server
+rejection, disconnected socket or missing app-state keys returns 503 and says
+the patch was not applied; retry after resolving that bridge error. Other send
+failures have an unknown outcome; inspect the phone before
 retrying either case. Hidden and refused in read-only mode.
+
+The LID index spelling was observed on two paired accounts (six and four direct
+chat settings, counts only). End-to-end archive on a paired phone and message
+range key matching, including group participant spelling, remain unverified.
 
 ### `send_typing`
 
