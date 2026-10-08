@@ -230,6 +230,8 @@ func TestHandleMessageSkipsAutoDownloadWhenDisabled(t *testing.T) {
 	msg := buildImageMessage(phonePN, phonePN, false, "")
 	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+	msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
+	msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
 
 	var calls atomic.Int32
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
@@ -311,6 +313,8 @@ func TestHandleMessageStatusMediaIsOptIn(t *testing.T) {
 			msg := buildImageMessage(tc.chat, phonePN, false, "")
 			msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 			msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+			msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
+			msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
 
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 			b.MediaAutoDownload, b.MediaAutoDownloadStatus = tc.autoDownload, tc.status
@@ -357,6 +361,8 @@ func TestHandleMessageStatusImageSkipsWebhookDownload(t *testing.T) {
 			msg := buildImageMessage(tc.chat, phonePN, false, "")
 			msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 			msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+			msg.Message.ImageMessage.FileSHA256 = []byte("test-sha256")
+			msg.Message.ImageMessage.FileEncSHA256 = []byte("test-enc-sha256")
 
 			var calls atomic.Int32
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
