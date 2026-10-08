@@ -118,6 +118,7 @@ FAKE_NUMBERS = {
 # The user part of `@g.us` JIDs, new-style (`1203630…`) or phone-timestamp.
 FAKE_GROUPS = {
     "1",
+    "3",  # suffix of the deliberately malformed device-suffixed group fixture
     "123",
     "222",
     "404",
