@@ -653,7 +653,7 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
                 if slot in best:
                     continue
                 _, separator, message_id = tid.partition("/")
-                visible_id = f"{origin}{separator}{message_id}" if separator else origin
+                visible_id = f"{origin.partition('/')[0]}{separator}{message_id}" if separator else origin
                 best[slot] = {
                     "target_type": ttype,
                     "target_id": canonical if canonical == origin or _visible(ttype, canonical) else visible_id,

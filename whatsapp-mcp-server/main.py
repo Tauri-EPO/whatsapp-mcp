@@ -2271,7 +2271,9 @@ def get_notes(target_type: str, target_id: str, include_history: bool = False) -
     Read this before annotating the same key: `set` replaces the whole value, so the
     merge has to happen here. The `updated_at` of a note is what `annotate(...,
     if_unchanged_since=...)` expects. Brazilian mobile spellings and confirmed
-    LIDs include legacy notes; the canonical key wins, including tombstones.
+    LIDs include admitted legacy notes; the canonical key wins, including
+    tombstones. The supplied spelling must be allowed, and stored write origins
+    are checked against the current policy.
 
     Args:
         target_type: "chat", "contact", "message" or "media"

@@ -77,6 +77,18 @@ def test_literal_chat_keeps_confirmed_phone_lid_name_pair(paired_dbs):
     assert set(chat["aliases"]) == {SHORT_JID, f"{LID}@lid"}
 
 
+def test_allowed_legacy_message_search_keeps_one_message_suffix(paired_dbs, monkeypatch):
+    conn = notes._connect(create=True)
+    assert conn is not None
+    target = SHORT_JID + "/synthetic-message"
+    conn.execute(
+        "INSERT INTO notes VALUES ('message', ?, 'role', 'visible legacy', '2026-10-08', 'legacy', 1)", (target,)
+    )
+    conn.close()
+    _allow(monkeypatch, SHORT_JID)
+    assert main.search_notes("visible legacy", target_type="message")[0]["target_id"] == target
+
+
 def _chat(store, jid, name="", stamp="2026-10-08 10:00:00"):
     with store.messages() as conn:
         conn.execute("INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)", (jid, name, stamp))

@@ -310,10 +310,12 @@ class TestAllowList:
         _denied(lambda: whatsapp.list_messages(chat_jid="+5588977776666", include_context=False))
         _denied(lambda: whatsapp.list_messages(chat_jid="+558877776666", include_context=False))
 
-    def test_notes_admit_either_known_spelling_and_write_the_ninth_digit_key(self, clinic, monkeypatch):
+    def test_notes_require_typed_spelling_and_write_the_ninth_digit_key(self, clinic, monkeypatch):
         _allow(monkeypatch, SHORT_JID)
-        assert notes.get_notes("contact", LONG_JID)["notes"] == {}
-        assert notes.annotate("chat", LONG_JID, "role", "x")["target_id"] == LONG_JID
+        _denied(lambda: notes.get_notes("contact", LONG_JID))
+        _denied(lambda: notes.annotate("chat", LONG_JID, "role", "x"))
+        assert notes.annotate("chat", SHORT_JID, "role", "x")["target_id"] == LONG_JID
+        assert notes.get_notes("chat", SHORT_JID)["notes"]["role"]["value"] == "x"
         assert notes.get_notes("contact", SHORT_JID)["notes"] == {}
 
     def test_a_send_preview_names_the_recipient_as_given(self, clinic):

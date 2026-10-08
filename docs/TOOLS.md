@@ -630,13 +630,14 @@ What is not covered:
   one key across Brazilian mobile spellings and mapped LIDs (issue #525). The
   canonical note key is always the 13-digit Brazilian mobile spelling, including
   the ninth digit; archive rows never change it. Foreign numbers and landlines
-  keep their normalized spelling; mapped LIDs use that phone key. Reads include legacy keys, with the canonical key winning when
+  keep their normalized spelling; mapped LIDs use that phone key. Reads include admitted legacy keys, with the canonical key winning when
   both exist; deletion writes a canonical tombstone that covers both. Rewriting
   a legacy note writes the canonical value and tombstones the alias in the same
   transaction; the original rows remain readable in the shared history.
-  These note operations accept the identity when **any** confirmed spelling
-  is allowed. They do not change the stricter send checks or merge hidden
-  message rows into read results.
+  These operations require the spelling supplied to be allowed. Canonical
+  versions retain their admitted write spelling; current policy filters that
+  origin, and unlisted legacy aliases stay hidden. The storage key grants no
+  access and does not merge hidden messages into read results.
 - Send tools and `forward_message` strip the [supported recipient separators](#phone-numbers)
   from bare numbers before the allow-list check and bridge call. They do not
   choose the Brazilian alternate spelling locally.
@@ -1929,11 +1930,12 @@ reads them instead of deriving them again.
 | `media` | the `sha256` | `list_media`, `list_messages`; the same store `annotate_media` writes |
 
 A contact is stored under its phone JID when the LID map knows the pair, and
-read under every spelling, so a note written against `<lid>@lid` is found again
-under `<phone>@s.whatsapp.net`. `WHATSAPP_ALLOWED_CHATS` applies to `chat`,
-`contact` and `message` targets, on both the write and the read: a contact JID is
-spelled exactly like its direct chat, and `search_contacts` filters on the same
-list.
+read under admitted spellings. `WHATSAPP_ALLOWED_CHATS` applies to the spelling
+supplied for `chat`, `contact` and `message` targets on writes and reads.
+Canonical storage keys grant no access to refused spellings. Legacy versions
+authorize by their stored spelling; new versions retain the admitted write
+spelling, checked against current policy. Contact search itself remains
+unfiltered, while notes on a contact require permission.
 
 #### Nothing is overwritten in silence
 
