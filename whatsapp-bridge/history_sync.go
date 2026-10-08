@@ -5,6 +5,7 @@ package main
 // waWeb.WebMessageInfo rows instead of live events.
 
 import (
+	"context"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -22,9 +23,42 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 
 // A decoded share uses the canonical importer without following nested bundles.
 func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, downloadShares, preserveExisting bool) {
-	// Only rows introduced by this peer import may replay within it. Existing
-	// archive rows are checked again under the canonical IMMEDIATE transaction.
-	peerRows := make(map[string]map[string]historyMessageVersion)
+	b.handleHistorySyncWithSharesContext(b.ctx, historySync, downloadShares, preserveExisting)
+}
+
+func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, historySync *events.HistorySync, downloadShares, preserveExisting bool) {
+	stopping := func() bool {
+		return (preserveExisting && ctx.Err() != nil) || b.historyStopping()
+	}
+	retry := b.retryBusy
+	if preserveExisting {
+		retry = func(write func() error) error {
+			return retryBusyWithWait(func() error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return write()
+			}, b.StoreRetryDelays, func(delay time.Duration) bool {
+				if ctx.Err() != nil {
+					return false
+				}
+				if b.storeRetryWait != nil {
+					return b.storeRetryWait(delay) && ctx.Err() == nil
+				}
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+					return false
+				case <-timer.C:
+					return true
+				}
+			})
+		}
+	}
+	// Peer imports can introduce rows, never replace any existing archive row.
+	// Check existence under the canonical IMMEDIATE transaction on every replay.
+	peerRows := make(map[string]map[string]struct{})
 	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -36,15 +70,19 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 		len(historySync.Data.Conversations),
 	)
 
-	// Recognition and network work must never be repeated inside a chunk retry.
-	b.recogniseHistoryShares(historySync.Data, downloadShares)
+	// Recognise once outside retries. Queue bundles only after this phone sync's
+	// own rows have completed; imported peer history never follows nested shares.
+	b.recogniseHistoryShares(historySync.Data, false)
+	if downloadShares {
+		defer b.queueHistoryShares(historySync.Data)
+	}
 	writeBatch := messageStore.Batch
 	if b.historyBatchWriter != nil {
 		writeBatch = b.historyBatchWriter
 	}
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
-		if b.historyStopping() {
+		if stopping() {
 			return
 		}
 		// Parse JID from the conversation
@@ -88,13 +126,13 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 			timestamp = b.historyLocationActivityTime(messages, chatJID, timestamp)
 
-			if err := b.retryBusy(func() error {
+			if err := retry(func() error {
 				if preserveExisting {
 					return messageStore.EnsureChat(chatJID, name)
 				}
 				return messageStore.StoreChat(chatJID, name, timestamp)
 			}); err != nil {
-				if b.historyStopping() {
+				if stopping() {
 					return
 				}
 				b.noteHistoryLoss(messages, timestamp, chatJID, err)
@@ -127,9 +165,12 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			storedInBatch := 0
-			var chunkPeerRows map[string]historyMessageVersion
+			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
 				for _, msg := range chunk {
+					if preserveExisting && ctx.Err() != nil {
+						return ctx.Err()
+					}
 					if msg == nil || msg.Message == nil {
 						continue
 					}
@@ -156,22 +197,11 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					}
 
 					if preserveExisting {
-						version, tracked := chunkPeerRows[histMsgID]
-						if !tracked {
-							version, tracked = peerRows[chatJID][histMsgID]
-						}
-						current, exists, err := batch.historyRowVersion(histMsgID, chatJID)
+						exists, err := batch.historyRowExists(histMsgID, chatJID)
 						if err != nil {
 							return err
 						}
-						if exists && (!tracked || current != version) {
-							// The explicit exact-key location policy permits position
-							// updates only; never change its author/content/activity.
-							if ex.location.update() {
-								if _, err := batch.UpdateLiveLocation(histMsgID, chatJID, ex.location); err != nil {
-									return err
-								}
-							}
+						if exists {
 							continue
 						}
 					}
@@ -210,7 +240,13 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 						if isFromMe && client.Store.ID != nil {
 							alt = client.Store.ID.ToNonAD()
 						}
-						resolvedSender = resolveUserJID(client, rawSender, alt)
+						if preserveExisting {
+							// The peer adapter already resolved attribution using the
+							// job context. Do not repeat that lookup without its deadline.
+							resolvedSender = rawSender
+						} else {
+							resolvedSender = resolveUserJID(client, rawSender, alt)
+						}
 					} else {
 						resolvedSender = jid
 					}
@@ -244,11 +280,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					} else {
 						storedInBatch++
 						if preserveExisting {
-							version, _, err := batch.historyRowVersion(histMsgID, chatJID)
-							if err != nil {
-								return err
-							}
-							chunkPeerRows[histMsgID] = version
+							chunkPeerRows[histMsgID] = struct{}{}
 						}
 						// Per-message echo stays at DEBUG: user content out of INFO,
 						// and two lines per row would swamp a full sync.
@@ -266,9 +298,9 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			storedInChat := 0
 			processed := len(messages)
 			commitChunk := func() error {
-				return b.retryBusy(func() error {
+				return retry(func() error {
 					storedInBatch = 0
-					chunkPeerRows = make(map[string]historyMessageVersion)
+					chunkPeerRows = make(map[string]struct{})
 					return writeBatch(storeChunk)
 				})
 			}
@@ -278,16 +310,16 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 				b.metrics.historyMessages.Add(int64(storedInBatch))
 				if preserveExisting {
 					if peerRows[chatJID] == nil {
-						peerRows[chatJID] = make(map[string]historyMessageVersion)
+						peerRows[chatJID] = make(map[string]struct{})
 					}
-					for id, version := range chunkPeerRows {
-						peerRows[chatJID][id] = version
+					for id := range chunkPeerRows {
+						peerRows[chatJID][id] = struct{}{}
 					}
 				}
 			}
 		chunks:
 			for start := 0; start < len(messages); start += historyBatchMessages {
-				if b.historyStopping() {
+				if stopping() {
 					return
 				}
 				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
@@ -296,7 +328,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					countCommitted()
 					continue
 				}
-				if b.historyStopping() {
+				if stopping() {
 					return
 				}
 				if isBusyError(batchErr) {
@@ -308,7 +340,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 				// A bad row must not cost its good neighbours. Each replay remains
 				// atomic with its auxiliary writes and owns one retry budget.
 				for index, msg := range chunk {
-					if b.historyStopping() {
+					if stopping() {
 						return
 					}
 					chunk = []*waHistorySync.HistorySyncMsg{msg}
@@ -317,7 +349,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 						countCommitted()
 						continue
 					}
-					if b.historyStopping() {
+					if stopping() {
 						return
 					}
 					if isBusyError(rowErr) {
@@ -330,7 +362,9 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			}
 			logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
 			for _, msg := range messages[:processed] {
-				if msg != nil && msg.Message != nil && msg.Message.Message.GetPollUpdateMessage() != nil {
+				// A peer knows a group's poll secret and cannot authenticate another
+				// voter's identity. Only the account's own phone history imports votes.
+				if !preserveExisting && msg != nil && msg.Message != nil && msg.Message.Message.GetPollUpdateMessage() != nil {
 					pendingVotes = append(pendingVotes, msg.Message)
 				}
 			}
@@ -344,7 +378,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 		}
 	}
 
-	if preserveExisting && !b.historyStopping() {
+	if preserveExisting && !stopping() {
 		// Only committed rows introduced by this import contribute activity.
 		// Read final timestamps after all chunks: newest-first location samples
 		// may later recover their original time under the same exact key.
@@ -362,18 +396,18 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			for id := range keys {
 				ids = append(ids, id)
 				if len(ids) == historyBatchMessages {
-					markerErr = b.retryBusy(refresh)
-					if markerErr != nil || b.historyStopping() {
+					markerErr = retry(refresh)
+					if markerErr != nil || stopping() {
 						break
 					}
 					ids = ids[:0]
 				}
 			}
-			if markerErr == nil && len(ids) > 0 && !b.historyStopping() {
-				markerErr = b.retryBusy(refresh)
+			if markerErr == nil && len(ids) > 0 && !stopping() {
+				markerErr = retry(refresh)
 			}
-			if markerErr == nil && !newest.IsZero() && !b.historyStopping() {
-				markerErr = b.retryBusy(func() error { return messageStore.StoreChat(chat, "", newest) })
+			if markerErr == nil && !newest.IsZero() && !stopping() {
+				markerErr = retry(func() error { return messageStore.StoreChat(chat, "", newest) })
 			}
 			if markerErr != nil {
 				// Rows have committed; this is a marker failure, not row loss.

@@ -183,6 +183,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// second attempt; the time moves only once the row is in, so a message that
 	// is dropped below, or that fails to store, is not activity (issues #519,
 	// #531).
+	rowConsumed := false
 	storeRow := func(kind string, write func() error) bool {
 		if !b.storeLive(kind, msg.Info.ID, chatJID, func() error {
 			if err := messageStore.EnsureChat(chatJID, name); err != nil {
@@ -191,6 +192,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			return write()
 		}) {
 			return false
+		}
+		if rowConsumed {
+			return true
 		}
 		if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, "", msgTimestamp) }); err != nil {
 			logger.Warnf("Failed to update the last message time of %s: %v", chatJID, err)
@@ -288,19 +292,6 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	if ex.empty() {
 		return
 	}
-	// Later positions with the exact original key are updates, not new chat
-	// activity or webhook deliveries. Different keys continue through the row path.
-	if ex.location.update() {
-		matched := false
-		if !b.storeLive("live location", msg.Info.ID, chatJID, func() error {
-			var err error
-			matched, err = messageStore.UpdateLiveLocation(msg.Info.ID, chatJID, ex.location)
-			return err
-		}) || matched {
-			return
-		}
-	}
-
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
 	// A busy database is tried again a bounded number of times; a write that is
@@ -308,9 +299,14 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// content) and a count on /metrics (store_failures.go).
 	stored := storeRow("message", func() error {
 		return messageStore.Batch(func(batch *messageBatch) error {
-			return persistMessage(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+			var err error
+			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+			return err
 		})
 	})
+	if rowConsumed {
+		return
+	}
 	if stored {
 		b.metrics.messagesStored.Add(1)
 	}

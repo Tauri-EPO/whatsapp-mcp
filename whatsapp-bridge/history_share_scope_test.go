@@ -54,10 +54,12 @@ func TestHistoryShareRejectsForeignConversationBeforeAnyImport(t *testing.T) {
 					outer.Data.Conversations[0].ID = proto.String(chat)
 					outer.Data.Conversations[0].Messages[0].Message.Message = message
 					b.handleHistorySync(outer)
+					waitHistoryShares(t, b)
 				} else {
 					event := buildTextMessage(types.NewJID("120363000000000001", types.GroupServer), phonePN, types.EmptyJID, types.EmptyJID, false, "")
 					event.Message = message
 					b.handleMessage(event)
+					waitHistoryShares(t, b)
 				}
 				var rows, indexed int
 				if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil {
@@ -96,6 +98,7 @@ func TestHistoryShareRejectsNonGroupOriginBeforeDownload(t *testing.T) {
 			}
 			bundle, requests := encryptedShareServer(t, b, compressShare(t, plain), "")
 			b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, chat, "SHARE", false)
+			waitHistoryShares(t, b)
 			var rows int
 			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil {
 				t.Fatal(err)

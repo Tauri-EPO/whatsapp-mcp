@@ -558,13 +558,12 @@ does not contain the messages. Imports are restricted to the originating group;
 a bundle containing another conversation is refused in full before any rows
 are written. Only group identity and messages are imported; the sender's read
 state, disappearing-message settings and other conversation metadata are not
-applied to this account. Historical sender ownership is recomputed from the
-participant relative to this account; a peer's `FromMe` bit never makes its
-message editable by this account. Missing/invalid participants remain inbound
-with unknown attribution. Existing archive rows are preserved; rows first
-introduced by one bundle may merge while their stored version is unchanged;
-an intervening live/phone delivery or edit revokes that permission. Exact-key live-location
-samples retain the documented position-only update policy. Chat activity follows
+applied to this account. Rows attributed to this account's phone number or LID
+are skipped: a peer cannot establish that this account sent a message. All
+imported rows are inbound; missing/invalid participants have unknown attribution.
+Poll updates from peers are ignored because they cannot authenticate a voter.
+Existing archive rows are preserved, including positions and duplicate keys
+within one bundle. Chat activity follows
 committed rows, never an overlapping peer copy. Compare the oldest stored
 message to confirm import; the share counter only confirms recognition. See
 [missing group history](TROUBLESHOOTING.md#the-number-was-added-to-a-group-and-the-earlier-messages-are-missing)
@@ -756,12 +755,14 @@ remain text with no structured fields; ambiguous text is never parsed for a back
 
 For live shares, sequence zero or unset is the initial sample. A later positive
 sequence updates position fields only when it has the exact same message ID and
-chat key as an archived live location. The first description, author, timestamp,
+chat key as an archived live location, with the same sender, sender namespace
+and ownership flag. The first description, author, timestamp,
 quote and mentions remain; stale positions do not replace newer ones. Such live
 updates emit no new webhook. A distinct key is archived as its own row, including
 a later sample received without the original: no guessed relationship drops data.
-History replays use the same key policy and retain newer positions when the initial
-sample arrives afterwards. Phone behaviour is unverified; these shapes are proven
+History from the account's own phone uses the same key policy and retains newer
+positions when the initial sample arrives afterwards. Peer history bundles never
+update an existing position. Phone behaviour is unverified; these shapes are proven
 with synthetic live events and history payloads, not a paired phone.
 
 <a id="mentions-of-you"></a>**Mentions of you.** WhatsApp records an @-mention as
@@ -795,7 +796,13 @@ Two caveats worth knowing:
   [`list_unanswered(include_group_mentions=True)`](#list_unanswered), which only
   keeps mentions newer than your own last word in the chat.
 
-**Shared locations read as text.** A location has no file, so it is stored as a message whose `content` is the place and `media_type` is empty: `📍 Padaria Estrela — Rua das Flores, 10 (-23.550520, -46.633308)`, followed by ` — <url>` and ` — <comment>` when the sender attached them. With no name or address the coordinates stand alone (`📍 (48.858400, 2.294500)`). A live location reads `📍 Live location (-22.906800, -43.172900) — <caption>` and records where the share *started*; later position updates are not tracked. Coordinates always carry six decimals and a `.` separator, whatever the machine's locale; a pair with a missing, non-numeric or out-of-range half is left out and the label alone is kept. `query` finds the place name, address or caption like any other text. Only the text is kept: the map thumbnail is not stored, so `has_media` and `media_type` do not see a location.
+**Location text.** New locations retain a searchable place description alongside
+their typed `location` fields described above. Coordinates in `content` use six
+decimals and a `.` separator; an invalid or incomplete coordinate pair is omitted.
+`query` finds names, addresses and captions. The original description remains
+when a live share's position changes. Rows archived before typed locations retain
+only their original text and empty media type; no ambiguous text is parsed for a
+backfill. Neither version has a downloadable map thumbnail or other media file.
 
 **Other message kinds.** The bridge stores these in `content`, so text searches
 find their labels and the fields the sender supplied; a sparse envelope still

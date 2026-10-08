@@ -127,10 +127,12 @@ func TestHistoryShareEncryptedHTTPToCanonicalSQLite(t *testing.T) {
 				msg := buildTextMessage(types.NewJID("120363000000000001", types.GroupServer), phonePN, types.EmptyJID, types.EmptyJID, false, "")
 				msg.Message = message
 				b.handleMessage(msg)
+				waitHistoryShares(t, b)
 			} else {
 				outer := shareHistoryFixture(1)
 				outer.Data.Conversations[0].Messages[0].Message.Message = message
 				b.handleHistorySync(outer)
+				waitHistoryShares(t, b)
 			}
 			var rows, indexed int
 			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil {
@@ -233,6 +235,7 @@ func TestHistoryShareNoticeAndNestedBundleDoNotDownload(t *testing.T) {
 	}
 	bundle, requests := encryptedShareServer(t, b, compressShare(t, plain), "")
 	b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, "120363000000000001@g.us", "SHARE", false)
+	waitHistoryShares(t, b)
 	if requests.Load() != 1 || b.metrics.groupHistoryShares.Load() != 3 || strings.Count(rec.String(), "Group history") != 3 {
 		t.Fatalf("nested download/recognition: HTTP=%d shares=%d logs=%s", requests.Load(), b.metrics.groupHistoryShares.Load(), rec.String())
 	}
@@ -289,60 +292,6 @@ func TestHistoryShareHTTPDownloadCancelledAndTemporaryFileRemoved(t *testing.T) 
 	}
 }
 
-func TestHistoryShareIndependentImportsSerialiseAndShutdownStopsWaiter(t *testing.T) {
-	for _, shutdown := range []bool{false, true} {
-		t.Run(map[bool]string{false: "independent shares both imported", true: "waiting share cancelled"}[shutdown], func(t *testing.T) {
-			ms := newTestMessageStore(t)
-			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
-			plain, err := proto.Marshal(shareHistoryFixture(1).Data)
-			if err != nil {
-				t.Fatal(err)
-			}
-			compressed := compressShare(t, plain)
-			bundle := &waE2E.MessageHistoryBundle{DirectPath: proto.String("/secret"), MediaKey: bytes.Repeat([]byte{2}, 32), FileSHA256: bytes.Repeat([]byte{3}, 32), FileEncSHA256: bytes.Repeat([]byte{4}, 32)}
-			// Hold the sole import slot before starting both existing callers.
-			b.historyShareInit.Do(func() { b.historyShareGate = make(chan struct{}, 1) })
-			b.historyShareGate <- struct{}{}
-			var calls, active atomic.Int32
-			b.historyShareDownload = func(_ context.Context, _ *waE2E.HistorySyncNotification, file whatsmeow.File) error {
-				if active.Add(1) != 1 {
-					t.Error("independent imports overlapped")
-				}
-				defer active.Add(-1)
-				calls.Add(1)
-				_, err := file.Write(compressed)
-				return err
-			}
-			done := make(chan struct{}, 2)
-			for range 2 {
-				go func() {
-					b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, "120363000000000001@g.us", "SHARE", false)
-					done <- struct{}{}
-				}()
-			}
-			if shutdown {
-				b.cancel()
-			} else {
-				<-b.historyShareGate
-			}
-			for range 2 {
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					t.Fatal("share caller did not finish")
-				}
-			}
-			want := int32(2)
-			if shutdown {
-				want = 0
-			}
-			if calls.Load() != want {
-				t.Fatalf("downloads=%d want=%d", calls.Load(), want)
-			}
-		})
-	}
-}
-
 func TestHistoryShareRecognitionPrecedesChatFailure(t *testing.T) {
 	ms := newTestMessageStore(t)
 	if _, err := ms.db.Exec("CREATE TRIGGER fail_chat BEFORE INSERT ON chats BEGIN SELECT RAISE(ABORT,'chat denied'); END"); err != nil {
@@ -353,6 +302,7 @@ func TestHistoryShareRecognitionPrecedesChatFailure(t *testing.T) {
 	fixture := shareHistoryFixture(2)
 	fixture.Data.Conversations[0].Messages[0].Message.Message = &waE2E.Message{MessageHistoryNotice: &waE2E.MessageHistoryNotice{}}
 	b.handleHistorySync(fixture)
+	waitHistoryShares(t, b)
 	if b.metrics.groupHistoryShares.Load() != 1 || b.metrics.storeFailures.Load() != 1 || strings.Count(rec.String(), "Group history notice seen") != 1 {
 		t.Fatalf("recognition or ordinary row failure accounting lost: shares=%d failures=%d logs=%s", b.metrics.groupHistoryShares.Load(), b.metrics.storeFailures.Load(), rec.String())
 	}

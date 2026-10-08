@@ -122,7 +122,11 @@ func TestReplyRESTWireStoredPreview(t *testing.T) {
 					t.Fatal(err)
 				}
 				ctx := sharedContextInfo(m)
-				if ctx == nil || ctx.Participant != nil || ctx.GetStanzaID() != "QPRE" || ctx.GetExpiration() != 86400 || len(ctx.GetMentionedJID()) != 1 || ctx.GetMentionedJID()[0] != phoneLID.String() {
+				wantAuthor := phonePN.String()
+				if kind == "missing" || kind == "other-chat" {
+					wantAuthor = ""
+				}
+				if ctx == nil || ctx.GetParticipant() != wantAuthor || (wantAuthor == "" && ctx.Participant != nil) || ctx.GetStanzaID() != "QPRE" || ctx.GetExpiration() != 86400 || len(ctx.GetMentionedJID()) != 1 || ctx.GetMentionedJID()[0] != phoneLID.String() {
 					t.Fatalf("wire context=%v", ctx)
 				}
 				quoted := ctx.GetQuotedMessage()
@@ -175,6 +179,116 @@ func TestReplyRESTWireStoredPreview(t *testing.T) {
 	}
 }
 
+func TestReplyRESTWireStoredAuthor(t *testing.T) {
+	for _, tc := range []struct {
+		name, sender, explicit, want        string
+		mapped, own, full, foreign, missing bool
+	}{
+		{name: "PN", sender: phonePN.String(), want: phonePN.String()},
+		{name: "PN mapped stays PN", sender: phonePN.String(), mapped: true, want: phonePN.String()},
+		{name: "LID mapped", sender: phoneLID.String(), mapped: true, want: phonePN.String()},
+		{name: "LID unmapped", sender: phoneLID.String(), want: phoneLID.String()},
+		{name: "own overrides stored peer", sender: phoneLID.String(), own: true, mapped: true, want: phonePN.String()},
+		{name: "own without stored sender", own: true, want: phonePN.String()},
+		{name: "unknown sender"},
+		{name: "unknown bare namespace", sender: phoneLID.User},
+		{name: "full LID legacy", sender: phoneLID.String(), full: true, want: phoneLID.String()},
+		{name: "full PN legacy", sender: phonePN.String(), full: true, want: phonePN.String()},
+		{name: "full other namespace", sender: outboundReplyGroup.String(), full: true, want: outboundReplyGroup.String()},
+		{name: "other chat", sender: phoneLID.String(), mapped: true, foreign: true},
+		{name: "missing row", missing: true},
+		{name: "explicit PN upgrades", sender: phoneLID.String(), mapped: true, explicit: phonePN.User, want: phoneLID.String()},
+		{name: "explicit LID preserved", sender: phonePN.String(), mapped: true, explicit: phoneLID.String(), want: phoneLID.String()},
+		{name: "invalid explicit stays omitted", sender: phonePN.String(), explicit: "1.2.3@s.whatsapp.net"},
+	} {
+		for _, outgoing := range []string{"text", "image"} {
+			t.Run(tc.name+"/"+outgoing, func(t *testing.T) {
+				lids := &mockLIDStore{}
+				if tc.mapped {
+					lids.pnByLID = map[types.JID]types.JID{phoneLID: phonePN}
+					lids.lidByPN = map[types.JID]types.JID{phonePN: phoneLID}
+				}
+				b := replyTestBridge(t, lids)
+				b.Client.Store.ID.Device = 7
+				chat := outboundReplyGroup.String()
+				quoteChat := chat
+				if tc.foreign {
+					quoteChat = phonePN.String()
+				}
+				if !tc.missing {
+					if err := b.Store.StoreMessage("QAUTHOR", quoteChat, tc.sender, "private stored text", time.Now(), tc.own, "", "", "", nil, nil, nil, nil, ""); err != nil {
+						t.Fatal(err)
+					}
+					if tc.full {
+						if _, err := b.Store.db.Exec("UPDATE messages SET sender = ?, sender_server = NULL WHERE id = ? AND chat_jid = ?", tc.sender, "QAUTHOR", quoteChat); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				path := ""
+				if outgoing == "image" {
+					path = filepath.Join(t.TempDir(), "sample.png")
+					if err := os.WriteFile(path, []byte("fake image"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					b.MediaRoots = []string{filepath.Dir(path)}
+				}
+				var wire []byte
+				b.uploadMedia = func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
+					return testUpload(), nil
+				}
+				b.sendMessage = func(_ context.Context, _ types.JID, message *waE2E.Message) (whatsmeow.SendResponse, error) {
+					var err error
+					wire, err = proto.Marshal(message)
+					return whatsmeow.SendResponse{ID: "REPLYAUTHOR", Timestamp: time.Now()}, err
+				}
+				handlerDone := make(chan struct{})
+				mux := b.newRESTMux(8080, sendRecipientToken)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { defer close(handlerDone); mux.ServeHTTP(w, r) }))
+				defer srv.Close()
+				body, err := json.Marshal(SendMessageRequest{Recipient: chat, Message: "reply", MediaPath: path, QuotedMessageID: "QAUTHOR", QuotedSenderJID: tc.explicit, QuotedContent: "caller fallback"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/send", bytes.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Authorization", "Bearer "+sendRecipientToken)
+				req.Host = "localhost:8080"
+				resp, err := srv.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+				responseBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				<-handlerDone
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("HTTP %d: %s", resp.StatusCode, responseBody)
+				}
+				m := &waE2E.Message{}
+				if err := proto.Unmarshal(wire, m); err != nil {
+					t.Fatal(err)
+				}
+				ctx := sharedContextInfo(m)
+				if ctx == nil || ctx.GetParticipant() != tc.want || (tc.want == "" && ctx.Participant != nil) || ctx.GetStanzaID() != "QAUTHOR" {
+					t.Fatalf("wire author=%v, want %q", ctx, tc.want)
+				}
+				wantPreview := "private stored text"
+				if tc.foreign || tc.missing {
+					wantPreview = "caller fallback"
+				}
+				if ctx.GetQuotedMessage().GetConversation() != wantPreview {
+					t.Errorf("wire preview=%v, want %q", ctx.GetQuotedMessage(), wantPreview)
+				}
+			})
+		}
+	}
+}
+
 type cancelReplyLIDs struct {
 	*mockLIDStore
 	blockPN, blockLID types.JID
@@ -205,7 +319,7 @@ func (l *cancelReplyLIDs) GetPNForLID(ctx context.Context, lid types.JID) (types
 }
 
 func TestReplyHTTPDisconnectCancelsLIDLookupsBeforeUpload(t *testing.T) {
-	for _, phase := range []string{"quote", "mention", "recipient", "recipient-send", "settings"} {
+	for _, phase := range []string{"quote", "stored-author", "mention", "recipient", "recipient-send", "settings"} {
 		t.Run(phase, func(t *testing.T) {
 			lids := &cancelReplyLIDs{mockLIDStore: &mockLIDStore{}, entered: make(chan context.Context, 1)}
 			b := replyTestBridge(t, lids)
@@ -227,6 +341,11 @@ func TestReplyHTTPDisconnectCancelsLIDLookupsBeforeUpload(t *testing.T) {
 			switch phase {
 			case "quote":
 				payload.QuotedMessageID, payload.QuotedSenderJID, lids.blockPN = "Q1", phonePN.String(), phonePN
+			case "stored-author":
+				payload.QuotedMessageID, lids.blockLID = "Q1", phoneLID
+				if err := b.Store.StoreMessage("Q1", payload.Recipient, phoneLID.String(), "original", time.Now(), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+					t.Fatal(err)
+				}
 			case "mention":
 				payload.Mentions, lids.blockPN = []string{phonePN.String()}, phonePN
 			case "recipient":
@@ -276,6 +395,13 @@ func TestReplyHTTPDisconnectCancelsLIDLookupsBeforeUpload(t *testing.T) {
 			}
 			if uploads.Load() != 0 || sends.Load() != 0 {
 				t.Errorf("side effects after cancellation: upload=%d send=%d", uploads.Load(), sends.Load())
+			}
+			wantRows := 0
+			if phase == "stored-author" {
+				wantRows = 1
+			}
+			if rows := queryMessageCount(b.Store, payload.Recipient); rows != wantRows {
+				t.Errorf("messages after cancellation=%d, want unchanged count %d", rows, wantRows)
 			}
 		})
 	}

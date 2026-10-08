@@ -453,7 +453,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	if err != nil {
 		return false, err.Error(), sentMessage{}
 	}
-	quote.preview, err = messageStore.outboundQuotePreview(ctx, chatJID.String(), quotedMsgID)
+	quote, err = messageStore.loadOutboundQuote(ctx, client, chatJID.String(), quote, quotedSenderJID == "")
 	if err != nil {
 		return false, fmt.Sprintf("Error loading quoted message: %v", err), sentMessage{}
 	}

@@ -106,6 +106,7 @@ func TestHistoryShareOverlapPreservesAuthoritativeRows(t *testing.T) {
 						event.Message = message
 						b.handleMessage(event)
 					}
+					waitHistoryShares(t, b)
 					after := shareArchiveSnapshot(t, ms, "H0", chat)
 					if before == "" || after != before {
 						t.Errorf("peer overwrote authoritative row: before=%s after=%s", before, after)
@@ -174,6 +175,7 @@ func TestHistoryShareLocationPolicyAcrossChunks(t *testing.T) {
 			event := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "")
 			event.Message = &waE2E.Message{MessageHistoryBundle: bundle}
 			b.handleMessage(event)
+			waitHistoryShares(t, b)
 			var content, raw string
 			var stamp, activity time.Time
 			var count int
@@ -190,8 +192,12 @@ func TestHistoryShareLocationPolicyAcrossChunks(t *testing.T) {
 			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count); err != nil {
 				t.Fatal(err)
 			}
-			if count != historyBatchMessages || !stamp.Equal(time.Unix(initialTime, 0)) || !activity.Equal(stamp) || position.Latitude == nil || *position.Latitude != 0.8 || position.Sequence == nil || *position.Sequence != 3 || position.Comment != "Original location" || !strings.Contains(content, "Original location") || requests.Load() != 1 {
-				t.Fatalf("shared samples lost canonical position/origin: count=%d content=%q stamp=%v activity=%v position=%s HTTP=%d", count, content, stamp, activity, raw, requests.Load())
+			wantTime, wantLatitude, wantSequence, wantComment := int64(initialTime+60), 0.8, int64(3), "Later location"
+			if existing {
+				wantTime, wantLatitude, wantSequence, wantComment = initialTime, 0.25, 0, "Original location"
+			}
+			if count != historyBatchMessages || !stamp.Equal(time.Unix(wantTime, 0)) || !activity.Equal(stamp) || position.Latitude == nil || *position.Latitude != wantLatitude || position.Sequence == nil || *position.Sequence != wantSequence || position.Comment != wantComment || !strings.Contains(content, wantComment) || requests.Load() != 1 {
+				t.Fatalf("peer changed an existing position/origin: count=%d content=%q stamp=%v activity=%v position=%s HTTP=%d", count, content, stamp, activity, raw, requests.Load())
 			}
 		})
 	}
@@ -208,7 +214,7 @@ func TestHistoryShareInterveningAuthority(t *testing.T) {
 			fixture := shareHistoryFixture(historyBatchMessages + 1)
 			for _, row := range fixture.Data.Conversations[0].Messages {
 				row.Message.MessageTimestamp = proto.Uint64(1600000000)
-				row.Message.Participant = proto.String(self.String())
+				row.Message.Participant = proto.String(phonePN.String())
 			}
 			overlap := fixture.Data.Conversations[0].Messages[historyBatchMessages].Message
 			overlap.Key.ID, overlap.MessageTimestamp = proto.String("H0"), proto.Uint64(1900000000)
@@ -231,6 +237,9 @@ func TestHistoryShareInterveningAuthority(t *testing.T) {
 						own.Data.Conversations[0].Messages[0].Message.Message = message
 						b.handleHistorySync(own)
 					case "edit":
+						event := buildTextMessage(chat, self, types.EmptyJID, types.EmptyJID, true, "")
+						event.Info.ID, event.Info.Timestamp, event.Message = "H0", time.Unix(1700000000, 0), message
+						b.handleMessage(event)
 						calls := 0
 						handler := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) error { calls++; return nil }, chatPolicy{}, b.storeLive)
 						rec := httptest.NewRecorder()
@@ -251,6 +260,7 @@ func TestHistoryShareInterveningAuthority(t *testing.T) {
 			event := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "")
 			event.Message = &waE2E.Message{MessageHistoryBundle: bundle}
 			b.handleMessage(event)
+			waitHistoryShares(t, b)
 			after := shareArchiveSnapshot(t, ms, "H0", chat.String())
 			if before == "" || before != after {
 				t.Errorf("peer overwrote intervening %s: before=%s after=%s", authority, before, after)

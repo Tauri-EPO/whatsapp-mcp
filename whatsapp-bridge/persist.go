@@ -26,7 +26,7 @@ type messageWriter interface {
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
-	UpdateLiveLocation(id, chat string, p *messageLocation) (bool, error)
+	UpdateLiveLocation(id, chat, sender string, fromMe bool, p *messageLocation) (bool, error)
 }
 
 // extractedMessage is the storable view of a waE2E.Message.
@@ -107,9 +107,23 @@ func (e extractedMessage) empty() bool { return e.content == "" && e.mediaType =
 // persistMessage writes the row plus its poll and view-once side tables.
 // Every failure reaches the retry owner. Live and history callers use a batch
 // so a failed auxiliary write cannot leave a partially committed message.
-func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, _ waLog.Logger) error {
-	if matched, err := w.UpdateLiveLocation(id, chatJID, e.location); err != nil || matched {
-		return err
+func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, logger waLog.Logger) error {
+	_, err := persistMessageResult(w, id, chatJID, sender, ts, fromMe, e, quoted, logger)
+	return err
+}
+
+// consumed means a position update or refused collision: live callers must
+// suppress activity, webhooks and automatic media work for this event.
+func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, logger waLog.Logger) (consumed bool, err error) {
+	if store, ok := w.(*MessageStore); ok && e.location != nil && e.location.Live {
+		err = store.Batch(func(batch *messageBatch) error {
+			consumed, err = persistMessageResult(batch, id, chatJID, sender, ts, fromMe, e, quoted, logger)
+			return err
+		})
+		return consumed, err
+	}
+	if matched, err := w.UpdateLiveLocation(id, chatJID, sender, fromMe, e.location); err != nil || matched {
+		return matched, err
 	}
 	quotedID := ""
 	if quoted {
@@ -121,25 +135,25 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
 		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location}); err != nil {
-		return err
+		return false, err
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of
 	// messages carry any, and the write then costs nothing on the rest
 	// (mentions.go).
 	if mentions := mentionsColumn(e.mentions); mentions != "" {
 		if err := w.SetMentions(id, chatJID, mentions); err != nil {
-			return fmt.Errorf("mentions: %w", err)
+			return false, fmt.Errorf("mentions: %w", err)
 		}
 	}
 	if e.poll != nil {
 		if err := w.StorePoll(id, chatJID, e.poll, ts); err != nil {
-			return fmt.Errorf("poll metadata: %w", err)
+			return false, fmt.Errorf("poll metadata: %w", err)
 		}
 	}
 	if e.viewOnce {
 		if err := w.MarkViewOnce(id, chatJID); err != nil {
-			return fmt.Errorf("view-once: %w", err)
+			return false, fmt.Errorf("view-once: %w", err)
 		}
 	}
-	return nil
+	return false, nil
 }

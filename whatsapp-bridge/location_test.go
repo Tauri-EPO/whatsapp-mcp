@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,193 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
+
+func locationRowSnapshot(t *testing.T, ms *MessageStore, id, chat string) string {
+	t.Helper()
+	rows, err := ms.db.Query("SELECT * FROM messages WHERE id=? AND chat_jid=?", id, chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	columns, err := rows.Columns()
+	if err != nil || !rows.Next() {
+		t.Fatalf("missing row: %v", err)
+	}
+	values, pointers := make([]any, len(columns)), make([]any, len(columns))
+	for i := range values {
+		pointers[i] = &values[i]
+	}
+	if err := rows.Scan(pointers...); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprint(values)
+}
+
+func livePosition(sequence int64, latitude float64) *waE2E.Message {
+	return &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{
+		SequenceNumber: proto.Int64(sequence), DegreesLatitude: proto.Float64(latitude), DegreesLongitude: proto.Float64(0.5), Caption: proto.String("original"),
+		ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("QUOTE"), MentionedJID: []string{phonePN.String()}},
+	}}
+}
+
+func TestLiveLocationAuthorCollisions(t *testing.T) {
+	for _, path := range []string{"live", "persist", "batch"} {
+		for _, kind := range []string{"live", "static", "text", "image"} {
+			for _, author := range []string{"sender", "namespace", "from-me", "unknown-namespace"} {
+				for _, sequence := range []int64{0, 3} {
+					t.Run(fmt.Sprintf("%s/%s/%s/seq%d", path, kind, author, sequence), func(t *testing.T) {
+						t.Setenv(storeDirEnv, t.TempDir())
+						ms, err := NewMessageStore()
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() { _ = ms.Close() })
+						chat := types.NewJID("120363000000000001", types.GroupServer)
+						stamp := time.Unix(1772359200, 0)
+						if err := ms.StoreChat(chat.String(), "group", stamp); err != nil {
+							t.Fatal(err)
+						}
+						original := livePosition(0, 0.25)
+						switch kind {
+						case "static":
+							original = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.25), DegreesLongitude: proto.Float64(0.5)}}
+						case "text":
+							original = &waE2E.Message{Conversation: proto.String("preserve me")}
+						case "image":
+							original = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Caption: proto.String("preserve image"), URL: proto.String("https://example.test/image"), MediaKey: []byte{1}, FileSHA256: []byte{2}, FileEncSHA256: []byte{3}, FileLength: proto.Uint64(9)}}
+						}
+						if err := persistMessage(ms, "KNOWN", chat.String(), phonePN.String(), stamp, false, extractMessage(original, stamp, "KNOWN"), true, testLogger()); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := ms.db.Exec("UPDATE messages SET deleted_at=?, view_once=1, target_message_id='TARGET' WHERE id='KNOWN'", dbTime(stamp)); err != nil {
+							t.Fatal(err)
+						}
+						if author == "unknown-namespace" {
+							if _, err := ms.db.Exec("UPDATE messages SET sender_server=NULL WHERE id='KNOWN'"); err != nil {
+								t.Fatal(err)
+							}
+						}
+						before := locationRowSnapshot(t, ms, "KNOWN", chat.String())
+						b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+						b.MediaAutoDownload, b.MediaMaxBytes = true, 0
+						// No worker drains this queue: even transient submissions are observed.
+						b.autoDownloads = newMediaJobQueue(b.ctx, 0, 8, func(context.Context, mediaJob) { t.Error("unexpected worker") })
+						srv, posts, _ := contentKindsWebhook(t)
+						b.Webhook = newWebhookSender("", true)
+						b.Webhook.url = srv.URL
+						sender, fromMe := phonePN, false
+						switch author {
+						case "sender":
+							sender = types.NewJID("5511888888888", types.DefaultUserServer)
+						case "namespace":
+							sender = types.NewJID(phonePN.User, types.HiddenUserServer)
+						case "from-me":
+							fromMe = true
+						}
+						incoming := livePosition(sequence, 0.9)
+						// A hostile mixed envelope would exercise automatic media effects
+						// if it escaped the collision gate.
+						incoming.ImageMessage = &waE2E.ImageMessage{Caption: proto.String("incoming caption"), URL: proto.String("https://example.test/new"), MediaKey: []byte{4}, FileSHA256: []byte{5}, FileEncSHA256: []byte{6}, FileLength: proto.Uint64(9)}
+						feed := func(id string) {
+							if path == "live" {
+								event := buildTextMessage(chat, sender, types.EmptyJID, types.EmptyJID, fromMe, "")
+								event.Info.ID, event.Info.Timestamp, event.Message = id, stamp.Add(time.Minute), incoming
+								b.handleMessage(event)
+							} else {
+								write := func(w messageWriter) error {
+									return persistMessage(w, id, chat.String(), sender.String(), stamp.Add(time.Minute), fromMe, extractMessage(incoming, stamp, id), true, testLogger())
+								}
+								var err error
+								if path == "batch" {
+									err = ms.Batch(func(w *messageBatch) error { return write(w) })
+								} else {
+									err = write(ms)
+								}
+								if err != nil {
+									t.Fatal(err)
+								}
+							}
+						}
+						feed("KNOWN")
+						if after := locationRowSnapshot(t, ms, "KNOWN", chat.String()); after != before {
+							t.Fatalf("collision replaced row:\nbefore %s\nafter  %s", before, after)
+						}
+						var activity time.Time
+						if err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid=?", chat.String()).Scan(&activity); err != nil || !activity.Equal(stamp) {
+							t.Fatalf("collision became activity: %v %v", activity, err)
+						}
+						if posts.Load() != 0 || b.autoDownloads.queued() != 0 || b.metrics.messagesStored.Load() != 0 {
+							t.Fatalf("collision emitted effects: posts=%d jobs=%d stored=%d", posts.Load(), b.autoDownloads.queued(), b.metrics.messagesStored.Load())
+						}
+						feed("DISTINCT")
+						locationRowSnapshot(t, ms, "DISTINCT", chat.String())
+						if path == "live" && (posts.Load() != 1 || b.autoDownloads.queued() != 1 || b.metrics.messagesStored.Load() != 1) {
+							t.Fatalf("distinct-key control did not emit effects: posts=%d jobs=%d stored=%d", posts.Load(), b.autoDownloads.queued(), b.metrics.messagesStored.Load())
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestLiveLocationConcurrentAuthorClaim(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms, err := NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ms.Close() }()
+	chat, stamp := phonePN.String(), time.Unix(1772359200, 0)
+	if err := ms.EnsureChat(chat, "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range 12 {
+		wg.Go(func() {
+			<-start
+			sender, latitude := phonePN.String(), 0.25
+			if i%2 != 0 {
+				sender, latitude = phonePN.User+"@lid", 0.75
+			}
+			if err := persistMessage(ms, "RACE", chat, sender, stamp, false, extractMessage(livePosition(1, latitude), stamp, "RACE"), true, testLogger()); err != nil {
+				t.Errorf("concurrent persist: %v", err)
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	var server string
+	var latitude float64
+	if err := ms.db.QueryRow("SELECT sender_server, json_extract(location,'$.latitude') FROM messages WHERE id='RACE'").Scan(&server, &latitude); err != nil {
+		t.Fatal(err)
+	}
+	want := 0.25
+	if server == types.HiddenUserServer {
+		want = 0.75
+	}
+	if latitude != want {
+		t.Fatalf("position crossed winning author namespace: %s %v", server, latitude)
+	}
+	before := locationRowSnapshot(t, ms, "RACE", chat)
+	loser := types.HiddenUserServer
+	if server == loser {
+		loser = types.DefaultUserServer
+	}
+	if err := persistMessage(ms, "RACE", chat, phonePN.User+"@"+loser, stamp.Add(time.Minute), false, extractMessage(livePosition(99, 0.9), stamp, "RACE"), true, testLogger()); err != nil {
+		t.Fatal(err)
+	}
+	if after := locationRowSnapshot(t, ms, "RACE", chat); after != before {
+		t.Fatal("losing author overwrote winner")
+	}
+	if err := persistMessage(ms, "RACE", chat, phonePN.User+"@"+server, stamp.Add(time.Minute), false, extractMessage(livePosition(2, 0.4), stamp, "RACE"), true, testLogger()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT json_extract(location,'$.latitude') FROM messages WHERE id='RACE'").Scan(&latitude); err != nil || latitude != 0.4 {
+		t.Fatalf("winning author cannot advance: %v %v", latitude, err)
+	}
+}
 
 func TestLiveLocationKeyPolicy(t *testing.T) {
 	for _, history := range []bool{false, true} {
@@ -235,6 +424,10 @@ func TestLocationLIDMigrationPreservesFieldsAndUpdates(t *testing.T) {
 		if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(path, testLogger()); err != nil {
 			t.Fatal(err)
 		}
+		// Startup migrates the author separately from the chat key (main.go).
+		if err := ms.MigrateLegacyLIDSendersToPhones(path, testLogger()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var raw, quote, mentions, target string
 	var deleted sql.NullTime
@@ -245,7 +438,7 @@ func TestLocationLIDMigrationPreservesFieldsAndUpdates(t *testing.T) {
 	if raw != original || quote != "Q1" || mentions != phonePN.User || !deleted.Valid || !deleted.Time.Equal(stamp) || !viewOnce || target != "TARGET" {
 		t.Fatalf("migration dropped metadata: %q %q %q %v %v %q", raw, quote, mentions, deleted, viewOnce, target)
 	}
-	if matched, err := ms.UpdateLiveLocation("LOCATION", "222@s.whatsapp.net", &messageLocation{Live: true, Latitude: proto.Float64(0.75), Longitude: proto.Float64(0.5), Sequence: proto.Int64(1)}); err != nil || !matched {
+	if matched, err := ms.UpdateLiveLocation("LOCATION", "222@s.whatsapp.net", "222@s.whatsapp.net", false, &messageLocation{Live: true, Latitude: proto.Float64(0.75), Longitude: proto.Float64(0.5), Sequence: proto.Int64(1)}); err != nil || !matched {
 		t.Fatalf("migrated live key no longer updates: %v %v", matched, err)
 	}
 	var lat float64

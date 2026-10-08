@@ -38,6 +38,7 @@ func TestHistorySharePreservesOwnReadAndEphemeralState(t *testing.T) {
 			conv.Name = proto.String("Peer-owned name")
 			if route == "own phone history" {
 				b.handleHistorySync(fixture)
+				waitHistoryShares(t, b)
 			} else {
 				plain, err := proto.Marshal(fixture.Data)
 				if err != nil {
@@ -49,10 +50,12 @@ func TestHistorySharePreservesOwnReadAndEphemeralState(t *testing.T) {
 					event := buildTextMessage(types.NewJID("120363000000000001", types.GroupServer), phonePN, types.EmptyJID, types.EmptyJID, false, "")
 					event.Message = message
 					b.handleMessage(event)
+					waitHistoryShares(t, b)
 				} else {
 					outer := shareHistoryFixture(1)
 					outer.Data.Conversations[0].Messages[0].Message.Message = message
 					b.handleHistorySync(outer)
+					waitHistoryShares(t, b)
 				}
 				if requests.Load() != 1 {
 					t.Fatalf("SDK HTTP downloads=%d", requests.Load())

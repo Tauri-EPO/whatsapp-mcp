@@ -175,9 +175,13 @@ Recognition alone does not prove import: a notice has no downloadable bundle.
 Check the subsequent history-sync summary and the oldest stored message with
 `list_messages(chat_jid=…, sort_by="oldest", limit=1)`. A failed download,
 integrity check or decode produces a generic warning; paths, keys and receiver
-lists stay out of the bridge's share diagnostic. Imports are serialised and
-cancelled during shutdown, with a two-minute download/decode budget, a 16 MiB
-compressed limit and a 64 MiB inflated limit. Nested share messages are counted
+lists stay out of the bridge's share diagnostic. Imports run in the background,
+one at a time with at most one waiting job, and are cancelled during shutdown.
+Each job has a two-minute budget, a 16 MiB compressed limit, a 4 MiB inflated
+limit and a 5,000-message limit checked before allocating the decoded protobuf.
+Oversized bundles and jobs refused by the queue produce a warning and no rows.
+Own-phone history rows are written before their share bundles are queued.
+Nested share messages are counted
 and logged but their bundles are not followed. Regular history chunk retries
 and store-failure accounting still apply after decoding. Only a group origin is
 accepted; every conversation and any explicit message chat key must match that
@@ -186,15 +190,14 @@ when its encryption and hashes are valid. The bundle imports group identity and
 messages only; its sender's read state, disappearing-message settings and other
 conversation metadata do not override this account's state. Ordinary history
 sync from the account's own phone still updates those fields. A shared row's
-`FromMe` flag belongs to the exporting participant, so the bridge resolves its
-original participant and recalculates ownership relative to the receiving
-account. Missing/invalid participant metadata never proves own-message status.
-Shared copies do
-not overwrite rows already archived from live delivery or the account's own
-phone, including a row arriving while the bundle is being decoded. The existing
-exact-key live-location policy updates position fields only. A bundle's own new
-rows may merge within that import; chat activity uses their committed stored
-timestamps, not an overlapping copy's timestamp.
+`FromMe` flag belongs to the exporting participant and is never trusted. Rows
+attributed to the receiving account's phone number or LID are skipped and counted
+in the import summary; genuine own messages arrive through live delivery or the
+account's own phone history. Missing/invalid participants remain inbound with
+unknown attribution. Peer poll updates are ignored. Shared copies never overwrite
+any existing row, including a position or a duplicate key in the same bundle.
+Chat activity uses newly committed stored timestamps, not an overlapping copy's
+timestamp.
 
 WhatsApp controls whether a share reaches this linked device; this path has
 synthetic encrypted HTTP test coverage, not a paired-phone guarantee. If the

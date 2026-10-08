@@ -206,9 +206,11 @@ type Bridge struct {
 	historyVotes sync.WaitGroup
 	// historyBatchWriter replaces the transaction runner in controlled tests.
 	historyBatchWriter func(func(*messageBatch) error) error
-	// One synchronous share import at a time; nested shares are recognised only.
-	historyShareGate chan struct{}
-	historyShareInit sync.Once
+	// Peer history has a separate one-worker, one-waiting-job budget.
+	historyShareMu         sync.Mutex
+	historyShares          *historyShareQueue
+	historyShareStopped    bool
+	historyShareJobTimeout time.Duration
 	// nil uses the SDK; tests bypass paired media-connection discovery only.
 	historyShareDownload func(context.Context, *waE2E.HistorySyncNotification, whatsmeow.File) error
 	// httpServer is the REST listener, kept so Shutdown can drain it (rest.go).
@@ -317,6 +319,15 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.cancel()
 	b.stopConnectionEvents()
+	// Seal submission and join peer imports before main may close the store.
+	// The job deadline and cancelled SDK context bound this independent worker.
+	b.historyShareMu.Lock()
+	b.historyShareStopped = true
+	shares := b.historyShares
+	b.historyShareMu.Unlock()
+	if shares != nil {
+		shares.stop()
+	}
 	done := make(chan struct{})
 	go func() {
 		b.historyVotes.Wait()

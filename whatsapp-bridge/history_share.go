@@ -19,7 +19,7 @@ import (
 
 const (
 	historyShareCompressedLimit = 16 << 20
-	historyShareInflatedLimit   = 64 << 20
+	historyShareInflatedLimit   = 4 << 20
 	historyShareTimeout         = 2 * time.Minute
 )
 
@@ -56,38 +56,82 @@ func (b *Bridge) processHistoryShare(msg *waE2E.Message, chat, id string, fromMe
 	b.metrics.groupHistoryShares.Add(1)
 	b.Log.Infof("Group history %s seen in %s (message %s, from_me=%t): %s; shared history recognised",
 		kind, chat, id, fromMe, describeSharedGroupHistory(meta))
-	if kind != "bundle" || !download || b.ctx.Err() != nil {
+	if kind != "bundle" || !download {
 		return
 	}
+	b.queueHistoryShare(msg.GetMessageHistoryBundle(), chat)
+}
+
+// Own-phone history calls this only after its rows have been persisted. Nested
+// bundles use recognition only and never reach this queue-only pass.
+func (b *Bridge) queueHistoryShares(data *waHistorySync.HistorySync) {
+	for _, conversation := range data.GetConversations() {
+		for _, row := range conversation.GetMessages() {
+			info := row.GetMessage()
+			ex := extractMessage(info.GetMessage(), time.Time{}, info.GetKey().GetID())
+			if bundle := ex.inner.GetMessageHistoryBundle(); bundle != nil {
+				b.queueHistoryShare(bundle, conversation.GetID())
+			}
+		}
+	}
+}
+
+func (b *Bridge) queueHistoryShare(bundle *waE2E.MessageHistoryBundle, chat string) {
 	if !historyShareGroupOrigin(chat) {
 		b.Log.Warnf("Shared history import failed: originating group scope refused")
 		return
 	}
-	ctx, cancel := context.WithTimeout(b.ctx, historyShareTimeout)
-	defer cancel()
-	// Callers wait in their existing event path; no extra goroutines or queues.
-	// Nested bundles are recognised above with download=false, so cannot deadlock.
-	b.historyShareInit.Do(func() { b.historyShareGate = make(chan struct{}, 1) })
-	select {
-	case b.historyShareGate <- struct{}{}:
-		defer func() { <-b.historyShareGate }()
-	case <-ctx.Done():
+	if bundle == nil || len(bundle.GetDirectPath()) > 2048 || !strings.HasPrefix(bundle.GetDirectPath(), "/") || len(bundle.GetMediaKey()) != 32 || len(bundle.GetFileSHA256()) != 32 || len(bundle.GetFileEncSHA256()) != 32 {
+		b.Log.Warnf("Shared history import failed: incomplete or oversized credentials")
 		return
 	}
-	data, err := b.decodeHistoryShare(ctx, msg.GetMessageHistoryBundle(), historyShareCompressedLimit, historyShareInflatedLimit)
+	b.historyShareMu.Lock()
+	defer b.historyShareMu.Unlock()
+	if b.historyShareStopped || b.ctx.Err() != nil {
+		b.Log.Warnf("Shared history import failed: job cancelled")
+		return
+	}
+	if b.historyShares == nil {
+		b.historyShares = newHistoryShareQueue(b.ctx, b.runHistoryShare)
+	}
+	timeout := b.historyShareJobTimeout
+	if timeout == 0 {
+		timeout = historyShareTimeout
+	}
+	// Retain only the bounded download credentials, not the live event tree.
+	credentials := &waE2E.MessageHistoryBundle{
+		DirectPath:    proto.String(bundle.GetDirectPath()),
+		MediaKey:      append([]byte(nil), bundle.GetMediaKey()...),
+		FileSHA256:    append([]byte(nil), bundle.GetFileSHA256()...),
+		FileEncSHA256: append([]byte(nil), bundle.GetFileEncSHA256()...),
+	}
+	if !b.historyShares.submit(historyShareJob{bundle: credentials, chat: chat, deadline: time.Now().Add(timeout)}) {
+		b.Log.Warnf("Shared history import failed: queue full (one active, one waiting)")
+	}
+}
+
+func (b *Bridge) runHistoryShare(ctx context.Context, job historyShareJob) {
+	data, err := b.decodeHistoryShare(ctx, job.bundle, historyShareCompressedLimit, historyShareInflatedLimit)
 	if err != nil {
 		// SDK errors can contain CDN paths; neither errors nor payloads are logged.
 		b.Log.Warnf("Shared history import failed: download, validation or decoding refused")
 		return
 	}
-	if !historyShareMatchesGroup(data, chat) {
+	if !historyShareMatchesGroup(data, job.chat) {
 		b.Log.Warnf("Shared history import failed: conversation scope refused")
 		return
 	}
-	messages := b.historyShareMessages(ctx, data)
-	if ctx.Err() == nil && messages != nil {
-		b.handleHistorySyncWithShares(&events.HistorySync{Data: messages}, false, true)
+	messages, skipped, err := b.historyShareMessages(ctx, data)
+	if err != nil {
+		b.Log.Warnf("Shared history import failed: participant lookup or job cancellation")
+		return
 	}
+	b.handleHistorySyncWithSharesContext(ctx, &events.HistorySync{Data: messages}, false, true)
+	if ctx.Err() != nil {
+		b.Log.Warnf("Shared history import failed: job cancelled")
+		return
+	}
+	b.Log.Infof("Shared history import finished: skipped %d receiver-attributed rows", skipped)
 }
 
 // The sender supplies both the media key and hashes: integrity proves the
@@ -119,7 +163,7 @@ func historyShareMatchesGroup(data *waHistorySync.HistorySync, chat string) bool
 // A participant's bundle is message data, not our own phone's account state.
 // Keep an explicit allow-list so peer read markers, disappearing-message
 // settings and future conversation metadata never enter the phone importer.
-func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.HistorySync) *waHistorySync.HistorySync {
+func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.HistorySync) (*waHistorySync.HistorySync, int, error) {
 	phone, lid := clientIdentity(b.Client)(ctx)
 	if phone.Server == types.HostedServer {
 		phone.Server = types.DefaultUserServer
@@ -128,45 +172,74 @@ func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.H
 		lid.Server = types.HiddenUserServer
 	}
 	messages := &waHistorySync.HistorySync{SyncType: data.SyncType}
+	skipped := 0
+	// At most two participant keys per bounded row. Repeated senders reuse the
+	// context-bound map answer instead of performing thousands of SQLite reads.
+	alternates := make(map[types.JID]types.JID)
 	for _, conversation := range data.GetConversations() {
 		clean := &waHistorySync.Conversation{ID: conversation.ID}
 		for _, row := range conversation.GetMessages() {
 			if ctx.Err() != nil {
-				return nil
+				return nil, skipped, ctx.Err()
 			}
 			if row == nil || row.Message == nil {
 				clean.Messages = append(clean.Messages, row)
 				continue
 			}
-			copyRow := proto.Clone(row).(*waHistorySync.HistorySyncMsg)
-			info := copyRow.Message
+			// The decoder produced an exclusively owned tree. Rewrite attribution
+			// in place instead of doubling every peer-controlled proto allocation.
+			info := row.Message
 			if info.Key == nil {
 				info.Key = &waCommon.MessageKey{}
 			}
-			raw := info.GetParticipant()
-			if raw == "" {
-				raw = info.Key.GetParticipant()
-			}
-			sender, err := normalizedUserJID(raw)
-			if err == nil {
-				switch sender.Server {
-				case types.DefaultUserServer, types.HostedServer:
-					sender.Server = types.DefaultUserServer
-				case types.HiddenUserServer, types.HostedLIDServer:
-					sender.Server = types.HiddenUserServer
-				default:
-					sender = types.EmptyJID
-				}
-			} else {
-				sender = types.EmptyJID
-			}
-			if !sender.IsEmpty() {
-				// Reuse the context-bound PN/LID lookup; compare full namespaces,
-				// never bare user digits that could identify a different account.
-				sender, err = outboundLookupChatJID(ctx, b.Client, sender)
+			sender := types.EmptyJID
+			own := false
+			// Check both attribution fields: a conflicting alternate must not
+			// smuggle an owner identity into a row. Compare full namespaces.
+			for _, raw := range []string{info.GetParticipant(), info.Key.GetParticipant()} {
+				candidate, err := normalizedUserJID(raw)
 				if err != nil {
-					return nil
+					continue
 				}
+				candidate = candidate.ToNonAD()
+				switch candidate.Server {
+				case types.DefaultUserServer, types.HostedServer:
+					candidate.Server = types.DefaultUserServer
+				case types.HiddenUserServer, types.HostedLIDServer:
+					candidate.Server = types.HiddenUserServer
+				default:
+					continue
+				}
+				own = own || candidate == phone.ToNonAD() || candidate == lid.ToNonAD()
+				if !own {
+					alt, known := alternates[candidate]
+					if !known {
+						var err error
+						alt, err = lookupAltJID(ctx, b.Client, candidate)
+						if err != nil {
+							return nil, skipped, err
+						}
+						alt = alt.ToNonAD()
+						if alt.Server == types.HostedServer {
+							alt.Server = types.DefaultUserServer
+						} else if alt.Server == types.HostedLIDServer {
+							alt.Server = types.HiddenUserServer
+						}
+						alternates[candidate] = alt
+					}
+					own = !alt.IsEmpty() && (alt == phone.ToNonAD() || alt == lid.ToNonAD())
+					if candidate.Server == types.HiddenUserServer && !alt.IsEmpty() {
+						candidate = alt
+					}
+				}
+				own = own || candidate == phone.ToNonAD() || candidate == lid.ToNonAD()
+				if sender.IsEmpty() {
+					sender = candidate
+				}
+			}
+			if own {
+				skipped++
+				continue
 			}
 			participant := ""
 			if !sender.IsEmpty() {
@@ -175,12 +248,12 @@ func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.H
 			info.Participant, info.Key.Participant = proto.String(participant), proto.String(participant)
 			// FromMe belongs to the exporting peer, not this receiver. Missing
 			// or invalid participant metadata never establishes ownership.
-			info.Key.FromMe = proto.Bool(!sender.IsEmpty() && (sender == phone.ToNonAD() || sender == lid.ToNonAD()))
-			clean.Messages = append(clean.Messages, copyRow)
+			info.Key.FromMe = proto.Bool(false)
+			clean.Messages = append(clean.Messages, row)
 		}
 		messages.Conversations = append(messages.Conversations, clean)
 	}
-	return messages
+	return messages, skipped, ctx.Err()
 }
 
 func (b *Bridge) decodeHistoryShare(ctx context.Context, bundle *waE2E.MessageHistoryBundle, compressedLimit, inflatedLimit int64) (*waHistorySync.HistorySync, error) {
@@ -251,8 +324,12 @@ func inflateHistoryShare(ctx context.Context, compressed io.Reader, limit int64)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Scan wire counts before allocating any objects in the peer's proto tree.
+	if _, err := scanHistoryShareWire(ctx, plain); err != nil {
+		return nil, err
+	}
 	data := &waHistorySync.HistorySync{}
-	if err := (proto.UnmarshalOptions{RecursionLimit: 100}).Unmarshal(plain, data); err != nil {
+	if err := (proto.UnmarshalOptions{RecursionLimit: 100, DiscardUnknown: true}).Unmarshal(plain, data); err != nil {
 		return nil, err
 	}
 	return data, nil

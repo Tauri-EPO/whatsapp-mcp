@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -35,19 +36,27 @@ func (store *MessageStore) outboundChatSettings(ctx context.Context, chat string
 // A quote can reference only this chat. Prefer the archived caption and typed
 // presentation; a missing row retains the caller's legacy text preview. Do not
 // copy download credentials or invent a thumbnail the archive never retained.
-func (store *MessageStore) outboundQuotePreview(ctx context.Context, chat, id string) (*waE2E.Message, error) {
-	if store == nil || id == "" {
-		return nil, ctx.Err()
+func (store *MessageStore) loadOutboundQuote(ctx context.Context, client *whatsmeow.Client, chat string, quote outboundQuote, deriveParticipant bool) (outboundQuote, error) {
+	if store == nil || quote.id == "" {
+		return quote, ctx.Err()
 	}
 	var content, kind, filename string
+	var sender, server string
+	var fromMe bool
 	var raw sql.NullString
 	var sha []byte
-	err := store.db.QueryRowContext(ctx, `SELECT COALESCE(content, ''), COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256 FROM messages WHERE id = ? AND chat_jid = ?`, id, chat).Scan(&content, &kind, &filename, &raw, &sha)
+	err := store.db.QueryRowContext(ctx, `SELECT COALESCE(content, ''), COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256, COALESCE(sender, ''), COALESCE(sender_server, ''), is_from_me FROM messages WHERE id = ? AND chat_jid = ?`, quote.id, chat).Scan(&content, &kind, &filename, &raw, &sha, &sender, &server, &fromMe)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return quote, nil
 	}
 	if err != nil {
-		return nil, err
+		return quote, err
+	}
+	if deriveParticipant {
+		quote.participant, err = storedQuoteParticipant(ctx, client, sender, server, fromMe)
+		if err != nil {
+			return quote, err
+		}
 	}
 	p := readMediaPresentation(raw.String, kind, sha)
 	m := &waE2E.Message{}
@@ -88,5 +97,36 @@ func (store *MessageStore) outboundQuotePreview(ctx context.Context, chat, id st
 	default:
 		m.Conversation = proto.String(content)
 	}
-	return m, nil
+	quote.preview = m
+	return quote, nil
+}
+
+// Stored bare senders need their recorded namespace; guessing a phone JID for
+// an unresolved LID misattributes the reply. Legacy full JIDs keep their server.
+// Own rows use this account's JID, and a learned LID mapping upgrades to PN.
+func storedQuoteParticipant(ctx context.Context, client *whatsmeow.Client, sender, server string, fromMe bool) (string, error) {
+	if fromMe {
+		if client == nil || client.Store == nil || client.Store.ID == nil {
+			return "", ctx.Err()
+		}
+		return storedSender(client.Store.ID.ToNonAD()), ctx.Err()
+	}
+	if sender == "" {
+		return "", ctx.Err()
+	}
+	if !strings.Contains(sender, "@") {
+		if server == "" {
+			return "", ctx.Err()
+		}
+		sender += "@" + server
+	}
+	jid, err := normalizedUserJID(sender)
+	if err != nil {
+		return "", ctx.Err()
+	}
+	jid, err = outboundLookupChatJID(ctx, client, jid)
+	if err != nil {
+		return "", err
+	}
+	return jid.String(), nil
 }

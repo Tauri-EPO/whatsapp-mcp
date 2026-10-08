@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"math"
 	"time"
 
@@ -64,37 +66,65 @@ func (p *messageLocation) update() bool {
 	return p != nil && p.Live && p.Sequence != nil && *p.Sequence > 0
 }
 
-// The exact (id, chat) key is the only relationship we infer. A distinct ID
-// remains a distinct archived row; no heuristic drops another share's sample.
-// A same-key update changes position only, preserving the first row's content,
-// author, timestamp, quote and mentions. Out-of-order samples cannot go backwards.
-func updateLiveLocationWith(ex sqlExecer, id, chat string, p *messageLocation) (bool, error) {
-	if id == "" || !p.update() {
+type locationWriter interface {
+	sqlExecer
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// A true result consumes a known key, including an author collision. It must
+// never fall through to the message upsert. The caller holds the IMMEDIATE
+// transaction across this check and any insert of a previously unknown key.
+// A same-author update changes position only; out-of-order samples cannot go
+// backwards. A distinct ID or chat remains a distinct archived row.
+func updateLiveLocationWith(ex locationWriter, id, chat, sender string, fromMe bool, p *messageLocation) (bool, error) {
+	if id == "" || p == nil || !p.Live {
 		return false, nil
 	}
-	position := *p
-	position.Name, position.Address, position.URL, position.Comment = "", "", "", ""
-	result, err := ex.Exec(`UPDATE messages SET location = CASE
-		WHEN COALESCE(json_extract(location, '$.sequence'), 0) < ? THEN json_patch(location, ?) ELSE location END
-		WHERE id = ? AND chat_jid = ? AND media_type = 'location'
-		AND CASE WHEN json_valid(location) THEN json_extract(location, '$.live') = 1 ELSE 0 END`,
-		*p.Sequence, position.column(), id, chat)
+	user, server := splitSenderJID(sender)
+	var sameAuthor bool
+	err := ex.QueryRow(`SELECT sender = ? AND sender_server IS ? AND is_from_me = ?
+		FROM messages WHERE id = ? AND chat_jid = ?`, user, server, fromMe, id, chat).Scan(&sameAuthor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	return n > 0, err
+	if !sameAuthor {
+		return true, nil
+	}
+	if !p.update() {
+		return false, nil // the initial sample may restore its original metadata
+	}
+	position := *p
+	position.Name, position.Address, position.URL, position.Comment = "", "", "", ""
+	_, err = ex.Exec(`UPDATE messages SET location = CASE
+		WHEN COALESCE(json_extract(location, '$.sequence'), 0) < ? THEN json_patch(location, ?) ELSE location END
+		WHERE id = ? AND chat_jid = ? AND media_type = 'location'
+		AND sender = ? AND sender_server IS ? AND is_from_me = ?
+		AND CASE WHEN json_valid(location) THEN json_extract(location, '$.live') = 1 ELSE 0 END`,
+		*p.Sequence, position.column(), id, chat, user, server, fromMe)
+	return true, err
 }
 
-func (s *MessageStore) UpdateLiveLocation(id, chat string, p *messageLocation) (bool, error) {
-	return updateLiveLocationWith(s.db, id, chat, p)
+func (s *MessageStore) UpdateLiveLocation(id, chat, sender string, fromMe bool, p *messageLocation) (bool, error) {
+	if id == "" || p == nil || !p.Live {
+		return false, nil
+	}
+	handled := false
+	err := s.Batch(func(b *messageBatch) error {
+		var err error
+		handled, err = b.UpdateLiveLocation(id, chat, sender, fromMe, p)
+		return err
+	})
+	return handled, err
 }
 
-func (b *messageBatch) UpdateLiveLocation(id, chat string, p *messageLocation) (bool, error) {
+func (b *messageBatch) UpdateLiveLocation(id, chat, sender string, fromMe bool, p *messageLocation) (bool, error) {
 	matched := false
 	err := b.write(func() error {
 		var err error
-		matched, err = updateLiveLocationWith(b.tx, id, chat, p)
+		matched, err = updateLiveLocationWith(b.tx, id, chat, sender, fromMe, p)
 		return err
 	})
 	return matched, err
