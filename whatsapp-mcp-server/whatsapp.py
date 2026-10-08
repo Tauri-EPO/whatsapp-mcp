@@ -1599,8 +1599,8 @@ def _placeholders(values: list[str]) -> str:
     return ",".join("?" for _ in values)
 
 
-def _in_chunks(values: list[str]) -> list[list[str]]:
-    return [values[i : i + _SQL_IN_CHUNK] for i in range(0, len(values), _SQL_IN_CHUNK)]
+def _in_chunks(values: list[str], size: int = _SQL_IN_CHUNK) -> list[list[str]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
 
 
 def lid_map_counterparts(users: Sequence[str]) -> dict[str, str]:
@@ -1867,8 +1867,8 @@ def _chat_twin_cap(cur: sqlite3.Cursor) -> int:
 
     `cte()` binds six parameters per pair and `hidden_clause` one more. A
     three-member identity uses twelve plus two, charged as two pairs; the
-    reserve covers the two dozen the statements around them bind (the filter,
-    the allow-list, the keyset, the limit). SQLite has allowed 32 766 parameters
+    current policy is deducted separately, and the reserve covers the other
+    bindings (the filter, the keyset, the limit). SQLite has allowed 32 766 parameters
     since 3.32 (2020) and 999 before it; the limit is asked for rather than
     assumed, so an interpreter carrying an old SQLite merges the busiest ~128
     pairs instead of answering "too many SQL variables".
@@ -1877,7 +1877,8 @@ def _chat_twin_cap(cur: sqlite3.Cursor) -> int:
         budget = cur.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
     except (AttributeError, sqlite3.Error):  # pragma: no cover - very old runtimes
         budget = 999
-    return max(0, min(CHAT_TWIN_MAX_PAIRS, (budget - 100) // 7))
+    _, policy_params = CHAT_POLICY.sql_clause("chats.jid")
+    return max(0, min(CHAT_TWIN_MAX_PAIRS, (budget - len(policy_params) - 100) // 7))
 
 
 def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatTwins:
@@ -3170,7 +3171,8 @@ def _matching_contact_chat_names(cur: sqlite3.Cursor, query: str) -> list[str]:
             candidates.update(lid for lid, phone in _paired_lid_chats(cur).items() if phone in hits)
             policy, policy_params = CHAT_POLICY.sql_clause("jid")
             placeholders: list[str] = []
-            for chunk in _in_chunks(sorted(candidates)):
+            remaining = cur.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(policy_params)
+            for chunk in _in_chunks(sorted(candidates), max(1, min(_SQL_IN_CHUNK, remaining))):
                 placeholders.extend(
                     jid
                     for jid, name in cur.execute(
@@ -5940,6 +5942,7 @@ def list_unread(
         prefix, twin_join, of_this_chat, twin_params = twins.both_rows()
         hidden_clause, hidden_params = twins.hidden_clause("chats.jid")
         read_marker = _last_read_time_select(cursor, "chats")
+        message_table = "messages"
         if twins.active:
             twin_join += " LEFT JOIN chats twin ON twin.jid = tw.twin_jid"
             other_marker = _last_read_time_select(cursor, "twin")
@@ -5953,12 +5956,20 @@ def list_unread(
                 # Singles have no member row and retain their own spelling.
                 twin_join += " LEFT JOIN chat_twin member ON member.listed_jid = chats.jid"
                 of_this_chat = "= COALESCE(member.jid, chats.jid)"
+                # SQLite 3.53 can prefer an is_from_me-only automatic index,
+                # scanning every inbound row for each chat. Pin an available
+                # bridge-owned chat index; older schemas may have neither.
+                for index in ("idx_messages_chat_timestamp", "idx_messages_chat_jid"):
+                    columns = cursor.execute(f"PRAGMA main.index_info('{index}')").fetchall()
+                    if columns and columns[0][2] == "chat_jid":
+                        message_table += f" INDEXED BY {index}"
+                        break
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         spoken_filter = _spoken_filter("messages")
         unread_where = f"""
             FROM chats
             {twin_join}
-            JOIN messages ON messages.chat_jid {of_this_chat}
+            JOIN {message_table} ON messages.chat_jid {of_this_chat}
             WHERE messages.is_from_me = 0
               AND ({read_marker} IS NULL OR messages.timestamp > {read_marker})
               AND {spoken_filter}

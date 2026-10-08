@@ -618,3 +618,118 @@ def test_name_matches_above_sqlite_budget_keep_complete_counts_and_cursor_pages(
     assert whatsapp.list_chats_page(query="Synthetic Clinic").items == []
     with paired_dbs.messages() as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'chat_name_matches'").fetchall() == []
+
+
+def test_name_candidate_chunks_reserve_large_policy_budget(paired_dbs, monkeypatch):
+    jids = [f"1202555{index:07d}@s.whatsapp.net" for index in range(600)]
+    with paired_dbs.messages() as conn:
+        conn.execute("DELETE FROM chats")
+        conn.executemany("INSERT INTO chats (jid,name) VALUES (?, '')", [(jid,) for jid in [*jids, ALICE]])
+    with paired_dbs.whatsmeow() as conn:
+        conn.executemany(
+            "INSERT INTO whatsmeow_contacts (our_jid,their_jid,full_name) VALUES ('me', ?, 'Synthetic Clinic')",
+            [(jid,) for jid in [*jids, ALICE]],
+        )
+    _allow(monkeypatch, *jids)
+    original = whatsapp._connect_messages_db
+
+    def connect():
+        conn = original()
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", connect)
+    assert whatsapp.count_chats() == 600
+    assert whatsapp.count_chats(query="Synthetic Clinic") == 600
+    found, cursor = [], None
+    while True:
+        page = whatsapp.list_chats_page(query="Synthetic Clinic", limit=200, cursor=cursor)
+        found.extend(row["jid"] for row in page.items)
+        if not page.has_more:
+            break
+        cursor = page.next_cursor
+    assert found == jids and ALICE not in found
+    _allow(monkeypatch, jids[-1])
+    assert whatsapp.count_chats(query="Synthetic Clinic") == 1
+    assert [row["jid"] for row in whatsapp.list_chats(query="Synthetic Clinic")] == [jids[-1]]
+
+
+def test_maximum_message_page_keeps_canonical_notes_and_tombstones_at_999_bind_limit(phone_pair, monkeypatch):
+    with phone_pair.messages() as conn:
+        conn.execute("DELETE FROM messages")
+        conn.executemany(
+            "INSERT INTO messages (id,chat_jid,sender,content,timestamp,is_from_me) VALUES (?, ?, ?, 'synthetic', '2026-10-08 10:00:00', 0)",
+            [(f"m{index:04d}", SHORT_JID, SHORT) for index in range(500)],
+        )
+    assert main.annotate("message", f"{SHORT_JID}/m0000", "role", "canonical")["target_id"] == f"{LONG_JID}/m0000"
+    conn = notes._connect(create=True)
+    try:
+        conn.executemany(
+            "INSERT INTO notes VALUES ('message', ?, 'role', 'legacy', '2099-01-01T00:00:00+00:00', 'legacy', 99)",
+            [(f"{SHORT_JID}/m0000",), (f"{SHORT_JID}/m0499",)],
+        )
+    finally:
+        conn.close()
+    main.annotate("message", f"{LONG_JID}/m0499", "role", "")
+    original = notes._connect
+
+    def connect(create):
+        conn = original(create)
+        if conn is not None:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return conn
+
+    monkeypatch.setattr(notes, "_connect", connect)
+    for limit in (499, 500):
+        result = main.list_messages(chat_jid=SHORT_JID, limit=limit, include_context=False)
+        assert "error" not in result and len(result["items"]) == limit
+    rows = {row["id"]: row for row in result["items"]}
+    assert rows["m0000"]["message_notes"] == {"role": "canonical"}
+    assert "message_notes" not in rows["m0499"]
+
+
+@pytest.mark.parametrize("with_lid", [False, True])
+def test_identity_cap_accounts_for_large_policy_without_losing_quiet_rows(paired_dbs, monkeypatch, with_lid):
+    with paired_dbs.messages() as conn:
+        conn.execute("DELETE FROM messages")
+        conn.execute("DELETE FROM chats")
+    jids = []
+    for index in range(60):
+        short = f"5511{60000000 + index:08d}"
+        long = short[:4] + "9" + short[4:]
+        members = [f"{short}@s.whatsapp.net", f"{long}@s.whatsapp.net"]
+        if with_lid:
+            lid = str(100000000000100 + index)
+            members.append(f"{lid}@lid")
+            with paired_dbs.whatsmeow() as conn:
+                conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (lid, short))
+        for jid in members:
+            _chat(paired_dbs, jid, "Clinic")
+            _message(paired_dbs, jid, "own", f"2026-10-08 10:{index:02d}:00", from_me=True)
+        jids.extend(members)
+    for index in range(600 - len(jids)):
+        jid = f"1202555{index:07d}@s.whatsapp.net"
+        _chat(paired_dbs, jid, "Quiet")
+        jids.append(jid)
+    _allow(monkeypatch, *jids)
+    original = whatsapp._connect_messages_db
+
+    def connect():
+        conn = original()
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", connect)
+    found, cursor = [], None
+    while True:
+        page = whatsapp.list_chats_page(sort_by="name", limit=200, cursor=cursor)
+        found.extend(page.items)
+        if not page.has_more:
+            break
+        cursor = page.next_cursor
+    represented = [jid for row in found for jid in row.get("aliases", [row["jid"]])]
+    assert sorted(represented) == sorted(jids)
+    assert len({row["jid"] for row in found}) == len(found)
+    assert whatsapp.count_chats() == len(found) < len(jids)
+    assert whatsapp.list_unread(count_only=True) == {"count": 0, "chats_with_unread": 0}
+    assert whatsapp.list_unanswered() == []

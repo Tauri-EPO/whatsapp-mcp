@@ -437,9 +437,9 @@ def _listing_ids(
 
 
 def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, dict[str, str]]:
-    """Current notes for many targets with batched identity and one notes query: ``{target_id as given: {key: value}}``.
+    """Current notes with batched identity and bounded queries: ``{target_id as given: {key: value}}``.
 
-    This is what puts ``notes`` on a listing row without an N+1: one query per
+    This puts ``notes`` on a listing row without an N+1: bounded batches per
     page, keyed by the id the caller passed, so a row looks its own notes up.
     Targets with nothing recorded are absent from the result.
 
@@ -459,12 +459,19 @@ def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, di
     if conn is None:
         return {}
     try:
-        rows = conn.execute(
-            "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
-            f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(lookup))})"
-            " GROUP BY target_id, key",
-            [target_type, *lookup],
-        ).fetchall()
+        # Every chunk sees the same snapshot, like the former single SELECT.
+        conn.execute("BEGIN")
+        size = max(1, min(whatsapp._SQL_IN_CHUNK, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - 1))
+        rows = []
+        for chunk in whatsapp._in_chunks(lookup, size):
+            rows.extend(
+                conn.execute(
+                    "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
+                    f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(chunk))})"
+                    " GROUP BY target_id, key",
+                    [target_type, *chunk],
+                ).fetchall()
+            )
     finally:
         conn.close()
     by_id: dict[str, dict[str, tuple[str, str]]] = {}
@@ -493,7 +500,7 @@ def attach_notes(
     field: str = "notes",
     only_when_present: bool = False,
 ) -> None:
-    """Put each row's notes on it, from one query for the whole page.
+    """Put each row's notes on it, from batched queries for the whole page.
 
     ``only_when_present`` leaves unnoted rows untouched — right for message rows,
     where most of a page never carries a note and an empty mapping per row is
