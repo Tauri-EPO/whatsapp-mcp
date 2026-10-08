@@ -201,6 +201,18 @@ def test_unavailable_export_manifest_keeps_completed_archive_valid(paired_dbs, t
     assert any("ownership was not recorded" in row.message for row in caplog.records)
 
 
+def test_unavailable_filesystem_root_returns_error_without_directory_effects(tmp_path, monkeypatch):
+    root = tmp_path / "unavailable" / "exports"
+    monkeypatch.setenv("WHATSAPP_EXPORT_DIR", str(root))
+    monkeypatch.setattr(Path, "exists", lambda _path: False)
+    created = []
+    monkeypatch.setattr(Path, "mkdir", lambda path, **_kwargs: created.append(path))
+    with pytest.raises(ToolError) as refused:
+        export.export_messages(out_path="normal.ndjson")
+    assert refused.value.code == "internal"
+    assert "filesystem root" in str(refused.value) and created == []
+
+
 @POSIX
 def test_migration_shared_export_root_preserves_other_files_and_directories(tmp_path):
     database = tmp_path / "notes.db"

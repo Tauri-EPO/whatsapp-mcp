@@ -38,6 +38,8 @@ def private_makedirs(path: str) -> None:
     target = Path(path)
     missing = []
     while not target.exists():
+        if target.parent == target:
+            raise FileNotFoundError("Artifact directory has no accessible filesystem root")
         missing.append(target)
         target = target.parent
     for folder in reversed(missing):
