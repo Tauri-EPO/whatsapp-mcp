@@ -362,7 +362,7 @@ if bridge_exec printenv WHATSAPP_OPERATOR_BIND >/dev/null 2>&1; then
       | sed -n "s/.*\"state\":\"\([a-z_]*\)\".*/\1/p"
   ' </dev/null) || operator_state=unavailable
   case "$operator_state" in
-    starting|awaiting_qr|code_issued|paired|connected|expired|logged_out|passkey_required|passkey_submitted|passkey_confirm|passkey_failed)
+    starting|awaiting_qr|code_issued|completing|paired|connected|expired|logged_out|passkey_required|passkey_submitted|passkey_confirm|passkey_failed)
       echo "Operator pairing state: $operator_state (GET /operator/v1/pairing)" ;;
     disabled) ;;
     *) echo "Operator pairing state unavailable; check the private listener and token." ;;

@@ -146,6 +146,9 @@ func TestOperatorPairingHTTPRotatesIssuesCodeAndInvalidatesOnPairing(t *testing.
 	if first.QR.Payload == second.QR.Payload || !second.QR.ExpiresAt.After(time.Now()) {
 		t.Fatal("rotated credential or actual expiry absent")
 	}
+	if status, _ := f.request(t, "POST", "pairing/restart", fakeOperatorToken, ""); status != 409 {
+		t.Fatal("restart cancelled an active QR attempt")
+	}
 	for index := 0; index < 4; index++ {
 		status, body := f.request(t, "POST", "pairing/code", fakeOperatorToken, `{"phone":"5511999999999"}`)
 		if index < 3 {
@@ -335,6 +338,37 @@ func TestOperatorNormalUnlinkRetainsExitThree(t *testing.T) {
 	b.handleEvent(&events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
 	if exit != exitCodeLoggedOut {
 		t.Fatalf("normal unlink with operator enabled exit=%d, want 3", exit)
+	}
+}
+
+func TestOperatorFinalDeviceSaveBlocksReplacementUntilTerminalSDKEvent(t *testing.T) {
+	f := newOperatorPairingFixture(t)
+	var replacements atomic.Int64
+	f.p.factory = func() (operatorPairingClient, error) { replacements.Add(1); return newFakeOperatorClient(), nil }
+	f.client.items <- whatsmeow.QRChannelItem{Event: "code", Code: "FAKE-COMMITTING-QR", Timeout: time.Minute}
+	state := f.stateHTTP(t, "awaiting_qr")
+	if !f.p.beginCompletion(f.client) {
+		t.Fatal("active SDK pairing was not admitted")
+	}
+	f.p.observe(state.Generation, whatsmeow.QRChannelItem{Event: "code", Code: "FAKE-LATE-QR", Timeout: time.Minute})
+	state = f.stateHTTP(t, "completing")
+	if state.QR != nil {
+		t.Fatal("a completing device save exposed another QR")
+	}
+	if status, _ := f.request(t, "POST", "pairing/restart", fakeOperatorToken, ""); status != 409 {
+		t.Fatal("restart interrupted the SDK's final device save")
+	}
+	f.wait(t, func(s operatorPairingState) bool { return f.client.disconnects.Load() > 0 })
+	if replacements.Load() != 0 {
+		t.Fatal("attempt timeout replaced a device before its save completed")
+	}
+	f.paired.Store(true)
+	f.p.connectionEvent(&events.PairSuccess{})
+	f.stateHTTP(t, "paired")
+	f.b.cancel()
+	<-f.p.done
+	if replacements.Load() != 0 {
+		t.Fatal("a just-linked device was replaced after its terminal event")
 	}
 }
 

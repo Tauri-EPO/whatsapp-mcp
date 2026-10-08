@@ -163,6 +163,8 @@ current QR, **not a promise about WhatsApp's undocumented pairing-code TTL**.
 After three exhausted attempts the process remains alive with `expired`;
 `restart` returns 202, invalidates credentials and creates a fresh client.
 It refuses paired devices, an unexpired temporary ban and an outdated build.
+An active attempt, including the SDK's final device-save step (`completing`),
+must finish first; restart does not replace a device that finishes linking.
 Locked/banned recovery requires this explicit operator action after resolving
 the account restriction; restarting does not bypass WhatsApp enforcement.
 

@@ -66,6 +66,8 @@ type operatorPairing struct {
 	started        atomic.Bool
 	codeCalls      int
 	sequence       int
+	completing     bool
+	completionDone chan struct{}
 	out            io.Writer
 	opt            pairingOptions
 	now            func() time.Time
@@ -91,7 +93,7 @@ func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem
 	now := p.now().UTC()
 	switch evt.Event {
 	case whatsmeow.QRChannelEventCode:
-		if p.state.State == "passkey_required" || p.state.State == "passkey_submitted" || p.state.State == "passkey_confirm" {
+		if p.completing || p.state.State == "passkey_required" || p.state.State == "passkey_submitted" || p.state.State == "passkey_confirm" {
 			return
 		}
 		p.sequence++
@@ -134,12 +136,61 @@ func (p *operatorPairing) connectionEvent(evt interface{}) {
 		p.invalidateLocked("connected")
 	case *events.PairSuccess:
 		p.invalidateLocked("paired")
+		p.completeLocked()
+	case *events.PairError:
+		p.invalidateLocked("expired")
+		p.completeLocked()
 	case *events.LoggedOut:
 		p.invalidateLocked("logged_out")
 		p.state.Generation++
 		if p.cancelAttempt != nil {
 			p.cancelAttempt()
 		}
+	}
+}
+
+// The pinned SDK saves the device asynchronously after PrePairCallback. Keep
+// that admission closed outside a live attempt, and wait for its terminal event
+// before a handoff so a just-linked device is never replaced by NewDevice.
+func (p *operatorPairing) beginCompletion(client pairingClient) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ctx.Err() != nil || p.client != client || p.completing || p.paired() {
+		return false
+	}
+	switch p.state.State {
+	case "awaiting_qr", "code_issued", "passkey_submitted", "passkey_confirm":
+	default:
+		return false
+	}
+	p.completing = true
+	p.completionDone = make(chan struct{})
+	p.invalidateLocked("completing")
+	return true
+}
+
+func (p *operatorPairing) completeLocked() {
+	if p.completing {
+		p.completing = false
+		close(p.completionDone)
+	}
+}
+
+func (p *operatorPairing) waitCompletion() bool {
+	p.mu.Lock()
+	var done <-chan struct{}
+	if p.completing {
+		done = p.completionDone
+	}
+	p.mu.Unlock()
+	if done == nil {
+		return p.ctx.Err() == nil
+	}
+	select {
+	case <-done:
+		return true
+	case <-p.ctx.Done():
+		return false
 	}
 }
 
@@ -152,6 +203,14 @@ func (p *operatorPairing) run() {
 				return
 			}
 			p.action.Lock()
+			if !p.waitCompletion() {
+				p.action.Unlock()
+				return
+			}
+			if !first && p.paired() {
+				p.action.Unlock()
+				break
+			}
 			if !first {
 				p.client.Disconnect()
 				client, err := p.factory()
@@ -191,7 +250,11 @@ func (p *operatorPairing) run() {
 			}
 			p.action.Lock()
 			client.Disconnect()
+			completed := p.waitCompletion()
 			p.action.Unlock()
+			if !completed {
+				return
+			}
 			p.mu.Lock()
 			cancelled := generation != p.state.Generation
 			if !cancelled {
@@ -358,6 +421,13 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 	}
 	if problem != nil && problem.Kind == "client_outdated" {
 		writeErrorCode(w, 409, "client_outdated", "Upgrade this bridge before retrying")
+		return
+	}
+	p.mu.Lock()
+	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && !problem.restrictsAccount())
+	p.mu.Unlock()
+	if active {
+		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")
 		return
 	}
 	p.b.clearConnectionProblem()

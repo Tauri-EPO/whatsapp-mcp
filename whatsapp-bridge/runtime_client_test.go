@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,4 +67,38 @@ func TestRuntimeClientConcurrentHealthAndHandoff(t *testing.T) {
 		}
 	}()
 	group.Wait()
+}
+
+func TestRuntimeSDKPrePairHookAndTerminalEventControlCompletion(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	b := testBridge(t, client, newTestMessageStore(t), testLogger())
+	reconnect := make(chan bool, 1)
+	b.installClient(client, false, reconnect)
+	p := newOperatorPairing(b.ctx, b, client, nil, b.isPaired, b.Connected, io.Discard, reconnect)
+	b.operatorPairing = p
+	if client.PrePairCallback(types.EmptyJID, "", "") {
+		t.Fatal("SDK could save a device outside an active attempt")
+	}
+	p.state.State = "awaiting_qr"
+	if !client.PrePairCallback(types.EmptyJID, "", "") || client.PrePairCallback(types.EmptyJID, "", "") {
+		t.Fatal("SDK completion admission was absent or duplicated")
+	}
+	if p.snapshot().State != "completing" {
+		t.Fatal("SDK pre-pair hook did not publish its save state")
+	}
+	done := p.completionDone
+	b.handleClientEvent(client, &events.PairSuccess{}, reconnect)
+	select {
+	case <-done:
+	default:
+		t.Fatal("terminal SDK event did not release completion")
+	}
+	if !b.isPaired() || p.snapshot().State != "paired" {
+		t.Fatal("terminal SDK event did not retain the linked device")
+	}
+	fresh := newTestClient(&mockLIDStore{})
+	b.installClient(fresh, false, reconnect)
+	if client.PrePairCallback(types.EmptyJID, "", "") {
+		t.Fatal("retired client could save another device")
+	}
 }
