@@ -238,7 +238,7 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 						if wire, _, err := buildForwardMedia(ctx, whatsmeow.MediaDocument, "application/pdf", cached, tc.data, common, "", outboundQuote{}, nil); err == nil || wire != nil {
 							t.Fatal("wire builder accepted presentation for different bytes")
 						}
-						data, err := os.ReadFile(cached)
+						data, err := os.ReadFile(cached) // #nosec G304 -- generated fixture cache path under t.TempDir, written above
 						if err != nil || !bytes.Equal(data, tc.data) {
 							t.Fatal("refusal modified the cache")
 						}

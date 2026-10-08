@@ -108,7 +108,7 @@ func presentationMIME(kind, raw string) string {
 		return ""
 	}
 	parsed, params, err := mime.ParseMediaType(raw)
-	if err != nil || len(params) != 0 || parsed != strings.ToLower(raw) {
+	if err != nil || len(params) != 0 || parsed != strings.ToLower(raw) || strings.Count(parsed, "/") != 1 || strings.Contains(parsed, "*") {
 		return ""
 	}
 	allowed := kind == "document" || (kind == "audio" && strings.HasPrefix(parsed, "audio/")) ||
