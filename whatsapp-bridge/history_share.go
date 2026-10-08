@@ -123,7 +123,7 @@ func (b *Bridge) runHistoryShare(ctx context.Context, job historyShareJob) {
 	}
 	messages, skipped, err := b.historyShareMessages(ctx, data)
 	if err != nil {
-		b.Log.Warnf("Shared history import failed: participant lookup or job cancellation")
+		b.Log.Warnf("Shared history import failed: message validation, participant lookup or job cancellation")
 		return
 	}
 	b.handleHistorySyncWithSharesContext(ctx, &events.HistorySync{Data: messages}, false, true)
@@ -189,6 +189,11 @@ func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.H
 			// The decoder produced an exclusively owned tree. Rewrite attribution
 			// in place instead of doubling every peer-controlled proto allocation.
 			info := row.Message
+			// Peer seconds are unsigned. Validate before converting to int64:
+			// the Python readers and fixed-width SQLite ordering stop at 9999.
+			if info.GetMessageTimestamp() > 253402300799 {
+				return nil, skipped, errors.New("shared history timestamp outside archive domain")
+			}
 			if info.Key == nil {
 				info.Key = &waCommon.MessageKey{}
 			}

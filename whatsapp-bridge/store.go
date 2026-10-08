@@ -819,7 +819,11 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 // inserts only its own column, leaving name/last_message_time NULL so a receipt
 // arriving before any StoreChat call doesn't fabricate placeholder metadata.
 func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
-	_, err := store.db.Exec(
+	return markChatReadWith(store.db, jid, readAt)
+}
+
+func markChatReadWith(ex sqlExecer, jid string, readAt time.Time) error {
+	_, err := ex.Exec(
 		`INSERT INTO chats (jid, last_read_time)
 		VALUES (?, ?)
 		ON CONFLICT(jid) DO UPDATE SET

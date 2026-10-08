@@ -185,10 +185,10 @@ func TestReplyRESTWireStoredAuthor(t *testing.T) {
 		mapped, own, full, foreign, missing bool
 	}{
 		{name: "PN", sender: phonePN.String(), want: phonePN.String()},
-		{name: "PN mapped stays PN", sender: phonePN.String(), mapped: true, want: phonePN.String()},
-		{name: "LID mapped", sender: phoneLID.String(), mapped: true, want: phonePN.String()},
+		{name: "PN mapped uses wire LID", sender: phonePN.String(), mapped: true, want: phoneLID.String()},
+		{name: "LID mapped", sender: phoneLID.String(), mapped: true, want: phoneLID.String()},
 		{name: "LID unmapped", sender: phoneLID.String(), want: phoneLID.String()},
-		{name: "own overrides stored peer", sender: phoneLID.String(), own: true, mapped: true, want: phonePN.String()},
+		{name: "own overrides stored peer", sender: phoneLID.String(), own: true, mapped: true, want: phoneLID.String()},
 		{name: "own without stored sender", own: true, want: phonePN.String()},
 		{name: "unknown sender"},
 		{name: "unknown bare namespace", sender: phoneLID.User},
@@ -342,8 +342,8 @@ func TestReplyHTTPDisconnectCancelsLIDLookupsBeforeUpload(t *testing.T) {
 			case "quote":
 				payload.QuotedMessageID, payload.QuotedSenderJID, lids.blockPN = "Q1", phonePN.String(), phonePN
 			case "stored-author":
-				payload.QuotedMessageID, lids.blockLID = "Q1", phoneLID
-				if err := b.Store.StoreMessage("Q1", payload.Recipient, phoneLID.String(), "original", time.Now(), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+				payload.QuotedMessageID, lids.blockPN = "Q1", phonePN
+				if err := b.Store.StoreMessage("Q1", payload.Recipient, phonePN.String(), "original", time.Now(), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
 					t.Fatal(err)
 				}
 			case "mention":

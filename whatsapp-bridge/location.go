@@ -166,13 +166,13 @@ func (b *messageBatch) UpdateLiveLocation(id, chat, sender string, fromMe bool, 
 // A history position update is not fresh conversation activity. Only the
 // location case changes the usual newest-first timestamp rule; other history
 // chunks keep their existing marker and retry behavior.
-func (b *Bridge) historyLocationActivityTime(rows []*waHistorySync.HistorySyncMsg, chat string, fallback time.Time) time.Time {
+func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locationAuthorReader, rows []*waHistorySync.HistorySyncMsg, chat string, fallback time.Time) (time.Time, error) {
 	if len(rows) == 0 {
-		return fallback
+		return fallback, nil
 	}
 	first := extractMessage(rows[0].GetMessage().GetMessage(), fallback, rows[0].GetMessage().GetKey().GetID()).location
 	if first == nil || !first.Live {
-		return fallback
+		return fallback, nil
 	}
 	initial := make(map[string]time.Time)
 	for _, row := range rows {
@@ -199,7 +199,7 @@ func (b *Bridge) historyLocationActivityTime(rows []*waHistorySync.HistorySyncMs
 			var user string
 			var server sql.NullString
 			var own bool
-			err := b.Store.db.QueryRow(`SELECT timestamp,sender,sender_server,is_from_me FROM messages WHERE id=? AND chat_jid=?`, info.GetKey().GetID(), chat).Scan(&original, &user, &server, &own)
+			err := reader.QueryRowContext(ctx, `SELECT timestamp,sender,sender_server,is_from_me FROM messages WHERE id=? AND chat_jid=?`, info.GetKey().GetID(), chat).Scan(&original, &user, &server, &own)
 			if err == nil {
 				// Positive samples never create activity for a known key. Initial
 				// samples may restore metadata only for the same verified author.
@@ -207,13 +207,15 @@ func (b *Bridge) historyLocationActivityTime(rows []*waHistorySync.HistorySyncMs
 				if !position.update() {
 					jid, _ := types.ParseJID(chat)
 					sender, fromMe := b.historySender(info, jid, false)
-					candidate, lookupErr := b.liveLocationSender(b.ctx, b.Store.db, info.GetKey().GetID(), chat, storedSender(sender), fromMe)
+					candidate, lookupErr := b.liveLocationSender(ctx, reader, info.GetKey().GetID(), chat, storedSender(sender), fromMe)
 					incomingUser, incomingServer := splitSenderJID(candidate)
 					accepted = lookupErr == nil && incomingUser == user && own == fromMe && ((server.Valid && incomingServer == server.String) || (!server.Valid && incomingServer == nil))
 				}
 				if !accepted {
 					stamp = original
 				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return time.Time{}, err
 			} else if position.update() {
 				if first, found := initial[info.GetKey().GetID()]; found {
 					stamp = first
@@ -225,7 +227,7 @@ func (b *Bridge) historyLocationActivityTime(rows []*waHistorySync.HistorySyncMs
 		}
 	}
 	if latest.IsZero() {
-		return fallback
+		return fallback, nil
 	}
-	return latest
+	return latest, nil
 }

@@ -103,13 +103,13 @@ func (store *MessageStore) loadOutboundQuote(ctx context.Context, client *whatsm
 
 // Stored bare senders need their recorded namespace; guessing a phone JID for
 // an unresolved LID misattributes the reply. Legacy full JIDs keep their server.
-// Own rows use this account's JID, and a learned LID mapping upgrades to PN.
+// Own rows use this account's JID. Both use the established wire LID resolver.
 func storedQuoteParticipant(ctx context.Context, client *whatsmeow.Client, sender, server string, fromMe bool) (string, error) {
 	if fromMe {
 		if client == nil || client.Store == nil || client.Store.ID == nil {
 			return "", ctx.Err()
 		}
-		return storedSender(client.Store.ID.ToNonAD()), ctx.Err()
+		return resolveQuotedParticipantJIDContext(ctx, client, storedSender(client.Store.ID.ToNonAD())), ctx.Err()
 	}
 	if sender == "" {
 		return "", ctx.Err()
@@ -124,9 +124,5 @@ func storedQuoteParticipant(ctx context.Context, client *whatsmeow.Client, sende
 	if err != nil {
 		return "", ctx.Err()
 	}
-	jid, err = outboundLookupChatJID(ctx, client, jid)
-	if err != nil {
-		return "", err
-	}
-	return jid.String(), nil
+	return resolveQuotedParticipantJIDContext(ctx, client, jid.String()), ctx.Err()
 }

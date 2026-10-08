@@ -123,10 +123,13 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				continue
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
-			timestamp = b.historyLocationActivityTime(messages, chatJID, timestamp)
+			location := extractMessage(latestMsg.Message.GetMessage(), timestamp, latestMsg.Message.GetKey().GetID()).location
+			locationMarkers := !preserveExisting && location != nil && location.Live
+			markersCommitted := false
+			markRead := conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
 			if err := retry(func() error {
-				if preserveExisting {
+				if preserveExisting || locationMarkers {
 					return messageStore.EnsureChat(chatJID, name)
 				}
 				return messageStore.StoreChat(chatJID, name, timestamp)
@@ -141,9 +144,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// metadata. Sparse history-sync chunks omit UnreadCount; the
 			// generated getter then returns 0 and would permanently mark the
 			// chat read under the monotonic merge.
-			if conversation.UnreadCount != nil &&
-				conversation.GetUnreadCount() == 0 &&
-				!conversation.GetMarkedAsUnread() {
+			if !locationMarkers && markRead {
 				if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
 					logger.Warnf("Failed to backfill read state for %s: %v", chatJID, err)
 				}
@@ -166,6 +167,26 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			storedInBatch := 0
 			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
+				if locationMarkers && !markersCommitted {
+					// Read ownership and activity after acquiring the same IMMEDIATE
+					// lock as the position update. A live original may have arrived
+					// since conversation setup, before this history transaction.
+					if err := batch.write(func() error {
+						stamp, err := b.historyLocationActivityTime(ctx, batch.tx, messages, chatJID, timestamp)
+						if err != nil {
+							return err
+						}
+						if err := storeChatWith(batch.tx, chatJID, name, stamp); err != nil {
+							return err
+						}
+						if markRead {
+							return markChatReadWith(batch.tx, chatJID, stamp)
+						}
+						return nil
+					}); err != nil {
+						return err
+					}
+				}
 				for _, msg := range chunk {
 					if preserveExisting && ctx.Err() != nil {
 						return ctx.Err()
@@ -273,6 +294,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				})
 			}
 			countCommitted := func() {
+				markersCommitted = true
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))
