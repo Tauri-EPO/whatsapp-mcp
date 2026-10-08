@@ -393,8 +393,8 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     ignored. A full Brazilian mobile
     (55 + area code + number) is found with or without the ninth digit after
     the area code, whichever of the two WhatsApp registered; `matched` is
-    "jid" and the hit's `jid` is the registered spelling, the one to use from
-    then on. National Brazilian mobile queries also try the whole alternate
+    "jid" and the hit's `jid` identifies the contact in the archive. Sends resolve
+    the registered number themselves. National Brazilian mobile queries also try the whole alternate
     phone JID; other lookup tools retain the country-code requirement. When
     both phone spellings have allowed archive rows, the hit carries one
     canonical phone jid and all merged `aliases`.
@@ -2233,8 +2233,9 @@ def annotate(
 
     Brazilian mobile spellings and confirmed LIDs share the 13-digit phone note
     key with the ninth digit, regardless of which chats exist.
-    Any allowed alias permits notes on that identity; message reads and sends
-    retain their own stricter policy. The returned target_id is the write key.
+    The spelling supplied must be allowed; the canonical storage key grants no
+    access to other spellings. Legacy notes under refused aliases stay hidden.
+    The returned target_id is the write key, not an authorization grant.
 
     Conventional keys — use these before inventing your own:
         label: what this is (patient, supplier, family, marketing...)

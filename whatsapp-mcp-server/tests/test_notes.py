@@ -286,9 +286,10 @@ class TestAllowList:
             monkeypatch.setattr(module, "CHAT_POLICY", policy)
         written = main.annotate("chat", f"{BOB_LID}@lid", "label", "supplier")
         assert written["success"] and written["target_id"] == BOB
-        # The same conversation under the spelling the note was stored with.
-        assert main.get_notes("chat", BOB)["notes"]["label"]["value"] == "supplier"
-        assert [hit["target_id"] for hit in main.search_notes("supplier")] == [BOB]
+        # The storage key does not authorize a spelling the policy refuses.
+        assert main.get_notes("chat", BOB)["error"]["code"] == "denied"
+        assert main.get_notes("chat", f"{BOB_LID}@lid")["notes"]["label"]["value"] == "supplier"
+        assert [hit["target_id"] for hit in main.search_notes("supplier")] == [f"{BOB_LID}@lid"]
         assert main.annotate("chat", ALICE, "label", "x")["error"]["code"] == "denied"
 
     def test_the_denial_names_the_spelling_the_caller_used(self, notes_store, monkeypatch):

@@ -234,9 +234,10 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   from bare numbers before comparison: list the spelling the chat is stored under (`search_contacts` reports
   it) for a contact the agent must be able to write to.
 - Notes and triage (`annotate`, `get_notes`, `mark_handled`, `snooze`) authorize
-  a person when **any** Brazilian mobile spelling or confirmed phone/LID alias
-  is allowed. Brazilian note keys always use the 13-digit phone spelling with
-  the ninth digit, independent of archive rows; legacy keys remain readable.
+  the spelling the caller supplies. Brazilian note keys always use the 13-digit
+  phone spelling with the ninth digit, independent of archive rows. That key
+  grants no access: writes retain the admitted spelling, checked against the
+  current policy on reads. Legacy notes under unlisted aliases stay hidden.
   Foreign numbers, landlines and unmapped LIDs retain one key. Chat listings
   merge stored phone spellings and a mapped LID only when **every** merged
   spelling is allowed; this never imports hidden messages. Send checks below

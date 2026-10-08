@@ -1881,7 +1881,7 @@ def _chat_twin_cap(cur: sqlite3.Cursor) -> int:
     return max(0, min(CHAT_TWIN_MAX_PAIRS, (budget - len(policy_params) - 100) // 7))
 
 
-def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatTwins:
+def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None, *, phone_pairs: bool = True) -> ChatTwins:
     """Stored Brazilian phone pairs and confirmed phone/LID pairs (issues #479, #337).
 
     Two statements on the way to a listing once the pair scan is warm: the rows
@@ -1894,7 +1894,7 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatT
     allow-list naming one of the two keeps hiding exactly what it hid before,
     rather than having the other half of the conversation folded into it.
     """
-    paired = {**_paired_phone_chats(cur), **_paired_lid_chats(cur)}
+    paired = {**(_paired_phone_chats(cur) if phone_pairs else {}), **_paired_lid_chats(cur)}
     wanted = set(only) if only is not None else None
     if wanted is not None:
         # Resolve the connected phone/alternate/LID component before narrowing
@@ -2995,8 +2995,6 @@ def message_stats(
         if twins.active:
             cte, twin_params = twins.cte()
             prefix = f"WITH {cte} "
-            twin_join = " LEFT JOIN chat_twin tw ON tw.jid = messages.chat_jid"
-            bucket_sql = "COALESCE(tw.listed_jid, messages.chat_jid)"
         base = f"FROM messages JOIN chats ON messages.chat_jid = chats.jid{twin_join}{join} {where}"
         # The WITH clause binds first, then the SUM(media) placeholders in the
         # SELECT list, ahead of the search join and the WHERE.
@@ -3010,11 +3008,23 @@ def message_stats(
         # precedence every merged row follows.
         label = "MIN(chats.name)" if group_by == "chat" else "NULL"
         if twins.active:
-            label = f"MIN(CASE WHEN chats.jid = {bucket_sql} THEN chats.name END)"
+            # Resolve identities after grouping physical chats, rather than
+            # joining the VALUES mapping for every archived message.
+            prefix = (
+                f"WITH {cte}, physical(chat_jid, name, n, outgoing, inbound, media, first_ts, last_ts) AS ("
+                f"SELECT messages.chat_jid, MIN(chats.name), {_STATS_AGGREGATES} {base} GROUP BY messages.chat_jid) "
+            )
+            bucket_sql = "COALESCE(tw.listed_jid, p.chat_jid)"
+            label = f"MIN(CASE WHEN p.chat_jid = {bucket_sql} THEN p.name END)"
+            base = "FROM physical p LEFT JOIN chat_twin tw ON tw.jid = p.chat_jid"
+            aggregates = "SUM(p.n), SUM(p.outgoing), SUM(p.inbound), SUM(p.media), MIN(p.first_ts), MAX(p.last_ts)"
+            count_sql = "SUM(p.n)"
+        else:
+            aggregates, count_sql = _STATS_AGGREGATES, "COUNT(*)"
         _execute_message_sql(
             cur,
-            f"{prefix}SELECT {bucket_sql}, {label}, {_STATS_AGGREGATES} {base} "
-            f"GROUP BY {bucket_sql} ORDER BY COUNT(*) DESC, {bucket_sql} DESC LIMIT ?",
+            f"{prefix}SELECT {bucket_sql}, {label}, {aggregates} {base} "
+            f"GROUP BY {bucket_sql} ORDER BY {count_sql} DESC, {bucket_sql} DESC LIMIT ?",
             [*params, limit],
             match_index,
             query,
@@ -3022,7 +3032,7 @@ def message_stats(
         rows = cur.fetchall()
         _execute_message_sql(
             cur,
-            f"{prefix}SELECT COUNT(DISTINCT {bucket_sql}), {_STATS_AGGREGATES} {base}",
+            f"{prefix}SELECT COUNT(DISTINCT {bucket_sql}), {aggregates} {base}",
             list(params),
             match_index,
             query,
@@ -4093,7 +4103,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
         # A chat is asked for by JID here; a bare number is not one.
         alternate = other_phone_spelling(chat_jid) if both_spellings and "@" in chat_jid else None
         lookups = [chat_jid, alternate] if alternate else [chat_jid]
-        twins = _chat_twins(cursor, only=lookups) if both_spellings else NO_CHAT_TWINS
+        twins = _chat_twins(cursor, only=lookups, phone_pairs=both_spellings)
         rows = [twins.listing_jid(jid) for jid in lookups]
 
         # See list_chats: the last message is always joined for is_from_me,
@@ -5951,19 +5961,19 @@ def list_unread(
                 twin_join += " LEFT JOIN chats third ON third.jid = tw.third_jid"
                 third_marker = _last_read_time_select(cursor, "third")
                 read_marker = f"NULLIF(MAX(COALESCE({read_marker}, ''), COALESCE({third_marker}, '')), '')"
-                # An equality join keeps SQLite seeking by chat even when a
-                # large VALUES table makes it estimate an IN-list poorly.
-                # Singles have no member row and retain their own spelling.
-                twin_join += " LEFT JOIN chat_twin member ON member.listed_jid = chats.jid"
-                of_this_chat = "= COALESCE(member.jid, chats.jid)"
-                # SQLite 3.53 can prefer an is_from_me-only automatic index,
-                # scanning every inbound row for each chat. Pin an available
-                # bridge-owned chat index; older schemas may have neither.
-                for index in ("idx_messages_chat_timestamp", "idx_messages_chat_jid"):
-                    columns = cursor.execute(f"PRAGMA main.index_info('{index}')").fetchall()
-                    if columns and columns[0][2] == "chat_jid":
-                        message_table += f" INDEXED BY {index}"
-                        break
+            # An equality join keeps SQLite seeking by chat even when a
+            # large VALUES table makes it estimate an IN-list poorly.
+            # Singles have no member row and retain their own spelling.
+            twin_join += " LEFT JOIN chat_twin member ON member.listed_jid = chats.jid"
+            of_this_chat = "= COALESCE(member.jid, chats.jid)"
+            # SQLite 3.53 can prefer an is_from_me-only automatic index,
+            # scanning every inbound row for each chat. Pin an available
+            # bridge-owned chat index; older schemas may have neither.
+            for index in ("idx_messages_chat_timestamp", "idx_messages_chat_jid"):
+                columns = cursor.execute(f"PRAGMA main.index_info('{index}')").fetchall()
+                if columns and columns[0][2] == "chat_jid":
+                    message_table += f" INDEXED BY {index}"
+                    break
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         spoken_filter = _spoken_filter("messages")
         unread_where = f"""

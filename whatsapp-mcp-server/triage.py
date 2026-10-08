@@ -134,14 +134,18 @@ def _current_triage_notes(keys: tuple[str, ...]) -> list[tuple[str, str, str, st
         return []
     try:
         rows = conn.execute(
-            "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
+            f"SELECT target_id, key, value, updated_at, MAX(version), {notes._ORIGIN_SQL} FROM notes"
             f" WHERE target_type = 'chat' AND key IN ({','.join('?' * len(keys))})"
             " GROUP BY target_id, key",
             list(keys),
         ).fetchall()
     finally:
         conn.close()
-    return [(target_id, key, value, updated_at) for target_id, key, value, updated_at, _v in rows]
+    return [
+        (target_id, key, value, updated_at)
+        for target_id, key, value, updated_at, _v, origin in rows
+        if notes._visible("chat", origin)
+    ]
 
 
 def _state_by_jid(keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
@@ -182,7 +186,8 @@ def _state_by_jid(keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
                 # can lift it — the same rule handled_at follows.
                 entry["snoozed_at"] = _normalised_moment(updated_at) if moment else None
         for spelling in aliases[normalize_chat_entry(target_id)]:
-            state.setdefault(spelling, {}).update(entry)
+            if notes._allowed(spelling):
+                state.setdefault(spelling, {}).update(entry)
     return state
 
 

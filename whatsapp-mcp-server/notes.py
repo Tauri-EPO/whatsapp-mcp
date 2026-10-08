@@ -27,7 +27,7 @@ only difference an agent sees is that media notes have a single history entry.
 Targets are spelled canonically: a contact known as both ``<phone>@s.whatsapp.net``
 and ``<lid>@lid`` is stored under the phone form. Brazilian mobile spellings
 share a deterministic 13-digit phone key, including the ninth digit,
-regardless of which archive rows exist. Authorization accepts any confirmed alias. Reads look under every
+regardless of which archive rows exist. Authorization checks the caller's spelling. Reads look under admitted
 spelling ``whatsapp._sender_aliases`` knows, so a note written before the LID
 map learned the pair is still found afterwards. A message target is
 ``"<chat_jid>/<message_id>"`` because message IDs are unique per chat only.
@@ -65,7 +65,22 @@ CREATE TABLE IF NOT EXISTS notes (
     version INTEGER NOT NULL,
     PRIMARY KEY (target_type, target_id, key, version)
 );
+CREATE TABLE IF NOT EXISTS note_origins (
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    spelling TEXT NOT NULL,
+    PRIMARY KEY (target_type, target_id, key, version)
+);
 """
+
+# Old rows authorize by their stored spelling. New canonical rows retain the
+# spelling whose authorization admitted the write, including after policy changes.
+_ORIGIN_SQL = (
+    "COALESCE((SELECT spelling FROM note_origins o WHERE o.target_type = notes.target_type"
+    " AND o.target_id = notes.target_id AND o.key = notes.key AND o.version = notes.version), notes.target_id)"
+)
 
 
 def _connect(create: bool) -> sqlite3.Connection | None:
@@ -107,19 +122,8 @@ def _canonical_jid(jid: str) -> str:
 
 
 def _allowed(jid: str) -> bool:
-    """Is any spelling of this conversation in the allow-list?
-
-    WHATSAPP_ALLOWED_CHATS is matched literally, so a DM the archive only knows
-    as ``<lid>@lid`` is listed under that spelling — while a note about it is
-    stored under the phone form. Checking the canonical spelling alone would
-    both refuse chats every read tool allows and accept chats they hide, so
-    every spelling of the identity has a say.
-    """
-    if jid.count("@") > 1:
-        return False
-    if not CHAT_POLICY.restricted or CHAT_POLICY.allows(normalize_chat_entry(jid)):
-        return True
-    return any(CHAT_POLICY.allows(spelling) for spelling in _jid_spellings(jid))
+    """Authorize the supplied spelling; a storage key never grants access."""
+    return jid.count("@") <= 1 and CHAT_POLICY.allows(normalize_chat_entry(jid))
 
 
 def _require_allowed(jid: str) -> None:
@@ -137,7 +141,7 @@ def resolve_target(target_type: str, target_id: str) -> tuple[str, str, list[str
     same call are all legitimate targets. Batched read-only metadata selects
     the canonical spelling without creating an archive row. ``WHATSAPP_ALLOWED_CHATS`` is checked: a contact JID is spelled
     exactly like its direct chat. Contact search also reads the address book
-    outside that list, but notes on identities with no allowed alias are refused.
+    outside that list, but a note requires the supplied spelling to be allowed.
     """
     ttype = (target_type or "").strip().lower()
     if ttype not in TARGET_TYPES:
@@ -158,10 +162,10 @@ def resolve_target(target_type: str, target_id: str) -> tuple[str, str, list[str
             )
         _require_allowed(chat_raw)
         chat = _canonical_jid(chat_raw)
-        return ttype, f"{chat}/{message_id}", [f"{s}/{message_id}" for s in sorted({chat, *_jid_spellings(chat_raw)})]
+        return ttype, f"{chat}/{message_id}", _listing_ids(ttype, raw)
     _require_allowed(raw)
     canonical = _canonical_jid(raw)
-    return ttype, canonical, sorted({canonical, *_jid_spellings(raw)})
+    return ttype, canonical, _listing_ids(ttype, raw)
 
 
 def _canonical_target(target_type: str, target_id: str, canonical_jids: dict[str, str] | None = None) -> str:
@@ -283,16 +287,17 @@ def _versioned_current(
     canonical id always outranks anything stored under an older spelling.
     """
     rows = conn.execute(
-        "SELECT target_id, value, updated_at, MAX(version) FROM notes"
+        f"SELECT target_id, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
         f" WHERE target_type = ? AND key = ? AND target_id IN ({','.join('?' * len(ids))})"
         " GROUP BY target_id",
         [ttype, key, *ids],
     ).fetchall()
     if not rows:
         return None, 0
-    best = max(rows, key=lambda row: (row[0] == tid, row[2], row[0]))
+    visible = [row for row in rows if _visible(ttype, row[4])]
+    best = max(visible, key=lambda row: (row[0] == tid, row[2], row[0])) if visible else None
     # An empty stored value is a tombstone: there is nothing to replace.
-    previous = (best[1], best[2]) if best[1] else None
+    previous = (best[1], best[2]) if best and best[1] else None
     return previous, max(int(row[3]) for row in rows)
 
 
@@ -349,6 +354,8 @@ def annotate(
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (ttype, tid, key, stored, now, "delete" if deleting else source, version + 1),
             )
+            origin = normalize_chat_entry(target_id.partition("/")[0])
+            conn.execute("INSERT INTO note_origins VALUES (?, ?, ?, ?, ?)", (ttype, tid, key, version + 1, origin))
             # Move the current value to its canonical key in this transaction.
             # Original rows remain in the shared history; alias tombstones
             # close their current values without overwriting that history.
@@ -361,6 +368,10 @@ def annotate(
             conn.executemany(
                 "INSERT INTO notes VALUES (?, ?, ?, '', ?, 'alias', ?)",
                 [(ttype, alias, key, now, version + 1) for alias, *_ in aliases],
+            )
+            conn.executemany(
+                "INSERT INTO note_origins VALUES (?, ?, ?, ?, ?)",
+                [(ttype, alias, key, version + 1, origin) for alias, *_ in aliases],
             )
         conn.commit()
     except BaseException:
@@ -382,14 +393,17 @@ def _current_rows(conn: sqlite3.Connection, ttype: str, tid: str, ids: list[str]
     whatever the clock says.
     """
     rows = conn.execute(
-        "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
+        f"SELECT target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
         f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(ids))})"
         " GROUP BY target_id, key",
         [ttype, *ids],
     ).fetchall()
     best: dict[str, tuple[str, str, str]] = {}
-    for target_id, key, value, updated_at, _version in sorted(rows, key=lambda row: (row[0] == tid, row[3], row[0])):
-        best[key] = (key, value, updated_at)
+    for target_id, key, value, updated_at, _version, origin in sorted(
+        rows, key=lambda row: (row[0] == tid, row[3], row[0])
+    ):
+        if _visible(ttype, origin):
+            best[key] = (key, value, updated_at)
     return [row for row in best.values() if row[1]]
 
 
@@ -432,7 +446,11 @@ def _listing_ids(
     canonical_chat = canonical_jids[chat] if canonical_jids is not None else _canonical_jid(chat)
     spellings = aliases[chat] if aliases is not None else _jid_spellings(chat)
     # Canonical last: it must shadow every legacy value, including tombstones.
-    ids = [f"{jid}{separator}{message_id}" for jid in dict.fromkeys(spellings) if jid and jid != canonical_chat]
+    ids = [
+        f"{jid}{separator}{message_id}"
+        for jid in dict.fromkeys(spellings)
+        if jid and jid != canonical_chat and _allowed(jid)
+    ]
     return [*ids, f"{canonical_chat}{separator}{message_id}"]
 
 
@@ -466,7 +484,7 @@ def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, di
         for chunk in whatsapp._in_chunks(lookup, size):
             rows.extend(
                 conn.execute(
-                    "SELECT target_id, key, value, updated_at, MAX(version) FROM notes"
+                    f"SELECT target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
                     f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(chunk))})"
                     " GROUP BY target_id, key",
                     [target_type, *chunk],
@@ -475,8 +493,9 @@ def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, di
     finally:
         conn.close()
     by_id: dict[str, dict[str, tuple[str, str]]] = {}
-    for target_id, key, value, updated_at, _version in rows:
-        by_id.setdefault(target_id, {})[key] = (value, updated_at)
+    for target_id, key, value, updated_at, _version, origin in rows:
+        if _visible(target_type, origin):
+            by_id.setdefault(target_id, {})[key] = (value, updated_at)
     out: dict[str, dict[str, str]] = {}
     for tid, ids in spellings.items():
         merged: dict[str, tuple[str, str]] = {}
@@ -534,12 +553,13 @@ def get_notes(target_type: str, target_id: str, include_history: bool = False) -
         if include_history:
             view["history"] = [
                 {"key": key, "value": value, "updated_at": updated_at, "source": source, "version": version}
-                for key, value, updated_at, source, version in conn.execute(
-                    "SELECT key, value, updated_at, source, version FROM notes"
+                for key, value, updated_at, source, version, origin in conn.execute(
+                    f"SELECT key, value, updated_at, source, version, {_ORIGIN_SQL} FROM notes"
                     f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(ids))})"
                     " ORDER BY updated_at DESC, version DESC",
                     [ttype, *ids],
                 )
+                if _visible(ttype, origin)
             ]
     finally:
         conn.close()
@@ -597,8 +617,8 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
         # Group first, filter after: matching an older version whose replacement
         # no longer contains the needle would report a value nobody can read.
         rows = conn.execute(
-            "SELECT target_type, target_id, key, value, updated_at FROM ("
-            "  SELECT target_type, target_id, key, value, updated_at, MAX(version)"
+            "SELECT target_type, target_id, key, value, updated_at, origin FROM ("
+            f"  SELECT target_type, target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} AS origin"
             f"  FROM notes WHERE {' AND '.join(inner)} GROUP BY target_type, target_id, key"
             ") WHERE value <> '' AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0)"
             " ORDER BY updated_at DESC",
@@ -619,8 +639,8 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
             canonical_jids = whatsapp.canonical_note_jids(
                 [tid.partition("/")[0] for ttype, tid, *_rest in batch if ttype != "media"]
             )
-            for ttype, tid, hit_key, value, updated_at in batch:
-                if not _visible(ttype, tid):
+            for ttype, tid, hit_key, value, updated_at, origin in batch:
+                if not _visible(ttype, origin):
                     continue
                 canonical = _canonical_target(ttype, tid, canonical_jids)
                 if canonical != tid:
@@ -632,9 +652,11 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
                 slot = (ttype, canonical, hit_key)
                 if slot in best:
                     continue
+                _, separator, message_id = tid.partition("/")
+                visible_id = f"{origin}{separator}{message_id}" if separator else origin
                 best[slot] = {
                     "target_type": ttype,
-                    "target_id": canonical,
+                    "target_id": canonical if canonical == origin or _visible(ttype, canonical) else visible_id,
                     "key": hit_key,
                     "value": value,
                     "updated_at": updated_at,

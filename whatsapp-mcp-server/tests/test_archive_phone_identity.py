@@ -7,6 +7,7 @@ import pytest
 import main
 import media_notes
 import notes
+import triage
 import whatsapp
 from chat_policy import ChatPolicy
 from tests.conftest import ALICE, BOB_LID, BOB_PN, FAMILY
@@ -22,6 +23,58 @@ from tests.test_phone_spellings import (
     SHORT_JID,
 )
 from tests.test_structured_errors import _sdk_client
+
+
+@pytest.mark.parametrize("target_type", ["chat", "contact", "message"])
+@pytest.mark.parametrize("listed", [SHORT_JID, LONG_JID, f"{LID}@lid"])
+def test_notes_drop_denied_legacy_origins_and_recheck_canonical_writes(paired_dbs, monkeypatch, target_type, listed):
+    with paired_dbs.whatsmeow() as conn:
+        conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (LID, SHORT))
+    suffix = "/synthetic-message" if target_type == "message" else ""
+    denied = next(jid for jid in [SHORT_JID, LONG_JID, f"{LID}@lid"] if jid != listed)
+    conn = notes._connect(create=True)
+    assert conn is not None
+    conn.execute(
+        "INSERT INTO notes VALUES (?, ?, 'role', 'hidden legacy', '2026-10-08', 'legacy', 1)",
+        (target_type, denied + suffix),
+    )
+    conn.close()
+    _allow(monkeypatch, listed)
+    assert main.get_notes(target_type, listed + suffix, include_history=True)["notes"] == {}
+    assert main.get_notes(target_type, listed + suffix, include_history=True)["history"] == []
+    assert notes.fetch_notes_for(target_type, [listed + suffix, denied + suffix]) == {}
+    assert main.search_notes("hidden legacy", target_type=target_type) == []
+    assert main.annotate(target_type, denied + suffix, "role", "refused")["error"]["code"] == "denied"
+    assert main.annotate(target_type, listed + suffix, "role", "visible canonical")["target_id"] == LONG_JID + suffix
+    assert main.get_notes(target_type, listed + suffix)["notes"]["role"]["value"] == "visible canonical"
+    assert notes.fetch_notes_for(target_type, [listed + suffix]) == {listed + suffix: {"role": "visible canonical"}}
+    assert main.search_notes("visible canonical", target_type=target_type)[0]["target_id"] == listed + suffix
+    _allow(monkeypatch, ALICE)
+    assert main.search_notes("visible canonical", target_type=target_type) == []
+
+
+def test_triage_drops_denied_legacy_and_keeps_admitted_write_origin(paired_dbs, monkeypatch):
+    conn = notes._connect(create=True)
+    assert conn is not None
+    conn.execute("INSERT INTO notes VALUES ('chat', ?, 'mute', 'yes', '2026-10-08', 'legacy', 1)", (LONG_JID,))
+    conn.close()
+    _allow(monkeypatch, SHORT_JID)
+    assert triage._state_by_jid((triage.MUTE_KEY,)) == {}
+    assert main.annotate("chat", LONG_JID, "mute", "yes")["error"]["code"] == "denied"
+    main.annotate("chat", SHORT_JID, "mute", "yes")
+    assert triage._state_by_jid((triage.MUTE_KEY,)) == {SHORT_JID: {"muted": True}}
+    _allow(monkeypatch, LONG_JID)
+    assert triage._state_by_jid((triage.MUTE_KEY,)) == {}
+
+
+def test_literal_chat_keeps_confirmed_phone_lid_name_pair(paired_dbs):
+    _chat(paired_dbs, SHORT_JID, SHORT)
+    _chat(paired_dbs, f"{LID}@lid", "Clinic")
+    with paired_dbs.whatsmeow() as conn:
+        conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (LID, SHORT))
+    chat = whatsapp.get_chat(SHORT_JID, both_spellings=False)
+    assert chat["jid"] == SHORT_JID and chat["name"] == "Clinic"
+    assert set(chat["aliases"]) == {SHORT_JID, f"{LID}@lid"}
 
 
 def _chat(store, jid, name="", stamp="2026-10-08 10:00:00"):
@@ -120,11 +173,15 @@ def test_legacy_notes_canonical_wins_and_delete_covers_both(paired_dbs, asked):
 
 @pytest.mark.parametrize("listed", [SHORT_JID, LONG_JID])
 @pytest.mark.parametrize("asked", [SHORT_JID, LONG_JID])
-def test_any_alias_note_policy_is_explicit_and_still_denies_unrelated(paired_dbs, monkeypatch, listed, asked):
+def test_note_policy_requires_the_typed_spelling(paired_dbs, monkeypatch, listed, asked):
     _chat(paired_dbs, SHORT_JID)
     _allow(monkeypatch, listed)
-    assert main.annotate("contact", asked, "role", "allowed")["target_id"] == LONG_JID
-    assert main.get_notes("contact", asked)["notes"]["role"]["value"] == "allowed"
+    if listed == asked:
+        assert main.annotate("contact", asked, "role", "allowed")["target_id"] == LONG_JID
+        assert main.get_notes("contact", asked)["notes"]["role"]["value"] == "allowed"
+    else:
+        assert main.annotate("contact", asked, "role", "blocked")["error"]["code"] == "denied"
+        assert main.get_notes("contact", asked)["error"]["code"] == "denied"
     assert main.annotate("contact", ALICE, "role", "blocked")["error"]["code"] == "denied"
     _allow(monkeypatch, ALICE)
     for jid in [SHORT_JID, LONG_JID]:
@@ -544,7 +601,8 @@ def test_phone_pair_name_order_and_cursor_use_the_displayed_real_name(phone_pair
 
 
 @pytest.mark.parametrize("triples", [1, 100])
-def test_triples_preserve_indexed_unread_joins_for_unrelated_group_history(paired_dbs, monkeypatch, triples):
+@pytest.mark.parametrize("members", ["triple", "phone_pair", "lid_pair"])
+def test_triples_preserve_indexed_unread_joins_for_unrelated_group_history(paired_dbs, monkeypatch, triples, members):
     groups = [f"120363{index:012d}@g.us" for index in range(200)]
     with paired_dbs.messages() as conn:
         conn.execute("DELETE FROM messages")
@@ -561,7 +619,12 @@ def test_triples_preserve_indexed_unread_joins_for_unrelated_group_history(paire
         short = f"5511{60000000 + index:08d}"
         long = short[:4] + "9" + short[4:]
         lid = str(100000000000100 + index)
-        for jid in (f"{short}@s.whatsapp.net", f"{long}@s.whatsapp.net", f"{lid}@lid"):
+        jids = [f"{short}@s.whatsapp.net"]
+        if members != "lid_pair":
+            jids.append(f"{long}@s.whatsapp.net")
+        if members != "phone_pair":
+            jids.append(f"{lid}@lid")
+        for jid in jids:
             _chat(paired_dbs, jid)
         with paired_dbs.whatsmeow() as conn:
             conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (lid, short))
