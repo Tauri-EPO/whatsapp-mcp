@@ -6403,6 +6403,15 @@ def leave_group(group_jid: str) -> dict[str, Any]:
     return _bridge_json(_bridge_request("POST", "/group/leave", json={"group_jid": jid}))
 
 
+def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
+    """Archive/unarchive through the bridge's app-state endpoint."""
+    target = (chat_jid or "").strip()
+    if "@" not in target or not all(target.rsplit("@", 1)):
+        raise ToolError("invalid_argument", "chat_jid must be a full JID")
+    _require_allowed(target)
+    return _bridge_json(_bridge_request("POST", "/chat/archive", json={"chat_jid": target, "archived": archived}))
+
+
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
     """Show (or clear) the 'typing…' presence in a chat."""
     target = (chat_jid or "").strip()

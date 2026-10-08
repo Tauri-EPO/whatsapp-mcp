@@ -2,7 +2,7 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -921,6 +921,18 @@ The group's invite link (admin only). **Parameters:** `chat_jid`, `reset` (optio
 ### `leave_group`
 
 Leave a group. Irreversible without a new invite; the local archive keeps the history. **Parameters:** `chat_jid`.
+
+### `archive_chat`
+
+Archive a WhatsApp conversation on the phone, or return it to the inbox with
+`archived=false`. **Parameters:** `chat_jid` (full JID from `list_chats`),
+`archived` (optional, default `true`). Requires a connected bridge and at least
+one stored message; a chat without an anchor returns `not_found`.
+
+Archiving also removes the chat's pin, as WhatsApp's archive patch does. Local
+messages remain available; no reply or read receipt is sent. The phone's settings
+decide whether a new message unarchives the conversation. Returns
+`{"success": true, "archived": true}`. Hidden and refused in read-only mode.
 
 ### `send_typing`
 

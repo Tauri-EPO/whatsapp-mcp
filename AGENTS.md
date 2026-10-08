@@ -75,6 +75,7 @@ whatsapp-mcp/
 │   ├── me.go                   # GET /api/me: the account's own phone JID and LID (authenticated)
 │   ├── chat_actions.go         # /api/react, /api/typing
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
+│   ├── chat_archive.go         # /api/chat/archive: archive/unarchive anchored to the newest stored message
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution; DSN options and connection-pool bounds (boundPool)
 │   ├── store_batch.go          # one transaction per conversation for the history-sync backfill

@@ -27,6 +27,7 @@ from tool_policy import (
 # The contract this feature promises. Kept spelled out so a tool that quietly
 # loses its @mutating_tool decorator fails here instead of in production.
 EXPECTED_MUTATING = {
+    "archive_chat",
     "send_message",
     "send_file",
     "send_audio_message",

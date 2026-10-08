@@ -71,6 +71,9 @@ from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
 )
 from whatsapp import (
+    archive_chat as whatsapp_archive_chat,
+)
+from whatsapp import (
     bridge_status as whatsapp_bridge_status,
 )
 from whatsapp import (
@@ -1677,6 +1680,24 @@ def leave_group(chat_jid: str) -> dict[str, Any]:
         chat_jid: The group JID
     """
     return whatsapp_leave_group(chat_jid)
+
+
+@mcp.tool()
+@tool_errors
+@mutating_tool
+def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
+    """Archive a WhatsApp conversation on the phone, or unarchive it with archived=False.
+
+    Requires a connected bridge and at least one locally stored message to anchor
+    the patch. Archiving also removes the chat's pin (WhatsApp behaviour); it
+    preserves local messages and sends no reply or read receipt. New messages may
+    unarchive it according to the phone's settings.
+
+    Args:
+        chat_jid: Full direct-chat or group JID from list_chats
+        archived: True to archive (default); False to return it to the inbox
+    """
+    return whatsapp_archive_chat(chat_jid, archived)
 
 
 @mcp.tool()

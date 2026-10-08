@@ -36,6 +36,7 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | **Triage** | `mark_handled` and `snooze` record what a reply pass decided, so the next `list_unanswered` returns what is left instead of the same 300 chats — nothing is sent, nothing the other side can see, and a new message from them brings the chat straight back |
 | **Groups and polls** | group members, add/remove/promote members, rename, invite link, leave, native poll results with every voter's choice |
 | **Memory** | deleted messages keep their content, view-once media is archived without consuming the phone's view, calls are logged, and the agent keeps its own notes across sessions — about files, chats, contacts and individual messages (label, importance, summary, a dated log), returned inline wherever the target is listed, versioned so a rewrite never loses what it replaced |
+| **File chats** | `archive_chat` archives or unarchives a conversation on the phone while keeping its local history |
 | **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result; `coverage` shows what the archive really holds and which periods are missing; `request_history` asks the phone to backfill a chat whose archive starts too late |
 
 The full list with parameters is in [docs/TOOLS.md](docs/TOOLS.md).

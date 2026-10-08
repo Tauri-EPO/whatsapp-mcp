@@ -97,6 +97,7 @@ EXPECTED_UNTRUSTED = {
 # The rest: they return counts, timestamps, paths, status flags or an echo of
 # what this agent itself just wrote — nothing a third party authored.
 EXPECTED_TRUSTED = {
+    "archive_chat",
     "bridge_status",
     "request_history",
     "annotate_media",
