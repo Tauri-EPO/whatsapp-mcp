@@ -131,6 +131,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 			return err
 		},
 		b.Policy,
+		b.storeLive,
 	)))
 	mux.HandleFunc("/api/forward", mutate(handleForwardMessage(forwardDeps{
 		lookup: messageStore.messageContentLookup,
@@ -156,6 +157,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 			return err
 		},
 		b.Policy,
+		b.storeLive,
 	)))
 
 	// Poll results (see polls.go).

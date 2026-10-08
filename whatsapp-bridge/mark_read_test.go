@@ -70,11 +70,12 @@ func testResolveJID(raw string) (types.JID, error) {
 func newMarkReadDeps(t *testing.T, store *MessageStore, rec *markReadRecorder) markReadDeps {
 	t.Helper()
 	return markReadDeps{
-		store:     store,
-		connected: func() bool { return true },
-		resolve:   testResolveJID,
-		markRead:  rec.markRead,
-		log:       testLogger(),
+		store:      store,
+		connected:  func() bool { return true },
+		resolve:    testResolveJID,
+		markRead:   rec.markRead,
+		log:        testLogger(),
+		storeWrite: storeWriteOwner(t, store),
 	}
 }
 

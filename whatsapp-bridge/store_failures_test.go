@@ -362,7 +362,7 @@ func TestStoreFailuresOfReactionsVotesAndHistoryAreErrors(t *testing.T) {
 			}},
 		}})
 		errs := errorLines(rec.String())
-		if len(errs) != 1 || !strings.Contains(errs[0], "history message HIST1 in "+group.String()) || strings.Contains(errs[0], "words that stay") {
+		if len(errs) != 1 || !strings.Contains(errs[0], "1 history messages in "+group.String()) || !strings.Contains(errs[0], "first ID HIST1, last ID HIST1") || strings.Contains(errs[0], "words that stay") {
 			t.Fatalf("want one ERROR naming the row and the chat, never the content, got %q", errs)
 		}
 		if got := b.metrics.storeFailures.Load(); got != 1 {

@@ -4725,7 +4725,7 @@ def mark_messages_read(
 
     counts = {"messages": 0, "senders": 0, "batches": 0}
     truncated = False
-    message = ""
+    messages: list[str] = []
     for target_jid, ids in _read_receipt_targets(chat_jid, message_ids):
         body = {**payload, "chat_jid": target_jid}
         if ids is not None:
@@ -4734,8 +4734,10 @@ def mark_messages_read(
         for key in counts:
             counts[key] += int(result.get(key) or 0)
         truncated = truncated or bool(result.get("truncated", False))
-        message = message or (result.get("message") or "")
-    return {"success": True, "message": message or "Marked as read", **counts, "truncated": truncated}
+        message = result.get("message") or ""
+        if message and message not in messages:
+            messages.append(message)
+    return {"success": True, "message": "; ".join(messages) or "Marked as read", **counts, "truncated": truncated}
 
 
 HISTORY_DEFAULT_COUNT = 50

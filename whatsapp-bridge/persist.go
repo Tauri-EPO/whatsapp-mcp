@@ -7,6 +7,7 @@ package main
 // message in place; extractMessage works on a local copy instead.
 
 import (
+	"fmt"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -14,7 +15,7 @@ import (
 )
 
 // messageWriter is satisfied by *MessageStore (single rows) and *messageBatch
-// (one transaction per history-sync conversation). Both take the sender as
+// (one transaction for a live row or a bounded history chunk). Both take the sender as
 // the full resolved JID; see StoreMessage (store.go).
 type messageWriter interface {
 	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
@@ -81,9 +82,9 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 func (e extractedMessage) empty() bool { return e.content == "" && e.mediaType == "" }
 
 // persistMessage writes the row plus its poll and view-once side tables.
-// Side-table failures are logged, not returned: the message row is what
-// readers depend on.
-func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, logger waLog.Logger) error {
+// Every failure reaches the retry owner. Live and history callers use a batch
+// so a failed auxiliary write cannot leave a partially committed message.
+func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, _ waLog.Logger) error {
 	quotedID := ""
 	if quoted {
 		quotedID = e.quotedID
@@ -101,17 +102,17 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 	// (mentions.go).
 	if mentions := mentionsColumn(e.mentions); mentions != "" {
 		if err := w.SetMentions(id, chatJID, mentions); err != nil {
-			logger.Warnf("Failed to store mentions for message %s: %v", id, err)
+			return fmt.Errorf("mentions: %w", err)
 		}
 	}
 	if e.poll != nil {
 		if err := w.StorePoll(id, chatJID, e.poll, ts); err != nil {
-			logger.Warnf("Failed to store poll %s: %v", id, err)
+			return fmt.Errorf("poll metadata: %w", err)
 		}
 	}
 	if e.viewOnce {
 		if err := w.MarkViewOnce(id, chatJID); err != nil {
-			logger.Warnf("Failed to flag view-once message %s: %v", id, err)
+			return fmt.Errorf("view-once: %w", err)
 		}
 	}
 	return nil

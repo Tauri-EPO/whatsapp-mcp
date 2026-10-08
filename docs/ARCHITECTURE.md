@@ -178,11 +178,45 @@ Under a persistently held writer, the default five-second SQLite busy timeout
 plus the shared budget consumes up to 16.2 seconds of lock waits and retry
 pauses, instead of separate chat/message budgets. SQL work, media upload, the
 remote send and machine scheduling add time; this is not a total-request
-latency guarantee. Long history transactions can still delay live writes.
+latency guarantee. Scheduling and repeated writer acquisition can still delay live writes.
 
-Poll vote tally helpers already use storeLive. Other mutations retain their
-own handling: edit/delete bookkeeping, inbound revokes, call rows and auxiliary
-message metadata are tracked separately; read/ephemeral state, renamed chats,
+Poll vote tally helpers already use storeLive. Edit/revoke/read-receipt archive bookkeeping,
+inbound revokes and call lifecycle rows also use the Bridge retry owner. The
+remote edit or revoke runs once before its local retry closure; exhaustion
+keeps the successful remote response with an archive warning and records one
+failure with its row identity. Their local lock waits and retry pauses can add
+about 16 seconds after the remote effect, using the same single budget as send.
+Live message rows and their direct path,
+mentions, poll and view-once metadata commit together in one transaction, so
+an auxiliary failure cannot leave a partial row or FTS entry. A non-busy
+auxiliary failure now drops the whole live row, logs ERROR, increments the
+failure counter and makes a forwarded webhook report `stored:false`.
+All messages.db transactions are write transactions and acquire the writer at
+BEGIN IMMEDIATE, before the FTS triggers can encounter a deferred lock upgrade.
+RenameChat also uses the shared retry owner.
+
+Other mutations retain their own handling: inbound read/ephemeral state,
 refreshed media metadata and group rosters may recover on later updates. Schema
 and namespace/time/LID migrations retain their startup error handling. Chat
 archive state and retention are not messages.db write paths.
+
+History imports commit at most 500 input envelopes per transaction, using a
+prepared insert within each chunk. A live event can write after a committed
+chunk; a large conversation no longer owns one continuous write transaction.
+BUSY/LOCKED retries repeat the whole chunk, and metrics count only committed
+rows. A row or side-table failure aborts the chunk and prevents later statements
+from silently autocommitting after a SQLite rollback. Earlier
+committed chunks remain. Non-busy failures replay that chunk atomically one row
+at a time, so one bad row costs one row. Exhausted BUSY/LOCKED stops that
+conversation at the newest committed prefix, keeping the history-request
+anchor in front of the unimported range. One ERROR names the chat, row count
+and first/last missing IDs; the failure counter counts ROWS, not ERROR lines.
+A chat-row failure skips its conversation and counts its importable messages
+once. Shutdown stops between chunks/conversations with one INFO, without
+counting unattempted rows as failures.
+
+The temporary-file benchmark `BenchmarkHistoryLiveWriteFile` runs the actual
+history and live handlers with 5,000 history messages, a concurrent live message
+and FTS enabled, and checks rows, index entries and metrics. Its transaction
+and live-wait timings depend on the machine and load; chunking bounds the input
+count per transaction rather than guaranteeing a latency or writer fairness.

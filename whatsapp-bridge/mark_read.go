@@ -34,12 +34,13 @@ type markReadFunc func(ctx context.Context, ids []types.MessageID, readAt time.T
 // PN -> LID rewrite applied to the JIDs a receipt is addressed with
 // (resolveRecipientJID in production).
 type markReadDeps struct {
-	store     *MessageStore
-	policy    chatPolicy
-	connected func() bool
-	resolve   func(jid string) (types.JID, error)
-	markRead  markReadFunc
-	log       waLog.Logger
+	store      *MessageStore
+	policy     chatPolicy
+	connected  func() bool
+	resolve    func(jid string) (types.JID, error)
+	markRead   markReadFunc
+	log        waLog.Logger
+	storeWrite storeWriteFunc
 }
 
 // markReadBatch is how many message IDs travel in one receipt when a whole
@@ -72,7 +73,8 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 			markRead: func(ctx context.Context, ids []types.MessageID, readAt time.Time, chat, sender types.JID) error {
 				return client.MarkRead(ctx, ids, readAt, chat, sender)
 			},
-			log: b.Log,
+			log:        b.Log,
+			storeWrite: b.storeLive,
 		})(w, r)
 	}
 }
@@ -185,11 +187,11 @@ func markListedRead(w http.ResponseWriter, r *http.Request, deps markReadDeps, r
 	if ts, ok, tsErr := deps.store.MaxMessageTimestamp(req.ChatJID, req.MessageIDs); tsErr == nil && ok {
 		localReadAt = ts
 	}
-	persistReadMarker(deps, req.ChatJID, localReadAt)
+	warning := persistReadMarker(deps, req.ChatJID, localReadAt)
 
 	writeMarkRead(w, http.StatusOK, MarkReadResponse{
 		Success:  true,
-		Message:  "Messages marked as read",
+		Message:  "Messages marked as read" + warning,
 		Messages: len(messageIDs),
 		Senders:  1,
 		Batches:  1,
@@ -293,14 +295,15 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 	}
 
 	covered := coveredPrefix(pending, acked, overflow)
+	warning := ""
 	if covered > 0 {
-		persistReadMarker(deps, req.ChatJID, pending[covered-1].Timestamp)
+		warning = persistReadMarker(deps, req.ChatJID, pending[covered-1].Timestamp)
 	}
 
 	if failure != nil {
 		writeMarkRead(w, http.StatusInternalServerError, MarkReadResponse{
 			Message: fmt.Sprintf("Acknowledged %d of %d message(s) before failing, read marker covers %d: %v",
-				len(acked)-len(unaddressable), len(pending)-len(unaddressable), covered, failure),
+				len(acked)-len(unaddressable), len(pending)-len(unaddressable), covered, failure) + warning,
 			Messages:  covered,
 			Senders:   len(groups),
 			Batches:   batches,
@@ -314,7 +317,7 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 	}
 	writeMarkRead(w, http.StatusOK, MarkReadResponse{
 		Success:   true,
-		Message:   message,
+		Message:   message + warning,
 		Messages:  covered,
 		Senders:   len(groups),
 		Batches:   batches,
@@ -421,10 +424,11 @@ func parseSenderJID(sender string) (types.JID, error) {
 // persistReadMarker advances chats.last_read_time. The receipts have already
 // gone out by then, so a failure is logged and the caller still hears what was
 // marked.
-func persistReadMarker(deps markReadDeps, chatJID string, readAt time.Time) {
-	if err := deps.store.MarkChatRead(chatJID, readAt); err != nil {
-		deps.log.Warnf("failed to persist local read marker for %s: %v", chatJID, err)
+func persistReadMarker(deps markReadDeps, chatJID string, readAt time.Time) string {
+	if !deps.storeWrite("read marker", "", chatJID, func() error { return deps.store.MarkChatRead(chatJID, readAt) }) {
+		return " (archive update failed; the remote read receipts already succeeded, do not repeat them)"
 	}
+	return ""
 }
 
 func writeMarkRead(w http.ResponseWriter, status int, resp MarkReadResponse) {

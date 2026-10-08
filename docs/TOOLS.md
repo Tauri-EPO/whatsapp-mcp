@@ -1011,6 +1011,11 @@ dropped. Returns `question`, `selectable_count`, per-option `count` and
 
 ### `delete_message`
 
+If a deletion for everyone succeeds remotely but the archive update fails,
+the successful response includes an archive warning; do not repeat the remote
+effect to repair the archive. Only local bookkeeping is retried, which can add
+about 16 seconds of lock waits after the remote effect.
+
 Revoke a message for everyone (WhatsApp's "Delete for everyone", own messages
 only) or drop it from the local archive without touching WhatsApp.
 
@@ -1028,6 +1033,12 @@ FTS index follows); downloaded media is left in `store/`. Respects
 ### `edit_message`
 
 Edit the text of a message this account sent (WhatsApp accepts edits for about 15 minutes). Recipients see the new text with an "edited" marker; the archive is updated. **Parameters:** `chat_jid`, `message_id` (from `send_message`), `text`, `dry_run` (optional, default `false` — see [Dry runs](#dry-runs)).
+
+If an edit or deletion for everyone succeeds remotely but its local archive
+update fails, the successful response includes an archive warning. The remote
+effect has already happened: do not repeat it to repair the local archive.
+The bridge retries only local bookkeeping and records an exhausted failure;
+its lock waits can add about 16 seconds after the remote effect.
 
 ### `forward_message`
 
@@ -1055,6 +1066,12 @@ fields answer `media_unavailable`. Do not retry those permanent media failures.
 `bridge_unavailable` remains the temporary bridge/CDN failure to retry later.
 
 ### `mark_messages_read`
+
+If read receipts succeed remotely but the local read-marker update fails, the
+response includes an archive warning. Do not send the receipts again to repair
+the marker; only local bookkeeping is retried, which can add about 16 seconds
+of lock waits after the remote effect. The bridge logs one ERROR and counts
+the failed marker on exhaustion.
 
 Send WhatsApp read receipts (the blue ticks). This is a visible side effect on
 the other person's phone and it cannot be undone; reading or searching messages

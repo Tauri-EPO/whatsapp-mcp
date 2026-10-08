@@ -148,8 +148,11 @@ func sqliteURI(path, query string) string {
 // form the cgo driver used ("2006-01-02 15:04:05.999999999-07:00"), so
 // existing stores and the MCP server's parser see no difference.
 const (
-	sqliteTimeFormat      = "_time_format=sqlite"
-	sqliteWriterOptions   = "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
+	sqliteTimeFormat    = "_time_format=sqlite"
+	sqliteWriterOptions = "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
+	// Every messages.db transaction writes (batches, rosters and migrations).
+	// Acquire its WAL writer before FTS can turn a deferred read into BUSY.
+	messagesWriterOptions = sqliteWriterOptions + "&_txlock=immediate"
 	sqliteReadOnlyOptions = "mode=ro&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
 )
 

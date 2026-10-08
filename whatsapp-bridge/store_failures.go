@@ -59,6 +59,8 @@ func retryBusyWithWait(write func() error, delays []time.Duration, wait func(tim
 	return err
 }
 
+type storeWriteFunc func(kind, messageID, chatJID string, write func() error) bool
+
 // storeLive runs one write under retryBusy and reports whether it is in the
 // store; a write that is given up is counted and logged once. write has to be
 // safe to run again (the bridge's inserts are upserts).

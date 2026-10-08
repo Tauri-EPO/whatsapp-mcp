@@ -1877,6 +1877,10 @@ def mark_messages_read(
         {"success", "message", "messages", "senders", "batches", "truncated"} —
         the counts describe what was acknowledged; truncated means the chat had
         more pending than one call marks, so call again to continue
+
+        If message warns that the archive update failed, the remote receipts
+        already succeeded: do not repeat them. Warnings from both halves of a
+        merged phone/LID chat are retained.
     """
     return whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp, up_to_timestamp)
 

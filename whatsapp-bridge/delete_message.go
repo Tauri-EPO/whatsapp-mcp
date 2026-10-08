@@ -61,7 +61,7 @@ func writeDeleteResponse(w http.ResponseWriter, status int, resp DeleteMessageRe
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicy) http.HandlerFunc {
+func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicy, storeWrite storeWriteFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -112,9 +112,10 @@ func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPoli
 			writeDeleteResponse(w, http.StatusBadGateway, DeleteMessageResponse{Message: "Revoke failed: " + err.Error(), ForEveryone: true})
 			return
 		}
-		if err := store.MarkMessageDeleted(req.MessageID, req.ChatJID, time.Now()); err != nil {
+		deletedAt := time.Now()
+		if !storeWrite("revoked message", req.MessageID, req.ChatJID, func() error { return store.MarkMessageDeleted(req.MessageID, req.ChatJID, deletedAt) }) {
 			// The revoke went out; report success but mention the bookkeeping miss.
-			writeDeleteResponse(w, http.StatusOK, DeleteMessageResponse{Success: true, Message: "Message revoked for everyone (local deleted_at not updated: " + err.Error() + ")", ForEveryone: true})
+			writeDeleteResponse(w, http.StatusOK, DeleteMessageResponse{Success: true, Message: "Message revoked for everyone (archive update failed; the remote revoke already succeeded, do not repeat it)", ForEveryone: true})
 			return
 		}
 		writeDeleteResponse(w, http.StatusOK, DeleteMessageResponse{Success: true, Message: "Message deleted for everyone", ForEveryone: true})

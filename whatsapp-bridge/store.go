@@ -6,7 +6,9 @@ package main
 // read here for contact/LID resolution.
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"os"
@@ -54,7 +56,7 @@ func NewMessageStore() (*MessageStore, error) {
 	// history-sync burst used to make readers hit SQLITE_BUSY), and the busy
 	// timeout makes both sides wait instead of failing on a short lock.
 	privateDatabase(messagesDBPath())
-	db, err := sql.Open("sqlite", sqliteURI(messagesDBPath(), sqliteWriterOptions))
+	db, err := sql.Open("sqlite", sqliteURI(messagesDBPath(), messagesWriterOptions))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -296,6 +298,33 @@ func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
 	return err
 }
 
+// beginMessageMigration pins ATTACH and DETACH to the same pooled connection.
+// An alias must never remain when BEGIN IMMEDIATE later reserves its writers.
+func (store *MessageStore) beginMessageMigration(alias string) (*sql.Tx, func(), error) {
+	ctx := context.Background()
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	finish := func() {
+		_ = tx.Rollback()
+		if alias != "" {
+			if _, err := conn.ExecContext(ctx, "DETACH DATABASE "+alias); err != nil {
+				// Discard a connection whose attachment could not be removed.
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				bridgeLog.Warnf("Discarded migration connection after detach failure: %v", err)
+			}
+		}
+		_ = conn.Close()
+	}
+	return tx, finish, nil
+}
+
 // MigrateLegacyLIDChatsToPhoneJIDs rewrites message/chat rows stored under
 // legacy @lid chat JIDs into phone-based @s.whatsapp.net chat JIDs using the
 // whatsmeow LID map in whatsapp.db.
@@ -308,13 +337,13 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to stat WhatsApp DB %s: %w", whatsappDBPath, err)
 	}
 
-	tx, err := store.db.Begin()
+	alias := fmt.Sprintf("wa_mig_%d", time.Now().UnixNano())
+	tx, finish, err := store.beginMessageMigration(alias)
 	if err != nil {
 		return fmt.Errorf("failed to start LID chat migration transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 
-	alias := fmt.Sprintf("wa_mig_%d", time.Now().UnixNano())
 	escapedPath := strings.ReplaceAll(whatsappDBPath, "'", "''")
 	if _, err := tx.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %s;", escapedPath, alias)); err != nil {
 		return fmt.Errorf("failed to attach WhatsApp DB for LID chat migration: %w", err)
@@ -599,13 +628,13 @@ func (store *MessageStore) MigrateLegacyLIDSendersToPhones(whatsappDBPath string
 		return fmt.Errorf("failed to stat WhatsApp DB %s: %w", whatsappDBPath, err)
 	}
 
-	tx, err := store.db.Begin()
+	alias := fmt.Sprintf("wa_sender_mig_%d", time.Now().UnixNano())
+	tx, finish, err := store.beginMessageMigration(alias)
 	if err != nil {
 		return fmt.Errorf("failed to start LID sender migration transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 
-	alias := fmt.Sprintf("wa_sender_mig_%d", time.Now().UnixNano())
 	escapedPath := strings.ReplaceAll(whatsappDBPath, "'", "''")
 	if _, err := tx.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %s;", escapedPath, alias)); err != nil {
 		return fmt.Errorf("failed to attach WhatsApp DB for LID sender migration: %w", err)

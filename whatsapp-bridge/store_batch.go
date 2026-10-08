@@ -4,8 +4,8 @@ package main
 //
 // A pair-time backfill stores tens of thousands of rows. One db.Exec per row
 // means one implicit transaction and one fsync per message (plus the FTS
-// triggers); wrapping a conversation in a transaction with a prepared
-// statement turns that into one fsync per conversation.
+// triggers); prepared inserts in bounded history chunks amortize fsyncs
+// without holding the write lock for an entire conversation.
 
 import (
 	"database/sql"
@@ -66,12 +66,13 @@ const insertMessageSQL = `INSERT INTO messages
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
 type messageBatch struct {
-	tx   *sql.Tx
-	stmt *sql.Stmt
+	tx      *sql.Tx
+	stmt    *sql.Stmt
+	failure error // first failed write; never issue more SQL after a possible rollback
 }
 
 // Batch runs fn inside a transaction with a prepared message insert and
-// commits when fn returns nil (rolls back otherwise).
+// commits when fn and every write succeed (rolls back otherwise).
 func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
 	tx, err := store.db.Begin()
 	if err != nil {
@@ -83,7 +84,11 @@ func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
 		return fmt.Errorf("prepare batch insert: %w", err)
 	}
 	b := &messageBatch{tx: tx, stmt: stmt}
-	if err := fn(b); err != nil {
+	err = fn(b)
+	if err == nil {
+		err = b.failure
+	}
+	if err != nil {
 		_ = stmt.Close()
 		_ = tx.Rollback()
 		return err
@@ -95,6 +100,16 @@ func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
 	return nil
 }
 
+// SQLite can roll back a transaction on a write error without invalidating
+// the driver Tx. Remember it so ignored side-table errors cannot turn later
+// statements into autocommits; Batch also refuses to commit after such an error.
+func (b *messageBatch) write(fn func() error) error {
+	if b.failure == nil {
+		b.failure = fn()
+	}
+	return b.failure
+}
+
 // StoreMessage is MessageStore.StoreMessage inside the batch.
 func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
@@ -102,24 +117,26 @@ func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timesta
 	if content == "" && mediaType == "" {
 		return nil
 	}
-	_, err := b.stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, directPath...)...)
-	return err
+	return b.write(func() error {
+		_, err := b.stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
+			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, directPath...)...)
+		return err
+	})
 }
 
 // MarkViewOnce is MessageStore.MarkViewOnce inside the batch.
 func (b *messageBatch) MarkViewOnce(messageID, chatJID string) error {
-	return markViewOnceWith(b.tx, messageID, chatJID)
+	return b.write(func() error { return markViewOnceWith(b.tx, messageID, chatJID) })
 }
 
 // SetMentions is MessageStore.SetMentions inside the batch.
 func (b *messageBatch) SetMentions(messageID, chatJID, mentions string) error {
-	return setMentionsWith(b.tx, messageID, chatJID, mentions)
+	return b.write(func() error { return setMentionsWith(b.tx, messageID, chatJID, mentions) })
 }
 
 // StorePoll is MessageStore.StorePoll inside the batch.
 func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error {
-	return storePollWith(b.tx, messageID, chatJID, p, createdAt)
+	return b.write(func() error { return storePollWith(b.tx, messageID, chatJID, p, createdAt) })
 }
 
 // messageArgs builds the bound parameters for insertMessageSQL. An empty

@@ -356,6 +356,43 @@ def test_a_read_receipt_goes_to_the_row_that_stores_each_message(twinned, monkey
     assert sent == [{"chat_jid": LONE_LID, "message_ids": ["s1"]}]
 
 
+@pytest.mark.parametrize("whole", [False, True])
+@pytest.mark.parametrize("warning_at", [0, 1, "both", None])
+def test_merged_receipt_archive_warning_reaches_mcp(twinned, monkeypatch, whole, warning_at):
+    import main
+
+    calls = []
+    warning = " (archive update failed; the remote read receipts already succeeded, do not repeat them)"
+
+    def fake_request(method, path, json=None, **kwargs):
+        assert method == "POST" and path == "/mark-read"
+        index = len(calls)
+        calls.append(json)
+        failed = warning_at == "both" or warning_at == index
+        return {
+            "success": True,
+            "message": "Messages marked as read" + (warning if failed else ""),
+            "messages": 1,
+            "senders": 1,
+            "batches": 1,
+            "truncated": index == 1,
+        }
+
+    monkeypatch.setattr(whatsapp, "_bridge_request", fake_request)
+    monkeypatch.setattr(whatsapp, "_bridge_json", lambda payload: payload)
+    result = main.mark_messages_read(BOB, message_ids=None if whole else ["p1", "l1"])
+    assert len(calls) == 2 and {call["chat_jid"] for call in calls} == {BOB, BOB_LID_JID}
+    if whole:
+        assert all("message_ids" not in call for call in calls)
+    else:
+        assert {call["chat_jid"]: call["message_ids"] for call in calls} == {BOB: ["p1"], BOB_LID_JID: ["l1"]}
+    assert result["success"] is True
+    assert result["messages"] == result["senders"] == result["batches"] == 2
+    assert result["truncated"] is True
+    assert (warning in result["message"]) is (warning_at is not None)
+    assert result["message"].count(warning) <= 1
+
+
 def test_the_stats_label_is_the_name_the_merged_row_shows(twinned):
     """MIN() over the pair's two names would file a person under a bare number."""
     with twinned.messages() as conn:
