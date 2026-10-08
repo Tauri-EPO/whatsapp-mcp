@@ -55,6 +55,8 @@ whatsapp-mcp/
 │   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
+│   ├── connection_problem.go   # classified connection failures, persisted ban expiry and dial blocking
+│   ├── connection_events.go    # opt-in safe connection webhooks with debounced disconnection
 │   ├── events.go               # whatsmeow event dispatch, handleMessage, calls, reconnect loop
 │   ├── history_sync.go         # handleHistorySync (phone replays at pair time / on demand)
 │   ├── persist.go              # one extraction + storage path shared by live messages and history sync
@@ -332,7 +334,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only | Extra `Host` header values accepted by the `http`/`sse` transports (comma-separated; bare hostnames match any port; `*` disables the check). Unset + non-loopback bind disables the check with a warning |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
-| `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per client (X-Forwarded-For first hop or peer) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; `0`/`off` disables |
+| `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per socket peer (or verified forwarding chain) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; `0`/`off` disables |
+| `WHATSAPP_MCP_TRUSTED_PROXIES` | *(unset = trust none)* | MCP-only comma-separated CIDRs or `loopback` (`127.0.0.0/8` and `::1/128`). Only a trusted socket peer may supply `X-Forwarded-For`; the rightmost untrusted hop keys the limiter. Invalid chains fall back to the socket peer; invalid configuration stops startup. Uvicorn forwarding is disabled so the middleware sees the real socket peer |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304` | Max request body for `http`/`sse` (passed to the SDK app) |
 | `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB) | Maximum raw file bytes streamed into `POST /upload` on `http`/`sse` (positive integer, at most 268435456 / 256 MiB); independent of the JSON-RPC body limit. Uploads expire after one hour and are swept at startup, on new uploads and every minute; a fixed 256 MiB shared outbox budget also bounds upload writes. Sent files are removed after success; failures preserve IDs until expiry |
 | `WHATSAPP_MCP_TOKEN` | bridge token when bound off-loopback; none on loopback | Static bearer token enforced on the `http`/`sse` transports (`http_auth.resolve_http_token`, min 16 chars). Unset + non-loopback bind → reuses the bridge token (env or `.bridge-token`); `off` disables auth explicitly. stdio unaffected |
@@ -344,6 +347,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds) |
+| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | POST safe connection-state transitions to `WEBHOOK_URL` when `WEBHOOK_ENABLED` is on; disconnects wait five seconds and are cancelled on a quick reconnect. Logout finishes a POST bounded to two seconds before exit. No QR, passkey material, phone/JID or message content. Strict boolean parsing |
 | `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`transcribe.py`). Wins over `WHISPER_BIN` |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |

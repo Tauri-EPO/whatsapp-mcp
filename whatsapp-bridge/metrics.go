@@ -32,6 +32,7 @@ type metricsRegistry struct {
 
 	mu       sync.Mutex
 	requests map[string]int64 // by status class: "2xx", "4xx", ...
+	tempBans map[int]int64
 }
 
 func newMetricsRegistry() *metricsRegistry {
@@ -93,7 +94,16 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_media_autodownload_drops_total", "Inbound media not cached on arrival because the auto-download queue was full.", "counter", fmt.Sprint(autoDropped))
 	add("whatsapp_bridge_webhook_failures_total", "Outbound webhook POSTs that failed.", "counter", fmt.Sprint(m.webhookFailures.Load()))
 	add("whatsapp_bridge_reconnects_total", "Reconnection attempts.", "counter", fmt.Sprint(m.reconnects.Load()))
+	problem, _ := b.connectionSnapshot()
+	out = append(out, "# HELP whatsapp_bridge_connection_problem Current connection problem.", "# TYPE whatsapp_bridge_connection_problem gauge")
+	for _, kind := range []string{"unlinked", "locked", "banned", "temporarily_banned", "client_outdated", "server_error", "other"} {
+		out = append(out, fmt.Sprintf("whatsapp_bridge_connection_problem{kind=%q} %d", kind, bool01(problem != nil && problem.Kind == kind)))
+	}
 	m.mu.Lock()
+	out = append(out, "# HELP whatsapp_bridge_temp_bans_total Temporary bans by WhatsApp reason (0 is unknown).", "# TYPE whatsapp_bridge_temp_bans_total counter")
+	for _, reason := range []int{0, 101, 102, 103, 104, 106} {
+		out = append(out, fmt.Sprintf("whatsapp_bridge_temp_bans_total{reason=%q} %d", fmt.Sprint(reason), m.tempBans[reason]))
+	}
 	classes := make([]string, 0, len(m.requests))
 	for k := range m.requests {
 		classes = append(classes, k)

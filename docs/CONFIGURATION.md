@@ -1,5 +1,31 @@
 # Configuration reference
 
+### Connection monitoring contract
+
+`/api/health` is liveness (HTTP 200 while the listener serves), with stable
+`connected` and `paired` booleans. `/api/ready` is HTTP 200 only when status
+is `ok`. `whatsapp_bridge_connected` and `whatsapp_bridge_paired` retain those
+names and boolean gauge meanings; renaming them requires a major version.
+Account enforcement adds `connection_problem` and passkey steps add the safe
+`pairing_state` string, never their credential material.
+
+With `WEBHOOK_FORWARD_CONNECTION_EVENTS=true` and `WEBHOOK_ENABLED=true`,
+connection transitions POST this separate payload to `WEBHOOK_URL`:
+
+```json
+{"type":"connection","state":"disconnected","reason":"temporarily_banned","at":"2026-10-08T00:00:00Z","connection_problem":{"kind":"temporarily_banned","code":402,"temp_ban_reason":101,"since":"2026-10-08T00:00:00Z","expires_at":"2026-10-09T00:00:00Z"}}
+```
+
+`state` is `connected`, `disconnected`, `logged_out`, `pairing_required` or
+`paired`. `reason` is a bridge-defined diagnostic label. Optional
+`connection_problem` has the health object; optional `pairing_state` is a
+passkey step. No account identifier, message, QR, challenge, assertion or
+confirmation code is included. Ordinary disconnections wait five seconds;
+reconnection within that window cancels the POST. Account problems bypass
+that debounce. A terminal logout POST completes or reaches its two-second
+deadline before the process exits. Delivery is best-effort with failure
+metrics, not a durable event queue; polling remains available.
+
 Every environment variable and CLI flag, plus the transport, authentication and allow-list semantics behind them. Compose users set these in `.env` (see [DOCKER.md](DOCKER.md)); laptop users export them before launching (see [LAPTOP.md](LAPTOP.md)). `AGENTS.md` section 7 is the agent-facing copy of the same table; keep both in sync when adding a variable.
 
 ## Environment variables
@@ -17,6 +43,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge |
+| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |
@@ -45,6 +72,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` when a token is enforced, else `0`     | Requests per minute per client on the `http`/`sse` transports (token bucket, 429 + `Retry-After`); `0`/`off` disables |
+| `WHATSAPP_MCP_TRUSTED_PROXIES` | *(unset = trust none)* | Comma-separated trusted proxy CIDRs or `loopback` (`127.0.0.0/8`, `::1/128`); accept forwarding headers only from those socket peers and use the rightmost untrusted address. Invalid config stops startup |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304`                              | Maximum request body accepted by the `http`/`sse` transports |
 | `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB)                   | Maximum raw file size for `POST /upload`, enforced while streaming; independent of the JSON-RPC body limit. Positive integer up to 268435456 (256 MiB shared budget); uploads expire in one hour |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
@@ -117,14 +145,27 @@ secret to manage; the startup line says which one is in use. Set
 `WHATSAPP_MCP_TOKEN=off` to run without auth deliberately. On loopback no token
 is required. The stdio transport is not affected by any of this.
 
-Whenever a token is enforced the server also rate-limits each client (first
-`X-Forwarded-For` hop, else the socket peer) to `WHATSAPP_MCP_RATE_LIMIT`
+Whenever a token is enforced the server also rate-limits each client (the
+socket peer by default) to `WHATSAPP_MCP_RATE_LIMIT`
 requests per minute (default 120; token bucket with the same burst), answering
 `429` with `Retry-After`, and caps JSON-RPC request bodies at
 `WHATSAPP_MCP_MAX_BODY_BYTES` (default 4 MiB). The limiter runs before the
 bearer check, so token guessing is throttled as well. `POST /upload` shares the
 token, rate limiter and Host/Origin checks, with a separate streamed file limit
 of `WHATSAPP_MCP_UPLOAD_MAX_BYTES` (default 64 MiB).
+
+Forwarding headers are ignored even on loopback unless
+`WHATSAPP_MCP_TRUSTED_PROXIES` explicitly trusts the proxy. For a same-host
+reverse proxy use `loopback`; for another host use its narrow CIDR. The
+limiter walks `X-Forwarded-For` from right to left through trusted proxies
+and stops at the first untrusted address. A malformed chain or a chain made
+entirely of trusted addresses uses the socket peer. Configure proxies to append
+the actual client address or overwrite the header, never pass it through as-is.
+The shipped Uvicorn launch disables its own proxy-header rewriting, preserving
+the socket address for this check. A separate middleware accepts the last
+`X-Forwarded-Proto` value (`http`/`https`) from trusted peers, preserving HTTPS
+redirects. Proxies must overwrite or append their actual scheme. Do the same
+with a custom ASGI launch.
 
 ### Reaching the server by a non-loopback hostname
 

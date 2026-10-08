@@ -12,6 +12,7 @@ This mirrors what the Go bridge does for its own REST API (see auth.go).
 
 from __future__ import annotations
 
+import ipaddress
 import secrets
 import threading
 import time
@@ -179,16 +180,67 @@ def resolve_max_body_bytes(value: str | None) -> int:
     return size
 
 
-def client_key(scope: Scope) -> str:
-    """Identify the caller: first X-Forwarded-For hop (Tailscale Serve / a proxy
-    set it) or the socket peer."""
-    for name, value in scope.get("headers", []):
-        if name.lower() == b"x-forwarded-for":
-            first = value.decode("latin-1").split(",")[0].strip()
-            if first:
-                return first
+ProxyNetworks = tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+
+
+def resolve_trusted_proxies(value: str | None) -> ProxyNetworks:
+    """Explicit CIDRs or loopback; unset trusts no forwarding headers."""
+    networks = []
+    for entry in (value or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if entry == "loopback":
+                networks.extend((ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")))
+            else:
+                networks.append(ipaddress.ip_network(entry, strict=True))
+        except ValueError:
+            raise ValueError("WHATSAPP_MCP_TRUSTED_PROXIES must contain CIDRs or loopback") from None
+    return tuple(networks)
+
+
+def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
+    """Walk from the socket peer to the rightmost untrusted forwarding hop.
+
+    Invalid chains fail closed to the peer. Never accept a client's leftmost
+    claim across an untrusted hop, or forwarding from an untrusted socket.
+    """
     client = scope.get("client")
-    return client[0] if client else "unknown"
+    peer = client[0] if client else "unknown"
+    try:
+        address = ipaddress.ip_address(peer)
+        headers = [v for n, v in scope.get("headers", []) if n.lower() == b"x-forwarded-for"]
+        if not headers or not any(address in network for network in trusted_proxies):
+            return str(address)
+        hops = [ipaddress.ip_address(hop.strip()) for v in headers for hop in v.decode("latin-1").split(",")]
+        for address in reversed(hops):
+            if not any(address in network for network in trusted_proxies):
+                return str(address)
+    except ValueError:
+        pass
+    return peer
+
+
+class ForwardedSchemeMiddleware:
+    """Preserve a trusted proxy's scheme without replacing the socket peer."""
+
+    def __init__(self, app: ASGIApp, trusted_proxies: ProxyNetworks):
+        self.app, self.trusted_proxies = app, trusted_proxies
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") == "http" and scope.get("client"):
+            try:
+                peer = ipaddress.ip_address(scope["client"][0])
+                if any(peer in network for network in self.trusted_proxies):
+                    values = [v for n, v in scope.get("headers", []) if n.lower() == b"x-forwarded-proto"]
+                    if values:
+                        scheme = values[-1].split(b",")[-1].strip().lower()
+                        if scheme in (b"http", b"https"):
+                            scope = dict(scope, scheme=scheme.decode("ascii"))
+            except ValueError:
+                pass
+        await self.app(scope, receive, send)
 
 
 class RateLimitMiddleware:
@@ -196,13 +248,20 @@ class RateLimitMiddleware:
     of the same size, 429 + Retry-After when exhausted. Sits in front of the
     bearer check so credential guessing is throttled too."""
 
-    def __init__(self, app: ASGIApp, per_minute: int, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        app: ASGIApp,
+        per_minute: int,
+        clock: Callable[[], float] = time.monotonic,
+        trusted_proxies: ProxyNetworks = (),
+    ):
         if per_minute <= 0:
             raise ValueError("RateLimitMiddleware requires per_minute > 0")
         self.app = app
         self.capacity = float(per_minute)
         self.refill_per_second = per_minute / 60.0
         self._clock = clock
+        self._trusted_proxies = trusted_proxies
         self._buckets: dict[str, tuple[float, float]] = {}  # key -> (tokens, last_refill)
         self._lock = threading.Lock()
         self._last_prune = clock()
@@ -230,7 +289,7 @@ class RateLimitMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        wait = self._take(client_key(scope))
+        wait = self._take(client_key(scope, self._trusted_proxies))
         if wait <= 0:
             await self.app(scope, receive, send)
             return

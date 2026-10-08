@@ -619,11 +619,31 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.Connected:
+		b.clearConnectionProblem()
 		b.recipientNumbers.clear()
 		b.Log.Infof("✓ Successfully connected to WhatsApp servers")
+		b.notifyConnection("connected", "authenticated", true, false)
+	case *events.ManualLoginReconnect:
+		// The library's 515 login handshake also needs to use our dial gate.
+		b.scheduleReconnect(reconnectChan)
+	case *events.KeepAliveTimeout:
+		if b.connectionNow().Sub(v.LastSuccess) > whatsmeow.KeepAliveMaxFailTime {
+			b.Log.Warnf("WhatsApp keepalive stalled; scheduling a gated reconnect")
+			b.scheduleReconnect(reconnectChan)
+		}
 
 	case *events.LoggedOut:
 		b.recipientNumbers.clear()
+		code := int(v.Reason)
+		if !v.OnConnect && code == 0 {
+			code = 401
+		}
+		b.recordConnectionProblem(code, 0, 0)
+		p, _ := b.connectionSnapshot()
+		b.notifyConnection("logged_out", p.Kind, true, true)
+		if code != 401 {
+			return
+		}
 		// whatsmeow has already wiped the device row; the process cannot re-enter
 		// the pairing flow from here. Exit and let the supervisor restart us: the
 		// next start finds no session and prints a fresh QR code.
@@ -631,6 +651,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 
 	case *events.Disconnected:
 		b.recipientNumbers.clear()
+		b.notifyConnection("disconnected", "transport_lost", false, false)
 		b.Log.Warnf("⚠️  Disconnected from WhatsApp servers, will attempt reconnection...")
 		// Signal reconnection needed
 		select {
@@ -640,7 +661,9 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.ConnectFailure:
-		b.Log.Errorf("❌ Connection failure: %v", v.Reason)
+		b.recordConnectionProblem(int(v.Reason), 0, 0)
+		p, _ := b.connectionSnapshot()
+		b.notifyConnection("disconnected", p.Kind, true, false)
 		// Signal reconnection needed
 		select {
 		case reconnectChan <- true:
@@ -679,7 +702,29 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}()
 
 	case *events.ClientOutdated:
+		b.recordConnectionProblem(405, 0, 0)
+		b.notifyConnection("logged_out", "client_outdated", true, true)
 		b.Exit("WhatsApp rejected this client version as outdated; rebuild with a newer whatsmeow (AGENTS.md §2 bump routine)", exitCodeClientOutdated)
+	case *events.TemporaryBan:
+		b.recordConnectionProblem(402, int(v.Code), v.Expire)
+		b.notifyConnection("disconnected", "temporarily_banned", true, false)
+		select {
+		case reconnectChan <- true:
+		default:
+		}
+	case *events.PairPasskeyError:
+		b.setPairingState("passkey_failed")
+		b.Log.Warnf("WhatsApp passkey check failed; see docs/DOCKER.md Pairing")
+	}
+}
+
+func (b *Bridge) scheduleReconnect(reconnectChan chan<- bool) {
+	// Disconnect may wait for whatsmeow's node-handler queue. Do it in the
+	// reconnect consumer after the callback returns, rather than in that queue.
+	b.forceReconnect.Store(true)
+	select {
+	case reconnectChan <- true:
+	default:
 	}
 }
 
@@ -718,8 +763,6 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 	for {
 		select {
 		case <-reconnectChan:
-			b.Log.Infof("🔄 Attempting to reconnect...")
-			b.metrics.reconnects.Add(1)
 
 			// Wait before reconnecting, unless we are shutting down
 			select {
@@ -729,7 +772,19 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 			}
 
 			// Try to reconnect
+			if err := b.waitConnectionAllowed(); err != nil {
+				return
+			}
+			if b.forceReconnect.Swap(false) {
+				if b.Disconnect != nil {
+					b.Disconnect()
+				} else if b.Client != nil {
+					b.Client.Disconnect()
+				}
+			}
 			if !b.Connected() {
+				b.Log.Infof("🔄 Attempting to reconnect...")
+				b.metrics.reconnects.Add(1)
 				err := b.Connect()
 				if err != nil {
 					b.Log.Errorf("❌ Reconnection failed: %v", err)

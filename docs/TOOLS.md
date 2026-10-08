@@ -328,6 +328,12 @@ that long does not appear in a real archive.
 
 Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
 
+Account restrictions add `connection_problem` with `kind`, numeric `code`,
+`since` and temporary-ban reason/expiry. Passkey linking steps add
+`pairing_state` (`passkey_required`, `passkey_confirm`, `passkey_failed`).
+Their reason calls for operator intervention, instead of suggesting a QR
+retry. No WebAuthn options, assertion or confirmation code is exposed here.
+
 It reports **which account this is** in an `owner` block — `{jid, phone, lid}`,
 the two spellings of your own identity. The `lid` is the one an agent cannot
 guess: it is what WhatsApp writes into a group message that mentions you, and it

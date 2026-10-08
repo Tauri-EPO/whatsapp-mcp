@@ -63,6 +63,32 @@ below).
 
 ## Pairing (QR code)
 
+If WhatsApp asks for a passkey after scanning, `bridge_status` and
+`/api/health` report `pairing_state=passkey_required`, `passkey_confirm`, or
+`passkey_failed`. The challenge, assertion and confirmation code are never
+published in health or metrics. The bridge logs the step and stops automatic
+QR retries after it; it stays alive for diagnosis. Restart the bridge after
+resolving the phone's passkey prompt or account access in the official WhatsApp
+app. A headless bridge has no WebAuthn authenticator and cannot complete that
+challenge. A page on a generic server origin cannot assert a passkey for
+`whatsapp.com`; it requires a matching relying-party origin. There is currently
+no operator endpoint for assertions or manual confirmation.
+
+The pinned whatsmeow `c386243a72ba` includes passkey support from `b572e5b`;
+its QR channel automatically confirms `SkipHandoffUX` events. A manual
+confirmation remains pending, bounded by the attempt timeout. A passkey request
+uses its advertised timeout (milliseconds), capped at five minutes. Pairing by
+phone-number code, account/device eligibility and native helper workarounds
+have not been verified against a paired phone; no bypass is promised.
+
+For a same-host reverse proxy, including Tailscale Serve, explicitly set
+`WHATSAPP_MCP_TRUSTED_PROXIES=loopback` only when its upstream socket is
+loopback. Otherwise trust the proxy's narrow CIDR. The default rate-limit key
+is the socket peer and ignores `X-Forwarded-For`, so proxied callers share a
+bucket until proxy trust is configured. Trusted proxies must append the real
+client or replace incoming forwarding headers. Tailscale Serve's replacement
+versus append behaviour has not been exercised here; confirm it on your proxy.
+
 The bridge prints the QR code to its stdout, which `docker compose logs`
 captures. On first start:
 

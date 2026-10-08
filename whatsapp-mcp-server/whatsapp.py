@@ -5566,6 +5566,18 @@ def bridge_status() -> dict[str, Any]:
             if not status["paired"]
             else "bridge is paired but disconnected from WhatsApp; it reconnects automatically"
         )
+    problem = body.get("connection_problem")
+    pairing_state = body.get("pairing_state")
+    if isinstance(problem, dict):
+        status["connection_problem"] = problem
+        kind = problem.get("kind")
+        if kind in ("banned", "locked", "client_outdated", "temporarily_banned"):
+            status["ok"] = False
+            status["reason"] = f"WhatsApp connection problem: {kind}; see docs/TROUBLESHOOTING.md"
+    if pairing_state in ("passkey_required", "passkey_confirm", "passkey_failed"):
+        status["pairing_state"] = pairing_state
+        status["ok"] = False
+        status["reason"] = f"WhatsApp pairing step: {pairing_state}; operator intervention required; see docs/DOCKER.md"
     try:
         version = _bridge_request("GET", "/version", timeout=10)
         if version.status_code == 200:

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -25,9 +26,24 @@ import (
 type mediaDownloader func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error)
 
 type Bridge struct {
-	Client *whatsmeow.Client
-	Store  *MessageStore
-	Log    waLog.Logger
+	forceReconnect             atomic.Bool
+	connectionEventsMu         sync.Mutex
+	connectionEvents           sync.WaitGroup
+	connectionEventsClosing    bool
+	connectionDisconnectCancel context.CancelFunc
+	lastConnectionEvent        string
+	ForwardConnection          bool
+	ConnectionDebounce         time.Duration
+	connectionEventWait        func(context.Context, time.Duration) bool
+	connectionMu               sync.Mutex
+	connectionProblem          *ConnectionProblem
+	pairingState               string
+	problemPersistenceFailed   bool
+	problemNow                 func() time.Time
+	problemWait                func(time.Duration) error
+	Client                     *whatsmeow.Client
+	Store                      *MessageStore
+	Log                        waLog.Logger
 
 	// StoreRoot is the store directory opened as an os.Root (store_dir.go).
 	// The retention sweep, the store-size measurement, /api/media/purge, the
@@ -76,7 +92,8 @@ type Bridge struct {
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
 	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.
-	Connect func() error
+	Connect    func() error
+	Disconnect func()
 	// Connected reports whether the WhatsApp socket is up (defaults to Client.IsConnected);
 	// handlers that need WhatsApp check it, tests override it.
 	Connected func() bool
@@ -205,6 +222,7 @@ type Bridge struct {
 func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root, switches bridgeSwitches) *Bridge {
 	b := &Bridge{
 		Client:              client,
+		Disconnect:          client.Disconnect,
 		SendAppState:        client.SendAppState,
 		appStateGate:        make(chan struct{}, 1),
 		Store:               store,
@@ -216,6 +234,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		ForwardStatus:       switches.ForwardStatus,
 		ForwardChannels:     switches.ForwardChannels,
 		ForwardBroadcasts:   switches.ForwardBroadcasts,
+		ForwardConnection:   switches.ForwardConnection,
 		MetricsEnabled:      switches.Metrics,
 		MediaAutoDownload:   switches.MediaAutoDownload,
 		MediaMaxBytes:       defaultMediaMaxBytes, // main applies the validated configuration before events start
@@ -252,7 +271,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		logger.Infof("Automatic media downloads: %d at a time, up to %d queued; extra media is not cached on arrival and stays available through download_media",
 			autoDownloadWorkers, autoDownloadQueue)
 	}
-	b.Connect = client.Connect
+	b.Connect = func() error { return client.ConnectContext(b.ctx) }
 	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
 	b.Send = b.sendBackend()
 	b.IsOnWhatsApp = client.IsOnWhatsApp
@@ -290,6 +309,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 		}
 	}
 	b.cancel()
+	b.stopConnectionEvents()
 	done := make(chan struct{})
 	go func() {
 		b.historyVotes.Wait()
@@ -303,6 +323,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 		// A keepalive blip in progress finishes with "unavailable" before the
 		// caller disconnects the client.
 		b.keepaliveLoop.Wait()
+		b.connectionEvents.Wait()
 		close(done)
 	}()
 	select {

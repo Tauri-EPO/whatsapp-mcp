@@ -49,6 +49,7 @@ const (
 	webhookForwardStatusEnv     = "WEBHOOK_FORWARD_STATUS"
 	webhookForwardChannelsEnv   = "WEBHOOK_FORWARD_CHANNELS"
 	webhookForwardBroadcastsEnv = "WEBHOOK_FORWARD_BROADCASTS"
+	webhookForwardConnectionEnv = "WEBHOOK_FORWARD_CONNECTION_EVENTS"
 )
 
 // bridgeSwitches are the on/off knobs main() loads once, before anything is
@@ -62,6 +63,7 @@ type bridgeSwitches struct {
 	ForwardStatus     bool // WEBHOOK_FORWARD_STATUS: status updates reach the webhook too
 	ForwardChannels   bool // WEBHOOK_FORWARD_CHANNELS: channel posts reach the webhook too
 	ForwardBroadcasts bool // WEBHOOK_FORWARD_BROADCASTS: broadcast-list messages reach the webhook too
+	ForwardConnection bool // WEBHOOK_FORWARD_CONNECTION_EVENTS: safe lifecycle events
 }
 
 // parseBridgeSwitches reads them all and reports every value it cannot read
@@ -81,6 +83,7 @@ func parseBridgeSwitches(getenv func(string) string) (bridgeSwitches, error) {
 		{webhookForwardStatusEnv, false, &sw.ForwardStatus},
 		{webhookForwardChannelsEnv, false, &sw.ForwardChannels},
 		{webhookForwardBroadcastsEnv, false, &sw.ForwardBroadcasts},
+		{webhookForwardConnectionEnv, false, &sw.ForwardConnection},
 	} {
 		value, err := parseBoolEnv(s.name, getenv(s.name), s.def)
 		if err != nil {

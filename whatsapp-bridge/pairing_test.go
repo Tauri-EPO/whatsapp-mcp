@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // fakePairingClient scripts one QR channel per GetQRChannel call.
@@ -18,6 +19,7 @@ type fakePairingClient struct {
 	connects   int
 	disconnect int
 	connectErr error
+	contexts   []context.Context
 }
 
 func (f *fakePairingClient) GetQRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
@@ -43,10 +45,39 @@ func (f *fakePairingClient) GetQRChannel(ctx context.Context) (<-chan whatsmeow.
 }
 
 func (f *fakePairingClient) Connect() error { f.connects++; return f.connectErr }
-func (f *fakePairingClient) Disconnect()    { f.disconnect++ }
+func (f *fakePairingClient) ConnectContext(ctx context.Context) error {
+	f.contexts = append(f.contexts, ctx)
+	return f.Connect()
+}
+func (f *fakePairingClient) Disconnect() { f.disconnect++ }
+func (f *fakePairingClient) SendPasskeyResponse(context.Context, *types.WebAuthnResponse) error {
+	return nil
+}
+func (f *fakePairingClient) SendPasskeyConfirmation(context.Context) error { return nil }
 
 func fastOpts(out *bytes.Buffer) pairingOptions {
 	return pairingOptions{attempts: 3, attemptTimeout: 2 * time.Second, retryDelay: 10 * time.Millisecond, out: out, log: testLogger()}
+}
+
+func TestPairingSignalLeavesEstablishedSocketAliveUntilLifecycleEnds(t *testing.T) {
+	lifecycle, cancelLifecycle := context.WithCancel(context.Background())
+	defer cancelLifecycle()
+	startup, cancelStartup := context.WithCancel(lifecycle)
+	defer cancelStartup()
+	c := &fakePairingClient{}
+	opt := fastOpts(&bytes.Buffer{})
+	opt.connectionContext = lifecycle
+	if err := connectOrPair(startup, c, true, opt); err != nil {
+		t.Fatal(err)
+	}
+	cancelStartup()
+	if err := c.contexts[0].Err(); err != nil {
+		t.Fatalf("socket cancelled before REST drain: %v", err)
+	}
+	cancelLifecycle()
+	if err := c.contexts[0].Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("socket context after lifecycle shutdown: %v", err)
+	}
 }
 
 func TestConnectOrPair_TimeoutEventStartsNextAttemptImmediately(t *testing.T) {

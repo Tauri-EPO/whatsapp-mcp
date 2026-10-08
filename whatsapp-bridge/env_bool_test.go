@@ -135,6 +135,7 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 		"forward status":      {ForwardStatus: true},
 		"forward channels":    {ForwardChannels: true},
 		"forward broadcasts":  {ForwardBroadcasts: true},
+		"connection events":   {ForwardConnection: true},
 		"none":                {},
 	}
 	for name, switches := range cases {
@@ -148,6 +149,7 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 			ForwardStatus:     b.ForwardStatus,
 			ForwardChannels:   b.ForwardChannels,
 			ForwardBroadcasts: b.ForwardBroadcasts,
+			ForwardConnection: b.ForwardConnection,
 		}
 		if got != switches {
 			t.Errorf("%s: the bridge runs with %+v, want %+v", name, got, switches)
