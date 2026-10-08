@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -28,6 +32,8 @@ import (
 
 // sessionKeepaliveEnv sets how often the blip is sent, in hours.
 const sessionKeepaliveEnv = "WHATSAPP_SESSION_KEEPALIVE_HOURS"
+
+const sessionKeepaliveFile = ".session-keepalive"
 
 const (
 	// sessionKeepaliveInterval: the default for sessionKeepaliveEnv. Twice a
@@ -111,10 +117,19 @@ func (b *Bridge) runSessionKeepalive() {
 	if ready == nil {
 		ready = func() bool { return b.Client != nil && b.Client.IsConnected() && b.Client.IsLoggedIn() }
 	}
+	clock := b.sessionNow
+	if clock == nil {
+		clock = time.Now
+	}
+	lastBlip := readSessionBlip(b.StoreRoot)
+	// A clock corrected after the previous process ran must not suppress
+	// keepalives until an erroneously future date.
+	if lastBlip.After(clock().Round(0)) {
+		lastBlip = time.Time{}
+	}
 
 	var (
 		readySince   time.Time // zero while the session is not ready
-		lastBlip     time.Time // the last "available" that went out
 		notBefore    time.Time // earliest next attempt after a failed one
 		noNameSince  time.Time // zero unless the push name is still missing
 		noNameWarned bool
@@ -140,7 +155,7 @@ func (b *Bridge) runSessionKeepalive() {
 
 		// Round(0) drops the monotonic reading: these comparisons must see
 		// the time a suspended host slept through.
-		now := time.Now().Round(0)
+		now := clock().Round(0)
 		if !ready() {
 			readySince = time.Time{}
 			continue
@@ -190,18 +205,80 @@ func (b *Bridge) runSessionKeepalive() {
 		b.metrics.sessionKeepalives.Add(1)
 		b.Log.Infof("Session keepalive: told WhatsApp this linked device is in use")
 		stopping := !b.sleep(b.SessionPresenceHold)
-		if err := markUnavailable(b.ctx, send); err != nil {
+		offErr := markUnavailable(b.ctx, send)
+		// Disk I/O must not delay the hold or the unavailable send. Remember
+		// the successful available even if unavailable will need a retry.
+		if err := writeSessionBlip(b.StoreRoot, lastBlip); err != nil {
+			b.Log.Warnf("Session keepalive: could not remember the last blip: %v", err)
+		}
+		if offErr != nil {
 			if stopping {
-				b.Log.Warnf("Session keepalive: shutting down with the device still marked available: %v", err)
+				b.Log.Warnf("Session keepalive: shutting down with the device still marked available: %v", offErr)
 				return
 			}
-			b.Log.Warnf("Session keepalive: the device is still marked available, trying again: %v", err)
+			b.Log.Warnf("Session keepalive: the device is still marked available, trying again: %v", offErr)
 			pendingOff = true
 		}
 		if stopping {
 			return
 		}
 	}
+}
+
+// readSessionBlip treats missing, unreadable or corrupt state as never. Only a
+// regular file opened through the store root is read; links are not state.
+func readSessionBlip(root *os.Root) time.Time {
+	if root == nil {
+		return time.Time{}
+	}
+	seen, err := root.Lstat(sessionKeepaliveFile)
+	if err != nil || !seen.Mode().IsRegular() {
+		return time.Time{}
+	}
+	f, err := root.Open(sessionKeepaliveFile)
+	if err != nil {
+		return time.Time{}
+	}
+	defer func() { _ = f.Close() }()
+	if opened, err := f.Stat(); err != nil || !os.SameFile(seen, opened) {
+		return time.Time{}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil || len(data) > 64 {
+		return time.Time{}
+	}
+	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}
+	}
+	return stamp
+}
+
+// writeSessionBlip replaces one timestamp atomically with a fresh owner-only
+// file. A stale temporary name is unlinked, never opened through, and rename
+// replaces a link under the final name without touching its target.
+func writeSessionBlip(root *os.Root, stamp time.Time) error {
+	if root == nil {
+		return errors.New("store directory unavailable")
+	}
+	part := sessionKeepaliveFile + ".part"
+	if err := root.Remove(part); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := root.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, storeFileMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Remove(part) }()
+	_, writeErr := f.WriteString(stamp.UTC().Format(time.RFC3339Nano) + "\n")
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return root.Rename(part, sessionKeepaliveFile)
 }
 
 // sendPresence sends one presence under a bounded context.

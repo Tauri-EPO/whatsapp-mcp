@@ -118,6 +118,8 @@ type Bridge struct {
 	// (nil = the client) and "connected and logged in" (nil = the client).
 	sessionPresence presenceSender
 	sessionReady    func() bool
+	// sessionNow is the wall clock for keepalive comparisons (nil = time.Now).
+	sessionNow func() time.Time
 	// keepaliveLoop is the keepalive's goroutine; Shutdown waits for it so a
 	// blip in progress still ends with "unavailable".
 	keepaliveLoop sync.WaitGroup
