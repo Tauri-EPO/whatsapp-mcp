@@ -487,11 +487,17 @@ def test_the_memo_never_claims_a_deleted_file_is_readable(media_store, monkeypat
 
 
 def test_an_arrival_is_seen_at_once_and_the_ttl_bounds_the_rest(media_store, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(media_inventory.time, "monotonic", lambda: now[0])
     listed = _count_listings(monkeypatch)
     assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]  # DOC1, nothing on disk
     doc = os.path.join(media_inventory.chat_media_dir(ALICE), "document_20260904_100000_DOC1.pdf")
     open(doc, "wb").write(b"pdf")
-    # Writing the file moved the directory's mtime, so the listing is read again.
+    # Keep the real helper: a root-directory stat must not pass this check.
+    # Force a distinguishable arrival without depending on filesystem granularity.
+    chat_dir = media_inventory.chat_media_dir(ALICE)
+    st = os.stat(chat_dir)
+    os.utime(chat_dir, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
     assert main.list_media(chat_jid=ALICE)["items"][1]["cached"]
     assert listed == [ALICE, ALICE]
 
@@ -499,8 +505,6 @@ def test_an_arrival_is_seen_at_once_and_the_ttl_bounds_the_rest(media_store, mon
     # cannot separate from the read): pinned mtime, frozen clock. The file is
     # missed for at most CACHE_TTL_S, and never the other way round.
     monkeypatch.setattr(media_inventory, "_dir_mtime_ns", lambda chat_jid: 1)
-    now = [1000.0]
-    monkeypatch.setattr(media_inventory.time, "monotonic", lambda: now[0])
     media_inventory.forget_cached_names()
     os.unlink(doc)
     assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]
