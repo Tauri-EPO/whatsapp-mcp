@@ -183,7 +183,8 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 func TestForwardAmbiguousDestinationNeverReachesSend(t *testing.T) {
 	for _, allow := range []string{"*@g.us", "*@s.whatsapp.net"} {
 		t.Run(allow, func(t *testing.T) {
-			b, _, _ := sendRecipientBridge(t, &mockLIDStore{}, &fakeIsOnWhatsApp{})
+			known, _ := types.ParseJID(efChat)
+			b, _, _ := sendRecipientBridge(t, &mockLIDStore{lidByPN: map[types.JID]types.JID{known: registeredLID}}, &fakeIsOnWhatsApp{})
 			b.Policy = parseChatPolicy(allow)
 			source, target := "120363000000000001@g.us", "5511888888888@s.whatsapp.net@g.us"
 			if allow == "*@s.whatsapp.net" {

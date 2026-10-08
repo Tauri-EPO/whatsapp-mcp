@@ -848,7 +848,7 @@ func placeholderWaveform(duration uint32) []byte {
 	return waveform
 }
 
-// registeredRecipient turns the recipient of a send into the JID WhatsApp has
+// registeredRecipient turns a send or forward recipient into the JID WhatsApp has
 // it registered under (canonicalRecipientJID), and answers the request itself
 // when there is nobody to send to: ok is false once it wrote the response.
 //
@@ -892,7 +892,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 		return "", false
 	}
 	if typed := normalizeChatEntry(recipient); typed != registered.String() {
-		b.Log.Debugf("→ /api/send recipient %s is registered on WhatsApp as %s", typed, registered)
+		b.Log.Debugf("→ recipient %s is registered on WhatsApp as %s", typed, registered)
 	}
 	return registered.String(), true
 }

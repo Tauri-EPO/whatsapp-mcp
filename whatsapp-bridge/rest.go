@@ -133,9 +133,10 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		b.Policy,
 	)))
 	mux.HandleFunc("/api/forward", mutate(handleForwardMessage(forwardDeps{
-		lookup:   messageStore.messageContentLookup,
-		download: b.DownloadMedia,
-		send:     b.Send,
+		lookup:           messageStore.messageContentLookup,
+		resolveRecipient: b.registeredRecipient,
+		download:         b.DownloadMedia,
+		send:             b.Send,
 	}, b.Policy)))
 
 	// Group management: participants, subject/description, invite link, leave (group_manage.go).

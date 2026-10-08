@@ -917,7 +917,7 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 
 #### Phone numbers
 
-The formatting rule applies to `send_message`, `send_file`, `send_audio_message` and the destination of `forward_message`. The registered-number lookup below applies to the three send tools.
+The formatting and registered-number lookup rules apply to `send_message`, `send_file`, `send_audio_message` and the destination of `forward_message`.
 
 - **Format.** Use the country code first: `5511999999999`. A bare number of 7–15 ASCII digits may contain one leading `+`, ASCII space/tab, `-`, `.`, `(`, `)`, spaces U+00A0/U+202F/U+2007/U+2009, format marks U+200B/U+200E/U+200F/U+202A/U+202C/U+2066/U+2067/U+2068/U+2069/U+FEFF, and dashes U+2010/U+2011/U+2012/U+2013/U+2014. Only those separators are removed before the allow-list check and send; other characters are not accepted as separators. Letters and wildcards are not phone numbers. A normalized number longer than 15 digits is refused with `invalid_argument`; use a full JID for a legacy group ID. Existing short digit-only recipients are still checked with WhatsApp. Digit-like strings such as `192.168.1.100` and `2026-10-07` normalize to digits and are also checked with WhatsApp.
 - **Full JIDs keep their internal spelling.** Forward destinations have their outer whitespace trimmed, as before. This includes formatted full phone JIDs such as `+55 11 99999-9999@s.whatsapp.net`, whose separators are not stripped even though contact lookup accepts that formatting. Prefer a digits-only phone JID; group and `@lid` JIDs retain their spelling. Configuration entries also remain literal: list digits or full JIDs, without recipient separators.
@@ -1031,6 +1031,12 @@ Edit the text of a message this account sent (WhatsApp accepts edits for about 1
 ### `forward_message`
 
 Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
+
+A phone destination uses the number WhatsApp has registered, as the send tools
+do. The bridge checks the destination as typed before any registration lookup,
+then the registered number before fetching media or sending. A number without
+a WhatsApp account is refused; if the lookup is unavailable, a restricted
+bridge refuses the forward instead of guessing its destination.
 
 An unsafe media identity answers `media_refused`; missing bytes or download
 fields answer `media_unavailable`. Do not retry those permanent media failures.
