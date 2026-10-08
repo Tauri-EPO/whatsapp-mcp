@@ -56,14 +56,22 @@ func TestConnectionWebhookDebouncesBriefDisconnectAndPublishesLongGap(t *testing
 		}
 	}
 	b.handleEvent(&events.Disconnected{}, ch)
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnect did not enter the debounce")
+	}
 	b.handleEvent(&events.Connected{}, ch)
 	b.connectionEvents.Wait()
 	if len(posts) != 0 {
 		t.Fatal("brief gap emitted a POST")
 	}
 	b.handleEvent(&events.Disconnected{}, ch)
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second disconnect did not enter the debounce")
+	}
 	close(fire)
 	b.connectionEvents.Wait()
 	if len(posts) != 1 {

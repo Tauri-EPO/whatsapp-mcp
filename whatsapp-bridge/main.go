@@ -252,6 +252,8 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	client.EnableAutoReconnect = false // All dials must respect the persisted connection problem.
 	client.DisableLoginAutoReconnect = true
 	client.Log = connectionProblemLogger{Logger: client.Log, bridge: bridge}
@@ -300,8 +302,6 @@ func runBridge(cfg bridgeConfig) int {
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) { bridge.handleEvent(evt, reconnectChan) })
-	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 	if client.Store.ID == nil {
 		bridge.notifyConnection("pairing_required", "unpaired", true, false)
 	}
@@ -325,6 +325,10 @@ func runBridge(cfg bridgeConfig) int {
 			}
 		},
 	}); err != nil {
+		if errors.Is(err, context.Canceled) && exitCtx.Err() != nil {
+			logger.Infof("Shutting down during connection startup")
+			return 0
+		}
 		if !errors.Is(err, errPairingOperator) {
 			logger.Errorf("%v", err)
 			return 1

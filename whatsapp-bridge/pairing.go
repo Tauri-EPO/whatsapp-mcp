@@ -166,7 +166,7 @@ func pairOnce(parent context.Context, c pairingClient, opt pairingOptions, attem
 					setState("passkey_failed")
 					return errPairingOperator
 				}
-				opt.log.Errorf("QR pairing error (%s); see pairing diagnostics", evt.Event)
+				opt.log.Errorf("QR pairing error (%s): %v", evt.Event, evt.Error)
 				return errors.New("WhatsApp QR pairing failed")
 			default:
 				opt.log.Warnf("QR pairing event: %s", evt.Event)

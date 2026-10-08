@@ -1,5 +1,7 @@
 # Configuration reference
 
+Every environment variable and CLI flag, plus the transport, authentication and allow-list semantics behind them. Compose users set these in `.env` (see [DOCKER.md](DOCKER.md)); laptop users export them before launching (see [LAPTOP.md](LAPTOP.md)). `AGENTS.md` section 7 is the agent-facing copy of the same table; keep both in sync when adding a variable.
+
 ### Connection monitoring contract
 
 `/api/health` is liveness (HTTP 200 while the listener serves), with stable
@@ -8,6 +10,10 @@ is `ok`. `whatsapp_bridge_connected` and `whatsapp_bridge_paired` retain those
 names and boolean gauge meanings; renaming them requires a major version.
 Account enforcement adds `connection_problem` and passkey steps add the safe
 `pairing_state` string, never their credential material.
+`connection_problem_persistence_failed` reports failure to save that state;
+only account restrictions block dialing on a write failure, with write retries.
+An outdated-client problem includes `build_version` and is cleared at startup
+when the build identity changes, so deploying an upgrade permits another dial.
 
 With `WEBHOOK_FORWARD_CONNECTION_EVENTS=true` and `WEBHOOK_ENABLED=true`,
 connection transitions POST this separate payload to `WEBHOOK_URL`:
@@ -25,8 +31,6 @@ reconnection within that window cancels the POST. Account problems bypass
 that debounce. A terminal logout POST completes or reaches its two-second
 deadline before the process exits. Delivery is best-effort with failure
 metrics, not a durable event queue; polling remains available.
-
-Every environment variable and CLI flag, plus the transport, authentication and allow-list semantics behind them. Compose users set these in `.env` (see [DOCKER.md](DOCKER.md)); laptop users export them before launching (see [LAPTOP.md](LAPTOP.md)). `AGENTS.md` section 7 is the agent-facing copy of the same table; keep both in sync when adding a variable.
 
 ## Environment variables
 
@@ -72,7 +76,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` when a token is enforced, else `0`     | Requests per minute per client on the `http`/`sse` transports (token bucket, 429 + `Retry-After`); `0`/`off` disables |
-| `WHATSAPP_MCP_TRUSTED_PROXIES` | *(unset = trust none)* | Comma-separated trusted proxy CIDRs or `loopback` (`127.0.0.0/8`, `::1/128`); accept forwarding headers only from those socket peers and use the rightmost untrusted address. Invalid config stops startup |
+| `WHATSAPP_MCP_TRUSTED_PROXIES` | *(unset = trust none)* | Comma-separated trusted proxy CIDRs, `loopback` (`127.0.0.0/8`, `::1/128`), or `gateway` (one default-route gateway from `/proc/net/route`, startup error if unavailable). Gateway trust requires a loopback-bound published MCP port; accept forwarding headers only from trusted socket peers and use the rightmost untrusted address. Invalid config stops startup |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304`                              | Maximum request body accepted by the `http`/`sse` transports |
 | `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB)                   | Maximum raw file size for `POST /upload`, enforced while streaming; independent of the JSON-RPC body limit. Positive integer up to 268435456 (256 MiB shared budget); uploads expire in one hour |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
@@ -155,12 +159,18 @@ token, rate limiter and Host/Origin checks, with a separate streamed file limit
 of `WHATSAPP_MCP_UPLOAD_MAX_BYTES` (default 64 MiB).
 
 Forwarding headers are ignored even on loopback unless
-`WHATSAPP_MCP_TRUSTED_PROXIES` explicitly trusts the proxy. For a same-host
-reverse proxy use `loopback`; for another host use its narrow CIDR. The
+`WHATSAPP_MCP_TRUSTED_PROXIES` explicitly trusts the proxy. With compose and a
+same-host proxy, use `gateway` only while the published port remains bound to
+`127.0.0.1` (`WHATSAPP_MCP_BIND`, the default). It trusts the single gateway
+resolved from `/proc/net/route`; an unavailable or ambiguous gateway stops
+startup. Docker port publishing makes this gateway the container's socket
+peer, rather than loopback. For a server running directly on the host use
+`loopback`; for another proxy use its narrow CIDR. The
 limiter walks `X-Forwarded-For` from right to left through trusted proxies
 and stops at the first untrusted address. A malformed chain or a chain made
 entirely of trusted addresses uses the socket peer. Configure proxies to append
 the actual client address or overwrite the header, never pass it through as-is.
+[Tailscale Serve replaces it with the caller's tailnet address](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go).
 The shipped Uvicorn launch disables its own proxy-header rewriting, preserving
 the socket address for this check. A separate middleware accepts the last
 `X-Forwarded-Proto` value (`http`/`https`) from trusted peers, preserving HTTPS

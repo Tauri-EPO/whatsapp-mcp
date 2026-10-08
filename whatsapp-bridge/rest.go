@@ -217,6 +217,9 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		"timestamp":      time.Now().Unix(),
 	}
 	problem, pairingState := b.connectionSnapshot()
+	b.connectionMu.Lock()
+	body["connection_problem_persistence_failed"] = b.problemPersistenceFailed
+	b.connectionMu.Unlock()
 	if problem != nil {
 		body["connection_problem"] = problem
 		if problem.Kind == "banned" || problem.Kind == "locked" || problem.Kind == "client_outdated" {

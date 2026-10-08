@@ -61,6 +61,23 @@ A `200` with a `mcp-session-id` header means the server is up. A `421
 Misdirected Request` means the `Host` header you used is not allow-listed (see
 below).
 
+## Rate limiting behind a proxy
+
+With the shipped compose topology, a same-host proxy reaches the MCP through
+Docker's default-route gateway, rather than a loopback socket inside the
+container. To keep one rate-limit bucket per proxied caller, explicitly set
+`WHATSAPP_MCP_TRUSTED_PROXIES=gateway`. This resolves `/proc/net/route` at
+startup and trusts that one gateway address; resolution failure stops startup.
+Keep `WHATSAPP_MCP_BIND=127.0.0.1`, the compose default: gateway trust is safe
+only when the published port is loopback-bound and reachable by same-host
+processes, such as Tailscale Serve. Do not combine it with a LAN/public bind.
+
+For a server running directly on the host, `loopback` trusts a local proxy;
+for other proxy topologies use the proxy's narrow CIDR. The default is empty,
+so proxied callers share a socket-peer bucket until trust is configured.
+Proxies must append the actual caller or replace incoming forwarding headers.
+[Tailscale Serve replaces `X-Forwarded-For` with the caller's tailnet address](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go).
+
 ## Pairing (QR code)
 
 If WhatsApp asks for a passkey after scanning, `bridge_status` and
@@ -80,14 +97,6 @@ confirmation remains pending, bounded by the attempt timeout. A passkey request
 uses its advertised timeout (milliseconds), capped at five minutes. Pairing by
 phone-number code, account/device eligibility and native helper workarounds
 have not been verified against a paired phone; no bypass is promised.
-
-For a same-host reverse proxy, including Tailscale Serve, explicitly set
-`WHATSAPP_MCP_TRUSTED_PROXIES=loopback` only when its upstream socket is
-loopback. Otherwise trust the proxy's narrow CIDR. The default rate-limit key
-is the socket peer and ignores `X-Forwarded-For`, so proxied callers share a
-bucket until proxy trust is configured. Trusted proxies must append the real
-client or replace incoming forwarding headers. Tailscale Serve's replacement
-versus append behaviour has not been exercised here; confirm it on your proxy.
 
 The bridge prints the QR code to its stdout, which `docker compose logs`
 captures. On first start:

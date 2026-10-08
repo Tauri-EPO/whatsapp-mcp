@@ -190,6 +190,99 @@ func TestSavedProblemRefusesCorruptionAndSymlink(t *testing.T) {
 	}
 }
 
+func TestProblemPersistenceFailureKeepsTransientReconnectAvailable(t *testing.T) {
+	for _, code := range []int{503, 409, 401, 402, 403, 405, 406} {
+		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+		root, err := os.OpenRoot(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+		b.StoreRoot = root
+		if err := root.Mkdir(connectionProblemFile+".part", storeDirMode); err != nil {
+			t.Fatal(err)
+		}
+		f, err := root.Create(connectionProblemFile + ".part/occupied")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+		b.recordConnectionProblem(code, 0, time.Hour)
+		r := httptest.NewRecorder()
+		b.handleHealth()(r, httptest.NewRequest("GET", "/api/health", nil))
+		if r.Code != 200 || !strings.Contains(r.Body.String(), `"connection_problem_persistence_failed":true`) {
+			t.Fatalf("health=%s", r.Body)
+		}
+		ctx, cancel := context.WithTimeout(b.ctx, 20*time.Millisecond)
+		err = b.waitConnectionAllowedContext(ctx)
+		cancel()
+		p, _ := b.connectionSnapshot()
+		if p.restrictsAccount() {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("code=%d dial not blocked: %v", code, err)
+			}
+			if err := root.Remove(connectionProblemFile + ".part/occupied"); err != nil {
+				t.Fatal(err)
+			}
+			// The next gate pass retries the actual filesystem write.
+			ctx, cancel = context.WithTimeout(b.ctx, 20*time.Millisecond)
+			_ = b.waitConnectionAllowedContext(ctx)
+			cancel()
+			if saved, err := readConnectionProblem(root); err != nil || saved == nil || saved.Code != code {
+				t.Fatalf("retry saved=%+v err=%v", saved, err)
+			}
+		} else if err != nil {
+			t.Fatalf("transient code=%d blocked: %v", code, err)
+		}
+	}
+}
+
+func TestTransientProblemCannotEraseRestriction(t *testing.T) {
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.recordConnectionProblem(406, 0, 0)
+	b.recordConnectionProblem(503, 0, 0)
+	p, _ := b.connectionSnapshot()
+	if p.Kind != "banned" {
+		t.Fatalf("restriction replaced: %+v", p)
+	}
+}
+
+func TestOutdatedBuildIsRetriedOnlyAfterBuildChanges(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	p := classifyConnectionProblem(405, 0, 0, time.Now())
+	if p.BuildVersion == "" {
+		t.Fatal("outdated problem has no build identity")
+	}
+	if err := writeConnectionProblem(root, p); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := readConnectionProblem(root); err != nil || saved == nil {
+		t.Fatalf("same build forgotten: %+v %v", saved, err)
+	}
+	p.BuildVersion = "fake-previous-build"
+	if err := writeConnectionProblem(root, p); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := readConnectionProblem(root); err != nil || saved != nil {
+		t.Fatalf("new build blocked: %+v %v", saved, err)
+	}
+	if _, err := root.Lstat(connectionProblemFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("outdated file not cleared")
+	}
+	p = classifyConnectionProblem(406, 0, 0, time.Now())
+	p.BuildVersion = "fake-previous-build"
+	if err := writeConnectionProblem(root, p); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := readConnectionProblem(root); err != nil || saved == nil {
+		t.Fatalf("account ban erased by upgrade: %+v %v", saved, err)
+	}
+}
+
 func TestPasskeyFlowIsVisibleWithoutLeakingOptions(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	states := []string{}

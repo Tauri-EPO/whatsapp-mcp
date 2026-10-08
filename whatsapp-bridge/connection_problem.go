@@ -43,6 +43,7 @@ type ConnectionProblem struct {
 	TempBanReason int        `json:"temp_ban_reason,omitempty"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 	Since         time.Time  `json:"since"`
+	BuildVersion  string     `json:"build_version,omitempty"`
 }
 
 func classifyConnectionProblem(code int, reason int, expire time.Duration, now time.Time) *ConnectionProblem {
@@ -61,6 +62,7 @@ func classifyConnectionProblem(code int, reason int, expire time.Duration, now t
 		p.Kind = "locked"
 	case 405:
 		p.Kind = "client_outdated"
+		p.BuildVersion = connectionBuildVersion()
 	case 406:
 		p.Kind = "banned"
 	default:
@@ -69,6 +71,15 @@ func classifyConnectionProblem(code int, reason int, expire time.Duration, now t
 		}
 	}
 	return p
+}
+
+func connectionBuildVersion() string {
+	info := buildInfo()
+	return info.Version + "+" + info.Commit + ";whatsmeow=" + info.Whatsmeow
+}
+
+func (p *ConnectionProblem) restrictsAccount() bool {
+	return p != nil && (p.Kind == "temporarily_banned" || p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
 }
 
 func (b *Bridge) connectionSnapshot() (*ConnectionProblem, string) {
@@ -88,7 +99,12 @@ func (b *Bridge) connectionNow() time.Time {
 func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration) {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
-	b.connectionProblem = classifyConnectionProblem(code, reason, expire, b.connectionNow())
+	next := classifyConnectionProblem(code, reason, expire, b.connectionNow())
+	// A transient failure cannot erase an account restriction received earlier.
+	if !next.restrictsAccount() && b.connectionProblem.restrictsAccount() {
+		return
+	}
+	b.connectionProblem = next
 	if code == 402 && b.metrics != nil {
 		b.metrics.mu.Lock()
 		if b.metrics.tempBans == nil {
@@ -104,10 +120,16 @@ func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration)
 	}
 	b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", b.connectionProblem.Kind, code, reason)
 	if b.StoreRoot != nil {
-		if err := writeConnectionProblem(b.StoreRoot, b.connectionProblem); err != nil {
-			b.problemPersistenceFailed = true
-			b.Log.Errorf("Could not persist connection problem; reconnect blocked: %v", err)
-		}
+		b.persistConnectionProblemLocked()
+	}
+}
+
+func (b *Bridge) persistConnectionProblemLocked() {
+	wasFailed := b.problemPersistenceFailed
+	err := writeConnectionProblem(b.StoreRoot, b.connectionProblem)
+	b.problemPersistenceFailed = err != nil
+	if err != nil && !wasFailed {
+		b.Log.Errorf("Could not persist connection problem (account restriction=%t): %v", b.connectionProblem.restrictsAccount(), err)
 	}
 }
 
@@ -116,6 +138,7 @@ func (b *Bridge) clearConnectionProblem() {
 	defer b.connectionMu.Unlock()
 	if b.StoreRoot != nil {
 		if err := b.StoreRoot.Remove(connectionProblemFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			b.problemPersistenceFailed = true
 			b.Log.Errorf("Could not clear saved connection problem: %v", err)
 			return
 		}
@@ -146,9 +169,22 @@ func (b *Bridge) waitConnectionAllowedContext(ctx context.Context) error {
 		}
 		p, state := b.connectionSnapshot()
 		b.connectionMu.Lock()
-		failed := b.problemPersistenceFailed
+		if b.problemPersistenceFailed && b.connectionProblem.restrictsAccount() && b.StoreRoot != nil {
+			b.persistConnectionProblemLocked()
+		}
+		failed := b.problemPersistenceFailed && b.connectionProblem.restrictsAccount()
 		b.connectionMu.Unlock()
-		blocked := failed || state != "" || p != nil && (p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
+		if failed {
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				continue
+			}
+		}
+		blocked := state != "" || p != nil && (p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
 		if blocked {
 			<-ctx.Done()
 			return ctx.Err()
@@ -205,7 +241,17 @@ func readConnectionProblem(root *os.Root) (*ConnectionProblem, error) {
 	if p.Kind != expected.Kind || p.Kind == "temporarily_banned" && p.ExpiresAt == nil {
 		return nil, errors.New("invalid saved connection classification")
 	}
-	return &p, nil
+	return clearOutdatedBuildProblem(root, &p, connectionBuildVersion())
+}
+
+func clearOutdatedBuildProblem(root *os.Root, p *ConnectionProblem, runningBuild string) (*ConnectionProblem, error) {
+	if p.Kind == "client_outdated" && p.BuildVersion != runningBuild {
+		if err := root.Remove(connectionProblemFile); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return p, nil
 }
 
 func writeConnectionProblem(root *os.Root, p *ConnectionProblem) error {

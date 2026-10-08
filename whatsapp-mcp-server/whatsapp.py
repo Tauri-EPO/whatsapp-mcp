@@ -372,7 +372,8 @@ class _BridgeHTTP:
         if self._client is None:
             # No redirects: the bridge never redirects, and following one could
             # replay a POST (with the bearer token) to an unexpected host.
-            self._client = httpx.Client(follow_redirects=False)
+            # Bridge credentials must not reach an inherited HTTP proxy.
+            self._client = httpx.Client(follow_redirects=False, trust_env=False)
         return self._client
 
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
@@ -5567,6 +5568,7 @@ def bridge_status() -> dict[str, Any]:
             else "bridge is paired but disconnected from WhatsApp; it reconnects automatically"
         )
     problem = body.get("connection_problem")
+    status["connection_problem_persistence_failed"] = body.get("connection_problem_persistence_failed") is True
     pairing_state = body.get("pairing_state")
     if isinstance(problem, dict):
         status["connection_problem"] = problem

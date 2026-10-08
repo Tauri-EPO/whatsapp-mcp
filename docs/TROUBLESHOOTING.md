@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Symptoms and fixes for pairing, auth, sync and app-state problems. For container-specific checks (`docker compose ps`, health endpoints, logs) see [DOCKER.md](DOCKER.md).
+
 ### Account connection problems
 
 `/api/health` stays alive and `bridge_status` reports `connection_problem`
@@ -13,7 +15,7 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 | `locked` (403) | Check primary-device account access in official WhatsApp; automatic pairing is blocked. |
 | `banned` (406) | Resolve the account restriction through official WhatsApp; automatic pairing is blocked. |
 | `temporarily_banned` (402) | Wait until `expires_at`; the bridge suspends all dials and resumes afterward. An unknown duration uses one hour. |
-| `client_outdated` (405) | Rebuild with an updated whatsmeow version; clear the saved problem after upgrading. |
+| `client_outdated` (405) | Rebuild with an updated whatsmeow version; a changed build identity automatically clears this restriction at startup. |
 | `server_error` (5xx) | Check WhatsApp service availability; normal reconnect backoff continues. |
 | `other` | Inspect the numeric code; normal reconnect backoff continues. |
 
@@ -22,12 +24,17 @@ It survives container restarts. To explicitly retry a blocked account after
 resolving its restriction, stop the bridge, remove that single saved state
 file from its store volume, and restart. Keep the databases and account keys.
 Do not clear a temporary ban early. An unreadable/corrupt state stops startup
-before any connection or QR; a persistence error blocks further dials.
-Automatic pairing restart APIs and connection-event webhooks are deferred to
-the operator-plane work. Temporary-ban reasons 101, 102, 103, 104 and 106 are
+before any connection or QR. `connection_problem_persistence_failed` in health
+reports a write error. Only account restrictions block dials on that error;
+the gate retries their write while retaining the restriction in memory.
+Transient failures keep normal reconnect backoff. `client_outdated` records
+the build version, commit and whatsmeow identity; a different build clears
+only that class, preserving account bans and locks.
+Automatic pairing restart APIs remain deferred to the operator-plane work.
+Connection-event webhooks are available through
+`WEBHOOK_FORWARD_CONNECTION_EVENTS` ([payload and debounce](CONFIGURATION.md#connection-monitoring-contract)).
+Temporary-ban reasons 101, 102, 103, 104 and 106 are
 WhatsApp's own descriptions of sending behaviour, not the bridge's diagnosis.
-
-Symptoms and fixes for pairing, auth, sync and app-state problems. For container-specific checks (`docker compose ps`, health endpoints, logs) see [DOCKER.md](DOCKER.md).
 
 ## Rolling back the media-length migration
 

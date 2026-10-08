@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -38,6 +40,49 @@ def test_chain(peer, headers, expected):
 
 def test_default_does_not_trust_even_loopback():
     assert client_key(scope("127.0.0.1", "198.51.100.1")) == "127.0.0.1"
+
+
+def test_gateway_trusts_one_address_and_separates_forwarded_clients(monkeypatch):
+    route = "Iface Destination Gateway Flags RefCnt Use Metric Mask\neth0 00000000 010012AC 0003 0 0 0 00000000\n"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: route)
+    trusted = resolve_trusted_proxies("gateway")
+    assert tuple(map(str, trusted)) == ("172.18.0.1/32",)
+    assert client_key(scope("172.18.0.1", "198.51.100.1"), trusted) == "198.51.100.1"
+    assert client_key(scope("172.18.0.2", "198.51.100.1"), trusted) == "172.18.0.2"
+    limiter = RateLimitMiddleware(_ok_app, 1, clock=lambda: 0, trusted_proxies=trusted)
+
+    async def socket_app(request, receive, send):
+        if request["type"] == "http":
+            request["client"] = ("172.18.0.1", 1234)
+        await limiter(request, receive, send)
+
+    with TestClient(socket_app) as client:
+        assert client.get("/mcp", headers={"X-Forwarded-For": "198.51.100.1"}).status_code == 200
+        assert client.get("/mcp", headers={"X-Forwarded-For": "198.51.100.2"}).status_code == 200
+        assert client.get("/mcp", headers={"X-Forwarded-For": "198.51.100.1"}).status_code == 429
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "",
+        "Iface Destination Gateway Flags RefCnt Use Metric Mask\neth0 00000000 00000000 0001 0 0 0 00000000\n",
+        "invalid\ninvalid",
+    ],
+)
+def test_gateway_requires_a_resolvable_default_route(monkeypatch, route):
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: route)
+    with pytest.raises(ValueError, match="WHATSAPP_MCP_TRUSTED_PROXIES=gateway cannot resolve"):
+        resolve_trusted_proxies("gateway")
+
+
+def test_gateway_uses_lowest_metric_and_refuses_equal_cost_ambiguity(monkeypatch):
+    routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask\neth0 00000000 010012AC 0003 0 0 10 00000000\neth1 00000000 010013AC 0003 0 0 20 00000000\n"
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: routes)
+    assert tuple(map(str, resolve_trusted_proxies("gateway"))) == ("172.18.0.1/32",)
+    routes = routes.replace("0 0 20", "0 0 10")
+    with pytest.raises(ValueError, match="cannot resolve"):
+        resolve_trusted_proxies("gateway")
 
 
 @pytest.mark.parametrize("value", ["any", "*", "10.0.0.1/8", "loopback,invalid"])

@@ -17,6 +17,7 @@ import secrets
 import threading
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
+from pathlib import Path
 from typing import Any
 
 Scope = MutableMapping[str, Any]
@@ -183,8 +184,35 @@ def resolve_max_body_bytes(value: str | None) -> int:
 ProxyNetworks = tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
 
 
+def _default_route_gateway() -> ipaddress.IPv4Network:
+    """Trust only the Linux default-route gateway, never its whole subnet."""
+    try:
+        routes = Path("/proc/net/route").read_text(encoding="ascii")
+        candidates = []
+        for line in routes.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 8 or fields[1] != "00000000" or fields[7] != "00000000":
+                continue
+            if int(fields[3], 16) & 3 != 3:
+                continue
+            address = ipaddress.IPv4Address(bytes.fromhex(fields[2])[::-1])
+            if address.is_unspecified or address.is_multicast:
+                continue
+            candidates.append((int(fields[6]), address))
+        if candidates:
+            metric = min(candidate[0] for candidate in candidates)
+            gateways = {address for cost, address in candidates if cost == metric}
+            if len(gateways) == 1:
+                return ipaddress.ip_network(f"{gateways.pop()}/32")
+    except (OSError, UnicodeError, ValueError):
+        pass
+    raise ValueError(
+        "WHATSAPP_MCP_TRUSTED_PROXIES=gateway cannot resolve one default-route gateway from /proc/net/route"
+    )
+
+
 def resolve_trusted_proxies(value: str | None) -> ProxyNetworks:
-    """Explicit CIDRs or loopback; unset trusts no forwarding headers."""
+    """Explicit CIDRs, loopback or the container gateway; unset trusts none."""
     networks = []
     for entry in (value or "").split(","):
         entry = entry.strip()
@@ -193,10 +221,14 @@ def resolve_trusted_proxies(value: str | None) -> ProxyNetworks:
         try:
             if entry == "loopback":
                 networks.extend((ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")))
+            elif entry == "gateway":
+                networks.append(_default_route_gateway())
             else:
                 networks.append(ipaddress.ip_network(entry, strict=True))
         except ValueError:
-            raise ValueError("WHATSAPP_MCP_TRUSTED_PROXIES must contain CIDRs or loopback") from None
+            if entry == "gateway":
+                raise
+            raise ValueError("WHATSAPP_MCP_TRUSTED_PROXIES must contain CIDRs, loopback or gateway") from None
     return tuple(networks)
 
 
