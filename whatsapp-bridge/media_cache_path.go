@@ -46,9 +46,10 @@ func requireChatMediaDir(root *os.Root, chatDir string) (os.FileInfo, error) {
 
 // openChatMediaDir opens the chat directory itself. What it returns is a handle
 // on the directory requireChatMediaDir saw: the two are compared, so a
-// directory swapped for a link between the check and the open is refused, and
-// every later step names a file inside that handle instead of resolving
-// store/<chat directory>/<file name> again by name.
+// directory swapped for a link between the check and the open is refused. The
+// callers then name the file inside that handle (the webhook's open, the
+// purge's delete) instead of resolving store/<chat directory>/<file name>
+// again by name.
 func openChatMediaDir(root *os.Root, chatDir string) (*os.Root, error) {
 	if root == nil {
 		return nil, errors.New("store directory unavailable")
@@ -82,46 +83,69 @@ func statCachedMedia(dir *os.Root, name string) (os.FileInfo, error) {
 	return info, nil
 }
 
-// findCachedMedia returns the first of names that is cached in chatDir, with
-// its info. Nothing cached is ("", nil, nil). When no name is cached and
-// something other than absence stood in the way (a name or the directory is a
-// link, a component is not a plain one), that comes back as the error, so the
-// caller can say "the store refused this path" instead of "not cached".
-func findCachedMedia(root *os.Root, chatDir string, names []string) (string, os.FileInfo, error) {
+// cachedMedia is a cached file that was found: its name, what Lstat saw, and
+// the opened chat directory it is in. Close it when done.
+type cachedMedia struct {
+	dir  *os.Root
+	name string
+	info os.FileInfo
+}
+
+func (c *cachedMedia) Close() { _ = c.dir.Close() }
+
+// Remove deletes the file through the directory handle it was found in, so a
+// chat directory swapped for a link after the lookup cannot send the delete
+// somewhere else.
+func (c *cachedMedia) Remove() error { return c.dir.Remove(c.name) }
+
+// findCachedMedia returns the first of names that is cached in chatDir. Nothing
+// cached is (nil, nil). When no name is cached and something other than absence
+// stood in the way (a name or the directory is a link, a component is not a
+// plain one: errMediaPath), that comes back as the error, so the caller can
+// say "this path was refused" instead of "not cached".
+func findCachedMedia(root *os.Root, chatDir string, names []string) (*cachedMedia, error) {
 	for _, name := range names {
 		if err := checkMediaPathComponents(chatDir, name); err != nil {
-			return "", nil, err
+			return nil, err
 		}
 	}
 	dir, err := openChatMediaDir(root, chatDir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil, nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	defer func() { _ = dir.Close() }()
 	var refused error
+	var previous string
 	for _, name := range names {
+		if name == previous {
+			continue // every type but a document has one name, listed twice
+		}
+		previous = name
 		info, err := statCachedMedia(dir, name)
 		switch {
 		case err == nil:
-			return name, info, nil
+			return &cachedMedia{dir: dir, name: name, info: info}, nil
 		case !errors.Is(err, fs.ErrNotExist):
 			refused = err
 		}
 	}
-	return "", nil, refused
+	_ = dir.Close()
+	return nil, refused
 }
 
 // cachedMediaPath returns the store-relative path of the existing cached file
 // for a row (current name first, then the legacy one) or "" when nothing is
 // cached. A name someone replaced with a symlink is never served as the media:
-// the download fetches the file again and its rename replaces the link.
-func cachedMediaPath(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) string {
-	name, _, _ := findCachedMedia(root, chatDir, mediaFileNames(mediaType, timestamp, messageID, originalName))
-	if name == "" {
-		return ""
+// the download fetches the file again and its rename replaces the link. The
+// error is what stood in the way when nothing usable was found; the caller logs
+// it, because the fetch that follows otherwise looks like an ordinary miss.
+func cachedMediaPath(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) (string, error) {
+	found, err := findCachedMedia(root, chatDir, mediaFileNames(mediaType, timestamp, messageID, originalName))
+	if found == nil {
+		return "", err
 	}
-	return path.Join(chatDir, name)
+	defer found.Close()
+	return path.Join(chatDir, found.name), nil
 }

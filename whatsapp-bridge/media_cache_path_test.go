@@ -4,9 +4,12 @@ package main
 // file is cached (issue #490, media_cache_path.go).
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -29,7 +32,8 @@ const cacheRuleID = "IMG1"
 func cacheRuleViews(t *testing.T, chat, id string) (download bool, purge PurgeResult, webhook error) {
 	t.Helper()
 	root := storeRootAt(t, storeDir())
-	download = cachedMediaPath(root, chatMediaRel(chat), "image", cacheRuleTime, id, "") != ""
+	cached, _ := cachedMediaPath(root, chatMediaRel(chat), "image", cacheRuleTime, id, "")
+	download = cached != ""
 	purge = purgeOne(root, mediaRow{ID: id, ChatJID: chat, MediaType: "image", Timestamp: cacheRuleTime}, true)
 	f, _, webhook := openStoreMedia(root, chatMediaRel(chat), mediaFileName("image", cacheRuleTime, id, ""))
 	if webhook == nil {
@@ -161,33 +165,89 @@ func TestPurgeOne_RemovesTheRegularFile(t *testing.T) {
 }
 
 // The error that says "something is in the way" must not be the one for
-// "nothing there": the purge tells the two apart for whoever reads its answer.
+// "nothing there": the purge tells the two apart for whoever reads its answer,
+// and the download logs the first.
 func TestFindCachedMediaTellsAbsenceFromRefusal(t *testing.T) {
 	chatDir, _ := cacheRuleStore(t)
 	root := storeRootAt(t, storeDir())
 	chat := chatMediaRel(mediaTestChat)
+	find := func(dir string, names ...string) (string, error) {
+		t.Helper()
+		found, err := findCachedMedia(root, dir, names)
+		if found == nil {
+			return "", err
+		}
+		defer found.Close()
+		if found.info == nil || err != nil {
+			t.Errorf("a found file must come with its info and no error: info=%v err=%v", found.info, err)
+		}
+		return found.name, err
+	}
 
-	if name, _, err := findCachedMedia(root, chat, []string{"missing.jpg"}); name != "" || err != nil {
+	if name, err := find(chat, "missing.jpg"); name != "" || err != nil {
 		t.Errorf("missing file: name=%q err=%v, want neither", name, err)
 	}
-	if name, _, err := findCachedMedia(root, "nobody@g.us", []string{"missing.jpg"}); name != "" || err != nil {
+	if name, err := find("nobody@g.us", "missing.jpg"); name != "" || err != nil {
 		t.Errorf("missing directory: name=%q err=%v, want neither", name, err)
 	}
 	symlinkOrSkip(t, "../victim.db", filepath.Join(chatDir, "linked.jpg"))
-	if name, _, err := findCachedMedia(root, chat, []string{"linked.jpg"}); name != "" || err == nil {
-		t.Errorf("linked file: name=%q err=%v, want a refusal", name, err)
+	if name, err := find(chat, "linked.jpg"); name != "" || !errors.Is(err, errMediaNotRegular) {
+		t.Errorf("linked file: name=%q err=%v, want the not-a-regular-file refusal", name, err)
 	}
 	// The second name is tried when the first is refused: a legacy file is
 	// still found next to a link under the current name.
 	writeTestFile(t, filepath.Join(chatDir, "legacy"), "x")
-	if name, info, err := findCachedMedia(root, chat, []string{"linked.jpg", "legacy"}); name != "legacy" || info == nil || err != nil {
-		t.Errorf("fallback: name=%q info=%v err=%v, want the legacy file", name, info, err)
+	if name, err := find(chat, "linked.jpg", "legacy"); name != "legacy" || err != nil {
+		t.Errorf("fallback: name=%q err=%v, want the legacy file", name, err)
 	}
-	if _, _, err := findCachedMedia(root, chat, []string{"../victim.db"}); err == nil || !strings.Contains(err.Error(), "refusing media path") {
+	// The same name twice, as every type but a document lists it, is one lookup
+	// with one answer.
+	if name, err := find(chat, "legacy", "legacy"); name != "legacy" || err != nil {
+		t.Errorf("repeated name: name=%q err=%v", name, err)
+	}
+	if _, err := find(chat, "../victim.db"); !errors.Is(err, errMediaPath) || !strings.Contains(err.Error(), "refusing media path") {
 		t.Errorf("a name with a separator: err=%v, want the component refusal", err)
 	}
-	if _, _, err := findCachedMedia(nil, chat, []string{"x.jpg"}); err == nil {
+	if found, err := findCachedMedia(nil, chat, []string{"x.jpg"}); found != nil || err == nil {
 		t.Error("want an error without a store root")
+	}
+}
+
+// A lookup that was refused is not a silent cache miss: the download says why
+// it fetches a file that has something under its name.
+func TestDownloadMedia_SaysWhenTheCacheLookupWasRefused(t *testing.T) {
+	storeInScratch(t)
+	ms := newConcurrentTestStore(t)
+	rec := installRecordingLogger(t)
+	b := testBridge(t, nil, ms, rec)
+	var transfers atomic.Int32
+	b.mediaTransfer = countingTransfer(&transfers)
+	dest := seedMediaRowIn(t, ms, mediaTestChat, "IMG1")
+	if err := os.Mkdir(filepath.Dir(dest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, storePath("victim.db"), "victim-content")
+	symlinkOrSkip(t, "../victim.db", dest)
+
+	if ok, _, _, _, err := b.downloadMedia(context.Background(), "IMG1", mediaTestChat); !ok || err != nil {
+		t.Fatalf("ok=%v err=%v, want a fresh download", ok, err)
+	}
+	if got := transfers.Load(); got != 1 {
+		t.Errorf("transfers = %d, want 1", got)
+	}
+	if !strings.Contains(rec.String(), "[WARN] Cache lookup for message \"IMG1\"") || !strings.Contains(rec.String(), "was refused") {
+		t.Errorf("want a WARN naming the refused lookup, got:\n%s", rec.String())
+	}
+
+	// An ordinary miss says nothing.
+	rec2 := installRecordingLogger(t)
+	b.Log = rec2
+	seedMediaRowIn(t, ms, mediaTestChat, "IMG2")
+	if ok, _, _, _, err := b.downloadMedia(context.Background(), "IMG2", mediaTestChat); !ok || err != nil {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if strings.Contains(rec2.String(), "Cache lookup") {
+		t.Errorf("an ordinary cache miss logged a refusal:\n%s", rec2.String())
 	}
 }
 

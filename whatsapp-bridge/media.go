@@ -163,7 +163,14 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	}
 
 	// Check if file already exists (under the current or the legacy name)
-	if cached := cachedMediaPath(root, chatDir, mediaType, timestamp, messageID, originalName.String); cached != "" {
+	cached, lookupErr := cachedMediaPath(root, chatDir, mediaType, timestamp, messageID, originalName.String)
+	if lookupErr != nil {
+		// Something stands under the cached name, or in front of the directory,
+		// that the lookup will not go through. Say so: the fetch that follows
+		// would otherwise read as an ordinary cache miss.
+		b.Log.Warnf("Cache lookup for message %q in chat %q was refused (%v); downloading the file again", messageID, chatJID, lookupErr)
+	}
+	if cached != "" {
 		absPath = filepath.Join(filepath.Dir(absPath), path.Base(cached))
 		b.Log.Debugf("📁 File already exists: %s", absPath)
 		return true, mediaType, filepath.Base(absPath), absPath, nil
@@ -321,12 +328,15 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 // a control character (NUL, a line break). The store root already keeps a write
 // inside the store; this keeps it inside the one directory of its chat, under
 // the one name of its message, which containment alone cannot express. It is
-// the same rule for every reader of the cache (media_cache_path.go). The names
+// the same rule for every reader of the cache (media_cache_path.go), and every
+// refusal wraps errMediaPath so a caller can tell it from the others. The names
 // of ordinary messages never trip it.
+var errMediaPath = errors.New("refusing media path")
+
 func checkMediaPathComponents(chatDir, filename string) error {
 	for _, c := range []struct{ what, name string }{{"chat JID", chatDir}, {"message ID", filename}} {
 		if c.name == "" || c.name == "." || strings.Contains(c.name, "..") || strings.ContainsAny(c.name, `/\`) || strings.ContainsFunc(c.name, unicode.IsControl) {
-			return fmt.Errorf("refusing media path: the %s does not name a single file inside the store directory", c.what)
+			return fmt.Errorf("%w: the %s does not name a single file inside the store directory", errMediaPath, c.what)
 		}
 	}
 	return nil
@@ -393,9 +403,11 @@ func mediaFileNames(mediaType string, timestamp time.Time, messageID, originalNa
 }
 
 // chatMediaRel is the store-relative directory holding one chat's media: the
-// chat JID with ':' (device suffix) mapped to '_'. Everything that touches a
-// chat's media works through the store root (os.Root) and this relative form;
-// nothing in the bridge joins it onto the store path.
+// chat JID with ':' (device suffix) mapped to '_'. Every file operation on a
+// chat's media goes through the store root (os.Root) with this relative form.
+// The one place that joins it onto the store path is downloadMedia, to build
+// the absolute path it hands back to its callers, which the bridge itself never
+// opens.
 func chatMediaRel(chatJID string) string {
 	return strings.ReplaceAll(chatJID, ":", "_")
 }

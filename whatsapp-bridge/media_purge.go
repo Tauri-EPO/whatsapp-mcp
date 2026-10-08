@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path"
 	"slices"
 	"strings"
 	"time"
@@ -175,9 +174,9 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 // purgeOne removes (or, in dry-run, measures) the cached file of one row.
 // What counts as that file is decided where the download decides it
 // (findCachedMedia, media_cache_path.go): a regular file under a plain name in
-// the chat's own directory, nothing followed. The delete runs through the store
-// root, so a component swapped for a symlink between the lookup and the Remove
-// still cannot take it out of the store.
+// the chat's own directory, nothing followed. The delete names the file inside
+// the directory handle the lookup opened, so a chat directory swapped for a
+// symlink between the lookup and the Remove cannot send it elsewhere.
 func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 	res := PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID}
 	if row.MediaType == "" || row.MediaType == "reaction" || row.MediaType == "poll_vote" {
@@ -188,40 +187,37 @@ func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 		res.Reason = "store directory unavailable"
 		return res
 	}
-	// A chat's media lives in exactly one directory directly under the store,
-	// each file under one plain name. The root already refuses an escape; this
-	// refuses the rest of what a corrupted chat_jid or message id could name —
-	// another chat's directory, a nested path — which containment alone cannot
-	// express. The download refuses the same rows with the same check.
-	chatDir := chatMediaRel(row.ChatJID)
-	names := mediaFileNames(row.MediaType, row.Timestamp, row.ID, row.Filename)
-	for _, name := range names {
-		if checkMediaPathComponents(chatDir, name) != nil {
+	found, refused := findCachedMedia(root, chatMediaRel(row.ChatJID), mediaFileNames(row.MediaType, row.Timestamp, row.ID, row.Filename))
+	if found == nil {
+		switch {
+		case errors.Is(refused, errMediaPath):
+			// A chat's media lives in exactly one directory directly under the
+			// store, each file under one plain name. The root already refuses
+			// an escape; this is the rest of what a corrupted chat_jid or
+			// message id could name — another chat's directory, a nested path —
+			// which containment alone cannot express. The download refuses the
+			// same rows with the same check.
 			res.Reason = "path outside the store directory"
-			return res
-		}
-	}
-	name, info, refused := findCachedMedia(root, chatDir, names)
-	if name == "" {
-		// "not cached" would blame a missing file for a path that was refused:
-		// a chat directory or a cached name that is a symlink is not followed,
-		// by the download either, and whoever put the link there needs to read
-		// that the purge will not go through it rather than that nothing is
-		// cached.
-		res.Reason = purgeReasonNotCached
-		if refused != nil {
+		case refused != nil:
+			// "not cached" would blame a missing file for a path that was
+			// refused: a chat directory or a cached name that is a symlink is
+			// not followed, by the download either, and whoever put the link
+			// there needs to read that the purge will not go through it rather
+			// than that nothing is cached.
 			res.Reason = purgeReasonNotResolvable
+		default:
+			res.Reason = purgeReasonNotCached
 		}
 		return res
 	}
-	rel := path.Join(chatDir, name)
-	res.Bytes = info.Size()
-	res.File = name
+	defer found.Close()
+	res.Bytes = found.info.Size()
+	res.File = found.name
 	if dryRun {
 		res.Purged = true
 		return res
 	}
-	if err := root.Remove(rel); err != nil {
+	if err := found.Remove(); err != nil {
 		res.Reason = "remove failed: " + err.Error()
 		res.Bytes = 0
 		return res
