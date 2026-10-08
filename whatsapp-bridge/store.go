@@ -32,9 +32,10 @@ type MessageStore struct {
 	db   *sql.DB
 	waDB *sql.DB // whatsmeow's DB for contact name resolution fallback
 
-	names     *chatNameCache  // resolved chat names + failed group lookups (chat_names.go)
-	groupInfo groupInfoLookup // live group metadata fetch; nil = no network
-	fts       bool            // messages_fts active (fts.go)
+	names          *chatNameCache           // resolved chat names + failed group lookups (chat_names.go)
+	groupInfo      groupInfoLookup          // live group metadata fetch; nil = no network
+	fts            bool                     // messages_fts active (fts.go)
+	storeRetryWait func(time.Duration) bool // bounded background-write retry; tests release a real SQLite lock here
 }
 
 type ChatEphemeralSettings struct {

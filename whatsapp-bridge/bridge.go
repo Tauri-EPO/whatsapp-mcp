@@ -252,12 +252,16 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 
 // sleep waits for d and reports false when the bridge is shutting down.
 func (b *Bridge) sleep(d time.Duration) bool {
+	return sleepContext(b.ctx, d)
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 		return true
-	case <-b.ctx.Done():
+	case <-ctx.Done():
 		return false
 	}
 }

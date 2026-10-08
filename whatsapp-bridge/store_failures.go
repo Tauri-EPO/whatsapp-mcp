@@ -20,6 +20,7 @@ package main
 // the write lock.
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -51,14 +52,30 @@ func defaultStoreRetryDelays() []time.Duration {
 // retryBusy runs write, and again after each of b.StoreRetryDelays for as
 // long as the database is busy. It returns the error of the last attempt.
 func (b *Bridge) retryBusy(write func() error) error {
+	return retryBusyWithWait(write, b.StoreRetryDelays, b.waitStoreRetry)
+}
+
+// The same bounded loop for event/history writes and outbound persistence.
+// write must contain database effects only and be safe to repeat.
+func retryBusyWithWait(write func() error, delays []time.Duration, wait func(time.Duration) bool) error {
 	err := write()
-	for _, delay := range b.StoreRetryDelays {
-		if err == nil || !isBusyError(err) || !b.waitStoreRetry(delay) {
+	for _, delay := range delays {
+		if err == nil || !isBusyError(err) || !wait(delay) {
 			break
 		}
 		err = write()
 	}
 	return err
+}
+
+// Outbound persistence runs after WhatsApp already accepted the send. Retry
+// only these local upserts; never send the WhatsApp message a second time.
+func (store *MessageStore) retryBusy(write func() error) error {
+	wait := store.storeRetryWait
+	if wait == nil {
+		wait = func(delay time.Duration) bool { return sleepContext(context.Background(), delay) }
+	}
+	return retryBusyWithWait(write, defaultStoreRetryDelays(), wait)
 }
 
 // storeLive runs one write under retryBusy and reports whether it is in the

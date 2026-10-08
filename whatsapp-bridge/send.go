@@ -455,7 +455,7 @@ func persistOutbound(client *whatsmeow.Client, messageStore *MessageStore, stora
 	// Pass empty name so StoreChat preserves any existing resolved
 	// contact/group name; we don't have one available here and
 	// must not clobber names from inbound handling or history sync.
-	if chatErr := messageStore.StoreChat(chatJID, "", sent.Timestamp); chatErr != nil {
+	if chatErr := messageStore.retryBusy(func() error { return messageStore.StoreChat(chatJID, "", sent.Timestamp) }); chatErr != nil {
 		bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
 	}
 	if storeErr := media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID); storeErr != nil {
@@ -509,10 +509,12 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 
 // store persists the outbound row with these media columns.
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
-	if err := messageStore.StoreMessage(
-		id, chatJID, senderJID, content, timestamp, true,
-		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID,
-	); err != nil {
+	if err := messageStore.retryBusy(func() error {
+		return messageStore.StoreMessage(
+			id, chatJID, senderJID, content, timestamp, true,
+			m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID,
+		)
+	}); err != nil {
 		return err
 	}
 	// The upload's direct path is the one the recipients were sent

@@ -127,3 +127,21 @@ UTC, second resolution, explicit offset, fixed width. SQLite has no date type, s
 Earlier releases bound a `time.Time` and let the SQLite driver render it, which stamped the writing machine's local offset on the row (older stores also hold Go's `time.Time.String()` form). The bridge rewrites those rows to the canonical spelling on startup, logs how many it changed per column, and stamps `PRAGMA user_version` so the rewrite runs once. The stamp is not the whole story: a stamped store still gets one `LIMIT 1` probe per time column at every start, so rows an older binary wrote during an image rollback are repaired on the way forward ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
 
 Two things this note does *not* cover: `chats.ephemeral_setting_timestamp` is an INTEGER of WhatsApp seconds, not a time string; and cached media file names keep the *local* wall clock of the message (`<type>_<yyyymmdd_hhmmss>_<id>`), so existing files stay reachable.
+
+
+## SQLite contention and persistence retries
+
+Live chat/message inserts, decoded poll-message rows, history chat metadata and
+outbound chat/message persistence share the same bounded SQLite BUSY/LOCKED
+retry loop: up to three attempts, with 200 ms then 1 s between attempts. Other
+errors stop immediately. Shutdown cancels event/history waits; outbound retries
+apply only to local upserts after WhatsApp accepted the send, so a retry never
+sends a second message. A final event/history write failure is counted and
+logged once; outbound persistence retains its warning and successful-send
+response because the remote send already happened.
+
+This protects those insertion paths rather than every SQLite mutation. Poll
+vote tallies, auxiliary message metadata, read state, group rosters, archive
+state, media-cache metadata, retention and migrations keep their own existing
+error handling. Long history transactions can still keep a live writer waiting;
+bounded attempts are not a latency guarantee.
