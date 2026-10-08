@@ -771,6 +771,16 @@ are independent of `WEBHOOK_FORWARD_STATUS`; `WEBHOOK_ENABLED=false` and
 `FORWARD_SELF=false` still take precedence. Media caching follows its existing
 settings; these switches change delivery to the webhook, not archive storage.
 
+A received broadcast-list message appears in the sending contact's direct chat
+on the phone, but the bridge archives it under the broadcast JID and withholds
+it by default because it is a mass mailing whose chat JID cannot be replied to;
+`WEBHOOK_FORWARD_BROADCASTS=true` restores its webhook delivery.
+The `@bot` form of a Meta AI direct chat is also withheld, with no opt-in;
+its legacy phone-JID form still follows normal direct-chat forwarding. Unknown
+and empty namespaces are withheld; phone, LID, hosted phone/LID and groups retain
+their conversational forwarding. DEBUG logs explain each withheld family or
+namespace and the relevant switches without including message content.
+
 `"stored": false` is added, to a message and to a reaction event alike, when
 the bridge could not write it to its
 database (it says so at ERROR and counts it in

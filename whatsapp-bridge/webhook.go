@@ -90,11 +90,28 @@ func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool) bool {
 		return b.ForwardChannels
 	case types.BroadcastServer:
 		return b.ForwardBroadcasts
-	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
+	case types.DefaultUserServer, types.HiddenUserServer, types.HostedServer, types.HostedLIDServer, types.GroupServer:
 		return true
 	default:
 		return false
 	}
+}
+
+func (b *Bridge) logWebhookWithheld(chat types.JID, id string) {
+	family, gate, on := "", "", false
+	switch {
+	case isStatusChat(chat):
+		family, gate, on = "status", webhookForwardStatusEnv, b.ForwardStatus
+	case chat.Server == types.NewsletterServer:
+		family, gate, on = "channel", webhookForwardChannelsEnv, b.ForwardChannels
+	case chat.Server == types.BroadcastServer:
+		family, gate, on = "broadcast list", webhookForwardBroadcastsEnv, b.ForwardBroadcasts
+	}
+	if gate == "" {
+		b.Log.Debugf("Message %s in %s not forwarded: namespace %q; WEBHOOK_ENABLED=%t FORWARD_SELF=%t", id, chat, chat.Server, b.Webhook.Enabled(), b.ForwardSelf)
+		return
+	}
+	b.Log.Debugf("Message %s in %s not forwarded: %s feed (%s=%t); WEBHOOK_ENABLED=%t FORWARD_SELF=%t", id, chat, family, gate, on, b.Webhook.Enabled(), b.ForwardSelf)
 }
 
 // WebhookPayload represents the data sent to the webhook

@@ -53,7 +53,7 @@ func TestFeedWebhookSwitchesAreIndependentAndStrict(t *testing.T) {
 }
 
 func TestFeedWebhookPolicyAllGates(t *testing.T) {
-	chats := []types.JID{phonePN, types.NewJID("120363000000000001", types.GroupServer), types.StatusBroadcastJID, types.NewJID("example", types.NewsletterServer), types.NewJID("example", types.BroadcastServer), phoneLID, types.NewJID("example", "example.invalid"), types.EmptyJID}
+	chats := []types.JID{phonePN, types.NewJID("120363000000000001", types.GroupServer), types.StatusBroadcastJID, types.NewJID("example", types.NewsletterServer), types.NewJID("example", types.BroadcastServer), phoneLID, types.NewJID("example", "example.invalid"), types.EmptyJID, types.NewJID("example", types.HostedServer), types.NewJID("example", types.HostedLIDServer), types.NewJID("example", types.BotServer)}
 	for flags := 0; flags < 32; flags++ {
 		b := &Bridge{Webhook: newWebhookSender("", flags&1 != 0), ForwardSelf: flags&2 != 0, ForwardStatus: flags&4 != 0, ForwardChannels: flags&8 != 0, ForwardBroadcasts: flags&16 != 0}
 		for index, chat := range chats {
@@ -66,7 +66,7 @@ func TestFeedWebhookPolicyAllGates(t *testing.T) {
 					feedAllowed = flags&8 != 0
 				case 4:
 					feedAllowed = flags&16 != 0
-				case 6, 7:
+				case 6, 7, 10:
 					feedAllowed = false
 				}
 				want := flags&1 != 0 && (!fromMe || flags&2 != 0) && feedAllowed
@@ -89,12 +89,17 @@ func TestFeedsReachWebhookOnlyWhenAsked(t *testing.T) {
 		{"broadcast", types.NewJID("example", types.BroadcastServer)},
 		{"status", types.StatusBroadcastJID},
 		{"unknown", types.NewJID("example", "example.invalid")},
+		{"bot", types.NewJID("example", types.BotServer)},
+		{"phone", phonePN},
+		{"lid", phoneLID},
+		{"group", types.NewJID("120363000000000001", types.GroupServer)},
 	}
 	for _, feed := range feeds {
 		for _, on := range []bool{false, true} {
 			for _, kind := range []string{"text", "image", "reaction"} {
 				t.Run(fmt.Sprintf("%s/%t/%s", feed.name, on, kind), func(t *testing.T) {
-					wantForward := on && feed.name != "unknown"
+					positive := feed.name == "phone" || feed.name == "lid" || feed.name == "group"
+					wantForward := positive || (on && feed.name != "unknown" && feed.name != "bot")
 					payloads := make(chan WebhookPayload, 1)
 					var requests atomic.Int32
 					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +115,8 @@ func TestFeedsReachWebhookOnlyWhenAsked(t *testing.T) {
 					}))
 					t.Cleanup(srv.Close)
 					t.Setenv("WEBHOOK_URL", srv.URL)
-					b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+					rec := installRecordingLogger(t)
+					b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
 					b.MediaAutoDownload = false
 					// Turn unrelated opt-ins on: they must not enable this feed.
 					b.ForwardStatus, b.ForwardChannels, b.ForwardBroadcasts = true, true, true
@@ -139,6 +145,9 @@ func TestFeedsReachWebhookOnlyWhenAsked(t *testing.T) {
 					}
 					if got := requests.Load(); got != wantRequests {
 						t.Fatalf("HTTP requests=%d want=%d", got, wantRequests)
+					}
+					if !wantForward && !strings.Contains(rec.String(), "not forwarded:") {
+						t.Fatalf("withheld event has no DEBUG explanation: %s", rec.String())
 					}
 					select {
 					case payload := <-payloads:
