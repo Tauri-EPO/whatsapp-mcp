@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -174,10 +173,11 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 }
 
 // purgeOne removes (or, in dry-run, measures) the cached file of one row.
-// Both the lookup and the delete run through the store root, so the kernel
-// resolves every path component inside the store: a name that reaches outside
-// it — a symlink planted in a chat directory, or a component swapped for one
-// between the stat and the Remove — is refused rather than deleted.
+// What counts as that file is decided where the download decides it
+// (findCachedMedia, media_cache_path.go): a regular file under a plain name in
+// the chat's own directory, nothing followed. The delete runs through the store
+// root, so a component swapped for a symlink between the lookup and the Remove
+// still cannot take it out of the store.
 func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 	res := PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID}
 	if row.MediaType == "" || row.MediaType == "reaction" || row.MediaType == "poll_vote" {
@@ -188,29 +188,35 @@ func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 		res.Reason = "store directory unavailable"
 		return res
 	}
-	// A chat's media lives in exactly one directory directly under the store.
-	// The root already refuses an escape; this refuses the rest of what a
-	// corrupted chat_jid could name — another chat's directory, a nested path —
-	// which containment alone cannot express.
+	// A chat's media lives in exactly one directory directly under the store,
+	// each file under one plain name. The root already refuses an escape; this
+	// refuses the rest of what a corrupted chat_jid or message id could name —
+	// another chat's directory, a nested path — which containment alone cannot
+	// express. The download refuses the same rows with the same check.
 	chatDir := chatMediaRel(row.ChatJID)
-	if chatDir == "" || chatDir == "." || chatDir == ".." || strings.ContainsAny(chatDir, `/\`) {
-		res.Reason = "path outside the store directory"
-		return res
+	names := mediaFileNames(row.MediaType, row.Timestamp, row.ID, row.Filename)
+	for _, name := range names {
+		if checkMediaPathComponents(chatDir, name) != nil {
+			res.Reason = "path outside the store directory"
+			return res
+		}
 	}
-	rel, info, refused := cachedMediaRel(root, chatDir, row.MediaType, row.Timestamp, row.ID, row.Filename)
-	if rel == "" {
-		// "not cached" would blame a missing file for a path the root refused —
-		// an operator who symlinked a chat directory onto another disk still
-		// sees those files through download_media, and needs to read that the
-		// purge cannot reach them rather than that they are gone.
+	name, info, refused := findCachedMedia(root, chatDir, names)
+	if name == "" {
+		// "not cached" would blame a missing file for a path that was refused:
+		// a chat directory or a cached name that is a symlink is not followed,
+		// by the download either, and whoever put the link there needs to read
+		// that the purge will not go through it rather than that nothing is
+		// cached.
 		res.Reason = purgeReasonNotCached
 		if refused != nil {
 			res.Reason = purgeReasonNotResolvable
 		}
 		return res
 	}
+	rel := path.Join(chatDir, name)
 	res.Bytes = info.Size()
-	res.File = path.Base(rel)
+	res.File = name
 	if dryRun {
 		res.Purged = true
 		return res
@@ -222,28 +228,6 @@ func purgeOne(root *os.Root, row mediaRow, dryRun bool) PurgeResult {
 	}
 	res.Purged = true
 	return res
-}
-
-// cachedMediaRel is cachedMediaPath through the store root: it returns the
-// store-relative path of the row's cached file and its info, or "" when nothing
-// is cached there. A name that resolves out of the store — a symlinked file, or
-// a chat directory an operator moved to another disk — fails root.Stat with
-// something other than "does not exist"; that error comes back as the third
-// value so the caller can tell "no file" from "the root refused this path"
-// instead of reporting both as an empty cache.
-func cachedMediaRel(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) (string, os.FileInfo, error) {
-	var refused error
-	for _, name := range mediaFileNames(mediaType, timestamp, messageID, originalName) {
-		p := path.Join(chatDir, name)
-		info, err := root.Stat(p)
-		switch {
-		case err == nil && !info.IsDir():
-			return p, info, nil
-		case err != nil && !errors.Is(err, fs.ErrNotExist):
-			refused = err
-		}
-	}
-	return "", nil, refused
 }
 
 func writePurgeResponse(w http.ResponseWriter, status int, resp MediaPurgeResponse) {

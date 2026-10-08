@@ -151,8 +151,8 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	if err := root.MkdirAll(chatDir, storeDirMode); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to create chat directory inside the store: %v", err)
 	}
-	if info, err := root.Lstat(chatDir); err != nil || !info.IsDir() {
-		return false, "", "", "", errors.New("chat directory is not a real directory inside the store")
+	if _, err := requireChatMediaDir(root, chatDir); err != nil {
+		return false, "", "", "", errChatDirNotReal
 	}
 
 	// The file's path relative to the store root, and the absolute one callers get
@@ -320,8 +320,8 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 // is not exactly one path component: empty, or carrying a separator, a ".." or
 // a control character (NUL, a line break). The store root already keeps a write
 // inside the store; this keeps it inside the one directory of its chat, under
-// the one name of its message, which containment alone cannot express (purgeOne
-// has a narrower check of its own for the directory it deletes from). The names
+// the one name of its message, which containment alone cannot express. It is
+// the same rule for every reader of the cache (media_cache_path.go). The names
 // of ordinary messages never trip it.
 func checkMediaPathComponents(chatDir, filename string) error {
 	for _, c := range []struct{ what, name string }{{"chat JID", chatDir}, {"message ID", filename}} {
@@ -392,33 +392,12 @@ func mediaFileNames(mediaType string, timestamp time.Time, messageID, originalNa
 	}
 }
 
-// cachedMediaPath returns the store-relative path of the existing cached file
-// for a row (current name first, then the legacy one) or "" when nothing is
-// cached. It looks through the store root and does not follow a link: only a
-// regular file is a cache hit, so a name someone replaced with a symlink — to a
-// file outside the store or to another file inside it — is never served as the
-// media; it is downloaded again and the rename replaces the link.
-func cachedMediaPath(root *os.Root, chatDir, mediaType string, timestamp time.Time, messageID, originalName string) string {
-	for _, name := range mediaFileNames(mediaType, timestamp, messageID, originalName) {
-		p := path.Join(chatDir, name)
-		if info, err := root.Lstat(p); err == nil && info.Mode().IsRegular() {
-			return p
-		}
-	}
-	return ""
-}
-
 // chatMediaRel is the store-relative directory holding one chat's media: the
-// chat JID with ':' (device suffix) mapped to '_'. Callers working through the
-// store root (os.Root) need the relative form; chatMediaDir is the same
-// directory as a filesystem path.
+// chat JID with ':' (device suffix) mapped to '_'. Everything that touches a
+// chat's media works through the store root (os.Root) and this relative form;
+// nothing in the bridge joins it onto the store path.
 func chatMediaRel(chatJID string) string {
 	return strings.ReplaceAll(chatJID, ":", "_")
-}
-
-// chatMediaDir is store/<chat_jid> with ':' (device suffix) mapped to '_'.
-func chatMediaDir(chatJID string) string {
-	return storePath(chatMediaRel(chatJID))
 }
 
 // downloadToPath downloads msg into relPath, a path relative to the store root.

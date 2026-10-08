@@ -255,40 +255,25 @@ func sniffMIME(head []byte) string {
 	return http.DetectContentType(head)
 }
 
-// openStoreMedia opens store/<chatDir>/<name> for reading without following a
-// symlink at either component, and returns its size. os.Root keeps the open
-// inside the store but does follow a link that stays inside it, so each
-// component is checked with Lstat, opened, and the handle compared with what
-// Lstat saw: a name swapped for a link between the two is a different file and
-// is refused. The directory is opened first and the file is named inside that
-// handle, never by the full path again, so swapping the directory after its
-// check changes nothing.
+// openStoreMedia opens store/<chatDir>/<name> for reading and returns its
+// size. Where the file is and what may stand under that name is the one rule of
+// media_cache_path.go, shared with the download and the purge: plain
+// components, the chat's own directory opened and pinned, a regular file,
+// nothing followed. What is added here is the open itself: the handle is
+// compared with what the lookup saw, so a name swapped for a link between the
+// two is a different file and is refused.
 func openStoreMedia(root *os.Root, chatDir, name string) (*os.File, int64, error) {
-	if root == nil {
-		return nil, 0, errors.New("store directory unavailable")
-	}
 	if err := checkMediaPathComponents(chatDir, name); err != nil {
 		return nil, 0, err
 	}
-	notADir := errors.New("chat directory is not a real directory inside the store")
-	seenDir, err := root.Lstat(chatDir)
-	if err != nil || !seenDir.IsDir() {
-		return nil, 0, notADir
-	}
-	dir, err := root.OpenRoot(chatDir)
-	if err != nil {
-		return nil, 0, notADir
-	}
-	defer func() { _ = dir.Close() }()
-	if pinned, err := dir.Stat("."); err != nil || !os.SameFile(seenDir, pinned) {
-		return nil, 0, errors.New("chat directory changed while it was being opened")
-	}
-	seen, err := dir.Lstat(name)
+	dir, err := openChatMediaDir(root, chatDir)
 	if err != nil {
 		return nil, 0, err
 	}
-	if !seen.Mode().IsRegular() {
-		return nil, 0, errors.New("cached media is not a regular file")
+	defer func() { _ = dir.Close() }()
+	seen, err := statCachedMedia(dir, name)
+	if err != nil {
+		return nil, 0, err
 	}
 	f, err := dir.Open(name)
 	if err != nil {
