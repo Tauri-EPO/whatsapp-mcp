@@ -161,6 +161,19 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 
 	// Handler for explicitly sending read receipts for selected messages.
 	mux.HandleFunc("/api/mark-read", mutate(requireMethod(http.MethodPost, b.handleMarkRead())))
+	mux.HandleFunc("/api/chat/archive", mutate(requireMethod(http.MethodPost, handleArchiveChat(archiveDeps{
+		store: messageStore, policy: b.Policy, connected: func() bool { return b.Connected() },
+		resolve: func(ctx context.Context, raw string) (types.JID, error) {
+			return resolveRecipientJIDContext(ctx, client, raw)
+		},
+		twin: func(ctx context.Context, jid types.JID) (types.JID, error) {
+			if jid.Server == types.HiddenUserServer {
+				return client.Store.LIDs.GetPNForLID(ctx, jid)
+			}
+			return types.EmptyJID, nil
+		},
+		send: b.sendAppState,
+	}))))
 
 	// Handler for sending (or removing) emoji reactions
 	mux.HandleFunc("/api/react", mutate(requireMethod(http.MethodPost, b.handleReact())))

@@ -2,7 +2,7 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -921,6 +921,36 @@ The group's invite link (admin only). **Parameters:** `chat_jid`, `reset` (optio
 ### `leave_group`
 
 Leave a group. Irreversible without a new invite; the local archive keeps the history. **Parameters:** `chat_jid`.
+
+### `archive_chat`
+
+Request that WhatsApp archive a direct conversation or group, or return it to the
+inbox with `archived=false`. **Parameters:** `chat_jid` (full JID from
+`list_chats`), `archived` (optional, default `true`). Requires a connected bridge
+and one stored message; reaction and poll-vote pointer rows do not anchor it.
+A chat without an anchor returns `not_found`; an unreadable timestamp or unknown
+group sender returns `invalid_argument` (HTTP 422). Status, broadcast and
+newsletter targets return `invalid_argument`.
+
+The newest permitted phone/LID twin row anchors a merged chat. Same-second rows
+use insertion order, which can be reversed in newest-first history batches; the
+stored schema has no finer chronological discriminator. Archiving also removes the chat's pin, as WhatsApp's patch
+does. Local messages remain available; no reply or read receipt is sent. The
+phone's settings decide whether a new message unarchives the conversation.
+
+Returns `{"success": true, "archived": true, "sent": true, "confirmed": false}`:
+`archived` is the requested state, **not confirmation from the phone**. The local
+archive may lag the phone, omit message kinds, or have locally deleted rows.
+A warning means the server accepted the patch but its subsequent app-state fetch
+failed. HTTP 408 means nothing was sent and retrying is safe. A definite server
+rejection, disconnected socket or missing app-state keys returns 503 and says
+the patch was not applied; retry after resolving that bridge error. Other send
+failures have an unknown outcome; inspect the phone before
+retrying either case. Hidden and refused in read-only mode.
+
+The LID index spelling was observed on two paired accounts (six and four direct
+chat settings, counts only). End-to-end archive on a paired phone and message
+range key matching, including group participant spelling, remain unverified.
 
 ### `send_typing`
 

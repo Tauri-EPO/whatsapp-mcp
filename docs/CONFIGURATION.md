@@ -46,7 +46,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304`                              | Maximum request body accepted by the `http`/`sse` transports |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_PUBLIC_URL`  | *(unset)*                                | URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`, or a bare `host` / `host:port`). Makes `bridge_status` report the expiry of that endpoint's TLS certificate. See [Watching the published certificate](#watching-the-published-certificate) |
-| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/mark-read/typing |
+| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/chat/archive/mark-read/typing |
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
 | `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
 | `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
@@ -174,7 +174,7 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   `mark_messages_read`, `download_media`, `read_media` and `transcribe_audio`
   for other chats with a message naming the variable.
 - The bridge enforces the same list on `/api/send`, `/api/react`,
-  `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
+  `/api/chat/archive`, `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
   reach a chat you did not enable. Set the variable for **both** processes
   (the compose file passes it to both containers).
 - A send to a bare number goes to the number WhatsApp has registered, which
@@ -215,12 +215,12 @@ Why this matters: an agent that reads any group or forwarded message is reading
 attacker-controlled text. Told "never send without approval", it is one prompt
 injection away from sending. With read-only on there is no send tool to call.
 
-**Blocked** (15 tools / 13 endpoints): `send_message`, `send_file`,
-`send_audio_message`, `send_reaction`, `send_typing`, `mark_messages_read`,
+**Blocked** (16 tools / 14 endpoints): `send_message`, `send_file`,
+`send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `mark_messages_read`,
 `delete_message`, `edit_message`, `forward_message`,
 `manage_group_participants`, `update_group`, `get_group_invite_link`,
 `leave_group`, `purge_media`, `request_history`; on the bridge `/api/send`, `/api/react`,
-`/api/typing`, `/api/mark-read`, `/api/delete`, `/api/edit`, `/api/forward`,
+`/api/typing`, `/api/chat/archive`, `/api/mark-read`, `/api/delete`, `/api/edit`, `/api/forward`,
 `/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
 `/api/group/leave`, `/api/media/purge`, `/api/history`.
 

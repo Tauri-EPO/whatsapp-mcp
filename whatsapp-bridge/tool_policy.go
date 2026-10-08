@@ -47,6 +47,7 @@ var endpointTools = map[string][]string{
 	"/api/react":              {"send_reaction"},
 	"/api/typing":             {"send_typing"},
 	"/api/mark-read":          {"mark_messages_read"},
+	"/api/chat/archive":       {"archive_chat"},
 	"/api/delete":             {"delete_message"},
 	"/api/edit":               {"edit_message"},
 	"/api/forward":            {"forward_message"},

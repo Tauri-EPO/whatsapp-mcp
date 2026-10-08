@@ -4032,7 +4032,7 @@ _BRIDGE_NAMED_CODES = frozenset({"media_unavailable"})
 
 def _bridge_error_code(status: int) -> str:
     """Map a bridge HTTP status to an error code."""
-    if status == 400:
+    if status in (400, 422):
         return "invalid_argument"
     if status == 403:
         return "denied"
@@ -4040,7 +4040,7 @@ def _bridge_error_code(status: int) -> str:
         return "not_found"
     if status == 401:
         return "internal"  # our own token was rejected: configuration, not the caller's fault
-    if status >= 500:
+    if status == 408 or status >= 500:
         return "bridge_unavailable"
     return "internal"
 
@@ -6401,6 +6401,15 @@ def leave_group(group_jid: str) -> dict[str, Any]:
     """Leave the group (irreversible without a new invite)."""
     jid = _group_jid(group_jid)
     return _bridge_json(_bridge_request("POST", "/group/leave", json={"group_jid": jid}))
+
+
+def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
+    """Archive/unarchive through the bridge's app-state endpoint."""
+    target = (chat_jid or "").strip()
+    if "@" not in target or not all(target.rsplit("@", 1)):
+        raise ToolError("invalid_argument", "chat_jid must be a full JID")
+    _require_allowed(target)
+    return _bridge_json(_bridge_request("POST", "/chat/archive", json={"chat_jid": target, "archived": archived}))
 
 
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:

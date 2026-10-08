@@ -585,6 +585,8 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	b := &Bridge{
 		StoreRoot:         storeRoot,
 		Client:            client,
+		SendAppState:      client.SendAppState,
+		appStateGate:      make(chan struct{}, 1),
 		Store:             ms,
 		Log:               logger,
 		ForwardSelf:       switches.ForwardSelf,
