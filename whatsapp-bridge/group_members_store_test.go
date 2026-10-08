@@ -244,23 +244,32 @@ func TestGroupMembershipFeedsRespectTheAllowList(t *testing.T) {
 
 func TestResolveGroupRosterSync(t *testing.T) {
 	cases := []struct {
-		in      string
-		want    time.Duration
-		wantErr bool
+		in        string
+		want      time.Duration
+		wantInErr string
 	}{
-		{"", groupRosterSyncInterval, false},
-		{" 12 ", 12 * time.Hour, false},
-		{"0", 0, false},
-		{"-1", 0, true},
-		{"six", 0, true},
+		{"", groupRosterSyncInterval, ""},
+		{" 12 ", 12 * time.Hour, ""},
+		{"10000", 10000 * time.Hour, ""},
+		{"87600", 87600 * time.Hour, ""},
+		{"2562047", 2562047 * time.Hour, ""},
+		{"2562048", 0, `invalid WHATSAPP_GROUP_ROSTER_SYNC_HOURS="2562048": number of hours is too large to represent as a duration`},
+		{"9999999", 0, `invalid WHATSAPP_GROUP_ROSTER_SYNC_HOURS="9999999": number of hours is too large to represent as a duration`},
+		{"5124096", 0, `invalid WHATSAPP_GROUP_ROSTER_SYNC_HOURS="5124096": number of hours is too large to represent as a duration`},
+		{"0", 0, ""},
+		{"-1", 0, `invalid WHATSAPP_GROUP_ROSTER_SYNC_HOURS="-1": expected a non-negative number of hours (0 disables)`},
+		{"six", 0, `invalid WHATSAPP_GROUP_ROSTER_SYNC_HOURS="six": expected a non-negative number of hours (0 disables)`},
 	}
 	for _, tc := range cases {
 		got, err := resolveGroupRosterSync(tc.in)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("resolveGroupRosterSync(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+		if (err != nil) != (tc.wantInErr != "") {
+			t.Fatalf("resolveGroupRosterSync(%q) error = %v, want %q", tc.in, err, tc.wantInErr)
 		}
-		if err == nil && got != tc.want {
+		if got != tc.want {
 			t.Fatalf("resolveGroupRosterSync(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+		if err != nil && err.Error() != tc.wantInErr {
+			t.Fatalf("error = %q, want %q", err, tc.wantInErr)
 		}
 	}
 	if s := groupRosterSyncSummary(0); s != "off" {

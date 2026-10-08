@@ -49,8 +49,8 @@ const (
 )
 
 // resolveGroupRosterSync parses groupRosterSyncEnv. Zero disables the pass;
-// a negative or non-numeric value is an error so main() fails fast rather than
-// silently running with a default the operator did not write.
+// a negative, non-numeric or unrepresentable duration is an error so main()
+// fails fast rather than running with a setting the operator did not write.
 func resolveGroupRosterSync(value string) (time.Duration, error) {
 	return resolveHoursEnv(groupRosterSyncEnv, value, groupRosterSyncInterval, 0)
 }

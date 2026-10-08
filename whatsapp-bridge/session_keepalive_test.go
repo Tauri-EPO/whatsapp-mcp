@@ -54,7 +54,7 @@ func TestResolveGroupRosterSync_KeepsItsSpellings(t *testing.T) {
 			t.Errorf("resolveGroupRosterSync(%q) = %v, %v; want %v", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"-1", "x", "1.5"} {
+	for _, value := range []string{"-1", "x", "1.5", "9999999", "5124096"} {
 		if _, err := resolveGroupRosterSync(value); err == nil {
 			t.Errorf("resolveGroupRosterSync(%q) was accepted", value)
 		}
