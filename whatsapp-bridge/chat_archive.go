@@ -51,14 +51,13 @@ func (store *MessageStore) archiveAnchor(chat string) (*waCommon.MessageKey, tim
 	if jid.Server == types.GroupServer {
 		participant := sender.String
 		if !strings.Contains(participant, "@") {
-			namespace := server.String
-			if namespace == "" {
-				namespace = types.DefaultUserServer
+			if server.String == "" {
+				return nil, ts, fmt.Errorf("latest group message has no known sender namespace")
 			}
-			participant += "@" + namespace
+			participant += "@" + server.String
 		}
 		parsed, err := types.ParseJID(participant)
-		if err != nil || parsed.User == "" || parsed.Server == "" {
+		if err != nil || parsed.User == "" || parsed.Server == "" || parsed.Server == types.GroupServer || parsed.User == jid.User {
 			return nil, ts, fmt.Errorf("latest group message has no usable sender")
 		}
 		key.Participant = proto.String(participant)

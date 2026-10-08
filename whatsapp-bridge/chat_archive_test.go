@@ -153,3 +153,25 @@ func TestArchiveMuxGuards(t *testing.T) {
 		})
 	}
 }
+
+func TestArchiveUnknownGroupAnchorRejected(t *testing.T) {
+	group := "120363000000000001@g.us"
+	for _, sender := range []string{"120363000000000001", "100000000000001", "", group} {
+		t.Run(sender, func(t *testing.T) {
+			store := newTestMessageStore(t)
+			if err := store.StoreMessage("M1", group, sender, "history", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			deps := archiveDeps{store: store, connected: func() bool { return true },
+				resolve: func(raw string) (types.JID, error) { return types.ParseJID(raw) },
+				send:    func(context.Context, appstate.PatchInfo) error { calls++; return nil },
+			}
+			rec := httptest.NewRecorder()
+			handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/api/chat/archive", strings.NewReader(`{"chat_jid":"`+group+`","archived":true}`)))
+			if rec.Code != http.StatusInternalServerError || calls != 0 || !strings.Contains(rec.Body.String(), "sender") {
+				t.Fatalf("status=%d sends=%d body=%s", rec.Code, calls, rec.Body.String())
+			}
+		})
+	}
+}
