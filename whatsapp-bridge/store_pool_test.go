@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -93,9 +94,9 @@ func TestSessionPoolIsBounded(t *testing.T) {
 // A burst of concurrent writers and readers on an on-disk WAL store completes
 // and stores its rows with the pool bounded. Unbounded, a burst this size
 // opened a connection per goroutine and failed writes with SQLITE_BUSY; the
-// bound itself is asserted by TestMessageStorePoolsAreBounded. At 4 connections
-// an occasional busy write remains (measured: 0 to 2 in 4,800), so a handful of
-// failures is tolerated rather than a flaky zero.
+// writers use the live path's bounded busy retry so a busy StoreChat cannot
+// skip all 40 of its messages (issue #580). Exhausting the pool first proves
+// the burst queues behind its bound independently of SQLite's scheduling.
 func TestBurstCompletesWithTheBoundedPool(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms, err := NewMessageStore()
@@ -103,6 +104,21 @@ func TestBurstCompletesWithTheBoundedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ms.db.Close() }()
+	b := testBridge(t, nil, ms, bridgeLog)
+	if got := ms.db.Stats().MaxOpenConnections; got != messagesPoolConns {
+		t.Fatalf("burst pool bound = %d, want %d", got, messagesPoolConns)
+	}
+	// Pin every connection until every writer and reader is waiting for one.
+	var held []*sql.Conn
+	for i := 0; i < messagesPoolConns; i++ {
+		conn, err := ms.db.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, conn)
+		defer func() { _ = conn.Close() }()
+	}
+	waitsBefore := ms.db.Stats().WaitCount
 
 	const chats, perChat, readers = 8, 40, 4
 	var wg sync.WaitGroup
@@ -112,13 +128,15 @@ func TestBurstCompletesWithTheBoundedPool(t *testing.T) {
 		go func(c int) {
 			defer wg.Done()
 			chat := fmt.Sprintf("5511999990%03d@s.whatsapp.net", c)
-			if err := ms.StoreChat(chat, "Alice", time.Now()); err != nil {
+			if err := b.retryBusy(func() error { return ms.StoreChat(chat, "Alice", time.Now()) }); err != nil {
 				failures.Add(1)
 				return
 			}
 			for i := 0; i < perChat; i++ {
-				if err := ms.StoreMessage(fmt.Sprintf("M%d", i), chat, "5511999999999", "hello", time.Now(),
-					false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := b.retryBusy(func() error {
+					return ms.StoreMessage(fmt.Sprintf("M%d", i), chat, "5511999999999", "hello", time.Now(),
+						false, "", "", "", nil, nil, nil, 0, "")
+				}); err != nil {
 					failures.Add(1)
 				}
 			}
@@ -136,14 +154,24 @@ func TestBurstCompletesWithTheBoundedPool(t *testing.T) {
 			}
 		}()
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	for ms.db.Stats().WaitCount-waitsBefore < chats+readers && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	stats := ms.db.Stats()
+	for _, conn := range held {
+		_ = conn.Close()
+	}
 	wg.Wait()
+	if stats.WaitCount-waitsBefore < chats+readers || stats.OpenConnections != messagesPoolConns {
+		t.Errorf("burst did not queue behind the pool bound: %+v", stats)
+	}
 
 	var stored int
 	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	const tolerated = 3
-	if n := failures.Load(); n > tolerated || stored < chats*perChat-tolerated {
+	if n := failures.Load(); n != 0 || stored != chats*perChat {
 		t.Errorf("%d operations failed, %d of %d messages stored", n, stored, chats*perChat)
 	}
 }
