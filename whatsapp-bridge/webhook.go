@@ -75,13 +75,26 @@ func newWebhookSender(token string, enabled bool) *webhookSender {
 // Enabled reports whether outbound webhooks are on (WEBHOOK_ENABLED at startup).
 func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 
-// forwardsToWebhook is the one answer to "does this message go to the
-// webhook": outbound webhooks are on, a message of our own only with
-// FORWARD_SELF, and a status update only with WEBHOOK_FORWARD_STATUS. The
-// webhook is for conversations: without that opt-in a receiver got one event
-// per status post of every contact and had to know to drop it (issue #482).
+// forwardsToWebhook is shared by text, images and reactions. Status, channels
+// and broadcast lists are stored regardless, but require separate opt-ins to
+// reach a webhook intended for conversations. The global/self gates always win.
 func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool) bool {
-	return b.Webhook.Enabled() && (b.ForwardSelf || !fromMe) && (b.ForwardStatus || !isStatusChat(chat))
+	if !b.Webhook.Enabled() || (fromMe && !b.ForwardSelf) {
+		return false
+	}
+	if isStatusChat(chat) {
+		return b.ForwardStatus
+	}
+	switch chat.Server {
+	case types.NewsletterServer:
+		return b.ForwardChannels
+	case types.BroadcastServer:
+		return b.ForwardBroadcasts
+	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
+		return true
+	default:
+		return false
+	}
 }
 
 // WebhookPayload represents the data sent to the webhook
