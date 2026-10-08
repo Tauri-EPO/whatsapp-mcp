@@ -196,3 +196,72 @@ func TestHistoryShareLocationPolicyAcrossChunks(t *testing.T) {
 		})
 	}
 }
+
+func TestHistoryShareInterveningAuthority(t *testing.T) {
+	for _, authority := range []string{"live", "phone history", "edit"} {
+		t.Run(authority, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			self := types.NewJID("5511888888888", types.DefaultUserServer)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, self), ms, testLogger())
+			b.MediaAutoDownload = false
+			chat := types.NewJID("120363000000000001", types.GroupServer)
+			fixture := shareHistoryFixture(historyBatchMessages + 1)
+			for _, row := range fixture.Data.Conversations[0].Messages {
+				row.Message.MessageTimestamp = proto.Uint64(1600000000)
+				row.Message.Participant = proto.String(self.String())
+			}
+			overlap := fixture.Data.Conversations[0].Messages[historyBatchMessages].Message
+			overlap.Key.ID, overlap.MessageTimestamp = proto.String("H0"), proto.Uint64(1900000000)
+			overlap.Message = &waE2E.Message{PollCreationMessage: &waE2E.PollCreationMessage{Name: proto.String("Stale peer replacement"), Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Alice")}, {OptionName: proto.String("Bob")}}, SelectableOptionsCount: proto.Uint32(1)}}
+			attempts := 0
+			var before string
+			b.historyBatchWriter = func(fn func(*messageBatch) error) error {
+				attempts++
+				if attempts == 2 {
+					message := &waE2E.Message{Conversation: proto.String("Authoritative intervening text")}
+					switch authority {
+					case "live":
+						event := buildTextMessage(chat, self, types.EmptyJID, types.EmptyJID, true, "")
+						event.Info.ID, event.Info.Timestamp, event.Message = "H0", time.Unix(1700000000, 0), message
+						b.handleMessage(event)
+					case "phone history":
+						own := shareHistoryFixture(1)
+						own.Data.Conversations[0].Messages[0].Message.Key.FromMe = proto.Bool(true)
+						own.Data.Conversations[0].Messages[0].Message.MessageTimestamp = proto.Uint64(1700000000)
+						own.Data.Conversations[0].Messages[0].Message.Message = message
+						b.handleHistorySync(own)
+					case "edit":
+						calls := 0
+						handler := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) error { calls++; return nil }, chatPolicy{}, b.storeLive)
+						rec := httptest.NewRecorder()
+						handler(rec, httptest.NewRequest(http.MethodPost, "/api/edit", strings.NewReader(`{"chat_jid":"120363000000000001@g.us","message_id":"H0","text":"Authoritative intervening text"}`)))
+						if rec.Code != http.StatusOK || calls != 1 {
+							t.Fatalf("intervening edit status=%d calls=%d", rec.Code, calls)
+						}
+					}
+					before = shareArchiveSnapshot(t, ms, "H0", chat.String())
+				}
+				return ms.Batch(fn)
+			}
+			plain, err := proto.Marshal(fixture.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bundle, _ := encryptedShareServer(t, b, compressShare(t, plain), "")
+			event := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "")
+			event.Message = &waE2E.Message{MessageHistoryBundle: bundle}
+			b.handleMessage(event)
+			after := shareArchiveSnapshot(t, ms, "H0", chat.String())
+			if before == "" || before != after {
+				t.Errorf("peer overwrote intervening %s: before=%s after=%s", authority, before, after)
+			}
+			var polls int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM polls WHERE chat_jid=? AND message_id='H0'", chat.String()).Scan(&polls); err != nil {
+				t.Fatal(err)
+			}
+			if polls != 0 {
+				t.Errorf("stale overlap created auxiliary poll: %d", polls)
+			}
+		})
+	}
+}

@@ -562,7 +562,8 @@ applied to this account. Historical sender ownership is recomputed from the
 participant relative to this account; a peer's `FromMe` bit never makes its
 message editable by this account. Missing/invalid participants remain inbound
 with unknown attribution. Existing archive rows are preserved; rows first
-introduced by one bundle may merge within that import. Exact-key live-location
+introduced by one bundle may merge while their stored version is unchanged;
+an intervening live/phone delivery or edit revokes that permission. Exact-key live-location
 samples retain the documented position-only update policy. Chat activity follows
 committed rows, never an overlapping peer copy. Compare the oldest stored
 message to confirm import; the share counter only confirms recognition. See

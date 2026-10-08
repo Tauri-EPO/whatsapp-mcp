@@ -24,7 +24,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, downloadShares, preserveExisting bool) {
 	// Only rows introduced by this peer import may replay within it. Existing
 	// archive rows are checked again under the canonical IMMEDIATE transaction.
-	peerRows := make(map[string]map[string]struct{})
+	peerRows := make(map[string]map[string]historyMessageVersion)
 	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -127,7 +127,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			storedInBatch := 0
-			var chunkPeerRows map[string]struct{}
+			var chunkPeerRows map[string]historyMessageVersion
 			storeChunk := func(batch *messageBatch) error {
 				for _, msg := range chunk {
 					if msg == nil || msg.Message == nil {
@@ -156,25 +156,23 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					}
 
 					if preserveExisting {
-						_, previousChunk := peerRows[chatJID][histMsgID]
-						_, thisChunk := chunkPeerRows[histMsgID]
-						if !previousChunk && !thisChunk {
-							var exists bool
-							if err := batch.write(func() error {
-								return batch.tx.QueryRow("SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND chat_jid=?)", histMsgID, chatJID).Scan(&exists)
-							}); err != nil {
-								return err
-							}
-							if exists {
-								// The explicit exact-key location policy permits position
-								// updates only; never change its author/content/activity.
-								if ex.location.update() {
-									if _, err := batch.UpdateLiveLocation(histMsgID, chatJID, ex.location); err != nil {
-										return err
-									}
+						version, tracked := chunkPeerRows[histMsgID]
+						if !tracked {
+							version, tracked = peerRows[chatJID][histMsgID]
+						}
+						current, exists, err := batch.historyRowVersion(histMsgID, chatJID)
+						if err != nil {
+							return err
+						}
+						if exists && (!tracked || current != version) {
+							// The explicit exact-key location policy permits position
+							// updates only; never change its author/content/activity.
+							if ex.location.update() {
+								if _, err := batch.UpdateLiveLocation(histMsgID, chatJID, ex.location); err != nil {
+									return err
 								}
-								continue
 							}
+							continue
 						}
 					}
 
@@ -246,7 +244,11 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					} else {
 						storedInBatch++
 						if preserveExisting {
-							chunkPeerRows[histMsgID] = struct{}{}
+							version, _, err := batch.historyRowVersion(histMsgID, chatJID)
+							if err != nil {
+								return err
+							}
+							chunkPeerRows[histMsgID] = version
 						}
 						// Per-message echo stays at DEBUG: user content out of INFO,
 						// and two lines per row would swamp a full sync.
@@ -266,7 +268,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			commitChunk := func() error {
 				return b.retryBusy(func() error {
 					storedInBatch = 0
-					chunkPeerRows = make(map[string]struct{})
+					chunkPeerRows = make(map[string]historyMessageVersion)
 					return writeBatch(storeChunk)
 				})
 			}
@@ -276,10 +278,10 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 				b.metrics.historyMessages.Add(int64(storedInBatch))
 				if preserveExisting {
 					if peerRows[chatJID] == nil {
-						peerRows[chatJID] = make(map[string]struct{})
+						peerRows[chatJID] = make(map[string]historyMessageVersion)
 					}
-					for id := range chunkPeerRows {
-						peerRows[chatJID][id] = struct{}{}
+					for id, version := range chunkPeerRows {
+						peerRows[chatJID][id] = version
 					}
 				}
 			}
