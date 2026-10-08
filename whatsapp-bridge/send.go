@@ -472,7 +472,9 @@ func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content
 	// retry waits through the same Bridge policy as event/history writes.
 	err := b.retryOutbound(
 		func() error { return messageStore.StoreChat(chatJID, "", sent.Timestamp) },
-		func() error { return media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID) },
+		func() error {
+			return media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID)
+		},
 	)
 	if err != nil {
 		b.noteStoreFailure("outbound message", sent.ID, chatJID, err)
