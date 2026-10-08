@@ -220,13 +220,11 @@ func TestHandleMessageCachesDirectPathOnlyAndEmptyMedia(t *testing.T) {
 }
 
 // What is not fetched unasked: a message with no length to hold against
-// WHATSAPP_MEDIA_MAX_BYTES (an empty file, or a sender that did not say), and a
+// WHATSAPP_MEDIA_MAX_BYTES (a sender that did not say), and a
 // message that lacks something a download needs. Both rows are stored.
 func TestHandleMessageDoesNotAutoDownloadWhatItCannotCheck(t *testing.T) {
 	noLength := fixtureDocument()
 	noLength.FileLength = nil
-	empty := fixtureDocument()
-	empty.FileLength = proto.Uint64(0)
 	noHash := fixtureDocument()
 	noHash.FileEncSHA256 = nil
 
@@ -237,7 +235,6 @@ func TestHandleMessageDoesNotAutoDownloadWhatItCannotCheck(t *testing.T) {
 		wantLog string
 	}{
 		{"no length declared, cap set", noLength, 1 << 20, "no length declared to check against WHATSAPP_MEDIA_MAX_BYTES=1048576"},
-		{"length 0, cap set", empty, 1 << 20, "no length declared to check against WHATSAPP_MEDIA_MAX_BYTES=1048576"},
 		{"no encrypted hash", noHash, 0, ""},
 	}
 	for _, tc := range cases {

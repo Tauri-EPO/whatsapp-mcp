@@ -60,7 +60,7 @@ const insertMessageSQL = `INSERT INTO messages
 			media_key = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.media_key ELSE messages.media_key END,
 			file_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_sha256 ELSE messages.file_sha256 END,
 			file_enc_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
-			file_length = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_length ELSE messages.file_length END,
+			file_length = CASE WHEN ` + replaceMediaSQL + ` THEN CASE WHEN excluded.file_length IS NULL AND excluded.file_sha256 = messages.file_sha256 THEN messages.file_length ELSE excluded.file_length END ELSE messages.file_length END,
 			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`
 
 // messageBatch groups message writes in one transaction. Obtain one through
@@ -97,7 +97,7 @@ func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
 
 // StoreMessage is MessageStore.StoreMessage inside the batch.
 func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
 	quotedMessageId string, directPath ...string) error {
 	if content == "" && mediaType == "" {
 		return nil
@@ -133,8 +133,16 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 // On a complete write, omitting the optional path therefore clears the stored
 // direct_path. Incomplete writes keep the previous snapshot, including its path.
 func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
 	quotedMessageId string, directPath ...string) []any {
+	switch mediaType {
+	case "image", "video", "audio", "document", "sticker":
+		if length, ok := fileLength.(uint64); ok {
+			fileLength = storedMediaLength(length)
+		}
+	default:
+		fileLength = nil
+	}
 	var qmid any
 	if quotedMessageId != "" {
 		qmid = quotedMessageId

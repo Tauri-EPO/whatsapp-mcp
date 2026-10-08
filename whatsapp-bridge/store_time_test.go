@@ -179,7 +179,7 @@ func seedLegacyRow(t *testing.T, db *sql.DB, query string, args ...any) {
 // A store written by earlier releases holds a mix of offsets and Go's
 // time.Time.String() form. The migration rewrites every one of them to the
 // canonical UTC spelling without moving the instant, leaves a value it cannot
-// parse alone, stamps user_version and does nothing on the second run.
+// parse alone, records its marker and does nothing on the second run.
 func TestMigrateCanonicalTimestamps(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	t.Chdir(t.TempDir())
@@ -211,9 +211,9 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 	seedLegacyRow(t, db, `INSERT INTO poll_votes (poll_message_id, chat_jid, voter, selected_json, voted_at)
 		VALUES ('P1', ?, 'v', '["a"]', ?)`, chat, "2026-09-04 17:20:00.5-03:00")
 
-	// NewMessageStore already stamped user_version on the empty store; the rows
+	// NewMessageStore recorded its timestamp marker on the empty store; the rows
 	// above are what an upgrade from an older release actually finds.
-	if _, err := db.Exec("PRAGMA user_version = 0"); err != nil {
+	if _, err := db.Exec("DELETE FROM schema_migrations WHERE name = ?", canonicalTimestampsMigration); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateCanonicalTimestamps(db); err != nil {
@@ -266,12 +266,8 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 
 	// The unparseable row keeps the store unstamped, so a later release still
 	// gets a chance at it.
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != 0 {
-		t.Errorf("user_version = %d, want 0 while a value is still unconverted", version)
+	if applied, err := migrationApplied(db, canonicalTimestampsMigration); err != nil || applied {
+		t.Fatalf("incomplete timestamp migration recorded its marker: applied=%v err=%v", applied, err)
 	}
 
 	// Idempotent: a second pass over the same rows changes nothing.
@@ -292,18 +288,15 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 		}
 	}
 
-	// Once the bad row is gone the migration completes and stamps the version.
+	// Once the bad row is gone the migration completes and records its marker.
 	if _, err := db.Exec(`DELETE FROM messages WHERE id = 'M4'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateCanonicalTimestamps(db); err != nil {
 		t.Fatalf("migrateCanonicalTimestamps (second run): %v", err)
 	}
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != messagesDBUserVersion {
-		t.Errorf("user_version = %d, want %d", version, messagesDBUserVersion)
+	if applied, err := migrationApplied(db, canonicalTimestampsMigration); err != nil || !applied {
+		t.Fatalf("timestamp marker applied=%v err=%v", applied, err)
 	}
 
 	// And the ordering the whole change is about: the M-rows now come out in
@@ -346,12 +339,9 @@ func TestMigrateCanonicalTimestampsRepairsRolledBackRows(t *testing.T) {
 	db := ms.db
 
 	// NewMessageStore stamps the empty store; these rows land after the stamp.
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != messagesDBUserVersion {
-		t.Fatalf("a fresh store should be stamped, user_version = %d", version)
+	applied, err := migrationApplied(db, canonicalTimestampsMigration)
+	if err != nil || !applied {
+		t.Fatalf("a fresh store needs the timestamp marker: applied=%v err=%v", applied, err)
 	}
 
 	const chat = "5511999999999@s.whatsapp.net"
@@ -400,11 +390,8 @@ func TestMigrateCanonicalTimestampsRepairsRolledBackRows(t *testing.T) {
 	if !strings.Contains(logged, "repaired 8 messages.timestamp value(s) written by an older bridge") {
 		t.Errorf("expected the repair to log the per-column count, got:\n%s", logged)
 	}
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != messagesDBUserVersion {
-		t.Errorf("user_version = %d after the repair, want %d", version, messagesDBUserVersion)
+	if applied, err := migrationApplied(db, canonicalTimestampsMigration); err != nil || !applied {
+		t.Fatalf("timestamp marker lost after repair: applied=%v err=%v", applied, err)
 	}
 
 	// Idempotent: the next start probes, finds nothing and rewrites nothing.

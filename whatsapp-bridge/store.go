@@ -243,10 +243,13 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
-	// Last, in user_version order: every table and column these rewrite must
-	// already exist, and each stamps only its own version (store_time.go).
+	// Run data rewrites after their tables and columns exist. Each owns an
+	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {
 		return err
+	}
+	if err := migrateUndeclaredMediaLengths(db); err != nil {
+		return fmt.Errorf("migrate media lengths: %w", err)
 	}
 	if err := migrateMentionsBackfill(db); err != nil {
 		return err
@@ -966,7 +969,7 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 // namespace the sender lives in — or the bare user part, which leaves
 // messages.sender_server unset (splitSenderJID, sender_namespace.go).
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
 	quotedMessageId string, directPath ...string) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
@@ -1137,8 +1140,8 @@ func (store *MessageStore) SetTargetMessageID(id, chatJID, target string) error 
 // Store additional media info in the database
 func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	_, err := store.db.Exec(
-		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = ? WHERE id = ? AND chat_jid = ?",
-		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, id, chatJID,
+		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END WHERE id = ? AND chat_jid = ?",
+		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, id, chatJID,
 	)
 	return err
 }
@@ -1158,12 +1161,16 @@ func setDirectPathWith(ex sqlExecer, messageID, chatJID, directPath string) erro
 func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, string, []byte, []byte, []byte, uint64, error) {
 	var mediaType, filename, url string
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
-	var fileLength uint64
+	var fileLength sql.NullInt64
 
 	err := store.db.QueryRow(
 		"SELECT media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length FROM messages WHERE id = ? AND chat_jid = ?",
 		id, chatJID,
 	).Scan(&mediaType, &filename, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength)
 
-	return mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err
+	length, lengthErr := mediaLengthValue(fileLength)
+	if err == nil {
+		err = lengthErr
+	}
+	return mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, length, err
 }

@@ -288,7 +288,7 @@ def _media_row(chat_jid: str, message_id: str) -> tuple[str, str | None, int | N
         )
     # SQLite's hex(NULL) is '', not NULL: a row without a content hash has to be
     # reported as null, the way download_media and list_media report it.
-    return media_type, row[1], int(row[2]) if row[2] else None, row[3] or None
+    return media_type, row[1], int(row[2]) if row[2] is not None else None, row[3] or None
 
 
 def _in_chat_dir(chat_jid: str, path: str) -> str:

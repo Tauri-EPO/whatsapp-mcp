@@ -100,6 +100,33 @@ sequenceDiagram
     Note over EXT: Process incoming message
 ```
 
+### Media lengths and the automatic cache limit
+
+`messages.file_length` is NULL when the message did not declare a length and
+0 for an explicitly empty file. `list_messages`, `list_media`, `get_media_notes`
+preserve that distinction as JSON null versus 0. The media reader keeps the
+declared value distinct internally and reports the actual cached file size
+when returning its bytes.
+
+A one-time, transactional `undeclared_media_lengths_v1` marker in
+`schema_migrations` changes legacy zeroes to NULL only for the five downloadable
+media types, because old rows cannot distinguish the two meanings. Older
+non-media zeroes stay untouched, avoiding unnecessary WAL writes. One INFO
+reports the changed-row count; later startups leave new explicit zeroes untouched. It updates only the length column, without
+rebuilding the content index or scanning media files. Replays keep a known
+length when the same plaintext hash arrives without one. The retry SDK has no
+length-presence bit: a zero refresh keeps a known length only for that same
+plaintext hash, otherwise stores NULL.
+
+Automatic downloads with a nonzero `WHATSAPP_MEDIA_MAX_BYTES` skip undeclared
+lengths and reject an oversized declaration. They also bound the streamed
+encrypted file (allowing AES padding and its MAC), check decrypted bytes before
+publishing the cache file, and remove a rejected temporary file. Manual
+downloads remain uncapped; an automatic caller that joins a manual transfer
+checks its result without removing the manual cache. In the opposite arrival
+order, a manual caller retries without the cap after the rejected automatic
+transfer stops and cleans its temporary file, under the same destination lock.
+
 ### Replayed media rows
 
 Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.
@@ -110,7 +137,7 @@ An incomplete replay keeps the existing media category, filename and timestamp o
 
 Storing the message row always happens first and never waits for a file. Caching the media is background work with a fixed budget: **four downloads at a time, up to 256 messages waiting**, each bounded by a ten-minute timeout. Shutdown cancels the transfers in flight, discards the backlog and waits for the workers, so a burst of photos can neither open a hundred simultaneous transfers nor keep writing while the databases close.
 
-When the queue is full the arriving message is dropped, not delayed: the bridge logs `Auto-download queue full …` (WARN) and counts it in `whatsapp_bridge_media_autodownload_drops_total`, next to the `whatsapp_bridge_media_autodownload_queued` and `_running` gauges on `/metrics`. Nothing is lost — the message and its media keys are in `messages.db`, so `download_media` (`POST /api/download`) still fetches that file whenever it is actually needed. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns the caching off entirely, and `WHATSAPP_MEDIA_MAX_BYTES` still skips files above its threshold before they ever reach the queue.
+When the queue is full the arriving message is dropped, not delayed: the bridge logs `Auto-download queue full …` (WARN) and counts it in `whatsapp_bridge_media_autodownload_drops_total`, next to the `whatsapp_bridge_media_autodownload_queued` and `_running` gauges on `/metrics`. Nothing is lost — the message and its media keys are in `messages.db`, so `download_media` (`POST /api/download`) still fetches that file whenever it is actually needed. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns the caching off entirely, and `WHATSAPP_MEDIA_MAX_BYTES` skips oversized declarations before the queue and bounds actual transfers. These skips are counted in `whatsapp_bridge_media_autodownload_size_skips_total`, with INFO saying that `download_media` still fetches the file. They do not increment the generic download-failure counter.
 
 ### The store root
 
@@ -130,7 +157,7 @@ YYYY-MM-DD HH:MM:SS+00:00        e.g. 2026-09-07 20:10:08+00:00
 
 UTC, second resolution, explicit offset, fixed width. SQLite has no date type, so these are TEXT, and the same offset on every row is what makes `ORDER BY timestamp` and `timestamp > ?` compare instants rather than wall clocks — and what lets a bound value seek the index instead of forcing a scan.
 
-Earlier releases bound a `time.Time` and let the SQLite driver render it, which stamped the writing machine's local offset on the row (older stores also hold Go's `time.Time.String()` form). The bridge rewrites those rows to the canonical spelling on startup, logs how many it changed per column, and stamps `PRAGMA user_version` so the rewrite runs once. The stamp is not the whole story: a stamped store still gets one `LIMIT 1` probe per time column at every start, so rows an older binary wrote during an image rollback are repaired on the way forward ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
+Earlier releases bound a `time.Time` and let the SQLite driver render it, which stamped the writing machine's local offset on the row (older stores also hold Go's `time.Time.String()` form). The bridge rewrites those rows to the canonical spelling on startup, logs how many it changed per column, and records its independent `canonical_timestamps_v1` marker in `schema_migrations` once every value was converted. Legacy `user_version` stays untouched; another rewrite cannot mark this one complete or cause it to be skipped. The stamp is not the whole story: a stamped store still gets one `LIMIT 1` probe per time column at every start, so rows an older binary wrote during an image rollback are repaired on the way forward ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
 
 Two things this note does *not* cover: `chats.ephemeral_setting_timestamp` is an INTEGER of WhatsApp seconds, not a time string; and cached media file names keep the *local* wall clock of the message (`<type>_<yyyymmdd_hhmmss>_<id>`), so existing files stay reachable.
 

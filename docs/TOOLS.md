@@ -771,7 +771,7 @@ your own account's archive; treat it accordingly.
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
 `<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers), `bytes`
-(the size WhatsApp reported), `sha256` (the content hash, identical for the
+(the declared size: 0 for an explicitly empty file, null when undeclared), `sha256` (the content hash, identical for the
 same file forwarded into several chats) and `notes` (what the agent recorded
 about that hash, `{}` when nothing was — see
 [annotate-after-reading](#annotate-after-reading)). The notes of a whole page
@@ -1329,8 +1329,10 @@ is the media key, either of the two hashes, or anywhere to ask (neither a
 direct path nor a url); an empty file (0 bytes) and a message that names its
 media by direct path alone are complete, and download. One difference on
 arrival: while `WHATSAPP_MEDIA_MAX_BYTES` is set (it is by default), a file
-whose message declares no length, or 0, is not cached automatically, because
-there is nothing to check against the cap; `download_media` fetches it. The
+whose message declares no length is not cached automatically, because there
+is nothing to check against the cap. An explicit zero is an empty file and is
+cacheable. With `WHATSAPP_MEDIA_MAX_BYTES=0`, undeclared lengths are cached too;
+`download_media` fetches either on request. The
 `TRANSCRIBE_ON_INGEST` worker turns that answer into a `media_unavailable` note
 on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.
@@ -1342,7 +1344,10 @@ worker, remember it in `notes.db`'s `media_refusals`, keyed by the exact
 This does not write a per-hash `media_unavailable` note: a forwarded copy with
 a safe identity remains fetchable. The synchronous image path does not queue
 a second attempt after either permanent code. `/metrics` counts identity
-refusals in `whatsapp_bridge_media_refusals_total`.
+refusals in `whatsapp_bridge_media_refusals_total`. Automatic caching skipped
+because declared or actual bytes exceed the cap is logged separately and counted
+in `whatsapp_bridge_media_autodownload_size_skips_total`, rather than the generic
+download failure counter. `download_media` still fetches such a file.
 
 ### `clear_media_refusal`
 
@@ -1631,8 +1636,8 @@ and text never appear.
 - `limit` (default 50, max 200), `page`, `cursor`: pagination as in every list tool
 
 Each item carries `message_id`, `chat_jid`, `chat_name`, `sender_jid`,
-`is_from_me`, `timestamp`, `media_type`, `filename`, `bytes` (reported by
-WhatsApp), `sha256` (hex content hash; `null` for rows without one), `cached`
+`is_from_me`, `timestamp`, `media_type`, `filename`, `bytes` (the declared size: null when undeclared, 0 for an
+explicitly empty file), `sha256` (hex content hash; `null` for rows without one), `cached`
 (the file is on disk under the store right now — a listing reuses one read of the
 chat's directory for a few seconds, so a file that arrived inside that window can
 read as `false`, never the other way round), `cached_bytes` / `cached_file`
@@ -1730,7 +1735,8 @@ or the file being re-downloaded.
   to 64 KB (JSON is fine). The same key overwrites; an empty value deletes.
 - `get_media_notes(sha256)`: every note on the hash (`{key: {value, updated_at}}`)
   plus the messages that carry the file (`message_id`, `chat_jid`, `chat_name`,
-  `timestamp`, `media_type`, `filename`, `bytes`).
+  `timestamp`, `media_type`, `filename`, `bytes`: null means an undeclared
+  length and 0 means an explicitly empty file).
 - `search_media_notes(query, key=None, limit=50)`: case-insensitive substring
   match over note values, newest first.
 

@@ -459,7 +459,7 @@ def _row_to_item(row: tuple, cache: _CacheIndex, notes: dict[str, dict[str, str]
         "timestamp": parse_db_time(timestamp).isoformat() if timestamp else None,
         "media_type": media_type,
         "filename": filename or None,
-        "bytes": int(file_length) if file_length else None,
+        "bytes": int(file_length) if file_length is not None else None,
         "sha256": sha256 or None,
         "cached": cached is not None,
         "cached_bytes": cached.bytes if cached else None,

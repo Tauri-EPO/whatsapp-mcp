@@ -25,6 +25,7 @@ type metricsRegistry struct {
 	sendFailures       atomic.Int64
 	mediaDownloads     atomic.Int64
 	mediaDownloadFails atomic.Int64
+	mediaAutoSizeSkips atomic.Int64
 	mediaRefusals      atomic.Int64
 	webhookFailures    atomic.Int64
 	reconnects         atomic.Int64
@@ -81,6 +82,7 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_send_failures_total", "Failed /api/send calls.", "counter", fmt.Sprint(m.sendFailures.Load()))
 	add("whatsapp_bridge_media_downloads_total", "Media files downloaded.", "counter", fmt.Sprint(m.mediaDownloads.Load()))
 	add("whatsapp_bridge_media_download_failures_total", "Media downloads that failed.", "counter", fmt.Sprint(m.mediaDownloadFails.Load()))
+	add("whatsapp_bridge_media_autodownload_size_skips_total", "Automatic media caching skipped because declared or actual bytes exceed the cap.", "counter", fmt.Sprint(m.mediaAutoSizeSkips.Load()))
 	add("whatsapp_bridge_media_refusals_total", "Media downloads refused for an unsafe row identity.", "counter", fmt.Sprint(m.mediaRefusals.Load()))
 	autoQueued, autoRunning, autoDropped := 0, int64(0), int64(0)
 	if b.autoDownloads != nil {

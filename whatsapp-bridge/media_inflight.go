@@ -142,6 +142,9 @@ func transferContext(lifecycle, starter context.Context) (context.Context, conte
 	if base == nil {
 		base = context.Background()
 	}
+	if limit := mediaLimit(starter); limit > 0 {
+		base = withMediaLimit(base, limit)
+	}
 	if deadline, ok := starter.Deadline(); ok {
 		return context.WithDeadline(base, deadline)
 	}

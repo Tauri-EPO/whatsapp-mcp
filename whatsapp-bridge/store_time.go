@@ -101,10 +101,9 @@ func anchorTime(v any) time.Time {
 	return time.Time{}
 }
 
-// messagesDBUserVersion is the schema version stamped on messages.db once every
-// time column holds the canonical spelling. Bump it (and add the matching
-// rewrite) when a future migration has to touch existing rows again.
-const messagesDBUserVersion = 1
+// Change this marker name when adding a timestamp column to the rewrite.
+// It is independent of other data migrations and of legacy user_version.
+const canonicalTimestampsMigration = "canonical_timestamps_v1"
 
 // canonicalTimeGlob matches exactly what dbTime produces, so rows already in
 // the canonical spelling are skipped by the migration without being parsed.
@@ -129,12 +128,11 @@ var canonicalTimeColumns = []struct{ table, column string }{
 }
 
 // migrateCanonicalTimestamps rewrites every non-canonical value in
-// canonicalTimeColumns into the canonical UTC spelling and stamps
-// PRAGMA user_version. It is idempotent: a store already at
-// messagesDBUserVersion is left alone, and re-running the rewrite on canonical
+// canonicalTimeColumns into the canonical UTC spelling and records its own
+// schema_migrations marker. Re-running the rewrite on canonical
 // rows changes nothing.
 //
-// The version is stamped only when every value was converted. A value nothing
+// The marker is recorded only when every value was converted. A value nothing
 // can parse would otherwise stay in the store forever, sorting and filtering
 // wrong on the strength of one startup warning; leaving the store unstamped
 // costs a scan per boot and keeps saying so until the row is fixed.
@@ -148,11 +146,10 @@ var canonicalTimeColumns = []struct{ table, column string }{
 // repeats the warning — the same deal an unstamped store already made, and the
 // same cure: fix or delete the row.
 func migrateCanonicalTimestamps(db *sql.DB) error {
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("failed to read messages.db user_version: %w", err)
+	stamped, err := migrationApplied(db, canonicalTimestampsMigration)
+	if err != nil {
+		return fmt.Errorf("failed to read timestamp migration marker: %w", err)
 	}
-	stamped := version >= messagesDBUserVersion
 
 	skipped := 0
 	for _, col := range canonicalTimeColumns {
@@ -186,8 +183,11 @@ func migrateCanonicalTimestamps(db *sql.DB) error {
 	if stamped {
 		return nil
 	}
-	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", messagesDBUserVersion)); err != nil {
-		return fmt.Errorf("failed to stamp messages.db user_version: %w", err)
+	// Timestamp rewrites commit bounded, idempotent chunks and may legitimately
+	// remain unmarked when a value cannot be parsed. They cannot use the atomic
+	// applyNamedMigration helper; record completion only after every chunk.
+	if err := recordMigration(db, canonicalTimestampsMigration); err != nil {
+		return fmt.Errorf("failed to record timestamp migration: %w", err)
 	}
 	return nil
 }
