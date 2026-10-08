@@ -30,7 +30,7 @@ func TestForwardRegisteredRecipientAndPolicy(t *testing.T) {
 		{name: "not on WhatsApp", to: dialledNumber, policy: efChat + "," + dialledNumber, status: 404, queries: 1, ask: &fakeIsOnWhatsApp{answers: map[string]types.IsOnWhatsAppResponse{"+" + dialledNumber: {Query: "+" + dialledNumber, IsIn: false}}}, wantMessage: "not on WhatsApp"},
 		{name: "no registration answer", to: dialledNumber, policy: efChat + "," + dialledNumber, status: 502, queries: 1, ask: &fakeIsOnWhatsApp{}, wantMessage: "no answer"},
 		{name: "lookup down with restricted policy", to: dialledNumber, policy: efChat + "," + dialledNumber, status: 502, queries: 1, media: true, ask: &fakeIsOnWhatsApp{err: errors.New("lookup offline")}, wantMessage: "nothing was sent"},
-		{name: "lookup down without policy retains fallback", to: dialledNumber, wantTo: dialledNumber, status: 200, queries: 1, ask: &fakeIsOnWhatsApp{err: errors.New("lookup offline")}},
+		{name: "lookup down without policy retains fallback", to: dialledNumber, wantTo: dialledJID.String(), status: 200, queries: 1, ask: &fakeIsOnWhatsApp{err: errors.New("lookup offline")}},
 		{name: "offline before media", to: dialledNumber, policy: efChat + "," + dialledNumber, status: 500, offline: true, media: true},
 		{name: "known phone does not query", to: dialledNumber, policy: efChat + "," + dialledNumber, wantTo: dialledJID.String(), status: 200, known: true},
 		{name: "group stays group", to: "120363000000000001@g.us", policy: efChat + ",*@g.us", wantTo: "120363000000000001@g.us", status: 200},

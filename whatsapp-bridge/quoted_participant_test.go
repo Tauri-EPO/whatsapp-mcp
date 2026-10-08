@@ -28,7 +28,7 @@ func TestResolveQuotedParticipantJID(t *testing.T) {
 		{"device suffix dropped before LID lookup", withLID, "15551234567:12@s.whatsapp.net", lid.String()},
 		{"LID passes through", withLID, "5555@lid", "5555@lid"},
 		{"group JID passes through", withLID, "120363000000000001@g.us", "120363000000000001@g.us"},
-		{"unparseable returned as-is", withLID, "1.2.3@s.whatsapp.net", "1.2.3@s.whatsapp.net"},
+		{"unparseable omitted", withLID, "1.2.3@s.whatsapp.net", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

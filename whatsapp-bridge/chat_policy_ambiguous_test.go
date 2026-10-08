@@ -79,7 +79,7 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 				raw    string
 				status int
 			}
-			for _, raw := range []string{"5511888888888@s.whatsapp.net@g.us", "120363000000000002@g.us@s.whatsapp.net", "120363000000000002@g.us@g.us", "5511888888888@s.whatsapp.net@s.whatsapp.net", "@g.us", "@lid", "@broadcast", "@newsletter", "@s.whatsapp.net", "g.us", "lid", "broadcast", "newsletter", "s.whatsapp.net", "5511888888888@", "5511999999999:1.2@s.whatsapp.net", "5511999999999.1.2@s.whatsapp.net"} {
+			for _, raw := range []string{"5511888888888@s.whatsapp.net@g.us", "120363000000000002@g.us@s.whatsapp.net", "120363000000000002@g.us@g.us", "5511888888888@s.whatsapp.net@s.whatsapp.net", "@g.us", "@lid", "@broadcast", "@newsletter", "@s.whatsapp.net", "g.us", "lid", "broadcast", "newsletter", "s.whatsapp.net", "5511888888888@", "5511999999999:1.2@s.whatsapp.net", "5511999999999.1.2@s.whatsapp.net", "5511999999999:3@s.whatsapp.net", "5511999999999.0@s.whatsapp.net", "5511999999999.0:1@s.whatsapp.net", "5511999999999.256@s.whatsapp.net", "111222333444555:3@lid", "111222333444555.0@lid", strings.Replace("120363000000000001@g.us", "@", ":3@", 1), strings.Replace("120363000000000001@g.us", "@", ".0@", 1)} {
 				targets = append(targets, struct {
 					raw    string
 					status int
@@ -143,33 +143,37 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 					if route.field == "group_jid" {
 						valid = "120363000000000001@g.us"
 					}
-					control := `{"` + route.field + `":"` + valid + `"` + route.extra + `}`
-					controlPath := route.path
-					if strings.HasSuffix(controlPath, "?jid=") {
-						controlPath += url.QueryEscape(valid)
+					for _, valid := range []string{valid, strings.ToUpper(valid), valid + "\n", " \t" + valid + "\n"} {
+						b.Connected = func() bool { return false }
+						encoded, _ := json.Marshal(valid)
+						control := `{"` + route.field + `":` + string(encoded) + route.extra + `}`
+						controlPath := route.path
+						if strings.HasSuffix(controlPath, "?jid=") {
+							controlPath += url.QueryEscape(valid)
+						}
+						if route.path == "/api/poll" {
+							controlPath += "?message_id=MSG1&chat_jid=" + url.QueryEscape(valid)
+						}
+						positive := httptest.NewRecorder()
+						self := b.Client.Store.ID
+						if route.path == "/api/react" {
+							// A permitted reaction reaches the pairing check; it does
+							// not need the mock client's uninitialized network internals.
+							b.Client.Store.ID = nil
+						}
+						controlMux := mux
+						if route.field == "group_jid" && allow == "*@s.whatsapp.net" {
+							b.Policy = parseChatPolicy("*@g.us")
+							controlMux = b.newRESTMux(8080, sendRecipientToken)
+						}
+						controlMux.ServeHTTP(positive, seamRequest(method, controlPath, control, sendRecipientToken))
+						b.Client.Store.ID = self
+						b.Policy = parseChatPolicy(allow)
+						if positive.Code == http.StatusForbidden || positive.Code == http.StatusBadRequest {
+							t.Fatalf("allowed control refused: %s/%s policy=%q body=%s", route.path, route.field, allow, positive.Body.String())
+						}
+						b.Connected = func() bool { t.Fatal("connection touched before denial"); return false }
 					}
-					if route.path == "/api/poll" {
-						controlPath += "?message_id=MSG1&chat_jid=" + url.QueryEscape(valid)
-					}
-					positive := httptest.NewRecorder()
-					self := b.Client.Store.ID
-					if route.path == "/api/react" {
-						// A permitted reaction reaches the pairing check; it does
-						// not need the mock client's uninitialized network internals.
-						b.Client.Store.ID = nil
-					}
-					controlMux := mux
-					if route.field == "group_jid" && allow == "*@s.whatsapp.net" {
-						b.Policy = parseChatPolicy("*@g.us")
-						controlMux = b.newRESTMux(8080, sendRecipientToken)
-					}
-					controlMux.ServeHTTP(positive, seamRequest(method, controlPath, control, sendRecipientToken))
-					b.Client.Store.ID = self
-					b.Policy = parseChatPolicy(allow)
-					if positive.Code == http.StatusForbidden || positive.Code == http.StatusBadRequest {
-						t.Fatalf("allowed control refused: %s/%s policy=%q body=%s", route.path, route.field, allow, positive.Body.String())
-					}
-					b.Connected = func() bool { t.Fatal("connection touched before denial"); return false }
 				}
 			}
 			if len(ask.calls) != 0 || len(*sent) != 0 {
@@ -257,7 +261,7 @@ func TestTypingNormalizesBeforeAuthorization(t *testing.T) {
 	}
 }
 
-func TestSendListedParsedDeviceIdentity(t *testing.T) {
+func TestSendRefusesDeviceIdentityBeforeEffects(t *testing.T) {
 	phone := types.JID{User: "5511999999999", Server: types.DefaultUserServer}
 	for _, raw := range []string{"5511999999999.0@s.whatsapp.net", "5511999999999.0:1@s.whatsapp.net", "5511999999999.256@s.whatsapp.net"} {
 		ask := &fakeIsOnWhatsApp{answers: map[string]types.IsOnWhatsAppResponse{
@@ -266,7 +270,7 @@ func TestSendListedParsedDeviceIdentity(t *testing.T) {
 		b, _, sent := sendRecipientBridge(t, &mockLIDStore{lidByPN: map[types.JID]types.JID{phone: registeredLID}}, ask)
 		b.Policy = parseChatPolicy(phone.String())
 		rec := postSend(b.newRESTMux(8080, sendRecipientToken), raw)
-		if rec.Code != http.StatusOK || len(*sent) != 1 || (*sent)[0] != phone.String() {
+		if rec.Code != http.StatusBadRequest || len(*sent) != 0 || len(ask.calls) != 0 {
 			t.Fatalf("raw=%q status=%d body=%s sent=%v queries=%v", raw, rec.Code, rec.Body.String(), *sent, ask.calls)
 		}
 	}

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
-
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -19,26 +17,20 @@ import (
 //   - "123@s.whatsapp.net"    -> LID from the store if known, else unchanged
 //   - "123"                   -> "123@s.whatsapp.net", upgraded to LID if known
 //   - "abc@lid" / other JIDs  -> unchanged
-//   - unparseable             -> unchanged (let WhatsApp reject it, don't guess)
+//   - malformed/empty        -> omitted with a warning
 //
 // Same LID upgrade rule as resolveMentionJIDs; see AGENTS.md gotcha #1.
 func resolveQuotedParticipantJID(client *whatsmeow.Client, raw string) string {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	var jid types.JID
-	if strings.Contains(raw, "@") {
-		parsed, err := types.ParseJID(raw)
-		if err != nil {
-			return raw
-		}
-		jid = parsed
-	} else {
-		jid = types.NewJID(raw, types.DefaultUserServer)
+	jid, err := normalizedUserJID(raw)
+	if err != nil {
+		bridgeLog.Warnf("skipping unparseable quoted sender %q: %v", raw, err)
+		return ""
 	}
-	if jid.Server == types.DefaultUserServer && client != nil && client.Store != nil && client.Store.LIDs != nil {
-		if lid, err := client.Store.LIDs.GetLIDForPN(context.Background(), jid.ToNonAD()); err == nil && !lid.IsEmpty() {
+	if jid.Server == types.DefaultUserServer {
+		if lid, err := lookupAltJID(context.Background(), client, jid.ToNonAD()); err == nil && !lid.IsEmpty() {
 			return lid.String()
 		}
 	}

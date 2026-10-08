@@ -76,7 +76,7 @@ func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*
 			}
 			participant += "@" + server.String
 		}
-		parsed, err := types.ParseJID(participant)
+		parsed, err := parseRecipientJID(participant)
 		if err != nil || parsed.User == "" || parsed.Server == "" || parsed.Server == types.GroupServer || parsed.User == jid.User {
 			return nil, ts, archiveAnchorError("latest group message has no usable sender")
 		}
@@ -106,6 +106,7 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		req.ChatJID = chat.String()
 		if chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer && chat.Server != types.GroupServer {
 			writeError(w, http.StatusBadRequest, "Only direct chats and groups can be archived")
 			return

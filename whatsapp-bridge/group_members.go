@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -181,10 +182,10 @@ func buildGroupOwner(owner types.JID, members []GroupMember, nameOf contactNameR
 // LID map (whatsapp.db), the same store resolveUserJID falls back to.
 func storeAltJID(client *whatsmeow.Client) altJIDResolver {
 	return func(jid types.JID) types.JID {
-		if client == nil || client.Store == nil || client.Store.LIDs == nil {
+		alt, err := lookupAltJID(context.Background(), client, jid)
+		if errors.Is(err, errLIDStoreUnavailable) {
 			return types.EmptyJID
 		}
-		alt, err := client.Store.GetAltJID(context.Background(), jid)
 		if err != nil {
 			// Degraded, not empty: without this line a failing map read looks
 			// exactly like "the map does not know this LID" (issue #396).

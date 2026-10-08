@@ -535,9 +535,11 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Message ID and Chat JID are required")
 			return
 		}
-		if _, ok := authorizeChat(w, b.Policy, req.ChatJID, false); !ok {
+		chat, ok := authorizeChat(w, b.Policy, req.ChatJID, false)
+		if !ok {
 			return
 		}
+		req.ChatJID = chat.String()
 		if !b.Connected() {
 			writeJSON(w, http.StatusServiceUnavailable, DownloadMediaResponse{
 				Success: false,

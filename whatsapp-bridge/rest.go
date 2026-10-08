@@ -173,7 +173,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		},
 		twin: func(ctx context.Context, jid types.JID) (types.JID, error) {
 			if jid.Server == types.HiddenUserServer {
-				return client.Store.LIDs.GetPNForLID(ctx, jid)
+				return lookupAltJID(ctx, client, jid)
 			}
 			return types.EmptyJID, nil
 		},

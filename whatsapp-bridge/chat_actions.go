@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"go.mau.fi/whatsmeow/types"
 )
+
+type chatPresenceSender func(context.Context, types.JID, types.ChatPresence, types.ChatPresenceMedia) error
 
 // Outbound chat actions: reactions and typing presence. Read receipts live in
 // mark_read.go. Registered in rest.go; all behind the token, Host and chat
@@ -105,7 +108,11 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 		// Send the chat presence update
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
-		err = client.SendChatPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
+		sendPresence := b.chatPresence
+		if sendPresence == nil {
+			sendPresence = client.SendChatPresence
+		}
+		err = sendPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

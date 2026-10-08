@@ -145,13 +145,38 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 	}
 }
 
-// parseRecipientJID reads a recipient the way the REST API takes one: a bare
-// phone number means a personal chat, anything with an "@" is a full JID.
+// parseRecipientJID only interprets a spelling: no '@' selects the phone
+// namespace, otherwise whatsmeow parses the JID. It does not validate or trim
+// input (ParseJID can discard extra '@' parts). HTTP callers must authorizeChat;
+// metadata callers must validate themselves before using its result.
 func parseRecipientJID(recipient string) (types.JID, error) {
 	if !strings.Contains(recipient, "@") {
 		return types.JID{User: recipient, Server: types.DefaultUserServer}, nil
 	}
 	return types.ParseJID(recipient)
+}
+
+// normalizedUserJID normalizes phone spellings and validates the JID envelope
+// for metadata/participants without a conversation
+// allow-list: mentions and quote attribution do not address another chat.
+// Device fields remain intact so callers retain their established lookup keys.
+func normalizedUserJID(raw string) (types.JID, error) {
+	raw, err := normalizePhoneRecipient(strings.TrimSpace(raw))
+	if err != nil {
+		return types.EmptyJID, err
+	}
+	if raw == "" || strings.Count(raw, "@") > 1 || (!strings.Contains(raw, "@") && !isPhoneDigits(raw)) {
+		return types.EmptyJID, errors.New("invalid phone number or JID")
+	}
+	jid, err := parseRecipientJID(raw)
+	if err != nil {
+		return types.EmptyJID, err
+	}
+	if jid.User == "" || jid.Server == "" {
+		return types.EmptyJID, errors.New("a user and server are required")
+	}
+	jid.Server = strings.ToLower(jid.Server)
+	return jid, nil
 }
 
 // recipientSeparators is the explicit contract shared with phone.py; Unicode
@@ -299,9 +324,13 @@ func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, r
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
 	// phone JID silently fail for migrated contacts.
 	if recipientJID.Server == types.DefaultUserServer {
-		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
+		lid, lidErr := lookupAltJID(ctx, client, recipientJID)
 		if err := ctx.Err(); err != nil {
 			return types.EmptyJID, err
+		}
+		if errors.Is(lidErr, errLIDStoreUnavailable) {
+			// A missing backend cannot retain the server's LID answer either.
+			return recipientJID, nil
 		}
 		if lidErr == nil && !lid.IsEmpty() {
 			bridgeLog.Debugf("Resolved %s -> %s (LID)", recipientJID, lid)
@@ -331,20 +360,14 @@ func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, r
 func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	var resolved []string
 	for _, mention := range mentions {
-		var jid types.JID
-		if strings.Contains(mention, "@") {
-			parsed, err := types.ParseJID(mention)
-			if err != nil {
-				bridgeLog.Warnf("skipping unparseable mention %q: %v", mention, err)
-				continue
-			}
-			jid = parsed
-		} else {
-			jid = types.JID{User: mention, Server: types.DefaultUserServer}
+		jid, err := normalizedUserJID(mention)
+		if err != nil {
+			bridgeLog.Warnf("skipping unparseable mention %q: %v", mention, err)
+			continue
 		}
 		resolved = append(resolved, jid.String())
 		if jid.Server == types.DefaultUserServer {
-			if lid, err := client.Store.LIDs.GetLIDForPN(context.Background(), jid); err == nil && !lid.IsEmpty() {
+			if lid, err := lookupAltJID(context.Background(), client, jid); err == nil && !lid.IsEmpty() {
 				resolved = append(resolved, lid.String())
 			}
 		}
@@ -895,7 +918,9 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, recipientLookupTimeout)
 	defer cancel()
-	registered, err := canonicalRecipientJID(lookupCtx, b.Client.Store.LIDs.GetLIDForPN, b.IsOnWhatsApp, recipient)
+	registered, err := canonicalRecipientJID(lookupCtx, func(ctx context.Context, jid types.JID) (types.JID, error) {
+		return lookupAltJID(ctx, b.Client, jid)
+	}, b.IsOnWhatsApp, recipient)
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):
 		countFailure()
@@ -912,13 +937,14 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false
 	}
-	if _, ok := authorizeChat(w, b.Policy, registered.String(), true); !ok {
+	canonical, ok := authorizeChat(w, b.Policy, registered.String(), true)
+	if !ok {
 		return "", false
 	}
 	if typed := normalizeChatEntry(recipient); typed != registered.String() {
 		b.Log.Debugf("→ recipient %s is registered on WhatsApp as %s", typed, registered)
 	}
-	return registered.String(), true
+	return canonical.String(), true
 }
 
 // handleSend serves POST /api/send.
@@ -944,9 +970,11 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return
 		}
-		if _, ok := authorizeChat(w, b.Policy, req.Recipient, true); !ok {
+		typed, ok := authorizeChat(w, b.Policy, req.Recipient, true)
+		if !ok {
 			return
 		}
+		req.Recipient = typed.String()
 
 		if req.Message == "" && req.MediaPath == "" {
 			writeError(w, http.StatusBadRequest, "Message or media path is required")
