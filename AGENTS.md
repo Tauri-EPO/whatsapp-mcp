@@ -60,6 +60,7 @@ whatsapp-mcp/
 │   ├── persist.go              # one extraction + storage path shared by live messages and history sync
 │   ├── store_failures.go       # a row that cannot be written: bounded retry on a busy database, one ERROR with ID + chat, a counter
 │   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
+│   ├── media_header.go         # template/buttons/interactive header media extraction
 │   ├── view_once.go            # view-once envelopes unwrapped and archived; the phone keeps its one view
 │   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
 │   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member

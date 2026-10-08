@@ -541,7 +541,7 @@ func extractMediaInfo(msg *waE2E.Message, msgTimestamp time.Time, msgID string) 
 	case "sticker":
 		name = "sticker_" + suffix + ".webp"
 	default: // a document keeps the sender's own name when it has one
-		if name = msg.GetDocumentMessage().GetFileName(); name == "" {
+		if name = part.(*waE2E.DocumentMessage).GetFileName(); name == "" {
 			name = "document_" + suffix
 		}
 	}
@@ -584,7 +584,7 @@ func mediaPartOf(msg *waE2E.Message) (string, cdnMedia) {
 	case msg.GetStickerMessage() != nil:
 		return "sticker", msg.GetStickerMessage()
 	}
-	return "", nil
+	return structuredHeaderMedia(msg)
 }
 
 // extractMediaDirectPath returns the direct path of the media of msg, or ""

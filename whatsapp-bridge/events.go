@@ -267,6 +267,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// timestamp must be the retry-corrected one stored below: downloadMedia
 	// rebuilds the on-disk filename from the stored row.
 	ex := extractMessage(original, msgTimestamp, msg.Info.ID)
+	// whatsmeow unwraps live envelopes before dispatch and keeps this flag.
+	if msg.IsViewOnce && !ex.viewOnce {
+		ex.viewOnce = true
+		ex.content = viewOnceContent(ex.content, ex.mediaType)
+	}
 	content, mediaType, filename, fileLength := ex.content, ex.mediaType, ex.filename, ex.fileLen
 	quotedMessageId, quotedSender, quotedContent := ex.quotedID, ex.quotedSender, ex.quotedContent
 	mentionedJIDs := ex.mentions

@@ -771,7 +771,8 @@ This is deliberate: the archive is the account owner's copy. To really forget a
 message locally use `delete_message` with `for_everyone=false`.
 
 View-once photos, videos and voice notes are archived like any other media,
-with `view_once: true` and a `🔒` prefix on the content; the phone's single
+with `view_once: true` and a single `🔒` prefix on the content, on live arrival
+and history synchronization alike; the phone's single
 viewing is unaffected because the bridge never sends the view receipt. This is
 your own account's archive; treat it accordingly.
 

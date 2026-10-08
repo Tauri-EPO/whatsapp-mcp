@@ -127,6 +127,14 @@ checks its result without removing the manual cache. In the opposite arrival
 order, a manual caller retries without the cap after the rejected automatic
 transfer stops and cleans its temporary file, under the same destination lock.
 
+### Structured media headers
+
+Documents, images and videos in a template, buttons or interactive message
+header use the same extraction, persistence and download path as top-level
+media. The row keeps its URL, direct path, key, both hashes, declared length
+and MIME/original document filename/title. Top-level media takes precedence when a
+message contains both forms; text-only headers do not invent a media row.
+
 ### Replayed media rows
 
 Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.
