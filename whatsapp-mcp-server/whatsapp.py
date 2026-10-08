@@ -4246,12 +4246,12 @@ def send_message(
     return True, result.get("message", "Message sent"), _sent_info(result)
 
 
-def _media_source(media_path: str, media_base64: str) -> str:
-    """``"path"`` or ``"inline"``: exactly one of the two must be given."""
-    if media_path and media_base64:
-        raise ToolError("invalid_argument", "give media_path or media_base64, not both")
-    if not media_path and not media_base64:
-        raise ToolError("invalid_argument", "media_path or media_base64 must be provided")
+def _media_source(media_path: str, media_base64: str, upload_id: str = "") -> str:
+    """Exactly one server path, inline payload or HTTP upload."""
+    if sum(bool(value) for value in (media_path, media_base64, upload_id)) != 1:
+        raise ToolError("invalid_argument", "provide exactly one of media_path / media_base64 / upload_id")
+    if upload_id:
+        return "upload"
     return "inline" if media_base64 else "path"
 
 
@@ -4272,6 +4272,7 @@ def send_file(
     dry_run: bool = False,
     media_base64: str = "",
     filename: str = "",
+    upload_id: str = "",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Send a media file (image, video, document) with an optional caption.
 
@@ -4279,10 +4280,9 @@ def send_file(
     passing both in one /api/send call produces a single attachment-with-caption
     message instead of two separate messages.
 
-    The file is either ``media_path`` on this host or ``media_base64`` carried
-    in the call: those bytes are written under the outbox the bridge may read
-    (``media_upload``), sent as a ``media_path`` like any other file, and
-    removed afterwards.
+    Exactly one of ``media_path``, ``media_base64`` or HTTP ``upload_id``.
+    Inline bytes are written under the shared outbox and always removed;
+    uploaded IDs are removed after success and retained on failure until expiry.
 
     ``dry_run=True`` runs the same validation (recipient, allow-list, the file
     exists or the payload decodes) and returns the request that would have
@@ -4291,11 +4291,21 @@ def send_file(
     recipient = normalize_recipient(recipient)
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
-    source = _media_source(media_path, media_base64)
+    source = _media_source(media_path, media_base64, upload_id)
+    if source == "upload" and filename:
+        raise ToolError("invalid_argument", "filename is fixed at upload; omit filename when using upload_id")
     _require_allowed(recipient)
+    if source == "upload":
+        with media_upload.uploaded_path(upload_id, consume=not dry_run) as path:
+            return send_file(recipient, path, caption, dry_run=dry_run)
     if source == "path":
         if not os.path.isfile(media_path):
-            raise ToolError("not_found", f"Media file not found: {media_path}")
+            raise ToolError(
+                "not_found",
+                f"Media file not found on the server: {media_path}. "
+                "For a file on another machine, POST /upload and use upload_id (http/sse), "
+                "or provide media_base64 with filename.",
+            )
         payload = {"recipient": recipient, "media_path": media_path}
         if caption:
             payload["message"] = caption
@@ -4339,18 +4349,23 @@ def send_file(
 
 
 def send_audio_message(
-    recipient: str, media_path: str = "", media_base64: str = "", filename: str = ""
+    recipient: str, media_path: str = "", media_base64: str = "", filename: str = "", upload_id: str = ""
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Send a voice note from ``media_path`` on this host or from
-    ``media_base64`` in the call. Anything that is not an ``.ogg`` is
+    """Send a voice note from exactly one of ``media_path``, ``media_base64``
+    or HTTP ``upload_id``. Anything that is not an ``.ogg`` is
     converted with ffmpeg first. Both the inline upload and the converted
     file live under the outbox the bridge may read and are removed after the
     send; a caller's own ``media_path`` is never touched."""
     recipient = normalize_recipient(recipient)
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
-    source = _media_source(media_path, media_base64)
+    source = _media_source(media_path, media_base64, upload_id)
+    if source == "upload" and filename:
+        raise ToolError("invalid_argument", "filename is fixed at upload; omit filename when using upload_id")
     _require_allowed(recipient)
+    if source == "upload":
+        with media_upload.uploaded_path(upload_id) as path:
+            return send_audio_message(recipient, path)
     cleanup: list[str] = []
     result: dict[str, Any] = {}
     try:
@@ -4361,12 +4376,23 @@ def send_audio_message(
         else:
             path = media_path
             if not os.path.isfile(path):
-                raise ToolError("not_found", f"Media file not found: {path}")
+                raise ToolError(
+                    "not_found",
+                    f"Media file not found on the server: {path}. "
+                    "POST /upload and use upload_id (http/sse), or provide media_base64 with filename.",
+                )
         if not path.lower().endswith(".ogg"):
             try:
                 # Into the outbox, not the system temp directory: the bridge only
                 # reads inside WHATSAPP_MEDIA_ROOTS.
-                path = audio.convert_to_opus_ogg_temp(path, directory=media_upload.upload_dir())
+                with media_upload.receiving_upload(limit=media_upload.MAX_OUTBOX_BYTES) as converted:
+                    output = audio.convert_to_opus_ogg_temp(
+                        path, directory=converted.folder, write_chunk=converted.write
+                    )
+                    converted.finish("voice.ogg", source=output)
+                    path = os.path.join(converted.folder, "voice.ogg")
+            except ToolError:
+                raise
             except Exception as e:
                 raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
             cleanup.append(path)

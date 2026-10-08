@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import threading
 
 DEFAULT_FFMPEG_TIMEOUT_S = 120
 
@@ -15,7 +16,7 @@ def ffmpeg_timeout_s() -> int:
     return value if value > 0 else DEFAULT_FFMPEG_TIMEOUT_S
 
 
-def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate=24000):
+def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate=24000, write_chunk=None):
     """
     Convert an audio file to Opus format in an Ogg container.
 
@@ -25,6 +26,8 @@ def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate
                                     extension of input_file with .ogg
         bitrate (str, optional): Target bitrate for Opus encoding (default: "32k")
         sample_rate (int, optional): Sample rate for output (default: 24000)
+        write_chunk: Optional quota writer (file handle, encoded bytes). When
+                     supplied, ffmpeg output is piped through it under the same deadline.
 
     Returns:
         str: Path to the converted file
@@ -69,9 +72,45 @@ def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate
     ]
 
     timeout = ffmpeg_timeout_s()
+    if write_chunk is not None:
+        # Pipe encoded bytes through the caller's storage quota. Letting ffmpeg
+        # write directly would bypass the bounds shared with incoming uploads.
+        cmd[-1:] = ["-f", "ogg", "pipe:1"]
+        with tempfile.TemporaryFile() as diagnostics, open(output_file, "wb", buffering=0) as target:
+            with subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=diagnostics) as process:
+                expired = threading.Event()
+
+                def stop():
+                    expired.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+                timer = threading.Timer(timeout, stop)
+                timer.daemon = True
+                timer.start()
+                try:
+                    assert process.stdout is not None
+                    while chunk := process.stdout.read(64 * 1024):
+                        write_chunk(target, chunk)
+                    result = process.wait()
+                    if expired.is_set():
+                        raise RuntimeError(f"ffmpeg timed out after {timeout}s converting {input_file}")
+                    if result:
+                        size = diagnostics.seek(0, os.SEEK_END)
+                        diagnostics.seek(max(0, size - 8192))
+                        detail = diagnostics.read(8192).decode("utf-8", errors="replace")
+                        raise RuntimeError(f"Failed to convert audio. You likely need to install ffmpeg {detail}")
+                finally:
+                    timer.cancel()
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+        return output_file
     try:
         # Run the ffmpeg command and capture output
-        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
+        subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=timeout)
         return output_file
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"ffmpeg timed out after {timeout}s converting {input_file}") from None
@@ -79,7 +118,7 @@ def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate
         raise RuntimeError(f"Failed to convert audio. You likely need to install ffmpeg {e.stderr}")
 
 
-def convert_to_opus_ogg_temp(input_file, bitrate="32k", sample_rate=24000, directory=None):
+def convert_to_opus_ogg_temp(input_file, bitrate="32k", sample_rate=24000, directory=None, write_chunk=None):
     """
     Convert an audio file to Opus format in an Ogg container and store in a temporary file.
 
@@ -91,6 +130,7 @@ def convert_to_opus_ogg_temp(input_file, bitrate="32k", sample_rate=24000, direc
                                    the system temp directory when None. The bridge
                                    only reads inside WHATSAPP_MEDIA_ROOTS, so send
                                    paths pass the outbox here.
+        write_chunk: Optional quota writer forwarded to convert_to_opus_ogg.
 
     Returns:
         str: Path to the temporary file with the converted audio
@@ -107,7 +147,7 @@ def convert_to_opus_ogg_temp(input_file, bitrate="32k", sample_rate=24000, direc
 
     try:
         # Convert the audio
-        convert_to_opus_ogg(input_file, temp_file.name, bitrate, sample_rate)
+        convert_to_opus_ogg(input_file, temp_file.name, bitrate, sample_rate, write_chunk=write_chunk)
         return temp_file.name
     except Exception as e:
         # Clean up the temporary file if conversion fails

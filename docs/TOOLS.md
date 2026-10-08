@@ -1099,7 +1099,8 @@ Send a media file (image, video, document).
 
 - `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `media_path`: Absolute path to the file on the server, inside its outbox
-- `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` is required
+- `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` / `upload_id` is required
+- `upload_id`: Opaque ID returned by `POST /upload` on the HTTP/SSE server; avoids putting file bytes in the tool call. Unavailable on stdio
 - `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories in it are dropped
 - `caption` (optional): Caption for the media
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
@@ -1110,9 +1111,57 @@ additional absolute directories. `media_base64` is for an agent that runs on
 another machine and cannot put a file there: the server writes the bytes under
 `<first root>/.uploads`, sends them and removes them. Inline payloads are capped
 at 64 MiB, and on the HTTP transport `WHATSAPP_MCP_MAX_BODY_BYTES` (4 MiB by
-default) applies first; anything bigger goes on the server and through
-`media_path`. A payload that is not base64, empty or too large is
+default) applies first; use the upload flow below when your client's tool-input
+channel refuses large inline arguments. A payload that is not base64, empty or too large is
 `invalid_argument`.
+
+Upload a file from another machine with a raw HTTP request, then pass only the
+returned `upload_id` to the MCP tool. The upload endpoint is `/upload` on the
+same server as `/mcp` (or `/sse`), using the same bearer token, Host/Origin
+allow-lists and rate limiter:
+
+```bash
+curl --fail-with-body https://example.ts.net/upload \
+  -H 'Authorization: Bearer TOKEN' \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'X-Filename: report.pdf' \
+  --data-binary @report.pdf
+```
+
+The response is `{upload_id, filename, bytes, sha256, expires_at}`. `filename`
+is sanitised (directory components are dropped, controls removed, capped at
+200 UTF-8 bytes). `X-Filename` is required and must leave a usable basename; percent-encode UTF-8 names, for example
+`X-Filename: relat%C3%B3rio.pdf`. Send raw bytes; multipart/form-data is refused
+with `415` to avoid storing the multipart envelope as a file. Call
+`send_file(chat_jid="5511999999999@s.whatsapp.net", upload_id="<returned upload_id>", caption="Report")`
+through your usual MCP client; the server hands the stored path to the bridge
+and removes the upload after a successful send. Failed sends keep the ID
+for retry until expiry; a timeout can leave the send outcome uncertain, so
+check the chat before retrying to avoid a duplicate.
+`dry_run=true` validates it and keeps the upload for a later send. Do not pass
+`filename` with `upload_id`: the name was fixed at upload, and the combination
+returns `invalid_argument`. An ID already being sent returns `conflict`: retry
+the same ID shortly rather than uploading another copy.
+
+The streamed upload limit is `WHATSAPP_MCP_UPLOAD_MAX_BYTES` (64 MiB by default,
+a positive integer at most 268435456 bytes / 256 MiB),
+independent of the JSON-RPC body limit; overflow answers `413` and removes the
+partial file. An oversized Content-Length is rejected before the body is read,
+and the streamed check also catches absent or false lengths. Upload writes
+share a fixed 256 MiB budget across stored and receiving files in `.uploads`;
+a full outbox also answers `413`, preserving earlier uploads. `media_base64` sends
+share this budget with uploads retained after failed sends, so an inline send
+can return `too_large` until existing uploads are sent or expire. Only owned
+timestamp upload folders (current and legacy) and lone `tmp*.ogg` conversion
+files count; unrelated files are neither charged nor removed. Before every
+write, including stdio inline sends, expired owned leftovers are swept. IDs expire after
+one hour; expired uploads are swept at startup, on new uploads and every minute
+while the HTTP/SSE server is running. Busy receiving/sending files are skipped.
+Upload validation/storage errors use `{"error": {"code", "message"}}`
+(with `limit_bytes` for size errors); auth and Host/Origin middleware retain
+their existing responses. Unknown, expired or already consumed IDs return `not_found`.
+Read-only servers, or policies that offer neither sending tool, refuse uploads
+with `403`. Stdio has no upload route: use `media_base64` or a server path there.
 
 **Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
 
@@ -1125,11 +1174,14 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 - `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `media_path`: Absolute path to the audio file on the server, inside its outbox
-- `media_base64`: The audio bytes, base64-encoded. Exactly one of `media_path` / `media_base64` is required; same cap and rules as `send_file`
+- `media_base64`: The audio bytes, base64-encoded. Exactly one of `media_path` / `media_base64` / `upload_id` is required; same cap and rules as `send_file`
+- `upload_id`: The ID returned by the HTTP upload flow above; the uploaded name's extension decides whether ffmpeg conversion is needed
 - `filename` (optional, with `media_base64`): default `voice.ogg`; any other extension (`note.wav`, `clip.m4a`) means the server converts it with ffmpeg first
 
 Converted audio is sent through the same media-path confinement as
-`send_file`.
+`send_file`. Conversion output also shares the 256 MiB outbox budget, even
+with `media_path`: `too_large` can mean retained uploads have filled it,
+although this caller never uploaded a file.
 
 **Returns** `{"success": true, "message": ..., "message_id": ..., "chat_jid": ..., "timestamp": ...}`. Keep `message_id` + `chat_jid` to react to, quote or delete the message later.
 

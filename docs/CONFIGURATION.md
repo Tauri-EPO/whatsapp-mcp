@@ -44,6 +44,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` when a token is enforced, else `0`     | Requests per minute per client on the `http`/`sse` transports (token bucket, 429 + `Retry-After`); `0`/`off` disables |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304`                              | Maximum request body accepted by the `http`/`sse` transports |
+| `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB)                   | Maximum raw file size for `POST /upload`, enforced while streaming; independent of the JSON-RPC body limit. Positive integer up to 268435456 (256 MiB shared budget); uploads expire in one hour |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_PUBLIC_URL`  | *(unset)*                                | URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`, or a bare `host` / `host:port`). Makes `bridge_status` report the expiry of that endpoint's TLS certificate. See [Watching the published certificate](#watching-the-published-certificate) |
 | `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/chat/archive/mark-read/typing |
@@ -117,9 +118,11 @@ is required. The stdio transport is not affected by any of this.
 Whenever a token is enforced the server also rate-limits each client (first
 `X-Forwarded-For` hop, else the socket peer) to `WHATSAPP_MCP_RATE_LIMIT`
 requests per minute (default 120; token bucket with the same burst), answering
-`429` with `Retry-After`, and caps request bodies at
+`429` with `Retry-After`, and caps JSON-RPC request bodies at
 `WHATSAPP_MCP_MAX_BODY_BYTES` (default 4 MiB). The limiter runs before the
-bearer check, so token guessing is throttled as well.
+bearer check, so token guessing is throttled as well. `POST /upload` shares the
+token, rate limiter and Host/Origin checks, with a separate streamed file limit
+of `WHATSAPP_MCP_UPLOAD_MAX_BYTES` (default 64 MiB).
 
 ### Reaching the server by a non-loopback hostname
 
@@ -762,7 +765,25 @@ the bridge does not read outside its roots. This is why the MCP server reads
 `WHATSAPP_MEDIA_ROOTS` as well: give both processes the same value (compose
 passes `/app/outbox` to both). Inline payloads are refused above 64 MiB, and
 on the `http`/`sse` transports `WHATSAPP_MCP_MAX_BODY_BYTES` (4 MiB by default,
-about 3 MiB of file) cuts in first; put anything bigger on the server.
+about 3 MiB of file) cuts in first. For larger files or clients with small tool
+input channels, [upload with HTTP](TOOLS.md#send_file) and pass the returned
+`upload_id` to either send tool. `POST /upload` streams up to
+`WHATSAPP_MCP_UPLOAD_MAX_BYTES` (64 MiB by default) without using the JSON-RPC
+body limit. The ID resolves only inside `.uploads`, expires after one hour,
+and the upload is removed after a successful send. Failures preserve the ID
+for retry until expiry. Upload writes share a fixed 256 MiB storage budget,
+including receiving files and `media_base64` sends; a full outbox returns 413
+or `too_large` on an inline send. Retained failed sends consume this budget
+until sent or expired. Voice-note conversion output also shares it, including
+`media_path` conversions, which can return `too_large` when earlier uploads
+filled the outbox even though this caller never uploaded a file.
+It counts only owned timestamp folders (including legacy
+eight-hex folders) and lone `tmp*.ogg` conversion files, which can be swept;
+unrelated files are neither charged nor removed. Expired leftovers are swept
+before writes on every transport, including stdio. Unsent uploads are swept
+at startup, on each new upload and every minute while HTTP/SSE is running.
+Busy receiving/sending uploads are skipped; deletion failures are best effort. The route is unavailable on stdio and refuses
+files when read-only or when neither sending tool is offered.
 
 ### Export directory
 
