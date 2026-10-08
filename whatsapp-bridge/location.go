@@ -170,16 +170,23 @@ func (b *messageBatch) UpdateLiveLocation(id, chat, sender string, fromMe bool, 
 // A history position update is not fresh conversation activity. Only the
 // location case changes the usual newest-first timestamp value; every own-phone
 // chunk checks for a location-key collision under its existing write lock.
-func historyLocationInitialTimes(rows []*waHistorySync.HistorySyncMsg, fallback time.Time) map[string]time.Time {
-	initial := make(map[string]time.Time)
+type locationSampleKey struct {
+	id, sender string // sender is the full resolved JID used by persistence
+	fromMe     bool
+}
+
+func (b *Bridge) historyLocationInitialTimes(rows []*waHistorySync.HistorySyncMsg, chat types.JID, fallback time.Time) map[locationSampleKey]time.Time {
+	initial := make(map[locationSampleKey]time.Time)
 	for _, row := range rows {
 		info := row.GetMessage()
 		p := extractMessage(info.GetMessage(), fallback, info.GetKey().GetID()).location
 		if p != nil && p.Live && !p.update() && info.GetKey().GetID() != "" && info.GetMessageTimestamp() != 0 {
 			stamp := time.Unix(int64(info.GetMessageTimestamp()), 0) //nolint:gosec // WhatsApp epoch seconds
-			old, found := initial[info.GetKey().GetID()]
+			sender, fromMe := b.historySender(info, chat, false)
+			key := locationSampleKey{id: info.GetKey().GetID(), sender: storedSender(sender), fromMe: fromMe}
+			old, found := initial[key]
 			if !found || stamp.Before(old) {
-				initial[info.GetKey().GetID()] = stamp
+				initial[key] = stamp
 			}
 		}
 	}
@@ -188,7 +195,7 @@ func historyLocationInitialTimes(rows []*waHistorySync.HistorySyncMsg, fallback 
 
 // The reader owns the current bounded chunk's IMMEDIATE transaction. Initial
 // timestamps were collected without a write lock to support later chunks.
-func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locationAuthorReader, rows []*waHistorySync.HistorySyncMsg, chat string, fallback time.Time, initial map[string]time.Time) (time.Time, error) {
+func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locationAuthorReader, rows []*waHistorySync.HistorySyncMsg, chat string, fallback time.Time, initial map[locationSampleKey]time.Time) (time.Time, error) {
 	var latest time.Time
 	for _, row := range rows {
 		info := row.GetMessage()
@@ -226,7 +233,10 @@ func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locatio
 			} else if !errors.Is(err, sql.ErrNoRows) {
 				return time.Time{}, err
 			} else if position.update() {
-				if first, found := initial[info.GetKey().GetID()]; found {
+				jid, _ := types.ParseJID(chat)
+				sender, fromMe := b.historySender(info, jid, false)
+				key := locationSampleKey{id: info.GetKey().GetID(), sender: storedSender(sender), fromMe: fromMe}
+				if first, found := initial[key]; found {
 					stamp = first
 				}
 			}

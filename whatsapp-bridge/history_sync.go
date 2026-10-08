@@ -127,9 +127,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// own-phone markers until its bounded write transaction can check
 			// the current row, including a live row arriving after setup.
 			locationMarkers := !preserveExisting
-			var locationInitial map[string]time.Time
+			var locationInitial map[locationSampleKey]time.Time
 			if locationMarkers {
-				locationInitial = historyLocationInitialTimes(messages, timestamp)
+				locationInitial = b.historyLocationInitialTimes(messages, jid, timestamp)
 			}
 			markRead := conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
@@ -254,6 +254,15 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						storedSenderJID, err = b.liveLocationSender(ctx, batch.tx, msgID, chatJID, storedSenderJID, isFromMe)
 						if err != nil {
 							return err
+						}
+						if ex.location.update() {
+							key := locationSampleKey{id: msgID, sender: storedSenderJID, fromMe: isFromMe}
+							if first, found := locationInitial[key]; found {
+								// An initial sample in a later chunk supplies this
+								// same author's original time. Store it with the row
+								// so a stopped import keeps committed markers coherent.
+								msgTimestamp = first
+							}
 						}
 					}
 

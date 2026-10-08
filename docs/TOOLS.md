@@ -761,6 +761,11 @@ the archived author and namespace are retained. The first description, timestamp
 quote and mentions remain; stale positions do not replace newer ones. Such live
 updates emit no new webhook. A distinct key is archived as its own row, including
 a later sample received without the original: no guessed relationship drops data.
+Messages of any kind cannot replace another author's archived location. Rejected
+collisions do not advance its conversation activity or read markers. An initial
+sample supplies an earlier timestamp only for the same resolved author and
+ownership flag, including a verified PN/LID alias.
+
 History from the account's own phone uses the same key policy and retains newer
 positions when the initial sample arrives afterwards. Peer history bundles never
 update an existing position. Phone behaviour is unverified; these shapes are proven

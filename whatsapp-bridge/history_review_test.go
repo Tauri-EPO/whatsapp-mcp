@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -90,5 +91,72 @@ func TestPhoneLocationMarkersUseTransactionalLiveRow(t *testing.T) {
 	}
 	if calls != 1 || !saved.Equal(stamp) || !activity.Equal(stamp) || !read.Equal(stamp) || !strings.Contains(location, `"latitude":0.9`) {
 		t.Fatalf("live/history interleaving lost state: calls=%d saved=%v activity=%v read=%v location=%s", calls, saved, activity, read, location)
+	}
+}
+
+func TestPhoneLocationInitialTimestampAuthor(t *testing.T) {
+	for _, author := range []string{"same", "sender", "namespace", "from-me", "verified-alias"} {
+		for _, mode := range []string{"same-chunk", "across-chunks", "committed-prefix"} {
+			t.Run(author+"/"+mode, func(t *testing.T) {
+				ms := newTestMessageStore(t)
+				lids := &mockLIDStore{}
+				if author == "verified-alias" {
+					lids.pnByLID = map[types.JID]types.JID{phoneLID: phonePN}
+				}
+				b := testBridge(t, newTestClient(lids), ms, testLogger())
+				size := 2
+				if mode != "same-chunk" {
+					size = historyBatchMessages + 1
+				}
+				fixture := shareHistoryFixture(size)
+				conversation := fixture.Data.Conversations[0]
+				conversation.UnreadCount = proto.Uint32(0)
+				for _, row := range conversation.Messages {
+					row.Message.MessageTimestamp = proto.Uint64(1699999000)
+				}
+				positive := conversation.Messages[0].Message
+				positive.Participant, positive.MessageTimestamp, positive.Message = proto.String(phonePN.String()), proto.Uint64(1900000000), livePosition(3, 0.9)
+				initial := conversation.Messages[size-1].Message
+				initial.Key.ID, initial.Participant, initial.MessageTimestamp, initial.Message = positive.Key.ID, proto.String(phonePN.String()), proto.Uint64(1700000000), livePosition(0, 0.25)
+				switch author {
+				case "sender":
+					initial.Participant = proto.String(selfPhone.String())
+				case "namespace":
+					initial.Participant = proto.String(phonePN.User + "@lid")
+				case "from-me":
+					initial.Key.FromMe = proto.Bool(true)
+				case "verified-alias":
+					initial.Participant = proto.String(phoneLID.String())
+				}
+				if mode == "committed-prefix" {
+					chunks := 0
+					b.historyBatchWriter = func(fn func(*messageBatch) error) error {
+						chunks++
+						if chunks == 2 {
+							b.cancel()
+							return context.Canceled
+						}
+						return ms.Batch(fn)
+					}
+				}
+				b.handleHistorySync(fixture)
+				want := int64(1900000000)
+				if author == "same" || author == "verified-alias" {
+					want = 1700000000
+				}
+				var activity, read, saved time.Time
+				var sender, server string
+				var own bool
+				if err := ms.db.QueryRow("SELECT last_message_time,last_read_time FROM chats WHERE jid=?", conversation.GetID()).Scan(&activity, &read); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.db.QueryRow("SELECT timestamp,sender,sender_server,is_from_me FROM messages WHERE id='H0' AND chat_jid=?", conversation.GetID()).Scan(&saved, &sender, &server, &own); err != nil {
+					t.Fatal(err)
+				}
+				if !saved.Equal(time.Unix(want, 0)) || !activity.Equal(saved) || !read.Equal(saved) || sender != phonePN.User || server != types.DefaultUserServer || own {
+					t.Fatalf("initial sample crossed author: saved=%v activity=%v read=%v author=%s/%s own=%t", saved, activity, read, sender, server, own)
+				}
+			})
+		}
 	}
 }
