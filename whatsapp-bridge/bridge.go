@@ -79,6 +79,9 @@ type Bridge struct {
 	Connected func() bool
 	// Send performs /api/send (defaults to sendWhatsAppMessage); tests inject a fake.
 	Send sendFunc
+	// Raw upload and send overrides feed the shared messageSendNetwork seam.
+	uploadMedia outboundUploadFunc
+	sendMessage outboundSendFunc
 	// chatPresence records typing targets in tests; nil uses Client.SendChatPresence.
 	chatPresence chatPresenceSender
 	// SendAppState is the raw client call; sendAppState serializes writers.
@@ -244,9 +247,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	}
 	b.Connect = client.Connect
 	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
-	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
-		return sendWhatsAppMessage(ctx, b.Client, b.Store, b.persistOutbound, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
-	}
+	b.Send = b.sendBackend()
 	b.IsOnWhatsApp = client.IsOnWhatsApp
 	b.chatPresence = client.SendChatPresence
 	b.Exit = func(reason string, code int) {

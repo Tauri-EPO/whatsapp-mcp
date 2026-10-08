@@ -204,6 +204,7 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   only if agents should be able to type it. Listing one spelling never
   opens the other, and when WhatsApp does not answer which number is
   registered the send or forward is refused instead of going out unchecked.
+  The bridge caches positive registered-number answers for one hour (up to 256 entries, cleared on connection, disconnection or logout), so a re-registered number may keep its old spelling until then; both allow-list checks still run on every cache hit.
 - Contact search (`search_contacts`) is not filtered: it reads the address
   book, not conversations.
 
