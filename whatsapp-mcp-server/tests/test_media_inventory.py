@@ -487,11 +487,14 @@ def test_the_memo_never_claims_a_deleted_file_is_readable(media_store, monkeypat
 
 
 def test_an_arrival_is_seen_at_once_and_the_ttl_bounds_the_rest(media_store, monkeypatch):
+    mtime = [1]
+    monkeypatch.setattr(media_inventory, "_dir_mtime_ns", lambda chat_jid: mtime[0])
     listed = _count_listings(monkeypatch)
     assert not main.list_media(chat_jid=ALICE)["items"][1]["cached"]  # DOC1, nothing on disk
     doc = os.path.join(media_inventory.chat_media_dir(ALICE), "document_20260904_100000_DOC1.pdf")
     open(doc, "wb").write(b"pdf")
-    # Writing the file moved the directory's mtime, so the listing is read again.
+    # Exercise a distinguishable mtime change without depending on filesystem granularity.
+    mtime[0] += 1
     assert main.list_media(chat_jid=ALICE)["items"][1]["cached"]
     assert listed == [ALICE, ALICE]
 
