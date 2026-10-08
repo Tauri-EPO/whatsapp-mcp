@@ -418,7 +418,7 @@ func TestMarkWholeChatReadRejects(t *testing.T) {
 		{"sender without ids", map[string]any{"chat_jid": markReadDM, "sender_jid": "5511999999999"}, http.StatusBadRequest},
 		{"bad up_to", map[string]any{"chat_jid": markReadDM, "up_to": "yesterday"}, http.StatusBadRequest},
 		{"up_to with ids", map[string]any{"chat_jid": markReadDM, "message_ids": []string{"DM-0"}, "up_to": "2026-09-01T08:00:00Z"}, http.StatusBadRequest},
-		{"bad chat", map[string]any{"chat_jid": "not-a-jid"}, http.StatusForbidden},
+		{"bad chat", map[string]any{"chat_jid": "not-a-jid"}, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

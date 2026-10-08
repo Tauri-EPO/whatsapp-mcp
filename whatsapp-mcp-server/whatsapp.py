@@ -21,7 +21,7 @@ import audio
 import endpoint_cert
 import media_upload
 import transcribe
-from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
+from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry, validate_chat_target
 from errors import MEDIA_REFUSED_CODE, ToolError
 from phone import br_mobile_alternate, normalize_recipient, phone_digits
 
@@ -60,6 +60,7 @@ CHAT_POLICY = load_chat_policy()
 
 def _policy_denied(jid: str | None) -> str | None:
     """Denial message when the policy blocks jid, else None."""
+    validate_chat_target(jid)
     if CHAT_POLICY.allows(jid):
         return None
     return CHAT_POLICY.denial_message(jid)
@@ -2187,12 +2188,7 @@ def chat_jid_filter(
 
     aliases: list[str] = []
     for entry in entries:
-        if _JID_SEPARATORS.search(entry):
-            raise ToolError(
-                "invalid_argument",
-                f"{argument} takes one JID or a list of JIDs, not several joined into one string: "
-                f'pass {argument}=["a@s.whatsapp.net", "b@g.us"] (got {entry!r})',
-            )
+        _validate_chat_filter_entry(entry, argument)
         if require_allowed:
             _require_readable(entry)
         for alias in _chat_jid_aliases(entry):
@@ -2280,6 +2276,7 @@ class MessageFilters:
     mentions_me: bool = False
 
     def build(self, cur: sqlite3.Cursor) -> tuple[list[str], list[Any]]:
+        _validate_filter_identifiers(self.chat_jid, self.exclude_chat_jid, self.sender_phone_number)
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -2703,6 +2700,7 @@ def list_messages_page(
     Returns:
         PageResult: items (hits plus context rows), next_cursor, has_more.
     """
+    _validate_filter_identifiers(chat_jid, exclude_chat_jid, sender_phone_number)
     limit = page_size(limit, MESSAGES_MAX_LIMIT)
     page = page_number(page)
     cursor_state = decode_cursor(cursor, "messages")
@@ -2900,6 +2898,7 @@ def message_stats(
     A `query` is counted here exactly as it would be listed there — the ranking
     is what an aggregate drops, not the set of hits.
     """
+    _validate_filter_identifiers(chat_jid, exclude_chat_jid, sender_phone_number)
     if group_by not in MESSAGE_STATS_GROUPINGS:
         raise ToolError("invalid_argument", f"group_by must be one of {', '.join(MESSAGE_STATS_GROUPINGS)}")
     limit = page_size(limit, MAX_STATS_BUCKETS)
@@ -3789,6 +3788,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
     Returns:
         Message dictionary or None if no messages found
     """
+    _require_unambiguous_identifier(jid)
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         conn = _connect_messages_db()
@@ -4116,9 +4116,33 @@ def _require_allowed(jid: str | None) -> None:
         raise ToolError("denied", denied)
 
 
-def _require_unambiguous_identifier(identifier: str) -> None:
-    if (identifier or "").count("@") > 1:
-        raise ToolError("denied", CHAT_POLICY.denial_message(identifier))
+def _require_unambiguous_identifier(identifier: str | None) -> None:
+    validate_chat_target(identifier)
+
+
+def _validate_chat_filter_entry(entry: str, argument: str) -> None:
+    entry = entry.strip()
+    if not entry:
+        return
+    if _JID_SEPARATORS.search(entry):
+        raise ToolError(
+            "invalid_argument",
+            f"{argument} takes one JID or a list of JIDs, not several joined into one string: "
+            f'pass {argument}=["a@s.whatsapp.net", "b@g.us"] (got {entry!r})',
+        )
+    _require_unambiguous_identifier(entry)
+
+
+def _validate_filter_identifiers(
+    chat_jid: str | Sequence[str] | None,
+    exclude_chat_jid: str | Sequence[str] | None,
+    sender: str | None = None,
+) -> None:
+    _require_unambiguous_identifier(sender)
+    for argument, value in (("chat_jid", chat_jid), ("exclude_chat_jid", exclude_chat_jid)):
+        if value is not None:
+            for entry in [value] if isinstance(value, str) else value:
+                _validate_chat_filter_entry(str(entry), argument)
 
 
 def _require_readable(jid: str | None) -> None:
@@ -4130,6 +4154,7 @@ def _require_readable(jid: str | None) -> None:
     JIDs the list admits, by the SQL policy clause of each query. Writes keep
     `_require_allowed`: the bridge decides which number a send reaches.
     """
+    validate_chat_target(jid)
     if not _readable(jid):
         raise ToolError("denied", CHAT_POLICY.denial_message(jid))
 
@@ -6482,7 +6507,7 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
 
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
     """Show (or clear) the 'typing…' presence in a chat."""
-    target = (chat_jid or "").strip()
+    target = normalize_recipient((chat_jid or "").strip())
     if not target:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(target)

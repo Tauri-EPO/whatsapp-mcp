@@ -286,6 +286,10 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "message_id and chat_jid are required"})
 					continue
 				}
+				if strings.Count(item.ChatJID, "@") > 1 {
+					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "malformed chat target: more than one '@'"})
+					continue
+				}
 				if !b.Policy.Allows(item.ChatJID) {
 					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "chat not in " + chatPolicyEnv})
 					continue

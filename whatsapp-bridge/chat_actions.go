@@ -77,6 +77,13 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 			return
 		}
 
+		normalized, err := normalizePhoneRecipient(req.Recipient)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.Recipient = normalized
+
 		// Validate request
 		if req.Recipient == "" {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
@@ -98,7 +105,7 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 		// Send the chat presence update
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
-		err := client.SendChatPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
+		err = client.SendChatPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

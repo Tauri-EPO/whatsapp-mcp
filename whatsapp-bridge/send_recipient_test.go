@@ -388,9 +388,6 @@ func TestSendRefusesARecipientItCannotRead(t *testing.T) {
 		_, mux, sentTo := sendRecipientBridge(t, &mockLIDStore{}, ask)
 		rec := postSend(mux, recipient)
 		wantStatus, wantCode := http.StatusBadRequest, "invalid_argument"
-		if recipient == "+55 11 98888-7777x" {
-			wantStatus, wantCode = http.StatusForbidden, "denied"
-		}
 		if body := decodeAPIError(t, rec); rec.Code != wantStatus || body.Error.Code != wantCode {
 			t.Errorf("%q: status %d code %q, want %d %s", recipient, rec.Code, body.Error.Code, wantStatus, wantCode)
 		}

@@ -2680,7 +2680,7 @@ func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 	}
 }
 
-func TestMarkReadHandler_InvalidRequests_AreRefused(t *testing.T) {
+func TestMarkReadHandler_InvalidRequests_Are400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
 	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
@@ -2712,9 +2712,6 @@ func TestMarkReadHandler_InvalidRequests_AreRefused(t *testing.T) {
 			handler.ServeHTTP(resp, req)
 
 			wantStatus := http.StatusBadRequest
-			if tc.name == "invalid chat_jid" {
-				wantStatus = http.StatusForbidden
-			}
 			if resp.Code != wantStatus {
 				t.Errorf("body=%q: expected %d, got %d", tc.body, wantStatus, resp.Code)
 			}

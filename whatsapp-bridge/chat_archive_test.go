@@ -92,7 +92,7 @@ func TestArchiveFailures(t *testing.T) {
 	}{
 		{"bad JSON", `{`, true, false, false, false, 400},
 		{"missing flag", `{"chat_jid":"` + archiveTestChat + `"}`, true, false, false, false, 400},
-		{"bad JID", `{"chat_jid":"@","archived":true}`, true, false, false, false, 403},
+		{"bad JID", `{"chat_jid":"@","archived":true}`, true, false, false, false, 400},
 		{"disconnected", `{"chat_jid":"` + archiveTestChat + `","archived":true}`, false, false, false, false, 503},
 		{"no anchor", `{"chat_jid":"` + archiveTestChat + `","archived":true}`, true, false, false, false, 404},
 		{"resolve failure", `{"chat_jid":"` + archiveTestChat + `","archived":true}`, true, true, true, false, 400},

@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -105,7 +106,11 @@ func (p chatPolicy) Allows(target string) bool {
 // parse first: ParseJID discards extra @ parts, and String hides an empty user.
 func authorizeChat(w http.ResponseWriter, policy chatPolicy, raw string, allowPhone bool) (types.JID, bool) {
 	if strings.Count(raw, "@") > 1 {
-		writeError(w, http.StatusForbidden, "malformed chat target: more than one '@'")
+		writeError(w, http.StatusBadRequest, "malformed chat target: more than one '@'")
+		return types.EmptyJID, false
+	}
+	if allowPhone && !strings.Contains(raw, "@") && !isPhoneDigits(raw) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%q is not a phone number: use the country code and ASCII digits, or a digits-only @s.whatsapp.net JID", raw))
 		return types.EmptyJID, false
 	}
 	var jid types.JID
@@ -120,7 +125,11 @@ func authorizeChat(w http.ResponseWriter, policy chatPolicy, raw string, allowPh
 		return types.EmptyJID, false
 	}
 	if jid.User == "" || jid.Server == "" {
-		writeError(w, http.StatusForbidden, "malformed chat target: a user and server are required")
+		writeError(w, http.StatusBadRequest, "malformed chat target: a user and server are required")
+		return types.EmptyJID, false
+	}
+	if strings.ContainsAny(jid.User, ":.") {
+		writeError(w, http.StatusBadRequest, "Invalid chat JID: malformed user")
 		return types.EmptyJID, false
 	}
 	if rejectByChatPolicy(w, policy, jid.String()) {
@@ -141,11 +150,10 @@ func (p chatPolicy) Summary() string {
 		return chatPolicyEnv + " unset: all chats allowed"
 	}
 	n := len(p.exact)
-	invalid := 0
+	invalid := len(p.invalidPositions)
 	for entry := range p.exact {
 		if strings.Count(entry, "@") > 1 {
 			n--
-			invalid++
 		}
 	}
 	parts := []string{}
@@ -167,10 +175,6 @@ func (p chatPolicy) Summary() string {
 func rejectByChatPolicy(w http.ResponseWriter, policy chatPolicy, target string) bool {
 	if policy.Allows(target) {
 		return false
-	}
-	if strings.Count(target, "@") > 1 {
-		writeError(w, http.StatusForbidden, "malformed chat target: more than one '@'")
-		return true
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)

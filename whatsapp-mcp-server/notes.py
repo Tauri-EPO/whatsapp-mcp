@@ -149,6 +149,7 @@ def _allowed(jid: str) -> bool:
 
 
 def _require_allowed(jid: str) -> None:
+    whatsapp._require_unambiguous_identifier(jid)
     if not _allowed(jid):
         # The caller's spelling, not the resolved one: it never supplied that.
         raise ToolError("denied", CHAT_POLICY.denial_message(jid))

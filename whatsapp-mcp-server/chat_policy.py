@@ -22,8 +22,16 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from errors import ToolError
+
 ENV_VAR = "WHATSAPP_ALLOWED_CHATS"
 DEFAULT_USER_SERVER = "s.whatsapp.net"
+MALFORMED_TARGET = "Malformed chat target: more than one '@'"
+
+
+def validate_chat_target(jid: str | None) -> None:
+    if (jid or "").count("@") > 1:
+        raise ToolError("invalid_argument", MALFORMED_TARGET)
 
 
 def normalize_chat_entry(raw: str) -> str:
@@ -47,6 +55,7 @@ class ChatPolicy:
     exact: frozenset[str]
     servers: frozenset[str]  # from "*@server" wildcards
     restricted: bool
+    invalid_positions: tuple[int, ...] = ()
 
     @classmethod
     def unrestricted(cls) -> ChatPolicy:
@@ -56,7 +65,10 @@ class ChatPolicy:
     def from_entries(cls, entries: list[str]) -> ChatPolicy:
         exact: set[str] = set()
         servers: set[str] = set()
-        for entry in entries:
+        invalid: list[int] = []
+        for index, entry in enumerate(entries, 1):
+            if entry.count("@") > 1:
+                invalid.append(index)
             normalized = normalize_chat_entry(entry)
             if not normalized:
                 continue
@@ -67,7 +79,9 @@ class ChatPolicy:
                 exact.add(normalized)
         if not exact and not servers:
             return cls.unrestricted()
-        return cls(exact=frozenset(exact), servers=frozenset(servers), restricted=True)
+        return cls(
+            exact=frozenset(exact), servers=frozenset(servers), restricted=True, invalid_positions=tuple(invalid)
+        )
 
     def allows(self, jid: str | None) -> bool:
         if (jid or "").count("@") > 1:
@@ -101,16 +115,18 @@ class ChatPolicy:
 
     def denial_message(self, jid: str | None) -> str:
         if (jid or "").count("@") > 1:
-            return "Malformed chat target: more than one '@'"
+            return MALFORMED_TARGET
         return f"Chat {jid!r} is not in {ENV_VAR}; this server is restricted to an allow-list of conversations"
+
+    def warn_invalid_entries(self) -> None:
+        if self.invalid_positions:
+            logging.getLogger("whatsapp_mcp").warning(
+                "%s: malformed entries at positions %s are retained as refused literals",
+                ENV_VAR,
+                list(self.invalid_positions),
+            )
 
 
 def load_chat_policy(env: Mapping[str, str] | None = None) -> ChatPolicy:
     source: Mapping[str, str] = os.environ if env is None else env
-    raw = source.get(ENV_VAR, "")
-    invalid = [index for index, item in enumerate(raw.split(","), 1) if item.count("@") > 1]
-    if invalid:
-        logging.getLogger("whatsapp_mcp").warning(
-            "%s: malformed entries at positions %s are retained as refused literals", ENV_VAR, invalid
-        )
-    return ChatPolicy.from_entries([item for item in raw.split(",") if item.strip()])
+    return ChatPolicy.from_entries(source.get(ENV_VAR, "").split(","))
