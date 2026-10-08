@@ -74,10 +74,9 @@ type SendMessageRequest struct {
 	Mentions []string `json:"mentions,omitempty"`
 }
 
-// classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
-// type, persist-side category). Single source of truth for the upload path
-// (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
-// (which stores the short category string).
+// classifyMediaPath maps the caller filename to the default upload type, MIME
+// and persisted category. /api/send keeps these values. Forwarding cached
+// images/videos can correct MIME within that category via classifySendMedia.
 func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
 	switch ext {
@@ -353,9 +352,26 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	return resolved
 }
 
-// Function to send a WhatsApp message
+// messageSendNetwork isolates connection/upload/send I/O for the real sender.
+// Phone recipients still use client.GetUserInfo on a LID-map miss; tests using
+// this seam need a group recipient or a locally mapped phone recipient.
+type messageSendNetwork struct {
+	connected func() bool
+	upload    func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+	send      func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error)
+}
+
 func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
-	if !client.IsConnected() {
+	network := messageSendNetwork{connected: client.IsConnected, upload: client.Upload,
+		send: func(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
+			return client.SendMessage(ctx, to, msg)
+		},
+	}
+	return sendWhatsAppMessageWithNetwork(ctx, client, messageStore, persist, recipient, message, mediaPath, quotedMsgID, quotedSenderJID, quotedContent, mentions, network)
+}
+
+func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string, network messageSendNetwork) (bool, string, sentMessage) {
+	if !network.connected() {
 		return false, notConnectedMessage, sentMessage{}
 	}
 
@@ -397,10 +413,10 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
 		}
 
-		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
+		mediaType, mimeType, _ := classifySendMedia(ctx, mediaPath, mediaData)
 
 		// Upload media to WhatsApp servers
-		upload, err = client.Upload(ctx, mediaData, mediaType)
+		upload, err = network.upload(ctx, mediaData, mediaType)
 		if err != nil {
 			return false, fmt.Sprintf("Error uploading media: %v", err), sentMessage{}
 		}
@@ -431,7 +447,7 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 	}
 
 	// Send message
-	resp, err := client.SendMessage(ctx, recipientJID, msg)
+	resp, err := network.send(ctx, recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err), sentMessage{}

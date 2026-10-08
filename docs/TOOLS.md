@@ -1042,6 +1042,13 @@ A disconnected bridge answers HTTP 500, "Not connected to WhatsApp", before
 downloading any media. Registration, media retrieval and sending share the
 forward's 60-second budget; registration also keeps its shorter timeout.
 
+Forwarded cached images/videos use byte detection within their original upload
+category: JPEG/PNG/GIF/WebP and MP4/QuickTime/AVI. Their category names
+(`.jpg`/`.mp4`) stay unchanged for download and purge. MOV without a leading
+QuickTime `ftyp`, HEIC, AVIF and 3GP are not recognised and keep the category
+default. `/api/send` keeps the MIME implied by the caller filename, including
+files prepared from `media_base64` or `upload_id`; its dry-run preview agrees.
+
 An unsafe media identity answers `media_refused`; missing bytes or download
 fields answer `media_unavailable`. Do not retry those permanent media failures.
 `bridge_unavailable` remains the temporary bridge/CDN failure to retry later.
