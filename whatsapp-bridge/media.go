@@ -152,8 +152,11 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	}
 
 	// Check if this is a media message
-	if mediaType != "image" && mediaType != "video" && mediaType != "audio" && mediaType != "document" && mediaType != "sticker" {
+	if mediaType == "" || mediaType == "location" {
 		return false, "", "", "", fmt.Errorf("not a media message")
+	}
+	if mediaType != "image" && mediaType != "video" && mediaType != "audio" && mediaType != "document" && mediaType != "sticker" {
+		return false, "", "", "", fmt.Errorf("unsupported media type: %s", mediaType)
 	}
 
 	filename := mediaFileName(mediaType, timestamp, messageID, originalName.String)

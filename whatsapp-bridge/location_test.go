@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -198,5 +200,56 @@ func TestForwardLocationRefusedBeforeRemoteEffects(t *testing.T) {
 	handleForwardMessage(deps, chatPolicy{})(w, r)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "cannot forward a location") {
 		t.Fatalf("forward response=%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestLocationLIDMigrationPreservesFieldsAndUpdates(t *testing.T) {
+	ms := newTestMessageStore(t)
+	stamp := time.Unix(1772359200, 0)
+	if err := ms.EnsureChat("111@lid", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	m := &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{DegreesLatitude: proto.Float64(0.25), DegreesLongitude: proto.Float64(0.5), Caption: proto.String("Park — East"),
+		ContextInfo: &waE2E.ContextInfo{StanzaID: proto.String("Q1"), MentionedJID: []string{phonePN.String()}},
+	}}
+	if err := persistMessage(ms, "LOCATION", "111@lid", "111@lid", stamp, false, extractMessage(m, stamp, "LOCATION"), true, testLogger()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.db.Exec("UPDATE messages SET deleted_at=?, view_once=1, target_message_id='TARGET' WHERE id='LOCATION'", dbTime(stamp)); err != nil {
+		t.Fatal(err)
+	}
+	var original string
+	if err := ms.db.QueryRow("SELECT location FROM messages WHERE id='LOCATION'").Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "whatsapp.db")
+	waDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = waDB.Close() }()
+	if _, err := waDB.Exec("CREATE TABLE whatsmeow_lid_map(lid TEXT PRIMARY KEY,pn TEXT NOT NULL); INSERT INTO whatsmeow_lid_map VALUES('111','222')"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(path, testLogger()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var raw, quote, mentions, target string
+	var deleted sql.NullTime
+	var viewOnce bool
+	if err := ms.db.QueryRow("SELECT location, quoted_message_id, mentions, deleted_at, view_once, target_message_id FROM messages WHERE id='LOCATION' AND chat_jid='222@s.whatsapp.net'").Scan(&raw, &quote, &mentions, &deleted, &viewOnce, &target); err != nil {
+		t.Fatal(err)
+	}
+	if raw != original || quote != "Q1" || mentions != phonePN.User || !deleted.Valid || !deleted.Time.Equal(stamp) || !viewOnce || target != "TARGET" {
+		t.Fatalf("migration dropped metadata: %q %q %q %v %v %q", raw, quote, mentions, deleted, viewOnce, target)
+	}
+	if matched, err := ms.UpdateLiveLocation("LOCATION", "222@s.whatsapp.net", &messageLocation{Live: true, Latitude: proto.Float64(0.75), Longitude: proto.Float64(0.5), Sequence: proto.Int64(1)}); err != nil || !matched {
+		t.Fatalf("migrated live key no longer updates: %v %v", matched, err)
+	}
+	var lat float64
+	if err := ms.db.QueryRow("SELECT json_extract(location,'$.latitude') FROM messages WHERE id='LOCATION'").Scan(&lat); err != nil || lat != 0.75 {
+		t.Fatalf("position=%v err=%v", lat, err)
 	}
 }
