@@ -8,6 +8,7 @@ package main
 // without holding the write lock for an entire conversation.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -113,7 +114,8 @@ const insertMessageSQL = `INSERT INTO messages
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
 type messageBatch struct {
-	tx      *sql.Tx
+	tx      *contextTransaction
+	ctx     context.Context
 	stmt    *sql.Stmt
 	failure error // first failed write; never issue more SQL after a possible rollback
 }
@@ -121,16 +123,22 @@ type messageBatch struct {
 // Batch runs fn inside a transaction with a prepared message insert and
 // commits when fn and every write succeed (rolls back otherwise).
 func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
-	tx, err := store.db.Begin()
+	return store.BatchContext(context.Background(), fn)
+}
+
+// BatchContext retains the normal transaction/replay contract while allowing
+// peer imports to cancel connection waits and every statement on shutdown.
+func (store *MessageStore) BatchContext(ctx context.Context, fn func(b *messageBatch) error) error {
+	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin batch: %w", err)
 	}
-	stmt, err := tx.Prepare(insertMessageSQL)
+	stmt, err := tx.PrepareContext(ctx, insertMessageSQL)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("prepare batch insert: %w", err)
 	}
-	b := &messageBatch{tx: tx, stmt: stmt}
+	b := &messageBatch{tx: &contextTransaction{Tx: tx, ctx: ctx}, ctx: ctx, stmt: stmt}
 	err = fn(b)
 	if err == nil {
 		err = b.failure
@@ -145,6 +153,28 @@ func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	return nil
+}
+
+type contextTransaction struct {
+	*sql.Tx
+	ctx context.Context
+}
+
+func (tx *contextTransaction) Exec(query string, args ...any) (sql.Result, error) {
+	return tx.ExecContext(tx.ctx, query, args...)
+}
+
+func (tx *contextTransaction) QueryRow(query string, args ...any) *sql.Row {
+	return tx.QueryRowContext(tx.ctx, query, args...)
+}
+
+type contextExecer struct {
+	db  *sql.DB
+	ctx context.Context
+}
+
+func (ex contextExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return ex.db.ExecContext(ex.ctx, query, args...)
 }
 
 // SQLite can roll back a transaction on a write error without invalidating
@@ -165,7 +195,7 @@ func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timesta
 		return nil
 	}
 	return b.write(func() error {
-		_, err := b.stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
+		_, err := b.stmt.ExecContext(b.ctx, messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
 			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
 		return err
 	})

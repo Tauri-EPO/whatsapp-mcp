@@ -262,6 +262,10 @@ func ownUsers(client *whatsmeow.Client) selfUsers {
 // unknown number (or a broadcast list we post to) would be named after our own
 // number, which reads as a real name and never heals (issue #448).
 func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, chatJID string, conversation *waHistorySync.Conversation, sender string, allowNetwork bool, logger waLog.Logger) string {
+	return getChatNameContext(context.Background(), client, store, jid, chatJID, conversation, sender, allowNetwork, logger)
+}
+
+func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *MessageStore, jid types.JID, chatJID string, conversation *waHistorySync.Conversation, sender string, allowNetwork bool, logger waLog.Logger) string {
 	if store != nil {
 		if name, ok := store.names.get(chatJID); ok {
 			return name
@@ -276,7 +280,7 @@ func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, c
 	// Already resolved in a previous run.
 	if store != nil && store.db != nil {
 		var existing string
-		if err := store.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existing); err == nil {
+		if err := store.db.QueryRowContext(ctx, "SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existing); err == nil {
 			existing = strings.TrimSpace(existing)
 			if existing != "" && !isPlaceholderName(existing, jid, self) {
 				store.names.put(chatJID, existing)

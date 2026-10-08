@@ -76,6 +76,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 		defer b.queueHistoryShares(historySync.Data)
 	}
 	writeBatch := messageStore.Batch
+	if preserveExisting {
+		writeBatch = func(write func(*messageBatch) error) error { return messageStore.BatchContext(ctx, write) }
+	}
 	if b.historyBatchWriter != nil {
 		writeBatch = b.historyBatchWriter
 	}
@@ -106,7 +109,11 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 
 		// Get appropriate chat name by passing the history sync conversation directly
 		// History sync never fetches group metadata (see chat_names.go).
-		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", false, logger)
+		nameContext := context.Background()
+		if preserveExisting {
+			nameContext = ctx
+		}
+		name := getChatNameContext(nameContext, client, messageStore, resolved, chatJID, conversation, "", false, logger)
 
 		// Process messages
 		messages := conversation.Messages
@@ -132,6 +139,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			markRead := !preserveExisting && conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
 			if err := retry(func() error {
+				if preserveExisting {
+					return storeChatWith(contextExecer{db: messageStore.db, ctx: ctx}, chatJID, name, time.Time{})
+				}
 				return messageStore.EnsureChat(chatJID, name)
 			}); err != nil {
 				if stopping() {
@@ -140,12 +150,14 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				b.noteHistoryLoss(messages, timestamp, chatJID, err)
 				continue
 			}
-			if err := messageStore.UpdateChatEphemeralSettings(
-				chatJID,
-				conversation.GetEphemeralExpiration(),
-				conversation.GetEphemeralSettingTimestamp(),
-			); err != nil {
-				logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
+			if !preserveExisting {
+				if err := messageStore.UpdateChatEphemeralSettings(
+					chatJID,
+					conversation.GetEphemeralExpiration(),
+					conversation.GetEphemeralSettingTimestamp(),
+				); err != nil {
+					logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
+				}
 			}
 
 			// Poll votes are decoded after the loop so the poll rows exist
@@ -341,7 +353,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				b.historyVotes.Add(1)
 				go func(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo) {
 					defer b.historyVotes.Done()
-					b.storeHistoryPollVotes(chat, chatJID, votes, nil)
+					b.storeHistoryPollVotes(chat, chatJID, votes, nil, historyVoteMarkers{name: name, read: markRead})
 				}(resolved, chatJID, pendingVotes)
 			}
 		}

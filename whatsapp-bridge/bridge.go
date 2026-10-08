@@ -319,17 +319,19 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.cancel()
 	b.stopConnectionEvents()
-	// Seal submission and join peer imports before main may close the store.
-	// The job deadline and cancelled SDK context bound this independent worker.
+	// Seal submission before the bounded drain joins cancelled peer imports.
 	b.historyShareMu.Lock()
 	b.historyShareStopped = true
 	shares := b.historyShares
 	b.historyShareMu.Unlock()
 	if shares != nil {
-		shares.stop()
+		shares.seal()
 	}
 	done := make(chan struct{})
 	go func() {
+		if shares != nil {
+			shares.stop()
+		}
 		b.historyVotes.Wait()
 		// Media transfers outlive the request that started them, so they are
 		// waited on here too: the lifecycle context above already aborted them
@@ -347,6 +349,6 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		b.Log.Warnf("Timed out waiting for history poll votes, media transfers and the session keepalive; exiting anyway")
+		b.Log.Warnf("Timed out waiting for shared history, history poll votes, media transfers and the session keepalive; exiting anyway")
 	}
 }

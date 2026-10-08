@@ -87,10 +87,14 @@ func (q *historyShareQueue) work(job historyShareJob) {
 // stop prevents a new WaitGroup Add before joining the worker. Bridge cancels
 // the lifecycle context first, so SDK HTTP and import checks can finish.
 func (q *historyShareQueue) stop() {
+	q.seal()
+	q.wg.Wait()
+}
+
+func (q *historyShareQueue) seal() {
 	q.mu.Lock()
 	q.closed = true
 	q.mu.Unlock()
-	q.wg.Wait()
 }
 
 func (q *historyShareQueue) idleSignal() <-chan struct{} {
