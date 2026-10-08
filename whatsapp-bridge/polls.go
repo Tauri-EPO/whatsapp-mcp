@@ -318,12 +318,12 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 		}
 	}()
 	for _, web := range votes {
-		evt, err := b.Client.ParseWebMessage(chat, web)
+		evt, err := b.currentClient().ParseWebMessage(chat, web)
 		if err != nil {
 			b.Log.Warnf("Could not parse history poll vote %s: %v", web.GetKey().GetID(), err)
 			continue
 		}
-		resolvedSender := resolveUserJID(b.Client, evt.Info.Sender, types.EmptyJID)
+		resolvedSender := resolveUserJID(b.currentClient(), evt.Info.Sender, types.EmptyJID)
 		sender := resolvedSender.User
 		for attempt := 0; ; attempt++ {
 			pollID, names, derr := decodePollVote(context.Background(), b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)

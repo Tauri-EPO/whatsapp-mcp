@@ -398,14 +398,14 @@ func (b *Bridge) sendBackend() sendFunc {
 func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersistence, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	network := messageSendNetwork{connected: b.Connected, upload: b.uploadMedia, send: b.sendMessage}
 	if network.upload == nil {
-		network.upload = b.Client.Upload
+		network.upload = b.currentClient().Upload
 	}
 	if network.send == nil {
 		network.send = func(ctx context.Context, jid types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
-			return b.Client.SendMessage(ctx, jid, msg)
+			return b.currentClient().SendMessage(ctx, jid, msg)
 		}
 	}
-	return sendWhatsAppMessageWithNetwork(ctx, b.Client, b.Store, persist, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions, network)
+	return sendWhatsAppMessageWithNetwork(ctx, b.currentClient(), b.Store, persist, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions, network)
 }
 
 // messageSendNetwork isolates connection/upload/send I/O for the real sender.
@@ -544,7 +544,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 // chat, and returns the chat JID they were stored under. client.Store.ID must
 // be set (a paired client).
 func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content string, media outboundMedia, quotedMsgID string) (string, error) {
-	client, messageStore := b.Client, b.Store
+	client, messageStore := b.currentClient(), b.Store
 	// Normalize @lid recipients to phone JID so outbound rows land in
 	// the same chat row as inbound (which handleMessage normalizes via
 	// resolveLIDChat). Otherwise sending to an @lid input would
@@ -983,7 +983,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	lookupCtx, cancel := context.WithTimeout(ctx, recipientLookupTimeout)
 	defer cancel()
 	registered, err := canonicalRecipientJID(lookupCtx, func(ctx context.Context, jid types.JID) (types.JID, error) {
-		return lookupAltJID(ctx, b.Client, jid)
+		return lookupAltJID(ctx, b.currentClient(), jid)
 	}, b.queryRegisteredNumber, recipient)
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):

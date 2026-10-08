@@ -84,7 +84,7 @@ type presenceSender func(ctx context.Context, state types.Presence) error
 // SessionKeepalive <= 0 disables it.
 func (b *Bridge) startSessionKeepalive() {
 	// Capture pairing before the goroutine starts: pairing can change Store.ID.
-	unpaired := b.Client != nil && b.Client.Store.ID == nil
+	unpaired := !b.isPaired()
 	if unpaired && b.StoreRoot != nil {
 		if err := b.StoreRoot.Remove(sessionKeepaliveFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			b.Log.Warnf("Session keepalive: could not discard the previous pairing's timestamp: %v", err)
@@ -119,14 +119,18 @@ func (b *Bridge) startSessionKeepalive() {
 func (b *Bridge) runSessionKeepalive(lastBlip time.Time, reason string) {
 	send := b.sessionPresence
 	if send == nil {
-		if b.Client == nil {
+		if b.currentClient() == nil {
 			return
 		}
-		send = b.Client.SendPresence
+		send = func(ctx context.Context, presence types.Presence) error {
+			return b.currentClient().SendPresence(ctx, presence)
+		}
 	}
 	ready := b.sessionReady
 	if ready == nil {
-		ready = func() bool { return b.Client != nil && b.Client.IsConnected() && b.Client.IsLoggedIn() }
+		ready = func() bool {
+			return b.currentClient() != nil && b.currentClient().IsConnected() && b.currentClient().IsLoggedIn()
+		}
 	}
 	clock := b.sessionNow
 	if clock == nil {

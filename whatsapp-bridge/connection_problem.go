@@ -20,9 +20,14 @@ const connectionProblemFile = ".connection-problem"
 type connectionProblemLogger struct {
 	waLog.Logger
 	bridge *Bridge
+	active func() bool
 }
 
 func (l connectionProblemLogger) Warnf(format string, args ...any) {
+	if l.active != nil && !l.active() {
+		l.Logger.Warnf(format, args...)
+		return
+	}
 	if format == "Got %d/%s connect failure, assuming automatic reconnect will handle it" && len(args) == 2 {
 		if code, ok := args[0].(int); ok && (code == 500 || code == 503) {
 			l.bridge.recordConnectionProblem(code, 0, 0)
@@ -34,7 +39,7 @@ func (l connectionProblemLogger) Warnf(format string, args ...any) {
 }
 
 func (l connectionProblemLogger) Sub(module string) waLog.Logger {
-	return connectionProblemLogger{Logger: l.Logger.Sub(module), bridge: l.bridge}
+	return connectionProblemLogger{Logger: l.Logger.Sub(module), bridge: l.bridge, active: l.active}
 }
 
 type ConnectionProblem struct {
@@ -88,6 +93,22 @@ func (b *Bridge) connectionSnapshot() (*ConnectionProblem, string) {
 	return b.connectionProblem, b.pairingState
 }
 
+func (b *Bridge) connectionWaitSnapshot() (*ConnectionProblem, string, <-chan struct{}) {
+	b.connectionMu.Lock()
+	defer b.connectionMu.Unlock()
+	if b.connectionChanged == nil {
+		b.connectionChanged = make(chan struct{})
+	}
+	return b.connectionProblem, b.pairingState, b.connectionChanged
+}
+
+func (b *Bridge) connectionChangedLocked() {
+	if b.connectionChanged != nil {
+		close(b.connectionChanged)
+	}
+	b.connectionChanged = make(chan struct{})
+}
+
 func (b *Bridge) connectionNow() time.Time {
 	if b.problemNow != nil {
 		return b.problemNow()
@@ -105,6 +126,7 @@ func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration)
 		return b.connectionProblem
 	}
 	b.connectionProblem = next
+	b.connectionChangedLocked()
 	if code == 402 && b.metrics != nil {
 		b.metrics.mu.Lock()
 		if b.metrics.tempBans == nil {
@@ -146,11 +168,13 @@ func (b *Bridge) clearConnectionProblem() {
 	}
 	b.connectionProblem, b.pairingState = nil, ""
 	b.problemPersistenceFailed = false
+	b.connectionChangedLocked()
 }
 
 func (b *Bridge) setPairingState(state string) {
 	b.connectionMu.Lock()
 	b.pairingState = state
+	b.connectionChangedLocked()
 	b.connectionMu.Unlock()
 	if state != "" {
 		b.notifyConnection("pairing_required", state, true, false)
@@ -168,7 +192,7 @@ func (b *Bridge) waitConnectionAllowedContext(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		p, state := b.connectionSnapshot()
+		p, state, changed := b.connectionWaitSnapshot()
 		b.connectionMu.Lock()
 		if b.problemPersistenceFailed && b.connectionProblem.restrictsAccount() && b.StoreRoot != nil {
 			b.persistConnectionProblemLocked()
@@ -178,6 +202,9 @@ func (b *Bridge) waitConnectionAllowedContext(ctx context.Context) error {
 		if failed {
 			timer := time.NewTimer(time.Second)
 			select {
+			case <-changed:
+				timer.Stop()
+				continue
 			case <-ctx.Done():
 				timer.Stop()
 				return ctx.Err()
@@ -187,8 +214,15 @@ func (b *Bridge) waitConnectionAllowedContext(ctx context.Context) error {
 		}
 		blocked := state != "" || p != nil && (p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
 		if blocked {
-			<-ctx.Done()
-			return ctx.Err()
+			if b.connectionBlocked != nil {
+				b.connectionBlocked()
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-changed:
+				continue
+			}
 		}
 		if p == nil || p.ExpiresAt == nil || !b.connectionNow().Before(*p.ExpiresAt) {
 			return nil
@@ -201,6 +235,8 @@ func (b *Bridge) waitConnectionAllowedContext(ctx context.Context) error {
 		} else {
 			timer := time.NewTimer(wait)
 			select {
+			case <-changed:
+				timer.Stop()
 			case <-timer.C:
 			case <-ctx.Done():
 				timer.Stop()

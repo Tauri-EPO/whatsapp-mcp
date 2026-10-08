@@ -352,4 +352,20 @@ if [ "$PAIRED" = "yes" ]; then
   exit 0
 fi
 echo "Stack is up but WhatsApp is not paired yet: run 'docker compose logs -f bridge' and scan the QR code."
+if bridge_exec printenv WHATSAPP_OPERATOR_BIND >/dev/null 2>&1; then
+  operator_state=$(bridge_exec sh -c '
+    [ -n "$WHATSAPP_OPERATOR_BIND" ] || { echo disabled; exit 0; }
+    token=$WHATSAPP_OPERATOR_TOKEN
+    [ -z "$WHATSAPP_OPERATOR_TOKEN_FILE" ] || token=$(cat "$WHATSAPP_OPERATOR_TOKEN_FILE")
+    wget -Y off -qO- --header "Authorization: Bearer $token" \
+      "http://$WHATSAPP_OPERATOR_BIND:${WHATSAPP_OPERATOR_PORT:-8090}/operator/v1/pairing" 2>/dev/null \
+      | sed -n "s/.*\"state\":\"\([a-z_]*\)\".*/\1/p"
+  ' </dev/null) || operator_state=unavailable
+  case "$operator_state" in
+    starting|awaiting_qr|code_issued|paired|connected|expired|logged_out|passkey_required|passkey_submitted|passkey_confirm|passkey_failed)
+      echo "Operator pairing state: $operator_state (GET /operator/v1/pairing)" ;;
+    disabled) ;;
+    *) echo "Operator pairing state unavailable; check the private listener and token." ;;
+  esac
+fi
 exit 2

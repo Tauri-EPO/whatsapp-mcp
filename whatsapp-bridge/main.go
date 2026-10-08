@@ -119,6 +119,27 @@ func runBridge(cfg bridgeConfig) int {
 	}
 	defer lock.Release()
 
+	// Only filesystem operations remain: all environment values were checked.
+	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
+	if tokErr != nil {
+		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
+		return 1
+	}
+	if err := cfg.Operator.refuseBridgeToken(bridgeToken); err != nil {
+		logger.Errorf("Refusing to start: %v", err)
+		return 1
+	}
+	// Print the one-time setup banner immediately, before binding REST or attempting to
+	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
+	// disk as soon as it generated one; if the banner instead waited until
+	// after a successful connection (as it used to), a QR-pairing timeout or
+	// early exit would leave a token on disk that was never shown to the
+	// user — and loadOrCreateBridgeToken() would report fresh=false on every
+	// later run, so the banner would never get a second chance to print it.
+	if fresh {
+		printTokenBanner(bridgeToken, cfg.Port)
+	}
+
 	// The session keys live here: owner-only before whatsmeow creates or opens it.
 	privateDatabase(whatsmeowDBPath())
 	sessionDB, err := openSessionDB()
@@ -198,9 +219,7 @@ func runBridge(cfg bridgeConfig) int {
 		logger.Errorf("Failed to initialize message store: %v", err)
 		return 1
 	}
-	messageStore.groupInfo = client.GetGroupInfo
 	defer func() { _ = messageStore.Close() }()
-	defer client.Disconnect()
 
 	if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs(whatsmeowDBPath(), logger); err != nil {
 		logger.Errorf("Failed to migrate legacy LID chat rows: %v", err)
@@ -228,23 +247,6 @@ func runBridge(cfg bridgeConfig) int {
 		logger.Infof("Reset %d chats that were named after our own number", renamed)
 	}
 
-	// Only filesystem operations remain: all environment values were checked.
-	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
-	if tokErr != nil {
-		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
-		return 1
-	}
-	// Print the one-time setup banner immediately, before binding REST or attempting to
-	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
-	// disk as soon as it generated one; if the banner instead waited until
-	// after a successful connection (as it used to), a QR-pairing timeout or
-	// early exit would leave a token on disk that was never shown to the
-	// user — and loadOrCreateBridgeToken() would report fresh=false on every
-	// later run, so the banner would never get a second chance to print it.
-	if fresh {
-		printTokenBanner(bridgeToken, cfg.Port)
-	}
-
 	mediaRoots, err := resolveMediaRootsValue(cfg.MediaRoots, false)
 	if err != nil {
 		logger.Errorf("Failed to resolve media roots: %v", err)
@@ -254,9 +256,10 @@ func runBridge(cfg bridgeConfig) int {
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
 	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
-	client.EnableAutoReconnect = false // All dials must respect the persisted connection problem.
-	client.DisableLoginAutoReconnect = true
-	client.Log = connectionProblemLogger{Logger: client.Log, bridge: bridge}
+	reconnectChan := make(chan bool, 1)
+	bridge.bindRuntimeClient()
+	bridge.installClient(client, client.Store.ID != nil, reconnectChan)
+	defer func() { bridge.Disconnect() }()
 	bridge.connectionProblem, err = readConnectionProblem(storeRoot)
 	if err != nil {
 		logger.Errorf("Refusing to connect with unreadable saved connection state: %v", err)
@@ -268,6 +271,25 @@ func runBridge(cfg bridgeConfig) int {
 	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)
+	pairingOut := io.Writer(os.Stdout)
+	if !cfg.PairingStdout {
+		pairingOut = io.Discard
+	}
+	if cfg.Operator.Bind != "" {
+		bridge.operatorPairing = newOperatorPairing(bridge.ctx, bridge, client, func() (operatorPairingClient, error) {
+			// Only an explicitly unpaired restart reaches this factory. Deleted
+			// SDK clients cannot be reused, and old QR contexts cannot disconnect
+			// this new client's socket.
+			freshClient := whatsmeow.NewClient(container.NewDevice(), clientLog)
+			bridge.installClient(freshClient, false, reconnectChan)
+			return freshClient, nil
+		}, bridge.isPaired, bridge.Connected, pairingOut)
+		bridge.operatorServer, err = startOperatorServer(cfg.Operator, bridge.operatorPairing.routes(), logger)
+		if err != nil {
+			logger.Errorf("Failed to start operator listener: %v", err)
+			return 1
+		}
+	}
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
 	bridge.Exit = func(reason string, code int) {
@@ -297,43 +319,43 @@ func runBridge(cfg bridgeConfig) int {
 	go bridge.runGroupRosterSync()
 	bridge.startSessionKeepalive()
 
-	// Channel to signal reconnection needs
-	reconnectChan := make(chan bool, 1)
-
-	// Setup event handling for messages and history sync
-	client.AddEventHandler(func(evt interface{}) { bridge.handleEvent(evt, reconnectChan) })
-	if client.Store.ID == nil {
+	if !bridge.isPaired() {
 		bridge.notifyConnection("pairing_required", "unpaired", true, false)
+	}
+	if bridge.operatorPairing != nil {
+		bridge.operatorPairing.start()
 	}
 
 	// Connect, or pair over QR on a fresh store. Each attempt has its own
 	// deadline; a rotated-code timeout starts the next attempt at once
 	// (pairing.go). The signal context aborts pairing while the bridge lifecycle
 	// remains alive until Shutdown drains accepted REST requests.
-	if err := connectOrPair(exitCtx, client, client.Store.ID != nil, pairingOptions{
-		attempts:          3,
-		attemptTimeout:    5 * time.Minute,
-		retryDelay:        5 * time.Second,
-		out:               os.Stdout,
-		log:               logger,
-		beforeDial:        func() error { return bridge.waitConnectionAllowedContext(exitCtx) },
-		connectionContext: bridge.ctx,
-		state: func(state string) {
-			bridge.setPairingState(state)
-			if state == "" {
-				bridge.notifyConnection("paired", "pairing_succeeded", true, false)
+	if bridge.operatorPairing == nil {
+		if err := connectOrPair(exitCtx, client, bridge.isPaired(), pairingOptions{
+			attempts:          3,
+			attemptTimeout:    5 * time.Minute,
+			retryDelay:        5 * time.Second,
+			out:               pairingOut,
+			log:               logger,
+			beforeDial:        func() error { return bridge.waitConnectionAllowedContext(exitCtx) },
+			connectionContext: bridge.ctx,
+			state: func(state string) {
+				bridge.setPairingState(state)
+				if state == "" {
+					bridge.notifyConnection("paired", "pairing_succeeded", true, false)
+				}
+			},
+		}); err != nil {
+			if errors.Is(err, context.Canceled) && exitCtx.Err() != nil {
+				logger.Infof("Shutting down during connection startup")
+				return 0
 			}
-		},
-	}); err != nil {
-		if errors.Is(err, context.Canceled) && exitCtx.Err() != nil {
-			logger.Infof("Shutting down during connection startup")
-			return 0
+			if !errors.Is(err, errPairingOperator) {
+				logger.Errorf("%v", err)
+				return 1
+			}
+			logger.Warnf("%v", err)
 		}
-		if !errors.Is(err, errPairingOperator) {
-			logger.Errorf("%v", err)
-			return 1
-		}
-		logger.Warnf("%v", err)
 	}
 
 	// Authentication can still need the queued 515 handshake. Consume it in

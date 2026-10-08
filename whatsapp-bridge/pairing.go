@@ -28,6 +28,7 @@ type pairingClient interface {
 	Disconnect()
 	SendPasskeyResponse(context.Context, *types.WebAuthnResponse) error
 	SendPasskeyConfirmation(context.Context) error
+	PairPhone(context.Context, string, bool, whatsmeow.PairClientType, string) (string, error)
 }
 
 type pairingOptions struct {
@@ -38,6 +39,7 @@ type pairingOptions struct {
 	log               waLog.Logger
 	beforeDial        func() error
 	state             func(string)
+	observe           func(whatsmeow.QRChannelItem)
 	connectionContext context.Context // socket lifetime; cancelled after REST drains
 }
 
@@ -130,6 +132,9 @@ func pairOnce(parent context.Context, c pairingClient, opt pairingOptions, attem
 				}
 				opt.log.Warnf("QR channel closed after %d code(s)", codesShown)
 				return errPairingTimeout
+			}
+			if opt.observe != nil {
+				opt.observe(evt)
 			}
 			switch {
 			case evt.Event == whatsmeow.QRChannelEventPasskeyRequest:

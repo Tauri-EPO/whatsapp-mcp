@@ -315,6 +315,12 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_BRIDGE_BIND` | `127.0.0.1` | Bridge REST listen address; `0.0.0.0` / `::` for other containers or hosts (`rest_bind.go`) |
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)* | Extra `Host` values accepted by the bridge (`host` any port, `host:port` exact, `*` any). Same semantics as `WHATSAPP_MCP_ALLOWED_HOSTS`; loopback spellings always included; a non-loopback bind without it stays loopback-only (403) |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge listens on |
+| `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback. |
+| `WHATSAPP_OPERATOR_PORT` | `8090` | Operator port; no host publication in compose. |
+| `WHATSAPP_OPERATOR_TOKEN` | required when enabled | Random ASCII secret, 32-256 characters; distinct from the effective bridge token, including the stored fallback. Never use a placeholder. |
+| `WHATSAPP_OPERATOR_TOKEN_FILE` | empty | Alternative owner-only regular token file; symlinks, permissive modes and oversized files refused. Set token or file, never both. |
+| `WHATSAPP_OPERATOR_ALLOWED_HOSTS` | loopback hosts | Explicit comma-separated operator Hosts (`host` or `host:port`); wildcard refused. Browser Origin must match the listener's scheme and Host; native clients may omit it. |
+| `WHATSAPP_PAIRING_STDOUT` | `true` | Draw QR codes on stdout. Set false when using operator HTTP or exporting logs; the operator compose override defaults false. |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls; also signed onto outbound webhooks |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true` | Cache inbound media on arrival; `false` = fetch only on `/api/download` (`media_retention.go`). That includes the image the webhook payload would carry: with `false` the event goes out without `mediaBase64` and nothing is written (issue #484). `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge (`env_bool.go`) |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false` | Cache the media of status updates (`status@broadcast`) on arrival too. Off by default: the row is stored with its CDN fields, nothing is written under `store/status@broadcast/`, a status image forwarded to the webhook (`WEBHOOK_FORWARD_STATUS`) goes without its bytes, and `/api/download` still fetches a file on demand (`skipsStatusMedia` in `media_retention.go`, issue #447). `true` caches the status feed like any chat; `WHATSAPP_MEDIA_AUTODOWNLOAD=false` wins over it, on the webhook path too. Same strict boolean parse as `WHATSAPP_READ_ONLY` |
@@ -369,6 +375,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`) are documented in `.env.example` and `docs/DOCKER.md`. The whisper server is not part of the compose file: `WHISPER_URL` names one the operator runs (`docs/DOCKER.md`, "Voice-note transcription").
 
 When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
+
+Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 
 ## 8. Gotchas (read before editing)
 

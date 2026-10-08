@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -27,6 +28,8 @@ type bridgeConfig struct {
 	DeviceName                   string
 	LogLevel                     string
 	JSONLogs                     bool
+	Operator                     operatorConfig
+	PairingStdout                bool
 }
 
 func loadBridgeConfig() (bridgeConfig, error) { return parseBridgeConfig(os.Getenv) }
@@ -70,6 +73,13 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	_, err = resolveMediaRootsValue(cfg.MediaRoots, true)
 	collect(err)
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
+	cfg.Operator, err = parseOperatorConfig(getenv, net.DefaultResolver.LookupIPAddr)
+	collect(err)
+	if cfg.Operator.Bind != "" && !isLoopbackBind(cfg.Bind) {
+		collect(errors.New("WHATSAPP_BRIDGE_BIND must remain loopback when WHATSAPP_OPERATOR_BIND is enabled"))
+	}
+	cfg.PairingStdout, err = parseBoolEnv(pairingStdoutEnv, getenv(pairingStdoutEnv), true)
+	collect(err)
 	// The valid-name appendix is long; put it after every other variable.
 	cfg.Tools, err = newToolPolicy(getenv(allowToolsEnv), getenv(denyToolsEnv))
 	collect(err)

@@ -5,16 +5,49 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestOperatorStartupHelper(t *testing.T) {
+	if os.Getenv("WAMCP_TEST_OPERATOR_STARTUP") != "1" {
+		return
+	}
+	os.Exit(run())
+}
+
+func TestOperatorStartupRefusesEffectiveStoredBridgeTokenBeforeDatabaseEffects(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".bridge-token"), []byte(fakeOperatorToken+"\n"), storeFileMode); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOperatorStartupHelper$") //nolint:gosec // Re-executes this test binary with a private fake store.
+	cmd.Env = append(os.Environ(), "WAMCP_TEST_OPERATOR_STARTUP=1", storeDirEnv+"="+dir, "WHATSAPP_BRIDGE_TOKEN=", operatorBindEnv+"=127.0.0.1", operatorTokenEnv+"="+fakeOperatorToken, operatorTokenFileEnv+"=", "WHATSAPP_MEDIA_ROOTS="+t.TempDir())
+	output, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(output), "effective WHATSAPP_BRIDGE_TOKEN") {
+		t.Fatalf("equal stored-token refusal: err=%v output=%s", err, output)
+	}
+	if strings.Contains(string(output), fakeOperatorToken) {
+		t.Fatal("operator startup diagnostic exposed the token")
+	}
+	for _, file := range []string{"whatsapp.db", "messages.db"} {
+		if _, err := os.Stat(filepath.Join(dir, file)); !os.IsNotExist(err) {
+			t.Fatal("equal tokens were refused after database effects")
+		}
+	}
+}
 
 func TestStartupBlockedSignalHelper(t *testing.T) {
 	if os.Getenv("WAMCP_TEST_BLOCKED_SIGNAL") != "1" {

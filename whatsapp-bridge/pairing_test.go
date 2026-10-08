@@ -54,6 +54,9 @@ func (f *fakePairingClient) SendPasskeyResponse(context.Context, *types.WebAuthn
 	return nil
 }
 func (f *fakePairingClient) SendPasskeyConfirmation(context.Context) error { return nil }
+func (f *fakePairingClient) PairPhone(context.Context, string, bool, whatsmeow.PairClientType, string) (string, error) {
+	return "", errors.New("unexpected phone pairing")
+}
 
 func fastOpts(out *bytes.Buffer) pairingOptions {
 	return pairingOptions{attempts: 3, attemptTimeout: 2 * time.Second, retryDelay: 10 * time.Millisecond, out: out, log: testLogger()}

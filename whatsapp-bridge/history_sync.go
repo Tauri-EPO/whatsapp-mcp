@@ -58,7 +58,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 	}
 	// Peer imports can introduce rows, never replace any existing archive row.
 	// Check existence under the canonical IMMEDIATE transaction on every replay.
-	client, messageStore, logger := b.Client, b.Store, b.Log
+	client, messageStore, logger := b.currentClient(), b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
 	// to reason about what arrived from WhatsApp when debugging.

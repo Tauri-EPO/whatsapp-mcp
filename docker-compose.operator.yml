@@ -1,0 +1,19 @@
+# Opt-in private operator network. Create it first and attach only the operator
+# client and this instance. /api remains loopback; no operator host port exists.
+# docker compose -f docker-compose.yml -f docker-compose.operator.yml up -d
+services:
+  bridge:
+    environment:
+      WHATSAPP_OPERATOR_BIND: ${WHATSAPP_OPERATOR_ALIAS:?set a unique operator alias per instance}
+      WHATSAPP_OPERATOR_ALLOWED_HOSTS: ${WHATSAPP_OPERATOR_ALIAS:?set a unique operator alias per instance}
+      WHATSAPP_PAIRING_STDOUT: ${WHATSAPP_PAIRING_STDOUT:-false}
+    networks:
+      default: {}
+      operator:
+        aliases:
+          - ${WHATSAPP_OPERATOR_ALIAS:?set a unique operator alias per instance}
+
+networks:
+  operator:
+    external: true
+    name: ${WHATSAPP_OPERATOR_NETWORK:?create a private operator network first}

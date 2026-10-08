@@ -88,6 +88,7 @@ case "$cmd" in
       WHATSAPP_MCP_METRICS)       value="${FAKE_ENV_MCP_METRICS:-}" ;;
       WHATSAPP_MCP_METRICS_TOKEN) value="${FAKE_ENV_MCP_METRICS_TOKEN:-}" ;;
       WHISPER_URL)                value="${FAKE_ENV_WHISPER_URL:-}" ;;
+      WHATSAPP_OPERATOR_BIND)     value="${FAKE_OPERATOR_BIND:-}" ;;
       *) value="" ;;
     esac
     [ -n "$value" ] || exit 1
@@ -97,6 +98,11 @@ case "$cmd" in
     [ -n "${FAKE_TOKEN_FILE:-}" ] || exit 1
     printf '%s\n' "$FAKE_TOKEN_FILE"
     exit 0 ;;
+  sh)
+    export WHATSAPP_OPERATOR_BIND="${FAKE_OPERATOR_BIND:-}"
+    export WHATSAPP_OPERATOR_TOKEN="fake-operator-token-0123456789abcdef"
+    export WHATSAPP_OPERATOR_TOKEN_FILE=""
+    exec bash "$@" ;;
   python)   # the whisper probe, run inside the mcp container
     [ "${FAKE_WHISPER_REACHABLE:-yes}" = "yes" ] || {
       echo "<urlopen error [Errno 111] Connection refused>"; exit 1; }
@@ -172,7 +178,11 @@ class Stack:
         self.script.write_bytes(SMOKE.read_bytes())
         bindir = tmp_path / "bin"
         bindir.mkdir()
-        for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
+        for name, body in (
+            ("docker", FAKE_DOCKER),
+            ("curl", FAKE_CURL),
+            ("wget", '#!/usr/bin/env bash\nprintf "%s\\n" "$FAKE_OPERATOR_BODY"\n'),
+        ):
             path = bindir / name
             path.write_text(body, encoding="utf-8", newline="\n")
             path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -545,3 +555,19 @@ def test_compose_mode_reads_whisper_url_from_dot_env(stack: Stack) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "reachable on whisper:8178" in result.stdout
     assert "compose exec -T mcp python" in stack.docker_calls()
+
+
+def test_unpaired_smoke_reports_only_operator_state(stack: Stack) -> None:
+    result = stack.run(
+        FAKE_COMPOSE_PS="  bridge: running healthy\n",
+        FAKE_HEALTH_BODY=UNPAIRED,
+        FAKE_READY="503",
+        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
+        FAKE_OPERATOR_BIND="whatsapp-operator-example",
+        FAKE_OPERATOR_BODY='{"state":"passkey_required","qr":{"payload":"FAKE-QR-CREDENTIAL"},"confirmation_code":"FAKE-CODE-CREDENTIAL"}',
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "Operator pairing state: passkey_required" in result.stdout
+    assert "FAKE-QR-CREDENTIAL" not in result.stdout + result.stderr
+    assert "FAKE-CODE-CREDENTIAL" not in result.stdout + result.stderr
+    assert "fake-operator-token" not in result.stdout + result.stderr
