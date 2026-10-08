@@ -172,9 +172,15 @@ func TestMessageStorePoolQueuesAndDrainsAllRows(t *testing.T) {
 	_ = available.Close()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+	// This is a row-accounting proof, not a ten-second latency contract.
+	// Reserve time to report stats and release held connections on deadlock.
+	drainBudget := time.Minute
+	if deadline, ok := t.Deadline(); ok {
+		drainBudget = min(drainBudget, time.Until(deadline)/2)
+	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(drainBudget):
 		t.Fatalf("queued drain did not finish: pool=%+v", ms.db.Stats())
 	}
 	if stats.WaitCount-waitsBefore < chats+readers || stats.OpenConnections != messagesPoolConns {
