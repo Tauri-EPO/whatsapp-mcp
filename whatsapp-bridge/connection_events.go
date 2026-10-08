@@ -48,11 +48,14 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 		return
 	}
 	ctx := b.ctx
+	var previous <-chan struct{}
+	var delivered chan struct{}
 	if synchronous {
 		ctx = context.WithoutCancel(ctx)
 	}
 	if immediate {
 		b.lastConnectionEvent = key
+		previous, delivered = b.queueConnectionDeliveryLocked()
 	} else {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
@@ -87,7 +90,24 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 			}
 			b.lastConnectionEvent = key
 			b.connectionDisconnectCancel = nil
+			previous, delivered = b.queueConnectionDeliveryLocked()
 			b.connectionEventsMu.Unlock()
+		}
+		defer b.finishConnectionDelivery(previous, delivered)
+		// Reserving under the transition lock preserves order even when a
+		// debounce expires just before reconnect. Terminal events share the
+		// queue, with their entire wait and POST bounded by the exit deadline.
+		if synchronous {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, connectionEventTimeout)
+			defer cancel()
+		}
+		if previous != nil {
+			select {
+			case <-previous:
+			case <-ctx.Done():
+				return
+			}
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, connectionEventTimeout)
 		defer cancel()
@@ -98,6 +118,32 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 	} else {
 		go post()
 	}
+}
+
+func (b *Bridge) queueConnectionDeliveryLocked() (<-chan struct{}, chan struct{}) {
+	previous := b.connectionDeliveryDone
+	done := make(chan struct{})
+	b.connectionDeliveryDone = done
+	return previous, done
+}
+
+func (b *Bridge) finishConnectionDelivery(previous <-chan struct{}, done chan struct{}) {
+	if previous != nil {
+		select {
+		case <-previous:
+		default:
+			// A terminal deadline may expire while waiting for an older POST.
+			// Keep its place in the queue until that predecessor finishes.
+			b.connectionEvents.Add(1)
+			go func() {
+				defer b.connectionEvents.Done()
+				<-previous
+				close(done)
+			}()
+			return
+		}
+	}
+	close(done)
 }
 
 func (b *Bridge) stopConnectionEvents() {

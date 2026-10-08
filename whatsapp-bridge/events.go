@@ -629,6 +629,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 	case *events.KeepAliveTimeout:
 		if b.connectionNow().Sub(v.LastSuccess) > whatsmeow.KeepAliveMaxFailTime {
 			b.Log.Warnf("WhatsApp keepalive stalled; scheduling a gated reconnect")
+			b.notifyConnection("disconnected", "keepalive_stalled", false, false)
 			b.scheduleReconnect(reconnectChan)
 		}
 
@@ -688,6 +689,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// configuration, and reading it on the event path keeps the timer
 		// goroutine off a value another goroutine could still be writing.
 		delay := b.StreamReplacedDelay
+		b.notifyConnection("disconnected", "session_replaced", false, false)
 		b.Log.Warnf("⚠️  Stream replaced by another session — will reconnect after %s", delay)
 		go func() {
 			select {

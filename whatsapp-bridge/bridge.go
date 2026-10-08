@@ -30,6 +30,7 @@ type Bridge struct {
 	connectionEventsMu         sync.Mutex
 	connectionEvents           sync.WaitGroup
 	connectionEventsClosing    bool
+	connectionDeliveryDone     <-chan struct{}
 	connectionDisconnectCancel context.CancelFunc
 	lastConnectionEvent        string
 	ForwardConnection          bool
