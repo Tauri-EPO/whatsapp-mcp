@@ -338,7 +338,7 @@ func main() {
 	go bridge.runMediaRetention()
 	logger.Infof("Session keepalive: %s", sessionKeepaliveSummary(bridge.SessionKeepalive))
 	go bridge.runGroupRosterSync()
-	go bridge.runSessionKeepalive()
+	bridge.startSessionKeepalive()
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to

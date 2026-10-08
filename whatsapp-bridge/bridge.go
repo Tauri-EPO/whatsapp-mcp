@@ -105,10 +105,19 @@ type Bridge struct {
 	// session_keepalive.go). 0 disables it, and WhatsApp then logs the device
 	// out about a month after pairing.
 	SessionKeepalive time.Duration
-	// sessionPresence and sessionKeepaliveTiming are test seams: the presence
-	// sender (nil = the client) and the loop's waits (zero = the defaults).
-	sessionPresence        presenceSender
-	sessionKeepaliveTiming sessionKeepaliveTiming
+	// The waits of the keepalive loop (session_keepalive.go); a test shortens
+	// them on its own Bridge.
+	SessionKeepaliveSettle time.Duration
+	SessionKeepalivePoll   time.Duration
+	SessionKeepaliveRetry  time.Duration
+	SessionPresenceHold    time.Duration
+	// sessionPresence and sessionReady are test seams: the presence sender
+	// (nil = the client) and "connected and logged in" (nil = the client).
+	sessionPresence presenceSender
+	sessionReady    func() bool
+	// sessionKeepalive is the loop's goroutine; Shutdown waits for it so a
+	// blip in progress still ends with "unavailable".
+	sessionKeepalive sync.WaitGroup
 	// StreamReplacedDelay is how long the reconnect after a StreamReplaced event
 	// waits, so this bridge does not ping-pong with the session that took its
 	// slot (events.go). Set once at startup; tests shorten it on their own
@@ -197,6 +206,10 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 
 		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
 		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
+		SessionKeepaliveSettle:  defaultSessionKeepaliveSettle,
+		SessionKeepalivePoll:    defaultSessionKeepalivePoll,
+		SessionKeepaliveRetry:   defaultSessionKeepaliveRetry,
+		SessionPresenceHold:     defaultSessionPresenceHold,
 		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
 		StoreRetryDelays:        defaultStoreRetryDelays(),
 
@@ -254,11 +267,14 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 			b.autoDownloads.wait()
 		}
 		b.mediaTransfers.wait()
+		// A keepalive blip in progress finishes with "unavailable" before the
+		// caller disconnects the client.
+		b.sessionKeepalive.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		b.Log.Warnf("Timed out waiting for history poll votes and media transfers; exiting anyway")
+		b.Log.Warnf("Timed out waiting for history poll votes, media transfers and the session keepalive; exiting anyway")
 	}
 }

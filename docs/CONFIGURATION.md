@@ -641,8 +641,9 @@ A connection does not count as opening: a bridge that reconnects several times
 a day still shows its pairing time as its last connection.
 
 What does count is presence. So every `WHATSAPP_SESSION_KEEPALIVE_HOURS`
-(default 12) the bridge marks its device available, waits five seconds and
-marks it unavailable again; the first time a minute after it connects. The
+(default 12, at most 168) the bridge marks its device available, waits five
+seconds and marks it unavailable again; the first time about a minute after
+the session is connected and logged in, never while the QR code is showing. The
 startup log says `Session keepalive: every 12 h`, each run logs
 `Session keepalive: told WhatsApp this linked device is in use`, and
 `whatsapp_bridge_session_keepalives_total` in `/metrics` counts them.
@@ -652,6 +653,8 @@ fresh "last seen", and the phone may hold a notification back. `0` turns the
 keepalive off; the device is then logged out about a month after pairing and
 the bridge needs a new QR scan (`messages.db` is kept). It runs under
 `WHATSAPP_READ_ONLY` as well: it keeps the session, it does not act on a chat.
+A bridge that is stopped while its device is marked available marks it
+unavailable before it disconnects.
 
 ## Bridge authentication and media paths
 

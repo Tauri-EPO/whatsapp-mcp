@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -22,6 +25,10 @@ func TestResolveSessionKeepalive(t *testing.T) {
 		{"0", 0, false},
 		{"24", 24 * time.Hour, false},
 		{" 6 ", 6 * time.Hour, false},
+		{"168", 168 * time.Hour, false},
+		{"169", 0, true},     // fewer than four blips a month
+		{"9999999", 0, true}, // would overflow time.Duration into a negative interval
+		{"5124096", 0, true}, // would wrap to about 25 minutes
 		{"-1", 0, true},
 		{"1.5", 0, true},
 		{"daily", 0, true},
@@ -32,30 +39,50 @@ func TestResolveSessionKeepalive(t *testing.T) {
 			t.Errorf("resolveSessionKeepalive(%q) = %v, %v; want %v, error=%v", tc.value, got, err, tc.want, tc.wantErr)
 		}
 	}
-	if s := sessionKeepaliveSummary(0); s == "" || s[:3] != "off" {
+	if s := sessionKeepaliveSummary(0); !strings.HasPrefix(s, "off") {
 		t.Errorf("a disabled keepalive must say so in the startup log, got %q", s)
+	}
+	if s := sessionKeepaliveSummary(12 * time.Hour); s != "every 12 h" {
+		t.Errorf("summary = %q", s)
+	}
+}
+
+// The roster sync shares the parser: its accepted spellings must not move.
+func TestResolveGroupRosterSync_KeepsItsSpellingsAndGainsABound(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": groupRosterSyncInterval, "0": 0, "6": 6 * time.Hour, "8760": 8760 * time.Hour} {
+		if got, err := resolveGroupRosterSync(value); err != nil || got != want {
+			t.Errorf("resolveGroupRosterSync(%q) = %v, %v; want %v", value, got, err, want)
+		}
+	}
+	for _, value := range []string{"-1", "x", "9999999999"} {
+		if _, err := resolveGroupRosterSync(value); err == nil {
+			t.Errorf("resolveGroupRosterSync(%q) was accepted", value)
+		}
 	}
 }
 
 // presenceRecorder stands in for the WhatsApp client: it records every
-// presence the keepalive sends and can be told to fail.
+// presence the keepalive sends and can be scripted to fail.
 type presenceRecorder struct {
 	mu     sync.Mutex
 	sent   []types.Presence
-	failN  int // the first failN sends fail
+	fail   func(state types.Presence, attempt int) error // nil = succeed
+	tries  map[types.Presence]int
 	events chan types.Presence
 }
 
 func newPresenceRecorder() *presenceRecorder {
-	return &presenceRecorder{events: make(chan types.Presence, 64)}
+	return &presenceRecorder{events: make(chan types.Presence, 256), tries: map[types.Presence]int{}}
 }
 
 func (p *presenceRecorder) send(_ context.Context, state types.Presence) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.failN > 0 {
-		p.failN--
-		return errors.New("socket closed")
+	p.tries[state]++
+	if p.fail != nil {
+		if err := p.fail(state, p.tries[state]); err != nil {
+			return err
+		}
 	}
 	p.sent = append(p.sent, state)
 	select {
@@ -76,36 +103,47 @@ func (p *presenceRecorder) next(t *testing.T) types.Presence {
 	}
 }
 
-// startKeepalive runs the loop on a test Bridge with millisecond waits and
-// returns once the test is over and the goroutine has stopped.
-func startKeepalive(t *testing.T, interval time.Duration, connected *atomic.Bool, rec *presenceRecorder) *Bridge {
+func (p *presenceRecorder) quiet(t *testing.T, d time.Duration) {
+	t.Helper()
+	select {
+	case state := <-p.events:
+		t.Fatalf("sent %q when nothing should be sent", state)
+	case <-time.After(d):
+	}
+}
+
+func (p *presenceRecorder) history() []types.Presence {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]types.Presence(nil), p.sent...)
+}
+
+// keepaliveBridge is a test Bridge with millisecond waits and the recorder as
+// its client. The loop is started by the caller (startSessionKeepalive); the
+// Bridge's own Shutdown, registered by testBridge, stops it and waits for it.
+func keepaliveBridge(t *testing.T, interval time.Duration, ready *atomic.Bool, rec *presenceRecorder) *Bridge {
 	t.Helper()
 	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	b.SessionKeepalive = interval
+	b.SessionKeepaliveSettle = 2 * time.Millisecond
+	b.SessionKeepalivePoll = 2 * time.Millisecond
+	b.SessionKeepaliveRetry = 2 * time.Millisecond
+	b.SessionPresenceHold = time.Millisecond
 	b.sessionPresence = rec.send
-	b.sessionKeepaliveTiming = sessionKeepaliveTiming{start: 5 * time.Millisecond, retry: 5 * time.Millisecond, hold: time.Millisecond}
-	b.Connected = connected.Load
-	done := make(chan struct{})
-	go func() {
-		b.runSessionKeepalive()
-		close(done)
-	}()
-	t.Cleanup(func() {
-		b.cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("the keepalive loop outlived its bridge")
-		}
-	})
+	b.sessionReady = ready.Load
 	return b
 }
 
+func readyFlag(v bool) *atomic.Bool {
+	var flag atomic.Bool
+	flag.Store(v)
+	return &flag
+}
+
 func TestSessionKeepalive_MarksTheDeviceAvailableThenUnavailableAndRepeats(t *testing.T) {
-	var connected atomic.Bool
-	connected.Store(true)
 	rec := newPresenceRecorder()
-	b := startKeepalive(t, 20*time.Millisecond, &connected, rec)
+	b := keepaliveBridge(t, 20*time.Millisecond, readyFlag(true), rec)
+	b.startSessionKeepalive()
 
 	for round := 1; round <= 2; round++ {
 		if got := rec.next(t); got != types.PresenceAvailable {
@@ -115,84 +153,151 @@ func TestSessionKeepalive_MarksTheDeviceAvailableThenUnavailableAndRepeats(t *te
 			t.Fatalf("round %d: second presence = %q, want unavailable: the account must not stay online", round, got)
 		}
 	}
-	if n := b.metrics.sessionKeepalives.Load(); n < 1 {
-		t.Errorf("sessionKeepalives = %d, want at least 1", n)
+	if n := b.metrics.sessionKeepalives.Load(); n < 2 {
+		t.Errorf("sessionKeepalives = %d, want one per blip", n)
 	}
 }
 
-func TestSessionKeepalive_WaitsForTheConnectionInsteadOfAWholeInterval(t *testing.T) {
-	var connected atomic.Bool
+// While the bridge shows its QR code the socket is up and there is no session:
+// nothing is sent until it is logged in, and then within the settle time
+// rather than a whole interval.
+func TestSessionKeepalive_WaitsForALoggedInSessionInsteadOfAWholeInterval(t *testing.T) {
 	rec := newPresenceRecorder()
-	// An hour-long interval: only the retry delay can explain a send in this test.
-	startKeepalive(t, time.Hour, &connected, rec)
+	ready := readyFlag(false)
+	b := keepaliveBridge(t, time.Hour, ready, rec)
+	b.startSessionKeepalive()
 
-	select {
-	case state := <-rec.events:
-		t.Fatalf("sent %q while disconnected", state)
-	case <-time.After(60 * time.Millisecond):
-	}
-	connected.Store(true)
+	rec.quiet(t, 60*time.Millisecond)
+	ready.Store(true)
 	if got := rec.next(t); got != types.PresenceAvailable {
-		t.Fatalf("after the socket came back: %q, want available", got)
+		t.Fatalf("after the session became ready: %q, want available", got)
 	}
 }
 
-func TestSessionKeepalive_AFailedSendIsRetriedSoonAndNotCounted(t *testing.T) {
-	var connected atomic.Bool
-	connected.Store(true)
+func TestSessionKeepalive_AFailedAvailableIsRetriedSoonAndNotCounted(t *testing.T) {
 	rec := newPresenceRecorder()
-	rec.failN = 2
-	b := startKeepalive(t, time.Hour, &connected, rec)
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceAvailable && attempt <= 2 {
+			return errors.New("socket closed")
+		}
+		return nil
+	}
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.startSessionKeepalive()
 
 	if got := rec.next(t); got != types.PresenceAvailable {
 		t.Fatalf("after two failures: %q, want available", got)
 	}
 	rec.next(t) // unavailable
-	deadline := time.Now().Add(2 * time.Second)
-	for b.metrics.sessionKeepalives.Load() != 1 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
 	if n := b.metrics.sessionKeepalives.Load(); n != 1 {
 		t.Errorf("sessionKeepalives = %d, want 1: the two failed attempts are not keepalives", n)
 	}
 }
 
-func TestSessionKeepalive_ZeroTurnsItOff(t *testing.T) {
-	var connected atomic.Bool
-	connected.Store(true)
+// A socket torn down while the frame is in flight surfaces as "context
+// canceled" from whatsmeow although the bridge is not shutting down. The loop
+// must outlive it, or the device is logged out a month later after all.
+func TestSessionKeepalive_SurvivesASendThatFailsWithContextCanceled(t *testing.T) {
 	rec := newPresenceRecorder()
-	startKeepalive(t, 0, &connected, rec)
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceAvailable && attempt == 1 {
+			return fmt.Errorf("failed to write frame: %w", context.Canceled)
+		}
+		return nil
+	}
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.startSessionKeepalive()
 
-	select {
-	case state := <-rec.events:
-		t.Fatalf("a disabled keepalive sent %q", state)
-	case <-time.After(60 * time.Millisecond):
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("after a cancelled write: %q, want available on the retry", got)
 	}
 }
 
-// A bridge that shuts down during the hold must still take the account
-// offline: "available" with no "unavailable" after it leaves it showing online.
-func TestSignalSessionInUse_SendsUnavailableEvenWhenCancelledDuringTheHold(t *testing.T) {
+// Logged in, but the push name has not arrived yet: not an error worth a WARN
+// every few minutes, just not ready.
+func TestSessionKeepalive_NoPushNameYetIsWaitedOutQuietly(t *testing.T) {
 	rec := newPresenceRecorder()
-	ctx, cancel := context.WithCancel(context.Background())
-	var offCtxErr error
-	send := func(c context.Context, state types.Presence) error {
-		if state == types.PresenceAvailable {
-			cancel()
-		} else {
-			offCtxErr = c.Err()
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceAvailable && attempt <= 3 {
+			return whatsmeow.ErrNoPushName
 		}
-		return rec.send(c, state)
+		return nil
 	}
-	if err := signalSessionInUse(ctx, send, time.Hour); err != nil {
-		t.Fatalf("signalSessionInUse: %v", err)
+	log := installRecordingLogger(t)
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.Log = log
+	b.startSessionKeepalive()
+
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("once the push name was there: %q, want available", got)
 	}
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if len(rec.sent) != 2 || rec.sent[0] != types.PresenceAvailable || rec.sent[1] != types.PresenceUnavailable {
-		t.Fatalf("sent %v, want [available unavailable]", rec.sent)
+	for _, line := range strings.Split(log.String(), "\n") {
+		if strings.Contains(line, "WARN") && strings.Contains(line, "Session keepalive") {
+			t.Errorf("a missing push name was logged as a warning: %s", line)
+		}
 	}
-	if offCtxErr != nil {
-		t.Errorf("the unavailable send ran under a cancelled context: %v", offCtxErr)
+}
+
+// "available" went out and "unavailable" failed: only "unavailable" is tried
+// again, promptly, and the blip is counted once.
+func TestSessionKeepalive_AFailedUnavailableIsRetriedAloneAndCountedOnce(t *testing.T) {
+	rec := newPresenceRecorder()
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceUnavailable && attempt <= 2 {
+			return errors.New("write timed out")
+		}
+		return nil
+	}
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.startSessionKeepalive()
+
+	rec.next(t) // available
+	if got := rec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("after two failed attempts: %q, want unavailable", got)
+	}
+	rec.quiet(t, 40*time.Millisecond)
+	if got := rec.history(); len(got) != 2 || got[0] != types.PresenceAvailable || got[1] != types.PresenceUnavailable {
+		t.Fatalf("sent %v, want exactly [available unavailable]: no second available", got)
+	}
+	if n := b.metrics.sessionKeepalives.Load(); n != 1 {
+		t.Errorf("sessionKeepalives = %d, want 1", n)
+	}
+}
+
+func TestSessionKeepalive_ZeroTurnsItOff(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 0, readyFlag(true), rec)
+	b.startSessionKeepalive()
+	rec.quiet(t, 60*time.Millisecond)
+}
+
+// The bridge shuts down while the device is marked available: Shutdown waits
+// for the loop, and the loop takes the account offline before it returns, under
+// a context that is not the cancelled one.
+func TestSessionKeepalive_ShutdownDuringTheHoldStillSendsUnavailable(t *testing.T) {
+	rec := newPresenceRecorder()
+	var offCtxErr atomic.Value
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.SessionPresenceHold = time.Hour // the shutdown arrives during the hold
+	b.sessionPresence = func(ctx context.Context, state types.Presence) error {
+		if state == types.PresenceUnavailable {
+			if err := ctx.Err(); err != nil {
+				offCtxErr.Store(err)
+			}
+		}
+		return rec.send(ctx, state)
+	}
+	b.startSessionKeepalive()
+
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("first presence = %q, want available", got)
+	}
+	b.Shutdown(5 * time.Second)
+
+	if got := rec.history(); len(got) != 2 || got[1] != types.PresenceUnavailable {
+		t.Fatalf("after Shutdown the bridge had sent %v, want [available unavailable]", got)
+	}
+	if err := offCtxErr.Load(); err != nil {
+		t.Errorf("the unavailable send ran under a dead context: %v", err)
 	}
 }

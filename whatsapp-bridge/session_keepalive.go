@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -36,28 +34,30 @@ const (
 	// day is far inside a limit counted in weeks and survives a bridge that is
 	// down for a night.
 	sessionKeepaliveInterval = 12 * time.Hour
-	// sessionKeepaliveStartDelay: let the connection settle first.
-	sessionKeepaliveStartDelay = time.Minute
-	// sessionKeepaliveRetryDelay: how soon to try again when the socket was
-	// down or the send failed.
-	sessionKeepaliveRetryDelay = 5 * time.Minute
-	// sessionPresenceHold: how long the device stays "available" each time.
-	sessionPresenceHold = 5 * time.Second
+	// sessionKeepaliveMaxHours: a longer interval would leave fewer than four
+	// blips inside the month WhatsApp allows, so it is refused at startup
+	// rather than accepted and found out thirty days later.
+	sessionKeepaliveMaxHours = 7 * 24
+	// defaultSessionKeepaliveSettle: how long the session must have been
+	// ready (connected and logged in) before the first blip.
+	defaultSessionKeepaliveSettle = time.Minute
+	// defaultSessionKeepalivePoll: how often readiness is looked at while the
+	// bridge is pairing or the socket is down, and how soon a pending
+	// "unavailable" is tried again.
+	defaultSessionKeepalivePoll = 15 * time.Second
+	// defaultSessionKeepaliveRetry: how soon to try again when "available"
+	// could not be sent.
+	defaultSessionKeepaliveRetry = 5 * time.Minute
+	// defaultSessionPresenceHold: how long the device stays "available".
+	defaultSessionPresenceHold = 5 * time.Second
+	// sessionUnavailableTimeout bounds the "unavailable" send, which runs under
+	// a context of its own so that a shutdown cannot skip it.
+	sessionUnavailableTimeout = 10 * time.Second
 )
 
-// resolveSessionKeepalive parses sessionKeepaliveEnv. Zero disables the
-// keepalive; a negative or non-numeric value is an error so main() fails fast
-// rather than silently running with a default the operator did not write.
+// resolveSessionKeepalive parses sessionKeepaliveEnv (see resolveHoursEnv).
 func resolveSessionKeepalive(value string) (time.Duration, error) {
-	v := strings.TrimSpace(value)
-	if v == "" {
-		return sessionKeepaliveInterval, nil
-	}
-	hours, err := strconv.Atoi(v)
-	if err != nil || hours < 0 {
-		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of hours (0 disables)", sessionKeepaliveEnv, value)
-	}
-	return time.Duration(hours) * time.Hour, nil
+	return resolveHoursEnv(sessionKeepaliveEnv, value, sessionKeepaliveInterval, sessionKeepaliveMaxHours)
 }
 
 // sessionKeepaliveSummary renders the setting for the startup log.
@@ -65,38 +65,36 @@ func sessionKeepaliveSummary(interval time.Duration) string {
 	if interval <= 0 {
 		return "off (WhatsApp logs a linked device out about a month after it was last opened)"
 	}
-	return fmt.Sprintf("every %d h", int(interval.Hours()))
+	return everyHoursSummary(interval)
 }
 
 // presenceSender is the part of the WhatsApp client the keepalive needs.
 type presenceSender func(ctx context.Context, state types.Presence) error
 
-// signalSessionInUse marks the device available, holds, and marks it
-// unavailable again. The second step is attempted even when the context was
-// cancelled during the hold, with a context of its own: a bridge shutting
-// down must not leave the account showing as online.
-func signalSessionInUse(ctx context.Context, send presenceSender, hold time.Duration) error {
-	if err := send(ctx, types.PresenceAvailable); err != nil {
-		return err
-	}
-	select {
-	case <-time.After(hold):
-	case <-ctx.Done():
-	}
-	offCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	return send(offCtx, types.PresenceUnavailable)
-}
-
-// runSessionKeepalive sends the blip sessionKeepaliveStartDelay after startup
-// and then every SessionKeepalive until b.ctx is cancelled (Shutdown).
-// SessionKeepalive <= 0 disables it. While the socket is down, or when a send
-// fails, it looks again after sessionKeepaliveRetryDelay instead of waiting a
-// whole interval.
-func (b *Bridge) runSessionKeepalive() {
+// startSessionKeepalive runs the loop in a goroutine Shutdown waits for.
+// SessionKeepalive <= 0 disables it.
+func (b *Bridge) startSessionKeepalive() {
 	if b.SessionKeepalive <= 0 {
 		return
 	}
+	b.sessionKeepalive.Add(1)
+	go func() {
+		defer b.sessionKeepalive.Done()
+		b.runSessionKeepalive()
+	}()
+}
+
+// runSessionKeepalive sends the blip once the session has been ready for
+// SessionKeepaliveSettle, and then every SessionKeepalive, until b.ctx is
+// cancelled (Shutdown).
+//
+// "Ready" is connected and logged in: while the bridge shows its QR code the
+// socket is up and there is no session to keep. A send that fails is tried
+// again after SessionKeepaliveRetry instead of a whole interval. Once
+// "available" went out, "unavailable" must follow: it is retried on its own,
+// and sent on the way out when the bridge shuts down in between, so the
+// account is never left showing as online.
+func (b *Bridge) runSessionKeepalive() {
 	send := b.sessionPresence
 	if send == nil {
 		if b.Client == nil {
@@ -104,37 +102,86 @@ func (b *Bridge) runSessionKeepalive() {
 		}
 		send = b.Client.SendPresence
 	}
-	timing := b.sessionKeepaliveTiming
-	if timing == (sessionKeepaliveTiming{}) {
-		timing = sessionKeepaliveTiming{start: sessionKeepaliveStartDelay, retry: sessionKeepaliveRetryDelay, hold: sessionPresenceHold}
+	ready := b.sessionReady
+	if ready == nil {
+		ready = func() bool { return b.Client != nil && b.Client.IsConnected() && b.Client.IsLoggedIn() }
 	}
-	delay := timing.start
+
+	settled := false    // the session has been ready for SessionKeepaliveSettle
+	pendingOff := false // "available" went out and "unavailable" has not yet
+	delay := b.SessionKeepalivePoll
 	for {
-		select {
-		case <-time.After(delay):
-		case <-b.ctx.Done():
+		if !b.keepaliveWait(delay) {
+			if pendingOff {
+				if err := markUnavailable(b.ctx, send); err != nil {
+					b.Log.Warnf("Session keepalive: shutting down with the device still marked available: %v", err)
+				}
+			}
 			return
 		}
-		if b.Connected != nil && !b.Connected() {
-			delay = timing.retry
+		if !ready() {
+			settled = false
+			delay = b.SessionKeepalivePoll
 			continue
 		}
-		if err := signalSessionInUse(b.ctx, send, timing.hold); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
+		if !settled {
+			settled = true
+			delay = b.SessionKeepaliveSettle
+			continue
+		}
+
+		if !pendingOff {
+			if err := send(b.ctx, types.PresenceAvailable); err != nil {
+				// Not the error's identity: a socket torn down mid-write
+				// surfaces as "context canceled" too, and the loop has to
+				// outlive that.
+				if b.ctx.Err() != nil {
+					return
+				}
+				if errors.Is(err, whatsmeow.ErrNoPushName) {
+					// Logged in, but the app-state sync that carries the
+					// push name has not arrived yet.
+					b.Log.Debugf("Session keepalive: no push name yet, waiting")
+					delay = b.SessionKeepalivePoll
+					continue
+				}
+				b.Log.Warnf("Session keepalive: could not tell WhatsApp this device is in use: %v", err)
+				delay = b.SessionKeepaliveRetry
+				continue
 			}
-			b.Log.Warnf("Session keepalive: could not tell WhatsApp this device is in use: %v", err)
-			delay = timing.retry
+			b.metrics.sessionKeepalives.Add(1)
+			b.Log.Infof("Session keepalive: told WhatsApp this linked device is in use")
+			pendingOff = true
+			delay = b.SessionPresenceHold
 			continue
 		}
-		b.metrics.sessionKeepalives.Add(1)
-		b.Log.Infof("Session keepalive: told WhatsApp this linked device is in use")
+
+		if err := markUnavailable(b.ctx, send); err != nil {
+			b.Log.Warnf("Session keepalive: the device is still marked available, trying again: %v", err)
+			delay = b.SessionKeepalivePoll
+			continue
+		}
+		pendingOff = false
 		delay = b.SessionKeepalive
 	}
 }
 
-// sessionKeepaliveTiming holds the three waits of the loop; the zero value
-// means the defaults above. Tests set short ones on their own Bridge.
-type sessionKeepaliveTiming struct {
-	start, retry, hold time.Duration
+// keepaliveWait sleeps for d and reports false when the bridge is shutting down.
+func (b *Bridge) keepaliveWait(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-b.ctx.Done():
+		return false
+	}
+}
+
+// markUnavailable sends presence "unavailable" under a context that survives
+// the cancellation of ctx: it is the half of the blip that must not be skipped.
+func markUnavailable(ctx context.Context, send presenceSender) error {
+	offCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionUnavailableTimeout)
+	defer cancel()
+	return send(offCtx, types.PresenceUnavailable)
 }
