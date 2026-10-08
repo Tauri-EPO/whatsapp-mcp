@@ -83,7 +83,7 @@ type Bridge struct {
 	SendAppState appStateSendFunc
 	appStateGate chan struct{}
 	// IsOnWhatsApp asks WhatsApp which number a recipient is registered under
-	// (defaults to Client.IsOnWhatsApp); /api/send asks it for a number the LID
+	// (defaults to Client.IsOnWhatsApp); /api/send and /api/forward ask it for a number the LID
 	// map does not know, tests inject a fake.
 	IsOnWhatsApp isOnWhatsAppFunc
 	// Exit terminates the process for conditions the bridge cannot recover from in-place

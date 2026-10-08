@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -280,8 +281,8 @@ func isPhoneDigits(s string) bool {
 //
 // It rewrites the address and never the number: /api/mark-read shares it, and
 // a receipt goes to a chat the archive already holds, under the JID WhatsApp
-// gave it. Finding the registered number is canonicalRecipientJID, which only
-// /api/send runs, between its two allow-list checks.
+// gave it. Finding the registered number is canonicalRecipientJID, which
+// /api/send and /api/forward run between their two destination allow-list checks.
 func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
 	return resolveRecipientJIDContext(context.Background(), client, recipient)
 }
@@ -861,11 +862,18 @@ func placeholderWaveform(duration uint32) []byte {
 // allow-list refuses the send, because it cannot tell which number the
 // message would go to; only a bridge with no list to protect falls back to
 // the number as typed, which is what every send did before this lookup.
-func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter, recipient string) (string, bool) {
+func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter, recipient string, failures *atomic.Int64) (string, bool) {
+	// Only the caller owns its endpoint's failure counter. Forward does not
+	// contribute to the /api/send metric and passes nil.
+	countFailure := func() {
+		if failures != nil {
+			failures.Add(1)
+		}
+	}
 	if !b.Connected() {
 		// Nothing can be asked, so nothing is sent: letting the send find
 		// out for itself would let a reconnect in between skip the checks.
-		b.metrics.sendFailures.Add(1)
+		countFailure()
 		writeError(w, http.StatusInternalServerError, notConnectedMessage)
 		return "", false
 	}
@@ -874,11 +882,11 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	registered, err := canonicalRecipientJID(lookupCtx, b.Client.Store.LIDs.GetLIDForPN, b.IsOnWhatsApp, recipient)
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):
-		b.metrics.sendFailures.Add(1)
+		countFailure()
 		writeError(w, http.StatusNotFound, recipient+" is not on WhatsApp: no account is registered under that number (country code first; supported formatting is accepted)")
 		return "", false
 	case errors.Is(err, errRecipientLookup) && b.Policy.restricted:
-		b.metrics.sendFailures.Add(1)
+		countFailure()
 		writeError(w, http.StatusBadGateway, err.Error()+"; nothing was sent")
 		return "", false
 	case errors.Is(err, errRecipientLookup):
@@ -956,7 +964,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 
 		ctx, cancel := requestContext(r, sendDeadline)
 		defer cancel()
-		recipient, ok := b.registeredRecipient(ctx, w, req.Recipient)
+		recipient, ok := b.registeredRecipient(ctx, w, req.Recipient, &b.metrics.sendFailures)
 		if !ok {
 			return
 		}

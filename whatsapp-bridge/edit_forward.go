@@ -179,13 +179,15 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			writeError(w, http.StatusInternalServerError, "Recipient resolver is not configured")
 			return
 		}
-		to, ok = deps.resolveRecipient(r.Context(), w, to)
+		sendCtx, cancelSend := requestContext(r, sendDeadline)
+		defer cancelSend()
+		to, ok = deps.resolveRecipient(sendCtx, w, to)
 		if !ok {
 			return
 		}
 		mediaPath := ""
 		if mediaType != "" {
-			ctx, cancel := requestContext(r, downloadDeadline)
+			ctx, cancel := context.WithTimeout(sendCtx, downloadDeadline)
 			defer cancel()
 			okDl, _, _, path, dlErr := deps.download(ctx, id, chat.String())
 			if dlErr != nil || !okDl {
@@ -202,8 +204,6 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			}
 			mediaPath = path
 		}
-		sendCtx, cancelSend := requestContext(r, sendDeadline)
-		defer cancelSend()
 		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Forward failed: " + msg})

@@ -1038,6 +1038,10 @@ then the registered number before fetching media or sending. A number without
 a WhatsApp account is refused; if the lookup is unavailable, a restricted
 bridge refuses the forward instead of guessing its destination.
 
+A disconnected bridge answers HTTP 500, "Not connected to WhatsApp", before
+downloading any media. Registration, media retrieval and sending share the
+forward's 60-second budget; registration also keeps its shorter timeout.
+
 An unsafe media identity answers `media_refused`; missing bytes or download
 fields answer `media_unavailable`. Do not retry those permanent media failures.
 `bridge_unavailable` remains the temporary bridge/CDN failure to retry later.
