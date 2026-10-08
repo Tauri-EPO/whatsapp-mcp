@@ -76,7 +76,7 @@ func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*
 			}
 			participant += "@" + server.String
 		}
-		parsed, err := types.ParseJID(participant)
+		parsed, err := parseRecipientJID(participant)
 		if err != nil || parsed.User == "" || parsed.Server == "" || parsed.Server == types.GroupServer || parsed.User == jid.User {
 			return nil, ts, archiveAnchorError("latest group message has no usable sender")
 		}

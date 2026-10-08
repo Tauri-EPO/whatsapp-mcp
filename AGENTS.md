@@ -61,7 +61,7 @@ whatsapp-mcp/
 │   ├── store_failures.go       # a row that cannot be written: bounded retry on a busy database, one ERROR with ID + chat, a counter
 │   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
 │   ├── view_once.go            # view-once envelopes unwrapped and archived; the phone keeps its one view
-│   ├── jid.go                  # phone <-> LID resolution helpers
+│   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
 │   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
 │   ├── send_mime.go            # sniff MIME for category-named cached images/videos

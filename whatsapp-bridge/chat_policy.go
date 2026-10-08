@@ -115,7 +115,7 @@ func authorizeChat(w http.ResponseWriter, policy chatPolicy, raw string, allowPh
 	}
 	var jid types.JID
 	var err error
-	if allowPhone && !strings.Contains(raw, "@") && isPhoneDigits(raw) {
+	if allowPhone && (strings.Contains(raw, "@") || isPhoneDigits(raw)) {
 		jid, err = parseRecipientJID(raw)
 	} else {
 		jid, err = types.ParseJID(raw)

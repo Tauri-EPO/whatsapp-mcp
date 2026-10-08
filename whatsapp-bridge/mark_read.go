@@ -411,14 +411,7 @@ func groupBySender(pending []unreadInboundMessage, chatJID types.JID) ([]senderB
 // parseSenderJID accepts either a full JID or a bare phone number.
 func parseSenderJID(sender string) (types.JID, error) {
 	sender = strings.TrimSpace(sender)
-	if !strings.Contains(sender, "@") {
-		jid := types.NewJID(sender, types.DefaultUserServer)
-		if jid.User == "" {
-			return types.EmptyJID, fmt.Errorf("invalid sender_jid %q", sender)
-		}
-		return jid, nil
-	}
-	jid, err := types.ParseJID(sender)
+	jid, err := parseRecipientJID(sender)
 	if err != nil || jid.User == "" || jid.Server == "" {
 		return types.EmptyJID, fmt.Errorf("invalid sender_jid %q", sender)
 	}

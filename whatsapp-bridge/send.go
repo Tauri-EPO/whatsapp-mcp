@@ -299,9 +299,13 @@ func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, r
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
 	// phone JID silently fail for migrated contacts.
 	if recipientJID.Server == types.DefaultUserServer {
-		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
+		lid, lidErr := lookupAltJID(ctx, client, recipientJID)
 		if err := ctx.Err(); err != nil {
 			return types.EmptyJID, err
+		}
+		if errors.Is(lidErr, errLIDStoreUnavailable) {
+			// A missing backend cannot retain the server's LID answer either.
+			return recipientJID, nil
 		}
 		if lidErr == nil && !lid.IsEmpty() {
 			bridgeLog.Debugf("Resolved %s -> %s (LID)", recipientJID, lid)
@@ -331,20 +335,14 @@ func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, r
 func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	var resolved []string
 	for _, mention := range mentions {
-		var jid types.JID
-		if strings.Contains(mention, "@") {
-			parsed, err := types.ParseJID(mention)
-			if err != nil {
-				bridgeLog.Warnf("skipping unparseable mention %q: %v", mention, err)
-				continue
-			}
-			jid = parsed
-		} else {
-			jid = types.JID{User: mention, Server: types.DefaultUserServer}
+		jid, err := parseRecipientJID(mention)
+		if err != nil {
+			bridgeLog.Warnf("skipping unparseable mention %q: %v", mention, err)
+			continue
 		}
 		resolved = append(resolved, jid.String())
 		if jid.Server == types.DefaultUserServer {
-			if lid, err := client.Store.LIDs.GetLIDForPN(context.Background(), jid); err == nil && !lid.IsEmpty() {
+			if lid, err := lookupAltJID(context.Background(), client, jid); err == nil && !lid.IsEmpty() {
 				resolved = append(resolved, lid.String())
 			}
 		}
@@ -895,7 +893,9 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, recipientLookupTimeout)
 	defer cancel()
-	registered, err := canonicalRecipientJID(lookupCtx, b.Client.Store.LIDs.GetLIDForPN, b.IsOnWhatsApp, recipient)
+	registered, err := canonicalRecipientJID(lookupCtx, func(ctx context.Context, jid types.JID) (types.JID, error) {
+		return lookupAltJID(ctx, b.Client, jid)
+	}, b.IsOnWhatsApp, recipient)
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):
 		countFailure()

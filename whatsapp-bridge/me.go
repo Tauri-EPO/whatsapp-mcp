@@ -62,8 +62,8 @@ func clientIdentity(client *whatsmeow.Client) ownIdentity {
 		}
 		phone := client.Store.ID.ToNonAD()
 		lid := client.Store.LID.ToNonAD()
-		if lid.IsEmpty() && client.Store.LIDs != nil {
-			if resolved, err := client.Store.LIDs.GetLIDForPN(ctx, phone); err == nil {
+		if lid.IsEmpty() {
+			if resolved, err := lookupAltJID(ctx, client, phone); err == nil {
 				lid = resolved.ToNonAD()
 			}
 		}

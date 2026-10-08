@@ -6,11 +6,23 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
+
+var errLIDStoreUnavailable = errors.New("client has no LID store")
+
+// lookupAltJID owns the optional LID-map read. Device normalization stays at
+// the caller, preserving the existing keys used by each lookup.
+func lookupAltJID(ctx context.Context, client *whatsmeow.Client, jid types.JID) (types.JID, error) {
+	if client == nil || client.Store == nil || client.Store.LIDs == nil {
+		return types.EmptyJID, errLIDStoreUnavailable
+	}
+	return client.Store.GetAltJID(ctx, jid)
+}
 
 // resolveLIDChat resolves a LID-based chat JID to its phone-based equivalent
 // so that incoming and outgoing messages are stored under the same chat entry.
@@ -38,12 +50,9 @@ func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt type
 
 	// Fallback: query the whatsmeow LID-PN mapping store. Guarded like
 	// resolveUserJID: a client without one leaves the chat in the LID namespace.
-	if client != nil && client.Store != nil && client.Store.LIDs != nil {
-		pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
-		if err == nil && !pn.IsEmpty() {
-			bridgeLog.Debugf("Resolved LID chat %s -> %s (from LID store)", chat, pn.ToNonAD())
-			return pn.ToNonAD()
-		}
+	if pn, err := lookupAltJID(context.Background(), client, chat); err == nil && !pn.IsEmpty() {
+		bridgeLog.Debugf("Resolved LID chat %s -> %s (from LID store)", chat, pn.ToNonAD())
+		return pn.ToNonAD()
 	}
 
 	bridgeLog.Warnf("could not resolve LID chat %s to phone JID", chat)
@@ -73,10 +82,8 @@ func resolveUserJID(client *whatsmeow.Client, j, alt types.JID) types.JID {
 	if !alt.IsEmpty() && alt.Server == types.DefaultUserServer {
 		return alt.ToNonAD()
 	}
-	if client != nil && client.Store != nil && client.Store.LIDs != nil {
-		if pn, err := client.Store.LIDs.GetPNForLID(context.Background(), j); err == nil && !pn.IsEmpty() {
-			return pn.ToNonAD()
-		}
+	if pn, err := lookupAltJID(context.Background(), client, j); err == nil && !pn.IsEmpty() {
+		return pn.ToNonAD()
 	}
 	return j
 }

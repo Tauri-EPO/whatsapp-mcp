@@ -281,15 +281,12 @@ func mediaRetryMessageInfo(messageID, chatJID, sender string, isFromMe bool) (*t
 		return nil, fmt.Errorf("invalid chat JID %q: %w", chatJID, err)
 	}
 	var senderJID types.JID
-	switch {
-	case strings.Contains(sender, "@"):
-		senderJID, err = types.ParseJID(sender)
+	if sender != "" {
+		senderJID, err = parseRecipientJID(sender)
 		if err != nil {
 			return nil, fmt.Errorf("invalid sender JID %q: %w", sender, err)
 		}
-	case sender != "":
-		senderJID = types.NewJID(sender, types.DefaultUserServer)
-	default:
+	} else {
 		senderJID = chat
 	}
 	return &types.MessageInfo{

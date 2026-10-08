@@ -138,7 +138,7 @@ func parseParticipants(raw []string) ([]types.JID, error) {
 		if !strings.Contains(item, "@") {
 			item = strings.TrimPrefix(item, "+") + "@" + types.DefaultUserServer
 		}
-		jid, err := types.ParseJID(item)
+		jid, err := parseRecipientJID(item)
 		if err != nil || jid.User == "" || strings.ContainsAny(jid.User, " @") ||
 			(jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
 			return nil, errors.New("invalid participant " + item + " (use a phone number or a user JID)")

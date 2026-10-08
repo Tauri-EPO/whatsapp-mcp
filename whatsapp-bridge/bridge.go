@@ -79,6 +79,8 @@ type Bridge struct {
 	Connected func() bool
 	// Send performs /api/send (defaults to sendWhatsAppMessage); tests inject a fake.
 	Send sendFunc
+	// chatPresence records typing targets in tests; nil uses Client.SendChatPresence.
+	chatPresence chatPresenceSender
 	// SendAppState is the raw client call; sendAppState serializes writers.
 	SendAppState appStateSendFunc
 	appStateGate chan struct{}

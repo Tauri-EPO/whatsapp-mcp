@@ -27,18 +27,12 @@ func resolveQuotedParticipantJID(client *whatsmeow.Client, raw string) string {
 	if raw == "" {
 		return ""
 	}
-	var jid types.JID
-	if strings.Contains(raw, "@") {
-		parsed, err := types.ParseJID(raw)
-		if err != nil {
-			return raw
-		}
-		jid = parsed
-	} else {
-		jid = types.NewJID(raw, types.DefaultUserServer)
+	jid, err := parseRecipientJID(raw)
+	if err != nil {
+		return raw
 	}
-	if jid.Server == types.DefaultUserServer && client != nil && client.Store != nil && client.Store.LIDs != nil {
-		if lid, err := client.Store.LIDs.GetLIDForPN(context.Background(), jid.ToNonAD()); err == nil && !lid.IsEmpty() {
+	if jid.Server == types.DefaultUserServer {
+		if lid, err := lookupAltJID(context.Background(), client, jid.ToNonAD()); err == nil && !lid.IsEmpty() {
 			return lid.String()
 		}
 	}
