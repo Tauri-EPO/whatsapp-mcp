@@ -182,7 +182,10 @@ and logged but their bundles are not followed. Regular history chunk retries
 and store-failure accounting still apply after decoding. Only a group origin is
 accepted; every conversation and any explicit message chat key must match that
 group. A bundle containing another chat is refused in full before import, even
-when its encryption and hashes are valid.
+when its encryption and hashes are valid. The bundle imports group identity and
+messages only; its sender's read state, disappearing-message settings and other
+conversation metadata do not override this account's state. Ordinary history
+sync from the account's own phone still updates those fields.
 
 WhatsApp controls whether a share reaches this linked device; this path has
 synthetic encrypted HTTP test coverage, not a paired-phone guarantee. If the

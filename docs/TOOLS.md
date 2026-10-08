@@ -556,7 +556,9 @@ live delivery or history replay; `request_history` asks the account's own phone
 for older messages and cannot request that bundle by name. A share notice alone
 does not contain the messages. Imports are restricted to the originating group;
 a bundle containing another conversation is refused in full before any rows
-are written. Compare the oldest stored message to confirm
+are written. Only group identity and messages are imported; the sender's read
+state, disappearing-message settings and other conversation metadata are not
+applied to this account. Compare the oldest stored message to confirm
 import; the share counter only confirms recognition. See
 [missing group history](TROUBLESHOOTING.md#the-number-was-added-to-a-group-and-the-earlier-messages-are-missing)
 for download limits and failure diagnostics. Delivery to a paired phone has not

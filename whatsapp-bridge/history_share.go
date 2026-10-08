@@ -84,7 +84,7 @@ func (b *Bridge) processHistoryShare(msg *waE2E.Message, chat, id string, fromMe
 		return
 	}
 	if ctx.Err() == nil {
-		b.handleHistorySyncWithShares(&events.HistorySync{Data: data}, false)
+		b.handleHistorySyncWithShares(&events.HistorySync{Data: historyShareMessages(data)}, false)
 	}
 }
 
@@ -112,6 +112,19 @@ func historyShareMatchesGroup(data *waHistorySync.HistorySync, chat string) bool
 		}
 	}
 	return true
+}
+
+// A participant's bundle is message data, not our own phone's account state.
+// Keep an explicit allow-list so peer read markers, disappearing-message
+// settings and future conversation metadata never enter the phone importer.
+func historyShareMessages(data *waHistorySync.HistorySync) *waHistorySync.HistorySync {
+	messages := &waHistorySync.HistorySync{SyncType: data.SyncType}
+	for _, conversation := range data.GetConversations() {
+		messages.Conversations = append(messages.Conversations, &waHistorySync.Conversation{
+			ID: conversation.ID, Messages: conversation.Messages,
+		})
+	}
+	return messages
 }
 
 func (b *Bridge) decodeHistoryShare(ctx context.Context, bundle *waE2E.MessageHistoryBundle, compressedLimit, inflatedLimit int64) (*waHistorySync.HistorySync, error) {
