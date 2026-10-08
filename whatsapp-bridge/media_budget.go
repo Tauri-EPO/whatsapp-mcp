@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -141,6 +142,8 @@ func (b *Bridge) runAutoDownload(ctx context.Context, job mediaJob) {
 	switch {
 	case success && err == nil:
 		b.Log.Infof("✅ Auto-downloaded media: %s", path)
+	case errors.Is(err, errAutoMediaLimit):
+		b.recordAutoSizeSkip(job.messageID, job.chatJID)
 	case err != nil:
 		b.Log.Warnf("❌ Auto-download failed for message %s in %s: %v", job.messageID, job.chatJID, err)
 	default:

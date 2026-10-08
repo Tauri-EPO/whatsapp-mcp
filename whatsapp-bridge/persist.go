@@ -90,7 +90,7 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 	}
 	var length any
 	if e.hasLength {
-		length = e.fileLen
+		length = storedMediaLength(e.fileLen)
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
 		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, e.directPath); err != nil {

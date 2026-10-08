@@ -13,6 +13,21 @@ import (
 	"go.mau.fi/whatsmeow"
 )
 
+func TestCachedFileExactlyAtAutomaticCapIsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	root := storeRootAt(t, dir)
+	chat := chatMediaRel(mediaTestChat)
+	if err := os.Mkdir(filepath.Join(dir, chat), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, chat, "boundary.bin"), bytes.Repeat([]byte("x"), 16), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkCachedMediaLimit(withMediaLimit(t.Context(), 16), root, chat+"/boundary.bin"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAutomaticCacheSizeUsesCanonicalPathRule(t *testing.T) {
 	for _, name := range []string{"regular oversized", "file symlink", "chat symlink"} {
 		t.Run(name, func(t *testing.T) {

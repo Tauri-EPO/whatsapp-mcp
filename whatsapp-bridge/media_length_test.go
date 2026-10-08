@@ -33,18 +33,21 @@ func TestMediaLengthPresence(t *testing.T) {
 }
 
 func TestMediaLengthMigrationIsAtomicAndDoesNotEraseNewZeroes(t *testing.T) {
-	ms := newTestMessageStore(t)
+	ms := newMigrationTestStore(t)
 	if err := ms.StoreChat(mediaTestChat, "Alice", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("OLD1", mediaTestChat, "x", "", time.Now(), false, "document", "empty.bin", "", nil, nil, nil, 0, ""); err != nil {
+	if _, err := ms.db.Exec("INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,media_type,file_length) VALUES ('OLD1', ?, 'x', '', '2026-09-04 10:00:00+00:00', 0, 'document', 0), ('TEXT1', ?, 'x', 'text', '2026-09-04 10:00:00+00:00', 0, '', 0)", mediaTestChat, mediaTestChat); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.db.Exec(`PRAGMA user_version = 1; CREATE TRIGGER fail_length BEFORE UPDATE OF file_length ON messages BEGIN SELECT RAISE(ABORT, 'blocked migration'); END`); err != nil {
+	if _, err := ms.db.Exec(`PRAGMA user_version = 1; DELETE FROM schema_migrations WHERE name = 'undeclared_media_lengths_v1'; CREATE TRIGGER fail_length BEFORE UPDATE OF file_length ON messages BEGIN SELECT RAISE(ABORT, 'blocked migration'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateUndeclaredMediaLengths(ms.db); err == nil {
 		t.Fatal("migration failure was ignored")
+	}
+	if applied, err := migrationApplied(ms.db, undeclaredMediaLengthsMigration); err != nil || applied {
+		t.Fatalf("failed migration recorded a marker: applied=%v err=%v", applied, err)
 	}
 	var version int
 	var length sql.NullInt64
@@ -62,6 +65,12 @@ func TestMediaLengthMigrationIsAtomicAndDoesNotEraseNewZeroes(t *testing.T) {
 	}
 	if err := ms.db.QueryRow("SELECT file_length FROM messages WHERE id = 'OLD1'").Scan(&length); err != nil || length.Valid {
 		t.Fatalf("legacy length=%v err=%v", length, err)
+	}
+	if applied, err := migrationApplied(ms.db, undeclaredMediaLengthsMigration); err != nil || !applied {
+		t.Fatalf("successful migration missing marker: applied=%v err=%v", applied, err)
+	}
+	if err := ms.db.QueryRow("SELECT file_length FROM messages WHERE id = 'TEXT1'").Scan(&length); err != nil || !length.Valid || length.Int64 != 0 {
+		t.Fatalf("legacy non-media length=%v err=%v", length, err)
 	}
 	if err := ms.StoreMessage("EMPTY1", mediaTestChat, "x", "", time.Now(), false, "document", "empty.bin", "", nil, nil, nil, 0, ""); err != nil {
 		t.Fatal(err)
@@ -134,7 +143,7 @@ func BenchmarkUndeclaredMediaLengthMigration(b *testing.B) {
 		b.Fatal(err)
 	}
 	for i := 0; i < b.N; i++ {
-		if _, err := ms.db.Exec("UPDATE messages SET file_length = 0; PRAGMA user_version = 1"); err != nil {
+		if _, err := ms.db.Exec("UPDATE messages SET file_length = 0; DELETE FROM schema_migrations WHERE name = 'undeclared_media_lengths_v1'"); err != nil {
 			b.Fatal(err)
 		}
 		b.StartTimer()

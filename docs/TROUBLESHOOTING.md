@@ -2,6 +2,25 @@
 
 Symptoms and fixes for pairing, auth, sync and app-state problems. For container-specific checks (`docker compose ps`, health endpoints, logs) see [DOCKER.md](DOCKER.md).
 
+## Rolling back the media-length migration
+
+Run `scripts/backup.sh backup` before deploying the release that distinguishes
+undeclared media lengths (NULL) from explicitly empty files (0).
+Before returning to an older bridge image, stop the bridge and run this SQL on
+its `messages.db`:
+
+```sql
+UPDATE messages SET file_length = 0 WHERE file_length IS NULL
+  AND media_type IN ('image','video','audio','document','sticker');
+```
+
+Older bridge images cannot scan NULL lengths and their `/api/download` fails
+without this conversion. The conversion loses the undeclared/empty distinction;
+older images also write ambiguous zeroes again. The new migration is one-time,
+so those later zeroes are not automatically reconverted when rolling forward.
+Keep the pre-upgrade backup as the recovery point; see
+[the backup and restore procedure](DOCKER.md).
+
 ## Bridge refuses to start
 
 Read `docker compose logs bridge` for `Refusing to start: invalid ...` (or the

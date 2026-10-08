@@ -137,6 +137,9 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	quotedMessageId string, directPath ...string) []any {
 	switch mediaType {
 	case "image", "video", "audio", "document", "sticker":
+		if length, ok := fileLength.(uint64); ok {
+			fileLength = storedMediaLength(length)
+		}
 	default:
 		fileLength = nil
 	}

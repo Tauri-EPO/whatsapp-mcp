@@ -6,7 +6,10 @@ import (
 	"database/sql"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +24,8 @@ func TestArrivalDistinguishesUnknownEmptyAndActualOversize(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
 			t.Setenv("WEBHOOK_ENABLED", "false")
 			ms := newConcurrentTestStore(t)
-			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+			log := installRecordingLogger(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, log)
 			b.MediaAutoDownload, b.MediaMaxBytes = true, 16
 			done := make(chan struct{}, 1)
 			b.autoDownloads = newMediaJobQueue(b.ctx, 1, 4, func(ctx context.Context, job mediaJob) {
@@ -74,6 +78,13 @@ func TestArrivalDistinguishesUnknownEmptyAndActualOversize(t *testing.T) {
 				t.Fatal("unknown length was fetched automatically")
 			}
 			relPath := chatMediaRel(phonePN.String()) + "/" + mediaFileName("document", msg.Info.Timestamp, msg.Info.ID, doc.GetFileName())
+			if name == "lying oversized" {
+				metrics := httptest.NewRecorder()
+				b.handleMetrics()(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+				if !strings.Contains(metrics.Body.String(), "whatsapp_bridge_media_autodownload_size_skips_total 1") || b.metrics.mediaDownloadFails.Load() != 0 || !strings.Contains(log.String(), "download_media still fetches it") || strings.Contains(log.String(), "Auto-download failed") {
+					t.Fatalf("cap skip observability: metrics=%s log=%s", metrics.Body.String(), log.String())
+				}
+			}
 			info, err := b.StoreRoot.Stat(relPath)
 			if name == "unknown" || name == "lying oversized" {
 				if !errors.Is(err, fs.ErrNotExist) {
@@ -148,8 +159,8 @@ func TestSynchronousImageActualCapIsNotRequeued(t *testing.T) {
 	if _, err := b.StoreRoot.Stat(relPath + ".part"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("synchronous temporary file left: %v", err)
 	}
-	if b.metrics.mediaDownloadFails.Load() != 1 {
-		t.Fatal("automatic cap did not record a failed transfer")
+	if b.metrics.mediaDownloadFails.Load() != 0 || b.metrics.mediaAutoSizeSkips.Load() != 1 {
+		t.Fatal("automatic cap must count a size skip, not a failed transfer")
 	}
 	select {
 	case payload := <-received:

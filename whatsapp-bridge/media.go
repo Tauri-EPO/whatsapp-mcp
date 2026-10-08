@@ -316,7 +316,9 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			}
 		}
 		if err != nil {
-			b.metrics.mediaDownloadFails.Add(1)
+			if !errors.Is(err, errAutoMediaLimit) {
+				b.metrics.mediaDownloadFails.Add(1)
+			}
 			return 0, err
 		}
 		b.metrics.mediaDownloads.Add(1)

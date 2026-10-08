@@ -14,6 +14,11 @@ import (
 
 var errAutoMediaLimit = errors.New("automatic media exceeds WHATSAPP_MEDIA_MAX_BYTES")
 
+func (b *Bridge) recordAutoSizeSkip(messageID, chatJID string) {
+	b.metrics.mediaAutoSizeSkips.Add(1)
+	b.Log.Infof("Skipping automatic media cache for message %s in %s: exceeds WHATSAPP_MEDIA_MAX_BYTES; download_media still fetches it", messageID, chatJID)
+}
+
 type mediaLimitKey struct{}
 
 func withMediaLimit(ctx context.Context, limit uint64) context.Context {

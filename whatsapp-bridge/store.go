@@ -243,8 +243,8 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
-	// Last, in user_version order: every table and column these rewrite must
-	// already exist, and each stamps only its own version (store_time.go).
+	// Run data rewrites after their tables and columns exist. Each owns an
+	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {
 		return err
 	}
