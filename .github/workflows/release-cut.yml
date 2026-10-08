@@ -18,11 +18,22 @@ name: Release cut
 # the release PR's head carries no check of its own, and the ruleset on main
 # requires them, so a bare `gh pr merge` on it is refused. The job refuses to
 # merge while CI on main is running and fails loudly when CI on main is red.
+#
+# `gh workflow run release-cut.yml -f dry_run=true` does everything but the
+# merge and the dispatch: it gets the release PR's checks running, waits for
+# them and says whether the ruleset would let the PR in. Use it after a change
+# to this file or to the ruleset. It cuts nothing, but it is not free of
+# effects: it brings the release branch up to date and approves its runs.
 
 on:
   schedule:
     - cron: "0 6 * * *" # 03:00 America/Sao_Paulo (UTC-3, no DST)
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run the release PR's checks and report whether it could merge; merge nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -37,6 +48,8 @@ jobs:
   cut:
     name: Merge the release PR and dispatch release.yml
     runs-on: ubuntu-latest
+    # Three attempts of a CI run each; `gh run watch` has no bound of its own.
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -44,8 +57,17 @@ jobs:
       - name: Find the release PR
         id: pr
         run: |
-          number=$(gh pr list --state open --head release-please--branches--main \
-            --json number --jq '.[0].number // empty')
+          # The branch name alone is not an identity: `gh pr list --head` also
+          # returns a fork's pull request from a branch of that name. Only the
+          # one release.yml opened from this repository is the release PR; the
+          # job approves its runs and merges it.
+          prs=$(gh pr list --state open --base main --head release-please--branches--main \
+            --limit 100 --json number,isCrossRepository,author)
+          number=$(jq -r '[.[] | select(.isCrossRepository == false and .author.login == "app/github-actions")][0].number // empty' <<< "$prs")
+          if [ -z "$number" ] && [ "$(jq '[.[] | select(.isCrossRepository == false)] | length' <<< "$prs")" != "0" ]; then
+            echo "::error::A pull request from this repository's release branch is open but was not opened by github-actions; the cut will not touch it."
+            exit 1
+          fi
           if [ -z "$number" ]; then
             echo "No open release PR: nothing releasable since the last tag."
             echo "number=" >> "$GITHUB_OUTPUT"
@@ -84,49 +106,118 @@ jobs:
       # The ruleset on main requires the CI jobs green on a head that is up to
       # date with main (issue #545). Two things stand between the release PR
       # and that rule. It is opened by github-actions[bot], whose pull_request
-      # runs wait for an approval nobody gives, so its head carries no check;
-      # and release-please only rewrites the branch when the notes change, so
-      # after a docs: / ci: / test: / chore: merge it sits behind main.
-      # Hence the loop: bring the branch up to date, run CI on that head
-      # (workflow_dispatch is the documented exception to "GITHUB_TOKEN events
-      # start no workflow"; the checks land on the head commit, which is what
-      # the ruleset reads), merge exactly that commit, and go round again if
-      # main moved meanwhile.
+      # runs are created waiting for an approval (conclusion action_required),
+      # so its head carries no check; and release-please only rewrites the
+      # branch when the notes change, so after a docs: / ci: / test: / chore:
+      # merge it sits behind main.
+      # Hence the loop: bring the branch up to date, approve the pull_request
+      # runs waiting on that head, wait for the CI one, merge exactly that
+      # commit, and go round again if main moved meanwhile.
+      # A CI run dispatched on the branch (workflow_dispatch) is not a way
+      # round the approval: its jobs pass and sit on the same commit, but the
+      # pull request does not list them and the ruleset keeps it blocked
+      # (seen on the 2.1.1 release PR, 2026-10-08).
       - name: Merge the release PR
         id: merge
         if: steps.ci.outputs.ready == 'true'
         env:
           PR: ${{ steps.pr.outputs.number }}
           BRANCH: release-please--branches--main
+          DRY_RUN: ${{ inputs.dry_run == true }}
         run: |
           for attempt in 1 2 3; do
+            sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
             behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by)
             if [ "$behind" != "0" ]; then
               echo "attempt $attempt: the release branch is $behind commit(s) behind main; updating it"
-              gh pr update-branch "$PR"
-              sleep 10
+              before=$sha
+              if ! gh pr update-branch "$PR"; then
+                echo "::error::The release branch could not be brought up to date with main (the workflow token cannot push a merge that changes workflow files). Run 'gh pr update-branch $PR' from an account of your own, or wait for the next releasable merge, which rebuilds the branch."
+                exit 1
+              fi
+              # The update is asynchronous: wait for the head to move rather
+              # than approve and test the old one.
+              for _ in $(seq 1 12); do
+                sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+                [ "$sha" != "$before" ] && break
+                sleep 5
+              done
+              if [ "$sha" = "$before" ]; then
+                echo "::error::update-branch did not move the release PR head within a minute; not cutting a release."
+                exit 1
+              fi
             fi
-            sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
-            since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            gh workflow run ci.yml --ref "$BRANCH"
             run=""
+            approved=""
             for _ in $(seq 1 36); do
-              # Only a run created by this dispatch: an earlier cut may have
-              # left a finished run on the same head.
-              run=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 10 \
-                --json databaseId,headSha,createdAt \
-                --jq "[.[] | select(.headSha == \"$sha\" and .createdAt >= \"$since\")][0].databaseId // empty")
+              # The pull_request runs of this head, from this repository's own
+              # release branch only (a fork can open a pull request on the same
+              # commit; its runs are not ours to approve), oldest first so the
+              # newest CI run is the one kept. A run still waiting gets its
+              # approval once (Security too, so nothing is left pending on the
+              # PR) and is not picked yet: the approval starts a new attempt of
+              # the same run a moment later, and until then the run still reads
+              # as finished with action_required, which `gh run watch` would
+              # take for a failure. A failed poll is simply tried again.
+              runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$sha&event=pull_request&branch=$BRANCH&per_page=100" \
+                --jq '[.workflow_runs[] | select(.head_repository.full_name == env.GH_REPO and .head_branch == env.BRANCH)] | sort_by(.created_at) | .[] | "\(.id) \(.path) \(.conclusion // .status)"') || runs=""
+              while read -r id path state; do
+                [ -n "$id" ] || continue
+                if [ "$state" = "action_required" ]; then
+                  case " $approved " in
+                    *" $id "*) ;;
+                    *)
+                      echo "attempt $attempt: approving run $id ($path) on the release PR head"
+                      gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null \
+                        || echo "::warning::could not approve run $id; if it is still waiting the cut stops below"
+                      approved="$approved $id"
+                      ;;
+                  esac
+                  # A newer CI run that is still waiting outranks an older one
+                  # already picked (the PR was closed and reopened on this head).
+                  if [ "$path" = ".github/workflows/ci.yml" ]; then
+                    run=""
+                  fi
+                  continue
+                fi
+                if [ "$path" = ".github/workflows/ci.yml" ]; then
+                  run=$id
+                fi
+              done <<< "$runs"
               [ -n "$run" ] && break
               sleep 5
             done
             if [ -z "$run" ]; then
-              echo "::error::CI was dispatched on $BRANCH but no run for $sha appeared; not cutting a release."
+              echo "::error::No approved pull_request CI run appeared for the release PR head $sha within three minutes; not cutting a release."
               exit 1
             fi
             echo "attempt $attempt: CI run $run on the release PR head $sha"
             if ! gh run watch "$run" --exit-status --interval 20; then
-              echo "::error::CI failed on the release PR head $sha (run $run); not cutting a release."
+              now=$(gh pr view "$PR" --json headRefOid --jq .headRefOid) || now=$sha
+              if [ "$now" != "$sha" ]; then
+                echo "::notice::attempt $attempt: the release branch moved during CI; going round again."
+                continue
+              fi
+              echo "::error::CI run $run on the release PR head $sha did not succeed; not cutting a release."
               exit 1
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              # The merge state can lag the last check by a few seconds.
+              state=UNKNOWN
+              for _ in $(seq 1 12); do
+                state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus) || state=UNKNOWN
+                case "$state" in UNKNOWN | BLOCKED) sleep 5 ;; *) break ;; esac
+              done
+              case "$state" in
+                CLEAN | UNSTABLE | HAS_HOOKS)
+                  echo "Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would merge it. Nothing was merged."
+                  exit 0
+                  ;;
+                *)
+                  echo "::error::Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would not merge it."
+                  exit 1
+                  ;;
+              esac
             fi
             if gh pr merge "$PR" --squash --delete-branch --match-head-commit "$sha"; then
               echo "Release PR #$PR merged at $sha."
@@ -139,7 +230,7 @@ jobs:
           exit 1
 
       - name: Dispatch release.yml to tag and publish
-        if: steps.ci.outputs.ready == 'true'
+        if: steps.ci.outputs.ready == 'true' && inputs.dry_run != true
         run: |
           gh workflow run release.yml --ref main
           echo "release.yml dispatched; it creates the tag and publishes vX.Y.Z, X.Y, latest, main and sha-<7> from one build."
@@ -149,7 +240,7 @@ jobs:
       # publish.yml does not fire on a GITHUB_TOKEN merge. Publishing the edge
       # images is then not a second build, it is the only one.
       - name: Publish the edge images if the dispatch failed
-        if: ${{ failure() && steps.merge.outcome == 'success' }}
+        if: ${{ failure() && steps.merge.outcome == 'success' && inputs.dry_run != true }}
         run: |
           gh workflow run publish.yml --ref main
           echo "release.yml could not be dispatched; publish.yml dispatched so the release commit still gets images. Tag and release it by re-running release.yml."
