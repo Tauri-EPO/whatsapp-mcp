@@ -226,7 +226,7 @@ def convert_to_wav16k(input_file: str, output_file: str) -> str:
     ]
     timeout = ffmpeg_timeout_s()
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
+        subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise TranscriptionError(f"ffmpeg timed out after {timeout}s preparing {input_file}") from None
     except FileNotFoundError:
@@ -297,7 +297,9 @@ def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> 
     if language and language != "auto":
         cmd += ["-l", language]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=config.timeout_s)
+        subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=config.timeout_s
+        )
     except subprocess.TimeoutExpired:
         raise TranscriptionError(f"whisper-cli timed out after {config.timeout_s}s") from None
     except subprocess.CalledProcessError as exc:

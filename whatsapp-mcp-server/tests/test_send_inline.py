@@ -195,12 +195,12 @@ def test_send_audio_inline_ogg_goes_out_as_is(outbox, bridge):
 def test_send_audio_inline_other_formats_are_converted_in_the_outbox(outbox, bridge, monkeypatch):
     seen = {}
 
-    def fake_convert(input_file, bitrate="32k", sample_rate=24000, directory=None):
+    def fake_convert(input_file, bitrate="32k", sample_rate=24000, directory=None, write_chunk=None):
         seen["input"] = input_file
         seen["directory"] = directory
         out = os.path.join(directory, "converted.ogg")
-        with open(out, "wb") as handle:
-            handle.write(OGG)
+        with open(out, "wb", buffering=0) as handle:
+            write_chunk(handle, OGG)
         return out
 
     monkeypatch.setattr(audio, "convert_to_opus_ogg_temp", fake_convert)
@@ -208,8 +208,8 @@ def test_send_audio_inline_other_formats_are_converted_in_the_outbox(outbox, bri
     whatsapp.send_audio_message(ALICE, media_base64=_b64(b"RIFF...."), filename="note.wav")
 
     assert os.path.basename(seen["input"]) == "note.wav"
-    assert seen["directory"] == str(outbox / ".uploads")
-    assert os.path.basename(bridge[0]["json"]["media_path"]) == "converted.ogg"
+    assert os.path.dirname(seen["directory"]) == str(outbox / ".uploads")
+    assert os.path.basename(bridge[0]["json"]["media_path"]) == "voice.ogg"
     assert bridge[0]["content"] == OGG
     assert os.listdir(outbox / ".uploads") == []  # the upload and the conversion are both gone
 
@@ -219,12 +219,12 @@ def test_send_audio_by_path_converts_into_the_outbox_and_keeps_the_source(outbox
     src.write_bytes(b"RIFF")
     seen = {}
 
-    def fake_convert(input_file, bitrate="32k", sample_rate=24000, directory=None):
+    def fake_convert(input_file, bitrate="32k", sample_rate=24000, directory=None, write_chunk=None):
         seen["directory"] = directory
         os.makedirs(directory, exist_ok=True)
         out = os.path.join(directory, "converted.ogg")
-        with open(out, "wb") as handle:
-            handle.write(OGG)
+        with open(out, "wb", buffering=0) as handle:
+            write_chunk(handle, OGG)
         return out
 
     monkeypatch.setattr(audio, "convert_to_opus_ogg_temp", fake_convert)
@@ -233,7 +233,7 @@ def test_send_audio_by_path_converts_into_the_outbox_and_keeps_the_source(outbox
 
     # The bridge only reads inside WHATSAPP_MEDIA_ROOTS, so the conversion must
     # land there rather than in the system temp directory.
-    assert seen["directory"] == str(outbox / ".uploads")
+    assert os.path.dirname(seen["directory"]) == str(outbox / ".uploads")
     assert src.is_file()
     assert os.listdir(outbox / ".uploads") == []
 
@@ -284,3 +284,110 @@ def test_audio_convert_temp_honours_the_directory(monkeypatch, tmp_path):
 
     assert os.path.dirname(out) == str(target)
     assert out.endswith(".ogg") and os.path.isfile(out)
+
+
+def test_bounded_audio_conversion_stops_a_stalled_process(monkeypatch, tmp_path):
+    import threading
+
+    stopped = threading.Event()
+
+    class StalledProcess:
+        stdout = None
+
+        def __init__(self, cmd, **kwargs):
+            assert cmd[-3:] == ["-f", "ogg", "pipe:1"]
+            self.stdout = self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            assert stopped.is_set()
+
+        def read(self, size):
+            assert stopped.wait(3), "The ffmpeg deadline never stopped the process"
+            return b""
+
+        def kill(self):
+            stopped.set()
+
+        def poll(self):
+            return -9 if stopped.is_set() else None
+
+        def wait(self):
+            return -9
+
+    monkeypatch.setenv("FFMPEG_TIMEOUT_S", "1")
+    monkeypatch.setattr(audio.subprocess, "Popen", StalledProcess)
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"fake")
+    target = tmp_path / "converted"
+    with pytest.raises(RuntimeError, match="timed out after 1s"):
+        audio.convert_to_opus_ogg_temp(str(source), directory=str(target), write_chunk=lambda *args: None)
+    assert list(target.iterdir()) == []
+
+
+def test_bounded_audio_conversion_kills_on_writer_refusal(monkeypatch, tmp_path):
+    import io
+
+    killed = []
+
+    class Producer:
+        stdout = io.BytesIO(b"fake encoded bytes")
+
+        def __init__(self, cmd, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            assert killed
+
+        def kill(self):
+            killed.append(True)
+
+        def poll(self):
+            return -9 if killed else None
+
+        def wait(self):
+            return -9
+
+    def refuse(*args):
+        raise ToolError("too_large", "fake quota refusal")
+
+    monkeypatch.setattr(audio.subprocess, "Popen", Producer)
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"fake")
+    target = tmp_path / "converted"
+    with pytest.raises(ToolError, match="fake quota refusal"):
+        audio.convert_to_opus_ogg_temp(str(source), directory=str(target), write_chunk=refuse)
+    assert list(target.iterdir()) == []
+
+
+def test_bounded_audio_failure_reports_stderr_tail(monkeypatch, tmp_path):
+    import io
+
+    class FailedProducer:
+        stdout = io.BytesIO()
+
+        def __init__(self, cmd, **kwargs):
+            kwargs["stderr"].write(b"fake input tag\n" * 2000 + b"FINAL: fake encoding failure\n")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def poll(self):
+            return 1
+
+        def wait(self):
+            return 1
+
+    monkeypatch.setattr(audio.subprocess, "Popen", FailedProducer)
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"fake")
+    with pytest.raises(RuntimeError, match="FINAL: fake encoding failure"):
+        audio.convert_to_opus_ogg_temp(str(source), write_chunk=lambda *args: None)

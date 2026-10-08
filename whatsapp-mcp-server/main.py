@@ -16,7 +16,9 @@ from http_auth import (
     resolve_http_token,
     resolve_max_body_bytes,
     resolve_rate_limit,
+    resolve_upload_max_bytes,
 )
+from http_upload import UploadApp
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
@@ -1886,17 +1888,20 @@ def send_file(
     dry_run: bool = False,
     media_base64: str = "",
     filename: str = "",
+    upload_id: str = "",
 ) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
-    The file comes from exactly one of two places: `media_path`, a file that
+    The file comes from exactly one of three places: `media_path`, a file that
     already exists on the server running this MCP (inside its outbox), or
-    `media_base64`, the bytes carried in this call together with `filename`.
+    `media_base64`, the bytes carried in this call together with `filename`,
+    or `upload_id`, the opaque ID returned by POST /upload on http/sse.
     Use `media_base64` when you run on another machine and have no way to put
     a file on the server; the server writes it into the outbox for the send
     and removes it afterwards. Inline payloads are capped (64 MiB, and the
     HTTP transport's body limit, 4 MiB by default, before that): put bigger
-    files on the server and use `media_path`.
+    files through POST /upload and use `upload_id` (64 MiB default upload cap,
+    one-hour expiry), or put them on the server and use `media_path`.
 
     When `caption` is provided, the file and text arrive as a single
     attachment-with-caption message (one bubble in the WA UI), instead of
@@ -1919,6 +1924,9 @@ def send_file(
         filename: Name the recipient sees, with the extension that decides how
                   WhatsApp presents it (report.pdf, photo.jpg, clip.mp4). Only
                   with `media_base64`; directories in it are dropped.
+        upload_id: HTTP upload ID, exclusive with both other sources. Removed
+                   after a successful send; failures/dry_run preserve it until expiry. Refused on stdio.
+                   Do not pass filename: its name was fixed at upload.
 
     Returns:
         A dictionary containing success status and a status message. With
@@ -1934,7 +1942,13 @@ def send_file(
 
     # Call the whatsapp_send_file function
     success, status_message, sent = whatsapp_send_file(
-        chat_jid, media_path, caption, dry_run=dry_run, media_base64=media_base64, filename=filename
+        chat_jid,
+        media_path,
+        caption,
+        dry_run=dry_run,
+        media_base64=media_base64,
+        filename=filename,
+        upload_id=upload_id,
     )
     return {"success": success, "message": status_message, **sent}
 
@@ -1943,12 +1957,13 @@ def send_file(
 @tool_errors
 @mutating_tool
 def send_audio_message(
-    chat_jid: str, media_path: str = "", media_base64: str = "", filename: str = ""
+    chat_jid: str, media_path: str = "", media_base64: str = "", filename: str = "", upload_id: str = ""
 ) -> dict[str, Any]:
     """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
 
     The audio comes from exactly one of `media_path` (a file on the server, inside
-    its outbox) or `media_base64` (the bytes in this call). Anything that is not
+    its outbox), `media_base64` (the bytes in this call), or `upload_id` from
+    POST /upload on http/sse (64 MiB default, one-hour expiry). Anything that is not
     already an Opus .ogg is converted with ffmpeg on the server. Use
     `media_base64` when you run on another machine: the server writes the bytes
     into the outbox for the send and removes them afterwards (64 MiB cap, and the
@@ -1962,12 +1977,15 @@ def send_audio_message(
                       accepted). Excludes `media_path`.
         filename: Optional name for `media_base64`, default "voice.ogg"; the
                   extension says whether a conversion is needed (note.wav, clip.m4a).
+        upload_id: HTTP upload ID, exclusive with both other sources; removed
+                   after a successful send; failures preserve it until expiry. Refused on stdio.
+                   Do not pass filename: its name was fixed at upload.
 
     Returns:
         A dictionary containing success status and a status message
     """
     success, status_message, sent = whatsapp_audio_voice_message(
-        chat_jid, media_path, media_base64=media_base64, filename=filename
+        chat_jid, media_path, media_base64=media_base64, filename=filename, upload_id=upload_id
     )
     return {"success": success, "message": status_message, **sent}
 
@@ -2679,7 +2697,12 @@ def shutdown_handler(signum, frame):
 
 
 def build_http_app(
-    server: MCPServer, transport: str, token: str | None, rate_limit_per_minute: int = 0, **app_kwargs: Any
+    server: MCPServer,
+    transport: str,
+    token: str | None,
+    rate_limit_per_minute: int = 0,
+    upload_max_bytes: int = 64 * 1024 * 1024,
+    **app_kwargs: Any,
 ):
     """Build the ASGI app for the http/sse transports.
 
@@ -2687,10 +2710,16 @@ def build_http_app(
     our middleware can sit in front of the SDK's own DNS-rebinding middleware:
     rate limit (outermost, throttles credential guessing too) → bearer auth → SDK.
     """
+    # Share the SDK's loopback defaults with the raw upload route. Custom routes
+    # do not pass through the SDK transport's Host/Origin validator or body cap.
+    security = app_kwargs["transport_security"] = app_kwargs.get("transport_security") or build_transport_security(
+        app_kwargs.get("host", "127.0.0.1"), None
+    )
     if transport == "sse":
         app = server.sse_app(**app_kwargs)
     else:
         app = server.streamable_http_app(**app_kwargs)
+    app = UploadApp(app, security, upload_max_bytes)
     if token:
         app = BearerTokenMiddleware(app, token)
     if rate_limit_per_minute > 0:
@@ -2767,6 +2796,7 @@ if __name__ == "__main__":
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
         rate_limit = resolve_rate_limit(os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None)
+        upload_max_bytes = resolve_upload_max_bytes(os.getenv("WHATSAPP_MCP_UPLOAD_MAX_BYTES"))
         app_kwargs: dict[str, Any] = {
             "host": host,
             "max_request_body_size": resolve_max_body_bytes(os.getenv("WHATSAPP_MCP_MAX_BODY_BYTES")),
@@ -2779,14 +2809,13 @@ if __name__ == "__main__":
             os.getenv("WHATSAPP_MCP_ALLOWED_HOSTS"),
             os.getenv("WHATSAPP_MCP_ALLOWED_ORIGINS"),
         )
-        if security is not None:
-            app_kwargs["transport_security"] = security
-            if not security.enable_dns_rebinding_protection:
-                print(
-                    "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
-                    "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
-                    file=sys.stderr,
-                )
+        app_kwargs["transport_security"] = security
+        if not security.enable_dns_rebinding_protection:
+            print(
+                "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
+                "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
+                file=sys.stderr,
+            )
         if token is None and token_source == "none":
             print(
                 "WARNING: no WHATSAPP_MCP_TOKEN set and no bridge token found; anyone who can reach "
@@ -2808,7 +2837,9 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        build_http_app(mcp, transport, token, rate_limit_per_minute=rate_limit, **app_kwargs),
+        build_http_app(
+            mcp, transport, token, rate_limit_per_minute=rate_limit, upload_max_bytes=upload_max_bytes, **app_kwargs
+        ),
         host=host,
         port=port,
         log_level="info",

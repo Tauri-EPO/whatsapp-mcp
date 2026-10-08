@@ -132,6 +132,7 @@ whatsapp-mcp/
 │   ├── observability.py        # WHATSAPP_MCP_LOG_FORMAT=json + the MCP /metrics middleware
 │   ├── parent_watchdog.py      # stdio: exit once the parent process is gone (WHATSAPP_PARENT_WATCHDOG_S)
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
+│   ├── http_upload.py          # POST /upload: bounded raw-body HTTP uploads, sent by upload_id, one-hour TTL
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
 │   ├── tool_policy.py          # WHATSAPP_READ_ONLY / _ALLOW_TOOLS / _DENY_TOOLS: hides + refuses tools
 │   ├── untrusted.py            # @untrusted_content: the third-party-data sentence, name sanitisation, WHATSAPP_WRAP_UNTRUSTED
@@ -324,6 +325,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per client (X-Forwarded-For first hop or peer) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; `0`/`off` disables |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304` | Max request body for `http`/`sse` (passed to the SDK app) |
+| `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB) | Maximum raw file bytes streamed into `POST /upload` on `http`/`sse` (positive integer, at most 268435456 / 256 MiB); independent of the JSON-RPC body limit. Uploads expire after one hour and are swept at startup, on new uploads and every minute; a fixed 256 MiB shared outbox budget also bounds upload writes. Sent files are removed after success; failures preserve IDs until expiry |
 | `WHATSAPP_MCP_TOKEN` | bridge token when bound off-loopback; none on loopback | Static bearer token enforced on the `http`/`sse` transports (`http_auth.resolve_http_token`, min 16 chars). Unset + non-loopback bind → reuses the bridge token (env or `.bridge-token`); `off` disables auth explicitly. stdio unaffected |
 | `WHATSAPP_PUBLIC_URL` | *(unset)* | MCP-server-only: the URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`; a bare `host` / `host:port` also works). Set it and `bridge_status` reports `endpoint_cert_expires_at` / `endpoint_cert_days_left` for that endpoint's certificate, and `endpoint_cert_error` when the handshake fails (`endpoint_cert.py`: one outbound TLS handshake, no HTTP request, 3 s, chain verified with the default context, result cached an hour). Unset = no fields, no probe |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty falls back to this default) |
