@@ -26,8 +26,6 @@ const groupRosterSyncEnv = "WHATSAPP_GROUP_ROSTER_SYNC_HOURS"
 const (
 	// groupRosterSyncInterval: the default for groupRosterSyncEnv.
 	groupRosterSyncInterval = 6 * time.Hour
-	// groupRosterSyncMaxHours bounds duration arithmetic and catches typos.
-	groupRosterSyncMaxHours = 365 * 24
 	// groupRosterSyncStartDelay: give the connection (and a pair-time history
 	// sync) time to settle before the first pass fetches anything.
 	groupRosterSyncStartDelay = 2 * time.Minute
@@ -51,10 +49,10 @@ const (
 )
 
 // resolveGroupRosterSync parses groupRosterSyncEnv. Zero disables the pass;
-// a negative or non-numeric value is an error so main() fails fast rather than
-// silently running with a default the operator did not write.
+// a negative, non-numeric or unrepresentable duration is an error so main()
+// fails fast rather than running with a setting the operator did not write.
 func resolveGroupRosterSync(value string) (time.Duration, error) {
-	return resolveHoursEnv(groupRosterSyncEnv, value, groupRosterSyncInterval, groupRosterSyncMaxHours)
+	return resolveHoursEnv(groupRosterSyncEnv, value, groupRosterSyncInterval, 0)
 }
 
 // groupRosterSyncSummary renders the setting for the startup log.

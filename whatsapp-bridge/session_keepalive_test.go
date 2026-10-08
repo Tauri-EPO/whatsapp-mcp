@@ -49,12 +49,12 @@ func TestResolveSessionKeepalive(t *testing.T) {
 
 // The roster sync shares the parser: what it accepts must not move.
 func TestResolveGroupRosterSync_KeepsItsSpellings(t *testing.T) {
-	for value, want := range map[string]time.Duration{"": groupRosterSyncInterval, "0": 0, "6": 6 * time.Hour, "8760": 8760 * time.Hour} {
+	for value, want := range map[string]time.Duration{"": groupRosterSyncInterval, "0": 0, "6": 6 * time.Hour, "10000": 10000 * time.Hour} {
 		if got, err := resolveGroupRosterSync(value); err != nil || got != want {
 			t.Errorf("resolveGroupRosterSync(%q) = %v, %v; want %v", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"-1", "x", "1.5"} {
+	for _, value := range []string{"-1", "x", "1.5", "9999999", "5124096"} {
 		if _, err := resolveGroupRosterSync(value); err == nil {
 			t.Errorf("resolveGroupRosterSync(%q) was accepted", value)
 		}
