@@ -123,8 +123,10 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				continue
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
-			location := extractMessage(latestMsg.Message.GetMessage(), timestamp, latestMsg.Message.GetKey().GetID()).location
-			locationMarkers := !preserveExisting && location != nil && location.Live
+			// Any incoming kind can collide with an archived location. Defer
+			// own-phone markers until its bounded write transaction can check
+			// the current row, including a live row arriving after setup.
+			locationMarkers := !preserveExisting
 			var locationInitial map[string]time.Time
 			if locationMarkers {
 				locationInitial = historyLocationInitialTimes(messages, timestamp)

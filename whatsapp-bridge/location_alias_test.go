@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -109,5 +110,73 @@ func TestPhoneLocationCollisionRetainsActivityAndReadMarker(t *testing.T) {
 				t.Fatalf("consumed collision advanced state: activity=%v read=%v", activity, read)
 			}
 		})
+	}
+}
+
+func TestPhoneHistoryReverseLocationCollision(t *testing.T) {
+	for _, kind := range []string{"text", "static"} {
+		for _, sequence := range []int64{0, 3} {
+			for _, intervening := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/seq%d/intervening%t", kind, sequence, intervening), func(t *testing.T) {
+					ms := newTestMessageStore(t)
+					chat := "120363000000000001@g.us"
+					stamp := time.Unix(1700000000, 0)
+					if err := ms.StoreChat(chat, "group", stamp.Add(30*time.Second)); err != nil {
+						t.Fatal(err)
+					}
+					if err := ms.MarkChatRead(chat, stamp); err != nil {
+						t.Fatal(err)
+					}
+					if err := ms.StoreMessage("UNREAD", chat, phonePN.String(), "still unread", stamp.Add(30*time.Second), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+						t.Fatal(err)
+					}
+					seed := func() {
+						t.Helper()
+						if err := persistMessage(ms, "H0", chat, selfPhone.String(), stamp, false, extractMessage(livePosition(0, 0.25), stamp, "H0"), true, testLogger()); err != nil {
+							t.Fatal(err)
+						}
+						if sequence > 0 {
+							if err := persistMessage(ms, "H0", chat, selfPhone.String(), stamp, false, extractMessage(livePosition(sequence, 0.4), stamp, "H0"), true, testLogger()); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					var before string
+					if !intervening {
+						seed()
+						before = shareArchiveSnapshot(t, ms, "H0", chat)
+					}
+					b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+					if intervening {
+						b.historyBatchWriter = func(fn func(*messageBatch) error) error {
+							seed()
+							before = shareArchiveSnapshot(t, ms, "H0", chat)
+							return ms.Batch(fn)
+						}
+					}
+					fixture := shareHistoryFixture(1)
+					conversation := fixture.Data.Conversations[0]
+					conversation.UnreadCount = proto.Uint32(0)
+					row := conversation.Messages[0].Message
+					row.Participant, row.MessageTimestamp = proto.String(phonePN.String()), proto.Uint64(1900000000)
+					row.Message = &waE2E.Message{Conversation: proto.String("foreign key claim")}
+					if kind == "static" {
+						row.Message = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.9), DegreesLongitude: proto.Float64(0.5)}}
+					}
+					b.handleHistorySync(fixture)
+					var activity, read time.Time
+					if err := ms.db.QueryRow("SELECT last_message_time,last_read_time FROM chats WHERE jid=?", chat).Scan(&activity, &read); err != nil {
+						t.Fatal(err)
+					}
+					var unread int
+					if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages JOIN chats ON chats.jid=messages.chat_jid WHERE chat_jid=? AND timestamp>last_read_time", chat).Scan(&unread); err != nil {
+						t.Fatal(err)
+					}
+					if before != shareArchiveSnapshot(t, ms, "H0", chat) || !activity.Equal(stamp.Add(30*time.Second)) || !read.Equal(stamp) || unread != 1 {
+						t.Fatalf("refused reverse collision advanced markers: activity=%v read=%v unread=%d", activity, read, unread)
+					}
+				})
+			}
+		}
 	}
 }

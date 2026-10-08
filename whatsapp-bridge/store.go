@@ -1196,7 +1196,11 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 // `filename` still carries the same value for one release so older readers
 // keep working; new readers use target_message_id.
 func (store *MessageStore) SetTargetMessageID(id, chatJID, target string) error {
-	_, err := store.db.Exec(`UPDATE messages SET target_message_id = ? WHERE id = ? AND chat_jid = ?`, target, id, chatJID)
+	return setTargetMessageIDWith(store.db, id, chatJID, target)
+}
+
+func setTargetMessageIDWith(ex sqlExecer, id, chatJID, target string) error {
+	_, err := ex.Exec(`UPDATE messages SET target_message_id = ? WHERE id = ? AND chat_jid = ?`, target, id, chatJID)
 	return err
 }
 

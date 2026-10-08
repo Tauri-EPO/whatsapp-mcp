@@ -53,7 +53,7 @@ func livePosition(sequence int64, latitude float64) *waE2E.Message {
 
 func TestLiveLocationAuthorCollisions(t *testing.T) {
 	for _, path := range []string{"live", "persist", "batch"} {
-		for _, kind := range []string{"live", "static", "text", "image", "reverse-static", "reverse-text"} {
+		for _, kind := range []string{"live", "static", "text", "image", "reverse-static", "reverse-text", "reverse-reaction", "reverse-poll-vote"} {
 			for _, author := range []string{"sender", "namespace", "from-me", "unknown-namespace"} {
 				for _, sequence := range []int64{0, 3} {
 					t.Run(fmt.Sprintf("%s/%s/%s/seq%d", path, kind, author, sequence), func(t *testing.T) {
@@ -119,6 +119,11 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 							incoming = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.9), DegreesLongitude: proto.Float64(0.5)}}
 						case "reverse-text":
 							incoming = &waE2E.Message{Conversation: proto.String("claim the author's key")}
+						case "reverse-reaction":
+							incoming = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Key: &waCommon.MessageKey{ID: proto.String("TARGET")}, Text: proto.String("👍")}}
+						case "reverse-poll-vote":
+							incoming = &waE2E.Message{PollUpdateMessage: &waE2E.PollUpdateMessage{PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String("TARGET")}}}
+							b.PollVoteDecrypt = func(context.Context, *events.Message) ([][]byte, error) { return nil, nil }
 						}
 						feed := func(id string) {
 							if path == "live" {
@@ -127,10 +132,16 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 								b.handleMessage(event)
 							} else {
 								write := func(w messageWriter) error {
+									if kind == "reverse-poll-vote" && incoming.GetPollUpdateMessage() != nil {
+										return ms.storePollVoteMessage(id, chat.String(), sender.String(), pollVoteContent(nil), stamp.Add(time.Minute), fromMe, "TARGET", testLogger())
+									}
+									if kind == "reverse-reaction" && incoming.GetReactionMessage() != nil {
+										return persistMessage(w, id, chat.String(), sender.String(), stamp.Add(time.Minute), fromMe, extractedMessage{content: "👍", mediaType: "reaction", filename: "TARGET"}, false, testLogger())
+									}
 									return persistMessage(w, id, chat.String(), sender.String(), stamp.Add(time.Minute), fromMe, extractMessage(incoming, stamp, id), true, testLogger())
 								}
 								var err error
-								if path == "batch" {
+								if path == "batch" && incoming.GetPollUpdateMessage() == nil {
 									err = ms.Batch(func(w *messageBatch) error { return write(w) })
 								} else {
 									err = write(ms)
@@ -171,7 +182,14 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 						if strings.HasPrefix(kind, "reverse-") {
 							wantJobs = 0
 						}
-						if path == "live" && (posts.Load() != 1 || b.autoDownloads.queued() != wantJobs || b.metrics.messagesStored.Load() != 1) {
+						wantPosts, wantStored := int32(1), int64(1)
+						if kind == "reverse-reaction" || kind == "reverse-poll-vote" {
+							wantStored = 0 // pointer rows have their existing separate event path
+						}
+						if kind == "reverse-poll-vote" {
+							wantPosts = 0 // votes do not emit message webhooks
+						}
+						if path == "live" && (posts.Load() != wantPosts || b.autoDownloads.queued() != wantJobs || b.metrics.messagesStored.Load() != wantStored) {
 							t.Fatalf("distinct-key control did not emit effects: posts=%d jobs=%d stored=%d", posts.Load(), b.autoDownloads.queued(), b.metrics.messagesStored.Load())
 						}
 					})

@@ -270,13 +270,20 @@ func (b *Bridge) handlePollVote(ctx context.Context, evt *events.Message, chatJI
 // is the row's: the caller reports it (store_failures.go), with a retry on the
 // live path.
 func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) error {
-	if err := store.StoreMessage(id, chatJID, sender, content, ts, fromMe, "poll_vote", pollID, "", nil, nil, nil, 0, ""); err != nil {
-		return err
-	}
-	if err := store.SetTargetMessageID(id, chatJID, pollID); err != nil {
-		logger.Warnf("Failed to set poll vote target: %v", err)
-	}
-	return nil
+	_, err := store.storePollVoteMessageResult(id, chatJID, sender, content, ts, fromMe, pollID, logger)
+	return err
+}
+
+func (store *MessageStore) storePollVoteMessageResult(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) (consumed bool, err error) {
+	err = store.Batch(func(batch *messageBatch) error {
+		ex := extractedMessage{content: content, mediaType: "poll_vote", filename: pollID, hasLength: true}
+		consumed, err = persistMessageResult(batch, id, chatJID, sender, ts, fromMe, ex, false, logger)
+		if err != nil || consumed {
+			return err
+		}
+		return batch.write(func() error { return setTargetMessageIDWith(batch.tx, id, chatJID, pollID) })
+	})
+	return consumed, err
 }
 
 // defaultHistoryVoteRetryDelays paces retries while whatsmeow is still writing

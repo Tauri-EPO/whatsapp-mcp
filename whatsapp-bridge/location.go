@@ -168,8 +168,8 @@ func (b *messageBatch) UpdateLiveLocation(id, chat, sender string, fromMe bool, 
 }
 
 // A history position update is not fresh conversation activity. Only the
-// location case changes the usual newest-first timestamp rule; other history
-// chunks keep their existing marker and retry behavior.
+// location case changes the usual newest-first timestamp value; every own-phone
+// chunk checks for a location-key collision under its existing write lock.
 func historyLocationInitialTimes(rows []*waHistorySync.HistorySyncMsg, fallback time.Time) map[string]time.Time {
 	initial := make(map[string]time.Time)
 	for _, row := range rows {
@@ -197,12 +197,14 @@ func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locatio
 		}
 		stamp := time.Unix(int64(info.GetMessageTimestamp()), 0) //nolint:gosec // same WhatsApp seconds as the canonical importer
 		position := extractMessage(info.GetMessage(), fallback, info.GetKey().GetID()).location
-		if position != nil && position.Live && info.GetKey().GetID() != "" {
+		live := position != nil && position.Live
+		if info.GetKey().GetID() != "" {
 			var original time.Time
-			var user string
+			var user sql.NullString
 			var server sql.NullString
-			var own bool
-			err := reader.QueryRowContext(ctx, `SELECT timestamp,sender,sender_server,is_from_me FROM messages WHERE id=? AND chat_jid=?`, info.GetKey().GetID(), chat).Scan(&original, &user, &server, &own)
+			var own sql.NullBool
+			err := reader.QueryRowContext(ctx, `SELECT timestamp,sender,sender_server,is_from_me FROM messages
+				WHERE id=? AND chat_jid=? AND (? OR media_type='location')`, info.GetKey().GetID(), chat, live).Scan(&original, &user, &server, &own)
 			if err == nil {
 				// Positive samples never create activity for a known key. Initial
 				// samples may restore metadata only for the same verified author.
@@ -210,9 +212,13 @@ func (b *Bridge) historyLocationActivityTime(ctx context.Context, reader locatio
 				if !position.update() {
 					jid, _ := types.ParseJID(chat)
 					sender, fromMe := b.historySender(info, jid, false)
-					candidate, lookupErr := b.liveLocationSender(ctx, reader, info.GetKey().GetID(), chat, storedSender(sender), fromMe)
+					candidate := storedSender(sender)
+					var lookupErr error
+					if live {
+						candidate, lookupErr = b.liveLocationSender(ctx, reader, info.GetKey().GetID(), chat, candidate, fromMe)
+					}
 					incomingUser, incomingServer := splitSenderJID(candidate)
-					accepted = lookupErr == nil && incomingUser == user && own == fromMe && ((server.Valid && incomingServer == server.String) || (!server.Valid && incomingServer == nil))
+					accepted = lookupErr == nil && user.Valid && incomingUser == user.String && own.Valid && own.Bool == fromMe && ((server.Valid && incomingServer == server.String) || (!server.Valid && incomingServer == nil))
 				}
 				if !accepted {
 					stamp = original

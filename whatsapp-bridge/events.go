@@ -226,7 +226,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	if handled, pollID, voteContent := b.handlePollVote(context.Background(), msg, chatJID, sender, msgTimestamp); handled {
 		if voteContent != "" {
 			storeRow("poll vote", func() error {
-				return messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+				var err error
+				rowConsumed, err = messageStore.storePollVoteMessageResult(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+				return err
 			})
 		}
 		return
@@ -246,16 +248,18 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		if reactedToID != "" {
 			emoji := reaction.GetText()
 			stored := storeRow("reaction", func() error {
-				return messageStore.StoreMessage(
-					msg.Info.ID, chatJID, storedSenderJID, emoji,
-					msgTimestamp, msg.Info.IsFromMe,
-					"reaction", reactedToID, "", nil, nil, nil, 0, "",
-				)
+				return messageStore.Batch(func(batch *messageBatch) error {
+					ex := extractedMessage{content: emoji, mediaType: "reaction", filename: reactedToID, hasLength: true}
+					var err error
+					rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, false, logger)
+					if err != nil || rowConsumed {
+						return err
+					}
+					return batch.write(func() error { return setTargetMessageIDWith(batch.tx, msg.Info.ID, chatJID, reactedToID) })
+				})
 			})
-			if stored {
-				if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
-					logger.Warnf("Failed to set reaction target: %v", err)
-				}
+			if rowConsumed {
+				return
 			}
 			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
