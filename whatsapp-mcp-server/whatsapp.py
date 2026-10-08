@@ -516,7 +516,7 @@ def _row_to_message(row: tuple) -> Message:
         deleted_at=parse_db_time(deleted) if deleted else None,
         view_once=bool(view_once),
         target_message_id=target,
-        bytes=int(file_length) if file_length else None,
+        bytes=int(file_length) if file_length is not None else None,
         sha256=sha256 or None,
     )
 

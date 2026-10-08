@@ -350,7 +350,7 @@ func TestMigrateCanonicalTimestampsRepairsRolledBackRows(t *testing.T) {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != messagesDBUserVersion {
+	if version != mediaLengthDBVersion {
 		t.Fatalf("a fresh store should be stamped, user_version = %d", version)
 	}
 
@@ -403,8 +403,8 @@ func TestMigrateCanonicalTimestampsRepairsRolledBackRows(t *testing.T) {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != messagesDBUserVersion {
-		t.Errorf("user_version = %d after the repair, want %d", version, messagesDBUserVersion)
+	if version != mediaLengthDBVersion {
+		t.Errorf("user_version = %d after the repair, want %d", version, mediaLengthDBVersion)
 	}
 
 	// Idempotent: the next start probes, finds nothing and rewrites nothing.

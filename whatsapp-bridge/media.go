@@ -116,12 +116,23 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 
 // Function to download media from a message
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
+	for {
+		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
+		if mediaLimit(ctx) != 0 || !errors.Is(err, errAutoMediaLimit) || ctx.Err() != nil {
+			return ok, kind, name, path, err
+		}
+		// An uncapped waiter retries after the capped starter cleans up.
+		// Re-read metadata too: a CDN retry may have refreshed its credentials.
+	}
+}
+
+func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	messageStore := b.Store
 	// Query the database for the message including timestamp
 	var mediaType, url string
 	var originalName, storedDirectPath sql.NullString
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
-	var fileLength uint64
+	var fileLength sql.NullInt64
 	var timestamp time.Time
 	var err error
 
@@ -133,6 +144,11 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to find message: %v", err)
+	}
+
+	length, lengthErr := mediaLengthValue(fileLength)
+	if lengthErr != nil {
+		return false, "", "", "", lengthErr
 	}
 
 	// Check if this is a media message
@@ -186,6 +202,9 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		b.Log.Warnf("Cache lookup for message %q in chat %q was refused (%v); downloading the file again", messageID, chatJID, lookupErr)
 	}
 	if cached != "" {
+		if err := checkCachedMediaLimit(ctx, root, cached); err != nil {
+			return false, "", "", "", err
+		}
 		absPath = filepath.Join(filepath.Dir(absPath), path.Base(cached))
 		b.Log.Debugf("📁 File already exists: %s", absPath)
 		return true, mediaType, filepath.Base(absPath), absPath, nil
@@ -238,7 +257,7 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		URL:           url,
 		DirectPath:    directPath,
 		MediaKey:      mediaKey,
-		FileLength:    fileLength,
+		FileLength:    length,
 		FileSHA256:    fileSHA256,
 		FileEncSHA256: fileEncSHA256,
 		MediaType:     waMediaType,
@@ -274,10 +293,12 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 				if n, altErr := b.transferMedia(ctx, &viaURL, relPath); altErr == nil {
 					b.Log.Warnf("Message %s was downloaded through the path cut out of its url after its direct path was refused", messageID)
 					written, err = n, nil
+				} else if errors.Is(altErr, errAutoMediaLimit) {
+					err = altErr
 				}
 			}
 			switch {
-			case err == nil:
+			case err == nil || errors.Is(err, errAutoMediaLimit):
 			case age < cdnFreshWindow && !linkExpired(directPath, time.Now()):
 				// Too young for its link to have expired, and the link does
 				// not say it has: the request itself is what the CDN refuses,
@@ -305,6 +326,9 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 		// %w, not %v: handleDownload asks errors.Is whether the sender's phone
 		// answered "gone" (errMediaUnavailable), and %v would cut that chain.
 		return false, "", "", "", fmt.Errorf("failed to download media: %w", err)
+	}
+	if err := checkCachedMediaLimit(ctx, root, relPath); err != nil {
+		return false, "", "", "", err
 	}
 	return true, mediaType, filename, absPath, nil
 }
@@ -430,8 +454,8 @@ func chatMediaRel(chatJID string) string {
 // downloadToPath downloads msg into relPath, a path relative to the store root.
 // Returns the byte count written.
 func downloadToPath(ctx context.Context, root *os.Root, client *whatsmeow.Client, msg whatsmeow.DownloadableMessage, relPath string) (int64, error) {
-	return writeMediaFile(root, relPath, func(f *os.File) error {
-		return client.DownloadToFile(ctx, msg, f)
+	return writeMediaDownload(ctx, root, relPath, func(downloadCtx context.Context, f whatsmeow.File) error {
+		return client.DownloadToFile(downloadCtx, msg, f)
 	})
 }
 

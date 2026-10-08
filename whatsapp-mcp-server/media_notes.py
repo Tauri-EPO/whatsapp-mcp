@@ -394,7 +394,7 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
             "timestamp": parse_db_time(r[3]).isoformat() if r[3] else None,
             "media_type": r[4],
             "filename": r[5] or None,
-            "bytes": int(r[6]) if r[6] else None,
+            "bytes": int(r[6]) if r[6] is not None else None,
         }
         for r in rows
     ]

@@ -51,13 +51,13 @@ func TestMediaReplayAcceptsOnlyFirstPartialAndKeepsChatsIndependent(t *testing.T
 				var kind, name, url string
 				var path sql.NullString
 				var key, sha, enc []byte
-				var length uint64
+				var length sql.NullInt64
 				var storedTimestamp time.Time
 				if err := ms.db.QueryRow("SELECT media_type,filename,url,direct_path,media_key,file_sha256,file_enc_sha256,file_length,timestamp FROM messages WHERE id='PARTIAL1' AND chat_jid=?", mediaTestChat).Scan(&kind, &name, &url, &path, &key, &sha, &enc, &length, &storedTimestamp); err != nil {
 					t.Fatal(err)
 				}
-				if kind != "document" || name != first.GetFileName() || url != first.GetURL() || path.String != first.GetDirectPath() || !bytes.Equal(key, first.GetMediaKey()) || !bytes.Equal(sha, first.GetFileSHA256()) || len(enc) != 0 || length != 0 || !storedTimestamp.Equal(firstTimestamp) {
-					t.Fatalf("first partial snapshot lost: kind=%s name=%s path=%s length=%d timestamp=%v", kind, name, path.String, length, storedTimestamp)
+				if kind != "document" || name != first.GetFileName() || url != first.GetURL() || path.String != first.GetDirectPath() || !bytes.Equal(key, first.GetMediaKey()) || !bytes.Equal(sha, first.GetFileSHA256()) || len(enc) != 0 || length.Valid || !storedTimestamp.Equal(firstTimestamp) {
+					t.Fatalf("first partial snapshot lost: kind=%s name=%s path=%s length=%v timestamp=%v", kind, name, path.String, length, storedTimestamp)
 				}
 			}
 			check()

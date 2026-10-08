@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -334,7 +335,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// against the cap (issue #474).
 	wanted := mediaType != "" && downloadable && b.MediaAutoDownload
 	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
-	noLength := b.MediaMaxBytes > 0 && fileLength == 0
+	noLength := b.MediaMaxBytes > 0 && !ex.hasLength
 	tooLarge := b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes
 	cacheOnArrival := wanted && !skipStatusMedia && !noLength && !tooLarge
 
@@ -347,7 +348,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	switch {
 	case cacheOnArrival && mediaType == "image" && shouldForward:
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
+		success, _, dlName, dlPath, dlErr := b.DownloadMedia(withMediaLimit(context.Background(), b.MediaMaxBytes), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			// One read through the store root gives the sniffed MIME type and
 			// the bytes for the payload, which must hash to what the message
@@ -357,7 +358,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to a background download so media is cached for future MCP tool calls
-			if permanentMediaCode(dlErr) == "" {
+			if permanentMediaCode(dlErr) == "" && !errors.Is(dlErr, errAutoMediaLimit) {
 				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 			}
 		}

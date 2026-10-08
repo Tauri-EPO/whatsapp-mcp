@@ -100,6 +100,31 @@ sequenceDiagram
     Note over EXT: Process incoming message
 ```
 
+### Media lengths and the automatic cache limit
+
+`messages.file_length` is NULL when the message did not declare a length and
+0 for an explicitly empty file. `list_messages`, `list_media`, `get_media_notes`
+preserve that distinction as JSON null versus 0. The media reader keeps the
+declared value distinct internally and reports the actual cached file size
+when returning its bytes.
+
+A one-time, transactional `user_version=2` migration changes legacy zeroes to
+NULL because old rows cannot distinguish the two meanings; later startups
+leave new explicit zeroes untouched. It updates only the length column, without
+rebuilding the content index or scanning media files. Replays keep a known
+length when the same plaintext hash arrives without one. The retry SDK has no
+length-presence bit: a zero refresh keeps a known length only for that same
+plaintext hash, otherwise stores NULL.
+
+Automatic downloads with a nonzero `WHATSAPP_MEDIA_MAX_BYTES` skip undeclared
+lengths and reject an oversized declaration. They also bound the streamed
+encrypted file (allowing AES padding and its MAC), check decrypted bytes before
+publishing the cache file, and remove a rejected temporary file. Manual
+downloads remain uncapped; an automatic caller that joins a manual transfer
+checks its result without removing the manual cache. In the opposite arrival
+order, a manual caller retries without the cap after the rejected automatic
+transfer stops and cleans its temporary file, under the same destination lock.
+
 ### Replayed media rows
 
 Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.

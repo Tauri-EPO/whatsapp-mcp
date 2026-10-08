@@ -18,7 +18,7 @@ import (
 // the full resolved JID; see StoreMessage (store.go).
 type messageWriter interface {
 	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
+		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
 		quotedMessageId string, directPath ...string) error
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
@@ -40,6 +40,7 @@ type extractedMessage struct {
 	fileSHA   []byte
 	fileEnc   []byte
 	fileLen   uint64
+	hasLength bool // protocol field presence; explicit zero is a length
 	poll      *pollCreation
 
 	// directPath is the media's own direct path, "" when the message has none.
@@ -63,6 +64,7 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	e.content = extractTextContent(e.inner)
 	e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen = extractMediaInfo(e.inner, ts, id)
 	e.directPath = extractMediaDirectPath(e.inner)
+	e.hasLength = mediaLengthDeclared(e.inner)
 	if e.poll = extractPollCreation(e.inner); e.poll != nil {
 		e.content = pollContent(e.poll)
 		e.mediaType = "poll"
@@ -86,8 +88,12 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 	if quoted {
 		quotedID = e.quotedID
 	}
+	var length any
+	if e.hasLength {
+		length = e.fileLen
+	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen, quotedID, e.directPath); err != nil {
+		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, e.directPath); err != nil {
 		return err
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of

@@ -771,7 +771,7 @@ your own account's archive; treat it accordingly.
 Each returned message includes `media_type` and, for media messages, `filename`
 (the sender's original document name, or the bridge's generated
 `<type>_<timestamp>_<id>.<ext>` for images, audio, video and stickers), `bytes`
-(the size WhatsApp reported), `sha256` (the content hash, identical for the
+(the declared size: 0 for an explicitly empty file, null when undeclared), `sha256` (the content hash, identical for the
 same file forwarded into several chats) and `notes` (what the agent recorded
 about that hash, `{}` when nothing was — see
 [annotate-after-reading](#annotate-after-reading)). The notes of a whole page

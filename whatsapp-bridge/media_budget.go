@@ -137,7 +137,7 @@ func (b *Bridge) queueAutoDownload(messageID, chatJID, mediaType string) {
 func (b *Bridge) runAutoDownload(ctx context.Context, job mediaJob) {
 	ctx, cancel := context.WithTimeout(ctx, autoDownloadTimeout)
 	defer cancel()
-	success, _, _, path, err := b.DownloadMedia(ctx, job.messageID, job.chatJID)
+	success, _, _, path, err := b.DownloadMedia(withMediaLimit(ctx, b.MediaMaxBytes), job.messageID, job.chatJID)
 	switch {
 	case success && err == nil:
 		b.Log.Infof("✅ Auto-downloaded media: %s", path)
