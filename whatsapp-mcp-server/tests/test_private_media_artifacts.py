@@ -170,6 +170,37 @@ def test_private_file_and_notes_factory_refuse_final_symlink(tmp_path):
     assert outside.read_bytes() == b"untouched"
 
 
+@pytest.mark.parametrize(
+    "destination",
+    [
+        ".mcp-export-artifacts",
+        ".mcp-export-artifacts.part",
+        ".mcp-export-artifacts/archive.ndjson",
+        ".mcp-export-artifacts.part/archive.ndjson",
+        "nested/../.mcp-export-artifacts",
+    ],
+)
+def test_export_metadata_namespace_is_refused_before_directory_or_data_effects(tmp_path, monkeypatch, destination):
+    root = tmp_path / "not-created"
+    monkeypatch.setenv("WHATSAPP_EXPORT_DIR", str(root))
+    with pytest.raises(ToolError) as refused:
+        export.export_messages(out_path=destination)
+    assert refused.value.code == "invalid_argument"
+    assert not root.exists()
+
+
+def test_unavailable_export_manifest_keeps_completed_archive_valid(paired_dbs, tmp_path, monkeypatch, caplog):
+    root = tmp_path / "exports"
+    root.mkdir()
+    (root / private_files.EXPORT_MANIFEST).mkdir()
+    monkeypatch.setenv("WHATSAPP_EXPORT_DIR", str(root))
+    with caplog.at_level(logging.WARNING, logger="whatsapp_mcp"):
+        result = export.export_messages(out_path="normal.ndjson")
+    records = [json.loads(line) for line in Path(result["path"]).read_text().splitlines()]
+    assert len(records) == result["count"] and all(isinstance(row, dict) for row in records)
+    assert any("ownership was not recorded" in row.message for row in caplog.records)
+
+
 @POSIX
 def test_migration_shared_export_root_preserves_other_files_and_directories(tmp_path):
     database = tmp_path / "notes.db"

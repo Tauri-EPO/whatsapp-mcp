@@ -23,7 +23,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
-from private_files import private_makedirs, private_open, record_export
+from private_files import EXPORT_MANIFEST, private_makedirs, private_open, record_export
 from whatsapp import MessageFilters, message_columns
 
 logger = logging.getLogger("whatsapp_mcp")
@@ -72,13 +72,6 @@ def resolve_export_path(out_path: str | None, chat_jid: str | Sequence[str] | No
     inside the directory that point out of it.
     """
     root = export_dir()
-    try:
-        private_makedirs(root)
-    except OSError as exc:
-        raise ToolError(
-            "internal",
-            f"export directory {root} is not usable ({exc}); set WHATSAPP_EXPORT_DIR to a writable path",
-        ) from exc
     root_real = os.path.realpath(root)
 
     candidate = (out_path or "").strip() or _default_name(chat_jid)
@@ -92,6 +85,16 @@ def resolve_export_path(out_path: str | None, chat_jid: str | Sequence[str] | No
             "denied",
             f"out_path must stay inside the export directory ({root_real}); {candidate!r} resolves outside it",
         )
+    first = os.path.relpath(target, root_real).split(os.sep, 1)[0]
+    if os.path.normcase(first) in {os.path.normcase(EXPORT_MANIFEST), os.path.normcase(EXPORT_MANIFEST + ".part")}:
+        raise ToolError("invalid_argument", "out_path uses a reserved export metadata name")
+    try:
+        private_makedirs(root)
+    except OSError as exc:
+        raise ToolError(
+            "internal",
+            f"export directory {root} is not usable ({exc}); set WHATSAPP_EXPORT_DIR to a writable path",
+        ) from exc
     if os.path.isdir(target):
         raise ToolError("invalid_argument", f"{candidate!r} is a directory")
     private_makedirs(os.path.dirname(target))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -12,7 +13,7 @@ from pathlib import Path
 _EXPORT_NAME = re.compile(r"messages-[\w-]+-[0-9]{8}T[0-9]{6}Z\.ndjson(?:\.part)?\Z")
 _UPLOAD_FOLDER = re.compile(r"[0-9]{8}T[0-9]{6}Z-(?:[0-9a-f]{8}|[0-9a-f]{32})\Z")
 _CONVERTED_FILE = re.compile(r"tmp[^/\\]+\.ogg\Z")
-_EXPORT_MANIFEST = ".mcp-export-artifacts"
+EXPORT_MANIFEST = ".mcp-export-artifacts"
 
 
 def record_export(root: str, path: str) -> None:
@@ -20,13 +21,16 @@ def record_export(root: str, path: str) -> None:
     relative = os.path.relpath(path, root)
     # One append write per record, safe for concurrent exporters. The names are
     # JSON encoded because out_path can contain newline characters.
-    import json
-
-    fd = _open_fd(os.path.join(root, _EXPORT_MANIFEST), os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     try:
-        os.write(fd, (json.dumps(relative) + "\n").encode())
-    finally:
-        os.close(fd)
+        fd = _open_fd(os.path.join(root, EXPORT_MANIFEST), os.O_CREAT | os.O_WRONLY | os.O_APPEND)
+        try:
+            os.write(fd, (json.dumps(relative) + "\n").encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        # The archive is already complete and private. An unavailable optional
+        # ownership record must not turn that successful export into a failure.
+        logging.getLogger("whatsapp_mcp").warning("Export ownership was not recorded; migration may skip this artifact")
 
 
 def private_makedirs(path: str) -> None:
@@ -119,10 +123,8 @@ def tighten_existing_artifacts(notes_path: str, export_root: str, upload_root: s
     files = sum(tighten(notes_path + suffix, 0o600) for suffix in ("", "-wal", "-shm"))
     directories = 0
     known: set[str] = set()
-    manifest = os.path.join(export_root, _EXPORT_MANIFEST)
+    manifest = os.path.join(export_root, EXPORT_MANIFEST)
     if not os.path.islink(manifest) and os.path.isfile(manifest):
-        import json
-
         with open(manifest, encoding="utf-8") as handle:
             for line in handle:
                 try:
