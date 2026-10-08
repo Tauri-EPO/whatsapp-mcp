@@ -141,12 +141,15 @@ def _allowed(jid: str) -> bool:
     both refuse chats every read tool allows and accept chats they hide, so
     every spelling of the identity has a say.
     """
+    if jid.count("@") > 1:
+        return False
     if not CHAT_POLICY.restricted:
         return True
     return any(CHAT_POLICY.allows(spelling) for spelling in _jid_spellings(jid))
 
 
 def _require_allowed(jid: str) -> None:
+    whatsapp._require_unambiguous_identifier(jid)
     if not _allowed(jid):
         # The caller's spelling, not the resolved one: it never supplied that.
         raise ToolError("denied", CHAT_POLICY.denial_message(jid))

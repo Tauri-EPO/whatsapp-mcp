@@ -497,17 +497,6 @@ func extractDirectPathFromURL(url string) string {
 // handleDownload serves POST /api/download.
 func (b *Bridge) handleDownload() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Check if connected
-		if !b.Connected() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(DownloadMediaResponse{
-				Success: false,
-				Message: "WhatsApp client is not connected. Please wait for reconnection.",
-			})
-			return
-		}
-
 		// Parse the request body
 		var req DownloadMediaRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -518,6 +507,16 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 		// Validate request
 		if req.MessageID == "" || req.ChatJID == "" {
 			writeError(w, http.StatusBadRequest, "Message ID and Chat JID are required")
+			return
+		}
+		if _, ok := authorizeChat(w, b.Policy, req.ChatJID, false); !ok {
+			return
+		}
+		if !b.Connected() {
+			writeJSON(w, http.StatusServiceUnavailable, DownloadMediaResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
 			return
 		}
 

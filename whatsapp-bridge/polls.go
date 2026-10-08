@@ -422,12 +422,7 @@ func handlePollResults(store *MessageStore, policy chatPolicy) http.HandlerFunc 
 			_ = json.NewEncoder(w).Encode(PollResultsResponse{Message: "message_id and chat_jid are required", Options: []PollOptionTally{}, Votes: []PollVoteEntry{}})
 			return
 		}
-		if _, err := types.ParseJID(chatJID); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(PollResultsResponse{Message: "invalid chat_jid", Options: []PollOptionTally{}, Votes: []PollVoteEntry{}})
-			return
-		}
-		if rejectByChatPolicy(w, policy, chatJID) {
+		if _, ok := authorizeChat(w, policy, chatJID, false); !ok {
 			return
 		}
 		resp, err := store.PollResults(messageID, chatJID)

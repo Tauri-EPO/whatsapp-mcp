@@ -123,6 +123,7 @@ def export_messages(
             raise ToolError("invalid_argument", "fields must name at least one column")
     # Validates the JIDs and the allow-list before a file is created; the same
     # call inside MessageFilters.build() then binds them.
+    whatsapp._validate_filter_identifiers(chat_jid, exclude_chat_jid, sender_phone_number)
     whatsapp.chat_jid_filter(chat_jid)
     whatsapp.chat_jid_filter(exclude_chat_jid, "exclude_chat_jid", require_allowed=False)
 

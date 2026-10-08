@@ -348,10 +348,9 @@ def visible_hashes(hashes: list[str]) -> set[str]:
     # Compare the blob, not lower(hex(...)): that is what idx_messages_file_sha256 indexes.
     clauses = [f"file_sha256 IN ({','.join('?' * len(wanted))})"]
     params: list[Any] = [bytes.fromhex(h) for h in wanted]
-    if CHAT_POLICY.restricted:
-        clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
-        clauses.append(clause)
-        params.extend(clause_params)
+    clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
+    clauses.append(clause)
+    params.extend(clause_params)
     try:
         conn = whatsapp._connect_messages_db()
         try:
@@ -368,10 +367,9 @@ def visible_hashes(hashes: list[str]) -> set[str]:
 def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
     clauses = ["m.file_sha256 = ?"]
     params: list[Any] = [bytes.fromhex(sha256)]
-    if CHAT_POLICY.restricted:
-        clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
-        clauses.append(clause)
-        params.extend(clause_params)
+    clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
+    clauses.append(clause)
+    params.extend(clause_params)
     try:
         conn = whatsapp._connect_messages_db()
         try:

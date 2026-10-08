@@ -2680,7 +2680,7 @@ func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 	}
 }
 
-func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
+func TestMarkReadHandler_InvalidRequests_Are400(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
 	handler := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger()).newRESTMux(8080, token)
 
@@ -2711,8 +2711,9 @@ func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
 
 			handler.ServeHTTP(resp, req)
 
-			if resp.Code != http.StatusBadRequest {
-				t.Errorf("body=%q: expected 400, got %d", tc.body, resp.Code)
+			wantStatus := http.StatusBadRequest
+			if resp.Code != wantStatus {
+				t.Errorf("body=%q: expected %d, got %d", tc.body, wantStatus, resp.Code)
 			}
 		})
 	}

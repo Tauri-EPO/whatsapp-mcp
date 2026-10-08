@@ -4,28 +4,31 @@ package main
 //
 // WHATSAPP_ALLOWED_CHATS (comma-separated JIDs, bare phone numbers, or
 // "*@g.us" / "*@s.whatsapp.net" wildcards) restricts which chats the REST API
-// will act on. The MCP server enforces the same variable on its tools; the
-// bridge repeats the check on every endpoint with a side effect (send, react,
-// mark-read, typing) so a bug or a bypass on the MCP side still cannot reach
-// a chat you did not enable. Unset means unrestricted.
+// will act on. The MCP server enforces the same variable on its tools.
+// Every chat-taking endpoint goes through authorizeChat before effects,
+// including history and download. Unset means unrestricted, but malformed
+// targets are still refused before parsing can discard part of their identity.
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
 	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
 const chatPolicyEnv = "WHATSAPP_ALLOWED_CHATS"
 
 // chatPolicy is the parsed allow-list. Restricted=false means "allow all".
 type chatPolicy struct {
-	restricted bool
-	exact      map[string]struct{}
-	servers    map[string]struct{}
+	restricted       bool
+	exact            map[string]struct{}
+	servers          map[string]struct{}
+	invalidPositions []int
 }
 
 // normalizeChatEntry canonicalises an allow-list entry or a request target:
@@ -34,6 +37,11 @@ func normalizeChatEntry(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
+	}
+	// Retain an invalid configuration entry so it cannot disappear into an
+	// unrestricted policy, or be rewritten into a valid exact entry.
+	if strings.Count(raw, "@") > 1 {
+		return raw
 	}
 	if !strings.Contains(raw, "@") {
 		return raw + "@" + types.DefaultUserServer
@@ -48,10 +56,13 @@ func normalizeChatEntry(raw string) string {
 
 func parseChatPolicy(raw string) chatPolicy {
 	p := chatPolicy{exact: map[string]struct{}{}, servers: map[string]struct{}{}}
-	for _, item := range strings.Split(raw, ",") {
+	for index, item := range strings.Split(raw, ",") {
 		n := normalizeChatEntry(item)
 		if n == "" {
 			continue
+		}
+		if strings.Count(n, "@") > 1 {
+			p.invalidPositions = append(p.invalidPositions, index+1)
 		}
 		at := strings.LastIndex(n, "@")
 		if n[:at] == "*" {
@@ -71,6 +82,11 @@ func loadChatPolicy() chatPolicy {
 // Allows reports whether the policy permits acting on target (a JID or a bare
 // phone number as accepted by the REST API).
 func (p chatPolicy) Allows(target string) bool {
+	// whatsmeow parses the first two @-separated parts. A policy must never
+	// authorize a different server from the one the client will address.
+	if strings.Count(target, "@") > 1 {
+		return false
+	}
 	if !p.restricted {
 		return true
 	}
@@ -85,12 +101,61 @@ func (p chatPolicy) Allows(target string) bool {
 	return ok
 }
 
+// authorizeChat is the one HTTP authorization boundary. Recipient endpoints
+// permit bare digit-only phones; other endpoints require a full JID. Never
+// parse first: ParseJID discards extra @ parts, and String hides an empty user.
+func authorizeChat(w http.ResponseWriter, policy chatPolicy, raw string, allowPhone bool) (types.JID, bool) {
+	if strings.Count(raw, "@") > 1 {
+		writeError(w, http.StatusBadRequest, "malformed chat target: more than one '@'")
+		return types.EmptyJID, false
+	}
+	if allowPhone && !strings.Contains(raw, "@") && !isPhoneDigits(raw) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%q is not a phone number: use the country code and ASCII digits, or a digits-only @s.whatsapp.net JID", raw))
+		return types.EmptyJID, false
+	}
+	var jid types.JID
+	var err error
+	if allowPhone && !strings.Contains(raw, "@") && isPhoneDigits(raw) {
+		jid, err = parseRecipientJID(raw)
+	} else {
+		jid, err = types.ParseJID(raw)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid chat JID: "+err.Error())
+		return types.EmptyJID, false
+	}
+	if jid.User == "" || jid.Server == "" {
+		writeError(w, http.StatusBadRequest, "malformed chat target: a user and server are required")
+		return types.EmptyJID, false
+	}
+	if strings.ContainsAny(jid.User, ":.") {
+		writeError(w, http.StatusBadRequest, "Invalid chat JID: malformed user")
+		return types.EmptyJID, false
+	}
+	if rejectByChatPolicy(w, policy, jid.String()) {
+		return types.EmptyJID, false
+	}
+	return jid, true
+}
+
+func (p chatPolicy) warnInvalidEntries(logger waLog.Logger) {
+	if len(p.invalidPositions) > 0 {
+		logger.Warnf("%s: malformed entries at positions %v are retained as refused literals", chatPolicyEnv, p.invalidPositions)
+	}
+}
+
 // Summary is a one-line description for the startup log.
 func (p chatPolicy) Summary() string {
 	if !p.restricted {
 		return chatPolicyEnv + " unset: all chats allowed"
 	}
 	n := len(p.exact)
+	invalid := len(p.invalidPositions)
+	for entry := range p.exact {
+		if strings.Count(entry, "@") > 1 {
+			n--
+		}
+	}
 	parts := []string{}
 	for s := range p.servers {
 		parts = append(parts, "*@"+s)
@@ -98,6 +163,9 @@ func (p chatPolicy) Summary() string {
 	desc := strings.Join(parts, ", ")
 	if desc != "" {
 		desc = " + " + desc
+	}
+	if invalid > 0 {
+		desc += " + " + strconv.Itoa(invalid) + " invalid entry(s) refused"
 	}
 	return chatPolicyEnv + ": restricted to " + strconv.Itoa(n) + " chat(s)" + desc
 }

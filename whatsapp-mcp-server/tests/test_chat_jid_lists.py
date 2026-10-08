@@ -81,6 +81,27 @@ def test_a_single_jid_still_filters(archive):
     assert ids(chat_jid=ALICE) == ["a1", "a2", "IMG_A", "VOICE"]
 
 
+@pytest.mark.parametrize("value", [f" {ALICE} ", [f" {ALICE} "], [" ", f" {ALICE} "], " \t"])
+@pytest.mark.parametrize("argument", ["chat_jid", "exclude_chat_jid"])
+def test_early_validation_preserves_padded_and_blank_filters(archive, value, argument):
+    filters = {argument: value}
+    expected = (
+        EVERYTHING
+        if isinstance(value, str) and not value.strip()
+        else (
+            ["a1", "a2", "IMG_A", "VOICE"]
+            if argument == "chat_jid"
+            else [i for i in EVERYTHING if i not in {"a1", "a2", "IMG_A", "VOICE"}]
+        )
+    )
+    assert ids(**filters) == expected
+    assert whatsapp.count_messages(**filters) == len(expected)
+    assert whatsapp.message_stats(**filters)["total"]["messages"] == len(expected)
+    result = export.export_messages(**filters, out_path="padded.ndjson")
+    with open(result["path"], encoding="utf-8") as handle:
+        assert [json.loads(line)["id"] for line in handle] == expected
+
+
 def test_a_list_covers_every_chat_in_it(archive):
     assert ids(chat_jid=[ALICE, FAMILY]) == ["a1", "a2", "IMG_A", "IMG_F", "VOICE", "f1"]
     assert ids(chat_jid=[FAMILY]) == ["IMG_F", "f1"]
