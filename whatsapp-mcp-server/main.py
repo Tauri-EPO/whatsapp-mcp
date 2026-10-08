@@ -1521,7 +1521,8 @@ def send_message(
     dry_run=false to actually send.
 
     Args:
-        chat_jid: Where to send: a phone number with country code and no symbols
+        chat_jid: Where to send: a phone number with country code (a leading +
+                  and the separators listed in docs/TOOLS.md are accepted)
                   ("123456789"), a direct-chat JID ("123456789@s.whatsapp.net") or
                   a group JID ("123456789@g.us")
         message: The message text to send
@@ -1815,7 +1816,9 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
     Args:
         chat_jid: Chat containing the original message
         message_id: ID of the message to forward
-        to_chat_jid: Destination: phone number, direct-chat JID or group JID
+        to_chat_jid: Destination: country-code phone number (a leading + and the
+                     separators listed in docs/TOOLS.md are accepted), direct-chat
+                     JID or group JID; outer whitespace is trimmed
 
     Returns:
         {"success": true, "message_id": ..., "chat_jid": ..., "timestamp": ...} of the new message
@@ -1904,8 +1907,8 @@ def send_file(
     the request that would be sent, without contacting WhatsApp.
 
     Args:
-        chat_jid: Phone number with country code (no symbols), direct-chat JID or
-                  group JID
+        chat_jid: Phone number with country code (leading + and the separators
+                  listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: Absolute path to the media file (image, video, document) on
                     the server. Leave empty when sending `media_base64`.
         caption: Optional text rendered with the file as a caption. Omit for a
@@ -1952,8 +1955,8 @@ def send_audio_message(
     HTTP transport's body limit, 4 MiB by default, before that).
 
     Args:
-        chat_jid: Phone number with country code (no symbols), direct-chat JID or
-                  group JID
+        chat_jid: Phone number with country code (leading + and the separators
+                  listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
         media_base64: The audio bytes, base64-encoded (a data: URL prefix is
                       accepted). Excludes `media_path`.
