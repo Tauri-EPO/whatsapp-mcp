@@ -53,7 +53,7 @@ func livePosition(sequence int64, latitude float64) *waE2E.Message {
 
 func TestLiveLocationAuthorCollisions(t *testing.T) {
 	for _, path := range []string{"live", "persist", "batch"} {
-		for _, kind := range []string{"live", "static", "text", "image"} {
+		for _, kind := range []string{"live", "static", "text", "image", "reverse-static", "reverse-text"} {
 			for _, author := range []string{"sender", "namespace", "from-me", "unknown-namespace"} {
 				for _, sequence := range []int64{0, 3} {
 					t.Run(fmt.Sprintf("%s/%s/%s/seq%d", path, kind, author, sequence), func(t *testing.T) {
@@ -79,6 +79,11 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 						}
 						if err := persistMessage(ms, "KNOWN", chat.String(), phonePN.String(), stamp, false, extractMessage(original, stamp, "KNOWN"), true, testLogger()); err != nil {
 							t.Fatal(err)
+						}
+						if strings.HasPrefix(kind, "reverse-") && sequence > 0 {
+							if err := persistMessage(ms, "KNOWN", chat.String(), phonePN.String(), stamp, false, extractMessage(livePosition(sequence, 0.4), stamp, "KNOWN"), true, testLogger()); err != nil {
+								t.Fatal(err)
+							}
 						}
 						if _, err := ms.db.Exec("UPDATE messages SET deleted_at=?, view_once=1, target_message_id='TARGET' WHERE id='KNOWN'", dbTime(stamp)); err != nil {
 							t.Fatal(err)
@@ -109,6 +114,12 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 						// A hostile mixed envelope would exercise automatic media effects
 						// if it escaped the collision gate.
 						incoming.ImageMessage = &waE2E.ImageMessage{Caption: proto.String("incoming caption"), URL: proto.String("https://example.test/new"), MediaKey: []byte{4}, FileSHA256: []byte{5}, FileEncSHA256: []byte{6}, FileLength: proto.Uint64(9)}
+						switch kind {
+						case "reverse-static":
+							incoming = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.9), DegreesLongitude: proto.Float64(0.5)}}
+						case "reverse-text":
+							incoming = &waE2E.Message{Conversation: proto.String("claim the author's key")}
+						}
 						feed := func(id string) {
 							if path == "live" {
 								event := buildTextMessage(chat, sender, types.EmptyJID, types.EmptyJID, fromMe, "")
@@ -140,9 +151,27 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 						if posts.Load() != 0 || b.autoDownloads.queued() != 0 || b.metrics.messagesStored.Load() != 0 {
 							t.Fatalf("collision emitted effects: posts=%d jobs=%d stored=%d", posts.Load(), b.autoDownloads.queued(), b.metrics.messagesStored.Load())
 						}
+						if strings.HasPrefix(kind, "reverse-") {
+							// A refused text/static write must not establish an author
+							// that can subsequently take over the live position.
+							first := incoming
+							incoming = livePosition(sequence+1, 0.95)
+							feed("KNOWN")
+							if after := locationRowSnapshot(t, ms, "KNOWN", chat.String()); after != before {
+								t.Fatal("collision established an author for a later position")
+							}
+							if posts.Load() != 0 || b.autoDownloads.queued() != 0 || b.metrics.messagesStored.Load() != 0 {
+								t.Fatal("later collision emitted effects")
+							}
+							incoming = first
+						}
 						feed("DISTINCT")
 						locationRowSnapshot(t, ms, "DISTINCT", chat.String())
-						if path == "live" && (posts.Load() != 1 || b.autoDownloads.queued() != 1 || b.metrics.messagesStored.Load() != 1) {
+						wantJobs := 1
+						if strings.HasPrefix(kind, "reverse-") {
+							wantJobs = 0
+						}
+						if path == "live" && (posts.Load() != 1 || b.autoDownloads.queued() != wantJobs || b.metrics.messagesStored.Load() != 1) {
 							t.Fatalf("distinct-key control did not emit effects: posts=%d jobs=%d stored=%d", posts.Load(), b.autoDownloads.queued(), b.metrics.messagesStored.Load())
 						}
 					})

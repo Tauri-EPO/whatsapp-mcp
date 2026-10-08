@@ -104,27 +104,31 @@ func (b *Bridge) liveLocationSender(ctx context.Context, reader locationAuthorRe
 	return sender, nil
 }
 
-// A true result consumes a known key, including an author collision. It must
+// A true result consumes a known key, including an author collision. Any
+// incoming kind must preserve another author's archived location row. It must
 // never fall through to the message upsert. The caller holds the IMMEDIATE
 // transaction across this check and any insert of a previously unknown key.
 // A same-author update changes position only; out-of-order samples cannot go
 // backwards. A distinct ID or chat remains a distinct archived row.
 func updateLiveLocationWith(ex locationWriter, id, chat, sender string, fromMe bool, p *messageLocation) (bool, error) {
-	if id == "" || p == nil || !p.Live {
+	if id == "" {
 		return false, nil
 	}
 	user, server := splitSenderJID(sender)
-	var sameAuthor bool
-	err := ex.QueryRow(`SELECT sender = ? AND sender_server IS ? AND is_from_me = ?
-		FROM messages WHERE id = ? AND chat_jid = ?`, user, server, fromMe, id, chat).Scan(&sameAuthor)
+	var sameAuthor, locationRow bool
+	err := ex.QueryRow(`SELECT COALESCE(sender = ? AND sender_server IS ? AND is_from_me = ?, 0),
+		media_type = 'location' FROM messages WHERE id = ? AND chat_jid = ?`, user, server, fromMe, id, chat).Scan(&sameAuthor, &locationRow)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if !sameAuthor {
+	if !sameAuthor && (locationRow || p != nil && p.Live) {
 		return true, nil
+	}
+	if p == nil || !p.Live {
+		return false, nil
 	}
 	if !p.update() {
 		return false, nil // the initial sample may restore its original metadata
@@ -141,7 +145,7 @@ func updateLiveLocationWith(ex locationWriter, id, chat, sender string, fromMe b
 }
 
 func (s *MessageStore) UpdateLiveLocation(id, chat, sender string, fromMe bool, p *messageLocation) (bool, error) {
-	if id == "" || p == nil || !p.Live {
+	if id == "" {
 		return false, nil
 	}
 	handled := false

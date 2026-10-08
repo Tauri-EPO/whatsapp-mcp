@@ -115,7 +115,7 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 // consumed means a position update or refused collision: live callers must
 // suppress activity, webhooks and automatic media work for this event.
 func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, logger waLog.Logger) (consumed bool, err error) {
-	if store, ok := w.(*MessageStore); ok && e.location != nil && e.location.Live {
+	if store, ok := w.(*MessageStore); ok {
 		err = store.Batch(func(batch *messageBatch) error {
 			consumed, err = persistMessageResult(batch, id, chatJID, sender, ts, fromMe, e, quoted, logger)
 			return err
@@ -123,6 +123,9 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 		return consumed, err
 	}
 	if matched, err := w.UpdateLiveLocation(id, chatJID, sender, fromMe, e.location); err != nil || matched {
+		if matched && err == nil {
+			logger.Debugf("Consumed location update or author collision for %s in %s", id, chatJID)
+		}
 		return matched, err
 	}
 	quotedID := ""
