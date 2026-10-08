@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,16 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 		{"GIF", "image", "image/gif", []byte("GIF89a\x01\x00\x01\x00fake")},
 		{"MOV", "video", "video/quicktime", []byte("\x00\x00\x00\x18ftypqt  \x00\x00\x00\x00qt  \x00\x00\x00\x00")},
 		{"AVI", "video", "video/avi", []byte("RIFF\x10\x00\x00\x00AVI fake")},
+		{"image with MP4", "image", "image/jpeg", []byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42\x00\x00\x00\x00")},
+		{"video with PNG", "video", "video/mp4", png},
+		{"empty image", "image", "image/jpeg", nil},
+		{"short image", "image", "image/jpeg", []byte("0123456789")},
+		{"empty video", "video", "video/mp4", nil},
+		{"short video", "video", "video/mp4", []byte("0123456789")},
+		{"BMP", "image", "image/jpeg", []byte("BM fake")},
+		{"ICO", "image", "image/jpeg", []byte("\x00\x00\x01\x00fake")},
+		{"WebM", "video", "video/mp4", []byte("\x1a\x45\xdf\xa3fake")},
+		{"non Opus audio", "audio", "audio/ogg; codecs=opus", []byte("ID3 fake audio")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
@@ -51,8 +62,8 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			b.mediaTransfer = func(context.Context, whatsmeow.DownloadableMessage, string) (int64, error) {
-				t.Fatal("existing cache must not be downloaded again")
-				return 0, nil
+				t.Error("existing cache must not be downloaded again")
+				return 0, fmt.Errorf("unexpected cache transfer")
 			}
 			client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
 			b.Client = client
@@ -66,6 +77,9 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 						t.Fatal("sender did not read the cached bytes")
 					}
 					want := whatsmeow.MediaImage
+					if tc.category == "audio" {
+						want = whatsmeow.MediaAudio
+					}
 					if tc.category == "video" {
 						want = whatsmeow.MediaVideo
 					}
@@ -80,6 +94,9 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 						t.Fatalf("recipient=%s", recipient)
 					}
 					got := packet.GetImageMessage().GetMimetype()
+					if tc.category == "audio" {
+						got = packet.GetAudioMessage().GetMimetype()
+					}
 					if tc.category == "video" {
 						got = packet.GetVideoMessage().GetMimetype()
 					}
@@ -101,7 +118,14 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 				},
 			}
 			body := fmt.Sprintf(`{"chat_jid":%q,"message_id":"MIME1","to_chat_jid":"120363000000000001@g.us"}`, efChat)
-			if code, response := efPost(t, handleForwardMessage(deps, chatPolicy{}), body); code != http.StatusOK || !response.Success || calls != 1 || uploads != 1 {
+			code, response := efPost(t, handleForwardMessage(deps, chatPolicy{}), body)
+			if tc.category == "audio" {
+				if code != http.StatusBadGateway || calls != 0 || uploads != 1 || !strings.Contains(response.Message, "failed to analyze Ogg Opus") {
+					t.Fatalf("non-Opus audio changed: code=%d response=%+v sends=%d uploads=%d", code, response, calls, uploads)
+				}
+				return
+			}
+			if code != http.StatusOK || !response.Success || calls != 1 || uploads != 1 {
 				t.Fatalf("forward=%d %+v sends=%d uploads=%d", code, response, calls, uploads)
 			}
 			var storedCaption, storedKind string
@@ -135,5 +159,19 @@ func TestMediaSniffPreservesDocumentAndUnknownContracts(t *testing.T) {
 		if mime != tc.mime || category != tc.category {
 			t.Fatalf("%s: %s %s", tc.path, mime, category)
 		}
+	}
+}
+
+func TestCachedMediaSniffShortVideoCapacity(t *testing.T) {
+	for _, data := range [][]byte{nil, []byte("0123456789"), []byte("\x00\x00\x00\x18ftypqt")} {
+		t.Run(fmt.Sprint(len(data)), func(t *testing.T) {
+			// os.ReadFile reserves extra capacity. Pin the helper's actual
+			// short-slice boundary independently of that allocation detail.
+			data = data[:len(data):len(data)]
+			_, mime, category := classifyMediaData("video.mp4", data)
+			if mime != "video/mp4" || category != "video" {
+				t.Fatalf("short video changed: mime=%s category=%s", mime, category)
+			}
+		})
 	}
 }

@@ -74,10 +74,9 @@ type SendMessageRequest struct {
 	Mentions []string `json:"mentions,omitempty"`
 }
 
-// classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
-// type, persist-side category). Single source of truth for the upload path
-// (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
-// (which stores the short category string).
+// classifyMediaPath maps the caller filename to the default upload type, MIME
+// and persisted category. /api/send keeps these values. Forwarding cached
+// images/videos can correct MIME within that category via classifySendMedia.
 func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
 	switch ext {
@@ -353,7 +352,9 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	return resolved
 }
 
-// messageSendNetwork isolates WhatsApp I/O so tests exercise the real sender.
+// messageSendNetwork isolates connection/upload/send I/O for the real sender.
+// Phone recipients still use client.GetUserInfo on a LID-map miss; tests using
+// this seam need a group recipient or a locally mapped phone recipient.
 type messageSendNetwork struct {
 	connected func() bool
 	upload    func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
@@ -412,7 +413,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
 		}
 
-		mediaType, mimeType, _ := classifyMediaData(mediaPath, mediaData)
+		mediaType, mimeType, _ := classifySendMedia(ctx, mediaPath, mediaData)
 
 		// Upload media to WhatsApp servers
 		upload, err = network.upload(ctx, mediaData, mediaType)

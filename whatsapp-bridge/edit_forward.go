@@ -180,6 +180,10 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			return
 		}
 		sendCtx, cancelSend := requestContext(r, sendDeadline)
+		if mediaType != "" {
+			// The downloaded path uses a category name, not a caller filename.
+			sendCtx = context.WithValue(sendCtx, cachedForwardMIMEKey{}, true)
+		}
 		defer cancelSend()
 		to, ok = deps.resolveRecipient(sendCtx, w, to)
 		if !ok {
