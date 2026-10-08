@@ -188,12 +188,12 @@ before upload and again at message construction; a mismatch refuses forwarding.
 Bounded document names retain their safe extension so replay does not change
 the existing cache identity used by download and purge.
 
-Validation runs at ingress and the wire sink: names/titles share the outbound
+Validation runs at ingress and the wire sink: stored names/titles share the
 display sanitizer (controls/bidi removed, 200 characters and safe extension
 retained; punctuation stays). Wire filenames additionally remove paths and
-filesystem punctuation. The
-waveform is exactly 64 bytes, seconds is within 0–86400, and MIME is a whitespace-
-and parameter-free type/subtype permitted for that category, except the exact
+filesystem punctuation. Waveform is exactly 64 bytes, seconds is within 0–86400,
+and MIME is a whitespace- and parameter-free type/subtype permitted for that
+category, except the exact
 `audio/ogg; codecs=opus` audio MIME (WebP only for
 stickers, audio/* for audio, any well-formed document type). Invalid fields are
 dropped. The LID-to-phone row copy keeps presentation and direct path together.

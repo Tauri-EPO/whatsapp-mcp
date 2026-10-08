@@ -77,6 +77,7 @@ func TestHeaderDocumentCaptionWhenBodyEmpty(t *testing.T) {
 
 func TestHistoryEnvelopesUseSDKOrderWithoutMutatingPayload(t *testing.T) {
 	doc := fixtureDocument()
+	doc.FileLength = proto.Uint64(64)
 	doc.Caption, doc.FileName = proto.String("fake wrapped caption"), proto.String("Meeting 10:30.pdf")
 	image := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Caption: doc.Caption, URL: doc.URL, DirectPath: doc.DirectPath, MediaKey: doc.MediaKey, FileSHA256: doc.FileSHA256, FileEncSHA256: doc.FileEncSHA256, FileLength: doc.FileLength}}
 	document := &waE2E.Message{DocumentMessage: doc}
@@ -114,7 +115,7 @@ func TestHistoryEnvelopesUseSDKOrderWithoutMutatingPayload(t *testing.T) {
 				var url, path string
 				var key, sha, enc []byte
 				var length int64
-				if err := ms.db.QueryRow("SELECT url,direct_path,media_key,file_sha256,file_enc_sha256,file_length FROM messages WHERE id='H0'").Scan(&url, &path, &key, &sha, &enc, &length); err != nil || url != doc.GetURL() || path != doc.GetDirectPath() || !bytes.Equal(key, doc.MediaKey) || !bytes.Equal(sha, doc.FileSHA256) || !bytes.Equal(enc, doc.FileEncSHA256) || length != int64(doc.GetFileLength()) {
+				if err := ms.db.QueryRow("SELECT url,direct_path,media_key,file_sha256,file_enc_sha256,file_length FROM messages WHERE id='H0'").Scan(&url, &path, &key, &sha, &enc, &length); err != nil || url != doc.GetURL() || path != doc.GetDirectPath() || !bytes.Equal(key, doc.MediaKey) || !bytes.Equal(sha, doc.FileSHA256) || !bytes.Equal(enc, doc.FileEncSHA256) || length != 64 {
 					t.Fatal("wrapped history lost CDN fields")
 				}
 			}
