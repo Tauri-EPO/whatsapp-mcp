@@ -122,7 +122,7 @@ func TestHistoryEndpointValidation(t *testing.T) {
 	identity := func(h http.HandlerFunc) http.HandlerFunc { return h }
 	mux := http.NewServeMux()
 	offline := func() bool { return false }
-	registerHistoryEndpoint(mux, identity, nil, offline, nil)
+	registerHistoryEndpoint(mux, identity, nil, offline, nil, chatPolicy{})
 
 	cases := []struct {
 		name       string

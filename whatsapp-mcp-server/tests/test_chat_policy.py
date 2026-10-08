@@ -58,7 +58,10 @@ class TestPolicyParsing:
     def test_sql_clause_matches_allows(self):
         policy = ChatPolicy.from_entries([DM_A, "*@g.us"])
         clause, params = policy.sql_clause("chats.jid")
-        assert clause == "(chats.jid IN (?) OR chats.jid LIKE ?)"
+        assert (
+            clause
+            == "((length(chats.jid) - length(replace(chats.jid, '@', '')) <= 1) AND (chats.jid IN (?) OR chats.jid LIKE ?))"
+        )
         assert params == [DM_A, "%@g.us"]
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE TABLE chats (jid TEXT)")

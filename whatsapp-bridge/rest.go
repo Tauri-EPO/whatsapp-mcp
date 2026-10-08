@@ -82,7 +82,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 
 	// On-demand history sync endpoint (see history_ondemand.go). Mutating: it
 	// asks the phone to push history and writes the rows into messages.db.
-	registerHistoryEndpoint(mux, mutate, client, func() bool { return b.Connected() }, messageStore)
+	registerHistoryEndpoint(mux, mutate, client, func() bool { return b.Connected() }, messageStore, b.Policy)
 
 	// Health check endpoint
 	// Liveness: the process serves requests. Always 200 once the listener is up,

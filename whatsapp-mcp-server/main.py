@@ -55,6 +55,7 @@ from triage import snooze as triage_snooze
 from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
+    CHAT_POLICY,
     MESSAGES_MAX_LIMIT,
     STATUS_BROADCAST_JID,
     UNANSWERED_FIELDS,
@@ -2738,8 +2739,9 @@ if __name__ == "__main__":
     # protocol channel. WHATSAPP_MCP_LOG_LEVEL controls verbosity (default INFO).
     _handler = logging.StreamHandler(sys.stderr)
     _handler.setFormatter(log_formatter(os.getenv(JSON_FORMAT_ENV)))
-    logging.basicConfig(level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(), handlers=[_handler])
+    logging.basicConfig(level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(), handlers=[_handler], force=True)
     logging.getLogger("whatsapp_mcp").info("whatsapp-mcp-server %s", MCP_VERSION)
+    CHAT_POLICY.warn_invalid_entries()
 
     # Operation-level access control (WHATSAPP_READ_ONLY, WHATSAPP_ALLOW_TOOLS,
     # WHATSAPP_DENY_TOOLS; tool_policy.py). Blocked tools are unregistered here,

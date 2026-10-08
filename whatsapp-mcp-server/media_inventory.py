@@ -258,10 +258,9 @@ def _media_filters(
     if min_bytes:
         clauses.append(f"{column_prefix}file_length >= ?")
         params.append(int(min_bytes))
-    if CHAT_POLICY.restricted:
-        clause, clause_params = CHAT_POLICY.sql_clause(f"{column_prefix}chat_jid")
-        clauses.append(clause)
-        params.extend(clause_params)
+    clause, clause_params = CHAT_POLICY.sql_clause(f"{column_prefix}chat_jid")
+    clauses.append(clause)
+    params.extend(clause_params)
     return clauses, params
 
 
