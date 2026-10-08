@@ -79,6 +79,10 @@ type Bridge struct {
 	Connected func() bool
 	// Send performs /api/send (defaults to sendWhatsAppMessage); tests inject a fake.
 	Send sendFunc
+	// SendAppState is the raw client call; sendAppState serializes writers.
+	SendAppState appStateSendFunc
+	appStateOnce sync.Once
+	appStateGate chan struct{}
 	// IsOnWhatsApp asks WhatsApp which number a recipient is registered under
 	// (defaults to Client.IsOnWhatsApp); /api/send asks it for a number the LID
 	// map does not know, tests inject a fake.

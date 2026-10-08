@@ -50,7 +50,10 @@ def test_archive_chat_policy_and_validation(monkeypatch):
     assert main.archive_chat("")["error"]["code"] == "invalid_argument"
 
 
-@pytest.mark.parametrize("status,code", [(404, "not_found"), (503, "bridge_unavailable")])
+@pytest.mark.parametrize(
+    "status,code",
+    [(404, "not_found"), (422, "invalid_argument"), (408, "bridge_unavailable"), (503, "bridge_unavailable")],
+)
 def test_archive_bridge_errors(monkeypatch, status, code):
     class Response:
         status_code = status
@@ -62,3 +65,23 @@ def test_archive_bridge_errors(monkeypatch, status, code):
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **kw: Response())
     assert main.archive_chat(CHAT)["error"]["code"] == code
+
+
+def test_archive_confirmation_is_not_phone_state(monkeypatch):
+    payload = {
+        "success": True,
+        "archived": True,
+        "sent": True,
+        "confirmed": False,
+        "warning": "Patch accepted; app-state confirmation failed. Do not retry automatically.",
+    }
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **kw: Response())
+    assert main.archive_chat(CHAT) == payload

@@ -243,6 +243,13 @@ func isPhoneDigits(s string) bool {
 // gave it. Finding the registered number is canonicalRecipientJID, which only
 // /api/send runs, between its two allow-list checks.
 func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
+	return resolveRecipientJIDContext(context.Background(), client, recipient)
+}
+
+func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, recipient string) (types.JID, error) {
+	if err := ctx.Err(); err != nil {
+		return types.EmptyJID, err
+	}
 	recipientJID, err := parseRecipientJID(recipient)
 	if err != nil {
 		return types.JID{}, fmt.Errorf("error parsing JID: %v", err)
@@ -252,8 +259,10 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
 	// phone JID silently fail for migrated contacts.
 	if recipientJID.Server == types.DefaultUserServer {
-		ctx := context.Background()
 		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
+		if err := ctx.Err(); err != nil {
+			return types.EmptyJID, err
+		}
 		if lidErr == nil && !lid.IsEmpty() {
 			bridgeLog.Debugf("Resolved %s -> %s (LID)", recipientJID, lid)
 			recipientJID = lid

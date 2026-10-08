@@ -924,15 +924,25 @@ Leave a group. Irreversible without a new invite; the local archive keeps the hi
 
 ### `archive_chat`
 
-Archive a WhatsApp conversation on the phone, or return it to the inbox with
-`archived=false`. **Parameters:** `chat_jid` (full JID from `list_chats`),
-`archived` (optional, default `true`). Requires a connected bridge and at least
-one stored message; a chat without an anchor returns `not_found`.
+Request that WhatsApp archive a direct conversation or group, or return it to the
+inbox with `archived=false`. **Parameters:** `chat_jid` (full JID from
+`list_chats`), `archived` (optional, default `true`). Requires a connected bridge
+and one stored message; reaction and poll-vote pointer rows do not anchor it.
+A chat without an anchor returns `not_found`; an unreadable timestamp or unknown
+group sender returns `invalid_argument` (HTTP 422). Status, broadcast and
+newsletter targets return `invalid_argument`.
 
-Archiving also removes the chat's pin, as WhatsApp's archive patch does. Local
-messages remain available; no reply or read receipt is sent. The phone's settings
-decide whether a new message unarchives the conversation. Returns
-`{"success": true, "archived": true}`. Hidden and refused in read-only mode.
+The newest permitted phone/LID twin row anchors a merged chat. Same-second rows
+use insertion order. Archiving also removes the chat's pin, as WhatsApp's patch
+does. Local messages remain available; no reply or read receipt is sent. The
+phone's settings decide whether a new message unarchives the conversation.
+
+Returns `{"success": true, "archived": true, "sent": true, "confirmed": false}`:
+`archived` is the requested state, **not confirmation from the phone**. The local
+archive may lag the phone, omit message kinds, or have locally deleted rows.
+A warning means the server accepted the patch but its subsequent app-state fetch
+failed. Other send failures have an unknown outcome; inspect the phone before
+retrying either case. Hidden and refused in read-only mode.
 
 ### `send_typing`
 

@@ -4032,7 +4032,7 @@ _BRIDGE_NAMED_CODES = frozenset({"media_unavailable"})
 
 def _bridge_error_code(status: int) -> str:
     """Map a bridge HTTP status to an error code."""
-    if status == 400:
+    if status in (400, 422):
         return "invalid_argument"
     if status == 403:
         return "denied"
@@ -4040,7 +4040,7 @@ def _bridge_error_code(status: int) -> str:
         return "not_found"
     if status == 401:
         return "internal"  # our own token was rejected: configuration, not the caller's fault
-    if status >= 500:
+    if status == 408 or status >= 500:
         return "bridge_unavailable"
     return "internal"
 

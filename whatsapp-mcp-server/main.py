@@ -1690,8 +1690,13 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
 
     Requires a connected bridge and at least one locally stored message to anchor
     the patch. Archiving also removes the chat's pin (WhatsApp behaviour); it
-    preserves local messages and sends no reply or read receipt. New messages may
-    unarchive it according to the phone's settings.
+    preserves local messages and sends no reply or read receipt. The result is
+    a requested state, not confirmation from the phone (confirmed=False). The
+    anchor excludes reaction/vote rows but may lag the phone or omit locally
+    deleted messages. New messages may unarchive it according to phone settings.
+    Unknown group senders/invalid anchors return invalid_argument; statuses,
+    broadcasts and newsletters are unsupported. On an unknown send outcome or
+    confirmation warning, inspect the phone before retrying.
 
     Args:
         chat_jid: Full direct-chat or group JID from list_chats

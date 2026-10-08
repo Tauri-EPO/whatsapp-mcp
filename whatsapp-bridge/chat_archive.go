@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -20,31 +19,45 @@ import (
 )
 
 type appStateSendFunc func(context.Context, appstate.PatchInfo) error
+type appStateNotSentError struct{ error }
+
+func (e appStateNotSentError) Unwrap() error { return e.error }
+
+type archiveAnchorError string
+
+func (e archiveAnchorError) Error() string { return string(e) }
 
 type archiveDeps struct {
 	store     *MessageStore
 	policy    chatPolicy
 	connected func() bool
-	resolve   func(string) (types.JID, error)
+	resolve   func(context.Context, string) (types.JID, error)
+	twin      func(context.Context, types.JID) (types.JID, error)
 	send      appStateSendFunc
 }
 
 // archiveAnchor selects one complete row, including a deterministic tie-break
-// for messages sharing a second. A MAX(timestamp) alone would lose the key.
-func (store *MessageStore) archiveAnchor(chat string) (*waCommon.MessageKey, time.Time, error) {
-	var id string
+// by insertion order for messages sharing a second. MAX(timestamp) loses the key.
+func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*waCommon.MessageKey, time.Time, error) {
+	var id, chat string
 	var sender, server sql.NullString
 	var fromMe bool
 	var rawTime any
-	err := store.db.QueryRow(`SELECT id, sender, sender_server, is_from_me, timestamp
-		FROM messages WHERE chat_jid = ? ORDER BY timestamp DESC, id DESC LIMIT 1`, chat).
-		Scan(&id, &sender, &server, &fromMe, &rawTime)
+	args := make([]any, len(chats))
+	for i, chat := range chats {
+		args[i] = chat
+	}
+	err := store.db.QueryRowContext(ctx, `SELECT id, sender, sender_server, is_from_me, timestamp, chat_jid
+		FROM messages WHERE chat_jid IN (`+strings.TrimSuffix(strings.Repeat("?,", len(chats)), ",")+`)
+		AND COALESCE(media_type, '') NOT IN ('reaction', 'poll_vote')
+		ORDER BY timestamp DESC, rowid DESC LIMIT 1`, args...).
+		Scan(&id, &sender, &server, &fromMe, &rawTime, &chat)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	ts := anchorTime(rawTime)
 	if ts.IsZero() {
-		return nil, ts, fmt.Errorf("latest message has an invalid timestamp")
+		return nil, ts, archiveAnchorError("latest message has an invalid timestamp")
 	}
 	key := &waCommon.MessageKey{ID: proto.String(id), FromMe: proto.Bool(fromMe)}
 	jid, _ := types.ParseJID(chat)
@@ -52,13 +65,13 @@ func (store *MessageStore) archiveAnchor(chat string) (*waCommon.MessageKey, tim
 		participant := sender.String
 		if !strings.Contains(participant, "@") {
 			if server.String == "" {
-				return nil, ts, fmt.Errorf("latest group message has no known sender namespace")
+				return nil, ts, archiveAnchorError("latest group message has no known sender namespace")
 			}
 			participant += "@" + server.String
 		}
 		parsed, err := types.ParseJID(participant)
 		if err != nil || parsed.User == "" || parsed.Server == "" || parsed.Server == types.GroupServer || parsed.User == jid.User {
-			return nil, ts, fmt.Errorf("latest group message has no usable sender")
+			return nil, ts, archiveAnchorError("latest group message has no usable sender")
 		}
 		key.Participant = proto.String(participant)
 	}
@@ -67,6 +80,8 @@ func (store *MessageStore) archiveAnchor(chat string) (*waCommon.MessageKey, tim
 
 func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := requestContext(r, actionDeadline)
+		defer cancel()
 		var req struct {
 			ChatJID  string `json:"chat_jid"`
 			Archived *bool  `json:"archived"`
@@ -81,6 +96,10 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Valid chat_jid and archived boolean are required")
 			return
 		}
+		if chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer && chat.Server != types.GroupServer {
+			writeError(w, http.StatusBadRequest, "Only direct chats and groups can be archived")
+			return
+		}
 		if rejectByChatPolicy(w, deps.policy, req.ChatJID) {
 			return
 		}
@@ -88,35 +107,94 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			writeError(w, http.StatusServiceUnavailable, "WhatsApp client is not connected. Please wait for reconnection.")
 			return
 		}
-		key, ts, err := deps.store.archiveAnchor(req.ChatJID)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, sql.ErrNoRows) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, "Cannot anchor chat archive: "+err.Error())
+		target, err := deps.resolve(ctx, req.ChatJID)
+		if ctx.Err() != nil {
+			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent")
 			return
 		}
-		target, err := deps.resolve(req.ChatJID)
 		if err != nil || target.User == "" || target.Server == "" {
-			writeError(w, http.StatusBadRequest, "Invalid chat_jid")
+			writeError(w, http.StatusBadRequest, "Cannot resolve chat_jid")
+			return
+		}
+		chats := []string{req.ChatJID}
+		addAlias := func(jid types.JID) {
+			if !jid.IsEmpty() && jid.String() != req.ChatJID && deps.policy.Allows(jid.String()) {
+				chats = append(chats, jid.String())
+			}
+		}
+		addAlias(target)
+		if deps.twin != nil {
+			if twin, err := deps.twin(ctx, target); err == nil {
+				addAlias(twin)
+			}
+		}
+		key, ts, err := deps.store.archiveAnchor(ctx, chats)
+		if err != nil {
+			status := http.StatusInternalServerError
+			code := "internal"
+			var invalid archiveAnchorError
+			if errors.Is(err, sql.ErrNoRows) {
+				status = http.StatusNotFound
+				code = "not_found"
+			} else if ctx.Err() != nil {
+				status = http.StatusRequestTimeout
+				code = "bridge_unavailable"
+			} else if errors.As(err, &invalid) {
+				status = http.StatusUnprocessableEntity
+				code = "invalid_argument"
+			}
+			writeErrorCode(w, status, code, "Cannot anchor chat archive: "+err.Error())
 			return
 		}
 		key.RemoteJID = proto.String(target.String())
 		if key.GetParticipant() != "" {
-			sender, err := deps.resolve(key.GetParticipant())
+			sender, err := deps.resolve(ctx, key.GetParticipant())
 			if err != nil || sender.User == "" || sender.Server == "" {
 				writeError(w, http.StatusBadRequest, "Cannot resolve latest message sender")
 				return
 			}
 			key.Participant = proto.String(sender.String())
 		}
-		ctx, cancel := requestContext(r, actionDeadline)
-		defer cancel()
-		if err := deps.send(ctx, appstate.BuildArchive(target, *req.Archived, ts, key)); err != nil {
-			writeError(w, http.StatusBadGateway, "Chat archive failed: "+err.Error())
+		if ctx.Err() != nil {
+			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "archived": *req.Archived})
+		if err := deps.send(ctx, appstate.BuildArchive(target, *req.Archived, ts, key)); err != nil {
+			var notSent appStateNotSentError
+			if errors.As(err, &notSent) {
+				writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired waiting for writer; nothing sent")
+				return
+			}
+			// At the pinned whatsmeow version this prefix is produced only after
+			// the server accepted the patch, when its subsequent fetch failed.
+			if strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:") {
+				writeJSON(w, http.StatusOK, map[string]any{"success": true, "archived": *req.Archived, "sent": true, "confirmed": false,
+					"warning": "Patch accepted; app-state confirmation failed. Do not retry automatically."})
+				return
+			}
+			writeError(w, http.StatusBadGateway, "Chat archive outcome is unknown; do not retry automatically: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "archived": *req.Archived, "sent": true, "confirmed": false})
 	}
+}
+
+// One app-state writer per bridge: the library reads a collection version
+// before sending without holding its sync lock. Waiting also obeys the request.
+func (b *Bridge) sendAppState(ctx context.Context, patch appstate.PatchInfo) error {
+	b.appStateOnce.Do(func() { b.appStateGate = make(chan struct{}, 1) })
+	select {
+	case b.appStateGate <- struct{}{}:
+	case <-ctx.Done():
+		return appStateNotSentError{ctx.Err()}
+	}
+	defer func() { <-b.appStateGate }()
+	if err := ctx.Err(); err != nil {
+		return appStateNotSentError{err}
+	}
+	send := b.SendAppState
+	if send == nil {
+		send = b.Client.SendAppState
+	}
+	return send(ctx, patch)
 }

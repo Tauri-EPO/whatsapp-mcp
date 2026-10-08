@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestArchivePatch(t *testing.T) {
 			}
 			calls := 0
 			deps := archiveDeps{store: store, connected: func() bool { return true },
-				resolve: func(raw string) (types.JID, error) {
+				resolve: func(_ context.Context, raw string) (types.JID, error) {
 					if raw == archiveTestChat {
 						raw = "100000000000001@lid"
 					}
@@ -50,7 +51,7 @@ func TestArchivePatch(t *testing.T) {
 					act := patch.Mutations[0].Value.GetArchiveChatAction()
 					rangeMsg := act.GetMessageRange()
 					key := rangeMsg.GetMessages()[0].GetKey()
-					if act.GetArchived() != archived || rangeMsg.GetLastMessageTimestamp() != ts.Unix() || key.GetID() != "M2" || key.GetFromMe() != tc.fromMe {
+					if act.GetArchived() != archived || rangeMsg.GetLastMessageTimestamp() != ts.Unix() || key.GetID() != "M1" || key.GetFromMe() != tc.fromMe {
 						t.Fatalf("wrong anchor/action: %v", act)
 					}
 					want := tc.chat
@@ -104,7 +105,7 @@ func TestArchiveFailures(t *testing.T) {
 			}
 			calls := 0
 			deps := archiveDeps{store: store, connected: func() bool { return tc.connected },
-				resolve: func(raw string) (types.JID, error) {
+				resolve: func(_ context.Context, raw string) (types.JID, error) {
 					if tc.resolveErr {
 						return types.EmptyJID, errors.New("lookup failed")
 					}
@@ -164,14 +165,141 @@ func TestArchiveUnknownGroupAnchorRejected(t *testing.T) {
 			}
 			calls := 0
 			deps := archiveDeps{store: store, connected: func() bool { return true },
-				resolve: func(raw string) (types.JID, error) { return types.ParseJID(raw) },
+				resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
 				send:    func(context.Context, appstate.PatchInfo) error { calls++; return nil },
 			}
 			rec := httptest.NewRecorder()
 			handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/api/chat/archive", strings.NewReader(`{"chat_jid":"`+group+`","archived":true}`)))
-			if rec.Code != http.StatusInternalServerError || calls != 0 || !strings.Contains(rec.Body.String(), "sender") {
+			if rec.Code != http.StatusUnprocessableEntity || calls != 0 || !strings.Contains(rec.Body.String(), "sender") {
 				t.Fatalf("status=%d sends=%d body=%s", rec.Code, calls, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestArchiveTwinsAndPointerRows(t *testing.T) {
+	const lid = "100000000000001@lid"
+	for _, requested := range []string{archiveTestChat, lid} {
+		for _, restricted := range []bool{false, true} {
+			store := newTestMessageStore(t)
+			ts := time.Now()
+			for _, row := range []struct {
+				id, chat, kind string
+				ts             time.Time
+			}{
+				{"PN", archiveTestChat, "", ts.Add(-time.Hour)}, {"LID", lid, "", ts},
+				{"REACTION", lid, "reaction", ts.Add(time.Hour)}, {"VOTE", lid, "poll_vote", ts.Add(2 * time.Hour)},
+			} {
+				if err := store.StoreMessage(row.id, row.chat, lid, "hello", row.ts, false, row.kind, "", "", nil, nil, nil, 0, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			policy := chatPolicy{}
+			if restricted {
+				policy = parseChatPolicy(requested)
+			}
+			deps := archiveDeps{store: store, policy: policy, connected: func() bool { return true },
+				resolve: func(context.Context, string) (types.JID, error) { return types.ParseJID(lid) },
+				twin:    func(context.Context, types.JID) (types.JID, error) { return types.ParseJID(archiveTestChat) },
+				send: func(_ context.Context, patch appstate.PatchInfo) error {
+					want := "LID"
+					if restricted && requested == archiveTestChat {
+						want = "PN"
+					}
+					if got := patch.Mutations[0].Value.GetArchiveChatAction().GetMessageRange().GetMessages()[0].GetKey().GetID(); got != want {
+						t.Errorf("anchor=%s want=%s", got, want)
+					}
+					return nil
+				},
+			}
+			rec := httptest.NewRecorder()
+			handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+requested+`","archived":true}`)))
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		}
+	}
+}
+
+func TestArchiveOutcomeAndTargetRefusals(t *testing.T) {
+	for _, chat := range []string{"status@broadcast", "120363000000000001@broadcast", "120363000000000001@newsletter"} {
+		rec := httptest.NewRecorder()
+		handleArchiveChat(archiveDeps{})(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+chat+`","archived":true}`)))
+		if rec.Code != 400 {
+			t.Fatalf("status=%d", rec.Code)
+		}
+	}
+	store := newTestMessageStore(t)
+	if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	deps := archiveDeps{store: store, connected: func() bool { return true }, resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
+		send: func(context.Context, appstate.PatchInfo) error {
+			return errors.New("failed to fetch app state after sending update: deadline exceeded")
+		},
+	}
+	rec := httptest.NewRecorder()
+	handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`)))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"sent":true`) || !strings.Contains(rec.Body.String(), `"confirmed":false`) || !strings.Contains(rec.Body.String(), "Do not retry") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	deps.send = func(context.Context, appstate.PatchInfo) error { return appStateNotSentError{context.DeadlineExceeded} }
+	rec = httptest.NewRecorder()
+	handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`)))
+	if rec.Code != 408 || !strings.Contains(rec.Body.String(), "nothing sent") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if _, err := store.db.Exec("UPDATE messages SET timestamp = 'unreadable'"); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`)))
+	if rec.Code != 422 || !strings.Contains(rec.Body.String(), "invalid_argument") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestArchiveResolutionDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	deps := archiveDeps{connected: func() bool { return true }, resolve: func(ctx context.Context, _ string) (types.JID, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("resolution has no deadline")
+		}
+		<-ctx.Done()
+		return types.EmptyJID, ctx.Err()
+	}, send: func(context.Context, appstate.PatchInfo) error { t.Fatal("late send"); return nil }}
+	rec := httptest.NewRecorder()
+	handleArchiveChat(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`)).WithContext(ctx))
+	if rec.Code != 408 || !strings.Contains(rec.Body.String(), "nothing sent") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestAppStateWriterSerializesAndCancelsWait(t *testing.T) {
+	var calls atomic.Int32
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	b := &Bridge{SendAppState: func(ctx context.Context, _ appstate.PatchInfo) error {
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	go func() { done <- b.sendAppState(context.Background(), appstate.PatchInfo{}) }()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := b.sendAppState(ctx, appstate.PatchInfo{})
+	close(release)
+	if firstErr := <-done; firstErr != nil {
+		t.Fatal(firstErr)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || calls.Load() != 1 {
+		t.Fatalf("err=%v sends=%d", err, calls.Load())
 	}
 }
