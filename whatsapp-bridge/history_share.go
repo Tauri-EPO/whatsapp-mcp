@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/types"
@@ -83,8 +84,9 @@ func (b *Bridge) processHistoryShare(msg *waE2E.Message, chat, id string, fromMe
 		b.Log.Warnf("Shared history import failed: conversation scope refused")
 		return
 	}
-	if ctx.Err() == nil {
-		b.handleHistorySyncWithShares(&events.HistorySync{Data: historyShareMessages(data)}, false)
+	messages := b.historyShareMessages(ctx, data)
+	if ctx.Err() == nil && messages != nil {
+		b.handleHistorySyncWithShares(&events.HistorySync{Data: messages}, false)
 	}
 }
 
@@ -117,12 +119,66 @@ func historyShareMatchesGroup(data *waHistorySync.HistorySync, chat string) bool
 // A participant's bundle is message data, not our own phone's account state.
 // Keep an explicit allow-list so peer read markers, disappearing-message
 // settings and future conversation metadata never enter the phone importer.
-func historyShareMessages(data *waHistorySync.HistorySync) *waHistorySync.HistorySync {
+func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.HistorySync) *waHistorySync.HistorySync {
+	phone, lid := clientIdentity(b.Client)(ctx)
+	if phone.Server == types.HostedServer {
+		phone.Server = types.DefaultUserServer
+	}
+	if lid.Server == types.HostedLIDServer {
+		lid.Server = types.HiddenUserServer
+	}
 	messages := &waHistorySync.HistorySync{SyncType: data.SyncType}
 	for _, conversation := range data.GetConversations() {
-		messages.Conversations = append(messages.Conversations, &waHistorySync.Conversation{
-			ID: conversation.ID, Messages: conversation.Messages,
-		})
+		clean := &waHistorySync.Conversation{ID: conversation.ID}
+		for _, row := range conversation.GetMessages() {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if row == nil || row.Message == nil {
+				clean.Messages = append(clean.Messages, row)
+				continue
+			}
+			copyRow := proto.Clone(row).(*waHistorySync.HistorySyncMsg)
+			info := copyRow.Message
+			if info.Key == nil {
+				info.Key = &waCommon.MessageKey{}
+			}
+			raw := info.GetParticipant()
+			if raw == "" {
+				raw = info.Key.GetParticipant()
+			}
+			sender, err := normalizedUserJID(raw)
+			if err == nil {
+				switch sender.Server {
+				case types.DefaultUserServer, types.HostedServer:
+					sender.Server = types.DefaultUserServer
+				case types.HiddenUserServer, types.HostedLIDServer:
+					sender.Server = types.HiddenUserServer
+				default:
+					sender = types.EmptyJID
+				}
+			} else {
+				sender = types.EmptyJID
+			}
+			if !sender.IsEmpty() {
+				// Reuse the context-bound PN/LID lookup; compare full namespaces,
+				// never bare user digits that could identify a different account.
+				sender, err = outboundLookupChatJID(ctx, b.Client, sender)
+				if err != nil {
+					return nil
+				}
+			}
+			participant := ""
+			if !sender.IsEmpty() {
+				participant = sender.String()
+			}
+			info.Participant, info.Key.Participant = proto.String(participant), proto.String(participant)
+			// FromMe belongs to the exporting peer, not this receiver. Missing
+			// or invalid participant metadata never establishes ownership.
+			info.Key.FromMe = proto.Bool(!sender.IsEmpty() && (sender == phone.ToNonAD() || sender == lid.ToNonAD()))
+			clean.Messages = append(clean.Messages, copyRow)
+		}
+		messages.Conversations = append(messages.Conversations, clean)
 	}
 	return messages
 }

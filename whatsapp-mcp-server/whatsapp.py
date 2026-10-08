@@ -243,8 +243,9 @@ _FTS_TOKEN_RE = re.compile(r"\S+")
 
 # Schema probes (does chats.last_read_time exist? is messages_fts usable?) ran
 # on every call. The answer only changes when the bridge migrates the file, so
-# cache it per database path and invalidate when the file's mtime/size move.
-_schema_cache: dict[tuple[str, str], tuple[tuple[float, int], Any]] = {}
+# cache it per database path and SQLite schema version. WAL-only migrations
+# may leave the main file mtime/size untouched; the reader must observe them.
+_schema_cache: dict[tuple[str, str], tuple[tuple[float, int, int], Any]] = {}
 _schema_cache_lock = threading.Lock()
 
 
@@ -256,8 +257,8 @@ def _db_signature(path: str) -> tuple[float, int]:
         return (0.0, 0)
 
 
-def _schema_memo(kind: str, path: str, compute):
-    sig = _db_signature(path)
+def _schema_memo(kind: str, path: str, compute, *, schema: sqlite3.Connection | sqlite3.Cursor):
+    sig = (*_db_signature(path), schema.execute("PRAGMA main.schema_version").fetchone()[0])
     with _schema_cache_lock:
         hit = _schema_cache.get((kind, path))
         if hit is not None and hit[0] == sig:
@@ -275,7 +276,7 @@ def _reset_schema_cache() -> None:
 
 def _fts_available(conn: sqlite3.Connection) -> bool:
     """True when messages_fts exists and this SQLite build can read it (memoised per file)."""
-    return _schema_memo("fts", MESSAGES_DB_PATH, lambda: _fts_available_uncached(conn))
+    return _schema_memo("fts", MESSAGES_DB_PATH, lambda: _fts_available_uncached(conn), schema=conn)
 
 
 def _fts_available_uncached(conn: sqlite3.Connection) -> bool:
@@ -515,12 +516,14 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
         # Iterated, not fetchall()'d: this runs on the caller's cursor, and
         # export.py's guard against buffering a whole archive watches for it.
         lambda: "sender_server" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        schema=cursor,
     )
     columns = MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
     has_location = _schema_memo(
         "messages.location",
         MESSAGES_DB_PATH,
         lambda: "location" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        schema=cursor,
     )
     return columns if has_location else columns.replace("messages.location", "NULL")
 
@@ -1274,6 +1277,7 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
         "chats.last_read_time",
         MESSAGES_DB_PATH,
         lambda: "last_read_time" in {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()},
+        schema=cursor,
     )
     return f"{table_alias}.last_read_time" if has_column else "NULL"
 
@@ -1284,6 +1288,7 @@ def _has_mentions_column(cursor: sqlite3.Cursor) -> bool:
         "messages.mentions",
         MESSAGES_DB_PATH,
         lambda: "mentions" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()},
+        schema=cursor,
     )
 
 

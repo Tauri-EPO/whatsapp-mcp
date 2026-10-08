@@ -185,7 +185,10 @@ group. A bundle containing another chat is refused in full before import, even
 when its encryption and hashes are valid. The bundle imports group identity and
 messages only; its sender's read state, disappearing-message settings and other
 conversation metadata do not override this account's state. Ordinary history
-sync from the account's own phone still updates those fields.
+sync from the account's own phone still updates those fields. A shared row's
+`FromMe` flag belongs to the exporting participant, so the bridge resolves its
+original participant and recalculates ownership relative to the receiving
+account. Missing/invalid participant metadata never proves own-message status.
 
 WhatsApp controls whether a share reaches this linked device; this path has
 synthetic encrypted HTTP test coverage, not a paired-phone guarantee. If the
