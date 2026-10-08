@@ -470,16 +470,25 @@ func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content
 	// must not clobber names from inbound handling or history sync.
 	// One budget for both upserts, after the remote send; shutdown cancels
 	// retry waits through the same Bridge policy as event/history writes.
-	err := b.retryBusy(func() error {
-		if err := messageStore.StoreChat(chatJID, "", sent.Timestamp); err != nil {
-			return err
-		}
-		return media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID)
-	})
+	err := b.retryOutbound(
+		func() error { return messageStore.StoreChat(chatJID, "", sent.Timestamp) },
+		func() error { return media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID) },
+	)
 	if err != nil {
 		b.noteStoreFailure("outbound message", sent.ID, chatJID, err)
 	}
 	return chatJID, err
+}
+
+// retryOutbound owns one budget for both repeatable local writes. Separate
+// callbacks let tests acquire a real writer lock between the two statements.
+func (b *Bridge) retryOutbound(chatWrite, messageWrite func() error) error {
+	return b.retryBusy(func() error {
+		if err := chatWrite(); err != nil {
+			return err
+		}
+		return messageWrite()
+	})
 }
 
 // outboundMedia is the media half of an outbound row: the columns

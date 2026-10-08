@@ -67,12 +67,12 @@ func lockedProductionStore(t *testing.T) (*MessageStore, func() func()) {
 	return ms, lock
 }
 
-func TestOutboundPersistenceRetriesBusyChatAndMessage(t *testing.T) {
-	for _, path := range []string{"chat", "message"} {
+func TestOutboundPersistenceRetriesBusyNewAndExistingChat(t *testing.T) {
+	for _, path := range []string{"new chat", "existing chat"} {
 		t.Run(path, func(t *testing.T) {
 			ms, lock := lockedProductionStore(t)
 			now := time.Unix(1772359200, 0)
-			if path == "message" {
+			if path == "existing chat" {
 				if err := ms.StoreChat(phonePN.String(), "", now); err != nil {
 					t.Fatal(err)
 				}
@@ -92,6 +92,41 @@ func TestOutboundPersistenceRetriesBusyChatAndMessage(t *testing.T) {
 				t.Fatalf("retries=%d indexed rows=%d want 1/1", waits, rows)
 			}
 		})
+	}
+}
+
+func TestOutboundMessageRetriesAfterChatWasWritten(t *testing.T) {
+	ms, lock := lockedProductionStore(t)
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, phonePN), ms, testLogger())
+	now := time.Unix(1772359200, 0)
+	chatWrites, messageWrites, waits := 0, 0, 0
+	release := func() {}
+	b.storeRetryWait = func(time.Duration) bool { waits++; release(); return true }
+	messageWasBusy := false
+	err := b.retryOutbound(func() error {
+		chatWrites++
+		if err := ms.StoreChat(phonePN.String(), "", now); err != nil {
+			return err
+		}
+		if chatWrites == 1 {
+			release = lock() // the chat succeeded; only the next message insert is BUSY
+		}
+		return nil
+	}, func() error {
+		messageWrites++
+		err := (outboundMedia{}).store(ms, "OUT1", phonePN.String(), phonePN.User, "searchable outbound", now, "")
+		if messageWrites == 1 {
+			messageWasBusy = isBusyError(err)
+		}
+		return err
+	})
+	release()
+	var indexed int
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'outbound'").Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if err != nil || !messageWasBusy || waits != 1 || chatWrites != 2 || messageWrites != 2 || indexed != 1 {
+		t.Fatalf("error=%v messageBusy=%v waits=%d chatWrites=%d messageWrites=%d indexed=%d", err, messageWasBusy, waits, chatWrites, messageWrites, indexed)
 	}
 }
 
