@@ -160,10 +160,14 @@ func extractTextContent(msg *waE2E.Message) string {
 	// template-sent message (e.g. WABA Connect Hrms_* notifications)
 	// returns "" and the row is silently skipped at the storage gate.
 	if tpl := msg.GetTemplateMessage(); tpl != nil {
-		if h := tpl.GetHydratedTemplate(); h != nil {
-			if t := h.GetHydratedContentText(); t != "" {
-				return t
+		legacy := tpl.GetFourRowTemplate().GetContent().GetHydratedHsm()
+		for _, h := range []*waE2E.TemplateMessage_HydratedFourRowTemplate{tpl.GetHydratedTemplate(), tpl.GetHydratedFourRowTemplate(), legacy.GetHydratedTemplate(), legacy.GetHydratedFourRowTemplate()} {
+			if text := h.GetHydratedContentText(); text != "" {
+				return text
 			}
+		}
+		if text := tpl.GetInteractiveMessageTemplate().GetBody().GetText(); text != "" {
+			return text
 		}
 	}
 	if btn := msg.GetButtonsMessage(); btn != nil {
@@ -179,6 +183,11 @@ func extractTextContent(msg *waE2E.Message) string {
 			if t := body.GetText(); t != "" {
 				return t
 			}
+		}
+	}
+	for _, header := range messageMediaHeaders(msg) {
+		if caption := header.GetDocumentMessage().GetCaption(); caption != "" {
+			return caption
 		}
 	}
 	if lst := msg.GetListMessage(); lst != nil {
@@ -541,7 +550,7 @@ func extractMediaInfo(msg *waE2E.Message, msgTimestamp time.Time, msgID string) 
 	case "sticker":
 		name = "sticker_" + suffix + ".webp"
 	default: // a document keeps the sender's own name when it has one
-		if name = msg.GetDocumentMessage().GetFileName(); name == "" {
+		if name = part.(*waE2E.DocumentMessage).GetFileName(); name == "" {
 			name = "document_" + suffix
 		}
 	}
@@ -584,7 +593,7 @@ func mediaPartOf(msg *waE2E.Message) (string, cdnMedia) {
 	case msg.GetStickerMessage() != nil:
 		return "sticker", msg.GetStickerMessage()
 	}
-	return "", nil
+	return structuredHeaderMedia(msg)
 }
 
 // extractMediaDirectPath returns the direct path of the media of msg, or ""

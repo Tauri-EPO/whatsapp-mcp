@@ -120,7 +120,7 @@ func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, st
 
 // forwardDeps: storage, recipient registration, media fetch and send are injected.
 type forwardDeps struct {
-	lookup           func(id, chatJID string) (content, mediaType string, found bool, err error)
+	lookup           func(id, chatJID string) (source forwardSource, found bool, err error)
 	resolveRecipient func(context.Context, http.ResponseWriter, string) (string, bool)
 	download         mediaDownloader
 	send             sendFunc
@@ -155,7 +155,8 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			return
 		}
 		to = typed.String()
-		content, mediaType, found, err := deps.lookup(id, chat.String())
+		source, found, err := deps.lookup(id, chat.String())
+		content, mediaType := source.content, source.mediaType
 		if err != nil {
 			writeEditForward(w, http.StatusInternalServerError, editForwardResponse{Message: "Failed to look up message: " + err.Error()})
 			return
@@ -185,6 +186,7 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 		if mediaType != "" {
 			// The downloaded path uses a category name, not a caller filename.
 			sendCtx = context.WithValue(sendCtx, cachedForwardMIMEKey{}, true)
+			sendCtx = context.WithValue(sendCtx, forwardSourceKey{}, &source)
 		}
 		defer cancelSend()
 		to, ok = deps.resolveRecipient(sendCtx, w, to)
@@ -195,7 +197,7 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 		if mediaType != "" {
 			ctx, cancel := context.WithTimeout(sendCtx, downloadDeadline)
 			defer cancel()
-			okDl, _, _, path, dlErr := deps.download(ctx, id, chat.String())
+			okDl, downloadedKind, _, path, dlErr := deps.download(ctx, id, chat.String())
 			if dlErr != nil || !okDl {
 				msg := "media is not available to forward"
 				if dlErr != nil {
@@ -209,6 +211,16 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 				return
 			}
 			mediaPath = path
+			// A phone retry can refresh the row while retrieving these bytes.
+			// Read its presentation again instead of carrying stale metadata.
+			current, found, err := deps.lookup(id, chat.String())
+			if err != nil || !found || current.mediaType != downloadedKind {
+				writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Media archive changed while forwarding"})
+				return
+			}
+			// Update before the sender reads it; keep the exact registration
+			// context and its budget, without creating another deadline.
+			source = current
 		}
 		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {
@@ -224,14 +236,19 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 }
 
 // messageContentLookup reads content and media_type for forwarding.
-func (store *MessageStore) messageContentLookup(id, chatJID string) (string, string, bool, error) {
-	var content, mediaType string
-	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, '') FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&content, &mediaType)
+func (store *MessageStore) messageContentLookup(id, chatJID string) (forwardSource, bool, error) {
+	source := forwardSource{id: id}
+	var presentation sql.NullString
+	var sha []byte
+	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256 FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation, &sha)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", false, nil
+			return forwardSource{}, false, nil
 		}
-		return "", "", false, err
+		return forwardSource{}, false, err
 	}
-	return content, mediaType, true, nil
+	if presentation.Valid {
+		source.presentation = readMediaPresentation(presentation.String, source.mediaType, sha)
+	}
+	return source, true, nil
 }

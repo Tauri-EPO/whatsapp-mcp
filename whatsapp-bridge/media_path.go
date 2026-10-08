@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // defaultOutboxSubpath is appended to the user's home directory when no
@@ -188,6 +189,19 @@ func pathHasPrefix(child, parent string) bool {
 // If the path ends in a separator, or is otherwise nameless, we fall back to a
 // neutral constant rather than sending an empty filename.
 func outboundFileName(mediaPath string) string {
+	name := cleanOutboundName(mediaPath)
+	if name == "" {
+		return "file"
+	}
+	return name
+}
+
+// Stored display names retain punctuation; only wire filenames lose paths.
+func cleanDisplayName(name string) string {
+	return boundMediaName(name, false)
+}
+
+func cleanOutboundName(mediaPath string) string {
 	name := mediaPath
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
 		name = name[i+1:]
@@ -197,9 +211,32 @@ func outboundFileName(mediaPath string) string {
 	if i := strings.LastIndex(name, ":"); i >= 0 {
 		name = name[i+1:]
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "file"
+	return boundMediaName(name, true)
+}
+
+func boundMediaName(name string, wire bool) string {
+	var bounded strings.Builder
+	bounded.Grow(min(len(name), 800))
+	count := 0
+	truncated := false
+	for _, r := range name {
+		if unicode.IsControl(r) || reordersText(r) || r == 0x200e || r == 0x200f || r == 0x061c || r == 0x2028 || r == 0x2029 || (wire && strings.ContainsRune(`<>:"/\|?*`, r)) {
+			continue
+		}
+		if count == 200 {
+			truncated = true
+			break
+		}
+		bounded.WriteRune(r)
+		count++
 	}
-	return name
+	result := strings.TrimSpace(bounded.String())
+	// The cache uses this safe extension. Bounding a replayed display name
+	// must not make an already-cached document unreachable.
+	if truncated && documentExt(name) != "" {
+		ext := filepath.Ext(strings.TrimSpace(name))
+		runes := []rune(result)
+		result = string(runes[:min(len(runes), 200-len(ext))]) + ext
+	}
+	return result
 }

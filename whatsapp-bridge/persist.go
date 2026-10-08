@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 // messageWriter is satisfied by *MessageStore (single rows) and *messageBatch
@@ -20,7 +22,7 @@ import (
 type messageWriter interface {
 	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-		quotedMessageId string, directPath ...string) error
+		quotedMessageId string, options ...messageMediaOptions) error
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
@@ -28,7 +30,7 @@ type messageWriter interface {
 
 // extractedMessage is the storable view of a waE2E.Message.
 type extractedMessage struct {
-	// inner is the message with any view-once envelope removed; downstream
+	// inner is the message with SDK envelopes removed; downstream
 	// extractors (quotes, ephemeral settings, webhook media) should use it.
 	inner    *waE2E.Message
 	viewOnce bool
@@ -56,14 +58,29 @@ type extractedMessage struct {
 // will be stored (downloadMedia rebuilds the name from the stored row).
 func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage {
 	e := extractedMessage{inner: m}
-	if inner, wrapped := unwrapViewOnce(m); wrapped {
-		e.inner, e.viewOnce = inner, true
+	if m != nil {
+		// The SDK only mutates the inner payload when inheriting outer
+		// MessageContextInfo. Clone that case with the protobuf API; ordinary
+		// unwraps keep their original inner pointer and avoid copying bytes.
+		rawView := m
+		if m.MessageContextInfo != nil {
+			rawView = proto.Clone(m).(*waE2E.Message)
+		}
+		event := (&events.Message{RawMessage: rawView}).UnwrapRaw()
+		e.inner, e.viewOnce = event.Message, event.IsViewOnce
 	}
 	if e.inner == nil {
 		return e
 	}
 	e.content = extractTextContent(e.inner)
 	e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen = extractMediaInfo(e.inner, ts, id)
+	// Keep an absent document name absent: a replay must not replace an
+	// original name with extractMediaInfo's generated cache fallback.
+	if _, part := mediaPartOf(e.inner); part != nil {
+		if doc, ok := part.(*waE2E.DocumentMessage); ok {
+			e.filename = cleanDisplayName(doc.GetFileName())
+		}
+	}
 	e.directPath = extractMediaDirectPath(e.inner)
 	e.hasLength = mediaLengthDeclared(e.inner)
 	if e.poll = extractPollCreation(e.inner); e.poll != nil {
@@ -94,7 +111,7 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 		length = storedMediaLength(e.fileLen)
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, e.directPath); err != nil {
+		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner)}); err != nil {
 		return err
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of

@@ -137,7 +137,7 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 			ContextInfo: mergeEphemeralContextInfo(nil, settings),
 		}
 	default:
-		// Image, video, document, audio: added to the context a send already
+		// Image, video, document, audio, sticker: added to an existing context
 		// put there (a quote, mentions), never in place of it.
 		if slot := mediaContextInfo(msg); slot != nil {
 			*slot = mergeEphemeralContextInfo(*slot, settings)
@@ -450,7 +450,10 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
 		}
 
-		mediaType, mimeType, _ := classifySendMedia(ctx, mediaPath, mediaData)
+		mediaType, mimeType, err := forwardMediaType(ctx, mediaPath, mediaData)
+		if err != nil {
+			return false, err.Error(), sentMessage{}
+		}
 
 		// Upload media to WhatsApp servers
 		upload, err = network.upload(ctx, mediaData, mediaType)
@@ -463,7 +466,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		// The message with its quote and mentions, and the caption that
 		// really travels with it: that text, not the one asked for, is what
 		// the row records below (issue #476).
-		msg, message, err = buildOutboundMedia(mediaType, mimeType, mediaPath, mediaData, upload, message, quote, mentionedJIDs)
+		msg, message, err = buildForwardMedia(ctx, mediaType, mimeType, mediaPath, mediaData, upload, message, quote, mentionedJIDs)
 		if err != nil {
 			return false, err.Error(), sentMessage{}
 		}
@@ -499,7 +502,15 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// list_messages / get_last_interaction never see our own outbound
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
-		sent.ChatJID, err = persist(storageJID, sent, message, outboundMediaColumns(mediaPath, upload), quotedMsgID)
+		media := outboundMediaColumns(mediaPath, upload)
+		if mediaPath != "" {
+			media.mediaType, _ = mediaPartOf(msg)
+			media.presentation = mediaPresentationOf(msg)
+			if doc := msg.GetDocumentMessage(); doc != nil {
+				media.filename = doc.GetFileName()
+			}
+		}
+		sent.ChatJID, err = persist(storageJID, sent, message, media, quotedMsgID)
 	}
 
 	return true, outboundSendStatus(recipient, err), sent
@@ -555,6 +566,7 @@ type outboundMedia struct {
 	directPath                          string
 	mediaKey, fileSHA256, fileEncSHA256 []byte
 	fileLength                          uint64
+	presentation                        *mediaPresentation
 }
 
 // outboundMediaColumns maps an upload to the columns of its row. whatsmeow
@@ -594,7 +606,7 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
 	return messageStore.StoreMessage(
 		id, chatJID, senderJID, content, timestamp, true,
-		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID, m.directPath,
+		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID, messageMediaOptions{directPath: m.directPath, presentation: m.presentation},
 	)
 }
 
@@ -728,7 +740,7 @@ func buildOutboundMedia(mediaType whatsmeow.MediaType, mimeType, mediaPath strin
 }
 
 // mediaContextInfo returns the ContextInfo slot of the media message msg
-// holds (image, video, document or audio), or nil for anything else.
+// holds (image, video, document, audio or sticker), or nil for anything else.
 func mediaContextInfo(msg *waE2E.Message) **waE2E.ContextInfo {
 	switch {
 	case msg == nil:
@@ -741,6 +753,8 @@ func mediaContextInfo(msg *waE2E.Message) **waE2E.ContextInfo {
 		return &msg.DocumentMessage.ContextInfo
 	case msg.AudioMessage != nil:
 		return &msg.AudioMessage.ContextInfo
+	case msg.StickerMessage != nil:
+		return &msg.StickerMessage.ContextInfo
 	}
 	return nil
 }
@@ -788,6 +802,9 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 		pageSize := 27 + numSegments
 		for _, segLen := range segmentTable {
 			pageSize += int(segLen)
+		}
+		if pageSize > len(data)-i {
+			break // Preserve the existing best-effort duration contract.
 		}
 
 		// Check if we're looking at an OpusHead packet (should be in first few pages)

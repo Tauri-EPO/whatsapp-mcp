@@ -127,6 +127,14 @@ checks its result without removing the manual cache. In the opposite arrival
 order, a manual caller retries without the cap after the rejected automatic
 transfer stops and cleans its temporary file, under the same destination lock.
 
+### Structured media headers
+
+Documents, images and videos in a template, buttons or interactive message
+header use the same extraction, persistence and download path as top-level
+media. The row keeps its URL, direct path, key, both hashes, declared length
+and MIME/original document filename/title. Top-level media takes precedence when a
+message contains both forms; text-only headers do not invent a media row.
+
 ### Replayed media rows
 
 Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.
@@ -161,6 +169,58 @@ Earlier releases bound a `time.Time` and let the SQLite driver render it, which 
 
 Two things this note does *not* cover: `chats.ephemeral_setting_timestamp` is an INTEGER of WhatsApp seconds, not a time string; and cached media file names keep the *local* wall clock of the message (`<type>_<yyyymmdd_hhmmss>_<id>`), so existing files stay reachable.
 
+
+## Forwarded media presentation
+
+`messages.media_presentation` holds a bounded JSON object with the plaintext
+file SHA256 and validated original MIME,
+document name/title, audio PTT/duration/waveform, and sticker animation. Live,
+history-batch and outbound writes insert it with the credentials through the
+shared upsert. Incomplete replays keep the snapshot; complete writes with the
+same plaintext hash merge supplied fields and keep omitted ones. A changed hash
+starts a new presentation. On read, JSON whose stored hash differs from the
+row's file hash is ignored, including after an older image replays a new file
+without updating the JSON. Invalid/wrongly typed JSON falls back to legacy
+forwarding with one bounded DEBUG line per discarded read; the upsert replaces
+invalid objects instead of passing them to `json_patch`.
+The sender checks a valid presentation's hash against the actual cached bytes
+before upload and again at message construction; a mismatch refuses forwarding.
+Bounded document names retain their safe extension so replay does not change
+the existing cache identity used by download and purge.
+
+Validation runs at ingress and the wire sink: stored names/titles share the
+display sanitizer (controls/bidi removed, 200 characters and safe extension
+retained; punctuation stays). Wire filenames additionally remove paths and
+filesystem punctuation. Waveform is exactly 64 bytes, seconds is within 0–86400,
+and MIME is a whitespace- and parameter-free type/subtype permitted for that
+category, except the exact
+`audio/ogg; codecs=opus` audio MIME (WebP only for
+stickers, audio/* for audio, any well-formed document type). Invalid fields are
+dropped. The LID-to-phone row copy keeps presentation and direct path together.
+
+Structured headers become media only with a URL/direct path and a key;
+thumbnail-only headers stay text. Template Format variants retain their body,
+and a header document caption supplies text when the body is empty. The shared
+extractor uses the SDK's envelope order for live and history: device-sent,
+bot-invoke, ephemeral, view-once variants, Lottie, document-with-caption and
+edited. Wrapper context is inherited on a local view without mutating the
+SDK-owned payload.
+
+The forward handler reads category, name and presentation together and reloads
+them after retrieval, since a phone retry can refresh the row. A changed retry
+hash clears the old presentation; ordinary retries preserve it. These values
+reach the sender under the same request deadline. The outgoing
+protobuf supplies the category/presentation of the newly archived outbound row.
+
+Startup adds one nullable column through `ensureColumn`, without rewriting old
+rows or changing migration markers. Existing Python readers ignore this column;
+MCP forwarding continues to call the bridge. Old rows use the documented legacy
+fallback in [TOOLS.md](TOOLS.md#forward_message), and cache names remain intact.
+Legacy Ogg Opus is forwarded as a voice note with computed duration/waveform;
+modern Opus rows retain their PTT and compute only missing duration/waveform.
+New unnamed inbound documents keep an empty filename, shown as null by MCP;
+outbound `/api/send` rows retain their actual wire presentation too. The JSON
+column itself is not exposed by MCP readers or webhooks.
 
 ## SQLite contention and persistence retries
 

@@ -227,6 +227,11 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "direct_path", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.direct_path column: %w", err)
 	}
+	// Recipient-visible metadata is captured for new media. Adding the nullable
+	// column is constant-time; old rows keep their documented legacy fallback.
+	if err := ensureColumn(db, "messages", "media_presentation", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.media_presentation: %w", err)
+	}
 	// sender_server: the namespace messages.sender lives in ("s.whatsapp.net"
 	// or "lid"), NULL when it is unknown — rows an older bridge wrote, and
 	// senders that are not user JIDs at all (sender_namespace.go).
@@ -513,7 +518,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	insertResult, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
-			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length
+			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation
 		)
 		SELECT
 			msg.id,
@@ -529,7 +534,9 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			msg.media_key,
 			msg.file_sha256,
 			msg.file_enc_sha256,
-			msg.file_length
+			msg.file_length,
+			msg.direct_path,
+			msg.media_presentation
 		FROM messages msg
 		JOIN tmp_lid_to_phone m ON m.lid_jid = msg.chat_jid;
 	`)
@@ -999,7 +1006,7 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 // messages.sender_server unset (splitSenderJID, sender_namespace.go).
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, directPath ...string) error {
+	quotedMessageId string, options ...messageMediaOptions) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -1008,7 +1015,7 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	// Single-row path; history sync uses Batch (store_batch.go) for the same
 	// statement inside one transaction.
 	_, err := store.db.Exec(insertMessageSQL, messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, directPath...)...)
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
 	return err
 }
 
@@ -1169,8 +1176,8 @@ func (store *MessageStore) SetTargetMessageID(id, chatJID, target string) error 
 // Store additional media info in the database
 func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	_, err := store.db.Exec(
-		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END WHERE id = ? AND chat_jid = ?",
-		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, id, chatJID,
+		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END, media_presentation = CASE WHEN file_sha256 = ? THEN media_presentation END WHERE id = ? AND chat_jid = ?",
+		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, fileSHA256, id, chatJID,
 	)
 	return err
 }

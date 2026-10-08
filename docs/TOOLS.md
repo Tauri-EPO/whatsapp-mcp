@@ -771,7 +771,8 @@ This is deliberate: the archive is the account owner's copy. To really forget a
 message locally use `delete_message` with `for_everyone=false`.
 
 View-once photos, videos and voice notes are archived like any other media,
-with `view_once: true` and a `🔒` prefix on the content; the phone's single
+with `view_once: true` and a single `🔒` prefix on the content, on live arrival
+and history synchronization alike; the phone's single
 viewing is unaffected because the bridge never sends the view receipt. This is
 your own account's archive; treat it accordingly.
 
@@ -1067,6 +1068,40 @@ category: JPEG/PNG/GIF/WebP and MP4/QuickTime/AVI. Their category names
 QuickTime `ftyp`, HEIC, AVIF and 3GP are not recognised and keep the category
 default. `/api/send` keeps the MIME implied by the caller filename, including
 files prepared from `media_base64` or `upload_id`; its dry-run preview agrees.
+
+Forwarding retains the stored category: a document called `image.png` stays a
+document, and a WebP sticker stays a sticker (a legacy non-WebP sticker cache
+is forwarded as an image with its detected MIME). New archive rows retain the original
+document name/title, audio MIME/PTT/duration/waveform and sticker animation.
+An unnamed document uses `file`, without exposing its cache timestamp or source
+message ID. Stored names/titles retain display punctuation, including colons
+and pipes; controls and bidi marks are stripped and each is capped at 200
+characters with a safe extension retained. Wire filenames also remove paths
+and filesystem punctuation; stored display titles retain their punctuation.
+Waveforms have exactly 64 bytes, duration is within 0–86400 seconds, and MIME
+is a concrete type/subtype allowed for the category; invalid fields are dropped.
+The exact `audio/ogg; codecs=opus` exception is retained for Opus audio, and
+forwarded Ogg Opus bytes use that MIME with the stored PTT flag.
+Audio bytes are forwarded without conversion. Stored PTT is retained; legacy
+Ogg Opus stays a voice note, with duration and waveform computed from the bytes.
+Missing Opus duration/waveform in a newer row is computed too.
+Older rows have no presentation metadata: document names use the stored name
+(generated timestamp names are suppressed), audio MIME is detected from bytes,
+and legacy non-Opus audio defaults to ordinary audio. An unknown legacy audio codec fails
+before upload. Existing cache names and purge lookups stay unchanged.
+
+The bridge validates presentation on storage and again on forwarding, and ties
+it to the file hash. Invalid JSON or a mismatching hash uses the legacy fallback.
+When a valid stored presentation matches the row but not the cached bytes,
+forwarding refuses before upload; it does not send an older cached file with
+the replacement file's attributes. Bounding document names retains their safe
+extension, keeping existing cache files reachable after replay.
+GIF playback, PTV semantics and view-once behavior are not reproduced by forwarding;
+the view-once placeholder caption is forwarded as text, as before.
+
+New unnamed inbound documents store an empty filename (`null` in MCP
+`list_messages`/`list_media`) instead of a generated cache name. `/api/send`
+also stores the presentation it actually sends, so a later forward preserves it.
 
 An unsafe media identity answers `media_refused`; missing bytes or download
 fields answer `media_unavailable`. Do not retry those permanent media failures.

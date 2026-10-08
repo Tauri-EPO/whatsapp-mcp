@@ -28,11 +28,31 @@ const replaceMediaSQL = `(:complete_media OR (
 	AND COALESCE(length(messages.file_enc_sha256), 0) = 0
 	AND COALESCE(messages.file_length, 0) = 0))`
 
+// CASE avoids JSON functions on corrupt stored text. Only an object with the
+// field types the Go decoder accepts can be merged into a new snapshot.
+const validPresentationSQL = `(CASE
+	WHEN length(messages.media_presentation) > 4096 THEN 0
+	WHEN NOT json_valid(messages.media_presentation) THEN 0
+	ELSE json_type(messages.media_presentation) = 'object'
+	AND COALESCE(json_type(messages.media_presentation, '$.sha256'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.mime'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.name'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.title'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.ptt'), 'null') IN ('true', 'false', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.animated'), 'null') IN ('true', 'false', 'null')
+	AND (COALESCE(json_type(messages.media_presentation, '$.seconds'), 'null') = 'null'
+		OR (json_type(messages.media_presentation, '$.seconds') = 'integer' AND json_extract(messages.media_presentation, '$.seconds') BETWEEN 0 AND 86400))
+	AND (COALESCE(json_type(messages.media_presentation, '$.waveform'), 'null') = 'null'
+		OR (json_type(messages.media_presentation, '$.waveform') = 'text' AND length(json_extract(messages.media_presentation, '$.waveform')) = 88
+			AND substr(json_extract(messages.media_presentation, '$.waveform'), -2) = '=='
+			AND json_extract(messages.media_presentation, '$.waveform') NOT GLOB '*[^A-Za-z0-9+/=]*'))
+	END)`
+
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -54,13 +74,24 @@ const insertMessageSQL = `INSERT INTO messages
 				THEN messages.timestamp ELSE excluded.timestamp END,
 			is_from_me = excluded.is_from_me,
 			media_type = CASE WHEN ` + replaceMediaSQL + ` THEN COALESCE(NULLIF(excluded.media_type, ''), messages.media_type) ELSE messages.media_type END,
-			filename = CASE WHEN ` + replaceMediaSQL + ` THEN COALESCE(NULLIF(excluded.filename, ''), messages.filename) ELSE messages.filename END,
+			filename = CASE WHEN ` + replaceMediaSQL + ` THEN CASE
+				WHEN excluded.media_type = 'document' AND :complete_media AND excluded.file_sha256 IS NOT messages.file_sha256
+				THEN excluded.filename ELSE COALESCE(NULLIF(excluded.filename, ''), messages.filename) END ELSE messages.filename END,
 			url = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.url ELSE messages.url END,
 			direct_path = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.direct_path ELSE messages.direct_path END,
 			media_key = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.media_key ELSE messages.media_key END,
 			file_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_sha256 ELSE messages.file_sha256 END,
 			file_enc_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
 			file_length = CASE WHEN ` + replaceMediaSQL + ` THEN CASE WHEN excluded.file_length IS NULL AND excluded.file_sha256 = messages.file_sha256 THEN messages.file_length ELSE excluded.file_length END ELSE messages.file_length END,
+			-- Presentation belongs to the same snapshot. A same-file replay
+			-- can add fields; missing metadata must not erase its old fields.
+			media_presentation = CASE WHEN ` + replaceMediaSQL + ` THEN CASE
+				WHEN excluded.file_sha256 = messages.file_sha256 AND ` + validPresentationSQL + ` THEN CASE
+					WHEN excluded.media_presentation IS NULL THEN messages.media_presentation
+					WHEN json_extract(messages.media_presentation, '$.sha256') = json_extract(excluded.media_presentation, '$.sha256')
+					THEN json_patch(messages.media_presentation, excluded.media_presentation)
+					ELSE excluded.media_presentation END
+				ELSE excluded.media_presentation END ELSE messages.media_presentation END,
 			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`
 
 // messageBatch groups message writes in one transaction. Obtain one through
@@ -113,13 +144,13 @@ func (b *messageBatch) write(fn func() error) error {
 // StoreMessage is MessageStore.StoreMessage inside the batch.
 func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, directPath ...string) error {
+	quotedMessageId string, options ...messageMediaOptions) error {
 	if content == "" && mediaType == "" {
 		return nil
 	}
 	return b.write(func() error {
 		_, err := b.stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
-			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, directPath...)...)
+			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
 		return err
 	})
 }
@@ -146,12 +177,13 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 // that only has the bare user part does not erase a namespace already stored.
 // The timestamp goes in through dbTime (store_time.go) so every row carries
 // the same UTC spelling. The optional direct path is inserted atomically with
-// the credentials; an omitted/empty path becomes NULL for URL-only snapshots.
+// the credentials and recipient-visible presentation; an omitted/empty path
+// becomes NULL for URL-only snapshots.
 // On a complete write, omitting the optional path therefore clears the stored
 // direct_path. Incomplete writes keep the previous snapshot, including its path.
 func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, directPath ...string) []any {
+	quotedMessageId string, options ...messageMediaOptions) []any {
 	switch mediaType {
 	case "image", "video", "audio", "document", "sticker":
 		if length, ok := fileLength.(uint64); ok {
@@ -167,11 +199,14 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	senderUser, senderServer := splitSenderJID(sender)
 	var path any
 	var pathText string
-	if len(directPath) > 0 && directPath[0] != "" {
-		pathText = directPath[0]
-		path = pathText
+	var presentation *mediaPresentation
+	if len(options) > 0 {
+		pathText, presentation = options[0].directPath, options[0].presentation
+		if pathText != "" {
+			path = pathText
+		}
 	}
 	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path,
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(),
 		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
 }
