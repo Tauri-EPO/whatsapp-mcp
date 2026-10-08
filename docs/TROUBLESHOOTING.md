@@ -61,6 +61,49 @@ It is anchored on the oldest message already stored, arrives asynchronously, and
 the phone decides how much it returns — messages it deleted itself are gone. For
 a full backfill instead, re-pair once with `--full-history-pair`.
 
+## "The number was added to a group and the earlier messages are missing"
+
+When someone adds a number to a group, WhatsApp can offer to share the group's
+recent messages with the new member. The archive of a bridge linked to that
+number still starts at the moment it joined: the shared messages are **not**
+stored today.
+
+That share does not travel as a history sync (the companion sync at pair time,
+or the on-demand request `request_history` makes). The adder's client uploads
+the messages as one encrypted bundle and sends a message that only points at
+it. The bridge recognises that message and says so, but it does not download or
+decode the bundle yet (issue #468):
+
+```text
+Group history bundle seen in <group>@g.us (message <id>, from_me=false): 42 messages, oldest in window 1700000000, oldest in bundle 1700003600, 1 history receivers, 3 other receivers; the shared messages are not downloaded or stored
+```
+
+How to read it:
+
+- The line means a share message reached this bridge. `from_me=true` is the
+  copy of a share this account made itself; the two receiver counts say how many
+  accounts were to get the history and how many were not. The timestamps are the
+  values WhatsApp sent, as sent.
+- Every such message also increments
+  `whatsapp_bridge_group_history_shares_total` on `/metrics`. It counts
+  messages, not adds: one add can produce more than one (a bundle and a notice,
+  or a redelivery), and the counter starts again at `0` when the bridge
+  restarts.
+- **No line is weaker evidence than a line.** It needs `WHATSAPP_LOG_LEVEL` at
+  `INFO` or lower, the share has to arrive on the live connection while the
+  bridge is running (a share replayed inside a history sync is not reported),
+  and a message this device could not decrypt never gets that far.
+
+`request_history` does not fetch the bundle: it asks the account's **own
+phone** for messages older than the oldest one stored, and it cannot name a
+bundle. Whether that phone, once it has processed the share itself, returns the
+shared messages on such a request (or at a re-pair with `--full-history-pair`)
+has not been observed; do not count on it.
+
+Until the bundle is decoded, the copy that is known to exist is the archive of
+an account that was already in the group: export it there with
+`export_messages`.
+
 ## "Messages are out of order after an image rollback"
 
 Every timestamp in `messages.db` is stored in one spelling (UTC, `+00:00`, fixed
@@ -115,7 +158,7 @@ the next start picks the change up and stops warning.
 
   ```bash
   docker logout ghcr.io                        # drop the stale credential
-  cd /etc/komodo/stacks/whatsapp-mcp           # wherever the stack lives
+  cd /path/to/stack                            # wherever the stack lives
   docker compose pull                          # anonymous pull; public package
   ```
 
@@ -213,6 +256,48 @@ the next start picks the change up and stops warning.
   and reissue certificates by hand, put that `openssl` line in a cron job on
   the host: nothing in this repo watches the expiry date for you.
 
+## The MCP server cannot read `messages.db` on a read-only store
+
+- **Reads fail with `database error: unable to open database file` or
+  `attempt to write a readonly database` although the file exists**, and you
+  mounted the store `:ro` into `mcp` (or run it as a different user). SQLite
+  must create `messages.db-shm` to read a WAL database; when the bridge is
+  running it has already created it and the reader only attaches, but once the
+  bridge has stopped cleanly the `-wal` / `-shm` files are gone and a reader
+  that cannot write the directory has nothing to attach to. To confirm: the
+  error is `unable to open database file` although `messages.db` exists (a
+  missing file says `messages.db not found` instead), `ls` of the store shows no
+  `messages.db-wal` / `messages.db-shm`, and `docker inspect <mcp container>`
+  lists the store mount with `"RW": false`. Start the bridge, or give `mcp` a
+  writable store (the default compose layout). The measurements
+  are in [DOCKER.md](./DOCKER.md#the-store-read-only-in-the-mcp-container).
+- **Every read fails with `unable to open database file`, bridge running or
+  not, and `mcp` runs as another user than the bridge**: the bridge keeps
+  `messages.db` and `whatsapp.db` `0600` and sets them back to that at every
+  start (its log says `Tightened ... to 0600` the first time). Run both
+  processes as the same user, as the images and the compose file do (uid 1000);
+  a group that used to be able to read the files no longer can.
+
+## `messages.db not found at <path>`
+
+- **Every read tool answers `internal: messages.db not found at <path>: the
+  bridge has not created it there, or the path is wrong. The path comes from
+  WHATSAPP_DB_PATH, ...`** (a tool that wraps database errors prefixes it with
+  `database error:`). The MCP server only
+  *reads* `messages.db` (the bridge owns and writes it) and opens it read-only,
+  so a path where nothing exists is an error instead of a new empty database
+  that answers every query with "no such table" or an empty list. The path in
+  the message is the one the server resolved: `WHATSAPP_DB_PATH` if set,
+  otherwise `WHATSAPP_STORE_DIR/messages.db`, otherwise `../whatsapp-bridge/store/messages.db`
+  relative to the server. Check that it is the directory the bridge writes to
+  (`docker compose exec bridge ls /app/store`; in compose both services mount
+  the `whatsapp-store` volume at `/app/store`) and that the bridge has started
+  at least once. `bridge_status` keeps working without the file, and
+  `whatsapp.db` (`WHATSMEOW_DB_PATH`) is opened the same way but its absence is
+  tolerated by the tools that use it. No `messages.db` is created in the wrong place, so
+  there is nothing to delete once the path is fixed. (Reading a database that
+  does exist may still create its `-shm` file next to it.)
+
 ## whisper configured but not reachable
 
 - **`bridge_status` answers `"whisper": { "configured": true, "backend": "url",
@@ -274,6 +359,60 @@ Two compose projects of this repo on one box
   message ID of that row is not a plain file name (a path separator, `..` or a
   control character). The message row is stored as usual; only its file is not
   cached, by design.
+
+## A recent file cannot be downloaded
+
+`download_media` / `read_media` answer `bridge_unavailable` with **"the WhatsApp
+CDN refused the request (HTTP 403) for a message only 4m old; its link cannot
+have expired yet, so this is not a lost file: try again later"** (404 and 410
+read the same way).
+
+The bridge downloads a file by the message's own direct path
+(`messages.direct_path`; rows stored before that column existed use the path
+cut out of `url`). When the CDN refuses that path and the `url` names something
+else, the url's path is tried once as well, which is what the bridge asked for
+before it kept the direct path. If both are refused: WhatsApp's CDN keeps a
+file for days, so for a message less than six hours old the request is what
+failed. The bridge then does not ask the sender's phone to re-upload, and does
+not mark the file `media_unavailable`: the next call tries again. Past six
+hours, or when the link itself is stamped as expired, the media retry runs as
+it always did.
+
+Each refusal leaves one WARN line in the bridge log (`docker compose logs
+bridge | grep "CDN refused media"`):
+
+```
+CDN refused media for message <message-id> with HTTP 403: message age 4m12s, asked for the message's direct path: /v/ (3 segments, query ccb,oh,oe,_nc_sid, expiry stamp in the future), same object as the url's path, other parameters; url host mmg.whatsapp.net; key 32, sha256 32, enc sha256 32 bytes
+```
+
+How to read it:
+
+- **`asked for the message's direct path` / `the path cut out of the stored
+  url`**: which of the two the request used. The second means the row has no
+  `direct_path` (an older row, or a message that carried none).
+- **`/v/ (3 segments, query ccb,oh,oe,_nc_sid, …)`**: the first segment of the
+  path, how deep it is, and the names of its query parameters. `no query` is a
+  path the CDN cannot authorise; a `?` in the list is a piece that was not
+  `name=value`.
+- **`expiry stamp in the future` / `in the past` / `no expiry stamp`**: what
+  the link's own `oe` parameter says. `in the past` on a recent message is an
+  old upload sent again, and goes to the media retry.
+- **`same as the url's path`**, **`same object as the url's path, other
+  parameters`** (the ordinary case: clients add a parameter of their own to
+  the url) or **`another object than the url's path`**: how the message's
+  `url` relates to its direct path. Only the last one means the two disagree.
+- **`url host …`**: the host of the stored url, or `not a plain host name`.
+- **`key 32, sha256 32, enc sha256 32 bytes`**: the sizes of the media key and
+  the two hashes the row holds. Anything but 32 is a row that was stored wrong.
+
+A second line, `Message <message-id> was downloaded through the path cut out of
+its url after its direct path was refused`, means the file arrived anyway. The
+pair is still worth reporting: it says which of the two paths the CDN accepts.
+
+The line carries no token, file name or hash, only the shape above, so it can
+be attached to a report once the message ID is replaced by a placeholder. A
+file that keeps failing with this line while the phone opens it is a bug worth
+reporting with it.
 
 ## App State / LTHash Conflicts
 

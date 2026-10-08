@@ -12,25 +12,25 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-func TestIsExpiredMediaError(t *testing.T) {
+func TestCDNRefusalStatus(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
-		want bool
+		want int
 	}{
-		{"nil", nil, false},
-		{"403", whatsmeow.ErrMediaDownloadFailedWith403, true},
-		{"404", whatsmeow.ErrMediaDownloadFailedWith404, true},
-		{"410", whatsmeow.ErrMediaDownloadFailedWith410, true},
-		{"wrapped 403", fmt.Errorf("failed to download media from last host: %w", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 403}}), true},
-		{"500", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 500}}, false},
-		{"hash mismatch", whatsmeow.ErrInvalidMediaSHA256, false},
-		{"other", errors.New("dial tcp: connection refused"), false},
+		{"nil", nil, 0},
+		{"403", whatsmeow.ErrMediaDownloadFailedWith403, 403},
+		{"404", whatsmeow.ErrMediaDownloadFailedWith404, 404},
+		{"410", whatsmeow.ErrMediaDownloadFailedWith410, 410},
+		{"wrapped 403", fmt.Errorf("failed to download media from last host: %w", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 403}}), 403},
+		{"500", whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: 500}}, 0},
+		{"hash mismatch", whatsmeow.ErrInvalidMediaSHA256, 0},
+		{"other", errors.New("dial tcp: connection refused"), 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isExpiredMediaError(tc.err); got != tc.want {
-				t.Fatalf("isExpiredMediaError(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := cdnRefusalStatus(tc.err); got != tc.want {
+				t.Fatalf("cdnRefusalStatus(%v) = %d, want %d", tc.err, got, tc.want)
 			}
 		})
 	}

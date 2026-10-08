@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -17,7 +15,11 @@ import (
 // that exercise webhook delivery. Individual tests set WEBHOOK_ENABLED when
 // they need to cover an enabled or disabled value.
 func TestMain(m *testing.M) {
-	_ = os.Unsetenv("WEBHOOK_ENABLED")
+	// testBridge reads the four switches the way main() does (testSwitches),
+	// so none of them may leak in from the shell or a compose env file.
+	for _, name := range []string{webhookEnabledEnv, forwardSelfEnv, mediaAutoDownloadEnv, metricsEnv} {
+		_ = os.Unsetenv(name)
+	}
 	os.Exit(m.Run())
 }
 
@@ -64,7 +66,7 @@ func setDefaultWebhookURL(t *testing.T, url string) {
 // newTestWebhook builds a sender with the production HTTP client and the
 // test-scoped token/default URL.
 func newTestWebhook() *webhookSender {
-	w := newWebhookSender(testWebhookToken)
+	w := newWebhookSender(testWebhookToken, testSwitches().WebhookEnabled)
 	if testDefaultWebhookURL != "" {
 		w.defaultURL = testDefaultWebhookURL
 	}
@@ -129,14 +131,17 @@ func TestSendWebhookWithMessageIDSerializesID(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("WEBHOOK_URL", srv.URL)
-	newTestWebhook().SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D")
+	newTestWebhook().SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D", true)
 
 	if payload.MessageID != "3EB0F00D" {
 		t.Fatalf("messageId = %q, want %q", payload.MessageID, "3EB0F00D")
 	}
 }
 
-func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
+// A disabled sender delivers nothing, media or not. The bytes are read by the
+// caller (Bridge.webhookMedia), which handleMessage only reaches when a webhook
+// will go out.
+func TestSendWebhookWithMediaDisabledSendsNothing(t *testing.T) {
 	var received bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received = true
@@ -146,32 +151,14 @@ func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
 
 	t.Setenv("WEBHOOK_ENABLED", "false")
 	t.Setenv("WEBHOOK_URL", srv.URL)
-	missingPath := filepath.Join(t.TempDir(), "missing.jpg")
-
-	readEnd, writeEnd, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdout pipe: %v", err)
-	}
-	previousStdout := os.Stdout
-	os.Stdout = writeEnd
 	newTestWebhook().SendWebhookWithMedia(
 		"123@s.whatsapp.net", "", "123@s.whatsapp.net", false,
 		"", "", "", nil, nil,
-		"message-id", "image", "image/jpeg", "missing.jpg", missingPath,
+		"message-id", "image", "image/jpeg", "missing.jpg", []byte("image bytes"), true,
 	)
-	_ = writeEnd.Close()
-	os.Stdout = previousStdout
-	output, err := io.ReadAll(readEnd)
-	if err != nil {
-		t.Fatalf("read captured stdout: %v", err)
-	}
-	_ = readEnd.Close()
 
 	if received {
 		t.Fatal("webhook was delivered despite WEBHOOK_ENABLED=false")
-	}
-	if strings.Contains(string(output), "Could not stat media file") {
-		t.Fatalf("disabled webhook still touched media path: %s", output)
 	}
 }
 
@@ -360,13 +347,13 @@ func TestSendWebhookSerializesNativeMentionAndQuotedOrigin(t *testing.T) {
 	newTestWebhook().SendWebhook(
 		"123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false,
 		"quoted-id", "456@s.whatsapp.net", "[🤖] prior response",
-		quotedOrigin, []string{"491742555497@s.whatsapp.net"},
+		quotedOrigin, []string{"491510000001@s.whatsapp.net"},
 	)
 
 	if payload.QuotedIsFromMe == nil || !*payload.QuotedIsFromMe {
 		t.Fatalf("quotedIsFromMe = %v, want true", payload.QuotedIsFromMe)
 	}
-	if len(payload.MentionedJIDs) != 1 || payload.MentionedJIDs[0] != "491742555497@s.whatsapp.net" {
+	if len(payload.MentionedJIDs) != 1 || payload.MentionedJIDs[0] != "491510000001@s.whatsapp.net" {
 		t.Fatalf("mentionedJids = %#v", payload.MentionedJIDs)
 	}
 }

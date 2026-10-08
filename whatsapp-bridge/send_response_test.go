@@ -13,6 +13,7 @@ import (
 func TestSendHandlerReturnsMessageID(t *testing.T) {
 	const token = "test-token-0123456789"
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.Connected = func() bool { return true }
 	b.Send = func(_ context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return true, "Message sent to " + recipient, sentMessage{
 			ID: "3EB0ABCDEF", ChatJID: "5511999999999@s.whatsapp.net",

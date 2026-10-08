@@ -31,7 +31,7 @@ A full page is built for a human reading a conversation: 20 keys per message, mo
 | `omit_nulls` (default `false`) | Drop keys that carry nothing: `null`, `false`, empty text, empty `notes` |
 | `max_content_chars` (default unset) | Cut the row's long text to N characters and set `content_truncated: true` on that row |
 
-Measured on a 500-message text page (269,890 bytes as returned today): `omit_nulls` alone brings it to 154,640 bytes (**-43%**), `fields=["timestamp","sender_phone","content"]` to 64,640 bytes (**-76%**). The two combine; `max_content_chars` is on top of both.
+On a 500-message text page of about 270 KB, `omit_nulls` alone brings it to about 155 KB (**-43%**), `fields=["timestamp","sender_phone","content"]` to about 65 KB (**-76%**); the exact sizes depend on the chat. The two combine; `max_content_chars` is on top of both.
 
 Rules worth knowing:
 
@@ -91,8 +91,8 @@ list_messages(exclude_chat_jid="120363000000000009@g.us", after="2026-09-07")
 Rules:
 
 - **A list is an array, never a joined string.** `chat_jid="a@s.whatsapp.net,b@g.us"` is refused with `invalid_argument` naming the list form. It used to return an empty page, which reads as "nothing happened in those chats" (issue #289).
-- **Both spellings of a conversation match.** A direct chat is stored under the phone JID or under the same person's `@lid` depending on when the row was written, so either form — or the bare phone number — finds it, in `chat_jid` and in `exclude_chat_jid` alike.
-- **`WHATSAPP_ALLOWED_CHATS` applies to every entry.** One chat outside the allow-list refuses the whole call with `denied`, naming it, instead of quietly answering for the rest. Exclusions are not checked: leaving out a chat the server cannot read is a no-op. The allow-list itself matches JIDs literally — it does not expand phone ↔ `@lid` — so a restricted deployment should list both spellings of a direct chat it wants readable.
+- **Both spellings of a conversation match.** A direct chat is stored under the phone JID or under the same person's `@lid` depending on when the row was written, so either form — or the bare phone number — finds it, in `chat_jid` and in `exclude_chat_jid` alike. A Brazilian mobile also matches [with or without the ninth digit](#one-number-two-spellings).
+- **`WHATSAPP_ALLOWED_CHATS` applies to every entry.** One chat outside the allow-list refuses the whole call with `denied`, naming it, instead of quietly answering for the rest. Exclusions are not checked: leaving out a chat the server cannot read is a no-op. The allow-list itself matches JIDs literally — it does not expand phone ↔ `@lid` — so a restricted deployment should list both spellings of a direct chat it wants readable. The one equivalence a read applies is the ninth digit of a Brazilian mobile: an entry is refused only when the list names neither spelling, and the rows returned are still those of the chats the list names.
 - **An empty list is refused** (`chat_jid=[]` matches nothing); omit the argument to cover every allowed chat.
 - Exclusion wins: a JID in both lists is dropped.
 
@@ -116,7 +116,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 
 | `code` | Meaning | What to do |
 | --- | --- | --- |
-| `not_found` | The chat, message, contact or file is not in the archive | Check the JID/ID (both come from `list_messages` / `list_chats` rows) |
+| `not_found` | The chat, message, contact or file is not in the archive; or a send went to a number that has no WhatsApp account | Check the JID/ID (both come from `list_messages` / `list_chats` rows), or the number |
 | `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
 | `invalid_argument` | Missing or malformed input | Fix the call |
 | `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
@@ -193,7 +193,7 @@ The sentence and the delimiters are hints; only the sanitisation above removes a
 }
 ```
 
-`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the canonical JID the bare number resolves to and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
+`payload` is the exact JSON body, byte for byte, so a human reviewing it sees what the recipient would see. `recipient_jid` is the JID the bare number reads as (a dry run asks WhatsApp nothing, so this is the number as typed: a real send goes to the number [WhatsApp has registered](#phone-numbers), which can be spelled differently) and `recipient_name` the chat's name in the archive (`null` for an unknown chat) — the two things worth double-checking before a message leaves. `send_file` adds `"media": {"path", "exists", "bytes"}` for a `media_path`, or `{"filename", "bytes", "mime", "inline": true, "upload_dir"}` for a `media_base64` payload (decoded and measured, written nowhere); the bridge's own `WHATSAPP_MEDIA_ROOTS` check only runs on a real send. There is no `message_id`, because nothing was sent.
 
 This is what a draft-only assistant should use: preview, show the payload, send only after the human says yes. Note that `dry_run` is *not* a way around [read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant) — with `WHATSAPP_READ_ONLY=1` these tools are not offered at all, dry run or not. Read-only is the operator's setting; `dry_run` is the agent's manners.
 
@@ -540,30 +540,73 @@ reports, so a contact WhatsApp only knows anonymously has `phone_number: null`
 unless the LID map resolves it.
 
 The search covers the [name a contact gave themselves](#name-name--push_name--name_source)
-as well as the one you saved, so somebody in your phone book as "Z Aa" is found
-by "Alena". `matched` names the field the query actually hit — `name` (the chat name this
+as well as the one you saved, so somebody in your phone book as "Z Dave" is found
+by "Carol". `matched` names the field the query actually hit — `name` (the chat name this
 account stored), `full_name`, `push_name`, `first_name` or `business_name` (the
-phone-book fields behind `name`), or `jid` — so a hit on a self-chosen name is
+phone-book fields behind `name`), `jid`, or `phone_number` (below) — so a hit on a self-chosen name is
 never mistaken for a hit on your own record. It is `null` when none of those
 fields contains the query literally, which only happens for a wildcard search
 that matched the JID pattern alone.
 
 **Phone numbers.** A query of seven or more digits and the usual separators is
-matched as the digits alone, so `+55 (88) 98195-2753`, `55 88 98195-2753` and
-`5588981952753` are the same search (a `+`, spaces, dashes, dots, parentheses
+matched as the digits alone, so `+55 (88) 97777-6666`, `55 88 97777-6666` and
+`5588977776666` are the same search (a `+`, spaces, dashes, dots, parentheses
 and the invisible marks WhatsApp puts around a displayed number are ignored).
 A Brazilian mobile has two spellings, with and
 without the ninth digit after the area code, and WhatsApp registers the account
 under one of them: a full number (`55` + two-digit area code + number) finds
-the contact under either, so `5588981952753` returns the contact stored as
-`558881952753@s.whatsapp.net` and the reverse. `matched` is `jid` on such a
+the contact under either, so `5588977776666` returns the contact stored as
+`558877776666@s.whatsapp.net` and the reverse. `matched` is `jid` on such a
 hit, and the `jid` it carries is the registered spelling — the one to pass to
-the other tools. A query that is the number's JID (`5588981952753@s.whatsapp.net`)
+the other tools. A query that is the number's JID (`5588977776666@s.whatsapp.net`)
 finds the other spelling too. The other spelling is matched as a whole number,
 never as a fragment, and only for mobiles (subscriber number beginning 6–9): a
 landline, a partial number, a number without the `55` and a number from any
 other country are searched exactly as typed. Name searches are unaffected, and
 so is a short numeric query such as `1.5` or `(11)`.
+
+**Contacts kept under a LID.** WhatsApp stores some direct chats under the
+contact's LID (`…@lid`) and never under the phone number. A query that is the
+whole number (in either spelling of a Brazilian mobile) finds those too,
+through the LID map: the hit's `jid` is the LID one, `phone_number` and `lid`
+are both filled, and `matched` is `phone_number`, because the digits are in the
+number behind the JID and not in the JID. A fragment of a number is not
+followed to a LID, and a contact that has a row under the number as well is
+returned once, as that row. `list_chats(query=…)` follows a whole number to its
+LID chat the same way.
+
+#### One number, two spellings
+
+The two spellings are one contact in the tools that look a contact or a
+conversation up, because they resolve it in one place: `get_contact`,
+`get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`,
+`get_last_interaction`, the `sender_jid` and `chat_jid` filters of
+`list_messages` and of the tools that share them (`message_stats`,
+`list_unread`, `list_unanswered`, `list_media`, `export_messages`), and the
+`query` of `list_chats`. Ask with `5588977776666` or with `558877776666` and
+the answer is the same rows; each row carries the JID it is stored under.
+
+Only `search_contacts`, `get_direct_chat_by_contact` and `list_chats(query=…)`
+also accept the number typed with its separators. Everywhere else it is the
+digits, bare or as a JID (`get_chat` takes a JID, as it always did).
+
+What is not covered:
+
+- A number without the `55`, a landline, a number from any other country, and a
+  LID (it has one spelling).
+- The tools that work on one message or one stored row and take its `chat_jid`:
+  `get_message_context`, `read_media`, `download_media`, `transcribe_audio`,
+  `get_poll_results` and the like. Pass the `chat_jid` the row came with.
+- Notes and triage marks (`annotate`, `get_notes`, `mark_handled`, `snooze`):
+  they are kept under the JID given, so use the stored spelling, the `jid` on
+  the chat or contact row.
+- The tools that act on WhatsApp (`send_message` and the rest) pass the
+  recipient to the bridge as given.
+
+Under [`WHATSAPP_ALLOWED_CHATS`](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch)
+a read is refused with `denied` only when the list names neither spelling. When
+it names one, the rows returned are those of the chats the list names and
+nothing else; the write tools still compare the recipient literally.
 
 **Natural Language Examples:**
 
@@ -578,7 +621,10 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 **Parameters:**
 
 - `identifier` (required): Phone number, LID, or full JID
-  - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
+  - Examples: `12025551234`, `100000000000004`, `12025551234@s.whatsapp.net`, `100000000000004@lid`
+  - A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings): `jid` and `phone_number` report the spelling the archive holds, `identifier` echoes what was asked
+  - A number whose chat WhatsApp keeps under the contact's LID is found too, through the LID map: `jid` is then the `…@lid` one, with `phone_number` and `lid` both filled
+  - Under `WHATSAPP_ALLOWED_CHATS` the identifier is classified first, the way it is without a list, and the list has to name the JID that comes out: `denied` otherwise, whether or not a chat exists
 
 Returns `jid`, `phone_number`, `lid`, `name`, `push_name`, `display_name`,
 `is_lid` and `resolved`. `name` is what this account knows them by and
@@ -593,7 +639,7 @@ and `lid` never holds a phone number. (An identifier that is neither, a name or
 another server's JID, is echoed back in `phone_number` as it always was.)
 `resolved` says whether a *name* was found;
 when it is `false` for a LID, `name` is `null` rather than the digits, because
-nobody named "184125298348272" exists. `status@broadcast` is refused with
+nobody named "100000000000004" exists. `status@broadcast` is refused with
 `invalid_argument`: the [status feed](#the-status-feed-statusbroadcast) is not a
 person, and its user part would otherwise be reported as the phone number
 "status".
@@ -602,7 +648,7 @@ person, and its user part would otherwise be reported as the phone number
 
 - "What's the name for phone number 5551234567?"
 - "Look up who owns this number"
-- "Who is 184125298348272@lid?"
+- "Who is 100000000000004@lid?"
 
 ## Message Operations
 
@@ -639,7 +685,7 @@ is "documents people sent me in a direct chat".
 <a id="mentions-of-you"></a>**Mentions of you.** WhatsApp records an @-mention as
 the mentioned account's identity, not as text, and it renders it in the message
 as that account's **LID** — a number that reads exactly like a phone number
-(`@158883943301358`). `mentions_me=True` matches that field against both
+(`@100000000000001`). `mentions_me=True` matches that field against both
 spellings of your own account, so you never have to know or paste either:
 
 ```python
@@ -831,7 +877,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
-- `chat_jid` (required): Phone number with country code (no symbols), direct-chat JID or group JID
+- `chat_jid` (required): Phone number with country code (digits only — see [Phone numbers](#phone-numbers)), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
@@ -840,6 +886,17 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs).
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
+
+#### Phone numbers
+
+This applies to `send_message`, `send_file` and `send_audio_message` alike.
+
+- **Format.** A bare number is digits only, country code first: `5511999999999`. A leading `+`, spaces, dashes or parentheses are not accepted (`invalid_argument`). A full JID (`5511999999999@s.whatsapp.net`) works too; group and `@lid` JIDs are used as they are.
+- **The number does not have to be spelled the way WhatsApp registered it.** For a number the bridge has never exchanged a message with, it asks WhatsApp which number is registered — the question the phone app asks when you type one — and sends there. A Brazilian mobile typed with its ninth digit (`55 11 9XXXX-XXXX`) reaches the account registered without it, and the other way round. It is not specific to Brazil.
+- **The `chat_jid` in the result is the registered one.** That is the JID the conversation is stored under: use it for the follow-up calls (`list_messages`, `send_reaction`, …), not the number as typed.
+- **A number with no WhatsApp account** fails with `not_found` ("… is not on WhatsApp") and nothing is sent. That answer is only given when WhatsApp said so.
+- **When WhatsApp does not answer the question** (it gets 10 seconds), nothing is concluded about the number. With `WHATSAPP_ALLOWED_CHATS` set the send is refused with `bridge_unavailable` ("could not check the number with WhatsApp …; nothing was sent"), because the bridge cannot tell which number the message would go to; that refusal is safe to try again. Without an allow-list the message goes to the number exactly as typed, as it did before this check existed.
+- **With `WHATSAPP_ALLOWED_CHATS`**, the number as typed and the number it is registered under both have to be on the list (`denied` otherwise, naming the one that is missing). See [Restricting which chats the agent can touch](CONFIGURATION.md#restricting-which-chats-the-agent-can-touch).
 
 **Natural Language Examples:**
 
@@ -1120,12 +1177,24 @@ documents kept an extension are still found under their old name. On a server yo
 what is missing. `/api/health` reports `store_bytes`, `media_bytes` and
 `media_files` so you can watch the cache grow.
 
-WhatsApp CDN URLs expire after a few days. When a stored URL answers 403/404/410
-(typical for history-synced or forwarded media), the bridge automatically asks
-the **sender's phone** to re-upload the file via WhatsApp's media-retry protocol,
-downloads it from the refreshed path, and persists that path for next time. The
-sender's phone must be online; the bridge waits up to 30 seconds before giving
-up with a clear error. Media the phone no longer has cannot be recovered, and
+WhatsApp CDN links expire after a few days. When the CDN answers 403/404/410
+for a message more than six hours old (typical for history-synced media, or a
+file that sat unread), the bridge automatically asks the **sender's phone** to
+re-upload the file via WhatsApp's media-retry protocol, downloads it from the
+refreshed path, and persists that path for next time. The sender's phone must
+be online; the bridge waits up to 30 seconds before giving up with a clear
+error.
+
+A message younger than six hours is different: its link cannot have expired
+(unless the link itself is stamped as expired, which is then treated as above),
+so a refusal says the request failed, not that the file is gone. The answer is
+`bridge_unavailable` with the status in it ("the WhatsApp CDN refused the
+request (HTTP 403) for a message only 4m old … try again later"); the sender's
+phone is not asked and nothing is recorded about the file. Try again later; if
+it keeps failing, the bridge log has what the operator needs
+([TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-recent-file-cannot-be-downloaded)).
+
+Media the phone no longer has cannot be recovered, and
 says so with its own code: `media_unavailable` means "do not ask again", where
 `bridge_unavailable` means "try later". A message stored without the CDN fields
 a download needs (`incomplete media information`: history-sync stubs, some
@@ -1171,6 +1240,43 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
+
+<a id="how-large-one-result-can-get"></a>**How large one result can get.** The whole answer is one JSON-RPC
+message, in one HTTP response body, so the largest result is the largest message
+a client has to accept. Sizes on the wire (base64 is 4/3 of the bytes):
+
+| Call | Ceiling of the answer |
+|---|---|
+| `max_edge=0` on a JPEG/PNG/GIF/WebP (the stored bytes) | **~21.5 MiB**: 16 MiB of file (`MAX_IMAGE_BYTES`) as base64 |
+| `as_images=true` on a PDF | ~10.7 MiB: at most 8 MiB of rendered pages (`media_pdf.MAX_TOTAL_BYTES`) as base64, whatever `max_pages` (20 at most) |
+| audio, or any other file as a resource | ~2.7 MiB: 2 MiB (`MAX_BASE64_BYTES`) as base64 |
+| an image with the default `max_edge` | a few hundred KiB at 1568 px; **up to ~1.4 MiB** when the stored file is 1 MiB or less and already fits (it is sent as it is), more with a larger `max_edge` |
+| `as_text=true`, or a text-ish file | 200 000 characters at most (`as_text`); 1 MiB of file (text files), a little more once JSON has escaped quotes, newlines and non-ASCII |
+
+**What a client must accept depends on how the server frames the answer.** On
+the streamable-HTTP transport the Python SDK's server answers a request with a
+plain `application/json` body when the call finishes quickly and emits no
+notification (the newer protocol revision), and with one `text/event-stream`
+event when it speaks an earlier revision or the call is still running after 15 s.
+The SDK client caps one SSE event (`max_sse_event_size`, default 1 MiB) and
+does not cap a JSON body, so the same photo can arrive either way. Measured on
+this server (mcp 2.3.0, a local HTTP stack with a 12.7 MB photo and a six-page
+noise "scan"):
+
+- the SDK 2.3.0 client (newer revision) received `max_edge=0` (16.1 MiB of
+  base64) and `as_images` (13 blocks, 7.8 MiB of base64) as JSON, with the
+  default cap, with 1 MiB and with 100 KB;
+- a session on the earlier revision (`protocolVersion` `2025-03-26`) got the same
+  photo as one 16.9 MB `text/event-stream` event, and the SDK's own SSE parser
+  with its default cap refused it (`Server-sent event exceeded the 1048576 byte
+  limit`), while `max_sse_event_size=None` received it whole.
+
+A client that can be answered with SSE (the earlier revision, or a call slower than
+15 s) must therefore lift the cap above the ceilings
+above; the README example passes `max_sse_event_size=None`. `max_bytes` caps the
+size of the **stored file** a call will read, so it lowers the first and
+third rows and the file behind `as_text`, but not the rendered pages of
+`as_images` (use `max_pages`) or a downscaled image (use `max_edge` / `quality`).
 
 The 16 MB in the first row is the size **of the file**, not of the answer: what
 travels is the downscaled copy. It covers TIFF, BMP and HEIC only on the path
@@ -1283,6 +1389,20 @@ refused before a parser sees it).
 The metadata block then also carries `pages_total` (pages, tables or sheets the
 document really has) and `truncated` (`max_pages`, 500 rows per sheet, or the
 200 000-character ceiling on the whole answer cut it short).
+
+**A page the parser refuses does not cost the others.** A PDF is extracted page
+by page. If one page raises (pypdf 6.18+ refuses a font whose `/Widths` list is
+oversized, and a stream that trips its recovery limit), the other pages are
+returned as usual, the metadata block gains
+`pages_failed: [2]` (the name `as_images` uses for pages it could not draw), and
+a closing note names each page with its exception class — class only, never text
+from the file; past 20 pages it says how many more — and says those pages can be
+read with
+[`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures)
+(`first_page=<the first failing page>` is spelled out). `pages_total` still
+counts every page. `pages_failed` is absent when every page extracted. When *every* page that
+was attempted fails the call is one `invalid_argument` error that names
+`as_images=true` instead.
 
 **There is no OCR.** A scanned PDF has no text layer, and the answer says so in
 as many words instead of coming back empty — and names
@@ -1680,17 +1800,57 @@ removed; call again with `dry_run=false` to delete. Check the `notes` field of
 
 - `items`: explicit `[{"message_id", "chat_jid"}]` from `list_media`
 - `chat_jid`, `older_than_days`, `min_bytes`, `media_type`: criteria resolved
-  by the bridge from `messages.db`; the bridge caps one call at 500 files and
-  reports `truncated` when more matched
+  by the bridge from `messages.db`; the bridge removes at most 500 files per
+  call (see [Purging a large set](#purging-a-large-set))
 - `dry_run` (default `true`)
+- `summary_only` (default `false`): leave `items` out and return the totals
+  only. A criteria call that matches 500 files otherwise answers with about
+  70 KB of per-file rows
 
 Returns `dry_run`, `message`, `matched`, `purged_files`, `purged_bytes`,
-`truncated` and `items` (`purged`, `bytes`, `file`, `reason` such as
-`not cached`, `not a media message`, `message not found`, denied chat).
+`truncated`, `remaining`, `scan_truncated`, `unreachable` and `items`
+(`purged`, `bytes`, `file`, `reason` such as `not cached`,
+`not a media message`, `message not found`, denied chat); `items` is absent
+with `summary_only`. `matched` is the number of cached files the criteria form
+selected; on the `items` form it is the number of named rows that exist.
 Every deleted path is built by the bridge from a message row (`chat_jid`,
 `media_type`, `timestamp`, `id`), never from a client-supplied path, and is
 confined to the store directory. `WHATSAPP_ALLOWED_CHATS` applies (the MCP
 server refuses denied chats, the bridge answers 403 and skips denied rows).
+
+<a id="purging-a-large-set"></a>**Purging a large set.** The criteria form
+looks at the rows that match oldest first and counts only those whose file is
+**still cached**: a row whose bytes an earlier purge, the retention sweep or a
+cache wipe already removed costs a stat, not one of the 500 slots. So the same
+call, repeated, makes progress, and the loop ends by itself:
+
+1. `purge_media(chat_jid="status@broadcast", summary_only=true)` — the dry run:
+   `purged_files` / `purged_bytes` are what the first real call removes
+   (exactly that set), `remaining` how many more matching cached files wait
+   behind it.
+2. `purge_media(chat_jid="status@broadcast", dry_run=false, summary_only=true)`,
+   **repeated while `truncated` is `true`**. `remaining` falls by up to 500 per
+   call; the call with `truncated: false` removed the last of them, and one more
+   reports `matched: 0`.
+
+A call scans at most 100000 matching rows (the stats of the uncached ones are
+the cost). If it reaches that before finding a cached file, `scan_truncated` is
+`true`, `truncated` stays `true` and `purged_files` is 0 — repeating would
+repeat the same walk, so narrow the criteria (`media_type`, `min_bytes`,
+`older_than_days`) instead. `unreachable` counts matching rows whose cached path
+the store root refuses (a symlink out of the store, a chat directory moved to
+another disk); the first 50 are listed in `items` with their reason, none of
+them uses a slot. `failed` counts selected files that could not be removed (a read-only
+directory, an immutable file); when a real call removes nothing and `failed`,
+`truncated` is `false` and the message says so, because repeating cannot help.
+Denied chats are skipped before they are probed and do not use the 100000-row
+ceiling. A criteria call keeps counting `remaining` after it has its 500 files,
+so it stats the rest of the matching rows too; it stops if the client
+disconnects. `unreachable` is also what a row with a corrupted chat path
+reports. Drop `summary_only` to see which rows and why. `remaining`,
+`scan_truncated`, `unreachable` and `failed` belong to the
+criteria form; the `items` form still takes the first 500 entries you name and
+reports `truncated` if you named more.
 
 **Natural Language Examples:**
 
@@ -1739,9 +1899,10 @@ says where the returned `name` came from:
 
 **`push_name` is the other half of the answer.** Your phone book and the
 contact's own name are two different facts, and collapsing them lost the one
-you did not save: on a live archive of 1,852 contacts, 1,011 have a push name,
-809 of them are in no phone book at all, and of the 202 with both, 178 differ
-("Kassia Interna" signs herself "Dra. Kássia Timbó"). So `push_name` is
+you did not save: in an archive of 2,000 contacts, say, about half have a push
+name, most of those are in no phone book at all, and of the ones with both a
+large share differ
+("Acme Clinic Desk" signs herself "Dr. Carol Lima"). So `push_name` is
 returned beside `name` whatever `name_source` says — on chats, on
 [`get_contact`](#get_contact) and on message rows as `sender_push_name` — and
 `name` is unchanged from before (issue #280).
@@ -1761,10 +1922,11 @@ same as before. Groups are never looked up — they have no phone-book entry.
 
 The `last_*` fields describe the chat's **newest stored message**, resolved by
 ordering that chat's rows (`timestamp DESC, id DESC`). They are not matched
-against `last_message_time`: protocol and unsupported events advance that
-marker without storing a message, and history sync writes second-resolution
-timestamps, so `last_message_time` can be newer than — or simply not equal to —
-the newest stored row's timestamp.
+against `last_message_time`: history sync stamps a chat with the conversation's
+own second-resolution time, and older bridges advanced that marker for
+protocol and unsupported events without storing a message (live messages now
+move it only when a row is written), so `last_message_time` can be newer than —
+or simply not equal to — the newest stored row's timestamp.
 
 `has_messages` says whether a stored row backs those fields:
 
@@ -2028,7 +2190,7 @@ Get specific chat metadata by JID.
 
 **Parameters:**
 
-- `chat_jid` (required): Chat JID
+- `chat_jid` (required): Chat JID. A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings); the row's `jid` is the stored spelling, and the JID as given wins when both have a chat
 - `include_last_message` (optional): Include `last_message` / `last_sender` (default `true`)
 - `fields`, `omit_nulls`, `max_content_chars` (optional): as in `list_chats`, applied to the single row
 
@@ -2043,11 +2205,22 @@ Find a direct message chat with a contact.
 The number is matched whole (a chat whose JID merely contains the digits is not
 an answer), with a `+`, spaces, dashes, dots and parentheses ignored. A
 Brazilian mobile is found with or without the ninth digit after the area code,
-as in [`search_contacts`](#search_contacts): `5588981952753` returns the chat
-stored as `558881952753@s.whatsapp.net`, and the returned `jid` tells you which
+as in [`search_contacts`](#search_contacts): `5588977776666` returns the chat
+stored as `558877776666@s.whatsapp.net`, and the returned `jid` tells you which
 spelling WhatsApp registered. When both spellings have a chat of their own, the
 one you asked for is returned; under `WHATSAPP_ALLOWED_CHATS`, the one the list
 admits. `not_found` when neither has one.
+
+A chat stored only under the contact's LID is found by the phone number as
+well, through the LID map; the returned `jid` is then the `…@lid` one. Under
+`WHATSAPP_ALLOWED_CHATS` that LID JID has to be on the list itself: the list
+does not expand a phone number to its LID.
+
+Errors: `not_found` when the allow-list names the number (in either spelling
+of a Brazilian mobile, as the LID you passed, or as the LID the map pairs it
+with) and no chat with it is stored under a JID the list names; `denied` when
+the list does not name it. A number outside the list gets the same `denied`
+whether or not a chat exists for it.
 
 ### `get_contact_chats`
 
@@ -2057,7 +2230,7 @@ see whether the same conversation is also running in a group you share.
 
 **Parameters:**
 
-- `contact_jid` (required): The contact's JID or phone number
+- `contact_jid` (required): The contact's JID or phone number ([either spelling](#one-number-two-spellings) of a Brazilian mobile)
 - `limit` (optional): Chats per page (default 20, max 200)
 - `page` (optional): Page number (default 0); ignored when `cursor` is set
 - `cursor` (optional): `next_cursor` from the previous page
@@ -2102,7 +2275,7 @@ Get the last message exchanged with a contact.
 
 **Parameters:**
 
-- `contact_jid` (required): The contact's JID or phone number
+- `contact_jid` (required): The contact's JID or phone number ([either spelling](#one-number-two-spellings) of a Brazilian mobile). The contact's own chat is searched under every spelling, so the answer can be a message this account sent
 
 ### `list_group_members`
 

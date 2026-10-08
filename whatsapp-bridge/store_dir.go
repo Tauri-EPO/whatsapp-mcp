@@ -11,8 +11,11 @@ package main
 // "./store" so existing setups keep working.
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -21,10 +24,85 @@ const defaultStoreDir = "store"
 
 // storeDirMode is the mode of every directory the bridge creates in the store,
 // the store itself included: owner only, because they hold the session keys and
-// the whole archive, and the SQLite files in them are created by the driver
-// with its own, looser default. It applies to directories created from now on;
-// one that already exists keeps the mode it has.
+// the whole archive. It applies to directories created from now on; one that
+// already exists keeps the mode it has.
 const storeDirMode os.FileMode = 0o700
+
+// storeFileMode is the mode of the two SQLite databases and of the files the
+// driver keeps next to them: owner only, like the media files and the token.
+const storeFileMode os.FileMode = 0o600
+
+// privateDatabase makes the SQLite database at path owner-only before the
+// driver opens it, and says so in the log when it had to change something.
+//
+// The driver creates a database 0644 (minus the umask) and gives the
+// write-ahead log and the shared-memory file the mode the database has at that
+// moment (issue #491). So the database is created here, empty and 0600, when it
+// does not exist yet, and a database an earlier release left readable by group
+// or others is tightened together with whatever -wal / -shm / -journal a
+// previous run left behind. The directory is not touched: it keeps the mode it
+// has (storeDirMode). Both processes run as one user in the images, so the MCP
+// server reads the files as before.
+//
+// A failure is logged and startup goes on: the open that follows either works
+// or reports its own error.
+func privateDatabase(path string) {
+	tightened, loose, err := secureDatabaseFiles(path)
+	if len(tightened) > 0 {
+		bridgeLog.Infof("Tightened %s to %04o: group or others could read it (both processes must run as the same user)", strings.Join(tightened, ", "), storeFileMode)
+	}
+	if len(loose) > 0 {
+		bridgeLog.Warnf("%s stays readable by group or others: this file system does not keep Unix permissions (a bind mount from a Windows or macOS host, CIFS, exFAT)", strings.Join(loose, ", "))
+	}
+	if err != nil {
+		bridgeLog.Warnf("Could not make %s owner-only: %v", path, err)
+	}
+}
+
+// secureDatabaseFiles creates path with storeFileMode when it is missing and
+// removes group and other access from it and from its SQLite siblings. It
+// returns the files whose mode it changed, and the ones that are still loose
+// after the chmod because the file system ignored it.
+//
+// Only regular files are touched, and nothing is opened through a name that
+// already exists: chmod and a plain create follow a symlink to wherever it
+// points, so a link or a directory under one of these names is left alone.
+func secureDatabaseFiles(path string) (tightened, loose []string, err error) {
+	if runtime.GOOS == "windows" {
+		// No owner/group/other bits to set there; every file would read as loose.
+		return nil, nil, nil
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, storeFileMode) //nolint:gosec // path is the operator-configured database inside the store directory
+	switch {
+	case err == nil:
+		if err := f.Close(); err != nil {
+			return nil, nil, err
+		}
+	case !errors.Is(err, fs.ErrExist):
+		return nil, nil, err
+	}
+	for _, name := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return tightened, loose, err
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&^storeFileMode == 0 {
+			continue
+		}
+		if err := os.Chmod(name, storeFileMode); err != nil {
+			return tightened, loose, err
+		}
+		if after, err := os.Lstat(name); err == nil && after.Mode().Perm()&^storeFileMode != 0 {
+			loose = append(loose, name)
+			continue
+		}
+		tightened = append(tightened, name)
+	}
+	return tightened, loose, nil
+}
 
 // storeDir returns the configured store directory (not cleaned or created).
 func storeDir() string {
@@ -40,8 +118,9 @@ func storePath(elem ...string) string {
 }
 
 // openStoreRoot opens the store directory as an os.Root. Everything that walks,
-// measures or deletes inside the store, and the inbound media write path, goes
-// through that handle (Bridge.StoreRoot):
+// measures or deletes inside the store, the inbound media write path and the
+// read that feeds an image to the webhook go through that handle
+// (Bridge.StoreRoot):
 // the kernel resolves each path component within the directory and refuses any
 // component that leaves it, including a symlink swapped in between the check and
 // the syscall. That is a control, where a filepath.Rel comparison on a name we

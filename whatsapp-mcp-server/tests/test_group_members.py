@@ -34,7 +34,7 @@ def test_get_group_members_happy_path(monkeypatch):
                     {
                         "jid": "5511999999999@s.whatsapp.net",
                         "phone_number": "5511999999999",
-                        "name": "Enrico",
+                        "name": "Alice",
                         "is_admin": True,
                     },
                     {"jid": "777@lid", "phone_number": "5511888888888", "is_admin": False},
@@ -53,7 +53,7 @@ def test_get_group_members_happy_path(monkeypatch):
     assert calls[0][1] == {"jid": GROUP}
     assert calls[0][2] == {"Authorization": "Bearer test-token-0123456789"}
     # admin first, then by JID; "members" is replaced by the PageResult "items"
-    assert [m["display"] for m in result["items"]] == ["Enrico", "5511888888888", "888@lid"]
+    assert [m["display"] for m in result["items"]] == ["Alice", "5511888888888", "888@lid"]
     assert "members" not in result
     assert result["participant_count"] == 3
     assert result["has_more"] is False and result["next_cursor"] is None

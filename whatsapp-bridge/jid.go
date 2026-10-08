@@ -36,11 +36,14 @@ func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt type
 		return alt
 	}
 
-	// Fallback: query the whatsmeow LID-PN mapping store.
-	pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
-	if err == nil && !pn.IsEmpty() {
-		bridgeLog.Debugf("Resolved LID chat %s -> %s (from LID store)", chat, pn.ToNonAD())
-		return pn.ToNonAD()
+	// Fallback: query the whatsmeow LID-PN mapping store. Guarded like
+	// resolveUserJID: a client without one leaves the chat in the LID namespace.
+	if client != nil && client.Store != nil && client.Store.LIDs != nil {
+		pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
+		if err == nil && !pn.IsEmpty() {
+			bridgeLog.Debugf("Resolved LID chat %s -> %s (from LID store)", chat, pn.ToNonAD())
+			return pn.ToNonAD()
+		}
 	}
 
 	bridgeLog.Warnf("could not resolve LID chat %s to phone JID", chat)

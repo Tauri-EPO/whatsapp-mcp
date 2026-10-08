@@ -1,14 +1,22 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 type callRow struct {
@@ -269,4 +277,242 @@ func TestHandleEvent_UnknownEventIsIgnored(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), installRecordingLogger(t))
 	b.handleEvent(&events.AppState{}, nil) // no case: must not panic
 	b.handleEvent("not an event", nil)
+}
+
+// failMessageInserts makes every StoreMessage on ms fail the way a full disk
+// would, while the rest of the store (chats, reads) keeps answering.
+func failMessageInserts(t *testing.T, ms *MessageStore) {
+	t.Helper()
+	if _, err := ms.db.Exec(`CREATE TRIGGER fail_message_insert BEFORE INSERT ON messages
+		BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`); err != nil {
+		t.Fatalf("install failing trigger: %v", err)
+	}
+}
+
+// A message whose row could not be written has nothing for downloadMedia to
+// look up: neither download path runs, the failure is one ERROR naming the
+// message, and the webhook still carries it downstream (issue #454).
+func TestHandleMessage_StoreFailureRunsNoMediaDownload(t *testing.T) {
+	const caption = "a caption that must stay out of the error"
+	cases := []struct {
+		name    string
+		webhook bool // the synchronous download for the payload, or the background queue
+	}{
+		{name: "image for the webhook payload", webhook: true},
+		{name: "background caching", webhook: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var webhookCh <-chan WebhookPayload
+			if tc.webhook {
+				srv, ch := captureWebhook(t)
+				t.Setenv("WEBHOOK_URL", srv.URL)
+				webhookCh = ch
+			} else {
+				t.Setenv("WEBHOOK_ENABLED", "false")
+			}
+			msg := buildImageMessage(phonePN, phonePN, false, caption)
+			msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
+			msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+			msg.Info.ID = "LOST1"
+
+			rec := installRecordingLogger(t)
+			ms := newTestMessageStore(t)
+			failMessageInserts(t, ms)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
+			var downloads atomic.Int32
+			b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
+				downloads.Add(1)
+				return false, "", "", "", errors.New("failed to find message")
+			}
+			// No workers: a download queued by mistake stays countable.
+			b.autoDownloads = newMediaJobQueue(b.ctx, 0, 4, b.runAutoDownload)
+
+			b.handleMessage(msg)
+
+			var rows int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil || rows != 0 {
+				t.Fatalf("the failing store kept %d rows (err %v); the test proves nothing", rows, err)
+			}
+			if got := downloads.Load(); got != 0 {
+				t.Errorf("synchronous downloads = %d, want 0", got)
+			}
+			if got := b.autoDownloads.queued(); got != 0 {
+				t.Errorf("queued downloads = %d, want 0", got)
+			}
+			if got := b.metrics.messagesStored.Load(); got != 0 {
+				t.Errorf("messagesStored = %d for a message that was not stored", got)
+			}
+			var errorLines []string
+			for _, line := range strings.Split(rec.String(), "\n") {
+				if strings.HasPrefix(line, "[ERROR]") {
+					errorLines = append(errorLines, line)
+				}
+			}
+			if len(errorLines) != 1 {
+				t.Fatalf("want one ERROR line, got %d:\n%s", len(errorLines), rec.String())
+			}
+			if line := errorLines[0]; !strings.Contains(line, "LOST1") || !strings.Contains(line, phonePN.String()) {
+				t.Errorf("the ERROR must name the message and the chat: %q", line)
+			}
+			// Not in the error, and not in the DEBUG echo either: that one is
+			// for messages that were stored.
+			if strings.Contains(rec.String(), caption) {
+				t.Errorf("the content of a message that was not stored reached the log:\n%s", rec.String())
+			}
+			if !tc.webhook {
+				return
+			}
+			select {
+			case payload := <-webhookCh:
+				if payload.MessageID != "LOST1" || payload.Content != caption || payload.MediaBase64 != "" {
+					t.Errorf("webhook payload = %+v, want the message without media bytes", payload)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the webhook must still fire for a message that could not be stored")
+			}
+		})
+	}
+}
+
+// resolveLIDChat falls back to the LID map like resolveUserJID does, and like
+// it must survive a client that has none instead of dereferencing nil.
+func TestResolveLIDChat_WithoutALIDStoreKeepsTheChat(t *testing.T) {
+	installRecordingLogger(t) // the "could not resolve" warning is expected here
+	clients := map[string]*whatsmeow.Client{
+		"nil client":      nil,
+		"no device store": {},
+		"no LID store":    {Store: &store.Device{}},
+	}
+	for name, client := range clients {
+		t.Run(name, func(t *testing.T) {
+			if got := resolveLIDChat(client, phoneLID, types.EmptyJID, types.EmptyJID, false); got != phoneLID {
+				t.Fatalf("resolveLIDChat() = %s, want the LID chat %s unchanged", got, phoneLID)
+			}
+		})
+	}
+}
+
+// The history WhatsApp shares when a member is added to a group arrives as a
+// message kind of its own. It is not decoded yet, but it must not vanish
+// without a trace either: one INFO line and a counter, nothing stored, nothing
+// downloaded, and none of the fields that locate or decrypt the blob in the
+// log (issue #468).
+func TestHandleMessage_SharedGroupHistoryIsLoggedAndCounted(t *testing.T) {
+	const (
+		receiver   = "15550001111@s.whatsapp.net"
+		directPath = "/v/t62.0000-00/secret-direct-path"
+		mediaKey   = "secret-media-key"
+		fileHash   = "secret-file-hash"
+	)
+	meta := &waE2E.MessageHistoryMetadata{
+		HistoryReceivers:               []string{receiver},
+		NonHistoryReceivers:            []string{receiver, receiver},
+		MessageCount:                   proto.Int64(42),
+		OldestMessageTimestampInWindow: proto.Int64(1700000000),
+		OldestMessageTimestampInBundle: proto.Int64(1700003600),
+	}
+	group := types.NewJID("120363000000000042", types.GroupServer)
+	cases := map[string]*waE2E.Message{
+		"bundle": {MessageHistoryBundle: &waE2E.MessageHistoryBundle{
+			Mimetype:               proto.String("application/octet-stream"),
+			DirectPath:             proto.String(directPath),
+			MediaKey:               []byte(mediaKey),
+			FileSHA256:             []byte(fileHash),
+			FileEncSHA256:          []byte(fileHash),
+			MessageHistoryMetadata: meta,
+		}},
+		"notice": {MessageHistoryNotice: &waE2E.MessageHistoryNotice{MessageHistoryMetadata: meta}},
+	}
+	for kind, message := range cases {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("WEBHOOK_ENABLED", "false")
+			rec := installRecordingLogger(t)
+			ms := newTestMessageStore(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
+			var downloads atomic.Int32
+			b.DownloadMedia = func(_ context.Context, _ string, _ string) (bool, string, string, string, error) {
+				downloads.Add(1)
+				return false, "", "", "", nil
+			}
+			b.autoDownloads = newMediaJobQueue(b.ctx, 0, 4, b.runAutoDownload)
+
+			msg := buildTextMessage(group, phonePN, types.EmptyJID, types.EmptyJID, false, "")
+			msg.Info.ID = "SHARE1"
+			msg.Message = message
+			b.handleMessage(msg)
+
+			var lines []string
+			for _, line := range strings.Split(rec.String(), "\n") {
+				if strings.Contains(line, "Group history") {
+					lines = append(lines, line)
+				}
+			}
+			if len(lines) != 1 || !strings.HasPrefix(lines[0], "[INFO]") {
+				t.Fatalf("want one INFO line about the shared history, got %q", lines)
+			}
+			for _, want := range []string{
+				"Group history " + kind + " seen in " + group.String(), "SHARE1", "from_me=false",
+				"42 messages", "oldest in window 1700000000", "oldest in bundle 1700003600",
+				"1 history receivers", "2 other receivers",
+			} {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("the line does not carry %q: %s", want, lines[0])
+				}
+			}
+			// The identifiers as text, and the keys in every spelling a
+			// careless %v, %x or base64 would give them.
+			secrets := []string{receiver, "15550001111", directPath}
+			for _, raw := range []string{mediaKey, fileHash} {
+				secrets = append(secrets, raw, hex.EncodeToString([]byte(raw)),
+					base64.StdEncoding.EncodeToString([]byte(raw)), fmt.Sprintf("%d", []byte(raw)))
+			}
+			for _, secret := range secrets {
+				if strings.Contains(rec.String(), secret) {
+					t.Errorf("%q reached the log:\n%s", secret, rec.String())
+				}
+			}
+			if got := b.metrics.groupHistoryShares.Load(); got != 1 {
+				t.Errorf("groupHistoryShares = %d, want 1", got)
+			}
+			var rows int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil || rows != 0 {
+				t.Errorf("stored rows = %d (err %v), want none: the bundle is not decoded yet", rows, err)
+			}
+			if got := b.metrics.messagesStored.Load(); got != 0 {
+				t.Errorf("messagesStored = %d, want 0", got)
+			}
+			if downloads.Load() != 0 || b.autoDownloads.queued() != 0 {
+				t.Errorf("downloads run = %d, queued = %d; want none", downloads.Load(), b.autoDownloads.queued())
+			}
+		})
+	}
+
+	// A share without metadata says so instead of printing zeros that read
+	// like an empty share at the epoch; our own copy is told apart.
+	t.Run("no metadata, from us", func(t *testing.T) {
+		t.Setenv("WEBHOOK_ENABLED", "false")
+		rec := installRecordingLogger(t)
+		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+		msg := buildTextMessage(group, phonePN, types.EmptyJID, types.EmptyJID, true, "")
+		msg.Message = &waE2E.Message{MessageHistoryNotice: &waE2E.MessageHistoryNotice{}}
+		b.handleMessage(msg)
+		if log := rec.String(); !strings.Contains(log, "from_me=true): no metadata;") || strings.Contains(log, "0 messages") {
+			t.Errorf("want the absent metadata named as absent:\n%s", log)
+		}
+		if got := b.metrics.groupHistoryShares.Load(); got != 1 {
+			t.Errorf("groupHistoryShares = %d, want 1", got)
+		}
+	})
+
+	// An ordinary message is not a share.
+	t.Run("a text message does not count", func(t *testing.T) {
+		t.Setenv("WEBHOOK_ENABLED", "false")
+		rec := installRecordingLogger(t)
+		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), rec)
+		b.handleMessage(buildTextMessage(group, phonePN, types.EmptyJID, types.EmptyJID, false, "hello"))
+		if got := b.metrics.groupHistoryShares.Load(); got != 0 || strings.Contains(rec.String(), "Group history") {
+			t.Errorf("groupHistoryShares = %d for a text message; log:\n%s", got, rec.String())
+		}
+	})
 }

@@ -131,6 +131,9 @@ from whatsapp import (
     leave_group as whatsapp_leave_group,
 )
 from whatsapp import (
+    lid_jids_of_contact as whatsapp_lid_jids_of_contact,
+)
+from whatsapp import (
     list_chats_page as whatsapp_list_chats,
 )
 from whatsapp import (
@@ -143,6 +146,9 @@ from whatsapp import (
     list_unread as whatsapp_list_unread,
 )
 from whatsapp import (
+    listed_reading as whatsapp_listed_reading,
+)
+from whatsapp import (
     manage_group_participants as whatsapp_manage_group_participants,
 )
 from whatsapp import (
@@ -153,6 +159,12 @@ from whatsapp import (
 )
 from whatsapp import (
     message_stats as whatsapp_message_stats,
+)
+from whatsapp import (
+    other_phone_spelling as whatsapp_other_phone_spelling,
+)
+from whatsapp import (
+    phone_book_spelling as whatsapp_phone_book_spelling,
 )
 from whatsapp import (
     purge_media as whatsapp_purge_media,
@@ -354,10 +366,11 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     anonymously has phone_number null and its LID in `lid`.
 
     `name` is what this account knows them by, `push_name` the name they gave
-    themselves, so someone saved as "Z Aa" is found by searching "Alena".
+    themselves, so someone saved as "Z Dave" is found by searching "Carol".
     `matched` names the field the query hit: "name" (the chat name this account
     stored), "full_name", "push_name", "first_name" or "business_name" (the
-    phone-book fields behind `name`), or "jid". The three that are not returned
+    phone-book fields behind `name`), "jid", or "phone_number" when the digits
+    are those of a contact WhatsApp keeps under a LID. The three that are not returned
     as keys are still reported by name, so "found by their business name" is
     not mistaken for "found by the name you saved". It is null when nothing in
     those fields contains the query literally — a wildcard search that only the
@@ -365,7 +378,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     attached: present it as "recorded as", never as "is".
 
     A phone number of seven digits or more may be typed any way
-    ("+55 (88) 98195-2753"): the `+`, spaces, dashes, dots and parentheses are
+    ("+55 (88) 97777-6666"): the `+`, spaces, dashes, dots and parentheses are
     ignored. A full Brazilian mobile
     (55 + area code + number) is found with or without the ninth digit after
     the area code, whichever of the two WhatsApp registered; `matched` is
@@ -402,12 +415,16 @@ def get_contact(identifier: str) -> dict[str, Any]:
     contact gave themselves, a cached snapshot with no date attached — present
     it as "recorded as", never as "is".
 
+    A Brazilian mobile is found with or without the ninth digit after the area
+    code: `jid` and `phone_number` report the spelling the archive holds, and
+    `identifier` echoes what was asked.
+
     Args:
         identifier: Phone number, LID, or full JID. Examples:
                     - "12025551234" (phone number)
-                    - "35047067385985" (LID - numeric)
+                    - "10000000000005" (LID - numeric)
                     - "12025551234@s.whatsapp.net" (phone JID)
-                    - "184125298348272@lid" (LID JID)
+                    - "100000000000004@lid" (LID JID)
 
     Returns:
         Dictionary with jid, phone_number, lid, name, push_name, display_name,
@@ -457,19 +474,65 @@ def get_contact(identifier: str) -> dict[str, Any]:
     if bare_numeric_digits:
         candidates.append(f"{bare_numeric_digits}@lid")
 
-    chat = None
-    for candidate_jid in candidates:
-        chat = whatsapp_get_chat(candidate_jid, include_last_message=False)
-        if chat:
-            jid = candidate_jid
-            break
+    # A Brazilian mobile has a second spelling, with or without the ninth
+    # digit (issue #475), and the store holds the one WhatsApp registered:
+    # get_chat finds the chat under either, and a contact with no chat of its
+    # own is still known to the phone book under one of them.
+    other_spelling = whatsapp_other_phone_spelling(jid)
 
-    if chat is None and bare_numeric_digits and unknown_lid_digits(bare_numeric_digits):
+    # A bare number is tried under two spellings, and the allow-list may name
+    # one of them only. A refusal for a spelling the identifier does not turn
+    # out to be must not fail the call (issue #466): the list is asked once,
+    # below, about what the identifier resolves to.
+    chat = None
+    refusals: dict[str, ToolError] = {}
+    pending = list(candidates)
+    followed_lid_map = False
+    while pending:
+        candidate_jid = pending.pop(0)
+        try:
+            found = whatsapp_get_chat(candidate_jid, include_last_message=False)
+        except ToolError as exc:
+            if exc.code != "denied":
+                raise
+            refusals[candidate_jid] = exc
+            found = None
+        if found:
+            chat = found
+            jid = candidate_jid
+            if other_spelling and chat["jid"] == other_spelling:
+                jid = other_spelling
+            break
+        if not pending and not followed_lid_map:
+            # Last resort: the chat may be stored under the LID the map pairs
+            # the number with, and nowhere else (issue #465), where
+            # get_direct_chat_by_contact looks too.
+            followed_lid_map = True
+            pending = [lid_jid for lid_jid in whatsapp_lid_jids_of_contact(jid) if lid_jid not in candidates]
+            candidates += pending
+
+    if (
+        chat is None
+        and bare_numeric_digits
+        and candidates[0] not in refusals
+        and unknown_lid_digits(bare_numeric_digits)
+    ):
         # Nothing here has ever seen this number: no chat under either
         # spelling, no message row, no phone-book entry, and the LID map said
         # nothing above. At 14-15 digits that is a LID whose mapping we never
-        # learned, not a phone number nobody has written to (#375).
+        # learned, not a phone number nobody has written to (#375). "No chat"
+        # is only known when the phone spelling was not refused above.
         jid = f"{bare_numeric_digits}@lid"
+
+    if chat is None:
+        # The classification above did not look at the allow-list. The list
+        # has to admit the JID it produced, or name another reading exactly
+        # (`listed_reading`, the rule get_direct_chat_by_contact applies).
+        answer = whatsapp_listed_reading(jid, candidates)
+        if answer is None:
+            # get_chat refused `jid` above: that refusal is the answer.
+            raise refusals.get(jid) or ToolError("denied", f"Chat {jid!r} is not in WHATSAPP_ALLOWED_CHATS")
+        jid = whatsapp_phone_book_spelling(answer)
 
     jid_user = jid.split("@", 1)[0]
     identity = sender_identity(jid)
@@ -484,7 +547,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
         resolved = display_name not in (jid, jid_user, identifier)
 
     # Echoing the identifier back as a name invents a contact called
-    # "117158134681735"; a LID nobody can name has none, unless the map gave us
+    # "100000000000003"; a LID nobody can name has none, unless the map gave us
     # the number behind it (what a phone identifier falls back to as well).
     # `display_name` still says who this is, the way message rows do.
     fallback_name = identity.phone if is_lid else jid_user
@@ -634,12 +697,14 @@ def list_messages(
                (e.g., "2026-01-01" or "2026-01-01T09:00:00")
         before: ISO-8601 upper bound, same convention (e.g., "2026-01-09T18:00:00")
         sender_jid: Only messages from this sender: phone number with country code
-               ("12025551234") or JID ("12025551234@s.whatsapp.net")
+               ("12025551234") or JID ("12025551234@s.whatsapp.net"). A Brazilian
+               mobile matches with or without the ninth digit
         chat_jid: One chat, or a list of them: "12025551234@s.whatsapp.net", a group
                JID, or ["a@s.whatsapp.net", "120363...@g.us"] to read a hand-picked
                set in one call. Phone and @lid spellings of the same conversation
-               both match. Several JIDs joined into one string is an error, not an
-               empty page.
+               both match, and so do the two spellings of a Brazilian mobile (with
+               or without the ninth digit). Several JIDs joined into one string is
+               an error, not an empty page.
         exclude_chat_jid: Same shape, dropped from the result — the way to read
                everything except a few noisy chats
         query: Search term to filter messages by content. Accent-insensitive and
@@ -1202,7 +1267,11 @@ def list_chats(
     with fields / omit_nulls / max_content_chars, or ask for count_only first.
 
     Args:
-        query: Search term to filter chats by name or JID
+        query: Search term to filter chats by name or JID. A phone number may be
+               typed with its separators, a full Brazilian mobile finds the
+               chat with or without the ninth digit, and a whole number finds
+               the chat WhatsApp keeps under that contact's LID (as in
+               search_contacts)
         limit: Max chats to return (default 50, max 200)
         page: Page number for pagination (default 0); ignored when cursor is set
         cursor: next_cursor from the previous page
@@ -1234,8 +1303,9 @@ def list_chats(
         whatever `name` ended up being: a cached snapshot with no date attached, so
         present it as "recorded as", never as "is".
         The last_* fields describe the chat's newest stored message, which can be older
-        than last_message_time (protocol and unsupported events move that marker
-        without storing a message). `has_messages` is false only when the chat has no
+        than last_message_time (history sync stamps a chat with the conversation's own
+        time, and older bridges moved that marker for events they did not store).
+        `has_messages` is false only when the chat has no
         stored messages at all: last_is_from_me is then null and `unread` is false
         because there is no direction to judge, not because nothing is waiting.
         `last_read_time` is how far the chat has been read on any device (null if never
@@ -1270,7 +1340,8 @@ def get_chat(
     """Get WhatsApp chat metadata by JID.
 
     Args:
-        chat_jid: The JID of the chat to retrieve
+        chat_jid: The JID of the chat to retrieve. A Brazilian mobile is found with
+                  or without the ninth digit; the row's `jid` is the stored spelling
         include_last_message: Whether to include the last message (default True)
         fields: Keep only these keys on the row (same names as list_chats); an
                 unknown name is an error listing the valid ones
@@ -1298,10 +1369,17 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
 
     The number is matched whole, never as a fragment. A `+`, spaces, dashes,
     dots and parentheses are ignored, and a Brazilian mobile is found with or
-    without the ninth digit after the area code ("5588981952753" and
-    "558881952753" are one contact): the chat's `jid` says which spelling
+    without the ninth digit after the area code ("5588977776666" and
+    "558877776666" are one contact): the chat's `jid` says which spelling
     WhatsApp registered. When both spellings have a chat, the one asked for is
-    returned (under an allow-list, the one it admits).
+    returned (under an allow-list, the one it admits). A chat stored only under
+    the contact's LID is found by the phone number as well; its `jid` is then
+    the `...@lid` one.
+
+    Errors: `not_found` means the number is allowed and no chat with it is
+    stored under a JID the allow-list names; `denied` means
+    WHATSAPP_ALLOWED_CHATS does not name it, and says nothing about whether a
+    chat exists.
 
     Args:
         contact_jid: The contact's phone number with country code ("12025551234")
@@ -1338,7 +1416,8 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: 
     membership-only groups follow, most recently confirmed membership first.
 
     Args:
-        contact_jid: The contact's JID or phone number
+        contact_jid: The contact's JID or phone number (a Brazilian mobile with or
+                     without the ninth digit: both find the same chats)
         limit: Maximum number of chats to return (default 20, max 200)
         page: Page number for pagination (default 0)
         cursor: next_cursor from the previous page
@@ -1354,7 +1433,8 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
     Args:
-        contact_jid: The contact's JID or phone number
+        contact_jid: The contact's JID or phone number (a Brazilian mobile with or
+                     without the ninth digit: both find the same message)
 
     Returns:
         Message dictionary with id, timestamp, sender, content, etc. or empty dict if not found.
@@ -2216,6 +2296,7 @@ def purge_media(
     min_bytes: int = 0,
     media_type: str = "",
     dry_run: bool = True,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """Free disk space by dropping cached media bytes; message rows, hashes and notes stay.
 
@@ -2229,7 +2310,12 @@ def purge_media(
 
     Either name the files (`items`) or describe them (any of chat_jid,
     older_than_days, min_bytes, media_type); the bridge caps one call at 500
-    files and reports `truncated` when more matched.
+    files. Only files that are still cached count: rows already purged are
+    stepped over, so to clear a large set **repeat the same call (dry_run=false)
+    while `truncated` is true** — `remaining` says how many matching cached
+    files are left. If `scan_truncated` is true and `purged_files` is 0, the
+    bridge stopped looking before it reached a cached file: narrow the criteria.
+    `truncated` is false when a call removed nothing because removals failed.
 
     Args:
         items: Explicit list of {"message_id", "chat_jid"} (from list_media)
@@ -2238,11 +2324,19 @@ def purge_media(
         min_bytes: Criteria form: only files at least this large
         media_type: Criteria form: image | video | audio | document | sticker
         dry_run: true (default) reports without deleting; false deletes
+        summary_only: true leaves `items` out and returns only the totals (use it
+            on criteria calls that match hundreds of files)
 
     Returns:
         {"dry_run", "message", "matched", "purged_files", "purged_bytes", "truncated",
+         "remaining", "scan_truncated", "unreachable", "failed",
          "items": [{message_id, chat_jid, purged, bytes, file, reason}]} where reason explains
-        skipped entries (not cached, not a media message, message not found, denied chat)
+        skipped entries (not cached, not a media message, message not found, denied chat);
+        `items` is absent with summary_only. `matched` is the number of files this call
+        selected (criteria form: cached files; items form: named rows that exist); on the
+        criteria form `remaining` counts the matching cached files it left for the next
+        call, `unreachable` the rows whose path the purge cannot touch (drop summary_only
+        to see which) and `failed` the selected files it could not remove
     """
     return whatsapp_purge_media(
         items=items,
@@ -2251,6 +2345,7 @@ def purge_media(
         min_bytes=min_bytes,
         media_type=media_type,
         dry_run=dry_run,
+        summary_only=summary_only,
     )
 
 
@@ -2393,9 +2488,10 @@ def read_media(
 
     Returns:
         A list of content blocks: the file (or its text, or its pages), then the JSON
-        metadata block, which carries `pages_total` and `truncated` with as_text, and
-        those plus `first_page`, `pages_rendered`, `image_bytes` and (for a page the
-        renderer could not draw) `pages_failed` with as_images.
+        metadata block, which carries `pages_total` and `truncated` with as_text (plus
+        `pages_failed` for PDF pages whose text could not be extracted; read those
+        with as_images), and those plus `first_page`, `pages_rendered`, `image_bytes`
+        and (for a page the renderer could not draw) `pages_failed` with as_images.
     """
     return media_read_bytes(
         chat_jid,

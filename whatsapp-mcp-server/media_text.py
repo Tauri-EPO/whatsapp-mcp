@@ -53,6 +53,8 @@ MAX_PAGES_LIMIT = 500
 MAX_ROWS_PER_SHEET = 500
 # A cell holding a whole paragraph is a note, not a value.
 MAX_CELL_CHARS = 500
+# How many unreadable pages the note spells out; the rest are counted.
+MAX_UNREADABLE_LISTED = 20
 
 TRUNCATION_NOTE = "[truncated: the rest of this document was not read]"
 NO_TEXT_LAYER = (
@@ -77,6 +79,9 @@ class Extracted:
     units_total: int = 0
     truncated: bool = False
     note: str | None = None
+    # PDF pages whose text could not be extracted: {"page": 2, "error": "LimitReachedError"}.
+    # The error class only, never the message: a parser message can quote the file.
+    unreadable: list[dict[str, object]] = field(default_factory=list)
 
 
 def page_limit(max_pages: int | None) -> int:
@@ -105,7 +110,9 @@ def _guard_zip(path: str) -> None:
         with zipfile.ZipFile(path) as archive:
             total = sum(info.file_size for info in archive.infolist())
     except (OSError, zipfile.BadZipFile) as exc:
-        raise ToolError("invalid_argument", f"this file is not a readable DOCX/XLSX container: {exc}") from exc
+        raise ToolError(
+            "invalid_argument", f"this file is not a readable DOCX/XLSX container: {type(exc).__name__}"
+        ) from exc
     if total > MAX_UNCOMPRESSED_BYTES:
         raise ToolError(
             "too_large",
@@ -157,22 +164,71 @@ def _pdf(path: str, wanted: int) -> Extracted:
         reader = PdfReader(path)
         pages = reader.pages
         total = len(pages)
-        texts = [(index, (pages[index].extract_text() or "").strip()) for index in range(min(total, wanted))]
     except Exception as exc:  # noqa: BLE001 - a malformed file is bad input, not a server fault
         # pypdf raises PyPdfError subclasses for a broken file, but also
         # KeyError/ValueError from deep inside the parser on a truncated one.
-        raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}: {exc}") from exc
+        # The class only, like the per-page failures below: a parser message can
+        # quote the file, and the file is whatever a stranger sent.
+        raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}") from exc
+    # No failure budget on purpose (issue #533): the attempts are bounded by
+    # max_pages (500 at most) and the 64 MiB the file may weigh, and stopping
+    # after N failures would make pages_failed and pages_total mean "not
+    # attempted" as well as "unreadable". The cost of a failing page against a
+    # healthy one was not measured; revisit with a number if a hostile file turns
+    # out slower to fail than to read.
+    # Page by page: one page pypdf refuses (a font with an oversized /Widths, a
+    # stream that trips its recovery limit) must not cost the pages around it.
+    texts: list[tuple[int, str]] = []
+    unreadable: list[dict[str, object]] = []
+    for index in range(min(total, wanted)):
+        try:
+            texts.append((index, (pages[index].extract_text() or "").strip()))
+        except MemoryError:
+            raise  # a server fault, not a page the parser refuses: do not go on to the next one
+        except Exception as exc:  # noqa: BLE001 - same as above, per page
+            unreadable.append({"page": index + 1, "error": type(exc).__name__})
+    if unreadable and not texts:
+        raise ToolError(
+            "invalid_argument",
+            f"this PDF could not be read as text: {_unreadable_sentence(unreadable)}",
+        )
     out = _collect((f"--- page {index + 1} of {total} ---\n{text}\n" for index, text in texts if text), total, wanted)
+    out.unreadable = unreadable
+    notes = []
     if not out.sections:
         # Empty because there is nothing to read, or empty because the pages we
         # were allowed to read happen to be the image-only ones: telling a
         # 300-page report to go and ask the sender for the original would be wrong.
-        out.note = (
-            NO_TEXT_LAYER
-            if total <= wanted
-            else f"no text in the first {wanted} of {total} pages; raise max_pages to look further"
-        )
+        if unreadable:
+            notes.append(
+                f"the {len(texts)} page(s) that could be read hold no text"
+                + (
+                    f" (the first {wanted} of {total} pages were looked at; raise max_pages to look further)."
+                    if total > wanted
+                    else "."
+                )
+            )
+        else:
+            notes.append(
+                NO_TEXT_LAYER
+                if total <= wanted
+                else f"no text in the first {wanted} of {total} pages; raise max_pages to look further"
+            )
+    if unreadable:
+        notes.append(_unreadable_sentence(unreadable))
+    out.note = " ".join(notes) or None
     return out
+
+
+def _unreadable_sentence(unreadable: list[dict[str, object]]) -> str:
+    """Which pages failed, and the way to read them anyway (written here, not by the sender)."""
+    shown = ", ".join(f"{item['page']} ({item['error']})" for item in unreadable[:MAX_UNREADABLE_LISTED])
+    if len(unreadable) > MAX_UNREADABLE_LISTED:
+        shown += f" and {len(unreadable) - MAX_UNREADABLE_LISTED} more"
+    return (
+        f"page(s) {shown} could not be extracted as text; "
+        f"read them with read_media(as_images=true, first_page={unreadable[0]['page']})"
+    )
 
 
 def _docx(path: str, wanted: int) -> Extracted:
@@ -185,7 +241,7 @@ def _docx(path: str, wanted: int) -> Extracted:
         body = "\n".join(line for line in blocks if line)
         tables: list[Table] = list(document.tables)
     except Exception as exc:  # noqa: BLE001 - same as above: bad input, not a server fault
-        raise ToolError("invalid_argument", f"this DOCX could not be read: {type(exc).__name__}: {exc}") from exc
+        raise ToolError("invalid_argument", f"this DOCX could not be read: {type(exc).__name__}") from exc
 
     sections = [f"--- document text ---\n{body}\n"] if body else []
     total = len(sections) + len(tables)
@@ -234,7 +290,7 @@ def _xlsx(path: str, wanted: int) -> Extracted:
             if rows:
                 rendered.append(f"--- sheet {sheet.title} ({sheet.max_row or 0} rows) ---\n{rows}")
     except Exception as exc:  # noqa: BLE001 - same as above
-        raise ToolError("invalid_argument", f"this XLSX could not be read: {type(exc).__name__}: {exc}") from exc
+        raise ToolError("invalid_argument", f"this XLSX could not be read: {type(exc).__name__}") from exc
     finally:
         if workbook is not None:
             workbook.close()

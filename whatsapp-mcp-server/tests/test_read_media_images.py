@@ -255,6 +255,65 @@ class TestConversion:
         assert meta["original_mime"] == "image/heic"
         assert (meta["width"], meta["height"], meta["resized"]) == (1568, 784, True)
 
+    def test_a_heic_is_opened_without_its_embedded_thumbnails(self, paired_dbs, monkeypatch):
+        """An embedded thumbnail is a second picture the sender chose (pillow-heif 1.8 would decode it)."""
+        pillow_heif = pytest.importorskip("pillow_heif")
+        pillow_heif.register_heif_opener()
+        # The options are process-wide: start from the library defaults and let
+        # monkeypatch put them back, so the order of the tests does not matter.
+        for option in ("THUMBNAILS", "DEPTH_IMAGES", "AUX_IMAGES"):
+            monkeypatch.setattr(pillow_heif.options, option, True)
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", chat_policy.load_chat_policy({}))
+        monkeypatch.setattr(media_image, "_heif_registered", False)
+        # At max_edge=64 a 200 px thumbnail is large enough for the 1.8 draft
+        # path (more than twice the edge), and the file stays cheap to encode.
+        heic = _photo(400, 400, fmt="HEIF", thumbnails=[200])
+        assert Image.open(io.BytesIO(heic)).info["thumbnails"] == [200], "the fixture must embed one"
+        with paired_dbs.messages() as conn:
+            _insert(conn, "HEICTHUMB", media_type="document", filename="IMG_0043.heic")
+        _cache("document_20260904_100000_HEICTHUMB.heic", heic)
+        blocks = media_read.read_media(ALICE, "HEICTHUMB", max_edge=64)
+        assert blocks[0].type == "image"
+        meta = _meta(blocks)
+        assert (meta["width"], meta["height"], meta["resized"]) == (64, 64, True)
+        # Once read_media has registered the plugin, an opened HEIC carries no
+        # thumbnail to draft from, and the other sender-chosen items are off too.
+        assert pillow_heif.options.THUMBNAILS is False
+        assert pillow_heif.options.DEPTH_IMAGES is False and pillow_heif.options.AUX_IMAGES is False
+        assert Image.open(io.BytesIO(heic)).info["thumbnails"] == []
+
+    def test_a_heic_thumbnail_is_not_drafted_even_with_the_plugin_option_back_on(self, paired_dbs, monkeypatch):
+        """The second line of defence: only a JPEG may be drafted, everything else is loaded first."""
+        pillow_heif = pytest.importorskip("pillow_heif")
+        # As if something switched the option back on after the server had
+        # registered the plugin: _register_heif() does not run again.
+        pillow_heif.register_heif_opener()
+        monkeypatch.setattr(pillow_heif.options, "THUMBNAILS", True)
+        monkeypatch.setattr(media_image, "_heif_registered", True)
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", chat_policy.load_chat_policy({}))
+        drafts: list[object] = []
+        plugin = pillow_heif.HeifImageFile
+        # Whatever draft() the plugin resolves to: Pillow's no-op up to
+        # pillow-heif 1.7, the thumbnail-picking one from 1.8 on.
+        original = plugin.draft
+
+        def spy(self, *args, **kwargs):
+            drafts.append(original(self, *args, **kwargs))
+            return drafts[-1]
+
+        monkeypatch.setattr(plugin, "draft", spy)
+        heic = _photo(400, 400, fmt="HEIF", thumbnails=[200])
+        assert Image.open(io.BytesIO(heic)).info["thumbnails"] == [200], "the option must be on for this test"
+        with paired_dbs.messages() as conn:
+            _insert(conn, "HEICDRAFT", media_type="document", filename="IMG_0044.heic")
+        _cache("document_20260904_100000_HEICDRAFT.heic", heic)
+        blocks = media_read.read_media(ALICE, "HEICDRAFT", max_edge=64)
+        meta = _meta(blocks)
+        assert (meta["width"], meta["height"], meta["resized"]) == (64, 64, True)
+        # thumbnail() asked, and a draft that returns a box would have switched
+        # the image to the embedded thumbnail.
+        assert drafts and all(result is None for result in drafts), drafts
+
     def test_the_image_cap_applies_only_where_the_conversion_happens(self):
         """A 9 MB TIFF is a photo when it is downscaled and a blob when it is not.
 

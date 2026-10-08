@@ -94,8 +94,8 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	mux.HandleFunc("/api/me", auth(requireMethod(http.MethodGet, handleMe(clientIdentity(client)))))
 
 	// Build identity; unauthenticated on purpose (see version.go).
-	mux.HandleFunc("/api/version", handleVersion(buildInfo(messageStore != nil && messageStore.fts)))
-	if getEnvBool(metricsEnv, true) {
+	mux.HandleFunc("/api/version", handleVersion(buildInfo().withFTS(messageStore != nil && messageStore.fts)))
+	if b.MetricsEnabled {
 		// Prometheus text; unauthenticated like /api/version (counts only, see metrics.go).
 		mux.HandleFunc("/metrics", requireMethod(http.MethodGet, b.handleMetrics()))
 	}

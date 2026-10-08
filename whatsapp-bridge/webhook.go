@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -50,7 +53,9 @@ type webhookSender struct {
 // operator-configured endpoint, not a browsable URL, and following a 3xx
 // would forward X-Bridge-Token to whatever host the redirect names — Go only
 // strips Authorization/Cookie on cross-origin redirects, not custom headers.
-func newWebhookSender(token string) *webhookSender {
+//
+// enabled is WEBHOOK_ENABLED as main() resolved it (env_bool.go).
+func newWebhookSender(token string, enabled bool) *webhookSender {
 	return &webhookSender{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -60,7 +65,7 @@ func newWebhookSender(token string) *webhookSender {
 		},
 		token:      token,
 		defaultURL: defaultWebhookURL,
-		enabled:    webhooksEnabled(),
+		enabled:    enabled,
 		url:        os.Getenv("WEBHOOK_URL"),
 	}
 }
@@ -86,18 +91,14 @@ type WebhookPayload struct {
 	MimeType      string `json:"mimeType,omitempty"`
 	MediaFilename string `json:"mediaFilename,omitempty"`
 	MediaBase64   string `json:"mediaBase64,omitempty"`
+	// Stored is only ever sent as false: the bridge could not write this
+	// message, so its ID resolves to nothing (download_media, a quote). Absent
+	// means stored (issue #518).
+	Stored *bool `json:"stored,omitempty"`
 	// Reaction fields - populated when EventType is "reaction".
 	ReactionToMessageID string  `json:"reactionToMessageId,omitempty"`
 	ReactionEmoji       *string `json:"reactionEmoji,omitempty"`
 	ReactionRemoved     *bool   `json:"reactionRemoved,omitempty"`
-}
-
-// webhooksEnabled reports whether webhook processing is enabled. Keep this
-// separate from sendWebhookPayload so media callers can avoid their webhook-only
-// file work when delivery is disabled.
-// webhooksEnabled reads WEBHOOK_ENABLED; call it at startup only (newWebhookSender, main).
-func webhooksEnabled() bool {
-	return getEnvBool("WEBHOOK_ENABLED", true)
 }
 
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
@@ -161,12 +162,20 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 // should use SendWebhookWithMessageID so receiver-side idempotency can identify
 // repeated WhatsApp events; this wrapper remains for compatibility.
 func (w *webhookSender) SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string) {
-	w.SendWebhookWithMessageID(sender, content, chatJID, isFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, "")
+	w.SendWebhookWithMessageID(sender, content, chatJID, isFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, "", true)
+}
+
+// storedField renders WebhookPayload.Stored: nothing for a stored message.
+func storedField(stored bool) *bool {
+	if stored {
+		return nil
+	}
+	return &stored
 }
 
 // SendWebhookWithMessageID sends a text-only message and preserves the native
 // WhatsApp message ID in the payload for downstream idempotency.
-func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string, messageID string) {
+func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string, messageID string, stored bool) {
 	w.sendPayload(WebhookPayload{
 		Sender:          sender,
 		Content:         content,
@@ -178,35 +187,128 @@ func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string
 		QuotedIsFromMe:  quotedIsFromMe,
 		MentionedJIDs:   mentionedJIDs,
 		MessageID:       messageID,
+		Stored:          storedField(stored),
 	})
 }
 
-// SendWebhookWithMedia sends a message to the webhook endpoint including base64-encoded
-// image data read from localPath. If localPath is empty or unreadable the webhook is
-// still sent – just without the MediaBase64 field so the text caption is not lost.
+// webhookMedia reads a cached media file for the webhook: the MIME type sniffed
+// from its first bytes (never the generated extension, which is always .jpg for
+// an image) and, when the file fits maxMediaBase64Bytes, its content. On any
+// failure it says why at WARN and returns no bytes, so the webhook still goes
+// out with the caption.
+//
+// The file is named the way downloadMedia named it, chat directory and file
+// name, and opened through the store root. The absolute path downloadMedia
+// returns was checked when the file was written, which is not a control at the
+// read: a component swapped for a symlink in between would have had another
+// file encoded into the payload and sent to WEBHOOK_URL (issue #493). Two
+// things stand in the way now. Nothing is followed, not even a link that stays
+// inside the store (openStoreMedia). And the bytes must be the ones the message
+// declared: their SHA-256 is compared with wantSHA256, the message's own
+// file_sha256, because a hard link or a rename can put another regular file of
+// the store (the token, a database) under the cached name without any link.
+// Without a hash to compare with, nothing is sent.
+func (b *Bridge) webhookMedia(chatJID, filename string, wantSHA256 []byte) (mimeType string, data []byte) {
+	f, size, err := openStoreMedia(b.StoreRoot, chatMediaRel(chatJID), filename)
+	if err != nil {
+		b.Log.Warnf("Could not open media file for the webhook: %v", err)
+		return sniffMIME(nil), nil
+	}
+	defer func() { _ = f.Close() }()
+	if size > maxMediaBase64Bytes {
+		b.Log.Warnf("Media file too large for base64 encoding (%d bytes), skipping MediaBase64", size)
+		head := make([]byte, 512)
+		n, _ := io.ReadFull(f, head)
+		return sniffMIME(head[:n]), nil
+	}
+	// The cap is on the handle being read: exactly the size it reported, so a
+	// file that grows afterwards cannot put more than the limit in memory.
+	data = make([]byte, size)
+	if _, err := io.ReadFull(f, data); err != nil {
+		b.Log.Warnf("Could not read media file for base64 encoding: %v", err)
+		return sniffMIME(nil), nil
+	}
+	if sum := sha256.Sum256(data); len(wantSHA256) == 0 || !bytes.Equal(sum[:], wantSHA256) {
+		b.Log.Warnf("Cached media is not the file the message declared (SHA-256 differs or is unknown); sending the webhook without it")
+		return sniffMIME(nil), nil
+	}
+	return sniffMIME(data), data
+}
+
+// sniffMIME is the content type of a file from its first bytes, and
+// application/octet-stream when there are none to look at.
+func sniffMIME(head []byte) string {
+	if len(head) == 0 {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(head)
+}
+
+// openStoreMedia opens store/<chatDir>/<name> for reading without following a
+// symlink at either component, and returns its size. os.Root keeps the open
+// inside the store but does follow a link that stays inside it, so each
+// component is checked with Lstat, opened, and the handle compared with what
+// Lstat saw: a name swapped for a link between the two is a different file and
+// is refused. The directory is opened first and the file is named inside that
+// handle, never by the full path again, so swapping the directory after its
+// check changes nothing.
+func openStoreMedia(root *os.Root, chatDir, name string) (*os.File, int64, error) {
+	if root == nil {
+		return nil, 0, errors.New("store directory unavailable")
+	}
+	if err := checkMediaPathComponents(chatDir, name); err != nil {
+		return nil, 0, err
+	}
+	notADir := errors.New("chat directory is not a real directory inside the store")
+	seenDir, err := root.Lstat(chatDir)
+	if err != nil || !seenDir.IsDir() {
+		return nil, 0, notADir
+	}
+	dir, err := root.OpenRoot(chatDir)
+	if err != nil {
+		return nil, 0, notADir
+	}
+	defer func() { _ = dir.Close() }()
+	if pinned, err := dir.Stat("."); err != nil || !os.SameFile(seenDir, pinned) {
+		return nil, 0, errors.New("chat directory changed while it was being opened")
+	}
+	seen, err := dir.Lstat(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !seen.Mode().IsRegular() {
+		return nil, 0, errors.New("cached media is not a regular file")
+	}
+	f, err := dir.Open(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(seen, opened) {
+		_ = f.Close()
+		return nil, 0, errors.New("cached media changed while it was being opened")
+	}
+	return f, opened.Size(), nil
+}
+
+// SendWebhookWithMedia sends a message to the webhook endpoint including the
+// base64-encoded image bytes in media (Bridge.webhookMedia reads them). With no
+// bytes the webhook is still sent – just without the MediaBase64 field, so the
+// text caption is not lost.
 func (w *webhookSender) SendWebhookWithMedia(
 	sender, content, chatJID string,
 	isFromMe bool,
 	quotedMessageId, quotedSender, quotedContent string,
 	quotedIsFromMe *bool, mentionedJIDs []string,
-	messageID, mediaType, mimeType, mediaFilename, localPath string,
+	messageID, mediaType, mimeType, mediaFilename string, media []byte, stored bool,
 ) {
 	if !w.enabled {
 		return
 	}
 
 	var mediaBase64 string
-	if localPath != "" {
-		info, statErr := os.Stat(localPath)
-		if statErr != nil {
-			bridgeLog.Warnf("Could not stat media file for base64 encoding: %v", statErr)
-		} else if info.Size() > maxMediaBase64Bytes {
-			bridgeLog.Warnf("Media file too large for base64 encoding (%d bytes), skipping MediaBase64", info.Size())
-		} else if data, err := os.ReadFile(localPath); err == nil { //nolint:gosec // localPath comes from downloadMedia inside the store directory
-			mediaBase64 = base64.StdEncoding.EncodeToString(data)
-		} else {
-			bridgeLog.Warnf("Could not read media file for base64 encoding: %v", err)
-		}
+	if len(media) > 0 {
+		mediaBase64 = base64.StdEncoding.EncodeToString(media)
 	}
 
 	w.sendPayload(WebhookPayload{
@@ -224,11 +326,12 @@ func (w *webhookSender) SendWebhookWithMedia(
 		MimeType:        mimeType,
 		MediaFilename:   mediaFilename,
 		MediaBase64:     mediaBase64,
+		Stored:          storedField(stored),
 	})
 }
 
 // SendReactionWebhook sends a typed reaction event to the webhook endpoint.
-func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, reactionToMessageID, emoji string) {
+func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, reactionToMessageID, emoji string, stored bool) {
 	removed := emoji == ""
 	w.sendPayload(WebhookPayload{
 		EventType:           "reaction",
@@ -239,6 +342,7 @@ func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe boo
 		MessageID:           messageID,
 		MediaType:           "reaction",
 		ReactionToMessageID: reactionToMessageID,
+		Stored:              storedField(stored),
 		ReactionEmoji:       &emoji,
 		ReactionRemoved:     &removed,
 	})

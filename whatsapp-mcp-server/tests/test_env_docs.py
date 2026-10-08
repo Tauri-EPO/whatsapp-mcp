@@ -33,7 +33,7 @@ def _read(rel: str) -> str:
 
 
 def code_variables() -> set[str]:
-    """Names a process actually reads: os.getenv-style calls, *Env constants, getEnvBool, whisper get()."""
+    """Names a process actually reads: os.getenv-style calls, *Env constants, whisper get()."""
     found: set[str] = set()
     py_patterns = [
         r'os\.(?:getenv|environ\.get)\(\s*"([A-Z0-9_]+)"',
@@ -48,7 +48,6 @@ def code_variables() -> set[str]:
             found |= set(re.findall(pat, text, flags=re.M))
     go_patterns = [
         r'os\.(?:Getenv|LookupEnv)\(\s*"([A-Z0-9_]+)"',
-        r'getEnv\w*\(\s*"([A-Z0-9_]+)"',  # getEnvBool("WEBHOOK_ENABLED", true)
         r'^\s*(?:const\s+)?\w*[eE]nv\w*\s*=\s*"([A-Z0-9_]+)"',  # const logLevelEnv = "..."
     ]
     for go in (ROOT / "whatsapp-bridge").glob("*.go"):

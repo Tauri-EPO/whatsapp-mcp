@@ -111,14 +111,25 @@ To read those files from the host, inspect the volume
 directory instead of the named volume.
 
 The bridge creates the store directory and each chat's media directory `0700`,
-and the media files and the token `0600`, owned by the container user (uid 1000
-in both images): on a bind-mounted store, read the files as that user or as
-root. The SQLite databases get the driver's default mode (`0644` under the usual
-umask), so on a new store it is the `0700` directory that keeps them private.
-Directories an earlier release created keep the mode they had (`0750`), which
-leaves the databases readable by the group: `chmod -R go-rwx <store>` tightens
-an existing store by hand. A chat directory replaced by a symlink is not written
-to: see [the store root](./ARCHITECTURE.md#the-store-root).
+and every file it writes there `0600`, owned by the container user (uid 1000 in
+both images): the media files, the token, and the two databases `messages.db`
+and `whatsapp.db` with their `-wal` / `-shm` files. On a bind-mounted store,
+read the files as that user or as root.
+
+A store an earlier release created is tightened as far as its files go: at
+startup the bridge sets `messages.db`, `whatsapp.db` and whatever `-wal` /
+`-shm` / `-journal` sits next to them to `0600` when group or others could read
+them (they were created `0644`), and logs one `Tightened ... to 0600` line
+naming the files. Directories are not re-moded: one an earlier release created
+keeps `0750`, one you created for a bind mount keeps what `mkdir` gave it, and
+`chmod -R go-rwx <store>` tightens those by hand. Both processes therefore have
+to run as the same user, which the images and the compose file do (uid 1000, no
+`user:` override); an MCP server started under another account that relied on
+group access to `messages.db` loses it at the next bridge start. `notes.db` and
+the exports are written by the MCP server and are not covered by this.
+
+A chat directory replaced by a symlink is not written to: see
+[the store root](./ARCHITECTURE.md#the-store-root).
 
 ## Tailscale
 
@@ -382,6 +393,14 @@ and carries every tag, so right after a release `main`, `latest` and `v1.2.3`
 are the same digest and all three report `v1.2.3+<sha>`; `main` goes back to
 `main+<sha>` on the next merge.
 
+**What runs on arm64.** The `linux/arm64` images are built for every merge and
+release, and CI executes the bridge on arm64 under QEMU (job "Bridge arm64
+(QEMU)"): the image starts, creates its store and reports the FTS5 state, and
+the whole Go test suite runs as an arm64 binary inside it. That covers the
+pure-Go SQLite (`modernc.org/sqlite`), whose libc is architecture-specific.
+Not exercised on arm64: the MCP server image (built, never run), the compose
+smoke (`scripts/smoke.sh`), real hardware and real WhatsApp traffic.
+
 The compose file names those images, so you choose per host:
 
 - **Pull mode** (no Go or Python build on the server):
@@ -423,7 +442,7 @@ host, not a permission problem — see
 
 Nothing here needs a stack manager, but the compose file runs happily under one,
 and the home server this fork is written for does exactly that: Komodo owns the
-checkout in `/etc/komodo/stacks/whatsapp-mcp` and redeploys it. Three habits
+checkout in `/etc/komodo/stacks/<stack>` and redeploys it. Three habits
 change when the manager owns the stack.
 
 **The compose directory and its `.env` are root-owned.** An operator in the
@@ -544,7 +563,10 @@ scripts/backup.sh prune ./backups 7      # keep the newest 7 snapshots
 It starts a throwaway `alpine` container with the `sqlite3` CLI, copies each
 database with `.backup` (a consistent snapshot even mid-write, thanks to WAL
 mode), verifies it with `PRAGMA integrity_check`, tars the media directories
-and copies the token. A snapshot is a plain directory:
+and copies the token. Every file of the snapshot is created `0600` and handed
+to the owner of the destination directory, so the account that ran the script
+can ship it off-box and no other account on the host can read it. A snapshot is
+a plain directory:
 
 ```
 messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
@@ -582,6 +604,39 @@ databases, media and token back, and resets ownership to the container user.
 To move to a new server, restore the snapshot into the fresh volume before the
 first `docker compose up`, and keep the same `WHATSAPP_BRIDGE_TOKEN` in `.env`
 if you had set one (otherwise the restored `.bridge-token` is used).
+
+### The store read-only in the MCP container
+
+The default compose file mounts `whatsapp-store` read-write into both services,
+as the same user (uid 1000), and that layout reads `messages.db` in every state
+of the bridge. The MCP server only reads the databases (it opens them with
+`mode=ro`), so mounting the volume `:ro` into `mcp`, or running `mcp` as a
+user that cannot write the store directory, looks like a free hardening step.
+It works **only while the bridge has the database open**, and the bridge is
+stopped on every deploy, `docker compose up -d --build` and crash. Measured with
+the real server image (SQLite 3.46.1 in its `python:3.13-slim` base; one
+container writing and another reading the same volume), with an idle writer:
+
+| Case | Result |
+|---|---|
+| bridge running (`messages.db-wal` and `-shm` exist), mount `:ro` | reads work, including rows still only in the `-wal` |
+| bridge running, `mcp` as another uid | every read fails: `unable to open database file` (the databases are `0600` since #491; with the `0644` files of earlier releases this case read) |
+| bridge stopped cleanly (no `-wal` / `-shm` left), mount `:ro` | every read fails: `unable to open database file` |
+| bridge stopped cleanly, `mcp` as another uid | every read fails: `unable to open database file` |
+| default compose layout (read-write, same uid), any state | reads work (the reader recreates `-shm` / `-wal` next to the file) |
+
+A WAL database needs its `-shm` file, and a reader that cannot create it can
+only use one the writer left behind. Before the server opened the files
+read-only (#529) the same two cases failed in exactly the same way (checked in
+the same Docker setup with a plain `sqlite3.connect`), so this is SQLite's rule
+and not something the server added. The "reads work" rows were measured with an
+idle writer: a reader that can neither write nor lock `-shm` was not tried
+against a checkpoint happening during its query.
+
+**Do not mount the store `:ro` into `mcp`.** The default layout is the supported
+one, and with a read-only mount every read tool, `coverage` included, fails
+whenever the bridge is down (see
+[Troubleshooting](./TROUBLESHOOTING.md#the-mcp-server-cannot-read-messagesdb-on-a-read-only-store)).
 
 ## Split topology (MCP server on another container or host)
 

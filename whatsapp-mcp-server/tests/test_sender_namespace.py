@@ -15,7 +15,7 @@ import whatsapp
 from tests.conftest import BOB_LID, BOB_PN, FAMILY
 
 # The sender from the report: 15 digits, in status@broadcast, mapped nowhere.
-STATUS_LID = "191134718546018"
+STATUS_LID = "100000000000002"
 
 # A messages.db written by a bridge from before the column existed.
 LEGACY_SCHEMA = """
@@ -46,7 +46,7 @@ class TestTheRecordedNamespaceDecides:
         row = whatsapp.msg_to_dict(_message(STATUS_LID, "lid"))
         assert row["sender_phone"] is None  # it was reported as the number itself
         assert row["sender_lid"] == STATUS_LID
-        assert row["sender_name"] is None  # nobody is called "191134718546018"
+        assert row["sender_name"] is None  # nobody is called "100000000000002"
         assert row["sender_display"] == f"{STATUS_LID}@lid"
 
     def test_a_recorded_lid_is_still_resolved_through_the_map(self, paired_dbs):
@@ -57,8 +57,8 @@ class TestTheRecordedNamespaceDecides:
 
     def test_a_recorded_phone_is_not_second_guessed_by_length(self, paired_dbs):
         """16 digits is a LID on sight — unless the bridge stored it as a number."""
-        row = whatsapp.msg_to_dict(_message("1171581346817350", "s.whatsapp.net"))
-        assert row["sender_phone"] == "1171581346817350"
+        row = whatsapp.msg_to_dict(_message("1000000000000030", "s.whatsapp.net"))
+        assert row["sender_phone"] == "1000000000000030"
         assert row["sender_lid"] is None
 
     def test_a_legacy_row_still_uses_the_heuristic(self, paired_dbs):
@@ -156,9 +156,9 @@ class TestStoredSenderNamespace:
 class TestUnknownLidDigits:
     def test_only_the_ambiguous_lengths_qualify(self, paired_dbs):
         assert whatsapp.unknown_lid_digits(STATUS_LID) is True  # 15 digits, unknown
-        assert whatsapp.unknown_lid_digits("3504706738598") is False  # 13: a plausible number
-        assert whatsapp.unknown_lid_digits("1171581346817350") is False  # 16: already a LID
-        assert whatsapp.unknown_lid_digits("35047067385985x") is False  # not digits
+        assert whatsapp.unknown_lid_digits("1000000000000") is False  # 13: a plausible number
+        assert whatsapp.unknown_lid_digits("1000000000000030") is False  # 16: already a LID
+        assert whatsapp.unknown_lid_digits("10000000000005x") is False  # not digits
 
     def test_a_number_the_archive_or_the_phone_book_knows_is_not_a_lid(self, paired_dbs):
         with paired_dbs.messages() as conn:

@@ -53,6 +53,7 @@ func NewMessageStore() (*MessageStore, error) {
 	// WAL lets the MCP server read messages.db while the bridge writes (a
 	// history-sync burst used to make readers hit SQLITE_BUSY), and the busy
 	// timeout makes both sides wait instead of failing on a short lock.
+	privateDatabase(messagesDBPath())
 	db, err := sql.Open("sqlite", sqliteURI(messagesDBPath(), sqliteWriterOptions))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
@@ -215,6 +216,12 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	// rows stored before the column existed (mentions.go).
 	if err := ensureColumn(db, "messages", "mentions", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.mentions column: %w", err)
+	}
+	// direct_path: the media's own direct path, which is what a download asks
+	// the CDN for. NULL on rows an older bridge wrote and on messages that
+	// carried none; those keep the path cut out of `url` (media.go, issue #452).
+	if err := ensureColumn(db, "messages", "direct_path", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.direct_path column: %w", err)
 	}
 	// sender_server: the namespace messages.sender lives in ("s.whatsapp.net"
 	// or "lid"), NULL when it is unknown — rows an older bridge wrote, and
@@ -540,6 +547,35 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	return nil
 }
 
+// ResetSelfNamedChats renames the chats an older bridge named after our own
+// number (issue #448) back to the user part of their JID, the placeholder the
+// normal resolution (chat_names.go) improves when the next message arrives and
+// the MCP server already reads through to the phone book. The chat with
+// ourselves keeps its name and groups are never looked at. One statement over
+// the chats table, no message row touched, and a second run matches nothing,
+// so it is safe on every startup. It returns how many chats it renamed.
+func (store *MessageStore) ResetSelfNamedChats(self selfUsers) (int64, error) {
+	if self.phone == "" {
+		return 0, nil // not paired yet: no chat can be named after us
+	}
+	lid := self.lid
+	if lid == "" {
+		lid = self.phone // a session with no LID: the same value fills both binds
+	}
+	res, err := store.db.Exec(
+		`UPDATE chats SET name = substr(jid, 1, instr(jid, '@') - 1)
+		 WHERE name IN (?, ?)
+		   AND jid NOT LIKE '%@g.us'
+		   AND instr(jid, '@') > 1
+		   AND substr(jid, 1, instr(jid, '@') - 1) NOT IN (?, ?)`,
+		self.phone, lid, self.phone, lid,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reset chats named after our own number: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // MigrateLegacyLIDSendersToPhones rewrites the `sender` column for any
 // message whose stored value is a LID user-part for which whatsmeow has a
 // known phone-number mapping. This is the row-level analogue of the
@@ -667,7 +703,14 @@ func (store *MessageStore) Close() error {
 // names set by inbound handling or history sync. last_message_time is
 // merged monotonically so out-of-order delivery (history sync, backfill)
 // can't move it backwards.
+//
+// A zero lastMessageTime binds NULL, which the merge reads as "no news":
+// the row is created or renamed and its time is left alone (EnsureChat).
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+	var seen any
+	if !lastMessageTime.IsZero() {
+		seen = dbTime(lastMessageTime)
+	}
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
 		VALUES (?, ?, ?)
@@ -679,7 +722,7 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 				WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
 				ELSE chats.last_message_time
 			END`,
-		jid, name, dbTime(lastMessageTime),
+		jid, name, seen,
 	)
 	return err
 }
@@ -1095,6 +1138,17 @@ func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fil
 		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = ? WHERE id = ? AND chat_jid = ?",
 		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, id, chatJID,
 	)
+	return err
+}
+
+// SetDirectPath records the direct path of a stored message's media. An empty
+// path clears the column, so the download falls back to the one in `url`.
+func (store *MessageStore) SetDirectPath(messageID, chatJID, directPath string) error {
+	return setDirectPathWith(store.db, messageID, chatJID, directPath)
+}
+
+func setDirectPathWith(ex sqlExecer, messageID, chatJID, directPath string) error {
+	_, err := ex.Exec(`UPDATE messages SET direct_path = NULLIF(?, '') WHERE id = ? AND chat_jid = ?`, directPath, messageID, chatJID)
 	return err
 }
 

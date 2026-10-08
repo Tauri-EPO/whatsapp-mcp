@@ -258,7 +258,7 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
     path = media_notes.notes_db_path()
     if not os.path.exists(path):
         return "1", []
-    conn.execute("ATTACH DATABASE ? AS notesdb", (path,))
+    whatsapp.attach_notes_read_only(conn, path)
     table = conn.execute("SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'").fetchone()
     if not table:
         return "1", []

@@ -18,6 +18,8 @@ const metricsEnv = "WHATSAPP_METRICS"
 type metricsRegistry struct {
 	messagesStored     atomic.Int64
 	historyMessages    atomic.Int64
+	groupHistoryShares atomic.Int64
+	storeFailures      atomic.Int64
 	messagesSent       atomic.Int64
 	sendFailures       atomic.Int64
 	mediaDownloads     atomic.Int64
@@ -70,6 +72,8 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_media_files", "Cached media files.", "gauge", fmt.Sprint(mediaFiles))
 	add("whatsapp_bridge_messages_stored_total", "Inbound/outbound messages written from live events.", "counter", fmt.Sprint(m.messagesStored.Load()))
 	add("whatsapp_bridge_history_messages_total", "Messages written from history sync.", "counter", fmt.Sprint(m.historyMessages.Load()))
+	add("whatsapp_bridge_message_store_failures_total", "Messages, reactions, poll votes and history rows that could not be written and were dropped.", "counter", fmt.Sprint(m.storeFailures.Load()))
+	add("whatsapp_bridge_group_history_shares_total", "Group history bundle and notice messages seen (a member was added with history sharing); logged, not decoded.", "counter", fmt.Sprint(m.groupHistoryShares.Load()))
 	add("whatsapp_bridge_messages_sent_total", "Successful /api/send calls.", "counter", fmt.Sprint(m.messagesSent.Load()))
 	add("whatsapp_bridge_send_failures_total", "Failed /api/send calls.", "counter", fmt.Sprint(m.sendFailures.Load()))
 	add("whatsapp_bridge_media_downloads_total", "Media files downloaded.", "counter", fmt.Sprint(m.mediaDownloads.Load()))

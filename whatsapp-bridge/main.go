@@ -23,31 +23,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Whether to forward messages sent by self via webhook.
-// Defaults to true. Override with env FORWARD_SELF=false.
-
 // CLI flag: request a full history sync at pair time.
 // Only meaningful on a fresh pair (whatsapp.db deleted). See the usage block
 // near NewClient for the full rationale and caveats.
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
-
-// getEnvBool reads a boolean env var with a default.
-// Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
-func getEnvBool(key string, def bool) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if v == "" {
-		return def
-	}
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return def
-	}
-}
 
 // resolveDeviceName returns the operator-configured linked-device label from
 // WHATSAPP_DEVICE_NAME, trimmed of surrounding whitespace. An empty or unset
@@ -70,11 +50,11 @@ func printQRCode(out io.Writer, code string, index int) {
 	_, _ = fmt.Fprintln(out, "\nWaiting for QR code scan... (a new code is printed each time WhatsApp rotates it)")
 }
 
-func webhookStartupMessage(forwardSelf bool) string {
-	if !webhooksEnabled() {
+func webhookStartupMessage(switches bridgeSwitches) string {
+	if !switches.WebhookEnabled {
 		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
 	}
-	if forwardSelf {
+	if switches.ForwardSelf {
 		return "FORWARD_SELF enabled: forwarding self messages to webhook"
 	}
 	return "FORWARD_SELF disabled: self messages will NOT be forwarded"
@@ -89,9 +69,19 @@ func main() {
 	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
 	logger, clientLog, dbLog := initLogging()
 	logger.Infof("Starting WhatsApp client...")
-	logger.Infof("%s", buildInfo(false).String())
+	logger.Infof("%s", buildInfo().String())
 
-	logger.Infof("%s", webhookStartupMessage(getEnvBool("FORWARD_SELF", true)))
+	// The on/off switches, read strictly before anything is opened: a value
+	// that is not a boolean stops the bridge here instead of silently meaning
+	// the default (env_bool.go).
+	switches, swErr := loadBridgeSwitches()
+	if swErr != nil {
+		// Nothing is open yet, so there is nothing to release: exit non-zero
+		// and let the supervisor see a failed start.
+		logger.Errorf("Refusing to start: %v", swErr)
+		os.Exit(1)
+	}
+	logger.Infof("%s", webhookStartupMessage(switches))
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {
@@ -103,8 +93,9 @@ func main() {
 	}
 
 	// One handle on the store for its whole lifetime. Everything that walks,
-	// measures or deletes inside it goes through this os.Root, which confines
-	// those operations to the directory at the kernel level (store_dir.go).
+	// measures, deletes, writes media or reads it back for the webhook goes
+	// through this os.Root, which confines those operations to the directory at
+	// the kernel level (store_dir.go).
 	storeRoot, rootErr := openStoreRoot()
 	if rootErr != nil {
 		logger.Errorf("Failed to open store directory %q: %v", storeDir(), rootErr)
@@ -124,6 +115,8 @@ func main() {
 	}
 	defer lock.Release()
 
+	// The session keys live here: owner-only before whatsmeow creates or opens it.
+	privateDatabase(whatsmeowDBPath())
 	container, err := sqlstore.New(context.Background(), "sqlite", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
@@ -215,6 +208,15 @@ func main() {
 		return
 	}
 
+	// Chats an older bridge named after our own number get their placeholder
+	// back, so the normal resolution names them (chat_names.go, issue #448).
+	// Names only: a failure is logged and the bridge starts anyway.
+	if renamed, err := messageStore.ResetSelfNamedChats(ownUsers(client)); err != nil {
+		logger.Warnf("%v", err)
+	} else if renamed > 0 {
+		logger.Infof("Reset %d chats that were named after our own number", renamed)
+	}
+
 	// Resolve the REST API port. Pure env parsing with no dependency on the
 	// WhatsApp connection, so it's safe to do this early alongside the token
 	// load below — and failing fast here means we don't run a QR-pairing
@@ -279,7 +281,7 @@ func main() {
 		return
 	}
 
-	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot)
+	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, switches)
 	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
 	// the store is closed and the lock released before the supervisor restarts us.
 	bridge.Exit = func(reason string, code int) {

@@ -7,7 +7,7 @@ import whatsapp
 from tests.conftest import ALICE, BOB, BOB_LID, BOB_PN, CARLA, DECOY, FAMILY
 
 # A LID nobody mapped: too long to be an E.164 number, so its shape gives it away.
-UNKNOWN_LID = "1171581346817350"
+UNKNOWN_LID = "1000000000000030"
 
 
 def _jids(rows):
@@ -50,15 +50,15 @@ def test_search_contacts_keeps_lids_out_of_phone_number(paired_dbs):
 
 
 def test_search_contacts_finds_the_name_a_contact_gave_themselves(paired_dbs):
-    """A contact saved as "Z Aa" is still found by "Alena" (#280)."""
+    """A contact saved as "Z Dave" is still found by "Carol" (#280)."""
     with paired_dbs.whatsmeow() as c:
         c.execute(
-            "UPDATE whatsmeow_contacts SET full_name = 'Z Aa', push_name = 'Alena Lima' WHERE their_jid = ?", (BOB,)
+            "UPDATE whatsmeow_contacts SET full_name = 'Z Dave', push_name = 'Carol Lima' WHERE their_jid = ?", (BOB,)
         )
-    (row,) = whatsapp.search_contacts("alena")
+    (row,) = whatsapp.search_contacts("carol")
     assert row["jid"] == BOB
-    assert row["name"] == "Z Aa"  # what this account saved them as, unchanged
-    assert row["push_name"] == "Alena Lima"
+    assert row["name"] == "Z Dave"  # what this account saved them as, unchanged
+    assert row["push_name"] == "Carol Lima"
     assert row["matched"] == "push_name"
 
 
@@ -96,10 +96,18 @@ def test_search_contacts_survives_broken_databases(paired_dbs, caplog):
 def test_sender_aliases_from_phone_lid_and_unknown(paired_dbs):
     assert whatsapp._sender_aliases(BOB_PN) == [BOB_PN, BOB, BOB_LID, f"{BOB_LID}@lid"]
     assert whatsapp._sender_aliases(f"{BOB_LID}@lid") == [BOB_PN, BOB, BOB_LID, f"{BOB_LID}@lid"]
+    assert whatsapp._sender_aliases("12025550100@s.whatsapp.net") == [
+        "12025550100",
+        "12025550100@s.whatsapp.net",
+        "12025550100@lid",
+    ]
+    # An unmapped Brazilian mobile also comes with its other spelling (issue #475).
     assert whatsapp._sender_aliases("5599999999999@s.whatsapp.net") == [
         "5599999999999",
         "5599999999999@s.whatsapp.net",
         "5599999999999@lid",
+        "559999999999",
+        "559999999999@s.whatsapp.net",
     ]
 
 
@@ -183,7 +191,7 @@ def test_msg_to_dict_never_reports_an_unresolved_lid_as_a_phone_or_a_name(paired
     row = whatsapp.msg_to_dict(_lid_message(UNKNOWN_LID))
     assert row["sender_phone"] is None  # grouping by sender_phone gets no ghost contact
     assert row["sender_lid"] == UNKNOWN_LID
-    assert row["sender_name"] is None  # nobody is called "1171581346817350"
+    assert row["sender_name"] is None  # nobody is called "1000000000000030"
     assert row["sender_display"] == f"{UNKNOWN_LID}@lid"
 
 

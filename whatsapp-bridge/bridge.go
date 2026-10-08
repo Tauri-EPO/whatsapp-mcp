@@ -30,11 +30,12 @@ type Bridge struct {
 	Log    waLog.Logger
 
 	// StoreRoot is the store directory opened as an os.Root (store_dir.go).
-	// The retention sweep, the store-size measurement, /api/media/purge and the
-	// inbound media download do every stat, write and delete through it, so the
-	// kernel — not a filepath comparison — keeps them inside the store. nil in
-	// tests that never touch the store; those paths then report "unavailable"
-	// instead of guessing.
+	// The retention sweep, the store-size measurement, /api/media/purge, the
+	// inbound media download and the webhook's read of an image do every stat,
+	// read, write and delete through it, so the kernel — not a filepath
+	// comparison — keeps them inside the store. nil in tests that never touch
+	// the store; those paths then report "unavailable" instead of guessing (a
+	// webhook then goes out without its image).
 	StoreRoot *os.Root
 
 	// Policy restricts which chats outbound endpoints may act on (WHATSAPP_ALLOWED_CHATS).
@@ -53,6 +54,8 @@ type Bridge struct {
 	DownloadMedia mediaDownloader
 	// ForwardSelf forwards self-sent messages to the webhook (FORWARD_SELF).
 	ForwardSelf bool
+	// MetricsEnabled serves GET /metrics (WHATSAPP_METRICS, metrics.go).
+	MetricsEnabled bool
 	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
 	MediaAutoDownload bool
 	// MediaAutoDownloadStatus extends it to the status feed
@@ -72,6 +75,10 @@ type Bridge struct {
 	Connected func() bool
 	// Send performs /api/send (defaults to sendWhatsAppMessage); tests inject a fake.
 	Send sendFunc
+	// IsOnWhatsApp asks WhatsApp which number a recipient is registered under
+	// (defaults to Client.IsOnWhatsApp); /api/send asks it for a number the LID
+	// map does not know, tests inject a fake.
+	IsOnWhatsApp isOnWhatsAppFunc
 	// Exit terminates the process for conditions the bridge cannot recover from in-place
 	// (device logged out, client outdated); main() wires it to a clean os.Exit so the
 	// supervisor restarts into the pairing path. Tests inject a recorder.
@@ -106,6 +113,14 @@ type Bridge struct {
 	// reason as the three timings above (issue #382): a test shortening a shared
 	// variable races the goroutine reading it.
 	HistoryVoteRetryDelays []time.Duration
+	// StoreRetryDelays paces the retries of a live write that found the
+	// database busy, and its length is how many retries it gets
+	// (store_failures.go); empty means a busy write is lost at once.
+	StoreRetryDelays []time.Duration
+	// PurgeScanLimit bounds how many message rows one criteria purge examines
+	// (media_purge.go); 0 means purgeMaxScan. On the Bridge so a test can shrink
+	// it without a shared variable.
+	PurgeScanLimit int
 
 	// origTimes caches send-times of undecryptable first deliveries (see originalTimestamps).
 	origTimes *originalTimestamps
@@ -119,6 +134,13 @@ type Bridge struct {
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc
+	// mediaRetryDownload asks the sender's phone to re-upload a file and
+	// downloads it (nil = downloadViaMediaRetry); tests inject a recorder
+	// (see Bridge.retryMedia).
+	mediaRetryDownload mediaRetryFunc
+	// storeRetryWait waits before a store retry (nil = a timer that Shutdown
+	// interrupts); tests use it to act between two attempts.
+	storeRetryWait func(time.Duration) bool
 	// autoDownloads is the bounded pool that caches inbound media; a full
 	// queue drops the download instead of growing (see media_budget.go).
 	autoDownloads *mediaJobQueue
@@ -141,7 +163,7 @@ type Bridge struct {
 // newBridge wires the production dependencies from a live client and store.
 // bridgeToken is the REST bearer token, also attached to outbound webhooks;
 // storeRoot is the open store directory (main() owns opening and closing it).
-func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root) *Bridge {
+func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root, switches bridgeSwitches) *Bridge {
 	b := &Bridge{
 		Client:              client,
 		Store:               store,
@@ -149,10 +171,11 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		StoreRoot:           storeRoot,
 		Policy:              loadChatPolicy(),
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
-		ForwardSelf:         getEnvBool("FORWARD_SELF", true),
-		MediaAutoDownload:   getEnvBool(mediaAutoDownloadEnv, true),
+		ForwardSelf:         switches.ForwardSelf,
+		MetricsEnabled:      switches.Metrics,
+		MediaAutoDownload:   switches.MediaAutoDownload,
 		MediaMaxBytes:       resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
-		Webhook:             newWebhookSender(bridgeToken),
+		Webhook:             newWebhookSender(bridgeToken, switches.WebhookEnabled),
 		RESTBind:            defaultBridgeBind,
 		GroupRosterSync:     groupRosterSyncInterval,
 		StreamReplacedDelay: defaultStreamReplacedDelay,
@@ -160,6 +183,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
 		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
 		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
+		StoreRetryDelays:        defaultStoreRetryDelays(),
 
 		rosterFailures: newRosterFailures(),
 		origTimes:      newOriginalTimestamps(),
@@ -183,6 +207,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
+	b.IsOnWhatsApp = client.IsOnWhatsApp
 	b.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
 		os.Exit(code)

@@ -8,8 +8,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -159,10 +157,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, true, logger)
 
 	// If contact resolution fails (common for LIDs), PushName is often the best available display name.
-	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user.
+	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user,
+	// in the namespace the chat arrived in or the one it was resolved to.
 	if !msg.Info.IsFromMe && msg.Info.Chat.Server != "g.us" && strings.TrimSpace(msg.Info.PushName) != "" {
 		pushName := strings.TrimSpace(msg.Info.PushName)
-		if name == "" || name == msg.Info.Chat.User {
+		if name == "" || name == msg.Info.Chat.User || name == resolvedChat.User {
 			logger.Infof("Updating chat name from PushName for %s: %s -> %s", chatJID, name, pushName)
 			name = pushName
 		}
@@ -178,10 +177,26 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		msgTimestamp = orig
 	}
 
-	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msgTimestamp)
-	if err != nil {
-		logger.Warnf("Failed to store chat: %v", err)
+	// storeRow writes one row of this message together with what it needs and
+	// implies: the chat row it references (and that row's name) before, the
+	// chat's last message time after. The first two share one retry, so a new
+	// chat that meets a busy database is not lost to the foreign key on the
+	// second attempt; the time moves only once the row is in, so a message that
+	// is dropped below, or that fails to store, is not activity (issues #519,
+	// #531).
+	storeRow := func(kind string, write func() error) bool {
+		if !b.storeLive(kind, msg.Info.ID, chatJID, func() error {
+			if err := messageStore.EnsureChat(chatJID, name); err != nil {
+				return err
+			}
+			return write()
+		}) {
+			return false
+		}
+		if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, "", msgTimestamp) }); err != nil {
+			logger.Warnf("Failed to update the last message time of %s: %v", chatJID, err)
+		}
+		return true
 	}
 
 	// A group sender we have no roster row for is a member we know about
@@ -205,9 +220,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Poll votes arrive as PollUpdateMessage stanzas: decrypt, map to option
 	// names, keep a structured copy for /api/poll and a message row with the
 	// poll's ID in `filename` (same convention as reactions). See polls.go.
-	if handled, pollID, voteContent := handlePollVote(context.Background(), b.PollVoteDecrypt, messageStore, msg, chatJID, sender, msgTimestamp, logger); handled {
+	if handled, pollID, voteContent := b.handlePollVote(context.Background(), msg, chatJID, sender, msgTimestamp); handled {
 		if voteContent != "" {
-			messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+			storeRow("poll vote", func() error {
+				return messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+			})
 		}
 		return
 	}
@@ -225,17 +242,20 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		}
 		if reactedToID != "" {
 			emoji := reaction.GetText()
-			if err := messageStore.StoreMessage(
-				msg.Info.ID, chatJID, storedSenderJID, emoji,
-				msgTimestamp, msg.Info.IsFromMe,
-				"reaction", reactedToID, "", nil, nil, nil, 0, "",
-			); err != nil {
-				logger.Warnf("Failed to store reaction: %v", err)
-			} else if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
-				logger.Warnf("Failed to set reaction target: %v", err)
+			stored := storeRow("reaction", func() error {
+				return messageStore.StoreMessage(
+					msg.Info.ID, chatJID, storedSenderJID, emoji,
+					msgTimestamp, msg.Info.IsFromMe,
+					"reaction", reactedToID, "", nil, nil, nil, 0, "",
+				)
+			})
+			if stored {
+				if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
+					logger.Warnf("Failed to set reaction target: %v", err)
+				}
 			}
 			if b.ForwardSelf || !msg.Info.IsFromMe {
-				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
+				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
 			}
 		}
 		return
@@ -250,6 +270,19 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	quotedMessageId, quotedSender, quotedContent := ex.quotedID, ex.quotedSender, ex.quotedContent
 	mentionedJIDs := ex.mentions
 
+	// Group history shared when a member is added has neither text nor media,
+	// so the gate below drops it. Say that it was seen and count it first: the
+	// blob is not downloaded or decoded yet, and without this line nothing
+	// tells whether the share ever reached this device (issue #468). Every
+	// device of the group may see the message, the one that did the add
+	// included, hence from_me. Counts and timestamps only: never the
+	// receivers, the path or the keys.
+	if kind, meta := sharedGroupHistory(ex.inner); kind != "" {
+		b.metrics.groupHistoryShares.Add(1)
+		logger.Infof("Group history %s seen in %s (message %s, from_me=%t): %s; the shared messages are not downloaded or stored",
+			kind, chatJID, msg.Info.ID, msg.Info.IsFromMe, describeSharedGroupHistory(meta))
+	}
+
 	// Skip if there's no content and no media
 	if ex.empty() {
 		return
@@ -257,9 +290,13 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
-	if err := persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger); err != nil {
-		logger.Warnf("Failed to store message: %v", err)
-	} else {
+	// A busy database is tried again a bounded number of times; a write that is
+	// given up is one ERROR naming the message (ID and chat only, never the
+	// content) and a count on /metrics (store_failures.go).
+	stored := storeRow("message", func() error {
+		return persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+	})
+	if stored {
 		b.metrics.messagesStored.Add(1)
 	}
 
@@ -286,26 +323,23 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// the webhook then carries the image message without the payload, as it
 	// does when a download fails.
 	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
-	var imageDownloadPath string
+	// A message that was not stored has no row for downloadMedia to find: a
+	// download could only fail a second time and bury the store error under
+	// "failed to find message" (issue #454). The webhook below still goes out,
+	// or the text would be lost downstream too, and says "stored": false so the
+	// receiver does not look the message up (issue #518).
+	downloadable := stored && url != "" && len(mediaKey) > 0
+	var imageData []byte
 	var imageMimeType string
-	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && !skipStatusMedia {
+	if mediaType == "image" && downloadable && shouldForward && !skipStatusMedia {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, _, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
+		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
-			imageDownloadPath = dlPath
-			// Detect MIME type by sniffing the actual file bytes rather than
-			// trusting the generated filename extension (always .jpg).
-			if f, openErr := os.Open(dlPath); openErr == nil { //nolint:gosec // dlPath is built by downloadMedia under the store directory
-				buf := make([]byte, 512)
-				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
-					imageMimeType = http.DetectContentType(buf[:n])
-				}
-				_ = f.Close()
-			}
-			if imageMimeType == "" {
-				imageMimeType = "application/octet-stream"
-			}
-			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
+			// One read through the store root gives the sniffed MIME type and
+			// the bytes for the payload, which must hash to what the message
+			// declared (webhook.go).
+			imageMimeType, imageData = b.webhookMedia(chatJID, dlName, ex.fileSHA)
+			logger.Infof("✅ Image downloaded: %s (%s, %d bytes for the webhook)", dlPath, imageMimeType, len(imageData))
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to a background download so media is cached for future MCP tool calls
@@ -313,11 +347,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 			}
 		}
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && skipStatusMedia {
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload && skipStatusMedia {
 		logger.Debugf("Not caching %s media of status update %s: %s is off (download_media still works)", mediaType, msg.Info.ID, mediaAutoDownloadStatusEnv)
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
 		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && b.MediaAutoDownload {
+	} else if mediaType != "" && downloadable && b.MediaAutoDownload {
 		// Media that is not included in a webhook payload: cached in the
 		// background by the bounded pool (media_budget.go), so a burst cannot
 		// start one transfer per message and shutdown can stop them all.
@@ -337,14 +371,14 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			b.Webhook.SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
-				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageData, stored,
 			)
 		} else {
-			b.Webhook.SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID)
+			b.Webhook.SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID, stored)
 		}
 	}
 
-	if err == nil {
+	if stored {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"

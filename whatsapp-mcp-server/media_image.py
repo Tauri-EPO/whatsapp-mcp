@@ -103,6 +103,10 @@ _heif_registered = False
 # EXIF tag 0x0112: the rotation the camera recorded instead of applying.
 ORIENTATION_TAG = 0x0112
 
+# The formats whose draft() is a reduced decode of the same picture (JPEG's DCT
+# scaling; MPO is JPEG frames). Only these may be drafted by thumbnail().
+_DRAFT_FORMATS = frozenset({"JPEG", "MPO"})
+
 # The `info` keys that hold metadata rather than picture: the EXIF block, the
 # colour profile, XMP and the Photoshop/IPTC resource block. Their presence is
 # what makes a file worth re-encoding even when its pixels are already fine —
@@ -161,8 +165,22 @@ def _register_heif() -> None:
         import pillow_heif
     except ImportError as exc:  # pragma: no cover - the dependency is pinned in pyproject.toml
         raise ToolError("internal", f"HEIC support is not installed on this server: {exc}") from exc
-    # register_heif_opener is re-exported without `__all__`, so pyright calls it private.
-    pillow_heif.register_heif_opener()  # pyright: ignore[reportPrivateImportUsage]
+    # thumbnails=False: a HEIC can embed thumbnail items, and they are separate
+    # pictures the sender chose. From pillow-heif 1.8 on, Image.thumbnail()
+    # decodes one of them instead of the primary image whenever it is large
+    # enough (HeifImageFile.draft), so the model would be shown a picture that
+    # the bytes, the hash and every human viewer do not show, and each extra
+    # item is one more decode a single call can be made to run. With the option
+    # off the plugin never loads them and the primary image is the only source
+    # (render() also loads the image before thumbnail(), in case the option is
+    # ever switched back on). Depth and auxiliary items are sender-chosen too
+    # and never used here, so they are not enumerated either.
+    #
+    # Up to pillow-heif 1.7 register_heif_opener is re-exported without
+    # `__all__`, so pyright calls it private there.
+    pillow_heif.register_heif_opener(  # pyright: ignore[reportPrivateImportUsage]
+        thumbnails=False, depth_images=False, aux_images=False
+    )
     _heif_registered = True
 
 
@@ -259,6 +277,13 @@ def render(path: str, mime: str, max_edge: int, quality: int, passthrough: bool)
                 # plus a full-size copy — hundreds of megabytes for a photo at
                 # the MAX_PIXELS ceiling, on a box with no memory limit. The
                 # target box is square, so the order does not change the result.
+                if opened.format not in _DRAFT_FORMATS:
+                    # Anywhere else a draft() is not a cheaper decode of the
+                    # same picture: pillow-heif 1.8 answers it with an embedded
+                    # thumbnail, a second image the sender chose. A loaded
+                    # image has nothing left to swap, so load first. No cost:
+                    # thumbnail() would decode these formats in full anyway.
+                    image.load()
                 image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
             if rotated:
                 image = ImageOps.exif_transpose(image) or image

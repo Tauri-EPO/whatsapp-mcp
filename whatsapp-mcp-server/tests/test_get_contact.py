@@ -32,12 +32,12 @@ def test_get_contact_normalizes_lid(monkeypatch):
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", fake_get_chat)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
 
-    result = mcp_main.get_contact(identifier="184125298348272")
+    result = mcp_main.get_contact(identifier="100000000000004")
 
-    assert result["jid"] == "184125298348272@lid"
+    assert result["jid"] == "100000000000004@lid"
     assert result["is_lid"] is True
     assert result["phone_number"] is None
-    assert result["lid"] == "184125298348272"
+    assert result["lid"] == "100000000000004"
     assert result["name"] == "Vicky"
     assert result["display_name"] == "Vicky"
     assert result["resolved"] is True
@@ -56,13 +56,13 @@ def test_get_contact_falls_back_to_lid_for_14_digit_numeric_identifier(monkeypat
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", fake_get_chat)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
 
-    result = mcp_main.get_contact(identifier="35047067385985")
+    result = mcp_main.get_contact(identifier="10000000000005")
 
-    assert calls == ["35047067385985@s.whatsapp.net", "35047067385985@lid"]
-    assert result["jid"] == "35047067385985@lid"
+    assert calls == ["10000000000005@s.whatsapp.net", "10000000000005@lid"]
+    assert result["jid"] == "10000000000005@lid"
     assert result["is_lid"] is True
     assert result["phone_number"] is None
-    assert result["lid"] == "35047067385985"
+    assert result["lid"] == "10000000000005"
     assert result["name"] == "Lidia"
     assert result["display_name"] == "Lidia"
     assert result["resolved"] is True
@@ -80,29 +80,29 @@ def test_get_contact_unresolved_phone_falls_back_to_jid_user(monkeypatch):
 
 
 def test_get_contact_unresolved_lid_has_no_name(monkeypatch):
-    """Echoing the digits back would invent a contact called "184125298348272" (#281)."""
+    """Echoing the digits back would invent a contact called "100000000000004" (#281)."""
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
 
-    result = mcp_main.get_contact(identifier="184125298348272@lid")
+    result = mcp_main.get_contact(identifier="100000000000004@lid")
 
-    assert result["jid"] == "184125298348272@lid"
+    assert result["jid"] == "100000000000004@lid"
     assert result["is_lid"] is True
     assert result["resolved"] is False
     assert result["name"] is None
-    assert result["display_name"] == "184125298348272@lid"  # still says who, never a name
+    assert result["display_name"] == "100000000000004@lid"  # still says who, never a name
     assert result["phone_number"] is None
-    assert result["lid"] == "184125298348272"
+    assert result["lid"] == "100000000000004"
 
 
 def test_get_contact_keeps_a_device_suffixed_lid_jid_in_the_lid_namespace(monkeypatch):
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
 
-    result = mcp_main.get_contact(identifier="184125298348272:3@lid")
+    result = mcp_main.get_contact(identifier="100000000000004:3@lid")
 
     assert result["is_lid"] is True
-    assert result["lid"] == "184125298348272:3"
+    assert result["lid"] == "100000000000004:3"
     assert result["phone_number"] is None
 
 
@@ -142,12 +142,12 @@ def test_get_contact_classifies_an_over_long_bare_number_as_a_lid(paired_dbs, mo
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
 
-    result = mcp_main.get_contact(identifier="1171581346817350")  # 16 digits: not E.164
+    result = mcp_main.get_contact(identifier="1000000000000030")  # 16 digits: not E.164
 
-    assert result["jid"] == "1171581346817350@lid"
+    assert result["jid"] == "1000000000000030@lid"
     assert result["is_lid"] is True
     assert result["phone_number"] is None
-    assert result["lid"] == "1171581346817350"
+    assert result["lid"] == "1000000000000030"
 
 
 def test_get_contact_reads_the_namespace_the_archive_recorded(paired_dbs, monkeypatch):
@@ -177,9 +177,9 @@ def test_get_contact_treats_an_unknown_15_digit_identifier_as_a_lid(paired_dbs, 
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
 
-    result = mcp_main.get_contact(identifier="191134718546018")
+    result = mcp_main.get_contact(identifier="100000000000002")
 
-    assert result["jid"] == "191134718546018@lid"
+    assert result["jid"] == "100000000000002@lid"
     assert result["is_lid"] is True
     assert result["resolved"] is False
     assert result["phone_number"] is None

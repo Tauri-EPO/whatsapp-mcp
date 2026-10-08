@@ -17,7 +17,7 @@ import whatsapp
 from tests.conftest import MESSAGES_SCHEMA, WHATSMEOW_SCHEMA
 
 OWNER_PHONE = "5511999999999"
-OWNER_LID = "158883943301358"
+OWNER_LID = "100000000000001"
 TEAM = "120363000000000001@g.us"
 FAMILY = "120363000000000002@g.us"
 QUIET = "120363000000000003@g.us"
@@ -32,7 +32,7 @@ def _stamp(**delta):
 # id, chat, timestamp, is_from_me, content, mentions
 MESSAGES = [
     # A mention written as the owner's LID, unanswered: the case from the issue.
-    ("t1", TEAM, _stamp(days=3), 0, f"Lucas chegou! @{OWNER_LID}", OWNER_LID),
+    ("t1", TEAM, _stamp(days=3), 0, f"Alice chegou! @{OWNER_LID}", OWNER_LID),
     ("t2", TEAM, _stamp(days=2), 0, "alguem viu?", None),
     # The group kept talking after the mention, so min_age_hours hides the chat
     # even though the mention itself has been waiting for days.

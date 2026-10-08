@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -134,22 +135,119 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 	}
 }
 
+// parseRecipientJID reads a recipient the way the REST API takes one: a bare
+// phone number means a personal chat, anything with an "@" is a full JID.
+func parseRecipientJID(recipient string) (types.JID, error) {
+	if !strings.Contains(recipient, "@") {
+		return types.JID{User: recipient, Server: types.DefaultUserServer}, nil
+	}
+	return types.ParseJID(recipient)
+}
+
+// isOnWhatsAppFunc asks WhatsApp whether phone numbers ("+" and digits) have
+// an account, and under which JID (Client.IsOnWhatsApp in production, a fake
+// in tests).
+type isOnWhatsAppFunc func(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error)
+
+// lidForPNFunc reads the local phone -> LID map (Store.LIDs.GetLIDForPN).
+type lidForPNFunc func(ctx context.Context, pn types.JID) (types.JID, error)
+
+// The two ways the registered-number question can end without a number. Any
+// other error of canonicalRecipientJID is a recipient that cannot be read.
+var (
+	// errNotOnWhatsApp: WhatsApp answered for the number, and it has no account.
+	errNotOnWhatsApp = errors.New("number is not on WhatsApp")
+	// errRecipientLookup: the question failed or came back empty, so nothing
+	// is known about the number. Never read it as "not registered".
+	errRecipientLookup = errors.New("could not check the number with WhatsApp")
+)
+
+// recipientLookupTimeout bounds the registered-number question, so a slow
+// answer cannot eat the deadline of the send that follows it.
+const recipientLookupTimeout = 10 * time.Second
+
+const notConnectedMessage = "Not connected to WhatsApp"
+
+// canonicalRecipientJID returns the JID a send to recipient is addressed,
+// stored and allow-listed under: for a phone number, the one WhatsApp has
+// registered. That is not always the number as dialled (a Brazilian mobile
+// typed with its ninth digit may be registered without it), and a send to the
+// dialled spelling dies in whatsmeow with "no LID found" (issue #444).
+//
+// A number the LID map knows is one WhatsApp itself named, so it comes back
+// as it is and costs no network call. Only a miss asks isOnWhatsApp, the
+// question the phone app asks when a number is typed into it. Groups, @lid
+// and every other server are returned untouched.
+func canonicalRecipientJID(ctx context.Context, lidForPN lidForPNFunc, isOnWhatsApp isOnWhatsAppFunc, recipient string) (types.JID, error) {
+	jid, err := parseRecipientJID(recipient)
+	if err != nil {
+		return types.EmptyJID, fmt.Errorf("error parsing JID: %v", err)
+	}
+	if jid.Server != types.DefaultUserServer {
+		return jid, nil
+	}
+	if lid, lidErr := lidForPN(ctx, jid); lidErr == nil && !lid.IsEmpty() {
+		return jid, nil
+	}
+	if !isPhoneDigits(jid.User) {
+		return types.EmptyJID, fmt.Errorf("%q is not a phone number: digits only, country code first", jid.User)
+	}
+	// The answers are read before the error: whatsmeow returns both when the
+	// query worked and only its own write of the LID mapping failed.
+	answers, err := isOnWhatsApp(ctx, []string{"+" + jid.User})
+	for _, answer := range answers {
+		if !answer.IsIn {
+			continue
+		}
+		if registered := registeredPhoneJID(answer); !registered.IsEmpty() {
+			return registered, nil
+		}
+		// On WhatsApp, but the answer names a LID and no phone JID: the
+		// number as typed is all there is to go by.
+		return jid, nil
+	}
+	switch {
+	case err != nil:
+		return types.EmptyJID, fmt.Errorf("%w: %v", errRecipientLookup, err)
+	case len(answers) == 0:
+		// A throttled or degraded query looks like this too.
+		return types.EmptyJID, fmt.Errorf("%w: no answer for it", errRecipientLookup)
+	}
+	return types.EmptyJID, errNotOnWhatsApp
+}
+
+// registeredPhoneJID picks the phone JID out of an IsOnWhatsApp answer. With
+// LID addressing the answer's JID is the LID and PhoneNumber the number;
+// without it the JID is the number itself.
+func registeredPhoneJID(answer types.IsOnWhatsAppResponse) types.JID {
+	for _, jid := range []types.JID{answer.PhoneNumber, answer.JID} {
+		if jid.Server == types.DefaultUserServer && jid.User != "" {
+			return jid.ToNonAD()
+		}
+	}
+	return types.EmptyJID
+}
+
+func isPhoneDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
 // resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
 // for personal chats before sending.
+//
+// It rewrites the address and never the number: /api/mark-read shares it, and
+// a receipt goes to a chat the archive already holds, under the JID WhatsApp
+// gave it. Finding the registered number is canonicalRecipientJID, which only
+// /api/send runs, between its two allow-list checks.
 func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
-	var recipientJID types.JID
-	var err error
-
-	if strings.Contains(recipient, "@") {
-		recipientJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return types.JID{}, fmt.Errorf("error parsing JID: %v", err)
-		}
-	} else {
-		recipientJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
+	recipientJID, err := parseRecipientJID(recipient)
+	if err != nil {
+		return types.JID{}, fmt.Errorf("error parsing JID: %v", err)
 	}
 
 	// For personal chats, resolve phone number JID to LID (Linked Identity).
@@ -210,24 +308,14 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp", sentMessage{}
+		return false, notConnectedMessage, sentMessage{}
 	}
 
 	mentionedJIDs := resolveMentionJIDs(client, mentions)
 
-	var settingsLookupJID types.JID
-	var err error
-
-	if strings.Contains(recipient, "@") {
-		settingsLookupJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err), sentMessage{}
-		}
-	} else {
-		settingsLookupJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
+	settingsLookupJID, err := parseRecipientJID(recipient)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing JID: %v", err), sentMessage{}
 	}
 
 	// Capture pre-LID-resolution JID for SQLite storage.
@@ -307,31 +395,35 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 	// list_messages / get_last_interaction never see our own outbound
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
-		// Normalize @lid recipients to phone JID so outbound rows land in
-		// the same chat row as inbound (which handleMessage normalizes via
-		// resolveLIDChat). Otherwise sending to an @lid input would
-		// fragment the chat under a separate jid.
-		persistJID := resolveUserJID(client, storageJID, types.EmptyJID)
-		chatJID := persistJID.String()
-		sent.ChatJID = chatJID
-		// Our own JID is always a phone JID, so an outbound row records the
-		// phone namespace (#375); ToNonAD drops the device suffix.
-		senderJID := storedSender(client.Store.ID.ToNonAD())
-		timestamp := sent.Timestamp
-
-		// Pass empty name so StoreChat preserves any existing resolved
-		// contact/group name; we don't have one available here and
-		// must not clobber names from inbound handling or history sync.
-		if chatErr := messageStore.StoreChat(chatJID, "", timestamp); chatErr != nil {
-			bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
-		}
-		media := outboundMediaColumns(mediaPath, upload)
-		if storeErr := media.store(messageStore, resp.ID, chatJID, senderJID, message, timestamp, quotedMsgID); storeErr != nil {
-			bridgeLog.Warnf("failed to persist outbound message: %v", storeErr)
-		}
+		sent.ChatJID = persistOutbound(client, messageStore, storageJID, sent, message, outboundMediaColumns(mediaPath, upload), quotedMsgID)
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient), sent
+}
+
+// persistOutbound stores the row of a message this bridge just sent, and its
+// chat, and returns the chat JID they were stored under. client.Store.ID must
+// be set (a paired client).
+func persistOutbound(client *whatsmeow.Client, messageStore *MessageStore, storageJID types.JID, sent sentMessage, content string, media outboundMedia, quotedMsgID string) string {
+	// Normalize @lid recipients to phone JID so outbound rows land in
+	// the same chat row as inbound (which handleMessage normalizes via
+	// resolveLIDChat). Otherwise sending to an @lid input would
+	// fragment the chat under a separate jid.
+	chatJID := resolveUserJID(client, storageJID, types.EmptyJID).String()
+	// Our own JID is always a phone JID, so an outbound row records the
+	// phone namespace (#375); ToNonAD drops the device suffix.
+	senderJID := storedSender(client.Store.ID.ToNonAD())
+
+	// Pass empty name so StoreChat preserves any existing resolved
+	// contact/group name; we don't have one available here and
+	// must not clobber names from inbound handling or history sync.
+	if chatErr := messageStore.StoreChat(chatJID, "", sent.Timestamp); chatErr != nil {
+		bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
+	}
+	if storeErr := media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID); storeErr != nil {
+		bridgeLog.Warnf("failed to persist outbound message: %v", storeErr)
+	}
+	return chatJID
 }
 
 // outboundMedia is the media half of an outbound row: the columns
@@ -339,6 +431,7 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 // text-only send.
 type outboundMedia struct {
 	mediaType, filename, url            string
+	directPath                          string
 	mediaKey, fileSHA256, fileEncSHA256 []byte
 	fileLength                          uint64
 }
@@ -350,10 +443,11 @@ type outboundMedia struct {
 // the encrypted one, the waE2E literals in buildMediaMessage set them the
 // other way round.
 //
-// The row keeps the URL, as inbound rows do (the download derives the direct
-// path from it); an upload that answered with a direct path only is stored in
-// the same URL form a media retry uses. The filename is the one the recipient
-// was shown (outboundFileName), not whatever the host calls the path.
+// The row keeps the upload's direct path, which is what a download asks for,
+// and its URL as inbound rows do; an upload that answered with a direct path
+// only gets the URL form a media retry uses, so the url column is never empty
+// for a file that can be fetched. The filename is the one the recipient was
+// shown (outboundFileName), not whatever the host calls the path.
 func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) outboundMedia {
 	if mediaPath == "" {
 		return outboundMedia{}
@@ -367,6 +461,7 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 		mediaType:     mediaType,
 		filename:      outboundFileName(mediaPath),
 		url:           url,
+		directPath:    upload.DirectPath,
 		mediaKey:      upload.MediaKey,
 		fileSHA256:    upload.FileSHA256,
 		fileEncSHA256: upload.FileEncSHA256,
@@ -376,10 +471,21 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 
 // store persists the outbound row with these media columns.
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
-	return messageStore.StoreMessage(
+	if err := messageStore.StoreMessage(
 		id, chatJID, senderJID, content, timestamp, true,
 		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID,
-	)
+	); err != nil {
+		return err
+	}
+	// The upload's direct path is the one the recipients were sent
+	// (buildMediaMessage), so it is the one this row downloads by. The row is
+	// stored either way: without the path the download uses the url's.
+	if m.directPath != "" {
+		if err := messageStore.SetDirectPath(id, chatJID, m.directPath); err != nil {
+			bridgeLog.Warnf("failed to store the media direct path of outbound message %s: %v", id, err)
+		}
+	}
+	return nil
 }
 
 // buildMediaMessage wraps an upload result in the waE2E message for its
@@ -647,6 +753,54 @@ func placeholderWaveform(duration uint32) []byte {
 	return waveform
 }
 
+// registeredRecipient turns the recipient of a send into the JID WhatsApp has
+// it registered under (canonicalRecipientJID), and answers the request itself
+// when there is nobody to send to: ok is false once it wrote the response.
+//
+// Security: handleSend has already checked the allow-list on the recipient as
+// typed, before WhatsApp is asked anything, so a number outside the list is
+// never looked up. The registered number is checked here as well: a number
+// that is not on the list must not become reachable through another spelling
+// of it that is. And when the question cannot be answered, a bridge with an
+// allow-list refuses the send, because it cannot tell which number the
+// message would go to; only a bridge with no list to protect falls back to
+// the number as typed, which is what every send did before this lookup.
+func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter, recipient string) (string, bool) {
+	if !b.Connected() {
+		// Nothing can be asked, so nothing is sent: letting the send find
+		// out for itself would let a reconnect in between skip the checks.
+		b.metrics.sendFailures.Add(1)
+		writeError(w, http.StatusInternalServerError, notConnectedMessage)
+		return "", false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, recipientLookupTimeout)
+	defer cancel()
+	registered, err := canonicalRecipientJID(lookupCtx, b.Client.Store.LIDs.GetLIDForPN, b.IsOnWhatsApp, recipient)
+	switch {
+	case errors.Is(err, errNotOnWhatsApp):
+		b.metrics.sendFailures.Add(1)
+		writeError(w, http.StatusNotFound, recipient+" is not on WhatsApp: no account is registered under that number (country code first, digits only)")
+		return "", false
+	case errors.Is(err, errRecipientLookup) && b.Policy.restricted:
+		b.metrics.sendFailures.Add(1)
+		writeError(w, http.StatusBadGateway, err.Error()+"; nothing was sent")
+		return "", false
+	case errors.Is(err, errRecipientLookup):
+		b.Log.Warnf("%v; sending to %s as typed", err, recipient)
+		return recipient, true
+	case err != nil:
+		writeError(w, http.StatusBadRequest, err.Error())
+		return "", false
+	}
+	if rejectByChatPolicy(w, b.Policy, registered.String()) {
+		return "", false
+	}
+	if typed := normalizeChatEntry(recipient); typed != registered.String() {
+		b.Log.Debugf("→ /api/send recipient %s is registered on WhatsApp as %s", typed, registered)
+	}
+	return registered.String(), true
+}
+
 // handleSend serves POST /api/send.
 func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -698,10 +852,15 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		b.Log.Debugf("→ /api/send recipient=%q message_len=%d has_media=%v",
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
-		// Send the message
 		ctx, cancel := requestContext(r, sendDeadline)
 		defer cancel()
-		success, message, sent := b.Send(ctx, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
+		recipient, ok := b.registeredRecipient(ctx, w, req.Recipient)
+		if !ok {
+			return
+		}
+
+		// Send the message
+		success, message, sent := b.Send(ctx, recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
 		b.Log.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
 		if success {
 			b.metrics.messagesSent.Add(1)

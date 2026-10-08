@@ -146,6 +146,15 @@ func (store *MessageStore) RenameChat(chatJID, name string) error {
 	return nil
 }
 
+// EnsureChat makes sure the chat row exists, which a message row needs before
+// it can reference it, and records the resolved name. It never touches
+// last_message_time: that moves only when a row of the chat is actually
+// written, so a message the bridge does not store cannot make the chat look
+// active at a time nothing in it accounts for (issue #531).
+func (store *MessageStore) EnsureChat(chatJID, name string) error {
+	return store.StoreChat(chatJID, name, time.Time{})
+}
+
 // conversationName extracts the name a history-sync conversation carries.
 func conversationName(conversation *waHistorySync.Conversation) string {
 	if conversation == nil {
@@ -161,10 +170,27 @@ func placeholderGroupName(jid types.JID) string {
 	return fmt.Sprintf("Group %s", jid.User)
 }
 
+// selfUsers are the user parts our own account goes by: the phone number and,
+// once the session has one, the LID. Both are empty before pairing, and then
+// nothing matches.
+type selfUsers struct{ phone, lid string }
+
+func (s selfUsers) has(user string) bool {
+	return user != "" && (user == s.phone || user == s.lid)
+}
+
+// ownUsers reads them off the whatsmeow store, the way /api/me does.
+func ownUsers(client *whatsmeow.Client) selfUsers {
+	phone, lid := clientIdentity(client)(context.Background())
+	return selfUsers{phone: phone.User, lid: lid.User}
+}
+
 // GetChatName resolves the display name for a chat. conversation is the
 // history-sync payload (nil for live messages); allowNetwork permits a group
 // metadata fetch through store.groupInfo. sender is the last-resort name for
-// direct chats.
+// chats that are not groups, unless the sender is us: a chat we start with an
+// unknown number (or a broadcast list we post to) would be named after our own
+// number, which reads as a real name and never heals (issue #448).
 func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, chatJID string, conversation *waHistorySync.Conversation, sender string, allowNetwork bool, logger waLog.Logger) string {
 	if store != nil {
 		if name, ok := store.names.get(chatJID); ok {
@@ -172,12 +198,17 @@ func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, c
 		}
 	}
 
+	var self selfUsers
+	if jid.Server != types.GroupServer {
+		self = ownUsers(client)
+	}
+
 	// Already resolved in a previous run.
 	if store != nil && store.db != nil {
 		var existing string
 		if err := store.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existing); err == nil {
 			existing = strings.TrimSpace(existing)
-			if existing != "" && !isPlaceholderName(existing, jid) {
+			if existing != "" && !isPlaceholderName(existing, jid, self) {
 				store.names.put(chatJID, existing)
 				return existing
 			}
@@ -213,8 +244,13 @@ func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, c
 		}
 		if name == "" {
 			// Sender/user fallbacks are placeholders too: do not cache them.
-			if sender != "" {
+			if sender != "" && !self.has(sender) {
 				return sender
+			}
+			if self.has(jid.User) {
+				// The chat with ourselves, whichever namespace it is filed
+				// under, goes by our number as it always did.
+				return self.phone
 			}
 			return jid.User
 		}
@@ -226,7 +262,12 @@ func GetChatName(client *whatsmeow.Client, store *MessageStore, jid types.JID, c
 }
 
 // isPlaceholderName reports whether a stored name is one of our fallbacks
-// (group placeholder or the bare user part), i.e. worth trying to improve.
-func isPlaceholderName(name string, jid types.JID) bool {
-	return name == placeholderGroupName(jid) || name == jid.User
+// (group placeholder or the bare user part), i.e. worth trying to improve. A
+// chat named after our own number or LID is one too, unless it is a group or
+// the chat with ourselves, the only one legitimately called that (issue #448).
+func isPlaceholderName(name string, jid types.JID, self selfUsers) bool {
+	if name == placeholderGroupName(jid) || name == jid.User {
+		return true
+	}
+	return jid.Server != types.GroupServer && self.has(name) && !self.has(jid.User)
 }

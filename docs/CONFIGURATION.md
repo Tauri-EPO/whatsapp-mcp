@@ -12,15 +12,15 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)*                 | Comma-separated `Host` values accepted besides loopback (`host` = any port, `host:port` exact, `*` any). Off-loopback binds refuse non-loopback Hosts until this names them |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
-| `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks  |
-| `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self                |
+| `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
+| `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`. Set the same value for both processes; absolute paths recommended for services |
-| `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir)                      |
-| `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir) |
+| `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
+| `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TIMEOUT_S` | `30`                                | Timeout for each MCP → bridge call; media upload/download use 120 s. Connection errors are retried twice, read timeouts are not |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
-| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable) |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable). A boolean; anything else stops the bridge |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false`                     | Cache the media of status updates (`status@broadcast`) as it arrives too. Off by default: a status post is stored and listed like any message, but its image, video or audio stays on WhatsApp's servers until `download_media` / `read_media` asks for it (while the link lives, about a day), and the webhook forwards a status image without its bytes. `true` caches the status feed like any chat. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns both off. `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
@@ -30,7 +30,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_LOG_LEVEL`   | `INFO`                                   | Bridge log level (`DEBUG`, `INFO`, `WARN`, `ERROR`) for bridge and whatsmeow client lines. `DEBUG` also echoes every stored message |
 | `WHATSAPP_LOG_FORMAT`  | `text`                                   | `json` writes bridge log lines as JSON objects (`ts`, `level`, `module`, `msg`) for Loki/Elastic/journald |
-| `WHATSAPP_METRICS`     | `true`                                   | `GET /metrics` on the bridge, Prometheus text: connection/pairing gauges, store and media sizes, messages stored/sent, download and webhook failures, reconnects, requests by status class. Unauthenticated (counts only); `false` removes it |
+| `WHATSAPP_METRICS`     | `true`                                   | `GET /metrics` on the bridge, Prometheus text: connection/pairing gauges, store and media sizes, messages stored/sent, download, store and webhook failures, reconnects, requests by status class. Unauthenticated (counts only); `false` removes it. A boolean; anything else stops the bridge |
 | `WHATSAPP_MCP_LOG_LEVEL` | `INFO`                                 | MCP server log level (stderr) |
 | `WHATSAPP_MCP_LOG_FORMAT` | `text`                                | `json` writes MCP server log lines as JSON objects (`ts`, `level`, `logger`, `msg`) |
 | `WHATSAPP_MCP_METRICS` | `true`                                   | `GET /metrics` on the `http`/`sse` transports: tool calls, errors by code and seconds per tool, the per-tool latency histogram `whatsapp_mcp_tool_duration_seconds` (see [Health and operations](DOCKER.md#health-and-operations) for the tail-latency query), HTTP requests by status class; `false` disables it |
@@ -59,6 +59,12 @@ Copy `.env.example` to `.env` and configure as needed:
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
 | `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)*                    | Let the background worker download uncached audio from the bridge instead of skipping it. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `FFMPEG_TIMEOUT_S`     | `120`                                    | Timeout for each ffmpeg conversion (`send_audio_message` encode, whisper WAV prep) |
+
+**Booleans.** Every on/off variable of the bridge takes `1`, `true`, `yes` or
+`on` and `0`, `false`, `no` or `off`, in any case; unset or empty means the
+default in the table. Any other value stops the bridge at startup with a
+message naming the variable: a typo is never read as the default
+(`WEBHOOK_ENABLED=fasle` used to keep the webhook on).
 
 ## MCP transport (stdio vs http/sse)
 
@@ -151,6 +157,15 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 
 - Bare numbers mean the direct chat with that number (`@s.whatsapp.net`).
 - `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
+- Entries are compared literally, with one exception, for reads only: a
+  Brazilian mobile is the same number with or without the ninth digit after
+  the area code (`5511999999999` and `551199999999`), and WhatsApp registers
+  the account under one of the two. A read tool given the spelling the list
+  does not name answers when the list names the other one, and is refused
+  with `denied` when it names neither. What it returns is still limited to the
+  chats the list names. Write tools and the bridge compare the recipient as
+  given: list the spelling the chat is stored under (`search_contacts` reports
+  it) for a contact the agent must be able to write to.
 - The MCP server filters `list_chats`, `list_messages`, `get_chat`,
   `get_message_context`, `get_direct_chat_by_contact`, `get_contact_chats` and
   `get_last_interaction`, and refuses `send_*`, `send_reaction`,
@@ -160,6 +175,15 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
   reach a chat you did not enable. Set the variable for **both** processes
   (the compose file passes it to both containers).
+- A send to a bare number goes to the number WhatsApp has registered, which
+  is not always spelled like the one typed (a Brazilian mobile with or
+  without its ninth digit). The bridge checks the list twice: on the number
+  as typed, before it asks WhatsApp anything, and on the registered number
+  before it sends. So list the number the way WhatsApp has it — the
+  `chat_jid` its messages are stored under — and add the other spelling
+  only if agents should be able to type it. Listing one spelling never
+  opens the other, and when WhatsApp does not answer which number is
+  registered the send is refused instead of going out unchecked.
 - Contact search (`search_contacts`) is not filtered: it reads the address
   book, not conversations.
 
@@ -639,6 +663,22 @@ the AutoHub hub's `WHATSAPP_BRIDGE_TOKEN` must equal this bridge's token (from
 `Authorization: Bearer`. The bridge always sends the token it has; the hub
 rejects unauthenticated forwards only once its `WHATSAPP_BRIDGE_TOKEN` is set
 to the matching value.
+
+### What the webhook receives
+
+Every forwarded message is one `POST` with a JSON body: `sender`, `content`,
+`chatJID`, `isFromMe`, `messageId`, the `quoted*` fields and `mentionedJids`
+when the message has them, and for an image `mediaType`, `mimeType`,
+`mediaFilename` and `mediaBase64`. Reactions arrive as their own event
+([TOOLS.md](TOOLS.md#send_reaction)).
+
+`"stored": false` is added, to a message and to a reaction event alike, when
+the bridge could not write it to its
+database (it says so at ERROR and counts it in
+`whatsapp_bridge_message_store_failures_total`). The webhook is still sent so
+the text is not lost, but that `messageId` resolves to nothing: do not call
+`download_media`, `get_message_context` or quote it. The field is absent on
+every message that was stored.
 
 ### Outbound media
 
