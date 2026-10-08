@@ -257,6 +257,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			}
 			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
+			} else {
+				b.logWebhookWithheld(resolvedChat, msg.Info.ID)
 			}
 		}
 		return
@@ -315,8 +317,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// tools, but message handling never blocks on a disabled outbound webhook.
 	shouldForward := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) && !bareContentEnvelope(ex.inner, content)
 
-	if !shouldForward && b.Webhook.Enabled() && isStatusChat(resolvedChat) && !b.ForwardStatus {
-		logger.Debugf("Status update %s is not forwarded to the webhook: %s is off", msg.Info.ID, webhookForwardStatusEnv)
+	if !b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
+		b.logWebhookWithheld(resolvedChat, msg.Info.ID)
 	}
 
 	// A message that was not stored has no row for downloadMedia to find: a

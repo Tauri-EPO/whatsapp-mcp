@@ -16,6 +16,7 @@ func invalidStartupValues() map[string]string {
 	return map[string]string{
 		forwardSelfEnv: "typo", mediaAutoDownloadEnv: "typo", webhookEnabledEnv: "typo",
 		metricsEnv: "typo", webhookForwardStatusEnv: "typo", mediaAutoDownloadStatusEnv: "typo",
+		webhookForwardChannelsEnv: "typo", webhookForwardBroadcastsEnv: "typo",
 		readOnlyEnv: "typo", allowToolsEnv: "missing_allow", denyToolsEnv: "missing_deny",
 		bridgePortEnv: "0", bridgeBindEnv: "http://localhost", mediaRetentionEnv: "-1",
 		groupRosterSyncEnv: "-1", sessionKeepaliveEnv: "169", mediaMaxBytesEnv: "50MB",

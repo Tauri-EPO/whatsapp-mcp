@@ -15,6 +15,8 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge |
+| `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge |
+| `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |
@@ -729,6 +731,10 @@ to the matching value.
 
 ### What the webhook receives
 
+Direct user chats (`@s.whatsapp.net` or `@lid`) and groups (`@g.us`) are
+forwarded by default. Empty or unrecognized chat namespaces are withheld;
+enabling a feed below does not enable another namespace.
+
 Every forwarded message is one `POST` with a JSON body: `sender`, `content`,
 `chatJID`, `isFromMe`, `messageId`, the `quoted*` fields and `mentionedJids`
 when the message has them, and for an image `mediaType`, `mimeType`,
@@ -756,6 +762,24 @@ and readable with `list_messages(chat_jid="status@broadcast")`. Set
 `WEBHOOK_FORWARD_STATUS=true` for a receiver that wants the feed; a status
 image then carries its bytes only if `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true`
 has the bridge cache status media as well.
+
+Channel posts (`@newsletter`) and broadcast-list messages (`@broadcast`, except
+`status@broadcast`) are also stored but withheld from the webhook by default.
+Set `WEBHOOK_FORWARD_CHANNELS=true` or `WEBHOOK_FORWARD_BROADCASTS=true` to include
+the corresponding feed. These switches cover text, images and reactions and
+are independent of `WEBHOOK_FORWARD_STATUS`; `WEBHOOK_ENABLED=false` and
+`FORWARD_SELF=false` still take precedence. Media caching follows its existing
+settings; these switches change delivery to the webhook, not archive storage.
+
+A received broadcast-list message appears in the sending contact's direct chat
+on the phone, but the bridge archives it under the broadcast JID and withholds
+it by default because it is a mass mailing whose chat JID cannot be replied to;
+`WEBHOOK_FORWARD_BROADCASTS=true` restores its webhook delivery.
+The `@bot` form of a Meta AI direct chat is also withheld, with no opt-in;
+its legacy phone-JID form still follows normal direct-chat forwarding. Unknown
+and empty namespaces are withheld; phone, LID, hosted phone/LID and groups retain
+their conversational forwarding. DEBUG logs explain each withheld family or
+namespace and the relevant switches without including message content.
 
 `"stored": false` is added, to a message and to a reaction event alike, when
 the bridge could not write it to its

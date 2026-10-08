@@ -58,6 +58,9 @@ type Bridge struct {
 	// (WEBHOOK_FORWARD_STATUS). Zero value = the feed stays off the webhook,
 	// which is for conversations (webhook.go: forwardsToWebhook).
 	ForwardStatus bool
+	// Channel posts and broadcast lists each require their own webhook opt-in.
+	ForwardChannels   bool
+	ForwardBroadcasts bool
 	// MetricsEnabled serves GET /metrics (WHATSAPP_METRICS, metrics.go).
 	MetricsEnabled bool
 	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
@@ -204,6 +207,8 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
 		ForwardSelf:         switches.ForwardSelf,
 		ForwardStatus:       switches.ForwardStatus,
+		ForwardChannels:     switches.ForwardChannels,
+		ForwardBroadcasts:   switches.ForwardBroadcasts,
 		MetricsEnabled:      switches.Metrics,
 		MediaAutoDownload:   switches.MediaAutoDownload,
 		MediaMaxBytes:       defaultMediaMaxBytes, // main applies the validated configuration before events start
