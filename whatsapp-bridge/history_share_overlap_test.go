@@ -21,7 +21,7 @@ func shareArchiveSnapshot(t *testing.T, ms *MessageStore, id, chat string) strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, err := rows.Columns()
 	if err != nil || !rows.Next() {
 		t.Fatalf("snapshot missing: %v", err)
