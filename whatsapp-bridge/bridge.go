@@ -88,6 +88,8 @@ type Bridge struct {
 	// (defaults to Client.IsOnWhatsApp); /api/send and /api/forward ask it for a number the LID
 	// map does not know, tests inject a fake.
 	IsOnWhatsApp isOnWhatsAppFunc
+	// recipientNumbers remembers positive typed -> registered answers, never permissions.
+	recipientNumbers recipientNumberCache
 	// Exit terminates the process for conditions the bridge cannot recover from in-place
 	// (device logged out, client outdated); main() wires it to a clean os.Exit so the
 	// supervisor restarts into the pairing path. Tests inject a recorder.

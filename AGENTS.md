@@ -64,6 +64,7 @@ whatsapp-mcp/
 │   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
 │   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
+│   ├── recipient_cache.go      # bounded, expiring typed -> registered number answers, cleared on reconnect
 │   ├── send_mime.go            # sniff MIME for category-named cached images/videos
 │   ├── edit_forward.go         # /api/edit (own message, edit window), /api/forward (re-send elsewhere)
 │   ├── media.go                # inbound media download into store/<chat>/

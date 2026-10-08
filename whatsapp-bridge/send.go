@@ -920,7 +920,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	defer cancel()
 	registered, err := canonicalRecipientJID(lookupCtx, func(ctx context.Context, jid types.JID) (types.JID, error) {
 		return lookupAltJID(ctx, b.Client, jid)
-	}, b.IsOnWhatsApp, recipient)
+	}, b.queryRegisteredNumber, recipient)
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):
 		countFailure()

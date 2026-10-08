@@ -616,15 +616,18 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.Connected:
+		b.recipientNumbers.clear()
 		b.Log.Infof("✓ Successfully connected to WhatsApp servers")
 
 	case *events.LoggedOut:
+		b.recipientNumbers.clear()
 		// whatsmeow has already wiped the device row; the process cannot re-enter
 		// the pairing flow from here. Exit and let the supervisor restart us: the
 		// next start finds no session and prints a fresh QR code.
 		b.Exit(fmt.Sprintf("device logged out by the phone (reason: %v); exiting so the next start pairs again", v.Reason), exitCodeLoggedOut)
 
 	case *events.Disconnected:
+		b.recipientNumbers.clear()
 		b.Log.Warnf("⚠️  Disconnected from WhatsApp servers, will attempt reconnection...")
 		// Signal reconnection needed
 		select {
