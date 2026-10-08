@@ -94,6 +94,7 @@ func TestRuntimeSDKPrePairHookAndTerminalEventControlCompletion(t *testing.T) {
 		t.Fatal("SDK could save a device outside an active attempt")
 	}
 	p.state.State = "awaiting_qr"
+	p.attemptContext = b.ctx
 	if !client.PrePairCallback(types.EmptyJID, "", "") || client.PrePairCallback(types.EmptyJID, "", "") {
 		t.Fatal("SDK completion admission was absent or duplicated")
 	}

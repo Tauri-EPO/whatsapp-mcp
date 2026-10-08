@@ -155,7 +155,7 @@ func (p *operatorPairing) connectionEvent(evt interface{}) {
 func (p *operatorPairing) beginCompletion(client pairingClient) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.ctx.Err() != nil || p.client != client || p.completing || p.paired() {
+	if p.ctx.Err() != nil || !p.attemptActiveLocked() || p.client != client || p.completing || p.paired() {
 		return false
 	}
 	switch p.state.State {
@@ -167,6 +167,10 @@ func (p *operatorPairing) beginCompletion(client pairingClient) bool {
 	p.completionDone = make(chan struct{})
 	p.invalidateLocked("completing")
 	return true
+}
+
+func (p *operatorPairing) attemptActiveLocked() bool {
+	return p.attemptContext != nil && p.attemptContext.Err() == nil
 }
 
 func (p *operatorPairing) completeLocked() {
@@ -222,7 +226,9 @@ func (p *operatorPairing) run() {
 					p.action.Unlock()
 					break
 				}
+				p.mu.Lock()
 				p.client = client
+				p.mu.Unlock()
 			}
 			first = false
 			ctx, cancel := context.WithCancel(p.ctx)
@@ -241,7 +247,9 @@ func (p *operatorPairing) run() {
 				observe:    func(evt whatsmeow.QRChannelItem) { p.observe(generation, evt) },
 				state:      func(state string) { p.b.setPairingState(state) },
 			})
+			p.mu.Lock()
 			cancel()
+			p.mu.Unlock()
 			if p.ctx.Err() != nil {
 				return
 			}
@@ -368,7 +376,7 @@ func (p *operatorPairing) code(w http.ResponseWriter, r *http.Request) {
 	}
 	defer p.action.Unlock()
 	p.mu.Lock()
-	if p.paired() || (p.state.State != "awaiting_qr" && p.state.State != "code_issued") || p.state.QR == nil || !p.now().Before(p.state.QR.ExpiresAt) {
+	if !p.attemptActiveLocked() || p.paired() || (p.state.State != "awaiting_qr" && p.state.State != "code_issued") || p.state.QR == nil || !p.now().Before(p.state.QR.ExpiresAt) {
 		p.mu.Unlock()
 		writeErrorCode(w, 409, "pairing_unavailable", "An unpaired client with a current QR is required")
 		return
@@ -390,7 +398,7 @@ func (p *operatorPairing) code(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.mu.Lock()
-	valid := generation == p.state.Generation && !p.paired() && !p.completing &&
+	valid := p.attemptActiveLocked() && generation == p.state.Generation && !p.paired() && !p.completing &&
 		(p.state.State == "awaiting_qr" || p.state.State == "code_issued") && p.now().Before(expires)
 	if valid {
 		p.state.State = "code_issued"
@@ -488,7 +496,7 @@ func (p *operatorPairing) passkeyResponse(w http.ResponseWriter, r *http.Request
 	}
 	defer p.action.Unlock()
 	p.mu.Lock()
-	valid := !p.paired() && p.state.State == "passkey_required" && body.Generation == p.state.Generation && p.state.StepExpiresAt != nil && p.now().Before(*p.state.StepExpiresAt)
+	valid := p.attemptActiveLocked() && !p.paired() && p.state.State == "passkey_required" && body.Generation == p.state.Generation && p.state.StepExpiresAt != nil && p.now().Before(*p.state.StepExpiresAt)
 	client, request := p.client, p.state.Passkey
 	p.mu.Unlock()
 	if !valid {
@@ -527,7 +535,7 @@ func (p *operatorPairing) passkeyConfirm(w http.ResponseWriter, r *http.Request)
 	}
 	defer p.action.Unlock()
 	p.mu.Lock()
-	valid := !p.paired() && p.state.State == "passkey_confirm" && body.Generation == p.state.Generation && p.state.ConfirmationCode != "" && subtle.ConstantTimeCompare([]byte(body.Code), []byte(p.state.ConfirmationCode)) == 1 && p.state.StepExpiresAt != nil && p.now().Before(*p.state.StepExpiresAt)
+	valid := p.attemptActiveLocked() && !p.paired() && p.state.State == "passkey_confirm" && body.Generation == p.state.Generation && p.state.ConfirmationCode != "" && subtle.ConstantTimeCompare([]byte(body.Code), []byte(p.state.ConfirmationCode)) == 1 && p.state.StepExpiresAt != nil && p.now().Before(*p.state.StepExpiresAt)
 	client := p.client
 	p.mu.Unlock()
 	if !valid {
