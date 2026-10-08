@@ -1844,9 +1844,13 @@ the cost). If it reaches that before finding a cached file, `scan_truncated` is
 `true`, `truncated` stays `true` and `purged_files` is 0 — repeating would
 repeat the same walk, so narrow the criteria (`media_type`, `min_bytes`,
 `older_than_days`) instead. `unreachable` counts matching rows whose cached path
-the store root refuses (a symlink out of the store, a chat directory moved to
-another disk); the first 50 are listed in `items` with their reason, none of
-them uses a slot. `failed` counts selected files that could not be removed (a read-only
+is refused: the cached name or the chat directory is a symlink (wherever it
+points, also to another file or chat of the store), the name is a directory, or
+the directory could not be opened. The reason reads `cached path does not
+resolve inside the store directory` in all of these cases, because the purge
+looks for a regular file in the chat's own directory and follows nothing, as
+the download does. The first 50 are listed in `items` with their reason, none
+of them uses a slot. `failed` counts selected files that could not be removed (a read-only
 directory, an immutable file); when a real call removes nothing and `failed`,
 `truncated` is `false` and the message says so, because repeating cannot help.
 Denied chats are skipped before they are probed and do not use the 100000-row
