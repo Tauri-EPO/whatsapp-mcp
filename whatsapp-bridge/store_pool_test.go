@@ -96,8 +96,9 @@ func TestSessionPoolIsBounded(t *testing.T) {
 // configured pool bound is in place, and exhausting the pool proves callers
 // really queue. This does not choose a suitably small bound: increasing the
 // production constant also increases the barrier. Pool sizes themselves are
-// covered by TestMessageStorePoolsAreBounded. Writers use the live path's
-// bounded busy retry so a busy StoreChat cannot skip all 40 rows (issue #580).
+// covered by TestMessageStorePoolsAreBounded. Only one connection is released
+// for this acceptance burst, separating pool queuing from SQLite writer contention. Busy release and bounded exhaustion
+// are exercised independently (issues #580, #599).
 func TestBurstCompletesWithTheBoundedPool(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms, err := NewMessageStore()
@@ -187,10 +188,13 @@ func TestBurstCompletesWithTheBoundedPool(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	stats := ms.db.Stats()
+	// Keep the other connections pinned until completion: exactly one SQL
+	// operation can run, so acceptance does not race SQLite's busy timeout.
+	_ = held[len(held)-1].Close()
+	wg.Wait()
 	for _, conn := range held {
 		_ = conn.Close()
 	}
-	wg.Wait()
 	t.Logf("first attempts returning SQLITE_BUSY/LOCKED: %d (load-dependent, not asserted)", firstBusy.Load())
 	if stats.WaitCount-waitsBefore < chats+readers || stats.OpenConnections != messagesPoolConns {
 		t.Errorf("burst did not queue behind the pool bound: %+v", stats)
