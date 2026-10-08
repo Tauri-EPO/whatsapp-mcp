@@ -185,6 +185,8 @@ type Bridge struct {
 	startedAt time.Time
 	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
 	historyVotes sync.WaitGroup
+	// historyBatchWriter replaces the transaction runner in controlled tests.
+	historyBatchWriter func(func(*messageBatch) error) error
 	// httpServer is the REST listener, kept so Shutdown can drain it (rest.go).
 	httpServer *http.Server
 	// ctx is cancelled by Shutdown; long-lived goroutines (reconnect loop, retention

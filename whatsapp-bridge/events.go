@@ -52,7 +52,7 @@ func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, 
 // chatJID is the already-LID-normalised chat from the carrier event;
 // using it (rather than Key.RemoteJID, which may carry the raw @lid
 // form) keeps the UPDATE aligned with how StoreMessage wrote the row.
-func handleMessageRevoke(messageStore *MessageStore, msg *waE2E.Message, chatJID string, eventTimestamp int64, logger waLog.Logger) {
+func (b *Bridge) handleMessageRevoke(msg *waE2E.Message, chatJID string, eventTimestamp int64) {
 	if msg == nil || msg.GetProtocolMessage() == nil {
 		return
 	}
@@ -69,9 +69,7 @@ func handleMessageRevoke(messageStore *MessageStore, msg *waE2E.Message, chatJID
 		return
 	}
 	deletedAt := time.Unix(eventTimestamp, 0)
-	if err := messageStore.MarkMessageDeleted(targetID, chatJID, deletedAt); err != nil {
-		logger.Warnf("Failed to mark message %s in %s as deleted: %v", targetID, chatJID, err)
-	}
+	b.storeLive("retracted message", targetID, chatJID, func() error { return b.Store.MarkMessageDeleted(targetID, chatJID, deletedAt) })
 }
 
 // Handle regular incoming messages with media support
@@ -205,7 +203,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	b.noteGroupSender(chatJID, resolvedSender, msgTimestamp)
 
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
-	handleMessageRevoke(messageStore, msg.Message, chatJID, msg.Info.Timestamp.Unix(), logger)
+	b.handleMessageRevoke(msg.Message, chatJID, msg.Info.Timestamp.Unix())
 
 	// Backfill ephemeral state from any regular message's ContextInfo.
 	// EPHEMERAL_SETTING ProtocolMessages and GroupInfo events only fire on
@@ -297,7 +295,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// given up is one ERROR naming the message (ID and chat only, never the
 	// content) and a count on /metrics (store_failures.go).
 	stored := storeRow("message", func() error {
-		return persistMessage(messageStore, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+		return messageStore.Batch(func(batch *messageBatch) error {
+			return persistMessage(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+		})
 	})
 	if stored {
 		b.metrics.messagesStored.Add(1)
@@ -475,7 +475,8 @@ func callChatJID(meta types.BasicCallMeta) string {
 // in practice WhatsApp's primary device handles outbound calls without
 // notifying linked devices, so events observed here are always inbound and
 // isFromMe stays false. We keep the branch anyway in case behavior changes.
-func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta types.BasicCallMeta, callType string, isGroup bool, logger waLog.Logger) {
+func (b *Bridge) handleCallOffer(meta types.BasicCallMeta, callType string, isGroup bool) {
+	client, logger := b.Client, b.Log
 	chatJID := callChatJID(meta)
 
 	fromJID := ""
@@ -488,8 +489,9 @@ func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta 
 
 	isFromMe := client.Store.ID != nil && fromJID == client.Store.ID.ToNonAD().String()
 
-	if err := messageStore.StoreCallOffer(meta.CallID, chatJID, fromJID, meta.Timestamp, isFromMe, callType, isGroup); err != nil {
-		logger.Warnf("Failed to store call offer: %v", err)
+	if !b.storeLive("call offer", meta.CallID, chatJID, func() error {
+		return b.Store.StoreCallOffer(meta.CallID, chatJID, fromJID, meta.Timestamp, isFromMe, callType, isGroup)
+	}) {
 		return
 	}
 
@@ -584,7 +586,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// doesn't expose Media directly (it's buried in the binary Data
 		// node). Group calls come through CallOfferNotice instead, which
 		// DOES expose Media cleanly.
-		handleCallOffer(b.Client, b.Store, v.BasicCallMeta, "voice", false, b.Log)
+		b.handleCallOffer(v.BasicCallMeta, "voice", false)
 
 	case *events.CallOfferNotice:
 		// Group calls. v.Media is "audio" or "video"; normalize to our
@@ -594,26 +596,22 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 			callType = "video"
 		}
 		isGroup := v.Type == "group" || !v.GroupJID.IsEmpty()
-		handleCallOffer(b.Client, b.Store, v.BasicCallMeta, callType, isGroup, b.Log)
+		b.handleCallOffer(v.BasicCallMeta, callType, isGroup)
 
 	case *events.CallAccept:
-		if err := b.Store.MarkCallAnswered(v.CallID, callChatJID(v.BasicCallMeta)); err != nil {
-			b.Log.Warnf("Failed to mark call answered: %v", err)
-		} else {
+		if b.storeLive("answered call", v.CallID, callChatJID(v.BasicCallMeta), func() error { return b.Store.MarkCallAnswered(v.CallID, callChatJID(v.BasicCallMeta)) }) {
 			b.Log.Infof("Call answered: id=%s", v.CallID)
 		}
 
 	case *events.CallReject:
-		if err := b.Store.MarkCallRejected(v.CallID, callChatJID(v.BasicCallMeta)); err != nil {
-			b.Log.Warnf("Failed to mark call rejected: %v", err)
-		} else {
+		if b.storeLive("rejected call", v.CallID, callChatJID(v.BasicCallMeta), func() error { return b.Store.MarkCallRejected(v.CallID, callChatJID(v.BasicCallMeta)) }) {
 			b.Log.Infof("Call rejected: id=%s", v.CallID)
 		}
 
 	case *events.CallTerminate:
-		if err := b.Store.MarkCallTerminated(v.CallID, callChatJID(v.BasicCallMeta), v.Reason, v.Timestamp); err != nil {
-			b.Log.Warnf("Failed to mark call terminated: %v", err)
-		} else {
+		if b.storeLive("terminated call", v.CallID, callChatJID(v.BasicCallMeta), func() error {
+			return b.Store.MarkCallTerminated(v.CallID, callChatJID(v.BasicCallMeta), v.Reason, v.Timestamp)
+		}) {
 			b.Log.Infof("Call terminated: id=%s reason=%q", v.CallID, v.Reason)
 		}
 

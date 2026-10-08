@@ -73,7 +73,7 @@ func parseChatAndMessage(w http.ResponseWriter, policy chatPolicy, rawChat, rawI
 	return chat, rawID, true
 }
 
-func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy) http.HandlerFunc {
+func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, storeWrite storeWriteFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeEditForward(w, http.StatusMethodNotAllowed, editForwardResponse{Message: "method not allowed"})
@@ -110,8 +110,8 @@ func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy) ht
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Edit failed: " + err.Error()})
 			return
 		}
-		if err := store.UpdateMessageContent(id, chat.String(), text); err != nil {
-			writeEditForward(w, http.StatusOK, editForwardResponse{Success: true, Message: "Message edited (local content not updated: " + err.Error() + ")", MessageID: id, ChatJID: chat.String()})
+		if !storeWrite("edited message", id, chat.String(), func() error { return store.UpdateMessageContent(id, chat.String(), text) }) {
+			writeEditForward(w, http.StatusOK, editForwardResponse{Success: true, Message: "Message edited (archive update failed; the remote edit already succeeded, do not repeat it)", MessageID: id, ChatJID: chat.String()})
 			return
 		}
 		writeEditForward(w, http.StatusOK, editForwardResponse{Success: true, Message: "Message edited", MessageID: id, ChatJID: chat.String()})

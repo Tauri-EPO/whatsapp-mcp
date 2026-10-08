@@ -80,7 +80,7 @@ whatsapp-mcp/
 │   ├── chat_archive.go         # /api/chat/archive: archive/unarchive anchored to the newest stored message
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution; DSN options and connection-pool bounds (boundPool)
-│   ├── store_batch.go          # one transaction per conversation for the history-sync backfill
+│   ├── store_batch.go          # atomic live-message writes and bounded history-sync transactions
 │   ├── migration_markers.go   # independent named markers for data rewrites
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text

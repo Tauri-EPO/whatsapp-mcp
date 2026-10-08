@@ -1029,6 +1029,11 @@ FTS index follows); downloaded media is left in `store/`. Respects
 
 Edit the text of a message this account sent (WhatsApp accepts edits for about 15 minutes). Recipients see the new text with an "edited" marker; the archive is updated. **Parameters:** `chat_jid`, `message_id` (from `send_message`), `text`, `dry_run` (optional, default `false` — see [Dry runs](#dry-runs)).
 
+If an edit or deletion for everyone succeeds remotely but its local archive
+update fails, the successful response includes an archive warning. The remote
+effect has already happened: do not repeat it to repair the local archive.
+The bridge retries only local bookkeeping and records an exhausted failure.
+
 ### `forward_message`
 
 Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.

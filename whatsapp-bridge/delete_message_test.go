@@ -45,7 +45,7 @@ func TestHandleDeleteMessage(t *testing.T) {
 		revoked = append(revoked, c.String()+"/"+string(id))
 		return nil
 	}
-	h := handleDeleteMessage(ms, revoke, parseChatPolicy(""))
+	h := handleDeleteMessage(ms, revoke, parseChatPolicy(""), storeWriteOwner(t, ms))
 
 	t.Run("local delete removes the row and sends nothing", func(t *testing.T) {
 		rec, resp := postDelete(h, `{"chat_jid":"`+chat+`","message_id":"theirs","for_everyone":false}`)
@@ -110,7 +110,7 @@ func TestHandleDeleteMessage(t *testing.T) {
 	})
 
 	t.Run("allow-list", func(t *testing.T) {
-		restricted := handleDeleteMessage(ms, revoke, parseChatPolicy("5511999999999"))
+		restricted := handleDeleteMessage(ms, revoke, parseChatPolicy("5511999999999"), storeWriteOwner(t, ms))
 		if rec, _ := postDelete(restricted, `{"chat_jid":"`+chat+`","message_id":"mine","for_everyone":false}`); rec.Code != http.StatusForbidden {
 			t.Fatalf("status=%d", rec.Code)
 		}
