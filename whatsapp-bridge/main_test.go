@@ -636,7 +636,7 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 // that steer one with t.Setenv before building a bridge. TestMain clears them,
 // so a test that sets none gets the defaults.
 func testSwitches() bridgeSwitches {
-	switches, err := loadBridgeSwitches()
+	switches, err := parseBridgeSwitches(os.Getenv)
 	if err != nil {
 		panic(err)
 	}
@@ -3151,8 +3151,9 @@ func TestResolveDeviceName(t *testing.T) {
 				// t.Setenv restores on cleanup; unset explicitly for this case.
 				_ = os.Unsetenv("WHATSAPP_DEVICE_NAME")
 			}
-			if got := resolveDeviceName(); got != tc.want {
-				t.Fatalf("resolveDeviceName() = %q, want %q", got, tc.want)
+			cfg, err := loadBridgeConfig()
+			if err != nil || cfg.DeviceName != tc.want {
+				t.Fatalf("DeviceName = %q, error %v, want %q", cfg.DeviceName, err, tc.want)
 			}
 		})
 	}

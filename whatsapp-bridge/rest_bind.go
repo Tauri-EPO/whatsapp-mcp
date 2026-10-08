@@ -23,7 +23,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"os"
 	"strings"
 )
 
@@ -53,7 +52,7 @@ func resolveBridgeBind(value string) (string, error) {
 		return ip.String(), nil
 	}
 	if strings.ContainsAny(v, ":/ ") {
-		return "", fmt.Errorf("invalid %s=%q: expected an IP address or hostname without port", bridgeBindEnv, value)
+		return "", fmt.Errorf("invalid %s=%q: expected an IP address or hostname without port", bridgeBindEnv, configValue(value))
 	}
 	return v, nil
 }
@@ -120,14 +119,4 @@ func (l hostAllowList) allows(host string) bool {
 	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
 	_, ok := l.hosts[name]
 	return ok
-}
-
-// loadRESTBindConfig reads the two env vars; the error names the offending
-// variable so main() can fail fast before pairing.
-func loadRESTBindConfig() (bind, allowedHosts string, err error) {
-	bind, err = resolveBridgeBind(os.Getenv(bridgeBindEnv))
-	if err != nil {
-		return "", "", err
-	}
-	return bind, os.Getenv(bridgeAllowedHostsEnv), nil
 }

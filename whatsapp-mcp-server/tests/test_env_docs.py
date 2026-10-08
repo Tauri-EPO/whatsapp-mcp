@@ -47,7 +47,7 @@ def code_variables() -> set[str]:
         for pat in py_patterns:
             found |= set(re.findall(pat, text, flags=re.M))
     go_patterns = [
-        r'os\.(?:Getenv|LookupEnv)\(\s*"([A-Z0-9_]+)"',
+        r'(?:os\.(?:Getenv|LookupEnv)|getenv)\(\s*"([A-Z0-9_]+)"',
         r'^\s*(?:const\s+)?\w*[eE]nv\w*\s*=\s*"([A-Z0-9_]+)"',  # const logLevelEnv = "..."
     ]
     for go in (ROOT / "whatsapp-bridge").glob("*.go"):
@@ -115,3 +115,14 @@ def test_compose_passes_through_what_containers_need():
 def test_compose_only_knobs_are_used_by_compose_or_env(name):
     text = _read("docker-compose.yml") + _read(".env.example")
     assert name in text, f"{name} is listed as compose-only but neither compose nor .env.example mentions it"
+
+
+@pytest.mark.parametrize("reader", ["os.Getenv", "os.LookupEnv", "getenv"])
+def test_code_variables_finds_literal_environment_helpers(tmp_path, monkeypatch, reader):
+    (tmp_path / "whatsapp-bridge").mkdir()
+    (tmp_path / "whatsapp-mcp-server").mkdir()
+    (tmp_path / "whatsapp-bridge" / "config.go").write_text(
+        f'package main\nvar knob = {reader}("WHATSAPP_UNDOCUMENTED_KNOB")\n', encoding="utf-8"
+    )
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    assert code_variables() == {"WHATSAPP_UNDOCUMENTED_KNOB"}
