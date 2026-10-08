@@ -19,6 +19,8 @@ import (
 
 // Real schema, WAL and FTS, with every pooled connection using a short busy
 // timeout. The barrier releases the writer only after SQLite reports BUSY.
+// These controlled tests do not measure the production five-second timeout
+// across three attempts; their retry delays are observed through test seams.
 func lockedProductionStore(t *testing.T) (*MessageStore, func() func()) {
 	t.Helper()
 	t.Setenv(storeDirEnv, t.TempDir())
@@ -300,5 +302,83 @@ func TestExistingLiveMessageAndPollRowOuterRetry(t *testing.T) {
 				t.Fatalf("retries=%d rows=%d failures=%d", waits, rows, b.metrics.storeFailures.Load())
 			}
 		})
+	}
+}
+
+func TestLiveStoreBusyReleaseAndBoundedExhaustion(t *testing.T) {
+	for _, phase := range []string{"chat", "message"} {
+		for _, free := range []bool{true, false} {
+			if phase == "message" && !free {
+				continue // message exhaustion is covered by the post-send archive tests
+			}
+			t.Run(phase+map[bool]string{true: "/release", false: "/exhaust"}[free], func(t *testing.T) {
+				ms, lock := lockedProductionStore(t)
+				wantDelays := []time.Duration{200 * time.Millisecond, time.Second}
+				now := time.Unix(1772359200, 0)
+				if phase == "message" {
+					if err := ms.StoreChat(phonePN.String(), "Alice", now); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rec := installRecordingLogger(t)
+				b := testBridge(t, nil, ms, rec)
+				release := lock()
+				waits, attempts := 0, 0
+				b.storeRetryWait = func(delay time.Duration) bool {
+					if waits >= len(wantDelays) {
+						t.Errorf("extra retry delay=%v after %d waits, want at most %d; errors=%v", delay, waits, len(wantDelays), errorLines(rec.String()))
+						return false
+					}
+					if delay != wantDelays[waits] {
+						t.Errorf("retry delay=%v want %v; errors=%v", delay, wantDelays[waits], errorLines(rec.String()))
+					}
+					waits++
+					if free && waits == 1 {
+						release()
+					}
+					return true
+				}
+				kind, id := "message", "LIVE1"
+				if phase == "chat" {
+					kind, id = "chat", ""
+				}
+				stored := b.storeLive(kind, id, phonePN.String(), func() error {
+					attempts++
+					if phase == "chat" {
+						return ms.StoreChat(phonePN.String(), "Alice", now)
+					}
+					return ms.StoreMessage("LIVE1", phonePN.String(), phonePN.String(), "searchable", now, false, "", "", "", nil, nil, nil, 0, "")
+				})
+				release()
+				wantWaits := len(wantDelays)
+				if free {
+					wantWaits = 1
+				}
+				if stored != free || waits != wantWaits || attempts != wantWaits+1 {
+					t.Fatalf("stored=%v want %v; waits=%d want %d; attempts=%d want %d; errors=%v", stored, free, waits, wantWaits, attempts, wantWaits+1, errorLines(rec.String()))
+				}
+				var rows int
+				query := `SELECT COUNT(*) FROM chats WHERE jid=?`
+				if phase == "message" {
+					query = `SELECT COUNT(*) FROM messages WHERE chat_jid=? AND rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'searchable')`
+				}
+				if err := ms.db.QueryRow(query, phonePN.String()).Scan(&rows); err != nil {
+					t.Fatal(err)
+				}
+				wantRows := 0
+				wantFailures := int64(1)
+				if free {
+					wantRows = 1
+					wantFailures = 0
+				}
+				errs := errorLines(rec.String())
+				if rows != wantRows || b.metrics.storeFailures.Load() != wantFailures || len(errs) != int(wantFailures) {
+					t.Fatalf("rows=%d want %d; failures=%d ERRORs=%d want %d; errors=%v", rows, wantRows, b.metrics.storeFailures.Load(), len(errs), wantFailures, errs)
+				}
+				if !free && ((phase == "message" && !strings.Contains(errs[0], "LIVE1")) || !strings.Contains(errs[0], phonePN.String()) || strings.Contains(errs[0], "searchable")) {
+					t.Fatalf("error identity/content: %v", errs)
+				}
+			})
+		}
 	}
 }
