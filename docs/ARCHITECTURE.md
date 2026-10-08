@@ -172,12 +172,25 @@ Two things this note does *not* cover: `chats.ephemeral_setting_timestamp` is an
 
 ## Forwarded media presentation
 
-`messages.media_presentation` holds a small JSON object with the original MIME,
+`messages.media_presentation` holds a bounded JSON object with the plaintext
+file SHA256 and validated original MIME,
 document name/title, audio PTT/duration/waveform, and sticker animation. Live,
 history-batch and outbound writes insert it with the credentials through the
 shared upsert. Incomplete replays keep the snapshot; complete writes with the
 same plaintext hash merge supplied fields and keep omitted ones. A changed hash
-starts a new presentation, so an old file's metadata cannot follow a new file.
+starts a new presentation. On read, JSON whose stored hash differs from the
+row's file hash is ignored, including after an older image replays a new file
+without updating the JSON. Invalid/wrongly typed JSON falls back to legacy
+forwarding with one bounded DEBUG line per discarded read; the upsert replaces
+invalid objects instead of passing them to `json_patch`.
+
+Validation runs at ingress and the wire sink: names/titles share the outbound
+filename sanitizer (controls/bidi/path characters removed, 200 characters),
+waveform is exactly 64 bytes, seconds is within 0–86400, and MIME is a whitespace-
+and parameter-free type/subtype permitted for that category (WebP only for
+stickers, audio/* for audio, any well-formed document type). Invalid fields are
+dropped. The LID-to-phone row copy keeps presentation and direct path together.
+
 The forward handler reads category, name and presentation together and reloads
 them after retrieval, since a phone retry can refresh the row. A changed retry
 hash clears the old presentation; ordinary retries preserve it. These values
@@ -188,6 +201,11 @@ Startup adds one nullable column through `ensureColumn`, without rewriting old
 rows or changing migration markers. Existing Python readers ignore this column;
 MCP forwarding continues to call the bridge. Old rows use the documented legacy
 fallback in [TOOLS.md](TOOLS.md#forward_message), and cache names remain intact.
+Legacy Ogg Opus is forwarded as a voice note with computed duration/waveform;
+modern Opus rows retain their PTT and compute only missing duration/waveform.
+New unnamed inbound documents keep an empty filename, shown as null by MCP;
+outbound `/api/send` rows retain their actual wire presentation too. The JSON
+column itself is not exposed by MCP readers or webhooks.
 
 ## SQLite contention and persistence retries
 

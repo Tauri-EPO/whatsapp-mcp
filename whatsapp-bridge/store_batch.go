@@ -28,6 +28,26 @@ const replaceMediaSQL = `(:complete_media OR (
 	AND COALESCE(length(messages.file_enc_sha256), 0) = 0
 	AND COALESCE(messages.file_length, 0) = 0))`
 
+// CASE avoids JSON functions on corrupt stored text. Only an object with the
+// field types the Go decoder accepts can be merged into a new snapshot.
+const validPresentationSQL = `(CASE
+	WHEN length(messages.media_presentation) > 4096 THEN 0
+	WHEN NOT json_valid(messages.media_presentation) THEN 0
+	ELSE json_type(messages.media_presentation) = 'object'
+	AND COALESCE(json_type(messages.media_presentation, '$.sha256'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.mime'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.name'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.title'), 'null') IN ('text', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.ptt'), 'null') IN ('true', 'false', 'null')
+	AND COALESCE(json_type(messages.media_presentation, '$.animated'), 'null') IN ('true', 'false', 'null')
+	AND (COALESCE(json_type(messages.media_presentation, '$.seconds'), 'null') = 'null'
+		OR (json_type(messages.media_presentation, '$.seconds') = 'integer' AND json_extract(messages.media_presentation, '$.seconds') BETWEEN 0 AND 86400))
+	AND (COALESCE(json_type(messages.media_presentation, '$.waveform'), 'null') = 'null'
+		OR (json_type(messages.media_presentation, '$.waveform') = 'text' AND length(json_extract(messages.media_presentation, '$.waveform')) = 88
+			AND substr(json_extract(messages.media_presentation, '$.waveform'), -2) = '=='
+			AND json_extract(messages.media_presentation, '$.waveform') NOT GLOB '*[^A-Za-z0-9+/=]*'))
+	END)`
+
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
@@ -66,9 +86,11 @@ const insertMessageSQL = `INSERT INTO messages
 			-- Presentation belongs to the same snapshot. A same-file replay
 			-- can add fields; missing metadata must not erase its old fields.
 			media_presentation = CASE WHEN ` + replaceMediaSQL + ` THEN CASE
-				WHEN excluded.file_sha256 = messages.file_sha256 THEN CASE
+				WHEN excluded.file_sha256 = messages.file_sha256 AND ` + validPresentationSQL + ` THEN CASE
 					WHEN excluded.media_presentation IS NULL THEN messages.media_presentation
-					ELSE json_patch(COALESCE(messages.media_presentation, '{}'), excluded.media_presentation) END
+					WHEN json_extract(messages.media_presentation, '$.sha256') = json_extract(excluded.media_presentation, '$.sha256')
+					THEN json_patch(messages.media_presentation, excluded.media_presentation)
+					ELSE excluded.media_presentation END
 				ELSE excluded.media_presentation END ELSE messages.media_presentation END,
 			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`
 
@@ -185,6 +207,6 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 		}
 	}
 	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.column(),
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(),
 		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
 }

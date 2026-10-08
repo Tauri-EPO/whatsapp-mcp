@@ -22,38 +22,56 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 	for _, batch := range []bool{false, true} {
 		for _, tc := range []struct {
 			name, kind, mime, filename, title string
+			inputMIME, sentName, wireKind     string
 			data                              []byte
 			ptt, animated                     bool
 			legacy                            bool
 			refused                           bool
 			refreshed                         bool
 			mimeOnlyReplay                    bool
+			missingAudioFields                bool
 		}{
 			{name: "PNG document", kind: "document", mime: "image/png", filename: "image.png", title: "Quarterly report", data: []byte("\x89PNG\r\n\x1a\nfake")},
 			{name: "document path name", kind: "document", mime: "application/pdf", filename: `C:\fake\private\report.pdf`, title: "Report", data: []byte("%PDF-1.7 fake")},
 			{name: "named document with generated prefix", kind: "document", mime: "application/pdf", filename: "document_report.pdf", title: "Report", data: []byte("%PDF-1.7 fake")},
 			{name: "unnamed document", kind: "document", mime: "application/pdf", data: []byte("%PDF-1.7 fake")},
 			{name: "MP3 normal audio", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio")},
-			{name: "Opus music", kind: "audio", mime: "audio/ogg; codecs=opus", data: ogg},
-			{name: "Opus voice note", kind: "audio", mime: "audio/ogg; codecs=opus", data: ogg, ptt: true},
+			{name: "Opus music", kind: "audio", mime: "audio/ogg", inputMIME: "audio/ogg; codecs=opus", data: ogg},
+			{name: "Opus voice note", kind: "audio", mime: "audio/ogg", inputMIME: "audio/ogg; codecs=opus", data: ogg, ptt: true},
+			{name: "Opus music missing duration and waveform", kind: "audio", mime: "audio/ogg", data: ogg, missingAudioFields: true},
 			{name: "static sticker", kind: "sticker", mime: "image/webp", data: []byte("RIFF\x10\x00\x00\x00WEBPVP8 fake")},
 			{name: "animated sticker", kind: "sticker", mime: "image/webp", data: []byte("RIFF\x10\x00\x00\x00WEBPVP8 fake"), animated: true},
 			{name: "legacy MP3", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio"), legacy: true},
 			{name: "legacy MP3 without ID3", kind: "audio", mime: "audio/mpeg", data: []byte("\xff\xfb\x90\x64fake MPEG audio"), legacy: true},
-			{name: "legacy Opus", kind: "audio", mime: "audio/ogg; codecs=opus", data: ogg, legacy: true},
+			{name: "legacy Opus", kind: "audio", mime: "audio/ogg", data: ogg, legacy: true, ptt: true},
 			{name: "legacy other Ogg", kind: "audio", mime: "audio/ogg", data: []byte("OggS\x00fake non-Opus container"), legacy: true},
 			{name: "legacy WAV", kind: "audio", mime: "audio/wav", data: []byte("RIFF\x10\x00\x00\x00WAVEfake"), legacy: true},
 			{name: "legacy AAC", kind: "audio", mime: "audio/aac", data: []byte("\xff\xf1\x50\x80\x01\x7f\xfcfake"), legacy: true},
 			{name: "legacy truncated AAC", kind: "audio", data: []byte("\xff\xf1"), legacy: true, refused: true},
 			{name: "legacy unnamed document", kind: "document", mime: "application/octet-stream", data: []byte("fake document"), legacy: true},
 			{name: "legacy generated-prefix original", kind: "document", mime: "application/pdf", filename: "document_report.pdf", title: "document_report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true},
-			{name: "legacy timestamped original", kind: "document", mime: "application/pdf", filename: "document_20260904_100000_report.pdf", title: "document_20260904_100000_report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true},
+			{name: "legacy ambiguous timestamp name", kind: "document", mime: "application/pdf", filename: "document_20260904_100000_report.pdf", sentName: "file", data: []byte("%PDF-1.7 fake"), legacy: true},
+			{name: "legacy other message cache name", kind: "document", mime: "application/pdf", filename: "document_20260904_100000_OTHER1.pdf", sentName: "file", data: []byte("%PDF-1.7 fake"), legacy: true},
+			{name: "original name matches cache pattern", kind: "document", mime: "application/pdf", filename: "document_20260904_100000_OTHER1.pdf", title: "Report", data: []byte("%PDF-1.7 fake")},
+			{name: "legacy PNG behind sticker name", kind: "sticker", wireKind: "image", mime: "image/png", inputMIME: "image/webp", data: []byte("\x89PNG\r\n\x1a\nfake"), legacy: true},
 			{name: "legacy MIME-only replay", kind: "document", mime: "application/pdf", filename: "report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true, mimeOnlyReplay: true},
 			{name: "legacy unknown audio", kind: "audio", data: []byte("unknown audio bytes"), legacy: true, refused: true},
 			{name: "phone retry changes hash", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio"), refreshed: true},
 		} {
 			t.Run(fmt.Sprintf("%t/%s", batch, tc.name), func(t *testing.T) {
 				t.Setenv(storeDirEnv, t.TempDir())
+				wantKind := tc.wireKind
+				if wantKind == "" {
+					wantKind = tc.kind
+				}
+				wantName := tc.sentName
+				if wantName == "" {
+					wantName = outboundFileName(tc.filename)
+				}
+				inputMIME := tc.inputMIME
+				if inputMIME == "" {
+					inputMIME = tc.mime
+				}
 				ms := newTestMessageStore(t)
 				client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
 				b := testBridge(t, client, ms, testLogger())
@@ -73,14 +91,17 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				var packet *waE2E.Message
 				switch tc.kind {
 				case "document":
-					packet = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Mimetype: proto.String(tc.mime), FileName: proto.String(tc.filename), Title: proto.String(tc.title), URL: &common.URL, MediaKey: common.MediaKey, FileSHA256: common.FileSHA256, FileEncSHA256: common.FileEncSHA256, FileLength: &common.FileLength}}
+					packet = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Mimetype: proto.String(inputMIME), FileName: proto.String(tc.filename), Title: proto.String(tc.title), URL: &common.URL, MediaKey: common.MediaKey, FileSHA256: common.FileSHA256, FileEncSHA256: common.FileEncSHA256, FileLength: &common.FileLength}}
 				case "audio":
-					packet = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String(tc.mime), PTT: proto.Bool(tc.ptt), Seconds: proto.Uint32(2), Waveform: []byte{1, 2, 3}, URL: &common.URL, MediaKey: common.MediaKey, FileSHA256: common.FileSHA256, FileEncSHA256: common.FileEncSHA256, FileLength: &common.FileLength}}
+					packet = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String(inputMIME), PTT: proto.Bool(tc.ptt), Seconds: proto.Uint32(2), Waveform: bytes.Repeat([]byte{1}, 64), URL: &common.URL, MediaKey: common.MediaKey, FileSHA256: common.FileSHA256, FileEncSHA256: common.FileEncSHA256, FileLength: &common.FileLength}}
+					if tc.missingAudioFields {
+						packet.AudioMessage.Seconds, packet.AudioMessage.Waveform = nil, nil
+					}
 					if tc.refreshed {
 						packet.AudioMessage.Mimetype, packet.AudioMessage.PTT = proto.String("audio/ogg; codecs=opus"), proto.Bool(true)
 					}
 				case "sticker":
-					packet = &waE2E.Message{StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String(tc.mime), IsAnimated: proto.Bool(tc.animated), URL: &common.URL, MediaKey: common.MediaKey, FileSHA256: common.FileSHA256, FileEncSHA256: common.FileEncSHA256, FileLength: &common.FileLength}}
+					packet = &waE2E.Message{StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String(inputMIME), IsAnimated: proto.Bool(tc.animated), URL: &common.URL, MediaKey: common.MediaKey, FileSHA256: common.FileSHA256, FileEncSHA256: common.FileEncSHA256, FileLength: &common.FileLength}}
 				}
 				ex := extractMessage(packet, ts, "KIND1")
 				if tc.legacy {
@@ -131,8 +152,8 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				}, send: func(_ context.Context, _ types.JID, got *waE2E.Message) (whatsmeow.SendResponse, error) {
 					calls++
 					kind, part := mediaPartOf(got)
-					if kind != tc.kind {
-						t.Fatalf("wire kind=%s want=%s", kind, tc.kind)
+					if kind != wantKind {
+						t.Fatalf("wire kind=%s want=%s", kind, wantKind)
 					}
 					ctx := part.(interface{ GetContextInfo() *waE2E.ContextInfo }).GetContextInfo()
 					if ctx.GetExpiration() != 86400 || ctx.GetEphemeralSettingTimestamp() != 1710000000 {
@@ -142,11 +163,7 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 						t.Fatalf("wire MIME=%s want=%s", part.(interface{ GetMimetype() string }).GetMimetype(), tc.mime)
 					}
 					if doc := got.GetDocumentMessage(); doc != nil {
-						wantName := outboundFileName(tc.filename)
 						wantTitle := tc.title
-						if wantName == "" {
-							wantName = "file"
-						}
 						if doc.GetFileName() != wantName || doc.GetTitle() != wantTitle {
 							t.Fatalf("document name/title=%q/%q want=%q/%q", doc.GetFileName(), doc.GetTitle(), wantName, wantTitle)
 						}
@@ -155,7 +172,10 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 						if audio.GetPTT() != tc.ptt {
 							t.Fatalf("PTT=%t want=%t", audio.GetPTT(), tc.ptt)
 						}
-						if !tc.legacy && !tc.refreshed && (audio.GetSeconds() != 2 || !bytes.Equal(audio.Waveform, []byte{1, 2, 3})) {
+						if (tc.name == "legacy Opus" || tc.missingAudioFields) && (audio.GetSeconds() != 2 || len(audio.Waveform) != 64) {
+							t.Fatal("Opus duration/waveform was not computed")
+						}
+						if !tc.legacy && !tc.refreshed && !tc.missingAudioFields && (audio.GetSeconds() != 2 || !bytes.Equal(audio.Waveform, bytes.Repeat([]byte{1}, 64))) {
 							t.Fatal("audio presentation changed")
 						}
 					}
@@ -198,10 +218,10 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				if err := json.Unmarshal([]byte(presentation), &p); err != nil {
 					t.Fatal(err)
 				}
-				if kind != tc.kind || p.MIME != tc.mime {
-					t.Fatalf("archive=%s/%s want=%s/%s", kind, p.MIME, tc.kind, tc.mime)
+				if kind != wantKind || p.MIME != tc.mime {
+					t.Fatalf("archive=%s/%s want=%s/%s", kind, p.MIME, wantKind, tc.mime)
 				}
-				if tc.kind == "document" && name != outboundFileName(tc.filename) {
+				if tc.kind == "document" && name != wantName {
 					t.Fatalf("archive filename=%s", name)
 				}
 				if ok, _, _, path, err := b.downloadMedia(t.Context(), "KIND1", efChat); !ok || err != nil || path != cached {

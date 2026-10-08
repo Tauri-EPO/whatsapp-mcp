@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"mime"
+	"strings"
+	"unicode"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 )
@@ -9,6 +13,7 @@ import (
 // mediaPresentation retains recipient-visible metadata, without copying CDN
 // credentials. NULL on old rows means it cannot be reconstructed from history.
 type mediaPresentation struct {
+	Hash     string  `json:"sha256,omitempty"`
 	MIME     string  `json:"mime,omitempty"`
 	Name     *string `json:"name,omitempty"`
 	Title    *string `json:"title,omitempty"`
@@ -25,7 +30,7 @@ type messageMediaOptions struct {
 }
 
 func mediaPresentationOf(msg *waE2E.Message) *mediaPresentation {
-	_, part := mediaPartOf(msg)
+	kind, part := mediaPartOf(msg)
 	if part == nil {
 		return nil
 	}
@@ -38,14 +43,83 @@ func mediaPresentationOf(msg *waE2E.Message) *mediaPresentation {
 		p.Name, p.Title = m.FileName, m.Title
 	case *waE2E.AudioMessage:
 		p.PTT, p.Seconds = m.PTT, m.Seconds
-		p.Waveform = append([]byte(nil), m.Waveform...)
+		p.Waveform = m.Waveform // validated clones only an exact 64-byte waveform
 	case *waE2E.StickerMessage:
 		p.Animated = m.IsAnimated
 	}
 	if p.MIME == "" && p.Name == nil && p.Title == nil && p.PTT == nil && p.Seconds == nil && len(p.Waveform) == 0 && p.Animated == nil {
 		return nil
 	}
-	return p
+	return p.forFile(kind, part.GetFileSHA256())
+}
+
+func (p *mediaPresentation) forFile(kind string, sha []byte) *mediaPresentation {
+	if p == nil || len(sha) == 0 || len(sha) > 64 {
+		return nil
+	}
+	hash := hex.EncodeToString(sha)
+	if p.Hash != "" && p.Hash != hash {
+		return nil
+	}
+	q := p.validated(kind)
+	q.Hash = hash
+	return q
+}
+
+// Validate at ingress and again at the wire sink, including old database rows.
+func (p *mediaPresentation) validated(kind string) *mediaPresentation {
+	if p == nil {
+		return nil
+	}
+	q := *p
+	q.MIME = presentationMIME(kind, p.MIME)
+	if p.Name != nil {
+		name := cleanOutboundName(*p.Name)
+		q.Name = &name
+	}
+	if p.Title != nil {
+		title := cleanOutboundName(*p.Title)
+		q.Title = &title
+	}
+	if p.Seconds != nil && *p.Seconds > 86400 {
+		q.Seconds = nil
+	}
+	q.Waveform = nil
+	if len(p.Waveform) == 64 {
+		q.Waveform = append([]byte(nil), p.Waveform...)
+	}
+	return &q
+}
+
+func presentationMIME(kind, raw string) string {
+	if len(raw) > 255 || strings.IndexFunc(raw, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return ""
+	}
+	parsed, params, err := mime.ParseMediaType(raw)
+	if err != nil || len(params) != 0 || parsed != strings.ToLower(raw) {
+		return ""
+	}
+	allowed := kind == "document" || (kind == "audio" && strings.HasPrefix(parsed, "audio/")) ||
+		(kind == "sticker" && parsed == "image/webp") ||
+		(kind == "image" && (parsed == "image/jpeg" || parsed == "image/png" || parsed == "image/gif" || parsed == "image/webp")) ||
+		(kind == "video" && (parsed == "video/mp4" || parsed == "video/quicktime" || parsed == "video/avi"))
+	if !allowed {
+		return ""
+	}
+	return parsed
+}
+
+func readMediaPresentation(raw, kind string, sha []byte) *mediaPresentation {
+	var p *mediaPresentation
+	if len(raw) > 4096 || json.Unmarshal([]byte(raw), &p) != nil || p == nil {
+		bridgeLog.Debugf("Ignoring invalid stored media presentation")
+		return nil
+	}
+	if p.Hash == "" || p.Hash != hex.EncodeToString(sha) {
+		bridgeLog.Debugf("Ignoring stored media presentation without a matching file hash")
+		return nil
+	}
+	return p.validated(kind)
 }
 
 func (p *mediaPresentation) column() any {

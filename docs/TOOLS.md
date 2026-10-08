@@ -1070,14 +1070,30 @@ default. `/api/send` keeps the MIME implied by the caller filename, including
 files prepared from `media_base64` or `upload_id`; its dry-run preview agrees.
 
 Forwarding retains the stored category: a document called `image.png` stays a
-document, and a sticker stays a sticker. New archive rows retain the original
+document, and a WebP sticker stays a sticker (a legacy non-WebP sticker cache
+is forwarded as an image with its detected MIME). New archive rows retain the original
 document name/title, audio MIME/PTT/duration/waveform and sticker animation.
 An unnamed document uses `file`, without exposing its cache timestamp or source
-message ID. Audio bytes are forwarded without Opus conversion or forced PTT.
+message ID. Names/titles use the outbound filename sanitizer: controls, bidi
+controls and path characters are stripped, and each is capped at 200 characters.
+Waveforms have exactly 64 bytes, duration is within 0–86400 seconds, and MIME
+is a parameter-free type/subtype allowed for the category; invalid fields are dropped.
+Audio bytes are forwarded without conversion. Stored PTT is retained; legacy
+Ogg Opus stays a voice note, with duration and waveform computed from the bytes.
+Missing Opus duration/waveform in a newer row is computed too.
 Older rows have no presentation metadata: document names use the stored name
 (generated timestamp names are suppressed), audio MIME is detected from bytes,
-and unknown PTT defaults to ordinary audio. An unknown legacy audio codec fails
+and legacy non-Opus audio defaults to ordinary audio. An unknown legacy audio codec fails
 before upload. Existing cache names and purge lookups stay unchanged.
+
+The bridge validates presentation on storage and again on forwarding, and ties
+it to the file hash. Invalid JSON or a mismatching hash uses the legacy fallback.
+GIF playback, PTV semantics and view-once behavior are not reproduced by forwarding;
+the view-once placeholder caption is forwarded as text, as before.
+
+New unnamed inbound documents store an empty filename (`null` in MCP
+`list_messages`/`list_media`) instead of a generated cache name. `/api/send`
+also stores the presentation it actually sends, so a later forward preserves it.
 
 An unsafe media identity answers `media_refused`; missing bytes or download
 fields answer `media_unavailable`. Do not retry those permanent media failures.

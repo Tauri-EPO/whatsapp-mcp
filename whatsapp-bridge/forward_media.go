@@ -32,7 +32,10 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 		upload = whatsmeow.MediaDocument
 		_, contentType, _ = classifyMediaPath(source.filename)
 	case "sticker":
-		upload, contentType = whatsmeow.MediaImage, "image/webp"
+		upload, contentType = whatsmeow.MediaImage, sniffMIME(data)
+		if isWebP(data) {
+			contentType = "image/webp"
+		}
 	case "audio":
 		upload, contentType = whatsmeow.MediaAudio, sniffMIME(data)
 		switch contentType {
@@ -42,14 +45,6 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 			contentType = "audio/wav"
 		case "application/ogg":
 			contentType = "audio/ogg"
-			// The first Ogg packet declares its codec. The duration analyser
-			// also accepts non-Opus Ogg, so it cannot identify that codec.
-			if len(data) >= 27 && data[26] > 0 && data[5]&1 == 0 {
-				start := 27 + int(data[26])
-				if start+19 <= len(data) && data[27] >= 19 && string(data[start:start+8]) == "OpusHead" {
-					contentType = "audio/ogg; codecs=opus"
-				}
-			}
 		}
 		if len(data) >= 7 && data[0] == 0xff && data[1]&0xf6 == 0xf0 {
 			contentType = "audio/aac"
@@ -64,8 +59,8 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 	default:
 		return "", "", fmt.Errorf("unsupported forwarded media kind: %s", source.mediaType)
 	}
-	if source.mediaType != "image" && source.mediaType != "video" && source.presentation != nil && source.presentation.MIME != "" {
-		contentType = source.presentation.MIME
+	if p := source.presentation.validated(source.mediaType); p != nil && p.MIME != "" && source.mediaType != "image" && source.mediaType != "video" && (source.mediaType != "sticker" || isWebP(data)) {
+		contentType = p.MIME
 	}
 	if source.mediaType == "audio" {
 		parsed, _, err := mime.ParseMediaType(contentType)
@@ -81,17 +76,35 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 	if !ok {
 		return buildOutboundMedia(kind, contentType, path, data, upload, caption, quote, mentions)
 	}
-	p := source.presentation
+	p := source.presentation.validated(source.mediaType)
 	switch source.mediaType {
 	case "audio":
 		audio := &waE2E.AudioMessage{Mimetype: proto.String(contentType), URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileSHA256: upload.FileSHA256, FileEncSHA256: upload.FileEncSHA256, FileLength: &upload.FileLength, PTT: proto.Bool(false)}
 		if p != nil {
 			audio.PTT, audio.Seconds, audio.Waveform = p.PTT, p.Seconds, p.Waveform
 		}
-		// Unknown legacy PTT stays false; a cache extension cannot prove a
-		// voice note. Captured duration/waveform are reused without transcoding.
+		if isOggOpus(data) {
+			if p == nil {
+				audio.PTT = proto.Bool(true)
+			}
+			if audio.Seconds == nil || len(audio.Waveform) != 64 {
+				seconds, waveform, err := analyzeOggOpus(data)
+				if err != nil {
+					return nil, "", err
+				}
+				if audio.Seconds == nil && seconds <= 86400 {
+					audio.Seconds = proto.Uint32(seconds)
+				}
+				if len(audio.Waveform) != 64 {
+					audio.Waveform = waveform
+				}
+			}
+		}
 		return &waE2E.Message{AudioMessage: audio}, "", nil
 	case "sticker":
+		if !isWebP(data) {
+			return buildOutboundMedia(whatsmeow.MediaImage, contentType, path, data, upload, caption, quote, mentions)
+		}
 		sticker := &waE2E.StickerMessage{Mimetype: proto.String(contentType), URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileSHA256: upload.FileSHA256, FileEncSHA256: upload.FileEncSHA256, FileLength: &upload.FileLength}
 		if p != nil {
 			sticker.IsAnimated = p.Animated
@@ -110,21 +123,48 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 		}
 		// Legacy unnamed documents used a generated name in filename. Never
 		// expose that source ID/timestamp or the on-disk cache basename.
-		if (p == nil || p.Name == nil) && len(name) >= 24 && strings.HasPrefix(name, "document_") && (name[24:] == "" || name[24:] == "_"+source.id) {
-			if _, err := time.Parse("20060102_150405", name[9:24]); err == nil {
-				name, title = "", ""
-			}
-		}
-		name = outboundFileName(name)
-		if p == nil && title != "" {
-			title = outboundFileName(title)
+		if (p == nil || p.Name == nil) && generatedMediaName(name) {
+			name, title = "", ""
 		}
 		msg, text, err := buildOutboundMedia(kind, contentType, name, data, upload, caption, quote, mentions)
 		if err == nil {
-			msg.DocumentMessage.Title = proto.String(title)
+			msg.DocumentMessage.Title = proto.String(cleanOutboundName(title))
 		}
 		return msg, text, err
 	default:
 		return buildOutboundMedia(kind, contentType, path, data, upload, caption, quote, mentions)
 	}
+}
+
+func isWebP(data []byte) bool {
+	return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
+}
+
+func isOggOpus(data []byte) bool {
+	if len(data) < 27 || string(data[:4]) != "OggS" || data[26] == 0 || data[5]&1 != 0 {
+		return false
+	}
+	start := 27 + int(data[26])
+	return start+19 <= len(data) && data[27] >= 19 && string(data[start:start+8]) == "OpusHead"
+}
+
+func generatedMediaName(name string) bool {
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	for _, kind := range []string{"document", "image", "video", "audio", "sticker"} {
+		if !strings.HasPrefix(name, kind+"_") {
+			continue
+		}
+		rest := strings.TrimPrefix(name, kind+"_")
+		if len(rest) < 15 {
+			return false
+		}
+		if _, err := time.Parse("20060102_150405", rest[:15]); err != nil {
+			return false
+		}
+		suffix := rest[15:]
+		return suffix == "" || ((suffix[0] == '_' || suffix[0] == '.') && len(suffix) > 1)
+	}
+	return false
 }

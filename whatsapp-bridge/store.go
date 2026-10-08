@@ -518,7 +518,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	insertResult, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
-			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length
+			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation
 		)
 		SELECT
 			msg.id,
@@ -534,7 +534,9 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			msg.media_key,
 			msg.file_sha256,
 			msg.file_enc_sha256,
-			msg.file_length
+			msg.file_length,
+			msg.direct_path,
+			msg.media_presentation
 		FROM messages msg
 		JOIN tmp_lid_to_phone m ON m.lid_jid = msg.chat_jid;
 	`)

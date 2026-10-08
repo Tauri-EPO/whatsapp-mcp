@@ -18,7 +18,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -240,7 +239,8 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 func (store *MessageStore) messageContentLookup(id, chatJID string) (forwardSource, bool, error) {
 	source := forwardSource{id: id}
 	var presentation sql.NullString
-	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation)
+	var sha []byte
+	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256 FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation, &sha)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return forwardSource{}, false, nil
@@ -248,9 +248,7 @@ func (store *MessageStore) messageContentLookup(id, chatJID string) (forwardSour
 		return forwardSource{}, false, err
 	}
 	if presentation.Valid {
-		if err := json.Unmarshal([]byte(presentation.String), &source.presentation); err != nil {
-			return forwardSource{}, false, fmt.Errorf("invalid media presentation: %w", err)
-		}
+		source.presentation = readMediaPresentation(presentation.String, source.mediaType, sha)
 	}
 	return source, true, nil
 }

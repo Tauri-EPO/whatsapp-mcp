@@ -67,8 +67,8 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	// Keep an absent document name absent: a replay must not replace an
 	// original name with extractMediaInfo's generated cache fallback.
 	if _, part := mediaPartOf(e.inner); part != nil {
-		if doc, ok := part.(*waE2E.DocumentMessage); ok && doc.GetFileName() == "" {
-			e.filename = ""
+		if doc, ok := part.(*waE2E.DocumentMessage); ok {
+			e.filename = cleanOutboundName(doc.GetFileName())
 		}
 	}
 	e.directPath = extractMediaDirectPath(e.inner)

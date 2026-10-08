@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // defaultOutboxSubpath is appended to the user's home directory when no
@@ -188,6 +189,16 @@ func pathHasPrefix(child, parent string) bool {
 // If the path ends in a separator, or is otherwise nameless, we fall back to a
 // neutral constant rather than sending an empty filename.
 func outboundFileName(mediaPath string) string {
+	name := cleanOutboundName(mediaPath)
+	if name == "" {
+		return "file"
+	}
+	return name
+}
+
+// The same bounded display-name sanitizer serves inbound metadata and wire
+// filenames/titles. Empty metadata stays empty; the filename sink uses "file".
+func cleanOutboundName(mediaPath string) string {
 	name := mediaPath
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
 		name = name[i+1:]
@@ -197,9 +208,18 @@ func outboundFileName(mediaPath string) string {
 	if i := strings.LastIndex(name, ":"); i >= 0 {
 		name = name[i+1:]
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "file"
+	var bounded strings.Builder
+	bounded.Grow(min(len(name), 800))
+	count := 0
+	for _, r := range name {
+		if unicode.IsControl(r) || reordersText(r) || r == 0x200e || r == 0x200f || r == 0x061c || r == 0x2028 || r == 0x2029 || strings.ContainsRune(`<>:"/\|?*`, r) {
+			continue
+		}
+		if count == 200 {
+			break
+		}
+		bounded.WriteRune(r)
+		count++
 	}
-	return name
+	return strings.TrimSpace(bounded.String())
 }
