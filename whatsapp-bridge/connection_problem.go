@@ -166,6 +166,22 @@ func (b *Bridge) persistConnectionProblemLocked() {
 func (b *Bridge) clearConnectionProblem() {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
+	b.clearConnectionProblemLocked()
+}
+
+// Snapshots are immutable. A recovery may clear only the restriction it
+// validated, never a newer SDK event received while the operator was checking.
+func (b *Bridge) clearConnectionProblemIf(expected *ConnectionProblem) bool {
+	b.connectionMu.Lock()
+	defer b.connectionMu.Unlock()
+	if b.connectionProblem != expected {
+		return false
+	}
+	b.clearConnectionProblemLocked()
+	return true
+}
+
+func (b *Bridge) clearConnectionProblemLocked() {
 	if b.StoreRoot != nil {
 		if err := b.StoreRoot.Remove(connectionProblemFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			b.problemPersistenceFailed = true

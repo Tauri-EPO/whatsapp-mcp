@@ -27,6 +27,7 @@ type fakeOperatorClient struct {
 	connects, disconnects, codes, responses, confirmations atomic.Int64
 	codeStarted, codeRelease                               chan struct{}
 	connectErr                                             error
+	responseHook                                           func() error
 }
 
 func newFakeOperatorClient() *fakeOperatorClient {
@@ -103,6 +104,9 @@ func (c *fakeOperatorClient) PairPhone(ctx context.Context, phone string, notify
 }
 func (c *fakeOperatorClient) SendPasskeyResponse(context.Context, *types.WebAuthnResponse) error {
 	c.responses.Add(1)
+	if c.responseHook != nil {
+		return c.responseHook()
+	}
 	return nil
 }
 func (c *fakeOperatorClient) SendPasskeyConfirmation(context.Context) error {
@@ -511,5 +515,70 @@ func TestOperatorPasskeyFailureReasonSurvivesActorAndClearsOnRestart(t *testing.
 	f.p.mu.Unlock()
 	if reason != "" {
 		t.Fatal("new attempt retained old failure")
+	}
+}
+
+func TestOperatorRestartPreservesBanArrivingAfterValidation(t *testing.T) {
+	f := newOperatorPairingFixture(t)
+	f.b.cancel()
+	<-f.p.done
+	f.b.problemNow = func() time.Time { return time.Now().Add(-2 * time.Hour) }
+	f.b.recordConnectionProblem(402, 101, time.Hour)
+	f.b.problemNow = nil
+	f.p.now = func() time.Time {
+		f.b.recordConnectionProblem(402, 101, time.Hour)
+		return time.Now()
+	}
+	if status, _ := f.request(t, "POST", "pairing/restart", fakeOperatorToken, ""); status != 409 {
+		t.Fatalf("restart discarded a newer ban: status=%d", status)
+	}
+	problem, _ := f.b.connectionSnapshot()
+	if problem == nil || problem.ExpiresAt == nil || !problem.ExpiresAt.After(time.Now()) {
+		t.Fatal("new account restriction was lost")
+	}
+}
+
+func TestOperatorPasskeySubmissionAdmitsSynchronousSDKCompletion(t *testing.T) {
+	f := newOperatorPairingFixture(t)
+	f.client.items <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{PublicKey: &types.WebAuthnPublicKey{Challenge: []byte("fake-challenge"), RelyingPartID: "whatsapp.com", Timeout: 60000}}}
+	state := f.stateHTTP(t, "passkey_required")
+	f.client.responseHook = func() error {
+		if !f.p.beginCompletion(f.client) {
+			return errors.New("SDK completion rejected during passkey submission")
+		}
+		f.paired.Store(true)
+		f.p.connectionEvent(&events.PairSuccess{})
+		return nil
+	}
+	encoded, _ := json.Marshal(map[string]any{"generation": state.Generation, "assertion": fakeOperatorAssertion()})
+	if status, _ := f.request(t, "POST", "pairing/passkey/response", fakeOperatorToken, string(encoded)); status != 202 {
+		t.Fatalf("SDK completion during submission: status=%d", status)
+	}
+	if state := f.p.snapshot(); state.State != "paired" || state.Passkey != nil {
+		t.Fatal("submission overwrote completed pairing")
+	}
+}
+
+func TestOperatorPasskeySubmissionFailureRestoresOnlyUnchangedChallenge(t *testing.T) {
+	f := newOperatorPairingFixture(t)
+	f.client.items <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{PublicKey: &types.WebAuthnPublicKey{Challenge: []byte("fake-challenge"), RelyingPartID: "whatsapp.com", Timeout: 60000}}}
+	state := f.stateHTTP(t, "passkey_required")
+	f.client.responseHook = func() error { return errors.New("fake rejected submission") }
+	encoded, _ := json.Marshal(map[string]any{"generation": state.Generation, "assertion": fakeOperatorAssertion()})
+	if status, _ := f.request(t, "POST", "pairing/passkey/response", fakeOperatorToken, string(encoded)); status != 502 {
+		t.Fatalf("failed submission: status=%d", status)
+	}
+	if state := f.p.snapshot(); state.State != "passkey_required" || state.Passkey == nil {
+		t.Fatal("unchanged challenge cannot be retried")
+	}
+	f.client.responseHook = func() error {
+		f.p.observe(state.Generation, whatsmeow.QRChannelItem{Event: "error", Error: errors.New("fake asynchronous refusal")})
+		return errors.New("fake rejected submission")
+	}
+	if status, _ := f.request(t, "POST", "pairing/passkey/response", fakeOperatorToken, string(encoded)); status != 502 {
+		t.Fatalf("asynchronously failed submission: status=%d", status)
+	}
+	if state := f.p.snapshot(); state.State != "passkey_failed" || state.Passkey != nil {
+		t.Fatal("rollback revived an asynchronously refused challenge")
 	}
 }

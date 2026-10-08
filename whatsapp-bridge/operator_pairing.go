@@ -458,7 +458,10 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")
 		return
 	}
-	p.b.clearConnectionProblem()
+	if !p.b.clearConnectionProblemIf(problem) {
+		writeErrorCode(w, 409, "connection_state_changed", "WhatsApp restriction changed; read the current state before retrying")
+		return
+	}
 	p.b.connectionMu.Lock()
 	failed := p.b.problemPersistenceFailed
 	p.b.connectionMu.Unlock()
@@ -526,18 +529,33 @@ func (p *operatorPairing) passkeyResponse(w http.ResponseWriter, r *http.Request
 		writeErrorCode(w, 400, "invalid_assertion", "Assertion does not match the WhatsApp challenge and relying party")
 		return
 	}
+	p.mu.Lock()
+	valid = p.attemptActiveLocked() && !p.paired() && p.client == client && p.state.Generation == body.Generation && p.state.State == "passkey_required" && p.state.Passkey == request && p.state.StepExpiresAt != nil && p.now().Before(*p.state.StepExpiresAt)
+	if valid {
+		// The SDK can complete SkipHandoffUX inside this call. Publish an
+		// admissible state before sending and never overwrite its callbacks.
+		p.state.State, p.state.Passkey = "passkey_submitted", nil
+	}
+	p.mu.Unlock()
+	if !valid {
+		writeErrorCode(w, 409, "passkey_unavailable", "Passkey attempt changed or expired")
+		return
+	}
 	ctx, cancel := p.actionContext(r)
 	defer cancel()
 	if err := client.SendPasskeyResponse(ctx, &body.Assertion); err != nil {
+		p.mu.Lock()
+		if p.attemptActiveLocked() && p.state.Generation == body.Generation && p.client == client && p.state.State == "passkey_submitted" && !p.completing && !p.paired() {
+			p.state.State, p.state.Passkey = "passkey_required", request
+		}
+		p.mu.Unlock()
 		writeErrorCode(w, 502, "passkey_failed", "WhatsApp refused the assertion")
 		return
 	}
 	p.mu.Lock()
-	if p.state.Generation == body.Generation && p.state.State == "passkey_required" {
-		p.state.State, p.state.Passkey = "passkey_submitted", nil
-	}
+	state := p.state.State
 	p.mu.Unlock()
-	writeJSON(w, 202, map[string]string{"state": "passkey_submitted"})
+	writeJSON(w, 202, map[string]string{"state": state})
 }
 
 func (p *operatorPairing) passkeyConfirm(w http.ResponseWriter, r *http.Request) {

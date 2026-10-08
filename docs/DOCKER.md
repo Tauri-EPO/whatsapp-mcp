@@ -103,8 +103,9 @@ have not been verified against a paired phone; no bypass is promised.
 
 By default the bridge prints the QR code to stdout, which `docker compose logs`
 captures. These QR codes are credentials: set `WHATSAPP_PAIRING_STDOUT=false`
-when logs leave the host, and use operator HTTP. The operator compose override
-defaults to false; the base compose file preserves the existing log flow.
+when logs leave the host, and use operator HTTP. Setting an operator bind
+defaults stdout pairing to false, including outside Compose; without an
+operator the existing log flow remains the default.
 On first start with log pairing:
 
 ```bash
@@ -171,7 +172,8 @@ the account restriction; restarting does not bypass WhatsApp enforcement.
 `GET health`/`GET ready` are credential-free and authenticated here. All operator
 responses use `Cache-Control: no-store`. Health and metrics never expose a QR,
 phone number, pairing code, assertion or confirmation code. INFO audit lines
-contain only the fixed mutating route and response status. Limits are 120
+contain only the fixed mutating route, response status and socket peer;
+authentication, origin and rate-limit refusals log at DEBUG. Limits are 120
 requests/minute per socket peer before authentication and 60/minute for the
 authenticated token; forwarded headers do not change the peer. Browser Origin
 must exactly match the listener's scheme and Host, and Host must be explicitly
@@ -214,18 +216,19 @@ resolved for that alias **on the operator network** and includes the alias in
 its Host allow-list. It publishes no operator host port. Port 8080 stays on
 loopback; enabling the operator refuses a widened `WHATSAPP_BRIDGE_BIND`.
 The MCP container shares the bridge namespace, so joining a private network
-alone does not isolate the agent plane. This override also binds MCP port 8000
-to `whatsapp-mcp-data` on the project's default network, including its image
-healthcheck; it cannot answer on the operator interface. The base MCP host-port
-publication stays unchanged. Without this override the base MCP listener is
-`0.0.0.0`, reachable on every network joined to the shared namespace.
+does not isolate the agent plane. MCP port 8000 remains bound to `0.0.0.0`,
+reachable on every joined network and authenticated with the MCP bearer token.
+The override disables MCP `/metrics` to avoid exposing unauthenticated counts.
+Re-enable metrics only with a separate `WHATSAPP_MCP_METRICS_TOKEN` in a custom
+override. The MCP host-port publication stays unchanged; a split namespace and
+proxy-only agent listener remain separate work in #634.
 
 Every member of a **shared** operator network can reach every operator listener
 on that network; separate tokens authenticate each instance. A per-instance
-operator network limits that reachability too. The default data-network alias
-must remain unique within each project's private default network. If a proxy
+operator network limits that reachability too. Shared-network peers can also
+reach each MCP listener; its token is the authentication boundary. If a proxy
 network is added, use another alias there: 8090 accepts only on the operator
-interface, while 8080 and 8000 refuse connections to the proxy interface.
+interface and 8080 remains loopback, while MCP 8000 remains token-gated.
 
 For a file-backed operator secret, mount the file **only on the bridge**,
 outside `/app/store` and `/app/outbox`. The MCP process uses the same uid and
