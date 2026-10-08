@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -224,7 +226,7 @@ func writeJSON(w http.ResponseWriter, code int, body interface{}) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func (b *Bridge) startRESTServer(port int, token string) {
+func (b *Bridge) startRESTServer(port int, token string) error {
 
 	handler := b.newRESTMux(port, token)
 
@@ -232,6 +234,10 @@ func (b *Bridge) startRESTServer(port int, token string) {
 	// WHATSAPP_BRIDGE_BIND widens that on purpose (rest_bind.go).
 	serverAddr := listenAddr(b.RESTBind, port)
 	b.Log.Infof("Starting REST API server on %s...", serverAddr)
+	listener, err := net.Listen("tcp", serverAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", serverAddr, err)
+	}
 
 	// Create server with timeouts for stability
 	server := &http.Server{
@@ -246,8 +252,9 @@ func (b *Bridge) startRESTServer(port int, token string) {
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			b.Log.Errorf("REST API server error: %v", err)
 		}
 	}()
+	return nil
 }

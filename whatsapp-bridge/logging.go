@@ -7,7 +7,7 @@ package main
 // `docker compose logs` mixed two formats. bridgeLog is the single logger
 // for code paths that do not receive one explicitly (store, media download,
 // REST handlers, webhook delivery). It is write-once configuration, set by
-// initLogging() in main() from WHATSAPP_LOG_LEVEL, and Noop in tests.
+// initLogging() in run() before configuration validation from WHATSAPP_LOG_LEVEL, and Noop in tests.
 //
 // Deliberate exceptions that still write to stdout directly: the first-run
 // token banner (auth.go) and the pairing QR code (printQRCode), which are

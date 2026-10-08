@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -150,17 +151,17 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 	}
 }
 
-// loadBridgeSwitches is the same parse over the real environment.
+// Switch parsing also accepts the real environment reader.
 func TestLoadBridgeSwitchesReadsTheEnvironment(t *testing.T) {
 	t.Setenv(webhookEnabledEnv, "off")
 	t.Setenv(metricsEnv, "treu")
-	if _, err := loadBridgeSwitches(); err == nil || !strings.Contains(err.Error(), metricsEnv) {
+	if _, err := parseBridgeSwitches(os.Getenv); err == nil || !strings.Contains(err.Error(), metricsEnv) {
 		t.Fatalf("error = %v, want one naming %s", err, metricsEnv)
 	}
 	t.Setenv(metricsEnv, "")
 	t.Setenv(forwardSelfEnv, "")
 	t.Setenv(mediaAutoDownloadEnv, "")
-	sw, err := loadBridgeSwitches()
+	sw, err := parseBridgeSwitches(os.Getenv)
 	if err != nil || sw.WebhookEnabled || !sw.Metrics || !sw.ForwardSelf || !sw.MediaAutoDownload {
 		t.Fatalf("switches = %+v, %v", sw, err)
 	}
