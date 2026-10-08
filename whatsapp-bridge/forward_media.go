@@ -134,7 +134,10 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 		// Legacy unnamed documents used a generated name in filename. Never
 		// expose that source ID/timestamp or the on-disk cache basename.
 		if (p == nil || p.Name == nil) && generatedMediaName(name) {
-			name, title = "", ""
+			name = ""
+			if p == nil || p.Title == nil {
+				title = ""
+			}
 		}
 		if p == nil && title != "" {
 			title = outboundFileName(title)

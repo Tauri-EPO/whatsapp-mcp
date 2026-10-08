@@ -31,6 +31,7 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 			refused                           bool
 			refreshed                         bool
 			mimeOnlyReplay                    bool
+			titleOnlyReplay                   bool
 			missingAudioFields                bool
 			boundedNameReplay, staleCache     bool
 		}{
@@ -58,6 +59,7 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 			{name: "original name matches cache pattern", kind: "document", mime: "application/pdf", filename: "document_20260904_100000_OTHER1.pdf", title: "Report", data: []byte("%PDF-1.7 fake")},
 			{name: "legacy PNG behind sticker name", kind: "sticker", wireKind: "image", mime: "image/png", inputMIME: "image/webp", data: []byte("\x89PNG\r\n\x1a\nfake"), legacy: true},
 			{name: "legacy MIME-only replay", kind: "document", mime: "application/pdf", filename: "report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true, mimeOnlyReplay: true},
+			{name: "legacy unnamed document title replay", kind: "document", mime: "application/pdf", title: "Archived report", data: []byte("%PDF-1.7 fake"), legacy: true, titleOnlyReplay: true},
 			{name: "legacy unknown audio", kind: "audio", data: []byte("unknown audio bytes"), legacy: true, refused: true},
 			{name: "phone retry changes hash", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio"), refreshed: true},
 			{name: "bounded name retains PDF cache", kind: "document", mime: "application/pdf", filename: strings.Repeat("n", 201) + ".pdf", title: "Report", sentName: strings.Repeat("n", 196) + ".pdf", data: []byte("%PDF-1.7 fake"), legacy: true, boundedNameReplay: true},
@@ -128,8 +130,11 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 						return persistMessage(w, "KIND1", efChat, "x", ts, false, ex, false, testLogger())
 					})
 				}
-				if tc.mimeOnlyReplay || tc.boundedNameReplay || tc.staleCache {
+				if tc.mimeOnlyReplay || tc.titleOnlyReplay || tc.boundedNameReplay || tc.staleCache {
 					replay := proto.Clone(packet).(*waE2E.Message)
+					if tc.titleOnlyReplay {
+						replay.DocumentMessage.FileName = nil
+					}
 					if tc.mimeOnlyReplay {
 						replay.DocumentMessage.FileName, replay.DocumentMessage.Title = nil, nil
 					}
@@ -263,8 +268,8 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				if kind != wantKind || p.MIME != tc.mime {
 					t.Fatalf("archive=%s/%s want=%s/%s", kind, p.MIME, wantKind, tc.mime)
 				}
-				if tc.kind == "document" && name != wantName {
-					t.Fatalf("archive filename=%s", name)
+				if tc.kind == "document" && (name != wantName || p.Title == nil || *p.Title != tc.title) {
+					t.Fatalf("archive filename=%s title=%v", name, p.Title)
 				}
 				if ok, _, _, path, err := b.downloadMedia(t.Context(), "KIND1", efChat); !ok || err != nil || path != cached {
 					t.Fatalf("cache path=%s err=%v", path, err)
