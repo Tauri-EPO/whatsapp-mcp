@@ -100,6 +100,15 @@ type Bridge struct {
 	// group_events.go). 0 disables the pass, and group_members then only grows
 	// from /api/group/members, group events and group messages.
 	GroupRosterSync time.Duration
+	// SessionKeepalive is how often the device is briefly marked available so
+	// WhatsApp counts it as in use (WHATSAPP_SESSION_KEEPALIVE_HOURS,
+	// session_keepalive.go). 0 disables it, and WhatsApp then logs the device
+	// out about a month after pairing.
+	SessionKeepalive time.Duration
+	// sessionPresence and sessionKeepaliveTiming are test seams: the presence
+	// sender (nil = the client) and the loop's waits (zero = the defaults).
+	sessionPresence        presenceSender
+	sessionKeepaliveTiming sessionKeepaliveTiming
 	// StreamReplacedDelay is how long the reconnect after a StreamReplaced event
 	// waits, so this bridge does not ping-pong with the session that took its
 	// slot (events.go). Set once at startup; tests shorten it on their own
@@ -183,6 +192,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		Webhook:             newWebhookSender(bridgeToken, switches.WebhookEnabled),
 		RESTBind:            defaultBridgeBind,
 		GroupRosterSync:     groupRosterSyncInterval,
+		SessionKeepalive:    sessionKeepaliveInterval,
 		StreamReplacedDelay: defaultStreamReplacedDelay,
 
 		ReconnectInitialBackoff: defaultReconnectInitialBackoff,

@@ -273,6 +273,12 @@ func main() {
 		return
 	}
 
+	sessionKeepalive, keepaliveErr := resolveSessionKeepalive(os.Getenv(sessionKeepaliveEnv))
+	if keepaliveErr != nil {
+		logger.Errorf("%v", keepaliveErr)
+		return
+	}
+
 	// Operation-level access control (read_only.go). Parsed before the REST
 	// server starts; a value we cannot read stops the bridge instead of
 	// leaving the mutating endpoints open.
@@ -304,6 +310,7 @@ func main() {
 	bridge.MediaRetention = mediaRetention
 	bridge.MediaAutoDownloadStatus = statusMedia
 	bridge.GroupRosterSync = rosterSync
+	bridge.SessionKeepalive = sessionKeepalive
 	bridge.ReadOnly = readOnly
 	bridge.Tools = tools
 
@@ -329,7 +336,9 @@ func main() {
 		bridge.MediaAutoDownload && bridge.MediaAutoDownloadStatus, retentionSummary(bridge.MediaRetention))
 	logger.Infof("Group roster sync: %s", groupRosterSyncSummary(bridge.GroupRosterSync))
 	go bridge.runMediaRetention()
+	logger.Infof("Session keepalive: %s", sessionKeepaliveSummary(bridge.SessionKeepalive))
 	go bridge.runGroupRosterSync()
+	go bridge.runSessionKeepalive()
 
 	// Print the one-time setup banner immediately, before attempting to
 	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
