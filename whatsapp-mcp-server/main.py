@@ -2022,6 +2022,12 @@ def list_media(
     false entry can still be fetched with download_media. Pointer rows
     (reactions, poll votes) and plain text never appear.
 
+    When using this listing to drive deletions, continue by cursor, never by
+    numbered page: removing cached files can change the min_bytes matches and
+    numbered offsets can skip files. Start with
+    list_media(min_bytes=1024, limit=50), process its items, then continue with
+    list_media(min_bytes=1024, limit=50, cursor=previous["next_cursor"]).
+
     Returns {"items": [...], "next_cursor": str|null, "has_more": bool}; pass
     next_cursor back as `cursor` for the following page.
 
@@ -2031,7 +2037,9 @@ def list_media(
         media_type: image | video | audio | document | sticker (default: all)
         after: Only media at or after this ISO-8601 timestamp (UTC)
         before: Only media at or before this ISO-8601 timestamp (UTC)
-        min_bytes: Only media at least this large (from the WhatsApp file length)
+        min_bytes: Minimum actual cached size; uncached rows use the declared WhatsApp
+            length (unknown lengths are excluded). A filtered page examines at most
+            4096 candidates; an empty page with next_cursor still needs continuation.
         has_notes: true = only files you have already annotated, false = only files with
                no note yet (the backlog to read and then annotate_media), null = both
         sort: "size" (largest first, default), "date" (newest first) or "copies" (most forwarded first)
@@ -2376,6 +2384,7 @@ def purge_media(
     media_type: str = "",
     dry_run: bool = True,
     summary_only: bool = False,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Free disk space by dropping cached media bytes; message rows, hashes and notes stay.
 
@@ -2389,11 +2398,13 @@ def purge_media(
 
     Either name the files (`items`) or describe them (any of chat_jid,
     older_than_days, min_bytes, media_type); the bridge caps one call at 500
-    files. Only files that are still cached count: rows already purged are
-    stepped over, so to clear a large set **repeat the same call (dry_run=false)
-    while `truncated` is true** — `remaining` says how many matching cached
-    files are left. If `scan_truncated` is true and `purged_files` is 0, the
-    bridge stopped looking before it reached a cached file: narrow the criteria.
+    files. Explicit requests accept at most 1000 named items; use criteria for
+    bulk work. Only cached files count in either form. For criteria, continue with
+    cursor=next_cursor while truncated is true, retaining the same filters.
+    The cursor advances even when a bounded scan finds no cached files.
+    remaining=-1 means the unexamined cached count is unknown; no tail scan is
+    done to count it. A dry run previews the real call with the SAME input cursor:
+    use its output cursor only after the corresponding real call.
     `truncated` is false when a call removed nothing because removals failed.
 
     Args:
@@ -2405,16 +2416,17 @@ def purge_media(
         dry_run: true (default) reports without deleting; false deletes
         summary_only: true leaves `items` out and returns only the totals (use it
             on criteria calls that match hundreds of files)
+        cursor: Criteria continuation returned as next_cursor; empty starts at the beginning
 
     Returns:
         {"dry_run", "message", "matched", "purged_files", "purged_bytes", "truncated",
-         "remaining", "scan_truncated", "unreachable", "failed",
+         "remaining", "next_cursor", "examined", "scan_truncated", "unreachable", "failed",
          "items": [{message_id, chat_jid, purged, bytes, file, reason}]} where reason explains
         skipped entries (not cached, not a media message, message not found, denied chat);
         `items` is absent with summary_only. `matched` is the number of files this call
-        selected (criteria form: cached files; items form: named rows that exist); on the
-        criteria form `remaining` counts the matching cached files it left for the next
-        call, `unreachable` the rows whose path the purge cannot touch (drop summary_only
+        selected, in both forms. Criteria remaining is -1 while an unexamined tail
+        may exist, 0 at the end; items remaining counts unexamined named entries.
+        `unreachable` counts the rows whose path the purge cannot touch (drop summary_only
         to see which) and `failed` the selected files it could not remove
     """
     return whatsapp_purge_media(
@@ -2425,6 +2437,7 @@ def purge_media(
         media_type=media_type,
         dry_run=dry_run,
         summary_only=summary_only,
+        cursor=cursor,
     )
 
 

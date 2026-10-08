@@ -429,6 +429,11 @@ func documentExt(name string) string {
 			return ""
 		}
 	}
+	// Reserve .part for writeMediaFile's unfinished downloads. A completed
+	// document must never share a name with another file's temporary download.
+	if ext == ".part" {
+		return ".part.bin"
+	}
 	return ext
 }
 

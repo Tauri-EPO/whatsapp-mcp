@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -40,6 +42,41 @@ from whatsapp import (
 MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
 SORTS = ("size", "date", "copies")
 MAX_LIMIT = 200
+MIN_BYTES_SCAN_LIMIT = 4096
+
+
+def _plain_component(value: str) -> bool:
+    return (
+        bool(value)
+        and value != "."
+        and ".." not in value
+        and not any(c in "/\\" or ord(c) < 32 or 127 <= ord(c) <= 159 for c in value)
+    )
+
+
+class _CachePathRefusedError(OSError):
+    """An unsafe cache identity, distinct from an ordinary missing file."""
+
+
+@contextmanager
+def _cache_directory(chat_jid: str):
+    """The chat's own real directory, pinned on platforms with directory FDs."""
+    if not _plain_component(chat_jid.replace(":", "_")):
+        raise _CachePathRefusedError("chat directory is not a plain component")
+    path = chat_media_dir(chat_jid)
+    seen = os.lstat(path)
+    if not stat.S_ISDIR(seen.st_mode):
+        raise _CachePathRefusedError("chat directory is not a real directory")
+    if os.name == "nt":
+        yield path
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if not os.path.samestat(seen, os.fstat(fd)):
+            raise _CachePathRefusedError("chat directory changed while opening")
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def media_root() -> str:
@@ -67,11 +104,15 @@ def cached_message_id(name: str) -> str | None:
     never contain a dot, so splitting the extension is safe for every shape.
     A half-written download (``.part``) carries no readable bytes yet.
     """
-    if name.endswith(".part"):
+    if not _plain_component(name) or name.endswith(".part"):
         return None
     parts = name.split("_", 3)
     if len(parts) != 4 or parts[0] not in MEDIA_TYPES:
         return None
+    # The bridge reserves .part for downloads in flight, mapping completed
+    # documents with that extension to .part.bin without changing their ID.
+    if parts[0] == "document" and parts[3].endswith(".part.bin"):
+        return parts[3].removesuffix(".part.bin")
     return os.path.splitext(parts[3])[0]
 
 
@@ -84,13 +125,13 @@ def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
     """
     found: dict[str, CachedFile] = {}
     try:
-        with os.scandir(chat_media_dir(chat_jid)) as entries:
+        with _cache_directory(chat_jid) as directory, os.scandir(directory) as entries:
             for entry in entries:
                 message_id = cached_message_id(entry.name)
-                if message_id is None or not entry.is_file():
+                if message_id is None or not entry.is_file(follow_symlinks=False):
                     continue
                 try:
-                    size = entry.stat().st_size
+                    size = entry.stat(follow_symlinks=False).st_size
                 except OSError:
                     continue
                 found[message_id] = CachedFile(entry.name, size)
@@ -99,7 +140,7 @@ def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
     return found
 
 
-def lookup_cached_name(chat_jid: str, message_id: str) -> str | None:
+def lookup_cached_name(chat_jid: str, message_id: str, *, refuse_unsafe: bool = False) -> str | None:
     """The filename cached for one message, or None when nothing is.
 
     The names come from the directory entries, which cost no syscall of their
@@ -115,13 +156,23 @@ def lookup_cached_name(chat_jid: str, message_id: str) -> str | None:
     read of the same message must not answer with different bytes.
     """
     found: str | None = None
+    refused = False
     try:
-        with os.scandir(chat_media_dir(chat_jid)) as entries:
+        with _cache_directory(chat_jid) as directory, os.scandir(directory) as entries:
             for entry in entries:
-                if cached_message_id(entry.name) == message_id and entry.is_file():
-                    found = entry.name
+                if cached_message_id(entry.name) == message_id:
+                    if entry.is_file(follow_symlinks=False):
+                        found = entry.name
+                    else:
+                        refused = True
+    except _CachePathRefusedError as exc:
+        if refuse_unsafe:
+            raise ToolError("denied", "the cached media path is unsafe: " + str(exc)) from exc
+        return None
     except OSError:
         return None
+    if found is None and refused and refuse_unsafe:
+        raise ToolError("denied", "the cached media name is not a regular file; links and directories are refused")
     return found
 
 
@@ -135,10 +186,10 @@ def list_chat_names(chat_jid: str) -> dict[str, str]:
     """
     names: dict[str, str] = {}
     try:
-        with os.scandir(chat_media_dir(chat_jid)) as entries:
+        with _cache_directory(chat_jid) as directory, os.scandir(directory) as entries:
             for entry in entries:
                 message_id = cached_message_id(entry.name)
-                if message_id is not None and entry.is_file():
+                if message_id is not None and entry.is_file(follow_symlinks=False):
                     names[message_id] = entry.name
     except OSError:
         return {}
@@ -148,7 +199,18 @@ def list_chat_names(chat_jid: str) -> dict[str, str]:
 def _stat_cached(chat_jid: str, name: str) -> CachedFile | None:
     """One named file of a chat directory, or None when it is gone or unreadable."""
     try:
-        return CachedFile(name, os.stat(os.path.join(chat_media_dir(chat_jid), name)).st_size)
+        if not _plain_component(name):
+            return None
+        with _cache_directory(chat_jid) as directory:
+            if isinstance(directory, int):
+                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            else:
+                before = os.lstat(directory)
+                info = os.stat(os.path.join(directory, name), follow_symlinks=False)
+                after = os.lstat(directory)
+                if not stat.S_ISDIR(after.st_mode) or not os.path.samestat(before, after):
+                    return None
+            return CachedFile(name, info.st_size) if stat.S_ISREG(info.st_mode) else None
     except OSError:
         return None
 
@@ -173,7 +235,10 @@ _names_lock = threading.Lock()
 def _dir_mtime_ns(chat_jid: str) -> int:
     """The chat directory's mtime, or 0 when it does not exist."""
     try:
-        return os.stat(chat_media_dir(chat_jid)).st_mtime_ns
+        if not _plain_component(chat_jid.replace(":", "_")):
+            return 0
+        info = os.lstat(chat_media_dir(chat_jid))
+        return info.st_mtime_ns if stat.S_ISDIR(info.st_mode) else 0
     except OSError:
         return 0
 
@@ -382,13 +447,25 @@ def list_media_page(
     limit = page_size(limit, MAX_LIMIT)
     page = page_number(page)  # checked even when a cursor overrides it
     state = decode_cursor(cursor, "media")
-    offset = int(state["o"]) if state else page * limit
+    try:
+        offset = int(state["o"]) if state else (0 if min_bytes else page * limit)
+        skip = int(state.get("s", 0)) if state else (page * limit if min_bytes else 0)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ToolError("invalid_argument", "invalid media cursor") from exc
+    if offset < 0 or skip < 0:
+        raise ToolError("invalid_argument", "invalid media cursor")
 
-    clauses, params = _media_filters(chat_jid, media_type, after, before, min_bytes, "m.", exclude_chat_jid)
+    if min_bytes is not None and min_bytes < 0:
+        raise ToolError("invalid_argument", "min_bytes must not be negative")
+    # A sender-declared SQL length cannot exclude a larger cached file. Apply
+    # this filter after the safe cache probe, with a bounded candidate window.
+    clauses, params = _media_filters(chat_jid, media_type, after, before, None, "m.", exclude_chat_jid)
     copies_clauses, copies_params = _media_filters(None, None, None, None, None, "")
     order = ORDER_BY[sort]
     rows: list[Any] = []
     has_more = False
+    cache = _CacheIndex()
+    examined = 0
     try:
         conn = whatsapp._connect_messages_db()
         try:
@@ -397,16 +474,31 @@ def list_media_page(
                 if notes_clause is None:
                     return PageResult([], None, False)
                 clauses.append(notes_clause)
+            window = MIN_BYTES_SCAN_LIMIT if min_bytes else limit + 1
+            sql = _page_sql(clauses, order, copies_clauses if sort == "copies" else None)
+            query_params = (*copies_params, *params) if sort == "copies" else tuple(params)
+            candidates = conn.execute(sql, (*query_params, window, offset)).fetchall()
+            page_rows = []
+            for row in candidates:
+                if min_bytes:
+                    cached = cache.lookup(row[1], row[0])
+                    size = cached.bytes if cached else (row[8] or 0)
+                    if size < min_bytes:
+                        examined += 1
+                        continue
+                    if skip:
+                        skip -= 1
+                        examined += 1
+                        continue
+                if len(page_rows) == limit:
+                    has_more = True
+                    break  # leave this matching candidate for the next call
+                page_rows.append(row)
+                examined += 1
+            has_more = has_more or (min_bytes is not None and min_bytes > 0 and len(candidates) == window)
             if sort == "copies":
-                sql = _page_sql(clauses, order, copies_clauses)
-                rows = conn.execute(sql, (*copies_params, *params, limit + 1, offset)).fetchall()
-                has_more = len(rows) > limit
-                rows = rows[:limit]
+                rows = page_rows
             else:
-                sql = _page_sql(clauses, order)
-                page_rows = conn.execute(sql, (*params, limit + 1, offset)).fetchall()
-                has_more = len(page_rows) > limit
-                page_rows = page_rows[:limit]
                 counts = _copies_for_hashes(
                     conn,
                     sorted({row[11] for row in page_rows if row[11] is not None}),
@@ -420,13 +512,12 @@ def list_media_page(
     except sqlite3.Error as exc:
         raise ToolError("internal", f"database error: {exc}") from exc
 
-    cache = _CacheIndex()
     notes, refusals = media_notes.fetch_media_annotations([row[9] for row in rows], [(row[1], row[0]) for row in rows])
     items = [_row_to_item(row, cache, notes) for row in rows]
     for item in items:
         if refusal := refusals.get((item["chat_jid"], item["message_id"])):
             item["media_refusal"] = refusal
-    next_cursor = encode_cursor({"k": "media", "o": offset + limit}) if has_more else None
+    next_cursor = encode_cursor({"k": "media", "o": offset + examined, "s": skip}) if has_more else None
     return PageResult(items, next_cursor, has_more)
 
 

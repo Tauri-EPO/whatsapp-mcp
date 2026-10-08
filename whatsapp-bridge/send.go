@@ -769,7 +769,7 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 
 	// Parse Ogg pages to find the last page with a valid granule position
 	var lastGranule uint64
-	var sampleRate uint32 = 48000 // Default Opus sample rate
+	const granuleRate = 48000 // RFC 7845 §4: independent of OpusHead input rate.
 	var preSkip uint16 = 0
 	var foundOpusHead bool
 
@@ -804,7 +804,7 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 			pageSize += int(segLen)
 		}
 		if pageSize > len(data)-i {
-			break // Preserve the existing best-effort duration contract.
+			break // incomplete payload; never inspect bytes beyond the input
 		}
 
 		// Check if we're looking at an OpusHead packet (should be in first few pages)
@@ -820,14 +820,13 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 			if headPos >= 0 && headPos+8+8 <= len(pageData) {
 				body := pageData[headPos+8:]
 				preSkip = binary.LittleEndian.Uint16(body[2:4])
-				sampleRate = binary.LittleEndian.Uint32(body[4:8])
 				foundOpusHead = true
-				bridgeLog.Debugf("Found OpusHead: sampleRate=%d, preSkip=%d", sampleRate, preSkip)
+				bridgeLog.Debugf("Found OpusHead: inputRate=%d, preSkip=%d", binary.LittleEndian.Uint32(body[4:8]), preSkip)
 			}
 		}
 
 		// Keep track of last valid granule position
-		if granulePos != 0 {
+		if granulePos != 0 && granulePos != ^uint64(0) {
 			lastGranule = granulePos
 		}
 
@@ -840,10 +839,10 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 	}
 
 	// Calculate duration based on granule position
-	if lastGranule > 0 {
-		// Formula for duration: (lastGranule - preSkip) / sampleRate
-		durationSeconds := float64(lastGranule-uint64(preSkip)) / float64(sampleRate)
-		duration = uint32(math.Ceil(durationSeconds))
+	if lastGranule > uint64(preSkip) {
+		// RFC 7845 §§4, 5.1: input sample rate is informational metadata.
+		durationSeconds := float64(lastGranule-uint64(preSkip)) / granuleRate
+		duration = uint32(math.Ceil(math.Min(durationSeconds, 300)))
 		bridgeLog.Debugf("Calculated Opus duration from granule: %f seconds (lastGranule=%d)",
 			durationSeconds, lastGranule)
 	} else {

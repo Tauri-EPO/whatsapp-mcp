@@ -87,7 +87,8 @@ def test_copies_are_counted_across_chats(media_store):
 def test_filters(media_store):
     assert _ids(main.list_media(chat_jid=FAMILY)) == ["IMG1G", "IMG1F"]
     assert _ids(main.list_media(media_type="document")) == ["DOC1"]
-    assert _ids(main.list_media(min_bytes=100_000)) == ["VID1", "IMG1G", "IMG1F", "IMG1"]
+    # Actual cached bytes take precedence; uncached copies retain declared size.
+    assert _ids(main.list_media(min_bytes=100_000)) == ["IMG1G", "IMG1F"]
     assert _ids(main.list_media(after="2026-09-03T00:00:00", sort="date")) == ["GONE", "DOC1", "VID1"]
     assert _ids(main.list_media(before="2026-09-01T23:59:59")) == ["IMG1"]
     # copies keep counting the whole archive even when the page is filtered
@@ -382,10 +383,12 @@ class _CountingScanner:
             def __init__(self, name: str) -> None:
                 self.name = name
 
-            def is_file(self) -> bool:
+            def is_file(self, *, follow_symlinks=True) -> bool:
+                assert follow_symlinks is False
                 return True
 
-            def stat(self):
+            def stat(self, *, follow_symlinks=True):
+                assert follow_symlinks is False
                 scanner.stats.append(self.name)
                 return os.stat_result((0o100644, 0, 0, 1, 0, 0, len(self.name), 0, 0, 0))
 
@@ -403,12 +406,28 @@ def _record_stats(monkeypatch) -> list[str]:
     """Every path os.stat is asked about while the test runs."""
     seen: list[str] = []
     real = os.stat
+    real_open, real_close = os.open, os.close
+    directories: dict[int, str] = {}
+
+    def opened(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        directories[fd] = os.fspath(path)
+        return fd
+
+    def closed(fd):
+        directories.pop(fd, None)
+        return real_close(fd)
 
     def recording(path, *args, **kwargs):
-        seen.append(str(path))
+        observed = str(path)
+        if "dir_fd" in kwargs:
+            observed = os.path.join(directories[kwargs["dir_fd"]], observed)
+        seen.append(observed)
         return real(path, *args, **kwargs)
 
     monkeypatch.setattr(media_inventory.os, "stat", recording)
+    monkeypatch.setattr(media_inventory.os, "open", opened)
+    monkeypatch.setattr(media_inventory.os, "close", closed)
     return seen
 
 
@@ -443,6 +462,10 @@ def test_one_message_is_looked_up_without_stat_ing_the_chat(media_store, monkeyp
 
 
 def test_a_page_stats_its_own_rows_and_nothing_else(media_store, monkeypatch):
+    def unavailable_procfs(*_args, **_kwargs):
+        raise OSError("procfs unavailable")
+
+    monkeypatch.setattr(os, "readlink", unavailable_procfs)
     cached_name = "image_20260901_100000_IMG1.jpg"
     scanner = _CountingScanner([cached_name, *(f"image_20260901_100000_M{i}.jpg" for i in range(1_000))])
     monkeypatch.setattr(media_inventory.os, "scandir", scanner)

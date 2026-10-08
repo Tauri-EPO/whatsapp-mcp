@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"strings"
 	"time"
 )
 
@@ -86,12 +87,17 @@ func statCachedMedia(dir *os.Root, name string) (os.FileInfo, error) {
 // cachedMedia is a cached file that was found: its name, what Lstat saw, and
 // the opened chat directory it is in. Close it when done.
 type cachedMedia struct {
-	dir  *os.Root
-	name string
-	info os.FileInfo
+	dir      *os.Root
+	name     string
+	info     os.FileInfo
+	borrowed bool
 }
 
-func (c *cachedMedia) Close() { _ = c.dir.Close() }
+func (c *cachedMedia) Close() {
+	if !c.borrowed {
+		_ = c.dir.Close()
+	}
+}
 
 // Remove deletes the file through the directory handle it was found in, so a
 // chat directory swapped for a link after the lookup cannot send the delete
@@ -116,6 +122,14 @@ func findCachedMedia(root *os.Root, chatDir string, names []string) (*cachedMedi
 	if err != nil {
 		return nil, err
 	}
+	found, err := findCachedMediaInDir(dir, names)
+	if found == nil {
+		_ = dir.Close()
+	}
+	return found, err
+}
+
+func findCachedMediaInDir(dir *os.Root, names []string) (*cachedMedia, error) {
 	var refused error
 	var previous string
 	for _, name := range names {
@@ -131,8 +145,47 @@ func findCachedMedia(root *os.Root, chatDir string, names []string) (*cachedMedi
 			refused = err
 		}
 	}
-	_ = dir.Close()
 	return nil, refused
+}
+
+// cachedMediaFinder reuses one pinned directory while scanning a chat. It
+// retains no file or policy decisions; each row still performs Lstat. A
+// directory swap cannot redirect a delete to the replacement directory.
+type cachedMediaFinder struct {
+	root *os.Root
+	dir  *os.Root
+	chat string
+}
+
+func (f *cachedMediaFinder) Close() {
+	if f.dir != nil {
+		_ = f.dir.Close()
+		f.dir = nil
+	}
+}
+
+func (f *cachedMediaFinder) find(chat string, names []string) (*cachedMedia, error) {
+	for _, name := range names {
+		if err := checkMediaPathComponents(chat, name); err != nil {
+			return nil, err
+		}
+	}
+	if f.dir == nil || f.chat != chat {
+		f.Close()
+		dir, err := openChatMediaDir(f.root, chat)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		f.dir, f.chat = dir, chat
+	}
+	found, err := findCachedMediaInDir(f.dir, names)
+	if found != nil {
+		found.borrowed = true
+	}
+	return found, err
 }
 
 // cachedMediaPath returns the store-relative path of the existing cached file
@@ -148,4 +201,41 @@ func cachedMediaPath(root *os.Root, chatDir, mediaType string, timestamp time.Ti
 	}
 	defer found.Close()
 	return path.Join(chatDir, found.name), nil
+}
+
+// eachCachedMedia enumerates generated cache names in pinned chat directories.
+// User files and unfinished .part downloads are not cached media.
+// It never descends into nested directories or follows a link. The directory
+// handle belongs to this walk; the callback may measure or remove the file.
+func eachCachedMedia(root *os.Root, fn func(chat string, file *cachedMedia)) error {
+	if root == nil {
+		return errors.New("store directory unavailable")
+	}
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		chat := entry.Name()
+		if !isChatDir(entry) || checkMediaPathComponents(chat, "probe") != nil {
+			continue
+		}
+		dir, err := openChatMediaDir(root, chat)
+		if err != nil {
+			continue
+		}
+		names, err := fs.ReadDir(dir.FS(), ".")
+		if err == nil {
+			for _, name := range names {
+				if checkMediaPathComponents(chat, name.Name()) != nil || strings.HasSuffix(name.Name(), ".part") || !generatedMediaName(name.Name()) {
+					continue
+				}
+				if info, err := statCachedMedia(dir, name.Name()); err == nil {
+					fn(chat, &cachedMedia{dir: dir, name: name.Name(), info: info})
+				}
+			}
+		}
+		_ = dir.Close()
+	}
+	return nil
 }

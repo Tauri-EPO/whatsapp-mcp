@@ -110,7 +110,7 @@ func TestMediaPurge_ItemsRemoveOnlyNamedFiles(t *testing.T) {
 		{"message_id":"","chat_jid":"` + purgeChat + `"}
 	]}`
 	code, resp := purgeCall(t, b, body)
-	if code != http.StatusOK || resp.DryRun || resp.PurgedFiles != 1 || resp.PurgedBytes != 4096 || resp.Matched != 3 {
+	if code != http.StatusOK || resp.DryRun || resp.PurgedFiles != 1 || resp.PurgedBytes != 4096 || resp.Matched != 1 {
 		t.Fatalf("%d %+v", code, resp)
 	}
 	byID := map[string]PurgeResult{}
@@ -142,7 +142,7 @@ func TestMediaPurge_CriteriaForm(t *testing.T) {
 		t.Fatalf("%d %+v", code, resp)
 	}
 	// Narrow by chat + type + size, real run.
-	code, resp = purgeCall(t, b, `{"dry_run": false, "chat_jid": "`+purgeChat+`", "media_type": "video", "min_bytes": 1000000}`)
+	code, resp = purgeCall(t, b, `{"dry_run": false, "chat_jid": "`+purgeChat+`", "media_type": "video", "min_bytes": 4096}`)
 	if code != http.StatusOK || resp.Matched != 1 || resp.PurgedFiles != 1 || fileExists(files["OLDVID"]) || !fileExists(files["GRPDOC"]) {
 		t.Fatalf("%d %+v", code, resp)
 	}
@@ -245,7 +245,7 @@ func TestPurgeOne_RefusesSymlinkedCacheFile(t *testing.T) {
 	symlinkOrSkip(t, secret, link)
 
 	res := purgeOne(storeRootAt(t, dir), mediaRow{ID: "LINK", ChatJID: purgeChat, MediaType: "image", Timestamp: ts}, false)
-	if res.Purged || res.Reason != "cached path does not resolve inside the store directory" {
+	if res.Purged || res.Reason != purgeReasonNotResolvable {
 		t.Errorf("result = %+v", res)
 	}
 	if _, err := os.Stat(secret); err != nil {
@@ -340,15 +340,17 @@ func TestMediaPurge_CriteriaConvergesPastTheCap(t *testing.T) {
 
 	// dry_run reports the set the next real call removes.
 	_, preview := purgeCall(t, b, dry)
-	if !preview.DryRun || preview.Matched != 500 || preview.PurgedFiles != 500 || preview.Remaining != 700 || !preview.Truncated || cachedCount(t, purgeChat) != 1200 {
+	if !preview.DryRun || preview.Matched != 500 || preview.PurgedFiles != 500 || preview.Remaining != -1 || preview.NextCursor == "" || preview.Examined != 800 || !preview.Truncated || cachedCount(t, purgeChat) != 1200 {
 		t.Fatalf("dry run = %+v", preview)
 	}
 
 	wantPurged := []int{500, 500, 200}
-	wantRemaining := []int{700, 200, 0}
+	wantRemaining := []int{-1, -1, 0}
+	cursor := ""
 	for i := range wantPurged {
-		code, resp := purgeCall(t, b, body)
-		if code != http.StatusOK || resp.PurgedFiles != wantPurged[i] || resp.Matched != wantPurged[i] || resp.Remaining != wantRemaining[i] || resp.Truncated != (wantRemaining[i] > 0) || resp.ScanTruncated {
+		callBody := strings.TrimSuffix(body, "}") + `,"cursor":"` + cursor + `"}`
+		code, resp := purgeCall(t, b, callBody)
+		if code != http.StatusOK || resp.PurgedFiles != wantPurged[i] || resp.Matched != wantPurged[i] || resp.Remaining != wantRemaining[i] || resp.Truncated != (wantRemaining[i] != 0) || resp.ScanTruncated {
 			t.Fatalf("call %d: %d %+v", i+1, code, resp)
 		}
 		if i == 0 {
@@ -356,10 +358,11 @@ func TestMediaPurge_CriteriaConvergesPastTheCap(t *testing.T) {
 			if !slices.Equal(got, want) {
 				t.Errorf("the real call removed a different set than its dry run (%d vs %d ids)", len(got), len(want))
 			}
-			if !strings.Contains(resp.Message, "700 more") {
-				t.Errorf("message does not say how many are left: %q", resp.Message)
+			if !strings.Contains(resp.Message, "cursor=next_cursor") {
+				t.Errorf("message does not explain continuation: %q", resp.Message)
 			}
 		}
+		cursor = resp.NextCursor
 	}
 	code, resp := purgeCall(t, b, body)
 	if code != http.StatusOK || resp.Matched != 0 || resp.PurgedFiles != 0 || resp.Remaining != 0 || resp.Truncated || resp.ScanTruncated || len(resp.Items) != 0 {
@@ -385,7 +388,7 @@ func TestMediaPurge_CriteriaScanIsBounded(t *testing.T) {
 	seedPurgeRows(t, b, purgeChat, "KEEP", 10, base.Add(time.Hour), true)
 
 	_, resp := purgeCall(t, b, `{"chat_jid": "`+purgeChat+`", "dry_run": false}`)
-	if resp.PurgedFiles != 0 || !resp.ScanTruncated || !resp.Truncated || !strings.Contains(resp.Message, "narrow the criteria") {
+	if resp.PurgedFiles != 0 || !resp.ScanTruncated || !resp.Truncated || resp.Examined != 100 || resp.NextCursor == "" || !strings.Contains(resp.Message, "cursor=next_cursor") {
 		t.Fatalf("scan limit not reported: %+v", resp)
 	}
 	// With the default ceiling the same call walks past the uncached rows.
@@ -443,10 +446,10 @@ func TestMediaPurge_CriteriaRespectsAllowListInRemaining(t *testing.T) {
 	seedPurgeRows(t, b, purgeGroup, "NO", 600, base, true)
 
 	_, resp := purgeCall(t, b, `{"media_type": "image", "dry_run": false}`)
-	if resp.PurgedFiles != 500 || resp.Remaining != 20 || !resp.Truncated {
+	if resp.PurgedFiles != 500 || resp.Remaining != -1 || !resp.Truncated || resp.NextCursor == "" {
 		t.Fatalf("first call = %+v", resp)
 	}
-	_, resp = purgeCall(t, b, `{"media_type": "image", "dry_run": false}`)
+	_, resp = purgeCall(t, b, `{"media_type": "image", "dry_run": false, "cursor":"`+resp.NextCursor+`"}`)
 	if resp.PurgedFiles != 20 || resp.Remaining != 0 || resp.Truncated {
 		t.Fatalf("second call = %+v", resp)
 	}
