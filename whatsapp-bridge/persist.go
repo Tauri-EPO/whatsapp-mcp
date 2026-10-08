@@ -22,7 +22,6 @@ type messageWriter interface {
 		quotedMessageId string, directPath ...string) error
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
-	SetDirectPath(messageID, chatJID, directPath string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
 }
 

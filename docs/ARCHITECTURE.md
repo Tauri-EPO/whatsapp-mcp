@@ -104,7 +104,7 @@ sequenceDiagram
 
 Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.
 
-An incomplete replay keeps the existing media category, filename and timestamp so an already cached file remains reachable. Partial credentials from different writes are never merged. This protects the downloadable snapshot independently of the replay's text content.
+An incomplete replay keeps the existing media category, filename and timestamp once the row has credentials, so an already cached file remains reachable. A row with no credentials accepts its first partial snapshot with its category, filename and timestamp together; later partial copies cannot mix their fields with it. An incomplete copy with no caption keeps a stored media caption and its searchable content. A complete copy may replace that caption with an empty one.
 
 ### The automatic media download budget
 

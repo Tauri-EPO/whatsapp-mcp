@@ -28,6 +28,8 @@ const replaceMediaSQL = `(:complete_media OR (
 	AND COALESCE(length(messages.file_enc_sha256), 0) = 0
 	AND COALESCE(messages.file_length, 0) = 0))`
 
+// A text write does not turn a reaction/poll pointer into a text row: blank
+// media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
 		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -40,9 +42,14 @@ const insertMessageSQL = `INSERT INTO messages
 				WHEN excluded.sender_server IS NOT NULL THEN excluded.sender_server
 				WHEN excluded.sender = messages.sender THEN messages.sender_server
 			END,
-			content = excluded.content,
-			-- The timestamp also names the cached file; a stub cannot move it.
-			timestamp = CASE WHEN NOT :complete_media AND messages.media_type IN
+			-- Incomplete media stubs carry no replacement caption. Reaction
+			-- removal still writes empty content; complete media may do so too.
+			content = CASE WHEN NOT :complete_media AND excluded.content = '' AND messages.media_type IN
+				('image', 'video', 'audio', 'document', 'sticker')
+				THEN messages.content ELSE excluded.content END,
+			-- The timestamp also names the cached file. Move it with the
+			-- snapshot when a row can accept its first partial credentials.
+			timestamp = CASE WHEN NOT ` + replaceMediaSQL + ` AND messages.media_type IN
 				('image', 'video', 'audio', 'document', 'sticker')
 				THEN messages.timestamp ELSE excluded.timestamp END,
 			is_from_me = excluded.is_from_me,
@@ -110,11 +117,6 @@ func (b *messageBatch) SetMentions(messageID, chatJID, mentions string) error {
 	return setMentionsWith(b.tx, messageID, chatJID, mentions)
 }
 
-// SetDirectPath is MessageStore.SetDirectPath inside the batch.
-func (b *messageBatch) SetDirectPath(messageID, chatJID, directPath string) error {
-	return setDirectPathWith(b.tx, messageID, chatJID, directPath)
-}
-
 // StorePoll is MessageStore.StorePoll inside the batch.
 func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error {
 	return storePollWith(b.tx, messageID, chatJID, p, createdAt)
@@ -128,6 +130,8 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 // The timestamp goes in through dbTime (store_time.go) so every row carries
 // the same UTC spelling. The optional direct path is inserted atomically with
 // the credentials; an omitted/empty path becomes NULL for URL-only snapshots.
+// On a complete write, omitting the optional path therefore clears the stored
+// direct_path. Incomplete writes keep the previous snapshot, including its path.
 func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
 	quotedMessageId string, directPath ...string) []any {
