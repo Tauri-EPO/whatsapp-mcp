@@ -56,6 +56,7 @@ EXPECTED_READABLE = {
     "download_media",
     "transcribe_audio",
     "annotate_media",
+    "clear_media_refusal",
     "get_media_notes",
     "annotate",
     "compact",

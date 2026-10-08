@@ -90,6 +90,20 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 // dead file on every pass over the archive.
 var errMediaUnavailable = errors.New("the sender's phone no longer has this media")
 
+// errMediaRefused is an immutable row identity that cannot safely name a file.
+// Unlike errMediaUnavailable this says nothing about another copy's bytes.
+var errMediaRefused = errors.New("media path permanently refused")
+
+func permanentMediaCode(err error) string {
+	if errors.Is(err, errMediaRefused) {
+		return "media_refused"
+	}
+	if errors.Is(err, errMediaUnavailable) {
+		return "media_unavailable"
+	}
+	return ""
+}
+
 // permanentMediaError is an errMediaUnavailable that keeps its own wording.
 // The two causes are equally final but not interchangeable to whoever reads the
 // answer — "the phone declined the retry" is a file that once existed, "the
@@ -134,7 +148,8 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	// single path component before anything touches the disk (issue #453).
 	if err := checkMediaPathComponents(chatDir, filename); err != nil {
 		b.Log.Warnf("Refusing to cache media for message %q in chat %q: %v", messageID, chatJID, err)
-		return false, "", "", "", err
+		b.metrics.mediaRefusals.Add(1)
+		return false, "", "", "", fmt.Errorf("%w: %w", errMediaRefused, err)
 	}
 	// Everything below — the directory, the cache lookup, the temp file and the
 	// rename — goes through the store root, so the kernel keeps it inside the
@@ -528,8 +543,8 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			// retry: name it so the caller records the miss once instead of
 			// asking again on every pass over the archive (issues #378, #392).
 			code := errorCode(http.StatusInternalServerError)
-			if errors.Is(err, errMediaUnavailable) {
-				code = "media_unavailable"
+			if named := permanentMediaCode(err); named != "" {
+				code = named
 			}
 			// The CDN turning down a recent message is the other end failing,
 			// and worth another try: 502, which the MCP server reads as

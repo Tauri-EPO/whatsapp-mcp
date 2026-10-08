@@ -99,6 +99,7 @@ EXPECTED_UNTRUSTED = {
 EXPECTED_TRUSTED = {
     "archive_chat",
     "bridge_status",
+    "clear_media_refusal",
     "request_history",
     "annotate_media",
     # Triage state: they echo the timestamp they just wrote, nothing a third

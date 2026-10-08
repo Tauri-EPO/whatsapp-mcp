@@ -233,6 +233,8 @@ injection away from sending. With read-only on there is no send tool to call.
   `notes.db`, local state owned by the MCP server, never WhatsApp. A read-only
   assistant still needs somewhere to keep its own working memory, and a triage
   pass that cannot record what it concluded has to derive it again next time.
+- `clear_media_refusal` — clears one dated row in `notes.db`'s `media_refusals`
+  table, without contacting WhatsApp.
 
 Two deliberate calls at the edges:
 
@@ -584,6 +586,14 @@ What to know before turning it on:
   bound on media traffic: `transcribe_audio` and `read_media`, when an agent
   calls them on a voice note whose bytes are not cached, still download it.
   `WHATSAPP_READ_ONLY` leaves the worker running: both tools are reads.
+- **Unsafe media identities are remembered per message.** `media_refused` from
+  the bridge records the exact `(chat_jid, message_id)` in `notes.db`'s
+  `media_refusals` table. Later ingest rounds skip that row, without a failure
+  strike once recorded and without hiding other copies of the same audio hash.
+  Manual media tools record the same dated refusal even when ingest fetching is
+  off. `list_media` shows it; `clear_media_refusal(chat_jid, message_id)` removes
+  it after a bridge path-rule change so ingest can try again.
+  `/metrics` counts these refusals as `whatsapp_bridge_media_refusals_total`.
 - **Uncached audio is skipped unless you ask for it.** By default a voice note
   whose bytes are not under the store directory (`WHATSAPP_MEDIA_AUTODOWNLOAD=false`,
   or a retention sweep took them) is left for a manual `transcribe_audio`, which

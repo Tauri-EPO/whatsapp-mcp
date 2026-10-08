@@ -123,6 +123,7 @@ Every tool returns its documented payload on success. On failure it returns one 
 | `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit`, or `pixels` and `limit` for an image too big to decode | Read a smaller file, or `download_media` when the client shares the filesystem |
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
 | `media_unavailable` | The bytes are not cached here and no request can bring them: the sender's phone answered that it no longer has them (WhatsApp media expires from its CDN after a few days), or the message was stored without the CDN fields a download needs (`incomplete media information`, typical of history-sync stubs) | Do not retry: that file is gone. Work from the message text, or ask the sender to send it again |
+| `media_refused` | The row's chat JID or message ID cannot safely name a cache file | Do not retry this row; another copy of the same file can still be downloaded |
 | `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
 
 An unreadable database is reported as `internal`, never as an empty result, so an empty list really means "nothing matched".
@@ -426,7 +427,8 @@ allow-list as the numbers above:
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |
 | `unavailable` | Rows whose hash carries a `media_unavailable` note: the bytes are not here and no download can ever bring them back — the sender's phone answered that it no longer has them, or the row was stored without the CDN fields |
-| `backlog` | `messages` minus the rows carrying any of those three notes — what is actually left to do |
+| `refused` | Rows whose exact `(chat_jid, message_id)` has a recorded `media_refused`; these leave the backlog while other copies of the hash remain eligible |
+| `backlog` | `messages` minus rows carrying any of those three notes or a recorded refusal — what is actually left to do |
 | `backlog_cached` | How many of the backlog have their bytes on disk. `backlog - backlog_cached` is what a batch would download first (`TRANSCRIBE_ON_INGEST_FETCH=1`, or `transcribe_audio`, which fetches on demand) |
 | `cached_examined` | How many rows the two cached counts looked at |
 
@@ -1003,6 +1005,10 @@ Edit the text of a message this account sent (WhatsApp accepts edits for about 1
 
 Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
 
+An unsafe media identity answers `media_refused`; missing bytes or download
+fields answer `media_unavailable`. Do not retry those permanent media failures.
+`bridge_unavailable` remains the temporary bridge/CDN failure to retry later.
+
 ### `mark_messages_read`
 
 Send WhatsApp read receipts (the blue ticks). This is a visible side effect on
@@ -1239,6 +1245,26 @@ there is nothing to check against the cap; `download_media` fetches it. The
 `TRANSCRIBE_ON_INGEST` worker turns that answer into a `media_unavailable` note
 on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.
+
+An unsafe chat JID or message ID answers `media_refused`, before any transfer.
+Manual download, read, transcription and forwarding calls, as well as the ingest
+worker, remember it in `notes.db`'s `media_refusals`, keyed by the exact
+`(chat_jid, message_id)`, and the worker spends no failure strike once recorded.
+This does not write a per-hash `media_unavailable` note: a forwarded copy with
+a safe identity remains fetchable. The synchronous image path does not queue
+a second attempt after either permanent code. `/metrics` counts identity
+refusals in `whatsapp_bridge_media_refusals_total`.
+
+### `clear_media_refusal`
+
+`list_media` and each message in `get_media_notes` show `media_refusal` with
+`reason` and `updated_at` when recorded. **`clear_media_refusal(chat_jid,
+message_id)`** removes one refusal and returns `{success, chat_jid, message_id,
+deleted}`; only messages in allowed chats can be cleared. Use it after a bridge
+upgrade changes the path rule. A rule that still rejects the identity records
+the refusal again on the next fetch; other copies remain unaffected.
+`updated_at` is when the row was last refused. A later successful media fetch
+clears the refusal automatically, so cached audio can be transcribed again.
 
 ### `read_media`
 

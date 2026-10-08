@@ -136,7 +136,7 @@ class _Failed:
         return self._body
 
 
-def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch):
+def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch, paired_dbs):
     """`/api/download` answers 500 for both a CDN failure and a file the phone lost (#378)."""
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     monkeypatch.setattr(whatsapp, "_policy_denied", lambda *_a, **_k: None, raising=False)
@@ -147,6 +147,12 @@ def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch):
         whatsapp.download_media("MSG1", "5511999999999@s.whatsapp.net")
     assert exc.value.code == "media_unavailable"
     assert "NOT_FOUND" in exc.value.message
+
+    refused = _Failed(500, "media_refused", "unsafe message identity")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: refused)
+    with pytest.raises(ToolError) as exc:
+        whatsapp.download_media("MSG1", "5511999999999@s.whatsapp.net")
+    assert exc.value.code == "media_refused"
 
     # Without a name, the status still decides.
     cdn = _Failed(500, "internal", "Failed to download media: CDN says 410")

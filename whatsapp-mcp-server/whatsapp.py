@@ -22,7 +22,7 @@ import endpoint_cert
 import media_upload
 import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
-from errors import ToolError
+from errors import MEDIA_REFUSED_CODE, ToolError
 from phone import br_mobile_alternate, phone_digits
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
@@ -4023,11 +4023,10 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
 
 # Codes the bridge may assert in its error body, because they say something no
-# HTTP status can: `media_unavailable` is /api/download's 500 for a file no
-# request can bring back — the sender's phone no longer has it (issue #378), or
-# the row has no CDN fields to download with (issue #392) — which the caller
-# must remember rather than retry. Every other failure keeps the status map.
-_BRIDGE_NAMED_CODES = frozenset({"media_unavailable"})
+# HTTP status can: media_unavailable means missing bytes or download fields;
+# media_refused means an unsafe cache identity. Both download and forward name
+# these permanent failures. Every other failure keeps the status map.
+_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", MEDIA_REFUSED_CODE})
 
 
 def _bridge_error_code(status: int) -> str:
@@ -4053,7 +4052,7 @@ def _bridge_json(response) -> dict[str, Any]:
     failures, and 4xx/5xx (JSON or plain text) otherwise. A failure body may
     carry ``error: {"code", "message"}``; that code is honoured only for the
     handful of meanings finer than any status (``_BRIDGE_NAMED_CODES``, today
-    ``media_unavailable`` on ``/api/download``, issues #378 and #392). Everything else
+    ``media_unavailable`` / ``media_refused`` on download and forward). Everything else
     keeps the status map, so what the bridge already answers cannot change
     meaning because a handler picked a different word for it.
     """
@@ -4081,6 +4080,28 @@ def _bridge_json(response) -> dict[str, Any]:
     if "ok" in payload and not payload.get("ok"):
         raise ToolError("internal", message or "bridge reported failure")
     return payload
+
+
+def _bridge_media_json(response, message_id: str, chat_jid: str) -> dict[str, Any]:
+    """Remember per-row refusals for every manual or background media fetch."""
+    import media_notes
+
+    try:
+        result = _bridge_json(response)
+    except ToolError as exc:
+        if exc.code == MEDIA_REFUSED_CODE:
+            exc._media_refusal_recorded = False
+            try:
+                media_notes.record_media_refusal(message_id, chat_jid, exc.message)
+                exc._media_refusal_recorded = True
+            except (ToolError, sqlite3.Error) as note_error:
+                logger.warning("could not record media refusal: %s", note_error)
+        raise
+    try:
+        media_notes.forget_media_refusal(message_id, chat_jid)
+    except (ToolError, sqlite3.Error) as note_error:
+        logger.warning("could not clear media refusal after successful fetch: %s", note_error)
+    return result
 
 
 def _sent_info(result: dict[str, Any]) -> dict[str, Any]:
@@ -4717,7 +4738,9 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     """
     _require_allowed(chat_jid)
     payload = {"message_id": message_id, "chat_jid": chat_jid}
-    result = _bridge_json(_bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    result = _bridge_media_json(
+        _bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S), message_id, chat_jid
+    )
     path = result.get("path")
     if path:
         logger.info("Media downloaded successfully: %s", path)
@@ -4930,6 +4953,10 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     download needs (issue #392). Either way it leaves the backlog instead of
     being asked for on every pass.
 
+    `refused` counts unsafe row identities recorded in notes.db per message,
+    using the same predicate as the ingest worker; other copies of that hash
+    remain in the backlog until handled independently.
+
     Two cached counts, because they answer different questions: `cached` is how
     much of the audio in scope is on disk at all, and `backlog_cached` how much
     of the *backlog* is, so `backlog - backlog_cached` is what a batch would
@@ -4944,10 +4971,11 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     params = tuple(msg_params)
 
     note_params: tuple[Any, ...] = ()
-    transcribed_expr = error_expr = unavailable_expr = "0"
+    transcribed_expr = error_expr = unavailable_expr = refused_expr = "0"
     notes_path = media_notes.notes_db_path()
     if os.path.exists(notes_path):
         attach_notes_read_only(cur.connection, notes_path)
+        refused_expr = f"NOT ({media_notes.media_refusal_clause(cur.connection, 'messages')})"
         if cur.execute("SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'").fetchone():
             note_exists = (
                 "EXISTS (SELECT 1 FROM notesdb.media_notes n "
@@ -4965,11 +4993,13 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     # agent then transcribed by hand carries two — so subtracting them
     # separately would take that row off the backlog twice.
     handled_expr = "0" if not note_params else f"({transcribed_expr} OR {error_expr} OR {unavailable_expr})"
+    handled_expr = f"({handled_expr} OR {refused_expr})"
     cur.execute(
         f"""SELECT COUNT(*),
                    COALESCE(SUM({transcribed_expr}), 0),
                    COALESCE(SUM({error_expr}), 0),
                    COALESCE(SUM({unavailable_expr}), 0),
+                   COALESCE(SUM({refused_expr}), 0),
                    COALESCE(SUM({handled_expr}), 0)
               FROM messages WHERE {clause}""",
         # Each EXISTS probe carries its own key placeholder, in the order the
@@ -4977,7 +5007,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
         # three again for `handled`), then the scope.
         (*note_params, *note_params, *params),
     )
-    total, transcribed, errors, unavailable, handled_total = (int(value or 0) for value in cur.fetchone())
+    total, transcribed, errors, unavailable, refused, handled_total = (int(value or 0) for value in cur.fetchone())
 
     # Untranscribed rows first, then newest: when COVERAGE_AUDIO_MAX_ROWS bites,
     # the budget is spent on the rows the answer is about. The worker transcribes
@@ -5026,6 +5056,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
         "transcribed": transcribed,
         "errors": errors,
         "unavailable": unavailable,
+        "refused": refused,
         "backlog": total - handled_total,
         "backlog_cached": backlog_cached,
     }
@@ -6445,11 +6476,13 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
         raise ToolError("invalid_argument", "chat_jid, message_id and to_chat_jid are required")
     _require_allowed(chat_jid)
     _require_allowed(to)
-    return _bridge_json(
+    return _bridge_media_json(
         _bridge_request(
             "POST",
             "/forward",
             json={"chat_jid": chat_jid, "message_id": message_id, "to_chat_jid": to},
             timeout=BRIDGE_MEDIA_TIMEOUT_S,
-        )
+        ),
+        message_id,
+        chat_jid,
     )
