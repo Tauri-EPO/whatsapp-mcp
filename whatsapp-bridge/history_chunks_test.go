@@ -65,7 +65,7 @@ func TestHistoryCommitsChunksAndAllowsLiveWriteBetweenThem(t *testing.T) {
 	}
 }
 
-func TestHistoryRollbackCountsOnlyTheFailedChunk(t *testing.T) {
+func TestHistoryNonBusyFailureReplaysRowsAndLosesOnlyTheBadRow(t *testing.T) {
 	for _, sideUpdate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "message insert", true: "mentions update"}[sideUpdate], func(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
@@ -76,8 +76,8 @@ func TestHistoryRollbackCountsOnlyTheFailedChunk(t *testing.T) {
 			defer func() { _ = ms.Close() }()
 			rec := installRecordingLogger(t)
 			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
-			// Roll back the second transaction after ten writes: earlier and later
-			// chunks must remain committed, and the rolled-back writes must not count.
+			// Roll back the second transaction after ten writes; replay must rescue
+			// every good neighbour while the bad row stays absent.
 			triggerAction := "INSERT"
 			if sideUpdate {
 				triggerAction = "UPDATE OF mentions"
@@ -102,12 +102,12 @@ func TestHistoryRollbackCountsOnlyTheFailedChunk(t *testing.T) {
 			if indexed != rows {
 				t.Fatalf("index=%d rows=%d", indexed, rows)
 			}
-			const want = 1001
+			const want = 1500
 			if rows != want || b.metrics.historyMessages.Load() != int64(want) {
 				t.Fatalf("rows=%d history metric=%d want=%d", rows, b.metrics.historyMessages.Load(), want)
 			}
-			if got := b.metrics.storeFailures.Load(); got != 500 {
-				t.Fatalf("lost rows=%d want=500", got)
+			if got := b.metrics.storeFailures.Load(); got != 1 {
+				t.Fatalf("lost rows=%d want=1", got)
 			}
 			if lines := errorLines(rec.String()); len(lines) != 1 || !strings.Contains(lines[0], "H510") {
 				t.Fatalf("rollback must name its originating message once: %v", lines)

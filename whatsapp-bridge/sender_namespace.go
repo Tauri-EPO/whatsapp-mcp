@@ -115,16 +115,18 @@ func (store *MessageStore) MigrateSenderNamespaces(whatsappDBPath string, logger
 		logger.Infof("Sender namespace backfill: %s not found, classifying from messages.db alone", whatsappDBPath)
 	}
 
-	tx, err := store.db.Begin()
+	alias := ""
+	if whatsappDB {
+		alias = fmt.Sprintf("wa_sender_ns_%d", time.Now().UnixNano())
+	}
+	tx, finish, err := store.beginMessageMigration(alias)
 	if err != nil {
 		return fmt.Errorf("failed to start sender namespace transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 
-	var alias string
 	var hasLIDMap, hasContacts bool
 	if whatsappDB {
-		alias = fmt.Sprintf("wa_sender_ns_%d", time.Now().UnixNano())
 		escapedPath := strings.ReplaceAll(whatsappDBPath, "'", "''")
 		if _, err := tx.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %s;", escapedPath, alias)); err != nil {
 			return fmt.Errorf("failed to attach WhatsApp DB for sender namespace backfill: %w", err)

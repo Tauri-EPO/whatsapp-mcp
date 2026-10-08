@@ -182,7 +182,7 @@ func TestHistoryChatLossHasIdentityWithoutAnEmptyMessageID(t *testing.T) {
 	b.storeRetryWait = func(time.Duration) bool { release(); return false }
 	b.handleHistorySync(largeHistoryFixture(1))
 	lines := errorLines(rec.String())
-	if b.metrics.storeFailures.Load() != 1 || len(lines) != 1 || !strings.Contains(lines[0], "history chat in "+phonePN.String()) || strings.Contains(lines[0], "  ") {
+	if b.metrics.storeFailures.Load() != 1 || len(lines) != 1 || !strings.Contains(lines[0], "1 history messages in "+phonePN.String()) || !strings.Contains(lines[0], "first ID H0, last ID H0") || strings.Contains(lines[0], "  ") {
 		t.Fatalf("failures=%d errors=%v", b.metrics.storeFailures.Load(), lines)
 	}
 }

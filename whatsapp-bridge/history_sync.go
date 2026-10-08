@@ -34,6 +34,9 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 	}
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
+		if b.historyStopping() {
+			return
+		}
 		// Parse JID from the conversation
 		if conversation.ID == nil {
 			continue
@@ -74,7 +77,13 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 
-			b.storeLive("history chat", "", chatJID, func() error { return messageStore.StoreChat(chatJID, name, timestamp) })
+			if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, name, timestamp) }); err != nil {
+				if b.historyStopping() {
+					return
+				}
+				b.noteHistoryLoss(messages, timestamp, chatJID, err)
+				continue
+			}
 			// Backfill read state only when WhatsApp explicitly reports unread
 			// metadata. Sparse history-sync chunks omit UnreadCount; the
 			// generated getter then returns 0 and would permanently mark the
@@ -101,7 +110,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			// The synchronous callback captures the current chunk; keep extraction
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
-			storedInBatch, failedID := 0, ""
+			storedInBatch := 0
 			storeChunk := func(batch *messageBatch) error {
 				for _, msg := range chunk {
 					if msg == nil || msg.Message == nil {
@@ -193,7 +202,6 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						err = batch.failure
 					}
 					if err != nil {
-						failedID = msgID
 						return err
 					} else {
 						storedInBatch++
@@ -210,35 +218,68 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				}
 				return nil
 			}
-			for _, msg := range messages {
+			storedInChat := 0
+			processed := len(messages)
+			commitChunk := func() error {
+				return b.retryBusy(func() error {
+					storedInBatch = 0
+					return writeBatch(storeChunk)
+				})
+			}
+			countCommitted := func() {
+				syncedCount += storedInBatch
+				storedInChat += storedInBatch
+				b.metrics.historyMessages.Add(int64(storedInBatch))
+			}
+		chunks:
+			for start := 0; start < len(messages); start += historyBatchMessages {
+				if b.historyStopping() {
+					return
+				}
+				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
+				batchErr := commitChunk()
+				if batchErr == nil {
+					countCommitted()
+					continue
+				}
+				if b.historyStopping() {
+					return
+				}
+				if isBusyError(batchErr) {
+					// Preserve the newest committed prefix for request_history's anchor.
+					processed = start
+					b.noteHistoryLoss(messages[start:], timestamp, chatJID, batchErr)
+					break
+				}
+				// A bad row must not cost its good neighbours. Each replay remains
+				// atomic with its auxiliary writes and owns one retry budget.
+				for index, msg := range chunk {
+					if b.historyStopping() {
+						return
+					}
+					chunk = []*waHistorySync.HistorySyncMsg{msg}
+					rowErr := commitChunk()
+					if rowErr == nil {
+						countCommitted()
+						continue
+					}
+					if b.historyStopping() {
+						return
+					}
+					if isBusyError(rowErr) {
+						processed = start + index
+						b.noteHistoryLoss(messages[processed:], timestamp, chatJID, rowErr)
+						break chunks
+					}
+					b.noteHistoryLoss(chunk, timestamp, chatJID, rowErr)
+				}
+			}
+			logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
+			for _, msg := range messages[:processed] {
 				if msg != nil && msg.Message != nil && msg.Message.Message.GetPollUpdateMessage() != nil {
 					pendingVotes = append(pendingVotes, msg.Message)
 				}
 			}
-			storedInChat := 0
-			for start := 0; start < len(messages); start += historyBatchMessages {
-				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
-				batchErr := b.retryBusy(func() error {
-					storedInBatch, failedID = 0, ""
-					return writeBatch(storeChunk)
-				})
-				if batchErr != nil {
-					// Only this chunk rolled back; previously committed chunks remain.
-					lost := countStorableHistoryMessages(chunk, timestamp)
-					kind := "history batch"
-					if failedID != "" {
-						kind = "history message"
-					}
-					b.noteStoreFailure(kind, failedID, chatJID, batchErr)
-					b.metrics.storeFailures.Add(int64(max(0, lost-1)))
-					logger.Warnf("History sync: %s chunk at %d lost %d messages", chatJID, start, lost)
-				} else {
-					syncedCount += storedInBatch
-					storedInChat += storedInBatch
-					b.metrics.historyMessages.Add(int64(storedInBatch))
-				}
-			}
-			logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
 			if len(pendingVotes) > 0 {
 				b.historyVotes.Add(1)
 				go func(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo) {
@@ -254,15 +295,29 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 
 // Used only after a chunk fails: count actual storable rows, excluding sparse
 // envelopes and poll updates, so rollback losses include the unattempted tail.
-func countStorableHistoryMessages(messages []*waHistorySync.HistorySyncMsg, fallback time.Time) int {
+func (b *Bridge) noteHistoryLoss(messages []*waHistorySync.HistorySyncMsg, fallback time.Time, chat string, err error) {
 	count := 0
+	first, last := "", ""
 	for _, msg := range messages {
 		if msg == nil || msg.Message == nil || msg.Message.GetMessageTimestamp() == 0 || msg.Message.Message.GetPollUpdateMessage() != nil {
 			continue
 		}
 		if ex := extractMessage(msg.Message.Message, fallback, msg.Message.GetKey().GetID()); !ex.empty() {
+			last = msg.Message.GetKey().GetID()
+			if count == 0 {
+				first = last
+			}
 			count++
 		}
 	}
-	return count
+	b.metrics.storeFailures.Add(int64(count))
+	b.Log.Errorf("Failed to store %d history messages in %s (first ID %s, last ID %s): %v", count, chat, first, last, err)
+}
+
+func (b *Bridge) historyStopping() bool {
+	if b.ctx != nil && b.ctx.Err() != nil {
+		b.Log.Infof("History sync stopped during shutdown")
+		return true
+	}
+	return false
 }

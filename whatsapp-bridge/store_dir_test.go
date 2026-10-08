@@ -61,7 +61,7 @@ func TestStoreDirIsUsedByStoreTokenAndLock(t *testing.T) {
 }
 
 func TestSQLiteOptionsCoverEveryHandle(t *testing.T) {
-	for _, opts := range []string{sqliteWriterOptions, sqliteReadOnlyOptions} {
+	for _, opts := range []string{sqliteWriterOptions, messagesWriterOptions, sqliteReadOnlyOptions} {
 		if !strings.Contains(opts, "busy_timeout(") {
 			t.Errorf("%q must set a busy timeout", opts)
 		}
