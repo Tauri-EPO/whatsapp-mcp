@@ -145,7 +145,7 @@ func parseRecipientJID(recipient string) (types.JID, error) {
 // recipientSeparators is the explicit contract shared with phone.py; Unicode
 // category tables differ between the Go and Python runtimes. Never extend it
 // without adding each character to the shared spelling fixture.
-const recipientSeparators = " \t-().\u00a0\u202f\u200b\u200e\u200f\u2010\u2011\u2013\u2014"
+const recipientSeparators = " \t-().\u00a0\u202f\u2007\u2009\u200b\u200e\u200f\u202a\u202c\u2066\u2067\u2068\u2069\ufeff\u2010\u2011\u2012\u2013\u2014"
 
 // normalizePhoneRecipient runs once at a send/forward boundary, before policy.
 // Full JIDs and invalid spellings stay as given, without gaining an alias.
@@ -216,7 +216,7 @@ func canonicalRecipientJID(ctx context.Context, lidForPN lidForPNFunc, isOnWhats
 		return jid, nil
 	}
 	if !isPhoneDigits(jid.User) {
-		return types.EmptyJID, fmt.Errorf("%q is not a phone number: use a country code and digits, optionally formatted with supported separators", jid.User)
+		return types.EmptyJID, fmt.Errorf("%q is not a phone number: use the country code and ASCII digits, or a digits-only @s.whatsapp.net JID", jid.User)
 	}
 	// The answers are read before the error: whatsmeow returns both when the
 	// query worked and only its own write of the LID mapping failed.
@@ -834,8 +834,9 @@ func placeholderWaveform(duration uint32) []byte {
 // it registered under (canonicalRecipientJID), and answers the request itself
 // when there is nobody to send to: ok is false once it wrote the response.
 //
-// Security: handleSend has already checked the allow-list on the recipient as
-// typed, before WhatsApp is asked anything, so a number outside the list is
+// Security: the handler has already normalized once at its request boundary
+// and checked the allow-list on that number before WhatsApp is asked anything,
+// so a number outside the list is
 // never looked up. The registered number is checked here as well: a number
 // that is not on the list must not become reachable through another spelling
 // of it that is. And when the question cannot be answered, a bridge with an

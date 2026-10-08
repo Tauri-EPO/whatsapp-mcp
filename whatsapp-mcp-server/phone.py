@@ -24,7 +24,7 @@ from errors import ToolError
 MIN_PHONE_DIGITS = 7
 
 # Same explicit characters as send.go, independent of runtime Unicode tables.
-RECIPIENT_SEPARATORS = " \t-().\u00a0\u202f\u200b\u200e\u200f\u2010\u2011\u2013\u2014"
+RECIPIENT_SEPARATORS = " \t-().\u00a0\u202f\u2007\u2009\u200b\u200e\u200f\u202a\u202c\u2066\u2067\u2068\u2069\ufeff\u2010\u2011\u2012\u2013\u2014"
 
 # 55, a two-digit area code (DDD, never a zero in it), the optional ninth digit
 # and the eight-digit subscriber number. Only a subscriber number beginning

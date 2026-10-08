@@ -6475,8 +6475,8 @@ def edit_message(chat_jid: str, message_id: str, text: str, dry_run: bool = Fals
 def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[str, Any]:
     """Re-send a stored message (text or cached media with caption) to another chat."""
     chat_jid, message_id = (chat_jid or "").strip(), (message_id or "").strip()
-    to = normalize_recipient(to_chat_jid)
-    if not chat_jid or not message_id or not to.strip():
+    to = normalize_recipient((to_chat_jid or "").strip())
+    if not chat_jid or not message_id or not to:
         raise ToolError("invalid_argument", "chat_jid, message_id and to_chat_jid are required")
     _require_allowed(chat_jid)
     _require_allowed(to)

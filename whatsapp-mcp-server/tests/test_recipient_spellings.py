@@ -78,3 +78,28 @@ def test_refused_recipient_has_no_http_effect(monkeypatch, tool, invalid):
         getattr(whatsapp, tool)(*args)
     assert exc.value.code == ("invalid_argument" if invalid else "denied")
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "raw,want",
+    [(" 120363000000000001@g.us ", "120363000000000001@g.us"), ("5511999999999\n", "5511999999999")],
+)
+def test_forward_trims_destination_before_policy_and_http(monkeypatch, raw, want):
+    source = "120363000000000001@g.us"
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([source, "5511999999999"]))
+    posted = []
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"success": True, "chat_jid": want}
+
+    def post(url, **kwargs):
+        posted.append(kwargs["json"])
+        return Response()
+
+    monkeypatch.setattr(whatsapp.bridge_http, "post", post)
+    result = whatsapp.forward_message(source, "MSG1", raw)
+    assert result["chat_jid"] == want
+    assert posted == [{"chat_jid": source, "message_id": "MSG1", "to_chat_jid": want}]

@@ -149,7 +149,7 @@ func TestCanonicalRecipientJID(t *testing.T) {
 			ask: &fakeIsOnWhatsApp{}, wantFail: true,
 		},
 		{
-			name: "not a phone number: nothing is asked", recipient: "+55 11 98888-7777x",
+			name: "not a phone number: nothing is asked", recipient: "+55 11 98888-7777",
 			ask: &fakeIsOnWhatsApp{}, wantFail: true,
 		},
 	}

@@ -59,6 +59,29 @@ func TestFormattedForwardPolicyBeforeSend(t *testing.T) {
 	}
 }
 
+func TestForwardTrimsDestinationBeforePolicy(t *testing.T) {
+	const source = "120363000000000001@g.us"
+	for _, tc := range []struct{ raw, want string }{
+		{" " + source + " ", source},
+		{"5511999999999\n", "5511999999999"},
+	} {
+		var addressed string
+		deps := forwardDeps{
+			lookup: func(_, _ string) (string, string, bool, error) { return "hello", "", true, nil },
+			send: func(_ context.Context, to, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
+				addressed = to
+				return true, "sent", sentMessage{ChatJID: to}
+			},
+		}
+		h := handleForwardMessage(deps, parseChatPolicy(source+",5511999999999"))
+		body, _ := json.Marshal(forwardRequest{ChatJID: source, MessageID: "MSG1", ToChatJID: tc.raw})
+		code, resp := efPost(t, h, string(body))
+		if code != http.StatusOK || addressed != tc.want || resp.ChatJID != tc.want {
+			t.Fatalf("forward %q: status=%d addressed=%q response=%+v, want %q", tc.raw, code, addressed, resp, tc.want)
+		}
+	}
+}
+
 func TestInvalidLongRecipientBeforeEffects(t *testing.T) {
 	ask := &fakeIsOnWhatsApp{}
 	b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)

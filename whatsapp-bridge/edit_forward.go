@@ -144,12 +144,12 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 		if !ok {
 			return
 		}
-		to, err := normalizePhoneRecipient(req.ToChatJID)
+		to, err := normalizePhoneRecipient(strings.TrimSpace(req.ToChatJID))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if strings.TrimSpace(to) == "" {
+		if to == "" {
 			writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "to_chat_jid is required"})
 			return
 		}
