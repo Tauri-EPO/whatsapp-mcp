@@ -127,3 +127,29 @@ UTC, second resolution, explicit offset, fixed width. SQLite has no date type, s
 Earlier releases bound a `time.Time` and let the SQLite driver render it, which stamped the writing machine's local offset on the row (older stores also hold Go's `time.Time.String()` form). The bridge rewrites those rows to the canonical spelling on startup, logs how many it changed per column, and stamps `PRAGMA user_version` so the rewrite runs once. The stamp is not the whole story: a stamped store still gets one `LIMIT 1` probe per time column at every start, so rows an older binary wrote during an image rollback are repaired on the way forward ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
 
 Two things this note does *not* cover: `chats.ephemeral_setting_timestamp` is an INTEGER of WhatsApp seconds, not a time string; and cached media file names keep the *local* wall clock of the message (`<type>_<yyyymmdd_hhmmss>_<id>`), so existing files stay reachable.
+
+
+## SQLite contention and persistence retries
+
+Live chat/message inserts, decoded poll-message rows, history chat metadata and
+outbound chat/message persistence share the Bridge's bounded SQLite BUSY/LOCKED
+retry policy: up to three attempts, with 200 ms then 1 s between attempts.
+Outbound chat and message upserts use one closure and one budget after WhatsApp
+accepted the send; retry never sends a second remote message. Shutdown cancels
+all retry waits. Other errors stop immediately. A final failure logs one ERROR
+with row identity and increments the counter, including chat rows. A successful
+send whose local persistence failed retains success and its message ID, with a
+warning that the archive row is unavailable and the message must not be resent.
+
+Under a persistently held writer, the default five-second SQLite busy timeout
+plus the shared budget consumes up to 16.2 seconds of lock waits and retry
+pauses, instead of separate chat/message budgets. SQL work, media upload, the
+remote send and machine scheduling add time; this is not a total-request
+latency guarantee. Long history transactions can still delay live writes.
+
+Poll vote tally helpers already use storeLive. Other mutations retain their
+own handling: edit/delete bookkeeping, inbound revokes, call rows and auxiliary
+message metadata are tracked separately; read/ephemeral state, renamed chats,
+refreshed media metadata and group rosters may recover on later updates. Schema
+and namespace/time/LID migrations retain their startup error handling. Chat
+archive state and retention are not messages.db write paths.

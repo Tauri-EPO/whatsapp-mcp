@@ -260,7 +260,10 @@ func TestSendToTheDialledSpellingLandsInTheExistingChat(t *testing.T) {
 			t.Errorf("handler passed an unreadable recipient %q: %v", recipient, err)
 		}
 		sent := sentMessage{ID: "OUT9", Timestamp: ts}
-		sent.ChatJID = persistOutbound(b.Client, b.Store, storageJID, sent, message, outboundMedia{}, "")
+		sent.ChatJID, err = b.persistOutbound(storageJID, sent, message, outboundMedia{}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
 		return true, "sent", sent
 	}
 
