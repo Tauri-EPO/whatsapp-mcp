@@ -19,10 +19,16 @@ import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 JSON_FORMAT_ENV = "WHATSAPP_MCP_LOG_FORMAT"
 METRICS_TOKEN_ENV = "WHATSAPP_MCP_METRICS_TOKEN"
+
+# SDK calls are counted after conversion, when the final outcome is known.
+# Context propagation to the SDK's worker thread keeps direct Python calls
+# counted by @tool_errors while each MCP call is counted only once.
+mcp_metrics_owned: ContextVar[bool] = ContextVar("mcp_metrics_owned", default=False)
 
 # Upper bounds (seconds) of the tool-duration histogram, from a cached DB read
 # to the slowest call this server can make: the tail reaches WHISPER_TIMEOUT_S

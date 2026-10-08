@@ -24,10 +24,14 @@ an unreadable database is reported as ``internal``, never as an empty account.
 from __future__ import annotations
 
 import functools
+import inspect
+import json
 import logging
 import time
 from collections.abc import Callable
 from typing import Any
+
+from mcp_types import CallToolResult, TextContent
 
 MEDIA_REFUSED_CODE = "media_refused"
 
@@ -71,6 +75,44 @@ def error(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return ToolError(code, message, **extra).to_dict()
 
 
+def tool_error_result(envelope: dict[str, Any]) -> CallToolResult:
+    """Carry the common failure on both MCP channels, with the error flag set."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(envelope, ensure_ascii=False))],
+        structured_content=envelope,
+        is_error=True,
+    )
+
+
+def structured_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Convert failure envelopes before the SDK validates the success schema.
+
+    A list-returning tool's success schema cannot accept an error dictionary.
+    The explicit error result bypasses success validation and preserves its code;
+    dict-returning tools and content-block tools use the same representation.
+    Return annotations, argument signatures and successful values stay intact.
+    """
+
+    def convert(result: Any) -> Any:
+        if isinstance(result, dict) and "error" in result:
+            return tool_error_result(result)
+        return result
+
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            return convert(await fn(*args, **kwargs))
+
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return convert(fn(*args, **kwargs))
+
+    return wrapper
+
+
 def tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator for MCP tools: map exceptions to the envelope.
 
@@ -80,7 +122,7 @@ def tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        from observability import metrics  # local import: observability imports nothing from here
+        from observability import mcp_metrics_owned, metrics  # local import avoids a module cycle
 
         started = time.monotonic()
         code: str | None = None
@@ -97,6 +139,7 @@ def tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
             logger.exception("%s failed", fn.__name__)
             return error("internal", f"{type(exc).__name__}: {exc}")
         finally:
-            metrics.record_tool(fn.__name__, time.monotonic() - started, code)
+            if not mcp_metrics_owned.get():
+                metrics.record_tool(fn.__name__, time.monotonic() - started, code)
 
     return wrapper

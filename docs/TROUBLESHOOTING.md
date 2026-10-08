@@ -474,6 +474,27 @@ be attached to a report once the message ID is replaced by a placeholder. A
 file that keeps failing with this line while the phone opens it is a bug worth
 reporting with it.
 
+## Tool output schema errors
+
+If a client reports `Tool has an output schema but did not return structured
+content`, record the client and SDK version, tool name, time, and exact error.
+Issue [#623](https://github.com/Tauri-EPO/whatsapp-mcp/issues/623) remains open:
+synthetic archives did not reproduce the reported live bot incident. Successful
+page projections, FTS queries, untrusted wrapping, domain errors, invalid input
+and unreadable databases were exercised without explaining that occurrence.
+
+The MCP server emits one INFO `tool_result` line after each completed tool call:
+tool name, duration in milliseconds, result kind, `is_error`,
+`has_structured_content`, content-block count and UTF-8 result-byte count. It
+logs no arguments or result content. Correlate the incident's tool and time with
+this line; `is_error=True has_structured_content=False` is an intentional
+text-only error when the success schema cannot accept the error envelope.
+`is_error=False has_structured_content=False` on a schema-bearing tool needs
+investigation. An unknown tool is logged as `<unknown>` without its supplied
+name. JSON logging carries the same fields in the message. Preserve these
+diagnostics and the client error for the next incident without attaching chat
+content, phone numbers, tokens or live archives.
+
 ## App State / LTHash Conflicts
 
 Some WhatsApp account state is managed by whatsmeow in

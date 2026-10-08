@@ -1507,6 +1507,7 @@ version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mcp", extra = ["cli"] },
     { name = "openpyxl" },
     { name = "pillow" },
@@ -1514,6 +1515,7 @@ dependencies = [
     { name = "pypdf" },
     { name = "pypdfium2" },
     { name = "python-docx" },
+    { name = "referencing" },
 ]
 
 [package.optional-dependencies]
@@ -1528,6 +1530,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3.0,<3" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pillow", specifier = ">=12.3" },
@@ -1539,6 +1542,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "python-docx", specifier = ">=1.2" },
+    { name = "referencing", specifier = ">=0.37.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.10" },
 ]
 provides-extras = ["dev"]
