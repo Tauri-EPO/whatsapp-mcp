@@ -52,6 +52,17 @@ def phone_digits(value: str) -> str | None:
     return compact
 
 
+def normalize_recipient(value: str) -> str:
+    """Normalise a bare phone's separators; full JIDs and invalid values stay as given.
+
+    No alternate number is chosen: the bridge checks the registered number.
+    """
+    value = value or ""
+    if "@" in value:
+        return value
+    return phone_digits(value) or value
+
+
 def br_mobile_alternate(digits: str) -> str | None:
     """The other spelling of a full Brazilian mobile number, or None.
 

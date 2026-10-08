@@ -23,7 +23,7 @@ import media_upload
 import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
 from errors import MEDIA_REFUSED_CODE, ToolError
-from phone import br_mobile_alternate, phone_digits
+from phone import br_mobile_alternate, normalize_recipient, phone_digits
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
 # transport stdout is the MCP protocol channel and stray output breaks it.
@@ -4229,6 +4229,7 @@ def send_message(
     ``dry_run=True`` validates and resolves everything, then returns the request
     that would have been posted instead of posting it.
     """
+    recipient = normalize_recipient(recipient)
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(recipient)
@@ -4287,6 +4288,7 @@ def send_file(
     exists or the payload decodes) and returns the request that would have
     been posted; an inline payload is not written to disk for a dry run.
     """
+    recipient = normalize_recipient(recipient)
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     source = _media_source(media_path, media_base64)
@@ -4344,6 +4346,7 @@ def send_audio_message(
     converted with ffmpeg first. Both the inline upload and the converted
     file live under the outbox the bridge may read and are removed after the
     send; a caller's own ``media_path`` is never touched."""
+    recipient = normalize_recipient(recipient)
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
     source = _media_source(media_path, media_base64)

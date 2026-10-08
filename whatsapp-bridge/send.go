@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // SendMessageResponse represents the response for the send message API
@@ -137,9 +138,31 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 // phone number means a personal chat, anything with an "@" is a full JID.
 func parseRecipientJID(recipient string) (types.JID, error) {
 	if !strings.Contains(recipient, "@") {
+		recipient = normalizePhoneRecipient(recipient)
 		return types.JID{User: recipient, Server: types.DefaultUserServer}, nil
 	}
 	return types.ParseJID(recipient)
+}
+
+// normalizePhoneRecipient mirrors phone.phone_digits: seven or more ASCII
+// digits, an optional leading +, spaces, Unicode dashes/format marks, dots
+// and parentheses. Invalid spellings stay unchanged, never gaining an alias.
+// Existing short digit-only recipients and full JIDs are left untouched.
+func normalizePhoneRecipient(raw string) string {
+	if strings.Contains(raw, "@") {
+		return raw
+	}
+	compact := strings.Map(func(r rune) rune {
+		if strings.ContainsRune("().", r) || unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f) || unicode.Is(unicode.Pd, r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, raw)
+	compact = strings.TrimPrefix(compact, "+")
+	if len(compact) >= 7 && isPhoneDigits(compact) {
+		return compact
+	}
+	return raw
 }
 
 // isOnWhatsAppFunc asks WhatsApp whether phone numbers ("+" and digits) have
@@ -863,6 +886,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 
 		// Validate request
+		req.Recipient = normalizePhoneRecipient(req.Recipient)
 		if req.Recipient == "" {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return

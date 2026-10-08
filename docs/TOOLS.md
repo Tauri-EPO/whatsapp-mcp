@@ -893,7 +893,7 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 
 This applies to `send_message`, `send_file` and `send_audio_message` alike.
 
-- **Format.** A bare number is digits only, country code first: `5511999999999`. A leading `+`, spaces, dashes or parentheses are not accepted (`invalid_argument`). A full JID (`5511999999999@s.whatsapp.net`) works too; group and `@lid` JIDs are used as they are.
+- **Format.** Use the country code first: `5511999999999`. As with the lookup tools, a bare number of seven or more digits may contain a leading `+`, spaces, Unicode dashes, dots, parentheses and format marks; these are removed before the allow-list check and send. Letters and wildcards are not phone numbers. The Brazilian alternate spelling is never substituted locally: the bridge checks the registered number. A full JID (`5511999999999@s.whatsapp.net`) works too; group and `@lid` JIDs are used as they are.
 - **The number does not have to be spelled the way WhatsApp registered it.** For a number the bridge has never exchanged a message with, it asks WhatsApp which number is registered — the question the phone app asks when you type one — and sends there. A Brazilian mobile typed with its ninth digit (`55 11 9XXXX-XXXX`) reaches the account registered without it, and the other way round. It is not specific to Brazil.
 - **The `chat_jid` in the result is the registered one.** That is the JID the conversation is stored under: use it for the follow-up calls (`list_messages`, `send_reaction`, …), not the number as typed.
 - **A number with no WhatsApp account** fails with `not_found` ("… is not on WhatsApp") and nothing is sent. That answer is only given when WhatsApp said so.
