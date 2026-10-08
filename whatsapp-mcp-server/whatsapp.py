@@ -23,7 +23,7 @@ import media_upload
 import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry, validate_chat_target
 from errors import MEDIA_REFUSED_CODE, ToolError
-from phone import br_mobile_alternate, normalize_recipient, phone_digits
+from phone import br_mobile_alternate, br_national_mobile_alternate, normalize_recipient, phone_digits
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
 # transport stdout is the MCP protocol channel and stray output breaks it.
@@ -1671,6 +1671,7 @@ class _Twin:
     aliases: list[str]  # both spellings, phone first
     name: str | None  # the absorbed row's name
     last_read_time: datetime | None
+    hidden_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1731,7 +1732,8 @@ class ChatTwins:
         return sorted(
             listed
             for listed, twin in self.by_listed.items()
-            if (twin.name and needle in twin.name.casefold()) or needle in twin.absorbed.casefold()
+            if any(needle in name.casefold() for name in twin.hidden_names or (twin.name or "",))
+            or any(needle in jid.casefold() for jid in twin.aliases if jid != listed)
         )
 
     def absorbing(self, spelling: str) -> list[str]:
@@ -1743,23 +1745,28 @@ class ChatTwins:
         return sorted(
             listed
             for listed, twin in self.by_listed.items()
-            if (twin.absorbed == spelling if "@" in spelling else spelling in twin.absorbed)
+            if any((jid == spelling if "@" in spelling else spelling in jid) for jid in twin.aliases if jid != listed)
         )
 
     def cte(self, name: str = "chat_twin") -> tuple[str, list[str]]:
-        """`name(jid, twin_jid, listed_jid)` for a WITH clause, both directions.
+        """`name(jid, twin_jid, listed_jid, third_jid)` for a WITH clause.
 
         The empty form keeps one query shape on a store with no pairs, the way
         get_contact_chats_page's `member_of` does for an older schema.
         """
-        header = f"{name}(jid, twin_jid, listed_jid)"
+        header = f"{name}(jid, twin_jid, listed_jid, third_jid)"
         rows: list[str] = []
         params: list[str] = []
         for listed, twin in sorted(self.by_listed.items()):
-            rows += ["(?, ?, ?)", "(?, ?, ?)"]
-            params += [listed, twin.absorbed, listed, twin.absorbed, listed, listed]
+            for jid in twin.aliases:
+                other = twin.absorbed if jid == listed else listed
+                third = next((member for member in twin.aliases if member not in (jid, other)), None)
+                rows.append("(?, ?, ?, ?)" if third else "(?, ?, ?, NULL)")
+                params += [jid, other, listed]
+                if third:
+                    params.append(third)
         if not rows:
-            return f"{header} AS (SELECT NULL, NULL, NULL WHERE 0)", []
+            return f"{header} AS (SELECT NULL, NULL, NULL, NULL WHERE 0)", []
         return f"{header} AS (VALUES {', '.join(rows)})", params
 
     def both_rows(self, alias: str = "tw") -> tuple[str, str, str, list[str]]:
@@ -1775,9 +1782,15 @@ class ChatTwins:
         return (
             f"WITH {cte} ",
             f"LEFT JOIN chat_twin {alias} ON {alias}.jid = chats.jid",
-            f"IN (chats.jid, {alias}.twin_jid)",
+            self.message_members("chats.jid", alias),
             params,
         )
+
+    def message_members(self, column: str, alias: str = "tw") -> str:
+        """Retain the two-row fast path; a phone pair plus LID has three members."""
+        if not any(len(twin.aliases) > 2 for twin in self.by_listed.values()):
+            return f"IN ({column}, {alias}.twin_jid)"
+        return f"IN ({column}, {alias}.twin_jid, {alias}.third_jid)"
 
     def merge(self, chats: Sequence[Chat]) -> None:
         """Relabel and fill in every row that absorbed a twin.
@@ -1829,6 +1842,20 @@ def _paired_lid_chats(cur: sqlite3.Cursor) -> dict[str, str]:
     return _cache_put("lid_chats", MESSAGES_DB_PATH, paired)
 
 
+def _paired_phone_chats(cur: sqlite3.Cursor) -> dict[str, str]:
+    """Stored Brazilian ninth-digit pairs, cached without their policy decision."""
+    hit, cached = _cache_get("phone_chats", MESSAGES_DB_PATH)
+    if hit:
+        return cached
+    stored = {row[0] for row in cur.execute("SELECT jid FROM chats WHERE jid LIKE '55%@s.whatsapp.net'")}
+    pairs = {
+        jid: other
+        for jid in stored
+        if (other := other_phone_spelling(jid)) and other in stored and len(jid) > len(other)
+    }
+    return _cache_put("phone_chats", MESSAGES_DB_PATH, pairs)
+
+
 # Far more pairs than an account ever has, and the ceiling of the runtime budget
 # below. Past the cap the quietest pairs simply stay unmerged, as they were
 # before #337, rather than a listing failing.
@@ -1838,7 +1865,8 @@ CHAT_TWIN_MAX_PAIRS = 2000
 def _chat_twin_cap(cur: sqlite3.Cursor) -> int:
     """How many pairs can be merged without crossing SQLite's parameter limit.
 
-    `cte()` binds six parameters per pair and `hidden_clause` one more; the
+    `cte()` binds six parameters per pair and `hidden_clause` one more. A
+    three-member identity uses twelve plus two, charged as two pairs; the
     reserve covers the two dozen the statements around them bind (the filter,
     the allow-list, the keyset, the limit). SQLite has allowed 32 766 parameters
     since 3.32 (2020) and 999 before it; the limit is asked for rather than
@@ -1853,11 +1881,11 @@ def _chat_twin_cap(cur: sqlite3.Cursor) -> int:
 
 
 def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatTwins:
-    """The phone/LID pairs this store holds, read through the LID map (issue #337).
+    """Stored Brazilian phone pairs and confirmed phone/LID pairs (issues #479, #337).
 
     Two statements on the way to a listing once the pair scan is warm: the rows
     of the paired chats, and the newest message of each — both on indexed
-    columns, and nothing at all runs when the store has no `@lid` chat. `only`
+    columns. Both pair scans are cached for five minutes. `only`
     narrows the work to the pairs touching those JIDs, which is all a by-JID
     lookup needs: a listing pays for every pair because it has to hide them all.
 
@@ -1865,8 +1893,16 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatT
     allow-list naming one of the two keeps hiding exactly what it hid before,
     rather than having the other half of the conversation folded into it.
     """
-    paired = _paired_lid_chats(cur)
+    paired = {**_paired_phone_chats(cur), **_paired_lid_chats(cur)}
     wanted = set(only) if only is not None else None
+    if wanted is not None:
+        # Resolve the connected phone/alternate/LID component before narrowing
+        # rows: asking for one spelling must find the same three-row chat.
+        while True:
+            expanded = wanted | {jid for pair in paired.items() if wanted.intersection(pair) for jid in pair}
+            if expanded == wanted:
+                break
+            wanted = expanded
     candidates = {
         lid_jid: phone_jid
         for lid_jid, phone_jid in paired.items()
@@ -1912,7 +1948,7 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatT
         if not _cache_get("twin_cap", MESSAGES_DB_PATH)[0]:
             _cache_put("twin_cap", MESSAGES_DB_PATH, True)
             logger.warning(
-                "chat listings: %d phone/LID pairs, only %d of them merged; the quietest list under both spellings",
+                "chat listings: %d identity pairs, only %d of them merged; the quietest list under both spellings",
                 len(both_stored),
                 cap,
             )
@@ -1923,25 +1959,39 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None) -> ChatT
     # Only `whatsmeow_lid_map.lid` is unique, so two LIDs can name one number.
     # Merging both would report one JID on two rows, which is worse than the
     # duplicate #337 is about: the busiest pair wins and the rest stay apart.
-    taken: set[str] = set()
-    for lid_jid, phone_jid in both_stored:
-        if taken & {lid_jid, phone_jid}:
+    groups: dict[str, set[str]] = {}
+    group_for: dict[str, str] = {}
+    # Join the two phone rows first, then at most one LID per identity. This
+    # preserves the existing busiest-LID rule without splitting a phone pair.
+    for left, right in sorted(both_stored, key=lambda pair: pair[0].endswith("@lid")):
+        key = group_for.get(right, right)
+        members_of_group = groups.setdefault(key, {right})
+        if left.endswith("@lid") and any(jid.endswith("@lid") for jid in members_of_group):
             continue
-        taken |= {lid_jid, phone_jid}
-        listed, hidden = (lid_jid, phone_jid) if holds_more(lid_jid) > holds_more(phone_jid) else (phone_jid, lid_jid)
-        name, _last_time, last_read = rows[hidden]
+        members_of_group.add(left)
+        group_for[left] = group_for[right] = key
+    for group in groups.values():
+        phones = sorted((jid for jid in group if jid.endswith("@s.whatsapp.net")), key=lambda jid: (len(jid), jid))
+        phone_jid = phones[0]
+        aliases = [*phones, *sorted(group - set(phones))]
+        listed = max(group, key=lambda jid: (holds_more(jid), jid == phone_jid))
+        hidden_rows = [jid for jid in aliases if jid != listed]
+        hidden = next((jid for jid in hidden_rows if not _is_placeholder_name(rows[jid][0])), hidden_rows[0])
+        name = rows[hidden][0]
+        last_reads = [parse_db_time(stamp) for jid in hidden_rows if (stamp := rows[jid][2])]
         by_listed[listed] = _Twin(
             absorbed=hidden,
             jid=phone_jid,
-            aliases=[phone_jid, lid_jid],
+            aliases=aliases,
             name=name,
-            last_read_time=parse_db_time(last_read) if last_read else None,
+            last_read_time=max(last_reads) if last_reads else None,
+            hidden_names=tuple(name for jid in hidden_rows if (name := rows[jid][0])),
         )
-        listed_for[hidden] = listed
+        listed_for.update({jid: listed for jid in hidden_rows})
     return ChatTwins(by_listed, listed_for) if by_listed else NO_CHAT_TWINS
 
 
-def _apply_name_fallback(chats: list[Chat]) -> None:
+def _apply_name_fallback(chats: list[Chat], *, phone_aliases: bool = True) -> None:
     """Fill name/push_name/name_source from the phone book for a page of chats.
 
     `chats.name` is what WhatsApp pushed for the conversation; for a large share
@@ -1955,7 +2005,8 @@ def _apply_name_fallback(chats: list[Chat]) -> None:
     that person (issue #379).
     """
     direct = [chat for chat in chats if not chat.is_group and not chat.is_status]
-    profiles = _contact_profiles([chat.jid for chat in direct]) if direct else {}
+    lookup = _chat_contact_profiles if phone_aliases else _contact_profiles
+    profiles = lookup([chat.jid for chat in direct]) if direct else {}
     for chat in chats:
         if chat.is_status:
             chat.name = chat_display_name(chat.jid, chat.name)
@@ -3081,7 +3132,70 @@ def get_message_context(
             conn.close()
 
 
-def _chat_filter(query: str | None, twins: ChatTwins = NO_CHAT_TWINS) -> tuple[list[str], list[Any]]:
+def _chat_contact_profiles(jids: list[str], conn: sqlite3.Connection | None = None) -> dict[str, ContactProfile]:
+    """Display profiles; alternate-phone fallback is authorized per call, never cached under the alias."""
+    aliases = {
+        jid: other
+        for jid in jids
+        if (other := other_phone_spelling(jid)) and CHAT_POLICY.allows(jid) and CHAT_POLICY.allows(other)
+    }
+    wanted = list(dict.fromkeys([*jids, *aliases.values()]))
+    all_profiles = _contact_names_uncached(conn, wanted) if conn is not None else _contact_profiles(wanted)
+    profiles = {jid: all_profiles[jid] for jid in jids if jid in all_profiles}
+    profiles.update(
+        {
+            jid: all_profiles[other]
+            for jid, other in aliases.items()
+            if not profiles.get(jid, _NO_PROFILE).name and other in all_profiles
+        }
+    )
+    return profiles
+
+
+def _matching_contact_chat_names(cur: sqlite3.Cursor, query: str) -> list[str]:
+    """Placeholder chats findable by exactly the phone-book name they display."""
+    if not os.path.isfile(WHATSMEOW_DB_PATH):
+        return []
+    try:
+        conn = _connect_whatsmeow_db()
+        try:
+            fields = ("full_name", "push_name", "first_name", "business_name")
+            match = " OR ".join(f"instr(LOWER({field}), LOWER(?)) > 0 OR instr({field}, ?) > 0" for field in fields)
+            hits = {
+                row[0] for row in conn.execute(f"SELECT their_jid FROM whatsmeow_contacts WHERE {match}", [query] * 8)
+            }
+            if not hits:
+                return []
+            candidates = hits | {other for jid in hits if (other := other_phone_spelling(jid))}
+            candidates.update(lid for lid, phone in _paired_lid_chats(cur).items() if phone in hits)
+            policy, policy_params = CHAT_POLICY.sql_clause("jid")
+            placeholders: list[str] = []
+            for chunk in _in_chunks(sorted(candidates)):
+                placeholders.extend(
+                    jid
+                    for jid, name in cur.execute(
+                        f"SELECT jid, name FROM chats WHERE jid IN ({_placeholders(chunk)}) AND ({policy}) AND {_direct_only_clause('jid')}",
+                        [*chunk, *policy_params],
+                    )
+                    if _is_placeholder_name(name)
+                )
+            profiles = _chat_contact_profiles(placeholders, conn)
+            needle = query.casefold()
+            return [
+                jid
+                for jid in placeholders
+                if (name := profiles.get(jid, _NO_PROFILE).name) and needle in name.casefold()
+            ]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.debug("contact-name search unavailable: %s", exc)
+        return []
+
+
+def _chat_filter(
+    query: str | None, twins: ChatTwins = NO_CHAT_TWINS, cur: sqlite3.Cursor | None = None
+) -> tuple[list[str], list[Any]]:
     """WHERE clauses selecting the chats a caller may see: name/JID search plus the allow-list.
 
     Shared by list_chats_page and count_chats so the count is taken over exactly
@@ -3105,11 +3219,22 @@ def _chat_filter(query: str | None, twins: ChatTwins = NO_CHAT_TWINS) -> tuple[l
         # A merged row answers to its twin's name and spelling too, and those
         # are folded in only after this runs.
         matched = set(twins.matching(query))
+        if cur is not None:
+            matched.update(twins.listing_jid(jid) for jid in _matching_contact_chat_names(cur, query))
         for spelling in other_spellings:
             matched.update(twins.absorbing(spelling))
         if matched := sorted(matched):
-            clause = f"{clause} OR {_chat_jid_clause('chats.jid', matched)}"
-            params.extend(matched)
+            if cur is not None:
+                # A common contact name may match more JIDs than one SQLite
+                # statement can bind. Like triage's temp table, this belongs
+                # only to this read connection; neither archive is written.
+                cur.execute("CREATE TEMP TABLE IF NOT EXISTS chat_name_matches (jid TEXT PRIMARY KEY)")
+                cur.execute("DELETE FROM temp.chat_name_matches")
+                cur.executemany("INSERT INTO temp.chat_name_matches VALUES (?)", [(jid,) for jid in matched])
+                clause += " OR chats.jid IN (SELECT jid FROM temp.chat_name_matches)"
+            else:
+                clause = f"{clause} OR {_chat_jid_clause('chats.jid', matched)}"
+                params.extend(matched)
         clauses.append(f"({clause})")
     clause, clause_params = CHAT_POLICY.sql_clause("chats.jid")
     clauses.append(clause)
@@ -3122,7 +3247,7 @@ def count_chats(query: str | None = None) -> int:
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
-        clauses, params = _chat_filter(query, _chat_twins(cur))
+        clauses, params = _chat_filter(query, _chat_twins(cur), cur)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         cur.execute(f"SELECT COUNT(*) FROM chats{where}", tuple(params))
         row = cur.fetchone()
@@ -3189,10 +3314,14 @@ def list_chats_page(
         # For the status feed it is the label this server gives it (#379).
         prefix, twin_join, sort_name, twin_params = "", "", _chat_name_expr(), []
         if twins.active and sort_by != "last_active":
+            conn.create_function("placeholder_chat_name", 1, _is_placeholder_name, deterministic=True)
             cte, twin_params = twins.cte()
             prefix = f"WITH {cte} "
             twin_join = "LEFT JOIN chat_twin tw ON tw.jid = chats.jid LEFT JOIN chats twin ON twin.jid = tw.twin_jid"
-            sort_name = f"COALESCE(NULLIF({_chat_name_expr()}, ''), twin.name)"
+            sort_name = (
+                f"CASE WHEN placeholder_chat_name({_chat_name_expr()}) AND NOT placeholder_chat_name(twin.name) "
+                f"THEN twin.name ELSE {_chat_name_expr()} END"
+            )
 
         query_parts = [
             f"""
@@ -3211,7 +3340,7 @@ def list_chats_page(
         """
         ]
 
-        where_clauses, filter_params = _chat_filter(query, twins)
+        where_clauses, filter_params = _chat_filter(query, twins, cur)
         params = [*twin_params, *filter_params]
 
         if where_clauses:
@@ -3352,6 +3481,78 @@ def lid_jids_of_contact(jid: str) -> list[str]:
     return _lid_jids_of_number(digits, alternate)
 
 
+def canonical_note_jids(jids: Sequence[str]) -> dict[str, str]:
+    """Deterministic note keys: Brazilian mobiles always have the ninth digit.
+
+    This depends only on spelling and confirmed LID mappings, never on which
+    chat or contact rows happen to exist. Unmapped LIDs remain LIDs; foreign
+    numbers and landlines keep their normalized spelling. LID queries are batched.
+    Authorization remains notes' separate any-alias check on every operation.
+    """
+    raw = {normalize_chat_entry(jid) for jid in jids}
+    lids = [jid.partition("@")[0] for jid in raw if jid.endswith("@lid")]
+    counterparts = {}
+    if lids and os.path.isfile(WHATSMEOW_DB_PATH):
+        try:
+            conn = _connect_whatsmeow_db()
+            try:
+                for chunk in _in_chunks(sorted(set(lids))):
+                    for lid, pn in conn.execute(
+                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})", chunk
+                    ):
+                        if pn and lid != pn:
+                            counterparts[lid] = pn
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+    result = {}
+    for jid in raw:
+        phone = (
+            f"{counterparts[jid.partition('@')[0]]}@{DEFAULT_USER_SERVER}"
+            if jid.endswith("@lid") and jid.partition("@")[0] in counterparts
+            else jid
+        )
+        other = other_phone_spelling(phone)
+        result[jid] = max((phone, other), key=len) if other else phone
+    return result
+
+
+def note_jid_spellings(jids: Sequence[str], canonical: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """Complete confirmed note aliases in batches, including every mapped LID."""
+    canonical = canonical_note_jids(jids) if canonical is None else canonical
+    members = {}
+    for jid in {normalize_chat_entry(jid) for jid in jids}:
+        phone = canonical[jid]
+        members[jid] = {value for value in (jid, phone, other_phone_spelling(phone)) if value}
+    phones = {
+        member.partition("@")[0]
+        for aliases in members.values()
+        for member in aliases
+        if member.endswith("@s.whatsapp.net")
+    }
+    mapped: dict[str, set[str]] = {}
+    if phones and os.path.isfile(WHATSMEOW_DB_PATH):
+        try:
+            conn = _connect_whatsmeow_db()
+            try:
+                for chunk in _in_chunks(sorted(phones)):
+                    for lid, pn in conn.execute(
+                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(chunk)})", chunk
+                    ):
+                        if lid and pn and lid != pn:
+                            mapped.setdefault(pn, set()).add(f"{lid}@lid")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+    for aliases in members.values():
+        for member in list(aliases):
+            if member.endswith("@s.whatsapp.net"):
+                aliases.update(mapped.get(member.partition("@")[0], set()))
+    return {jid: sorted(aliases) for jid, aliases in members.items()}
+
+
 def phone_book_spelling(jid: str) -> str:
     """The spelling of a Brazilian mobile to answer about when it has no chat of its own.
 
@@ -3371,7 +3572,7 @@ def phone_book_spelling(jid: str) -> str:
     return jid
 
 
-def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
+def _jid_search_patterns(query: str, *, national_mobile: bool = False) -> tuple[list[str], list[str]]:
     """The LIKE patterns a search binds against a JID column, and what the extra ones stand for.
 
     The query as a substring, as before. A query that is a phone number also
@@ -3384,13 +3585,19 @@ def _jid_search_patterns(query: str) -> tuple[list[str], list[str]]:
     """
     patterns = ["%" + query + "%"]
     digits, alternate = _phone_spellings(query)
+    national = br_national_mobile_alternate(digits) if national_mobile and digits and "@" not in query else None
+    national_jid = f"{national}@{DEFAULT_USER_SERVER}" if national else None
     typed_digits = digits if digits and digits != query and "@" not in query else None
     if typed_digits:
         patterns.append("%" + typed_digits + "%")
     if alternate:
         patterns.append(alternate)
-    lid_jids = _lid_jids_of_number(digits, alternate)
-    return [*patterns, *lid_jids], [spelling for spelling in (typed_digits, alternate, *lid_jids) if spelling]
+    if national_jid:
+        patterns.append(national_jid)
+    lid_jids = _lid_jids_of_number(digits, alternate or national_jid)
+    return [*patterns, *lid_jids], [
+        spelling for spelling in (typed_digits, alternate, national_jid, *lid_jids) if spelling
+    ]
 
 
 def _lid_jids_of_number(digits: str | None, alternate: str | None) -> list[str]:
@@ -3445,7 +3652,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     found: list[tuple[str, str | None, str | None, list[tuple[str, str | None]]]] = []
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
-    jid_patterns, other_spellings = _jid_search_patterns(query)
+    jid_patterns, other_spellings = _jid_search_patterns(query, national_mobile=True)
 
     # 1) Search messages.db chats table (existing behavior)
     try:
@@ -3547,7 +3754,36 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         elif matched is None and any(spelling in jid for spelling in other_spellings):
             matched = "jid"
         rows.append({**contact_to_dict(contact), "matched": matched})
-    return rows
+    if not rows:
+        return rows
+    try:
+        conn = _connect_messages_db()
+        try:
+            twins = _chat_twins(conn.cursor(), only=[row["jid"] for row in rows])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return rows
+    collapsed: list[dict[str, Any]] = []
+    hits: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        twin = twins.merged_row(twins.listing_jid(row["jid"]))
+        if twin is None or sum(jid.endswith("@s.whatsapp.net") for jid in twin.aliases) < 2:
+            collapsed.append(row)
+            continue
+        canonical = twin.jid
+        if canonical in hits:
+            hit = hits[canonical]
+            for key in ("name", "push_name", "lid", "matched"):
+                if (
+                    key == "name" and _is_placeholder_name(hit.get(key)) and not _is_placeholder_name(row.get(key))
+                ) or (not hit.get(key) and row.get(key)):
+                    hit[key] = row[key]
+            continue
+        hit = {**row, "jid": canonical, "phone_number": canonical.partition("@")[0], "aliases": list(twin.aliases)}
+        hits[canonical] = hit
+        collapsed.append(hit)
+    return collapsed
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
@@ -3836,7 +4072,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
     Either spelling of a merged phone/LID pair (issue #337) returns the same
     merged row, reported under the phone JID with both in `aliases`. A
     Brazilian mobile is also found under its other spelling, with or without
-    the ninth digit (issue #475); the JID as given wins when both have a chat.
+    the ninth digit (issue #475). Both stored phone spellings merge when allowed,
+    using the shorter phone JID and up to one mapped LID (issue #479).
     `both_spellings=False` is the literal lookup and the literal allow-list
     check, for a caller on the way to a write.
 
@@ -3854,7 +4091,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
         # A chat is asked for by JID here; a bare number is not one.
         alternate = other_phone_spelling(chat_jid) if both_spellings and "@" in chat_jid else None
         lookups = [chat_jid, alternate] if alternate else [chat_jid]
-        twins = _chat_twins(cursor, only=lookups)
+        twins = _chat_twins(cursor, only=lookups) if both_spellings else NO_CHAT_TWINS
         rows = [twins.listing_jid(jid) for jid in lookups]
 
         # See list_chats: the last message is always joined for is_from_me,
@@ -3897,7 +4134,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
             has_messages=bool(chat_data[7]),
         )
         twins.merge([chat])
-        _apply_name_fallback([chat])
+        _apply_name_fallback([chat], phone_aliases=both_spellings)
         return chat_to_dict(chat)
 
     except sqlite3.Error as e:
@@ -5707,6 +5944,15 @@ def list_unread(
             twin_join += " LEFT JOIN chats twin ON twin.jid = tw.twin_jid"
             other_marker = _last_read_time_select(cursor, "twin")
             read_marker = f"NULLIF(MAX(COALESCE({read_marker}, ''), COALESCE({other_marker}, '')), '')"
+            if any(len(twin.aliases) > 2 for twin in twins.by_listed.values()):
+                twin_join += " LEFT JOIN chats third ON third.jid = tw.third_jid"
+                third_marker = _last_read_time_select(cursor, "third")
+                read_marker = f"NULLIF(MAX(COALESCE({read_marker}, ''), COALESCE({third_marker}, '')), '')"
+                # An equality join keeps SQLite seeking by chat even when a
+                # large VALUES table makes it estimate an IN-list poorly.
+                # Singles have no member row and retain their own spelling.
+                twin_join += " LEFT JOIN chat_twin member ON member.listed_jid = chats.jid"
+                of_this_chat = "= COALESCE(member.jid, chats.jid)"
         policy_clause, policy_params = CHAT_POLICY.sql_clause("chats.jid")
         spoken_filter = _spoken_filter("messages")
         unread_where = f"""
@@ -5755,7 +6001,7 @@ def list_unread(
             twin = twins.merged_row(jid)
             # The pair's rows, and the marker the count was taken against, so the
             # messages listed are the ones counted.
-            spellings = [jid, twin.absorbed] if twin is not None else [jid]
+            spellings = twin.aliases if twin is not None else [jid]
             cursor.execute(
                 f"""
                 SELECT {message_columns(cursor)}
@@ -6044,7 +6290,7 @@ def newest_pending_mentions(
         cte, twin_params = twins.cte()
         prefix = f"WITH {cte} "
         twin_join = " LEFT JOIN chat_twin tw ON tw.jid = messages.chat_jid"
-        own_match = "IN (messages.chat_jid, tw.twin_jid)"
+        own_match = twins.message_members("messages.chat_jid")
     where, params = _pending_mention_where(cur, "messages", "messages.chat_jid", own_match)
     bound_sql = "".join(f" AND messages.timestamp {op} ?" for op, _ in bounds)
     closing_sql, closing_params = _closing_mention_clause(ignore_closing_messages, "messages")
@@ -6079,7 +6325,7 @@ def _pending_mentions_by_row(
     for jid in listed:
         twin = twins.merged_row(jid)
         if twin is not None:
-            lists_for[twin.absorbed] = jid
+            lists_for.update({spelling: jid for spelling in twin.aliases})
     merged: dict[str, tuple[str, str]] = {}
     pending_by_chat = newest_pending_mentions(
         cur, list(lists_for), bounds, twins, ignore_closing_messages=ignore_closing_messages

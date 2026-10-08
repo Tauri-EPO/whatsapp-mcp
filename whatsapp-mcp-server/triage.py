@@ -44,6 +44,7 @@ from typing import Any
 
 import notes
 import whatsapp
+from chat_policy import normalize_chat_entry
 from errors import ToolError
 
 HANDLED_KEY = "handled_at"
@@ -143,28 +144,6 @@ def _current_triage_notes(keys: tuple[str, ...]) -> list[tuple[str, str, str, st
     return [(target_id, key, value, updated_at) for target_id, key, value, updated_at, _v in rows]
 
 
-_ALIASED_SERVERS = ("s.whatsapp.net", "lid")
-
-
-def _spellings(target_id: str, counterparts: dict[str, str]) -> list[str]:
-    """Every ``chats.jid`` this note's target may be stored under.
-
-    ``annotate`` records a note about a chat known as ``<lid>@lid`` under its phone
-    JID once the LID map has learned the pair, while ``chats.jid`` keeps whichever
-    form the bridge wrote. Matching the stored spelling alone would let a handled
-    LID chat come back on every run. Groups, newsletters and broadcasts have one
-    spelling and are left alone.
-    """
-    user, _, server = target_id.rpartition("@")
-    if server not in _ALIASED_SERVERS or not user:
-        return [target_id]
-    other = counterparts.get(user)
-    if not other:
-        return [target_id]
-    twin = f"{other}@lid" if server == "s.whatsapp.net" else f"{other}@s.whatsapp.net"
-    return [target_id, twin]
-
-
 def _state_by_jid(keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     """{chat JID spelling: {handled_at, snooze_until, snoozed_at, muted}} for every noted chat.
 
@@ -172,16 +151,18 @@ def _state_by_jid(keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     every ``list_unanswered`` call and the note table grows with every triage pass.
 
     When the same identity carries a note under both spellings — one written
-    before the LID map paired them, one after — the phone spelling wins, and
-    between two rows on equal footing the newer one does. Letting SQLite's row
+    before the LID map paired them, one after — the canonical spelling wins,
+    and between legacy rows the newer one does, including tombstones. Letting SQLite's row
     order decide would let a stale far-future ``snooze_until`` hide a chat for
     months.
     """
     rows = _current_triage_notes(keys)
-    counterparts = whatsapp.lid_map_counterparts([target_id.rpartition("@")[0] for target_id, *_rest in rows])
+    targets = [target_id for target_id, *_rest in rows]
+    canonical = whatsapp.canonical_note_jids(targets)
+    aliases = whatsapp.note_jid_spellings(targets, canonical)
 
-    def rank(row: tuple[str, str, str, str]) -> tuple[bool, str]:
-        return row[0].endswith("@s.whatsapp.net"), row[3]
+    def rank(row: tuple[str, str, str, str]) -> tuple[bool, str, str]:
+        return row[0] == canonical[normalize_chat_entry(row[0])], row[3], row[0]
 
     state: dict[str, dict[str, Any]] = {}
     for target_id, key, value, updated_at in sorted(rows, key=rank):
@@ -200,7 +181,7 @@ def _state_by_jid(keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
                 # When the snooze was set, so a message that arrived afterwards
                 # can lift it — the same rule handled_at follows.
                 entry["snoozed_at"] = _normalised_moment(updated_at) if moment else None
-        for spelling in _spellings(target_id, counterparts):
+        for spelling in aliases[normalize_chat_entry(target_id)]:
             state.setdefault(spelling, {}).update(entry)
     return state
 

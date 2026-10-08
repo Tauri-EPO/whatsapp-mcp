@@ -254,9 +254,11 @@ dropped by `exclude_groups`.
 
 WhatsApp may keep the same direct conversation twice: once keyed by the phone
 JID, once by that person's `@lid`. Where whatsmeow's LID map links the two, the
-chat listings return **one row** for them (issue #337):
+chat listings return **one row** for them (issue #337). Stored Brazilian mobile
+phone JIDs with and without the ninth digit also share one row when both are
+allowed (issue #479); that row may carry both phone spellings and one mapped LID:
 
-- `jid` is the phone spelling and `aliases` holds both, `["<number>@s.whatsapp.net", "<id>@lid"]`. The key is absent from a chat WhatsApp knows one way only.
+- `jid` is the phone spelling (the shorter of two stored Brazilian spellings) and `aliases` holds every merged spelling, `["<number>@s.whatsapp.net", "<id>@lid"]`. The key is absent from a chat WhatsApp knows one way only.
 - `last_message`, `last_sender`, `last_is_from_me`, `has_messages` and `last_message_time` all come from the spelling holding the newest message, so a listing stays ordered by the timestamp it prints. `last_read_time` is the newer of the two markers: a conversation read under one spelling counts as read under both.
 - `coverage(by_chat=true)` reports the messages of both rows under one `chat_jid`, and `chats_total` counts the person once.
 - `list_chats`, `get_chat`, `get_contact_chats` and `get_direct_chat_by_contact` all answer with that merged row, whichever of the two spellings you asked with. Paging is over the merged rows, so a page never holds the same person twice.
@@ -268,6 +270,16 @@ this archive — keeps listing on its own, under its own JID. So does either hal
 of a pair when [`WHATSAPP_ALLOWED_CHATS`](#chat-filters) admits one spelling and
 not the other: the allow-list hides exactly what it hid before, rather than
 folding the unlisted half into a row you can see.
+
+The pairing cache refreshes after five minutes; policy checks run on every call.
+If multiple LIDs map to one phone, only the busiest stored LID merges with it;
+other LID rows stay separate. Merging changes no row in `messages.db`.
+
+A placeholder direct-chat name resolved from the local phone book is searchable
+through `list_chats(query=...)` and its count, even before another message
+arrives. Contact, push-name and business-name events refresh stored bridge
+placeholders without network calls or changes to activity timestamps; real
+names and group names keep their existing precedence (issue #506).
 
 The message tools need nothing for this: a `chat_jid` filter already expands to
 both spellings, so the JID of a merged row reads the whole conversation.
@@ -607,14 +619,24 @@ digits, bare or as a JID (`get_chat` takes a JID, as it always did).
 
 What is not covered:
 
-- A number without the `55`, a landline, a number from any other country, and a
-  LID (it has one spelling).
+- A landline, a number from any other country, and an unmapped LID retain their
+  original spelling. Only `search_contacts` adds the whole Brazilian alternate
+  JID for a national mobile query such as `(88) 97777-6666`, without adding a
+  broader substring or changing other lookup tools (issue #477).
 - The tools that work on one message or one stored row and take its `chat_jid`:
   `get_message_context`, `read_media`, `download_media`, `transcribe_audio`,
   `get_poll_results` and the like. Pass the `chat_jid` the row came with.
-- Notes and triage marks (`annotate`, `get_notes`, `mark_handled`, `snooze`):
-  they are kept under the JID given, so use the stored spelling, the `jid` on
-  the chat or contact row.
+- Notes and triage marks (`annotate`, `get_notes`, `mark_handled`, `snooze`) share
+  one key across Brazilian mobile spellings and mapped LIDs (issue #525). The
+  canonical note key is always the 13-digit Brazilian mobile spelling, including
+  the ninth digit; archive rows never change it. Foreign numbers and landlines
+  keep their normalized spelling; mapped LIDs use that phone key. Reads include legacy keys, with the canonical key winning when
+  both exist; deletion writes a canonical tombstone that covers both. Rewriting
+  a legacy note writes the canonical value and tombstones the alias in the same
+  transaction; the original rows remain readable in the shared history.
+  These note operations accept the identity when **any** confirmed spelling
+  is allowed. They do not change the stricter send checks or merge hidden
+  message rows into read results.
 - Send tools and `forward_message` strip the [supported recipient separators](#phone-numbers)
   from bare numbers before the allow-list check and bridge call. They do not
   choose the Brazilian alternate spelling locally.
@@ -2446,7 +2468,7 @@ Get specific chat metadata by JID.
 
 **Parameters:**
 
-- `chat_jid` (required): Chat JID. A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings); the row's `jid` is the stored spelling, and the JID as given wins when both have a chat
+- `chat_jid` (required): Chat JID. A Brazilian mobile is found [with or without the ninth digit](#one-number-two-spellings); both stored spellings merge when both are allowed, with the shorter phone JID and all `aliases` on the returned row
 - `include_last_message` (optional): Include `last_message` / `last_sender` (default `true`)
 - `fields`, `omit_nulls`, `max_content_chars` (optional): as in `list_chats`, applied to the single row
 
