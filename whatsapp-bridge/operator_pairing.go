@@ -61,6 +61,7 @@ type operatorPairing struct {
 	cancelAttempt  context.CancelFunc
 	attemptContext context.Context
 	kick           chan struct{}
+	reconnect      chan bool
 	done           chan struct{}
 	started        atomic.Bool
 	codeCalls      int
@@ -70,9 +71,9 @@ type operatorPairing struct {
 	now            func() time.Time
 }
 
-func newOperatorPairing(ctx context.Context, b *Bridge, client operatorPairingClient, factory func() (operatorPairingClient, error), paired, connected func() bool, out io.Writer) *operatorPairing {
+func newOperatorPairing(ctx context.Context, b *Bridge, client operatorPairingClient, factory func() (operatorPairingClient, error), paired, connected func() bool, out io.Writer, reconnect chan bool) *operatorPairing {
 	return &operatorPairing{b: b, client: client, factory: factory, paired: paired, connected: connected, ctx: ctx, kick: make(chan struct{}, 1), done: make(chan struct{}), out: out, now: time.Now,
-		state: operatorPairingState{State: "starting", Attempts: 3}, opt: pairingOptions{attemptTimeout: 5 * time.Minute, retryDelay: 5 * time.Second}}
+		state: operatorPairingState{State: "starting", Attempts: 3}, opt: pairingOptions{attemptTimeout: 5 * time.Minute, retryDelay: 5 * time.Second}, reconnect: reconnect}
 }
 
 func (p *operatorPairing) invalidateLocked(state string) {
@@ -201,10 +202,16 @@ func (p *operatorPairing) run() {
 				}
 			}
 			p.mu.Unlock()
-			if cancelled || errors.Is(err, errPairingOperator) || p.paired() {
+			if cancelled || errors.Is(err, errPairingOperator) {
 				break
 			}
 			problem, _ := p.b.connectionSnapshot()
+			if p.paired() {
+				if !problem.restrictsAccount() {
+					p.b.scheduleReconnect(p.reconnect)
+				}
+				break // Retain the paired device; only the gated consumer may redial.
+			}
 			if problem.restrictsAccount() {
 				break
 			}

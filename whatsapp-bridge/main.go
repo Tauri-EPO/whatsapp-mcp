@@ -283,7 +283,7 @@ func runBridge(cfg bridgeConfig) int {
 			freshClient := whatsmeow.NewClient(container.NewDevice(), clientLog)
 			bridge.installClient(freshClient, false, reconnectChan)
 			return freshClient, nil
-		}, bridge.isPaired, bridge.Connected, pairingOut)
+		}, bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
 		bridge.operatorServer, err = startOperatorServer(cfg.Operator, bridge.operatorPairing.routes(), logger)
 		if err != nil {
 			logger.Errorf("Failed to start operator listener: %v", err)

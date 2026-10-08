@@ -84,7 +84,7 @@ type presenceSender func(ctx context.Context, state types.Presence) error
 // SessionKeepalive <= 0 disables it.
 func (b *Bridge) startSessionKeepalive() {
 	// Capture pairing before the goroutine starts: pairing can change Store.ID.
-	unpaired := !b.isPaired()
+	unpaired := b.currentClient() != nil && !b.isPaired()
 	if unpaired && b.StoreRoot != nil {
 		if err := b.StoreRoot.Remove(sessionKeepaliveFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			b.Log.Warnf("Session keepalive: could not discard the previous pairing's timestamp: %v", err)

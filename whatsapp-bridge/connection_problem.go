@@ -30,10 +30,10 @@ func (l connectionProblemLogger) Warnf(format string, args ...any) {
 	}
 	if format == "Got %d/%s connect failure, assuming automatic reconnect will handle it" && len(args) == 2 {
 		if code, ok := args[0].(int); ok && (code == 500 || code == 503) {
-			l.bridge.recordConnectionProblem(code, 0, 0)
+			l.bridge.recordConnectionProblemIf(code, 0, 0, l.active)
 		}
 	} else if format == "Got 503 stream error, assuming automatic reconnect will handle it" && len(args) == 0 {
-		l.bridge.recordConnectionProblem(503, 0, 0)
+		l.bridge.recordConnectionProblemIf(503, 0, 0, l.active)
 	}
 	l.Logger.Warnf(format, args...)
 }
@@ -118,8 +118,15 @@ func (b *Bridge) connectionNow() time.Time {
 
 // Serialise state changes and persistence; a restart must never forget a ban.
 func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration) *ConnectionProblem {
+	return b.recordConnectionProblemIf(code, reason, expire, nil)
+}
+
+func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duration, active func() bool) *ConnectionProblem {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
+	if active != nil && !active() {
+		return nil
+	}
 	next := classifyConnectionProblem(code, reason, expire, b.connectionNow())
 	// A transient failure cannot erase an account restriction received earlier.
 	if !next.restrictsAccount() && b.connectionProblem.restrictsAccount() {

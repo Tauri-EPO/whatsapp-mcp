@@ -674,9 +674,6 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		if code != 401 {
 			return
 		}
-		if b.operatorPairing != nil {
-			return
-		} // The operator can explicitly initialize a fresh client.
 		// whatsmeow has already wiped the device row; the process cannot re-enter
 		// the pairing flow from here. Exit and let the supervisor restart us: the
 		// next start finds no session and prints a fresh QR code.
@@ -808,6 +805,7 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 			if err := b.waitConnectionAllowed(); err != nil {
 				return
 			}
+			b.clientGate.RLock()
 			if b.forceReconnect.Swap(false) {
 				if b.Disconnect != nil {
 					b.Disconnect()
@@ -840,6 +838,7 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 				b.Log.Infof("Already connected, skipping reconnection")
 				reconnectBackoff = b.ReconnectInitialBackoff
 			}
+			b.clientGate.RUnlock()
 
 		case <-b.ctx.Done():
 			return

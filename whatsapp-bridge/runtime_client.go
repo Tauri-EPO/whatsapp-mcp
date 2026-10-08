@@ -38,8 +38,11 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 		client.Log = b.Log
 	}
 	client.Log = connectionProblemLogger{Logger: client.Log, bridge: b, active: func() bool { return b.currentClient() == client }}
+	b.connectionMu.Lock()
+	b.forceReconnect.Store(false)
 	b.runtimePaired.Store(paired)
 	b.runtimeClient.Store(client)
+	b.connectionMu.Unlock()
 	client.AddEventHandler(func(evt interface{}) {
 		b.handleClientEvent(client, evt, reconnect)
 	})

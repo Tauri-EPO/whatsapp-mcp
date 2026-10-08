@@ -26,6 +26,7 @@ type fakeOperatorClient struct {
 	items                                                  chan whatsmeow.QRChannelItem
 	connects, disconnects, codes, responses, confirmations atomic.Int64
 	codeStarted, codeRelease                               chan struct{}
+	connectErr                                             error
 }
 
 func newFakeOperatorClient() *fakeOperatorClient {
@@ -34,8 +35,11 @@ func newFakeOperatorClient() *fakeOperatorClient {
 func (c *fakeOperatorClient) GetQRChannel(context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	return c.items, nil
 }
-func (c *fakeOperatorClient) ConnectContext(context.Context) error { c.connects.Add(1); return nil }
-func (c *fakeOperatorClient) Disconnect()                          { c.disconnects.Add(1) }
+func (c *fakeOperatorClient) ConnectContext(context.Context) error {
+	c.connects.Add(1)
+	return c.connectErr
+}
+func (c *fakeOperatorClient) Disconnect() { c.disconnects.Add(1) }
 func (c *fakeOperatorClient) PairPhone(ctx context.Context, phone string, notify bool, clientType whatsmeow.PairClientType, name string) (string, error) {
 	if phone != "5511999999999" || !notify || clientType != whatsmeow.PairClientChrome || name != "Chrome (Linux)" {
 		panic("unexpected pairing-code parameters")
@@ -75,7 +79,7 @@ func newOperatorPairingFixture(t *testing.T) *operatorPairingFixture {
 	f := &operatorPairingFixture{client: newFakeOperatorClient()}
 	f.b = testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), newJSONLogger("pairing-test", "INFO", &f.audit))
 	f.b.Connected = f.connected.Load
-	f.p = newOperatorPairing(f.b.ctx, f.b, f.client, func() (operatorPairingClient, error) { return newFakeOperatorClient(), nil }, f.paired.Load, f.connected.Load, io.Discard)
+	f.p = newOperatorPairing(f.b.ctx, f.b, f.client, func() (operatorPairingClient, error) { return newFakeOperatorClient(), nil }, f.paired.Load, f.connected.Load, io.Discard, make(chan bool, 1))
 	f.p.opt.attemptTimeout, f.p.opt.retryDelay = time.Second, time.Millisecond
 	f.b.operatorPairing = f.p
 	f.server = httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, f.p.routes(), f.b.Log))
@@ -278,6 +282,59 @@ func TestOperatorRestrictionClearingWakesAlreadyBlockedReconnect(t *testing.T) {
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatal("gate was released only by its timeout")
+	}
+}
+
+func TestOperatorPairedStartupFailureReachesGatedReconnectWithoutReplacingDevice(t *testing.T) {
+	client := newFakeOperatorClient()
+	client.connectErr = errors.New("fake temporary startup dial failure")
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, types.NewJID("5511999999999", types.DefaultUserServer)), newTestMessageStore(t), testLogger())
+	var connected atomic.Bool
+	var retries, replacements atomic.Int64
+	b.Connected = connected.Load
+	b.Disconnect = client.Disconnect
+	b.Connect = func() error { retries.Add(1); connected.Store(true); return nil }
+	b.ReconnectInitialBackoff = time.Millisecond
+	b.ReconnectMaxBackoff = time.Millisecond
+	reconnect := make(chan bool, 1)
+	p := newOperatorPairing(b.ctx, b, client, func() (operatorPairingClient, error) {
+		replacements.Add(1)
+		return nil, errors.New("paired device must be retained")
+	}, b.isPaired, b.Connected, io.Discard, reconnect)
+	b.operatorPairing = p
+	server := httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, p.routes(), b.Log))
+	t.Cleanup(server.Close)
+	loopDone := make(chan struct{})
+	go func() { defer close(loopDone); b.reconnectLoop(reconnect) }()
+	t.Cleanup(func() { b.cancel(); <-loopDone })
+	p.start()
+	deadline := time.Now().Add(2 * time.Second)
+	for !connected.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !connected.Load() || retries.Load() != 1 || replacements.Load() != 0 || client.connects.Load() != 1 {
+		t.Fatal("paired startup failure did not recover through the gated reconnect consumer")
+	}
+	req, _ := http.NewRequest("GET", server.URL+"/operator/v1/ready", nil)
+	req.Header.Set("Authorization", "Bearer "+fakeOperatorToken)
+	response, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatalf("paired startup recovery readiness=%d", response.StatusCode)
+	}
+}
+
+func TestOperatorNormalUnlinkRetainsExitThree(t *testing.T) {
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.operatorPairing = &operatorPairing{}
+	exit := 0
+	b.Exit = func(_ string, code int) { exit = code }
+	b.handleEvent(&events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
+	if exit != exitCodeLoggedOut {
+		t.Fatalf("normal unlink with operator enabled exit=%d, want 3", exit)
 	}
 }
 

@@ -55,6 +55,10 @@ whatsapp-mcp/
 │   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
+│   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
+│   ├── operator_config.go      # bounded operator configuration, token-file checks and single-interface bind
+│   ├── operator_pairing.go     # HTTP pairing state, QR/code, explicit restart and passkey actions
+│   ├── runtime_client.go      # atomic client handoff, refreshed REST handlers and retired-event filtering
 │   ├── connection_problem.go   # classified connection failures, persisted ban expiry and dial blocking
 │   ├── connection_events.go    # opt-in safe connection webhooks with debounced disconnection
 │   ├── events.go               # whatsmeow event dispatch, handleMessage, calls, reconnect loop
@@ -161,6 +165,7 @@ whatsapp-mcp/
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp — docs/DOCKER.md (no whisper: WHISPER_URL points at a server you run)
+├── docker-compose.operator.yml # optional private operator network; no operator host port
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), upstream-harvest.sh, merge-when-green.sh (update / wait for CI / squash-merge a PR)
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
