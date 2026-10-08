@@ -804,7 +804,7 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 			pageSize += int(segLen)
 		}
 		if pageSize > len(data)-i {
-			return 0, nil, fmt.Errorf("truncated Ogg page body")
+			break // Preserve the existing best-effort duration contract.
 		}
 
 		// Check if we're looking at an OpusHead packet (should be in first few pages)
