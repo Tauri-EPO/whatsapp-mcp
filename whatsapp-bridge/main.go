@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -27,13 +26,6 @@ import (
 // near NewClient for the full rationale and caveats.
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
-
-// resolveDeviceName returns the operator-configured linked-device label from
-// WHATSAPP_DEVICE_NAME, trimmed of surrounding whitespace. An empty or unset
-// value returns "", which callers treat as "keep the whatsmeow default".
-func resolveDeviceName() string {
-	return strings.TrimSpace(os.Getenv("WHATSAPP_DEVICE_NAME"))
-}
 
 // printQRCode renders one pairing QR code to out. index is 1 for the first
 // code of a pairing session; later codes are redraws after whatsmeow rotated
@@ -68,12 +60,19 @@ const shutdownTimeout = 10 * time.Second
 
 func main() {
 	flag.Parse()
+	os.Exit(run())
+}
+
+// run validates startup before any filesystem or network effect. Logging is
+// configured first because even refusal must retain the selected log format.
+func run() int {
+	_, _, _ = initLogging()
 	cfg, err := loadBridgeConfig()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Refusing to start: %s\n", oneLine(err.Error()))
-		os.Exit(1)
+		bridgeLog.Errorf("Refusing to start: %s", err)
+		return 1
 	}
-	os.Exit(runBridge(cfg))
+	return runBridge(cfg)
 }
 
 func runBridge(cfg bridgeConfig) int {
@@ -233,6 +232,17 @@ func runBridge(cfg bridgeConfig) int {
 		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
 		return 1
 	}
+	// Print the one-time setup banner immediately, before binding REST or attempting to
+	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
+	// disk as soon as it generated one; if the banner instead waited until
+	// after a successful connection (as it used to), a QR-pairing timeout or
+	// early exit would leave a token on disk that was never shown to the
+	// user — and loadOrCreateBridgeToken() would report fresh=false on every
+	// later run, so the banner would never get a second chance to print it.
+	if fresh {
+		printTokenBanner(bridgeToken, cfg.Port)
+	}
+
 	mediaRoots, err := resolveMediaRootsValue(cfg.MediaRoots, false)
 	if err != nil {
 		logger.Errorf("Failed to resolve media roots: %v", err)
@@ -274,17 +284,6 @@ func runBridge(cfg bridgeConfig) int {
 	logger.Infof("Session keepalive: %s", sessionKeepaliveSummary(bridge.SessionKeepalive))
 	go bridge.runGroupRosterSync()
 	bridge.startSessionKeepalive()
-
-	// Print the one-time setup banner immediately, before attempting to
-	// connect/pair. loadOrCreateBridgeToken() already persisted the token to
-	// disk as soon as it generated one; if the banner instead waited until
-	// after a successful connection (as it used to), a QR-pairing timeout or
-	// early exit would leave a token on disk that was never shown to the
-	// user — and loadOrCreateBridgeToken() would report fresh=false on every
-	// later run, so the banner would never get a second chance to print it.
-	if fresh {
-		printTokenBanner(bridgeToken, cfg.Port)
-	}
 
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)

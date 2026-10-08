@@ -12,7 +12,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -39,7 +38,7 @@ func parseBoolEnv(name, raw string, def bool) (bool, error) {
 		}
 	}
 	return def, fmt.Errorf("%s=%q is not a boolean; use one of %s", name,
-		raw, strings.Join(append(append([]string{}, boolTrue...), boolFalse...), ", "))
+		configValue(raw), strings.Join(append(append([]string{}, boolTrue...), boolFalse...), ", "))
 }
 
 // The names are constants ending in Env on purpose: that spelling is how
@@ -59,11 +58,6 @@ type bridgeSwitches struct {
 	WebhookEnabled    bool // WEBHOOK_ENABLED: outbound webhooks at all
 	Metrics           bool // WHATSAPP_METRICS: serve GET /metrics
 	ForwardStatus     bool // WEBHOOK_FORWARD_STATUS: status updates reach the webhook too
-}
-
-// loadBridgeSwitches reads them from the environment.
-func loadBridgeSwitches() (bridgeSwitches, error) {
-	return parseBridgeSwitches(os.Getenv)
 }
 
 // parseBridgeSwitches reads them all and reports every value it cannot read

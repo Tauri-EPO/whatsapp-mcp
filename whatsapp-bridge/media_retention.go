@@ -76,10 +76,10 @@ func resolveMediaRetention(value string) (time.Duration, error) {
 	}
 	days, err := strconv.Atoi(v)
 	if err != nil || days < 0 {
-		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of days", mediaRetentionEnv, value)
+		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of days", mediaRetentionEnv, configValue(value))
 	}
 	if int64(days) > int64((1<<63-1)/(24*time.Hour)) {
-		return 0, fmt.Errorf("invalid %s=%q: duration overflows (at most %d days)", mediaRetentionEnv, value, (1<<63-1)/(24*time.Hour))
+		return 0, fmt.Errorf("invalid %s=%q: duration overflows (at most %d days)", mediaRetentionEnv, configValue(value), (1<<63-1)/(24*time.Hour))
 	}
 	return time.Duration(days) * 24 * time.Hour, nil
 }
@@ -92,7 +92,7 @@ func resolveMediaMaxBytes(value string) (uint64, error) {
 	}
 	n, err := strconv.ParseUint(v, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative integer of bytes", mediaMaxBytesEnv, value)
+		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative integer of bytes", mediaMaxBytesEnv, configValue(value))
 	}
 	return n, nil
 }

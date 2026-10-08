@@ -50,7 +50,7 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	if value := getenv(bridgePortEnv); value != "" {
 		cfg.Port, err = strconv.Atoi(value)
 		if err != nil || cfg.Port < 1 || cfg.Port > 65535 {
-			collect(fmt.Errorf("invalid WHATSAPP_BRIDGE_PORT=%q: expected 1-65535", value))
+			collect(fmt.Errorf("invalid WHATSAPP_BRIDGE_PORT=%q: expected 1-65535", configValue(value)))
 		}
 	}
 	cfg.Bind, err = resolveBridgeBind(getenv(bridgeBindEnv))
@@ -65,15 +65,25 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	collect(err)
 	cfg.ReadOnly, err = parseReadOnly(getenv(readOnlyEnv))
 	collect(err)
-	cfg.Tools, err = newToolPolicy(getenv(allowToolsEnv), getenv(denyToolsEnv))
-	collect(err)
 	cfg.MediaMaxBytes, err = resolveMediaMaxBytes(getenv(mediaMaxBytesEnv))
 	collect(err)
 	_, err = resolveMediaRootsValue(cfg.MediaRoots, true)
 	collect(err)
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
+	// The valid-name appendix is long; put it after every other variable.
+	cfg.Tools, err = newToolPolicy(getenv(allowToolsEnv), getenv(denyToolsEnv))
+	collect(err)
 	if len(problems) > 0 {
 		return bridgeConfig{}, errors.New(strings.Join(problems, "; "))
 	}
 	return cfg, nil
+}
+
+// configValue bounds echoed invalid input, without changing what parsers read.
+func configValue(value string) string {
+	runes := []rune(value)
+	if len(runes) > 80 {
+		return string(runes[:80]) + "...(truncated)"
+	}
+	return value
 }

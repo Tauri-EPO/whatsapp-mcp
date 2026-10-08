@@ -137,7 +137,6 @@ func sortedNames(names map[string]bool) []string {
 }
 
 // newToolPolicy parses both lists and rejects names that are not tools.
-
 func newToolPolicy(allowRaw, denyRaw string) (toolPolicy, error) {
 	p := toolPolicy{allow: parseToolList(allowRaw), deny: parseToolList(denyRaw)}
 	known := knownTools()
@@ -154,7 +153,7 @@ func newToolPolicy(allowRaw, denyRaw string) (toolPolicy, error) {
 		}
 		if len(unknown) > 0 {
 			problems = append(problems, fmt.Sprintf("%s lists unknown tool(s): %s",
-				list.env, strings.Join(unknown, ", ")))
+				list.env, configValue(strings.Join(unknown, ", "))))
 		}
 	}
 	if len(problems) > 0 {

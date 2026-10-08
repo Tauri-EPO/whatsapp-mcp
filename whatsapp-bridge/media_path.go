@@ -30,16 +30,9 @@ import (
 // out of the way of unrelated tools.
 const defaultOutboxSubpath = ".local/share/whatsapp-mcp/outbox"
 
-// resolveMediaRoots returns the list of allowed absolute root directories
-// for outbound media. Roots are resolved via filepath.EvalSymlinks where
-// possible so a later prefix check is meaningful even if the user pointed
-// the env var at a symlinked location.
-func resolveMediaRoots() ([]string, error) {
-	return resolveMediaRootsValue(os.Getenv("WHATSAPP_MEDIA_ROOTS"), false)
-}
-
 // validateOnly checks the environment without touching the filesystem.
-// Normal startup creates the default outbox and resolves symlinks afterwards.
+// This first pass is pure; startup parses the same value again to create the
+// default outbox and resolve symlinks after all configuration is accepted.
 func resolveMediaRootsValue(value string, validateOnly bool) ([]string, error) {
 	if env := strings.TrimSpace(value); env != "" {
 		var roots []string
@@ -49,7 +42,7 @@ func resolveMediaRootsValue(value string, validateOnly bool) ([]string, error) {
 				continue
 			}
 			if !filepath.IsAbs(raw) {
-				return nil, fmt.Errorf("WHATSAPP_MEDIA_ROOTS entries must be absolute paths, got %q", raw)
+				return nil, fmt.Errorf("WHATSAPP_MEDIA_ROOTS entries must be absolute paths, got %q", configValue(raw))
 			}
 			if validateOnly {
 				roots = append(roots, filepath.Clean(raw))

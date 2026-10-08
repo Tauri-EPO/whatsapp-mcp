@@ -2,6 +2,26 @@
 
 Symptoms and fixes for pairing, auth, sync and app-state problems. For container-specific checks (`docker compose ps`, health endpoints, logs) see [DOCKER.md](DOCKER.md).
 
+## Bridge refuses to start
+
+Read `docker compose logs bridge` for `Refusing to start: invalid ...` (or the
+named boolean/tool-policy error). The single ERROR line lists all bad variables;
+JSON logging keeps the same structured format. Fix every listed variable in the
+stack's environment and recreate the container. Under `restart: unless-stopped`,
+invalid configuration makes the container restart in a loop until corrected.
+
+`WHATSAPP_MEDIA_MAX_BYTES` accepts decimal bytes; write `0` for no limit.
+Spellings such as `-1`, `+1`, `50MB`, `256M`, `1e9`, `268_435_456`, `0x10000000`,
+a quoted number, a trailing comment or `unlimited` used to silently select
+256 MiB and now stop startup. `WHATSAPP_MEDIA_RETENTION_DAYS` accepts at most
+`106751`; larger values used to overflow, potentially disabling retention or
+sweeping nearly all cached media. Empty values retain the defaults.
+
+Startup I/O errors, failure to connect after three attempts, a QR pairing
+timeout and failure to establish a stable connection now exit with status 1
+after cleanup. A supervisor using restart-on-failure therefore retries even an
+unpaired bridge. Normal shutdown after a successful connection exits 0.
+
 ## Authentication Issues
 
 - **Pairing fails with `Client outdated` or HTTP 405**: Update to the latest

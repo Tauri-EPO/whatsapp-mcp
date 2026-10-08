@@ -52,7 +52,7 @@ func resolveBridgeBind(value string) (string, error) {
 		return ip.String(), nil
 	}
 	if strings.ContainsAny(v, ":/ ") {
-		return "", fmt.Errorf("invalid %s=%q: expected an IP address or hostname without port", bridgeBindEnv, value)
+		return "", fmt.Errorf("invalid %s=%q: expected an IP address or hostname without port", bridgeBindEnv, configValue(value))
 	}
 	return v, nil
 }
