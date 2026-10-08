@@ -89,6 +89,19 @@ def test_allowed_legacy_message_search_keeps_one_message_suffix(paired_dbs, monk
     assert main.search_notes("visible legacy", target_type="message")[0]["target_id"] == target
 
 
+@pytest.mark.parametrize("jid", [SHORT_JID, LONG_JID])
+@pytest.mark.parametrize("suffix", [" synthetic-message", "synthetic-message ", "  synthetic-message  "])
+def test_message_note_normalization_preserves_read_write_and_versions(paired_dbs, monkeypatch, jid, suffix):
+    _allow(monkeypatch, jid)
+    target = jid + "/" + suffix
+    assert main.annotate("message", target, "log", "first")["version"] == 1
+    assert main.get_notes("message", target)["notes"]["log"]["value"] == "first"
+    updated = main.annotate("message", target, "log", "second", mode="append")
+    assert updated["version"] == 2 and updated["value"] == "first\nsecond"
+    history = main.get_notes("message", target, include_history=True)["history"]
+    assert [row["version"] for row in history] == [2, 1]
+
+
 def _chat(store, jid, name="", stamp="2026-10-08 10:00:00"):
     with store.messages() as conn:
         conn.execute("INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)", (jid, name, stamp))

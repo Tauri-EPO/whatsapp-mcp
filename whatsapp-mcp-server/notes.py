@@ -162,7 +162,7 @@ def resolve_target(target_type: str, target_id: str) -> tuple[str, str, list[str
             )
         _require_allowed(chat_raw)
         chat = _canonical_jid(chat_raw)
-        return ttype, f"{chat}/{message_id}", _listing_ids(ttype, raw)
+        return ttype, f"{chat}/{message_id}", _listing_ids(ttype, f"{chat_raw}/{message_id}")
     _require_allowed(raw)
     canonical = _canonical_jid(raw)
     return ttype, canonical, _listing_ids(ttype, raw)
