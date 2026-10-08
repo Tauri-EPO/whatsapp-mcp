@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -53,48 +51,25 @@ func TestIsBusyError(t *testing.T) {
 // second connection, the way a history-sync transaction does. busy_timeout is
 // a few milliseconds so a blocked insert fails fast with the real SQLITE_BUSY.
 type lockedStore struct {
-	ms     *MessageStore
-	holder *sql.Conn
+	ms            *MessageStore
+	lockWriter    func() func()
+	releaseWriter func()
 }
 
 func newLockedStore(t *testing.T) *lockedStore {
 	t.Helper()
-	dsn := sqliteURI(filepath.Join(t.TempDir(), "messages.db"), "_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5)&"+sqliteTimeFormat)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(`
-		CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP, last_read_time TIMESTAMP,
-			ephemeral_expiration INTEGER NOT NULL DEFAULT 0, ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0);
-		CREATE TABLE messages (id TEXT, chat_jid TEXT, sender TEXT, sender_server TEXT, content TEXT, timestamp TIMESTAMP,
-			is_from_me BOOLEAN, media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB,
-			file_enc_sha256 BLOB, file_length INTEGER, deleted_at TIMESTAMP, view_once BOOLEAN NOT NULL DEFAULT 0,
-			target_message_id TEXT, quoted_message_id TEXT, mentions TEXT,
-			PRIMARY KEY (id, chat_jid), FOREIGN KEY (chat_jid) REFERENCES chats(jid));`); err != nil {
-		t.Fatal(err)
-	}
-	holder, err := db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = holder.Close() })
-	return &lockedStore{ms: &MessageStore{db: db, names: newChatNameCache()}, holder: holder}
+	ms, lock := lockedProductionStore(t)
+	return &lockedStore{ms: ms, lockWriter: lock}
 }
 
 func (l *lockedStore) lock(t *testing.T) {
 	t.Helper()
-	if _, err := l.holder.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
-		t.Fatalf("take the write lock: %v", err)
-	}
+	l.releaseWriter = l.lockWriter()
 }
 
 func (l *lockedStore) unlock(t *testing.T) {
 	t.Helper()
-	if _, err := l.holder.ExecContext(context.Background(), "ROLLBACK"); err != nil {
-		t.Fatalf("release the write lock: %v", err)
-	}
+	l.releaseWriter()
 }
 
 func errorLines(log string) []string {

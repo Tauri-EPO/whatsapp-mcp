@@ -1,23 +1,15 @@
 package main
 
-// What the bridge does when a row cannot be written.
+// Failed event, history and outbound persistence writes share one bounded
+// BUSY/LOCKED retry policy owned by Bridge, including shutdown cancellation.
+// Each closure contains repeatable database effects only: an outbound remote
+// send is never inside it. Exhaustion records one ERROR with row identity
+// (never content) and increments the store-failure counter. Chat rows have
+// no message ID. Non-busy errors stop on the first attempt.
 //
-// A write that fails loses data, so it is an ERROR that names the row (kind,
-// message ID, chat; never the content) and a count on /metrics, for a live
-// message, a reaction, a poll vote and a history row alike (issue #520).
-//
-// The realistic cause is transient: a history sync writes one transaction per
-// conversation, and a live insert that waits longer than busy_timeout for the
-// write lock comes back SQLITE_BUSY although it would succeed a moment later.
-// Live writes are therefore tried again while the database is busy, a bounded
-// number of times (issue #519). Any other error is final at once.
-//
-// The bound matters because these writes run on whatsmeow's event path, and
-// every attempt may itself wait the busy timeout: a message that meets a lock
-// held for longer than all of them still ends up dropped, after having held
-// the events behind it for several such waits. The retry narrows the window;
-// it does not remove the cause, which is how long a history-sync batch holds
-// the write lock.
+// A persistent writer lock can consume each SQLite busy timeout. The default
+// budget is three attempts and two waits (200 ms + 1 s); retries narrow the
+// loss window but cannot guarantee machine latency or fair writer scheduling.
 
 import (
 	"errors"
@@ -51,9 +43,15 @@ func defaultStoreRetryDelays() []time.Duration {
 // retryBusy runs write, and again after each of b.StoreRetryDelays for as
 // long as the database is busy. It returns the error of the last attempt.
 func (b *Bridge) retryBusy(write func() error) error {
+	return retryBusyWithWait(write, b.StoreRetryDelays, b.waitStoreRetry)
+}
+
+// The same bounded loop for event/history writes and outbound persistence.
+// write must contain database effects only and be safe to repeat.
+func retryBusyWithWait(write func() error, delays []time.Duration, wait func(time.Duration) bool) error {
 	err := write()
-	for _, delay := range b.StoreRetryDelays {
-		if err == nil || !isBusyError(err) || !b.waitStoreRetry(delay) {
+	for _, delay := range delays {
+		if err == nil || !isBusyError(err) || !wait(delay) {
 			break
 		}
 		err = write()
@@ -85,5 +83,9 @@ func (b *Bridge) waitStoreRetry(delay time.Duration) bool {
 // one count on /metrics.
 func (b *Bridge) noteStoreFailure(kind, messageID, chatJID string, err error) {
 	b.metrics.storeFailures.Add(1)
-	b.Log.Errorf("Failed to store %s %s in %s: %v", kind, messageID, chatJID, err)
+	row := kind
+	if messageID != "" {
+		row += " " + messageID
+	}
+	b.Log.Errorf("Failed to store %s in %s: %v", row, chatJID, err)
 }

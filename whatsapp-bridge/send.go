@@ -40,6 +40,18 @@ type SendMessageResponse struct {
 // sendFunc is the /api/send backend (sendWhatsAppMessage in production).
 type sendFunc func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage)
 
+type outboundPersistence func(types.JID, sentMessage, string, outboundMedia, string) (string, error)
+
+const outboundArchiveWarning = "message was sent, but its archive row could not be written; do not resend it"
+
+func outboundSendStatus(recipient string, persistErr error) string {
+	message := fmt.Sprintf("Message sent to %s", recipient)
+	if persistErr != nil {
+		message += "; warning: " + outboundArchiveWarning
+	}
+	return message
+}
+
 // sentMessage identifies a message the bridge just sent.
 type sentMessage struct {
 	ID        string
@@ -341,7 +353,7 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
+func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	if !client.IsConnected() {
 		return false, notConnectedMessage, sentMessage{}
 	}
@@ -433,16 +445,17 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 	// list_messages / get_last_interaction never see our own outbound
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
-		sent.ChatJID = persistOutbound(client, messageStore, storageJID, sent, message, outboundMediaColumns(mediaPath, upload), quotedMsgID)
+		sent.ChatJID, err = persist(storageJID, sent, message, outboundMediaColumns(mediaPath, upload), quotedMsgID)
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient), sent
+	return true, outboundSendStatus(recipient, err), sent
 }
 
 // persistOutbound stores the row of a message this bridge just sent, and its
 // chat, and returns the chat JID they were stored under. client.Store.ID must
 // be set (a paired client).
-func persistOutbound(client *whatsmeow.Client, messageStore *MessageStore, storageJID types.JID, sent sentMessage, content string, media outboundMedia, quotedMsgID string) string {
+func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content string, media outboundMedia, quotedMsgID string) (string, error) {
+	client, messageStore := b.Client, b.Store
 	// Normalize @lid recipients to phone JID so outbound rows land in
 	// the same chat row as inbound (which handleMessage normalizes via
 	// resolveLIDChat). Otherwise sending to an @lid input would
@@ -455,13 +468,29 @@ func persistOutbound(client *whatsmeow.Client, messageStore *MessageStore, stora
 	// Pass empty name so StoreChat preserves any existing resolved
 	// contact/group name; we don't have one available here and
 	// must not clobber names from inbound handling or history sync.
-	if chatErr := messageStore.StoreChat(chatJID, "", sent.Timestamp); chatErr != nil {
-		bridgeLog.Warnf("failed to store outbound chat metadata: %v", chatErr)
+	// One budget for both upserts, after the remote send; shutdown cancels
+	// retry waits through the same Bridge policy as event/history writes.
+	err := b.retryOutbound(
+		func() error { return messageStore.StoreChat(chatJID, "", sent.Timestamp) },
+		func() error {
+			return media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID)
+		},
+	)
+	if err != nil {
+		b.noteStoreFailure("outbound message", sent.ID, chatJID, err)
 	}
-	if storeErr := media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID); storeErr != nil {
-		bridgeLog.Warnf("failed to persist outbound message: %v", storeErr)
-	}
-	return chatJID
+	return chatJID, err
+}
+
+// retryOutbound owns one budget for both repeatable local writes. Separate
+// callbacks let tests acquire a real writer lock between the two statements.
+func (b *Bridge) retryOutbound(chatWrite, messageWrite func() error) error {
+	return b.retryBusy(func() error {
+		if err := chatWrite(); err != nil {
+			return err
+		}
+		return messageWrite()
+	})
 }
 
 // outboundMedia is the media half of an outbound row: the columns

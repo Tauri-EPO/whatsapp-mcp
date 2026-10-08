@@ -66,7 +66,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 
-			_ = messageStore.StoreChat(chatJID, name, timestamp)
+			b.storeLive("history chat", "", chatJID, func() error { return messageStore.StoreChat(chatJID, name, timestamp) })
 			// Backfill read state only when WhatsApp explicitly reports unread
 			// metadata. Sparse history-sync chunks omit UnreadCount; the
 			// generated getter then returns 0 and would permanently mark the

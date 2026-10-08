@@ -905,6 +905,14 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs).
 
+A send can succeed on WhatsApp while its local archive write fails. In that
+case `success` stays `true`, the result keeps `message_id` and `chat_jid`, and
+`message` warns that the archive row could not be written. **Do not resend:**
+the recipient already received it. Archive-dependent calls such as
+`get_message_context` or `edit_message` may not find that row. The bridge logs
+one ERROR with its ID and chat and increments its store-failure counter. This
+applies to `send_message`, `send_file` and `send_audio_message`.
+
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
 #### Phone numbers
