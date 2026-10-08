@@ -57,7 +57,10 @@ func liveGroupOps(client *whatsmeow.Client, connected func() bool) groupOps {
 			if err := online(); err != nil {
 				return err
 			}
-			return client.SetGroupDescription(ctx, jid, description)
+			// whatsmeow deprecated SetGroupDescription as a duplicate of this
+			// call. Empty IDs: it reads the current topic ID from the group
+			// info and generates the new one.
+			return client.SetGroupTopic(ctx, jid, "", "", description)
 		},
 		inviteLink: func(ctx context.Context, jid types.JID, reset bool) (string, error) {
 			if err := online(); err != nil {
