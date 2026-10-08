@@ -211,15 +211,25 @@ func cleanOutboundName(mediaPath string) string {
 	var bounded strings.Builder
 	bounded.Grow(min(len(name), 800))
 	count := 0
+	truncated := false
 	for _, r := range name {
 		if unicode.IsControl(r) || reordersText(r) || r == 0x200e || r == 0x200f || r == 0x061c || r == 0x2028 || r == 0x2029 || strings.ContainsRune(`<>:"/\|?*`, r) {
 			continue
 		}
 		if count == 200 {
+			truncated = true
 			break
 		}
 		bounded.WriteRune(r)
 		count++
 	}
-	return strings.TrimSpace(bounded.String())
+	result := strings.TrimSpace(bounded.String())
+	// The cache uses this safe extension. Bounding a replayed display name
+	// must not make an already-cached document unreachable.
+	if truncated && documentExt(name) != "" {
+		ext := filepath.Ext(strings.TrimSpace(name))
+		runes := []rune(result)
+		result = string(runes[:min(len(runes), 200-len(ext))]) + ext
+	}
+	return result
 }

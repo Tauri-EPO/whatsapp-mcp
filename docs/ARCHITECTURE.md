@@ -183,6 +183,10 @@ row's file hash is ignored, including after an older image replays a new file
 without updating the JSON. Invalid/wrongly typed JSON falls back to legacy
 forwarding with one bounded DEBUG line per discarded read; the upsert replaces
 invalid objects instead of passing them to `json_patch`.
+The sender checks a valid presentation's hash against the actual cached bytes
+before upload and again at message construction; a mismatch refuses forwarding.
+Bounded document names retain their safe extension so replay does not change
+the existing cache identity used by download and purge.
 
 Validation runs at ingress and the wire sink: names/titles share the outbound
 filename sanitizer (controls/bidi/path characters removed, 200 characters),

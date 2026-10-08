@@ -1088,6 +1088,10 @@ before upload. Existing cache names and purge lookups stay unchanged.
 
 The bridge validates presentation on storage and again on forwarding, and ties
 it to the file hash. Invalid JSON or a mismatching hash uses the legacy fallback.
+When a valid stored presentation matches the row but not the cached bytes,
+forwarding refuses before upload; it does not send an older cached file with
+the replacement file's attributes. Bounding document names retains their safe
+extension, keeping existing cache files reachable after replay.
 GIF playback, PTV semantics and view-once behavior are not reproduced by forwarding;
 the view-once placeholder caption is forwarded as text, as before.
 

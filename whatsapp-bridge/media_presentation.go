@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"mime"
 	"strings"
 	"unicode"
@@ -64,6 +66,16 @@ func (p *mediaPresentation) forFile(kind string, sha []byte) *mediaPresentation 
 	q := p.validated(kind)
 	q.Hash = hash
 	return q
+}
+
+func (p *mediaPresentation) forBytes(kind string, data []byte) (*mediaPresentation, error) {
+	if p != nil && p.Hash != "" {
+		hash := sha256.Sum256(data)
+		if p.Hash != hex.EncodeToString(hash[:]) {
+			return nil, fmt.Errorf("cached media does not match its stored presentation hash")
+		}
+	}
+	return p.validated(kind), nil
 }
 
 // Validate at ingress and again at the wire sink, including old database rows.

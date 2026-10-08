@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 			refreshed                         bool
 			mimeOnlyReplay                    bool
 			missingAudioFields                bool
+			boundedNameReplay, staleCache     bool
 		}{
 			{name: "PNG document", kind: "document", mime: "image/png", filename: "image.png", title: "Quarterly report", data: []byte("\x89PNG\r\n\x1a\nfake")},
 			{name: "document path name", kind: "document", mime: "application/pdf", filename: `C:\fake\private\report.pdf`, title: "Report", data: []byte("%PDF-1.7 fake")},
@@ -57,6 +60,10 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 			{name: "legacy MIME-only replay", kind: "document", mime: "application/pdf", filename: "report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true, mimeOnlyReplay: true},
 			{name: "legacy unknown audio", kind: "audio", data: []byte("unknown audio bytes"), legacy: true, refused: true},
 			{name: "phone retry changes hash", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio"), refreshed: true},
+			{name: "bounded name retains PDF cache", kind: "document", mime: "application/pdf", filename: strings.Repeat("n", 201) + ".pdf", title: "Report", sentName: strings.Repeat("n", 196) + ".pdf", data: []byte("%PDF-1.7 fake"), legacy: true, boundedNameReplay: true},
+			{name: "stale document cache refused", kind: "document", mime: "application/pdf", filename: "new.pdf", title: "New title", data: []byte("%PDF-1.7 old fake"), staleCache: true, refused: true},
+			{name: "stale audio cache refused", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 old fake"), staleCache: true, refused: true},
+			{name: "stale sticker cache refused", kind: "sticker", mime: "image/webp", data: []byte("RIFF\x10\x00\x00\x00WEBPVP8 old fake"), staleCache: true, refused: true},
 		} {
 			t.Run(fmt.Sprintf("%t/%s", batch, tc.name), func(t *testing.T) {
 				t.Setenv(storeDirEnv, t.TempDir())
@@ -88,6 +95,8 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				}
 				common := testUpload()
 				common.FileLength = uint64(len(tc.data))
+				hash := sha256.Sum256(tc.data)
+				common.FileSHA256 = hash[:]
 				var packet *waE2E.Message
 				switch tc.kind {
 				case "document":
@@ -105,6 +114,9 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				}
 				ex := extractMessage(packet, ts, "KIND1")
 				if tc.legacy {
+					if tc.boundedNameReplay {
+						ex.filename = tc.filename // exact filename kept by the old writer
+					}
 					if tc.kind == "document" && ex.filename == "" {
 						ex.filename = "document_" + ts.Format("20060102_150405") + "_KIND1"
 					}
@@ -116,9 +128,21 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 						return persistMessage(w, "KIND1", efChat, "x", ts, false, ex, false, testLogger())
 					})
 				}
-				if tc.mimeOnlyReplay {
+				if tc.mimeOnlyReplay || tc.boundedNameReplay || tc.staleCache {
 					replay := proto.Clone(packet).(*waE2E.Message)
-					replay.DocumentMessage.FileName, replay.DocumentMessage.Title = nil, nil
+					if tc.mimeOnlyReplay {
+						replay.DocumentMessage.FileName, replay.DocumentMessage.Title = nil, nil
+					}
+					if tc.staleCache {
+						switch tc.kind {
+						case "document":
+							replay.DocumentMessage.FileSHA256 = bytes.Repeat([]byte{9}, 32)
+						case "audio":
+							replay.AudioMessage.FileSHA256 = bytes.Repeat([]byte{9}, 32)
+						case "sticker":
+							replay.StickerMessage.FileSHA256 = bytes.Repeat([]byte{9}, 32)
+						}
+					}
 					replayWriter(t, ms, batch, func(w messageWriter) error {
 						return persistMessage(w, "KIND1", efChat, "x", ts, false, extractMessage(replay, ts, "KIND1"), false, testLogger())
 					})
@@ -204,6 +228,24 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				if tc.refused {
 					if code != http.StatusBadGateway || calls != 0 || uploads != 0 {
 						t.Fatalf("unknown audio was uploaded/sent: code=%d sends=%d uploads=%d", code, calls, uploads)
+					}
+					if tc.staleCache {
+						source, found, err := ms.messageContentLookup("KIND1", efChat)
+						if err != nil || !found {
+							t.Fatal("stale-cache fixture missing")
+						}
+						ctx := context.WithValue(t.Context(), forwardSourceKey{}, &source)
+						if wire, _, err := buildForwardMedia(ctx, whatsmeow.MediaDocument, "application/pdf", cached, tc.data, common, "", outboundQuote{}, nil); err == nil || wire != nil {
+							t.Fatal("wire builder accepted presentation for different bytes")
+						}
+						data, err := os.ReadFile(cached)
+						if err != nil || !bytes.Equal(data, tc.data) {
+							t.Fatal("refusal modified the cache")
+						}
+						var rows int
+						if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages WHERE id='SENTKIND1'").Scan(&rows); err != nil || rows != 0 {
+							t.Fatal("refused cache produced an outbound row")
+						}
 					}
 					return
 				}

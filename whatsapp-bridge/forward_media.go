@@ -25,6 +25,10 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 		kind, contentType, _ := classifySendMedia(ctx, path, data)
 		return kind, contentType, nil
 	}
+	p, err := source.presentation.forBytes(source.mediaType, data)
+	if err != nil {
+		return "", "", err
+	}
 	var upload whatsmeow.MediaType
 	var contentType string
 	switch source.mediaType {
@@ -59,7 +63,7 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 	default:
 		return "", "", fmt.Errorf("unsupported forwarded media kind: %s", source.mediaType)
 	}
-	if p := source.presentation.validated(source.mediaType); p != nil && p.MIME != "" && source.mediaType != "image" && source.mediaType != "video" && (source.mediaType != "sticker" || isWebP(data)) {
+	if p != nil && p.MIME != "" && source.mediaType != "image" && source.mediaType != "video" && (source.mediaType != "sticker" || isWebP(data)) {
 		contentType = p.MIME
 	}
 	if source.mediaType == "audio" {
@@ -76,7 +80,10 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 	if !ok {
 		return buildOutboundMedia(kind, contentType, path, data, upload, caption, quote, mentions)
 	}
-	p := source.presentation.validated(source.mediaType)
+	p, err := source.presentation.forBytes(source.mediaType, data)
+	if err != nil {
+		return nil, "", err
+	}
 	switch source.mediaType {
 	case "audio":
 		audio := &waE2E.AudioMessage{Mimetype: proto.String(contentType), URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileSHA256: upload.FileSHA256, FileEncSHA256: upload.FileEncSHA256, FileLength: &upload.FileLength, PTT: proto.Bool(false)}
