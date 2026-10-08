@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,10 +79,9 @@ func TestOutboundPersistenceRetriesBusyChatAndMessage(t *testing.T) {
 			}
 			release := lock()
 			waits := 0
-			ms.storeRetryWait = func(time.Duration) bool { waits++; release(); return true }
-			if path == "chat" {
-				persistOutbound(newTestClientWithSelf(&mockLIDStore{}, phonePN), ms, phonePN, sentMessage{ID: "OUT1", Timestamp: now}, "searchable outbound", outboundMedia{}, "")
-			} else if err := (outboundMedia{}).store(ms, "OUT1", phonePN.String(), phonePN.User, "searchable outbound", now, ""); err != nil {
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, phonePN), ms, testLogger())
+			b.storeRetryWait = func(time.Duration) bool { waits++; release(); return true }
+			if _, err := b.persistOutbound(phonePN, sentMessage{ID: "OUT1", Timestamp: now}, "searchable outbound", outboundMedia{}, ""); err != nil {
 				t.Fatal(err)
 			}
 			var rows int
@@ -108,9 +111,57 @@ func TestHistoryChatRetriesBusy(t *testing.T) {
 	}
 }
 
+func TestOutboundPersistenceStopsRetryOnShutdown(t *testing.T) {
+	ms, lock := lockedProductionStore(t)
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, phonePN), ms, testLogger())
+	release := lock()
+	defer release()
+	b.StoreRetryDelays = []time.Duration{time.Hour}
+	b.cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.persistOutbound(phonePN, sentMessage{ID: "OUT1", Timestamp: time.Now()}, "outbound", outboundMedia{}, "")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !isBusyError(err) || b.metrics.storeFailures.Load() != 1 {
+			t.Fatalf("error=%v failures=%d", err, b.metrics.storeFailures.Load())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("outbound retry ignored Bridge shutdown")
+	}
+}
+
+func TestHistoryChatLossHasIdentityWithoutAnEmptyMessageID(t *testing.T) {
+	ms, lock := lockedProductionStore(t)
+	rec := installRecordingLogger(t)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
+	if err := ms.StoreChat(phonePN.String(), "Alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	release := lock()
+	defer release()
+	b.storeRetryWait = func(time.Duration) bool { release(); return false }
+	b.handleHistorySync(largeHistoryFixture(1))
+	lines := errorLines(rec.String())
+	if b.metrics.storeFailures.Load() != 1 || len(lines) != 1 || !strings.Contains(lines[0], "history chat in "+phonePN.String()) || strings.Contains(lines[0], "  ") {
+		t.Fatalf("failures=%d errors=%v", b.metrics.storeFailures.Load(), lines)
+	}
+}
+
 func TestOutboundBusyBoundAndNonBusyErrors(t *testing.T) {
-	for _, busy := range []bool{true, false} {
-		t.Run(map[bool]string{true: "busy bound", false: "non-busy constraint"}[busy], func(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		busy               bool
+		override, expected []time.Duration
+	}{
+		{"default busy bound", true, nil, []time.Duration{200 * time.Millisecond, time.Second}},
+		{"custom Bridge budget", true, []time.Duration{3 * time.Second}, []time.Duration{3 * time.Second}},
+		{"non-busy constraint", false, []time.Duration{3 * time.Second}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			busy := tc.busy
 			ms, lock := lockedProductionStore(t)
 			now := time.Unix(1772359200, 0)
 			if err := ms.StoreChat(phonePN.String(), "", now); err != nil {
@@ -123,13 +174,38 @@ func TestOutboundBusyBoundAndNonBusyErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			waits := 0
-			ms.storeRetryWait = func(time.Duration) bool { waits++; return true }
-			err := (outboundMedia{}).store(ms, "OUT1", phonePN.String(), phonePN.User, "outbound", now, "")
-			release()
-			want := 0
-			if busy {
-				want = len(defaultStoreRetryDelays())
+			rec := installRecordingLogger(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, phonePN), ms, rec)
+			b.Connected = func() bool { return true }
+			if tc.override != nil {
+				b.StoreRetryDelays = tc.override
 			}
+			b.storeRetryWait = func(delay time.Duration) bool {
+				if waits >= len(tc.expected) || delay != tc.expected[waits] {
+					t.Fatalf("outbound ignored Bridge delay: %s", delay)
+				}
+				waits++
+				return true
+			}
+			remoteSends := 0
+			var persistErr error
+			b.Send = func(_ context.Context, recipient, message, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
+				remoteSends++ // remote acceptance, followed by real local persistence
+				sent := sentMessage{ID: "OUT1", Timestamp: now}
+				sent.ChatJID, persistErr = b.persistOutbound(phonePN, sent, message, outboundMedia{}, "")
+				return true, outboundSendStatus(recipient, persistErr), sent
+			}
+			b.IsOnWhatsApp = func(context.Context, []string) ([]types.IsOnWhatsAppResponse, error) {
+				return []types.IsOnWhatsAppResponse{{JID: phonePN, IsIn: true}}, nil
+			}
+			httpReply := httptest.NewRecorder()
+			b.handleSend(nil).ServeHTTP(httpReply, httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(`{"recipient":"5511999999999","message":"must stay secret"}`)))
+			err := persistErr
+			release()
+			if remoteSends != 1 {
+				t.Fatalf("send backend was not reached: HTTP=%d %s", httpReply.Code, httpReply.Body.String())
+			}
+			want := len(tc.expected)
 			if err == nil || waits != want || isBusyError(err) != busy {
 				t.Fatalf("error=%v retries=%d want=%d", err, waits, want)
 			}
@@ -139,6 +215,17 @@ func TestOutboundBusyBoundAndNonBusyErrors(t *testing.T) {
 			}
 			if rows != 0 {
 				t.Fatalf("persisted %d rows after failure", rows)
+			}
+			var response SendMessageResponse
+			if err := json.Unmarshal(httpReply.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if httpReply.Code != http.StatusOK || !response.Success || remoteSends != 1 || response.MessageID != "OUT1" || !strings.Contains(response.Message, outboundArchiveWarning) {
+				t.Fatalf("sent=%d HTTP=%d response=%+v", remoteSends, httpReply.Code, response)
+			}
+			lines := errorLines(rec.String())
+			if b.metrics.storeFailures.Load() != 1 || len(lines) != 1 || !strings.Contains(lines[0], "OUT1") || !strings.Contains(lines[0], phonePN.String()) || strings.Contains(lines[0], "must stay secret") {
+				t.Fatalf("failures=%d errors=%v", b.metrics.storeFailures.Load(), lines)
 			}
 		})
 	}

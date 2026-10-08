@@ -617,7 +617,7 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	b.Connect = func() error { return nil }
 	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
-		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+		return sendWhatsAppMessage(ctx, b.Client, b.Store, b.persistOutbound, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
 	// Every number is on WhatsApp exactly as typed unless a test says otherwise.
 	b.IsOnWhatsApp = func(_ context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {

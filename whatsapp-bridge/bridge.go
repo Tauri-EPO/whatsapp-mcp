@@ -240,7 +240,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	b.Connect = client.Connect
 	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
 	b.Send = func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
-		return sendWhatsAppMessage(ctx, b.Client, b.Store, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+		return sendWhatsAppMessage(ctx, b.Client, b.Store, b.persistOutbound, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
 	b.IsOnWhatsApp = client.IsOnWhatsApp
 	b.Exit = func(reason string, code int) {
@@ -252,16 +252,12 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 
 // sleep waits for d and reports false when the bridge is shutting down.
 func (b *Bridge) sleep(d time.Duration) bool {
-	return sleepContext(b.ctx, d)
-}
-
-func sleepContext(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 		return true
-	case <-ctx.Done():
+	case <-b.ctx.Done():
 		return false
 	}
 }
