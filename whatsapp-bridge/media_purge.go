@@ -264,8 +264,10 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			writePurgeResponse(w, http.StatusBadRequest, MediaPurgeResponse{Message: "older_than_days and min_bytes must not be negative", DryRun: dryRun})
 			return
 		}
-		if req.ChatJID != "" && rejectByChatPolicy(w, b.Policy, req.ChatJID) {
-			return
+		if req.ChatJID != "" {
+			if _, ok := authorizeChat(w, b.Policy, req.ChatJID, false); !ok {
+				return
+			}
 		}
 
 		var rows []mediaRow
@@ -282,6 +284,10 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 				item.MessageID, item.ChatJID = strings.TrimSpace(item.MessageID), strings.TrimSpace(item.ChatJID)
 				if item.MessageID == "" || item.ChatJID == "" {
 					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "message_id and chat_jid are required"})
+					continue
+				}
+				if strings.Count(item.ChatJID, "@") > 1 {
+					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "malformed chat target: more than one '@'"})
 					continue
 				}
 				if !b.Policy.Allows(item.ChatJID) {

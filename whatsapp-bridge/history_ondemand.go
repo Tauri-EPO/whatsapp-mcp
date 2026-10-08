@@ -95,7 +95,7 @@ func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe
 }
 
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
-func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore) {
+func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -113,6 +113,10 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			writeError(w, http.StatusBadRequest, "chat_jid is required")
 			return
 		}
+		chatJID, ok := authorizeChat(w, policy, req.ChatJID, false)
+		if !ok {
+			return
+		}
 		count := clampHistoryCount(req.Count)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -128,12 +132,6 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 		}
 		if client.Store == nil || client.Store.ID == nil {
 			writeErr(http.StatusServiceUnavailable, "Client is not paired")
-			return
-		}
-
-		chatJID, err := types.ParseJID(req.ChatJID)
-		if err != nil {
-			writeErr(http.StatusBadRequest, fmt.Sprintf("Invalid chat_jid: %v", err))
 			return
 		}
 

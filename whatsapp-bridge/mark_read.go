@@ -89,22 +89,16 @@ func markReadHandler(deps markReadDeps) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "chat_jid is required")
 			return
 		}
-		if rejectByChatPolicy(w, deps.policy, req.ChatJID) {
-			return
-		}
-
-		// The storage (phone-form) JID: validation, the archive query and the
-		// read marker all use it. The LID rewrite happens later, and only for
-		// the receipt itself.
-		chatJID, err := types.ParseJID(req.ChatJID)
-		if err != nil || chatJID.User == "" || chatJID.Server == "" {
-			writeError(w, http.StatusBadRequest, "Invalid chat_jid")
+		// Authorize the storage JID; the receipt's LID rewrite happens later.
+		chatJID, ok := authorizeChat(w, deps.policy, req.ChatJID, false)
+		if !ok {
 			return
 		}
 
 		now := time.Now()
 		readAt := now
 		if req.Timestamp != "" {
+			var err error
 			if readAt, err = time.Parse(time.RFC3339, req.Timestamp); err != nil {
 				writeError(w, http.StatusBadRequest, "timestamp must be RFC 3339")
 				return

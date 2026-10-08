@@ -165,6 +165,12 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   from configuration. A formatted entry such as `+55 11 99999-9999` does not
   allow its digits-only number; it fails closed.
 - `*@g.us` allows every group, `*@s.whatsapp.net` every direct chat.
+- A target containing more than one `@` is always refused, including when
+  the allow-list is unset. Invalid configuration entries remain restrictive;
+  they never authorize a shorter JID or turn the policy into unrestricted access.
+  Startup logs warn about invalid entry positions without printing their values.
+  Restricted read queries also omit ambiguous stored JIDs; an unrestricted
+  deployment reads its archive without per-row identity filtering.
 - Entries are compared literally, with one exception, for reads only: a
   Brazilian mobile is the same number with or without the ninth digit after
   the area code (`5511999999999` and `551199999999`), and WhatsApp registers
@@ -179,8 +185,12 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   `get_last_interaction`, and refuses `send_*`, `send_reaction`,
   `mark_messages_read`, `download_media`, `read_media` and `transcribe_audio`
   for other chats with a message naming the variable.
-- The bridge enforces the same list on `/api/send`, `/api/react`,
-  `/api/chat/archive`, `/api/mark-read` and `/api/typing` (HTTP 403), so an MCP-side bug cannot
+- The bridge enforces the same list through `authorizeChat` on `/api/send`,
+  `/api/forward` (source and destination), `/api/edit`, `/api/react`, `/api/typing`,
+  `/api/mark-read`, `/api/delete`, `/api/chat/archive`, `/api/poll`, all four
+  group-management routes, `/api/group/members`, `/api/history`, `/api/download`
+  and media-purge criteria (HTTP 403 for policy refusal, HTTP 400 for malformed
+  targets). Per-item purge reports its own refusal reason. An MCP-side bug cannot
   reach a chat you did not enable. Set the variable for **both** processes
   (the compose file passes it to both containers).
 - A send to a bare number goes to the number WhatsApp has registered, which
