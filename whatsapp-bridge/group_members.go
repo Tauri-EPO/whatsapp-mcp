@@ -243,16 +243,13 @@ func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altO
 			_ = json.NewEncoder(w).Encode(GroupMembersResponse{Success: false, Message: "group JID is required (?jid=...@g.us)"})
 			return
 		}
-		if rejectAmbiguousChat(w, policy, raw) {
+		jid, ok := authorizeChat(w, policy, raw, false)
+		if !ok {
 			return
 		}
-		jid, err := types.ParseJID(raw)
-		if err != nil || jid.Server != types.GroupServer {
+		if jid.Server != types.GroupServer {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(GroupMembersResponse{Success: false, Message: "not a group JID: " + raw})
-			return
-		}
-		if rejectByChatPolicy(w, policy, jid.String()) {
 			return
 		}
 		// Read before the request: this is the stamp the cached roster is swept

@@ -509,7 +509,7 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Message ID and Chat JID are required")
 			return
 		}
-		if rejectAmbiguousChat(w, b.Policy, req.ChatJID) {
+		if _, ok := authorizeChat(w, b.Policy, req.ChatJID, false); !ok {
 			return
 		}
 		if !b.Connected() {

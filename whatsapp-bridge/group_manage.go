@@ -112,15 +112,16 @@ func parseGroupRequest(w http.ResponseWriter, r *http.Request, policy chatPolicy
 		return groupRequest{}, types.EmptyJID, false
 	}
 	raw := strings.TrimSpace(req.GroupJID)
-	if rejectAmbiguousChat(w, policy, raw) {
+	if raw == "" {
+		writeGroupError(w, http.StatusBadRequest, "group_jid is required")
 		return groupRequest{}, types.EmptyJID, false
 	}
-	jid, err := types.ParseJID(raw)
-	if raw == "" || err != nil || jid.Server != types.GroupServer {
+	jid, ok := authorizeChat(w, policy, raw, false)
+	if !ok {
+		return groupRequest{}, types.EmptyJID, false
+	}
+	if jid.Server != types.GroupServer {
 		writeGroupError(w, http.StatusBadRequest, "group_jid must be a group JID (…@g.us)")
-		return groupRequest{}, types.EmptyJID, false
-	}
-	if rejectByChatPolicy(w, policy, jid.String()) {
 		return groupRequest{}, types.EmptyJID, false
 	}
 	return req, jid, true

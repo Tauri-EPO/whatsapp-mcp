@@ -888,7 +888,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false
 	}
-	if rejectByChatPolicy(w, b.Policy, registered.String()) {
+	if _, ok := authorizeChat(w, b.Policy, registered.String(), true); !ok {
 		return "", false
 	}
 	if typed := normalizeChatEntry(recipient); typed != registered.String() {
@@ -920,10 +920,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return
 		}
-		if rejectByChatPolicy(w, b.Policy, req.Recipient) {
-			return
-		}
-		if target, parseErr := parseRecipientJID(req.Recipient); parseErr == nil && rejectByChatPolicy(w, b.Policy, target.String()) {
+		if _, ok := authorizeChat(w, b.Policy, req.Recipient, true); !ok {
 			return
 		}
 

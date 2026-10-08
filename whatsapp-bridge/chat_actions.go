@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -22,17 +21,11 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "recipient, message_id, and emoji are required")
 			return
 		}
-		if rejectAmbiguousChat(w, b.Policy, req.Recipient) {
+		chatJID, ok := authorizeChat(w, b.Policy, req.Recipient, false)
+		if !ok {
 			return
 		}
-		chatJID, err := types.ParseJID(req.Recipient)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid recipient JID: %v", err))
-			return
-		}
-		if rejectByChatPolicy(w, b.Policy, chatJID.String()) {
-			return
-		}
+		var err error
 		var senderJID types.JID
 		switch {
 		case req.FromMe:
@@ -89,34 +82,8 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return
 		}
-		if rejectAmbiguousChat(w, b.Policy, req.Recipient) {
-			return
-		}
-
-		// Create JID for recipient
-		var recipientJID types.JID
-		var err error
-
-		// Check if recipient is a JID
-		if strings.Contains(req.Recipient, "@") {
-			recipientJID, err = types.ParseJID(req.Recipient)
-			if err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": fmt.Sprintf("Error parsing JID: %v", err),
-				})
-				return
-			}
-		} else {
-			// Create JID from phone number
-			recipientJID = types.JID{
-				User:   req.Recipient,
-				Server: "s.whatsapp.net",
-			}
-		}
-
-		if rejectByChatPolicy(w, b.Policy, recipientJID.String()) {
+		recipientJID, ok := authorizeChat(w, b.Policy, req.Recipient, true)
+		if !ok {
 			return
 		}
 
@@ -131,7 +98,7 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 		// Send the chat presence update
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
-		err = client.SendChatPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
+		err := client.SendChatPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

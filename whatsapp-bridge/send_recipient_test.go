@@ -387,8 +387,12 @@ func TestSendRefusesARecipientItCannotRead(t *testing.T) {
 		ask := &fakeIsOnWhatsApp{}
 		_, mux, sentTo := sendRecipientBridge(t, &mockLIDStore{}, ask)
 		rec := postSend(mux, recipient)
-		if body := decodeAPIError(t, rec); rec.Code != http.StatusBadRequest || body.Error.Code != "invalid_argument" {
-			t.Errorf("%q: status %d code %q, want 400 invalid_argument", recipient, rec.Code, body.Error.Code)
+		wantStatus, wantCode := http.StatusBadRequest, "invalid_argument"
+		if recipient == "+55 11 98888-7777x" {
+			wantStatus, wantCode = http.StatusForbidden, "denied"
+		}
+		if body := decodeAPIError(t, rec); rec.Code != wantStatus || body.Error.Code != wantCode {
+			t.Errorf("%q: status %d code %q, want %d %s", recipient, rec.Code, body.Error.Code, wantStatus, wantCode)
 		}
 		if len(ask.calls) != 0 || len(*sentTo) != 0 {
 			t.Errorf("%q: asked %v, sent %v; want neither", recipient, ask.calls, *sentTo)
@@ -412,11 +416,11 @@ func TestSendAllowListCoversTheRegisteredNumber(t *testing.T) {
 		},
 		{
 			name: "only the registered number is listed: the typed one is refused before any lookup", allowed: registeredNumber,
-			wantStatus: http.StatusForbidden, wantAsked: false, wantNamed: dialledNumber,
+			wantStatus: http.StatusForbidden, wantAsked: false, wantNamed: dialledJID.String(),
 		},
 		{
 			name: "an unrelated chat and every group are listed", allowed: "5511977776666,*@g.us",
-			wantStatus: http.StatusForbidden, wantAsked: false, wantNamed: dialledNumber,
+			wantStatus: http.StatusForbidden, wantAsked: false, wantNamed: dialledJID.String(),
 		},
 		{
 			name: "the dialled spelling and every group: still not the registered number", allowed: dialledNumber + ",*@g.us",

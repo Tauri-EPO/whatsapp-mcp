@@ -77,15 +77,8 @@ func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPoli
 			writeDeleteResponse(w, http.StatusBadRequest, DeleteMessageResponse{Message: "chat_jid and message_id are required"})
 			return
 		}
-		if rejectAmbiguousChat(w, policy, req.ChatJID) {
-			return
-		}
-		chat, err := types.ParseJID(req.ChatJID)
-		if err != nil || chat.User == "" {
-			writeDeleteResponse(w, http.StatusBadRequest, DeleteMessageResponse{Message: "Invalid chat_jid: " + req.ChatJID})
-			return
-		}
-		if rejectByChatPolicy(w, policy, chat.String()) {
+		chat, ok := authorizeChat(w, policy, req.ChatJID, false)
+		if !ok {
 			return
 		}
 

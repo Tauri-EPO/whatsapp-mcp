@@ -32,7 +32,7 @@ func TestChatPolicy_ParseAndAllow(t *testing.T) {
 			t.Errorf("Allows(%q) = %v, want %v", target, got, want)
 		}
 	}
-	if !strings.Contains(p.Summary(), "restricted to 2 chat(s)") || !strings.Contains(p.Summary(), "*@g.us") {
+	if !strings.Contains(p.Summary(), "restricted to 1 chat(s)") || !strings.Contains(p.Summary(), "*@g.us") {
 		t.Fatalf("unexpected summary %q", p.Summary())
 	}
 }

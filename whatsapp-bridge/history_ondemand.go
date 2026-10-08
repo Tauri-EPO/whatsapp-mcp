@@ -113,7 +113,8 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			writeError(w, http.StatusBadRequest, "chat_jid is required")
 			return
 		}
-		if rejectAmbiguousChat(w, policy, req.ChatJID) {
+		chatJID, ok := authorizeChat(w, policy, req.ChatJID, false)
+		if !ok {
 			return
 		}
 		count := clampHistoryCount(req.Count)
@@ -131,12 +132,6 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 		}
 		if client.Store == nil || client.Store.ID == nil {
 			writeErr(http.StatusServiceUnavailable, "Client is not paired")
-			return
-		}
-
-		chatJID, err := types.ParseJID(req.ChatJID)
-		if err != nil {
-			writeErr(http.StatusBadRequest, fmt.Sprintf("Invalid chat_jid: %v", err))
 			return
 		}
 

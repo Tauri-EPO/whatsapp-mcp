@@ -3019,6 +3019,8 @@ def get_message_context(
     chat_jid makes the lookup a primary-key hit and removes the ambiguity;
     without it the most recent row with that ID is used.
     """
+    if chat_jid:
+        _require_allowed(chat_jid)
     try:
         conn = _connect_messages_db()
         cursor = conn.cursor()
@@ -3608,6 +3610,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    _require_unambiguous_identifier(jid)
     # An empty (or bare "@lid") argument would otherwise reach the SQL as an
     # empty alias and match every row whose address form the bridge left empty.
     if not (jid or "").strip().split("@", 1)[0]:
@@ -3933,6 +3936,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     phone row, under the spelling given or the other one, comes before any LID
     row.
     """
+    _require_unambiguous_identifier(sender_phone_number)
     try:
         policy_clause, policy_params = CHAT_POLICY.sql_clause("c.jid")
         conn = _connect_messages_db()
@@ -4110,6 +4114,11 @@ def _sent_info(result: dict[str, Any]) -> dict[str, Any]:
 def _require_allowed(jid: str | None) -> None:
     if denied := _policy_denied(jid):
         raise ToolError("denied", denied)
+
+
+def _require_unambiguous_identifier(identifier: str) -> None:
+    if (identifier or "").count("@") > 1:
+        raise ToolError("denied", CHAT_POLICY.denial_message(identifier))
 
 
 def _require_readable(jid: str | None) -> None:
@@ -4466,10 +4475,7 @@ def get_group_members(group_jid: str, limit: int = 100, page: int = 0, cursor: s
     {jid, phone_number, lid, name, display, is_admin, is_super_admin}.
     Raises ToolError.
     """
-    group_jid = (group_jid or "").strip()
-    if not group_jid.endswith("@g.us"):
-        raise ToolError("invalid_argument", f"Not a group JID: {group_jid!r} (expected ...@g.us)")
-    _require_allowed(group_jid)
+    group_jid = _group_jid(group_jid)
     limit = page_size(limit, GROUP_MEMBERS_MAX_LIMIT)
     cursor_state = decode_cursor(cursor, "group_members")
     offset = page_number(page) * limit

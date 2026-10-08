@@ -227,6 +227,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		storeStats:     newStoreStats(storeRoot),
 		metrics:        newMetricsRegistry(),
 	}
+	b.Policy.warnInvalidEntries(logger)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if b.Webhook != nil {
 		b.Webhook.failures = &b.metrics.webhookFailures

@@ -264,8 +264,10 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			writePurgeResponse(w, http.StatusBadRequest, MediaPurgeResponse{Message: "older_than_days and min_bytes must not be negative", DryRun: dryRun})
 			return
 		}
-		if req.ChatJID != "" && rejectByChatPolicy(w, b.Policy, req.ChatJID) {
-			return
+		if req.ChatJID != "" {
+			if _, ok := authorizeChat(w, b.Policy, req.ChatJID, false); !ok {
+				return
+			}
 		}
 
 		var rows []mediaRow

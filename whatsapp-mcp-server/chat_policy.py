@@ -11,12 +11,13 @@ Entries are comma-separated and may be:
 - a bare phone number (country code, digits only) → ``@s.whatsapp.net``
 - a server wildcard: ``*@g.us`` (all groups) or ``*@s.whatsapp.net`` (all DMs)
 
-The bridge enforces the same variable on its outbound endpoints (send, react,
-mark-read, typing) as a second line of defence; see whatsapp-bridge/chat_policy.go.
+The bridge's authorizeChat helper repeats enforcement on chat-taking REST
+endpoints, including history and download; see whatsapp-bridge/chat_policy.go.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -83,11 +84,11 @@ class ChatPolicy:
     def sql_clause(self, column: str) -> tuple[str, list[str]]:
         """SQL predicate restricting ``column`` (a chat JID column) to allowed chats.
 
-        Ambiguous JIDs are refused even when the allow-list is unset.
+        Unrestricted reads use a constant predicate to preserve covering indexes.
         """
         unambiguous = f"(length({column}) - length(replace({column}, '@', '')) <= 1)"
         if not self.restricted:
-            return unambiguous, []
+            return "1=1", []
         parts: list[str] = []
         params: list[str] = []
         if self.exact:
@@ -96,13 +97,20 @@ class ChatPolicy:
         for server in sorted(self.servers):
             parts.append(f"{column} LIKE ?")
             params.append(f"%@{server}")
-        return unambiguous + " AND (" + " OR ".join(parts) + ")", params
+        return "(" + unambiguous + " AND (" + " OR ".join(parts) + "))", params
 
     def denial_message(self, jid: str | None) -> str:
+        if (jid or "").count("@") > 1:
+            return "Malformed chat target: more than one '@'"
         return f"Chat {jid!r} is not in {ENV_VAR}; this server is restricted to an allow-list of conversations"
 
 
 def load_chat_policy(env: Mapping[str, str] | None = None) -> ChatPolicy:
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(ENV_VAR, "")
+    invalid = [index for index, item in enumerate(raw.split(","), 1) if item.count("@") > 1]
+    if invalid:
+        logging.getLogger("whatsapp_mcp").warning(
+            "%s: malformed entries at positions %s are retained as refused literals", ENV_VAR, invalid
+        )
     return ChatPolicy.from_entries([item for item in raw.split(",") if item.strip()])

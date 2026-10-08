@@ -30,8 +30,37 @@ func TestChatPolicyRefusesAmbiguousJIDs(t *testing.T) {
 	}
 }
 
+func TestInvalidEntryWarningDoesNotExposeValue(t *testing.T) {
+	raw := "5511888888888:1@lid@s.whatsapp.net"
+	policy := parseChatPolicy("," + raw + "," + raw)
+	logger := installRecordingLogger(t)
+	policy.warnInvalidEntries(logger)
+	log := logger.String()
+	if strings.Count(log, "malformed entries") != 1 || !strings.Contains(log, "[2 3]") || strings.Contains(log, raw) || !strings.Contains(policy.Summary(), "restricted to 0 chat(s)") {
+		t.Fatalf("warning=%q summary=%q", log, policy.Summary())
+	}
+}
+
+func TestHistoryAndDownloadRefuseWellFormedDisallowedChat(t *testing.T) {
+	for _, path := range []string{"/api/history", "/api/download"} {
+		b, _, _ := sendRecipientBridge(t, &mockLIDStore{}, &fakeIsOnWhatsApp{})
+		b.Policy = parseChatPolicy("*@g.us")
+		b.Connected = func() bool { t.Fatal("connection before policy denial"); return false }
+		b.DownloadMedia = func(context.Context, string, string) (bool, string, string, string, error) {
+			t.Fatal("download before policy denial")
+			return false, "", "", "", nil
+		}
+		rec := httptest.NewRecorder()
+		body := `{"chat_jid":"5511888888888@s.whatsapp.net","message_id":"MSG1","count":1}`
+		b.newRESTMux(8080, sendRecipientToken).ServeHTTP(rec, seamRequest(http.MethodPost, path, body, sendRecipientToken))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s status=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
-	for _, allow := range []string{"", "*@g.us", "*@s.whatsapp.net"} {
+	for _, allow := range []string{"", "*@g.us", "*@s.whatsapp.net", efChat + ",120363000000000001@g.us"} {
 		t.Run(allow, func(t *testing.T) {
 			ask := &fakeIsOnWhatsApp{}
 			b, _, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
@@ -43,10 +72,10 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 			}
 			mux := b.newRESTMux(8080, sendRecipientToken)
 			source := "120363000000000001@g.us"
-			if allow == "*@s.whatsapp.net" {
+			if allow == "*@s.whatsapp.net" || strings.Contains(allow, efChat) {
 				source = efChat
 			}
-			for _, target := range []string{"5511888888888@s.whatsapp.net@g.us", "120363000000000002@g.us@s.whatsapp.net", "120363000000000002@g.us@g.us", "5511888888888@s.whatsapp.net@s.whatsapp.net"} {
+			for _, target := range []string{"5511888888888@s.whatsapp.net@g.us", "120363000000000002@g.us@s.whatsapp.net", "120363000000000002@g.us@g.us", "5511888888888@s.whatsapp.net@s.whatsapp.net", "@g.us", "@lid", "@broadcast", "@newsletter", "@s.whatsapp.net", "g.us", "lid", "broadcast", "newsletter", "s.whatsapp.net", "5511888888888@"} {
 				for _, route := range []struct{ path, field, extra string }{
 					{"/api/send", "recipient", `,"message":"hello"`},
 					{"/api/react", "recipient", `,"message_id":"MSG1","emoji":"","from_me":true`},
@@ -78,6 +107,37 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 					if rec.Code != http.StatusForbidden {
 						t.Fatalf("%s/%s policy=%q target=%q: %d %s", route.path, route.field, allow, target, rec.Code, rec.Body.String())
 					}
+					// A well-formed allowed target must pass authorization, even
+					// when later validation or the disconnected client refuses it.
+					b.Connected = func() bool { return false }
+					valid := source
+					if route.field == "group_jid" {
+						valid = "120363000000000001@g.us"
+					}
+					control := `{"` + route.field + `":"` + valid + `"` + route.extra + `}`
+					controlPath := route.path
+					if route.path == "/api/poll" {
+						controlPath += "?message_id=MSG1&chat_jid=" + url.QueryEscape(valid)
+					}
+					positive := httptest.NewRecorder()
+					self := b.Client.Store.ID
+					if route.path == "/api/react" {
+						// A permitted reaction reaches the pairing check; it does
+						// not need the mock client's uninitialized network internals.
+						b.Client.Store.ID = nil
+					}
+					controlMux := mux
+					if route.field == "group_jid" && allow == "*@s.whatsapp.net" {
+						b.Policy = parseChatPolicy("*@g.us")
+						controlMux = b.newRESTMux(8080, sendRecipientToken)
+					}
+					controlMux.ServeHTTP(positive, seamRequest(method, controlPath, control, sendRecipientToken))
+					b.Client.Store.ID = self
+					b.Policy = parseChatPolicy(allow)
+					if positive.Code == http.StatusForbidden {
+						t.Fatalf("allowed control refused: %s/%s policy=%q body=%s", route.path, route.field, allow, positive.Body.String())
+					}
+					b.Connected = func() bool { t.Fatal("connection touched before denial"); return false }
 				}
 			}
 			if len(ask.calls) != 0 || len(*sent) != 0 {

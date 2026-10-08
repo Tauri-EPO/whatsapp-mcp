@@ -199,7 +199,7 @@ func TestHandleGroupMembers(t *testing.T) {
 	if rec := do(http.MethodGet, "/api/group/members", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing jid status = %d", rec.Code)
 	}
-	if rec := do(http.MethodGet, "/api/group/members?jid=5511999999999@s.whatsapp.net", ""); rec.Code != http.StatusBadRequest {
+	if rec := do(http.MethodGet, "/api/group/members?jid=5511999999999@s.whatsapp.net", ""); rec.Code != http.StatusForbidden {
 		t.Fatalf("non-group jid status = %d", rec.Code)
 	}
 	if rec := do(http.MethodGet, "/api/group/members?jid=404@g.us", ""); rec.Code != http.StatusBadGateway {
