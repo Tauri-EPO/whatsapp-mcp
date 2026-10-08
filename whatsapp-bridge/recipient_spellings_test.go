@@ -36,9 +36,9 @@ func TestFormattedForwardPolicyBeforeSend(t *testing.T) {
 		lookedUp, sent := 0, 0
 		deps := forwardDeps{
 			resolveRecipient: forwardRecipientAsTyped,
-			lookup: func(_, _ string) (string, string, bool, error) {
+			lookup: func(_, _ string) (forwardSource, bool, error) {
 				lookedUp++
-				return "hello", "", true, nil
+				return forwardSource{content: "hello"}, true, nil
 			},
 			send: func(_ context.Context, to, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
 				sent++
@@ -69,7 +69,7 @@ func TestForwardTrimsDestinationBeforePolicy(t *testing.T) {
 		var addressed string
 		deps := forwardDeps{
 			resolveRecipient: forwardRecipientAsTyped,
-			lookup:           func(_, _ string) (string, string, bool, error) { return "hello", "", true, nil },
+			lookup:           func(_, _ string) (forwardSource, bool, error) { return forwardSource{content: "hello"}, true, nil },
 			send: func(_ context.Context, to, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
 				addressed = to
 				return true, "sent", sentMessage{ChatJID: to}

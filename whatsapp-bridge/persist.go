@@ -20,7 +20,7 @@ import (
 type messageWriter interface {
 	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-		quotedMessageId string, directPath ...string) error
+		quotedMessageId string, options ...messageMediaOptions) error
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
@@ -64,6 +64,13 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	}
 	e.content = extractTextContent(e.inner)
 	e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen = extractMediaInfo(e.inner, ts, id)
+	// Keep an absent document name absent: a replay must not replace an
+	// original name with extractMediaInfo's generated cache fallback.
+	if _, part := mediaPartOf(e.inner); part != nil {
+		if doc, ok := part.(*waE2E.DocumentMessage); ok && doc.GetFileName() == "" {
+			e.filename = ""
+		}
+	}
 	e.directPath = extractMediaDirectPath(e.inner)
 	e.hasLength = mediaLengthDeclared(e.inner)
 	if e.poll = extractPollCreation(e.inner); e.poll != nil {
@@ -94,7 +101,7 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 		length = storedMediaLength(e.fileLen)
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, e.directPath); err != nil {
+		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner)}); err != nil {
 		return err
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of

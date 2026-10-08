@@ -162,6 +162,25 @@ Earlier releases bound a `time.Time` and let the SQLite driver render it, which 
 Two things this note does *not* cover: `chats.ephemeral_setting_timestamp` is an INTEGER of WhatsApp seconds, not a time string; and cached media file names keep the *local* wall clock of the message (`<type>_<yyyymmdd_hhmmss>_<id>`), so existing files stay reachable.
 
 
+## Forwarded media presentation
+
+`messages.media_presentation` holds a small JSON object with the original MIME,
+document name/title, audio PTT/duration/waveform, and sticker animation. Live,
+history-batch and outbound writes insert it with the credentials through the
+shared upsert. Incomplete replays keep the snapshot; complete writes with the
+same plaintext hash merge supplied fields and keep omitted ones. A changed hash
+starts a new presentation, so an old file's metadata cannot follow a new file.
+The forward handler reads category, name and presentation together and reloads
+them after retrieval, since a phone retry can refresh the row. A changed retry
+hash clears the old presentation; ordinary retries preserve it. These values
+reach the sender under the same request deadline. The outgoing
+protobuf supplies the category/presentation of the newly archived outbound row.
+
+Startup adds one nullable column through `ensureColumn`, without rewriting old
+rows or changing migration markers. Existing Python readers ignore this column;
+MCP forwarding continues to call the bridge. Old rows use the documented legacy
+fallback in [TOOLS.md](TOOLS.md#forward_message), and cache names remain intact.
+
 ## SQLite contention and persistence retries
 
 Live chat/message inserts, decoded poll-message rows, history chat metadata and

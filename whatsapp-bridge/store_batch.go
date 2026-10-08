@@ -31,8 +31,8 @@ const replaceMediaSQL = `(:complete_media OR (
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -61,6 +61,13 @@ const insertMessageSQL = `INSERT INTO messages
 			file_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_sha256 ELSE messages.file_sha256 END,
 			file_enc_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
 			file_length = CASE WHEN ` + replaceMediaSQL + ` THEN CASE WHEN excluded.file_length IS NULL AND excluded.file_sha256 = messages.file_sha256 THEN messages.file_length ELSE excluded.file_length END ELSE messages.file_length END,
+			-- Presentation belongs to the same snapshot. A same-file replay
+			-- can add fields; missing metadata must not erase its old fields.
+			media_presentation = CASE WHEN ` + replaceMediaSQL + ` THEN CASE
+				WHEN excluded.file_sha256 = messages.file_sha256 THEN CASE
+					WHEN excluded.media_presentation IS NULL THEN messages.media_presentation
+					ELSE json_patch(COALESCE(messages.media_presentation, '{}'), excluded.media_presentation) END
+				ELSE excluded.media_presentation END ELSE messages.media_presentation END,
 			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`
 
 // messageBatch groups message writes in one transaction. Obtain one through
@@ -113,13 +120,13 @@ func (b *messageBatch) write(fn func() error) error {
 // StoreMessage is MessageStore.StoreMessage inside the batch.
 func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, directPath ...string) error {
+	quotedMessageId string, options ...messageMediaOptions) error {
 	if content == "" && mediaType == "" {
 		return nil
 	}
 	return b.write(func() error {
 		_, err := b.stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
-			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, directPath...)...)
+			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
 		return err
 	})
 }
@@ -146,12 +153,13 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 // that only has the bare user part does not erase a namespace already stored.
 // The timestamp goes in through dbTime (store_time.go) so every row carries
 // the same UTC spelling. The optional direct path is inserted atomically with
-// the credentials; an omitted/empty path becomes NULL for URL-only snapshots.
+// the credentials and recipient-visible presentation; an omitted/empty path
+// becomes NULL for URL-only snapshots.
 // On a complete write, omitting the optional path therefore clears the stored
 // direct_path. Incomplete writes keep the previous snapshot, including its path.
 func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, directPath ...string) []any {
+	quotedMessageId string, options ...messageMediaOptions) []any {
 	switch mediaType {
 	case "image", "video", "audio", "document", "sticker":
 		if length, ok := fileLength.(uint64); ok {
@@ -167,11 +175,14 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	senderUser, senderServer := splitSenderJID(sender)
 	var path any
 	var pathText string
-	if len(directPath) > 0 && directPath[0] != "" {
-		pathText = directPath[0]
-		path = pathText
+	var presentation *mediaPresentation
+	if len(options) > 0 {
+		pathText, presentation = options[0].directPath, options[0].presentation
+		if pathText != "" {
+			path = pathText
+		}
 	}
 	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path,
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.column(),
 		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
 }

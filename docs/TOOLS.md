@@ -1068,6 +1068,16 @@ QuickTime `ftyp`, HEIC, AVIF and 3GP are not recognised and keep the category
 default. `/api/send` keeps the MIME implied by the caller filename, including
 files prepared from `media_base64` or `upload_id`; its dry-run preview agrees.
 
+Forwarding retains the stored category: a document called `image.png` stays a
+document, and a sticker stays a sticker. New archive rows retain the original
+document name/title, audio MIME/PTT/duration/waveform and sticker animation.
+An unnamed document uses `file`, without exposing its cache timestamp or source
+message ID. Audio bytes are forwarded without Opus conversion or forced PTT.
+Older rows have no presentation metadata: document names use the stored name
+(generated timestamp names are suppressed), audio MIME is detected from bytes,
+and unknown PTT defaults to ordinary audio. An unknown legacy audio codec fails
+before upload. Existing cache names and purge lookups stay unchanged.
+
 An unsafe media identity answers `media_refused`; missing bytes or download
 fields answer `media_unavailable`. Do not retry those permanent media failures.
 `bridge_unavailable` remains the temporary bridge/CDN failure to retry later.

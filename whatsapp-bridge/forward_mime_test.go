@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,7 +39,7 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 		{"BMP", "image", "image/jpeg", []byte("BM fake")},
 		{"ICO", "image", "image/jpeg", []byte("\x00\x00\x01\x00fake")},
 		{"WebM", "video", "video/mp4", []byte("\x1a\x45\xdf\xa3fake")},
-		{"non Opus audio", "audio", "audio/ogg; codecs=opus", []byte("ID3 fake audio")},
+		{"non Opus audio", "audio", "audio/mpeg", []byte("ID3 fake audio")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
@@ -119,18 +118,12 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 			}
 			body := fmt.Sprintf(`{"chat_jid":%q,"message_id":"MIME1","to_chat_jid":"120363000000000001@g.us"}`, efChat)
 			code, response := efPost(t, handleForwardMessage(deps, chatPolicy{}), body)
-			if tc.category == "audio" {
-				if code != http.StatusBadGateway || calls != 0 || uploads != 1 || !strings.Contains(response.Message, "failed to analyze Ogg Opus") {
-					t.Fatalf("non-Opus audio changed: code=%d response=%+v sends=%d uploads=%d", code, response, calls, uploads)
-				}
-				return
-			}
 			if code != http.StatusOK || !response.Success || calls != 1 || uploads != 1 {
 				t.Fatalf("forward=%d %+v sends=%d uploads=%d", code, response, calls, uploads)
 			}
 			var storedCaption, storedKind string
 			var storedLength uint64
-			if err := ms.db.QueryRow("SELECT content,media_type,file_length FROM messages WHERE id='FORWARDED1' AND chat_jid='120363000000000001@g.us'").Scan(&storedCaption, &storedKind, &storedLength); err != nil || storedCaption != "caption" || storedKind != tc.category || storedLength != uint64(len(tc.data)) {
+			if err := ms.db.QueryRow("SELECT content,media_type,file_length FROM messages WHERE id='FORWARDED1' AND chat_jid='120363000000000001@g.us'").Scan(&storedCaption, &storedKind, &storedLength); err != nil || storedCaption != map[bool]string{true: "", false: "caption"}[tc.category == "audio"] || storedKind != tc.category || storedLength != uint64(len(tc.data)) {
 				t.Fatalf("outbound row: caption=%s kind=%s length=%d err=%v", storedCaption, storedKind, storedLength, err)
 			}
 			if ok, _, _, path, err := b.downloadMedia(t.Context(), "MIME1", efChat); !ok || err != nil || path != cached {

@@ -67,6 +67,8 @@ whatsapp-mcp/
 │   ├── recipient_cache.go      # bounded, expiring typed -> registered number answers, cleared on reconnect
 │   ├── send_mime.go            # sniff MIME for category-named cached images/videos
 │   ├── edit_forward.go         # /api/edit (own message, edit window), /api/forward (re-send elsewhere)
+│   ├── forward_media.go        # forward stored category and original presentation, keeping cache names
+│   ├── media_presentation.go   # recipient-visible metadata persisted with the media snapshot
 │   ├── media.go                # inbound media download into store/<chat>/
 │   ├── media_cache_path.go     # the one rule for where a cached media file is (download lookup, purge, webhook read)
 │   ├── media_path.go           # WHATSAPP_MEDIA_ROOTS: outbound media_path confined to an allow-list
