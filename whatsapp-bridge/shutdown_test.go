@@ -73,7 +73,9 @@ func TestStreamReplacedSignalsReconnectWhenRunning(t *testing.T) {
 func TestShutdownDrainsRESTServer(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.RESTBind = "127.0.0.1"
-	b.startRESTServer(0, "test-token-0123456789") // port 0: any free port
+	if err := b.startRESTServer(0, "test-token-0123456789"); err != nil { // port 0: any free port
+		t.Fatal(err)
+	}
 	if b.httpServer == nil {
 		t.Fatal("startRESTServer must keep the server for Shutdown")
 	}

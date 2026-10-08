@@ -21,13 +21,13 @@ func resolveHoursEnv(env, value string, def time.Duration, maxHours int) (time.D
 	}
 	hours, err := strconv.Atoi(v)
 	if err != nil || hours < 0 {
-		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of hours (0 disables)", env, value)
+		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of hours (0 disables)", env, configValue(value))
 	}
 	if int64(hours) > math.MaxInt64/int64(time.Hour) {
-		return 0, fmt.Errorf("invalid %s=%q: number of hours is too large to represent as a duration", env, value)
+		return 0, fmt.Errorf("invalid %s=%q: number of hours is too large to represent as a duration", env, configValue(value))
 	}
 	if maxHours > 0 && hours > maxHours {
-		return 0, fmt.Errorf("invalid %s=%q: at most %d hours (0 disables)", env, value, maxHours)
+		return 0, fmt.Errorf("invalid %s=%q: at most %d hours (0 disables)", env, configValue(value), maxHours)
 	}
 	return time.Duration(hours) * time.Hour, nil
 }

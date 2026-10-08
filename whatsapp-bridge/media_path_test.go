@@ -110,7 +110,7 @@ func TestValidateMediaPathRejectsDirectory(t *testing.T) {
 
 func TestResolveMediaRootsRejectsRelativeEnv(t *testing.T) {
 	t.Setenv("WHATSAPP_MEDIA_ROOTS", "relative/path")
-	if _, err := resolveMediaRoots(); err == nil {
+	if _, err := resolveMediaRootsValue(os.Getenv("WHATSAPP_MEDIA_ROOTS"), false); err == nil {
 		t.Fatal("expected error for relative path in env, got nil")
 	}
 }
@@ -120,7 +120,7 @@ func TestResolveMediaRootsAcceptsEnvList(t *testing.T) {
 	b := t.TempDir()
 	t.Setenv("WHATSAPP_MEDIA_ROOTS", a+string(os.PathListSeparator)+b)
 
-	roots, err := resolveMediaRoots()
+	roots, err := resolveMediaRootsValue(os.Getenv("WHATSAPP_MEDIA_ROOTS"), false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -18,7 +18,6 @@ package main
 
 import (
 	"net/http"
-	"os"
 )
 
 const readOnlyEnv = "WHATSAPP_READ_ONLY"
@@ -34,10 +33,6 @@ type readOnlyPolicy struct {
 func parseReadOnly(raw string) (readOnlyPolicy, error) {
 	enabled, err := parseBoolEnv(readOnlyEnv, raw, false)
 	return readOnlyPolicy{enabled: enabled}, err
-}
-
-func loadReadOnlyPolicy() (readOnlyPolicy, error) {
-	return parseReadOnly(os.Getenv(readOnlyEnv))
 }
 
 // Summary is a one-line description for the startup log.

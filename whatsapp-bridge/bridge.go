@@ -204,7 +204,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		ForwardStatus:       switches.ForwardStatus,
 		MetricsEnabled:      switches.Metrics,
 		MediaAutoDownload:   switches.MediaAutoDownload,
-		MediaMaxBytes:       resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),
+		MediaMaxBytes:       defaultMediaMaxBytes, // main applies the validated configuration before events start
 		Webhook:             newWebhookSender(bridgeToken, switches.WebhookEnabled),
 		RESTBind:            defaultBridgeBind,
 		GroupRosterSync:     groupRosterSyncInterval,
