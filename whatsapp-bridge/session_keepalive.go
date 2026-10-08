@@ -83,13 +83,24 @@ type presenceSender func(ctx context.Context, state types.Presence) error
 // startSessionKeepalive runs the loop in a goroutine Shutdown waits for.
 // SessionKeepalive <= 0 disables it.
 func (b *Bridge) startSessionKeepalive() {
+	// Capture pairing before the goroutine starts: pairing can change Store.ID.
+	unpaired := b.Client != nil && b.Client.Store.ID == nil
+	if unpaired && b.StoreRoot != nil {
+		if err := b.StoreRoot.Remove(sessionKeepaliveFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			b.Log.Warnf("Session keepalive: could not discard the previous pairing's timestamp: %v", err)
+		}
+	}
 	if b.SessionKeepalive <= 0 {
 		return
+	}
+	lastBlip, reason := readSessionBlipState(b.StoreRoot)
+	if unpaired {
+		lastBlip, reason = time.Time{}, "new pairing"
 	}
 	b.keepaliveLoop.Add(1)
 	go func() {
 		defer b.keepaliveLoop.Done()
-		b.runSessionKeepalive()
+		b.runSessionKeepalive(lastBlip, reason)
 	}()
 }
 
@@ -105,7 +116,7 @@ func (b *Bridge) startSessionKeepalive() {
 // that send fails, right away if "available" itself failed (whatsmeow
 // switches to active delivery receipts before it writes the frame), and on
 // the way out when the bridge is shutting down.
-func (b *Bridge) runSessionKeepalive() {
+func (b *Bridge) runSessionKeepalive(lastBlip time.Time, reason string) {
 	send := b.sessionPresence
 	if send == nil {
 		if b.Client == nil {
@@ -121,11 +132,14 @@ func (b *Bridge) runSessionKeepalive() {
 	if clock == nil {
 		clock = time.Now
 	}
-	lastBlip := readSessionBlip(b.StoreRoot)
-	// A clock corrected after the previous process ran must not suppress
-	// keepalives until an erroneously future date.
-	if lastBlip.After(clock().Round(0)) {
-		lastBlip = time.Time{}
+	switch {
+	case lastBlip.IsZero():
+		b.Log.Infof("Session keepalive: no last blip remembered (%s); the next is due once the session settles", reason)
+	case lastBlip.After(clock().Round(0)):
+		b.Log.Infof("Session keepalive: remembered blip is in the future; discarding it, the next is due once the session settles")
+	default:
+		b.Log.Infof("Session keepalive: last remembered blip %s; next due %s (once the session settles)",
+			lastBlip.UTC().Format(time.RFC3339Nano), lastBlip.Add(b.SessionKeepalive).UTC().Format(time.RFC3339Nano))
 	}
 
 	var (
@@ -156,6 +170,14 @@ func (b *Bridge) runSessionKeepalive() {
 		// Round(0) drops the monotonic reading: these comparisons must see
 		// the time a suspended host slept through.
 		now := clock().Round(0)
+		// A backward clock step, at startup or while running, must not
+		// postpone a blip until the erroneous future time catches up.
+		if lastBlip.After(now) {
+			lastBlip = time.Time{}
+		}
+		if readySince.After(now) {
+			readySince = time.Time{}
+		}
 		if !ready() {
 			readySince = time.Time{}
 			continue
@@ -228,30 +250,41 @@ func (b *Bridge) runSessionKeepalive() {
 // readSessionBlip treats missing, unreadable or corrupt state as never. Only a
 // regular file opened through the store root is read; links are not state.
 func readSessionBlip(root *os.Root) time.Time {
+	stamp, _ := readSessionBlipState(root)
+	return stamp
+}
+
+func readSessionBlipState(root *os.Root) (time.Time, string) {
 	if root == nil {
-		return time.Time{}
+		return time.Time{}, "store unavailable"
 	}
 	seen, err := root.Lstat(sessionKeepaliveFile)
-	if err != nil || !seen.Mode().IsRegular() {
-		return time.Time{}
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, "no saved timestamp"
+	}
+	if err != nil {
+		return time.Time{}, "timestamp unreadable"
+	}
+	if !seen.Mode().IsRegular() {
+		return time.Time{}, "timestamp is not a regular file"
 	}
 	f, err := root.Open(sessionKeepaliveFile)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, "timestamp unreadable"
 	}
 	defer func() { _ = f.Close() }()
 	if opened, err := f.Stat(); err != nil || !os.SameFile(seen, opened) {
-		return time.Time{}
+		return time.Time{}, "timestamp changed while opening"
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 65))
 	if err != nil || len(data) > 64 {
-		return time.Time{}
+		return time.Time{}, "timestamp unreadable or oversized"
 	}
 	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, "timestamp corrupt"
 	}
-	return stamp
+	return stamp, ""
 }
 
 // writeSessionBlip replaces one timestamp atomically with a fresh owner-only

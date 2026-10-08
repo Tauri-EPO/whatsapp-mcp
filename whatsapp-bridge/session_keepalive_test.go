@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -408,6 +409,88 @@ func TestSessionKeepalive_FailedAvailableDoesNotPersistABlip(t *testing.T) {
 	}
 }
 
+func TestSessionKeepalive_BackwardClockStepWhileRunningBlipsAgain(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	stamp := time.Date(2027, 10, 7, 12, 0, 0, 0, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	b.sessionNow = func() time.Time { return time.Unix(0, now.Load()) }
+	b.SessionKeepaliveSettle = 0
+	b.startSessionKeepalive()
+	rec.next(t)
+	rec.next(t)
+	rec.quiet(t, 20*time.Millisecond)
+	now.Store(stamp.AddDate(-1, 0, 0).UnixNano())
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("after backward clock step: %q, want available", got)
+	}
+	rec.next(t)
+	b.Shutdown(5 * time.Second)
+	if got := readSessionBlip(b.StoreRoot); !got.Equal(stamp.AddDate(-1, 0, 0)) {
+		t.Fatalf("saved blip after clock step = %v", got)
+	}
+}
+
+func TestSessionKeepalive_NewPairingDiscardsThePreviousTimestamp(t *testing.T) {
+	rec := newPresenceRecorder()
+	ready := readyFlag(false)
+	b := keepaliveBridge(t, 12*time.Hour, ready, rec)
+	b.Client = &whatsmeow.Client{Store: &store.Device{}}
+	if err := writeSessionBlip(b.StoreRoot, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.startSessionKeepalive()
+	if _, err := b.StoreRoot.Lstat(sessionKeepaliveFile); !os.IsNotExist(err) {
+		t.Fatalf("old pairing timestamp still present: %v", err)
+	}
+	rec.quiet(t, 20*time.Millisecond)
+	ready.Store(true)
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("newly paired session: %q, want available", got)
+	}
+	rec.next(t)
+	b.Shutdown(5 * time.Second)
+	if !strings.Contains(b.Log.(*recordingLogger).String(), "new pairing") {
+		t.Fatal("new pairing was not reported")
+	}
+}
+
+func TestSessionKeepalive_FailedStateWriteKeepsTheInMemoryInterval(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	part := sessionKeepaliveFile + ".part"
+	if err := b.StoreRoot.Mkdir(part, storeDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.StoreRoot.WriteFile(part+"/occupied", []byte("x"), storeFileMode); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	b.sessionNow = func() time.Time { return time.Unix(0, now.Load()) }
+	b.SessionKeepaliveSettle = 0
+	b.startSessionKeepalive()
+	for round := 0; round < 6; round++ {
+		now.Store(stamp.Add(time.Duration(round) * b.SessionKeepalive).UnixNano())
+		if got := rec.next(t); got != types.PresenceAvailable {
+			t.Fatalf("round %d: %q, want available", round, got)
+		}
+		if got := rec.next(t); got != types.PresenceUnavailable {
+			t.Fatalf("round %d: %q, want unavailable", round, got)
+		}
+		rec.quiet(t, 20*time.Millisecond)
+	}
+	b.Shutdown(5 * time.Second)
+	if got := strings.Count(b.Log.(*recordingLogger).String(), "[WARN] Session keepalive: could not remember"); got != 6 {
+		t.Fatalf("write warnings = %d, want one per blip (6)", got)
+	}
+	if _, err := b.StoreRoot.Lstat(sessionKeepaliveFile); !os.IsNotExist(err) {
+		t.Fatalf("failed write left a timestamp: %v", err)
+	}
+}
+
 func TestSessionKeepalive_RestartWaitsForTheRemainingWallClockInterval(t *testing.T) {
 	stamp := time.Date(2026, 10, 7, 12, 0, 0, 123, time.UTC)
 	var now atomic.Int64
@@ -440,6 +523,9 @@ func TestSessionKeepalive_RestartWaitsForTheRemainingWallClockInterval(t *testin
 	now.Store(stamp.Add(time.Hour).UnixNano())
 	restarted.startSessionKeepalive()
 	restartedRec.quiet(t, 20*time.Millisecond)
+	if log := restarted.Log.(*recordingLogger).String(); !strings.Contains(log, "last remembered blip "+stamp.Format(time.RFC3339Nano)) || !strings.Contains(log, "next due "+stamp.Add(12*time.Hour).Format(time.RFC3339Nano)) {
+		t.Fatalf("restart did not report the remembered time and next due time: %s", log)
+	}
 	now.Store(stamp.Add(12*time.Hour - time.Nanosecond).UnixNano())
 	restartedRec.quiet(t, 20*time.Millisecond)
 	now.Store(stamp.Add(12 * time.Hour).UnixNano())
