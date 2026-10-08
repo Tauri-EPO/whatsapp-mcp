@@ -32,7 +32,7 @@ func extractTextContent(msg *waE2E.Message) string {
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetCaption()
 	}
-	if vid := msg.GetVideoMessage(); vid != nil {
+	if vid := videoMessageOf(msg); vid != nil {
 		return vid.GetCaption()
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
@@ -77,6 +77,84 @@ func extractTextContent(msg *waE2E.Message) string {
 		}
 	}
 
+	// These envelopes contain text/metadata, not a downloadable attachment.
+	// Keep a type label even for a sparse envelope so it survives persist.go.
+	if event := msg.GetEventMessage(); event != nil {
+		label := "Event"
+		if event.GetIsCanceled() {
+			label += " canceled"
+		}
+		var starts, ends string
+		if stamp := envelopeTimestamp(event.GetStartTime()); stamp != "" {
+			starts = "starts " + stamp
+		}
+		if stamp := envelopeTimestamp(event.GetEndTime()); stamp != "" {
+			ends = "ends " + stamp
+		}
+		location := ""
+		if event.GetLocation() != nil {
+			location = formatLocationContent(event.GetLocation())
+		}
+		return describeMessage(label, event.GetName(), event.GetDescription(), location, starts, ends, event.GetJoinLink())
+	}
+	if invite := msg.GetGroupInviteMessage(); invite != nil {
+		group, expires := "", ""
+		if invite.GetGroupJID() != "" {
+			group = "group " + invite.GetGroupJID()
+		}
+		// The direct invitation token grants joining authority: never archive it.
+		if stamp := envelopeTimestamp(invite.GetInviteExpiration()); stamp != "" {
+			expires = "expires " + stamp
+		}
+		return describeMessage("Group invite", invite.GetGroupName(), invite.GetCaption(), group, expires)
+	}
+	if product := msg.GetProductMessage(); product != nil {
+		p := product.GetProduct()
+		price := ""
+		if p != nil && p.PriceAmount1000 != nil {
+			price = formatAmount1000(strconv.FormatInt(p.GetPriceAmount1000(), 10), p.GetCurrencyCode())
+		}
+		return describeMessage("Product", p.GetTitle(), p.GetDescription(), product.GetBody(), product.GetFooter(), price, p.GetURL())
+	}
+	if order := msg.GetOrderMessage(); order != nil {
+		count, amount := "", ""
+		if order.ItemCount != nil {
+			count = fmt.Sprintf("%d items", order.GetItemCount())
+			if order.GetItemCount() == 1 {
+				count = "1 item"
+			}
+		}
+		if order.TotalAmount1000 != nil {
+			amount = formatAmount1000(strconv.FormatInt(order.GetTotalAmount1000(), 10), order.GetTotalCurrencyCode())
+		}
+		return describeMessage("Order", order.GetOrderTitle(), order.GetMessage(), order.GetOrderID(), count, amount)
+	}
+	if payment := msg.GetSendPaymentMessage(); payment != nil {
+		// TransactionData is opaque; never turn it into display text.
+		return describeMessage("Payment sent", extractTextContent(payment.GetNoteMessage()))
+	}
+	if payment := msg.GetRequestPaymentMessage(); payment != nil {
+		amount := ""
+		if payment.Amount1000 != nil {
+			amount = formatAmount1000(strconv.FormatUint(payment.GetAmount1000(), 10), payment.GetCurrencyCodeIso4217())
+		}
+		if money := payment.GetAmount(); payment.Amount1000 == nil && money != nil {
+			// Retain the native units without guessing the Money offset scale.
+			amount = fmt.Sprintf("%s value=%d offset=%d", money.GetCurrencyCode(), money.GetValue(), money.GetOffset())
+		}
+		return describeMessage("Payment request", extractTextContent(payment.GetNoteMessage()), amount)
+	}
+	if reply := msg.GetListResponseMessage(); reply != nil {
+		id := ""
+		if strings.TrimSpace(reply.GetTitle()) == "" && strings.TrimSpace(reply.GetDescription()) == "" {
+			id = reply.GetSingleSelectReply().GetSelectedRowID()
+		}
+		return describeMessage("List reply", reply.GetTitle(), reply.GetDescription(), id)
+	}
+	if reply := msg.GetInteractiveResponseMessage(); reply != nil {
+		return describeMessage("Interactive reply", reply.GetBody().GetText(), reply.GetNativeFlowResponseMessage().GetName(), cappedFlowParams(reply.GetNativeFlowResponseMessage().GetParamsJSON()))
+	}
+
 	// WhatsApp Business templates arrive hydrated — body lives in
 	// HydratedTemplate.HydratedContentText. Without this branch every
 	// template-sent message (e.g. WABA Connect Hrms_* notifications)
@@ -112,14 +190,115 @@ func extractTextContent(msg *waE2E.Message) string {
 		if t := br.GetSelectedDisplayText(); t != "" {
 			return t
 		}
+		return describeMessage("Button reply", br.GetSelectedButtonID())
 	}
 	if tbr := msg.GetTemplateButtonReplyMessage(); tbr != nil {
 		if t := tbr.GetSelectedDisplayText(); t != "" {
 			return t
 		}
+		return describeMessage("Template button reply", tbr.GetSelectedID())
 	}
 
+	// Intentionally omitted: DeclinePaymentRequest, CancelPaymentRequest and
+	// PaymentInvite carry payment state/authority rather than conversational text;
+	// EventInviteMessage identifies an event without its details; ScheduledCallCreation
+	// and CallLogMesssage are call records, handled separately from messages;
+	// PollResultSnapshot is a tally snapshot, not a spoken message; InvoiceMessage
+	// is an invoice envelope without a supported readable payload. ProtocolMessage
+	// changes state (revoke/ephemeral/edit), SenderKeyDistributionMessage and
+	// DeviceSentMessage are protocol wrappers, KeepInChatMessage and PinInChatMessage
+	// are housekeeping, AlbumMessage is a pointer to separately delivered media,
+	// and GroupHistoryBundle/GroupHistoryNotice are history-sharing protocol data.
+	// ReactionMessage and PollUpdateMessage have their dedicated persistence paths;
+	// unsupported templates/buttons/lists with no displayed content remain omitted.
 	return ""
+}
+
+// Only a completely empty newly supported metadata envelope is withheld.
+// Ordinary text that happens to equal a label still reaches the webhook.
+func bareContentEnvelope(msg *waE2E.Message, content string) bool {
+	if msg.GetConversation() != "" || msg.GetExtendedTextMessage() != nil ||
+		msg.GetImageMessage() != nil || videoMessageOf(msg) != nil || msg.GetDocumentMessage() != nil {
+		return false
+	}
+	labels := []struct {
+		present bool
+		label   string
+	}{
+		{msg.GetEventMessage() != nil, "Event"},
+		{msg.GetGroupInviteMessage() != nil, "Group invite"},
+		{msg.GetProductMessage() != nil, "Product"},
+		{msg.GetOrderMessage() != nil, "Order"},
+		{msg.GetSendPaymentMessage() != nil, "Payment sent"},
+		{msg.GetRequestPaymentMessage() != nil, "Payment request"},
+		{msg.GetListResponseMessage() != nil, "List reply"},
+		{msg.GetInteractiveResponseMessage() != nil, "Interactive reply"},
+		{msg.GetButtonsResponseMessage() != nil && msg.GetButtonsResponseMessage().GetSelectedDisplayText() == "", "Button reply"},
+		{msg.GetTemplateButtonReplyMessage() != nil && msg.GetTemplateButtonReplyMessage().GetSelectedDisplayText() == "", "Template button reply"},
+	}
+	for _, kind := range labels {
+		if kind.present && content == kind.label {
+			return true
+		}
+	}
+	return false
+}
+
+func envelopeTimestamp(seconds int64) string {
+	// Seconds in 1970–2099; omit milliseconds, wrapped values and unset zero.
+	if seconds <= 0 || seconds >= 4102444800 {
+		return ""
+	}
+	return time.Unix(seconds, 0).UTC().Format(time.RFC3339)
+}
+
+func cappedFlowParams(params string) string {
+	const limit = 4096
+	const marker = " … [truncated]"
+	chars := []rune(params)
+	if len(chars) <= limit {
+		return params
+	}
+	return string(chars[:limit-len([]rune(marker))]) + marker
+}
+
+// describeMessage joins only fields the sender supplied; labels also keep
+// empty metadata envelopes from vanishing. Thumbnails and opaque order,
+// direct-invite and payment transaction tokens stay out.
+func describeMessage(label string, values ...string) string {
+	parts := []string{label}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, " — ")
+}
+
+// Amount1000 is explicitly thousandths on the wire. String arithmetic keeps
+// all int64/uint64 values exact, including their extrema and negative subunits.
+func formatAmount1000(digits, currency string) string {
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign = "-"
+		digits = strings.TrimPrefix(digits, "-")
+	}
+	if len(digits) < 4 {
+		digits = strings.Repeat("0", 4-len(digits)) + digits
+	}
+	fraction := digits[len(digits)-3:]
+	if fraction[2] == '0' {
+		fraction = fraction[:2]
+	}
+	return strings.TrimSpace(currency + " " + sign + digits[:len(digits)-3] + "." + fraction)
+}
+
+// Round video notes use the same VideoMessage payload under PtvMessage.
+func videoMessageOf(msg *waE2E.Message) *waE2E.VideoMessage {
+	if video := msg.GetVideoMessage(); video != nil {
+		return video
+	}
+	return msg.GetPtvMessage()
 }
 
 // formatContactContent renders a shared contact card as searchable text:
@@ -247,8 +426,8 @@ func extractChatEphemeralFromMessage(msg *waE2E.Message) ChatEphemeralSettings {
 		ctx = msg.ImageMessage.GetContextInfo()
 	case msg.AudioMessage != nil:
 		ctx = msg.AudioMessage.GetContextInfo()
-	case msg.VideoMessage != nil:
-		ctx = msg.VideoMessage.GetContextInfo()
+	case videoMessageOf(msg) != nil:
+		ctx = videoMessageOf(msg).GetContextInfo()
 	case msg.DocumentMessage != nil:
 		ctx = msg.DocumentMessage.GetContextInfo()
 	case msg.StickerMessage != nil:
@@ -276,7 +455,7 @@ func extractQuotedMessageInfo(msg *waE2E.Message) (quotedMessageId string, quote
 		contextInfo = extText.GetContextInfo()
 	} else if img := msg.GetImageMessage(); img != nil {
 		contextInfo = img.GetContextInfo()
-	} else if vid := msg.GetVideoMessage(); vid != nil {
+	} else if vid := videoMessageOf(msg); vid != nil {
 		contextInfo = vid.GetContextInfo()
 	} else if doc := msg.GetDocumentMessage(); doc != nil {
 		contextInfo = doc.GetContextInfo()
@@ -317,7 +496,7 @@ func extractMentionedJIDs(msg *waE2E.Message) []string {
 		contextInfo = extText.GetContextInfo()
 	} else if img := msg.GetImageMessage(); img != nil {
 		contextInfo = img.GetContextInfo()
-	} else if vid := msg.GetVideoMessage(); vid != nil {
+	} else if vid := videoMessageOf(msg); vid != nil {
 		contextInfo = vid.GetContextInfo()
 	} else if doc := msg.GetDocumentMessage(); doc != nil {
 		contextInfo = doc.GetContextInfo()
@@ -391,8 +570,8 @@ func mediaPartOf(msg *waE2E.Message) (string, cdnMedia) {
 		return "", nil
 	case msg.GetImageMessage() != nil:
 		return "image", msg.GetImageMessage()
-	case msg.GetVideoMessage() != nil:
-		return "video", msg.GetVideoMessage()
+	case videoMessageOf(msg) != nil:
+		return "video", videoMessageOf(msg)
 	case msg.GetAudioMessage() != nil:
 		return "audio", msg.GetAudioMessage()
 	case msg.GetDocumentMessage() != nil:
