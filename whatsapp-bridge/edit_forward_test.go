@@ -15,6 +15,12 @@ import (
 
 const efChat = "5511999999999@s.whatsapp.net"
 
+// Handler unit tests focus on content/media handling; REST tests exercise the
+// real registration resolver and both policy checks.
+func forwardRecipientAsTyped(_ context.Context, _ http.ResponseWriter, to string) (string, bool) {
+	return to, true
+}
+
 func efPost(t *testing.T, h http.HandlerFunc, body string) (int, editForwardResponse) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/x", strings.NewReader(body))
@@ -100,7 +106,8 @@ func TestForwardTextAndMedia(t *testing.T) {
 	ms := seedEditStore(t)
 	var sends []struct{ to, content, media string }
 	deps := forwardDeps{
-		lookup: ms.messageContentLookup,
+		lookup:           ms.messageContentLookup,
+		resolveRecipient: forwardRecipientAsTyped,
 		download: func(_ context.Context, id, chat string) (bool, string, string, string, error) {
 			return true, "image", "pic.jpg", "/store/" + chat + "/pic.jpg", nil
 		},
@@ -126,7 +133,8 @@ func TestForwardTextAndMedia(t *testing.T) {
 func TestForwardRefusals(t *testing.T) {
 	ms := seedEditStore(t)
 	deps := forwardDeps{
-		lookup: ms.messageContentLookup,
+		lookup:           ms.messageContentLookup,
+		resolveRecipient: forwardRecipientAsTyped,
 		download: func(_ context.Context, id, chat string) (bool, string, string, string, error) {
 			return false, "", "", "", errors.New("expired")
 		},
