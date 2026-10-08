@@ -127,7 +127,7 @@ func TestEnvelopeContextInheritanceDoesNotMutateInner(t *testing.T) {
 	metadata := &waE2E.MessageContextInfo{}
 	raw := &waE2E.Message{MessageContextInfo: metadata, EphemeralMessage: &waE2E.FutureProofMessage{Message: inner}}
 	ex := extractMessage(raw, time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC), "CONTEXTWRAP1")
-	if ex.content != "fake text" || ex.inner.GetMessageContextInfo() != metadata || inner.MessageContextInfo != nil {
+	if ex.content != "fake text" || !proto.Equal(ex.inner.GetMessageContextInfo(), metadata) || inner.MessageContextInfo != nil {
 		t.Fatal("wrapper metadata inheritance mutated or lost")
 	}
 }

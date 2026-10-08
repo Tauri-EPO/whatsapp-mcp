@@ -13,6 +13,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 // messageWriter is satisfied by *MessageStore (single rows) and *messageBatch
@@ -58,17 +59,15 @@ type extractedMessage struct {
 func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage {
 	e := extractedMessage{inner: m}
 	if m != nil {
-		// Reuse the pinned SDK's unwrap order without its final mutation of
-		// the inner MessageContextInfo. Inherit it on a local view instead.
-		rawView := *m
-		rawView.MessageContextInfo = nil
-		event := (&events.Message{RawMessage: &rawView}).UnwrapRaw()
-		e.inner, e.viewOnce = event.Message, event.IsViewOnce
-		if e.inner != nil && e.inner.MessageContextInfo == nil && m.MessageContextInfo != nil {
-			innerView := *e.inner
-			innerView.MessageContextInfo = m.MessageContextInfo
-			e.inner = &innerView
+		// The SDK only mutates the inner payload when inheriting outer
+		// MessageContextInfo. Clone that case with the protobuf API; ordinary
+		// unwraps keep their original inner pointer and avoid copying bytes.
+		rawView := m
+		if m.MessageContextInfo != nil {
+			rawView = proto.Clone(m).(*waE2E.Message)
 		}
+		event := (&events.Message{RawMessage: rawView}).UnwrapRaw()
+		e.inner, e.viewOnce = event.Message, event.IsViewOnce
 	}
 	if e.inner == nil {
 		return e
