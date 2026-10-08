@@ -213,7 +213,7 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 
 	// NewMessageStore recorded its timestamp marker on the empty store; the rows
 	// above are what an upgrade from an older release actually finds.
-	if _, err := db.Exec("PRAGMA user_version = 0; DELETE FROM schema_migrations WHERE name = 'canonical_timestamps_v1'"); err != nil {
+	if _, err := db.Exec("DELETE FROM schema_migrations WHERE name = ?", canonicalTimestampsMigration); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateCanonicalTimestamps(db); err != nil {
@@ -266,12 +266,8 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 
 	// The unparseable row keeps the store unstamped, so a later release still
 	// gets a chance at it.
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != 0 {
-		t.Errorf("user_version = %d, want 0 while a value is still unconverted", version)
+	if applied, err := migrationApplied(db, canonicalTimestampsMigration); err != nil || applied {
+		t.Fatalf("incomplete timestamp migration recorded its marker: applied=%v err=%v", applied, err)
 	}
 
 	// Idempotent: a second pass over the same rows changes nothing.
@@ -292,7 +288,7 @@ func TestMigrateCanonicalTimestamps(t *testing.T) {
 		}
 	}
 
-	// Once the bad row is gone the migration completes and stamps the version.
+	// Once the bad row is gone the migration completes and records its marker.
 	if _, err := db.Exec(`DELETE FROM messages WHERE id = 'M4'`); err != nil {
 		t.Fatal(err)
 	}

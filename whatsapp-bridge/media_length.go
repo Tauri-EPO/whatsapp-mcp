@@ -30,38 +30,25 @@ func mediaLengthValue(length sql.NullInt64) (uint64, error) {
 // Legacy zeroes have no presence bit: conservatively mark them undeclared once.
 // The transaction stamps the same write, so a later known empty file stays zero.
 func migrateUndeclaredMediaLengths(db *sql.DB) error {
-	applied, err := migrationApplied(db, undeclaredMediaLengthsMigration)
-	if err != nil || applied {
+	var changed int64
+	applied, err := applyNamedMigration(db, undeclaredMediaLengthsMigration, func(tx *sql.Tx) error {
+		// Old non-media zeroes stay zero: rewriting them would amplify WAL
+		// for no useful conversion, as readers do not expose their length.
+		result, err := tx.Exec("UPDATE messages SET file_length = NULL WHERE file_length = 0 AND media_type IN ('image','video','audio','document','sticker')")
+		if err != nil {
+			return err
+		}
+		changed, err = result.RowsAffected()
+		return err
+	})
+	if err != nil || !applied {
 		return err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
+	if changed > 0 {
+		bridgeLog.Infof("Media length migration: marked %d legacy media length(s) undeclared", changed)
+	} else {
+		bridgeLog.Debugf("Media length migration: marked 0 legacy media length(s) undeclared")
 	}
-	defer func() { _ = tx.Rollback() }()
-	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)", undeclaredMediaLengthsMigration).Scan(&applied); err != nil {
-		return err
-	}
-	if applied {
-		return nil
-	}
-	// Old non-media zeroes stay zero on purpose: readers do not expose their
-	// length, and rewriting them would amplify WAL for no useful conversion.
-	result, err := tx.Exec("UPDATE messages SET file_length = NULL WHERE file_length = 0 AND media_type IN ('image','video','audio','document','sticker')")
-	if err != nil {
-		return err
-	}
-	if err := recordMigration(tx, undeclaredMediaLengthsMigration); err != nil {
-		return err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	bridgeLog.Infof("Media length migration: marked %d legacy media length(s) undeclared", changed)
 	return nil
 }
 

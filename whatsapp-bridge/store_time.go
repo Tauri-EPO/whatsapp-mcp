@@ -132,7 +132,7 @@ var canonicalTimeColumns = []struct{ table, column string }{
 // schema_migrations marker. Re-running the rewrite on canonical
 // rows changes nothing.
 //
-// The version is stamped only when every value was converted. A value nothing
+// The marker is recorded only when every value was converted. A value nothing
 // can parse would otherwise stay in the store forever, sorting and filtering
 // wrong on the strength of one startup warning; leaving the store unstamped
 // costs a scan per boot and keeps saying so until the row is fixed.
@@ -183,6 +183,9 @@ func migrateCanonicalTimestamps(db *sql.DB) error {
 	if stamped {
 		return nil
 	}
+	// Timestamp rewrites commit bounded, idempotent chunks and may legitimately
+	// remain unmarked when a value cannot be parsed. They cannot use the atomic
+	// applyNamedMigration helper; record completion only after every chunk.
 	if err := recordMigration(db, canonicalTimestampsMigration); err != nil {
 		return fmt.Errorf("failed to record timestamp migration: %w", err)
 	}

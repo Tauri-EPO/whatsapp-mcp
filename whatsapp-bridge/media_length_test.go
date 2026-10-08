@@ -40,7 +40,8 @@ func TestMediaLengthMigrationIsAtomicAndDoesNotEraseNewZeroes(t *testing.T) {
 	if _, err := ms.db.Exec("INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,media_type,file_length) VALUES ('OLD1', ?, 'x', '', '2026-09-04 10:00:00+00:00', 0, 'document', 0), ('TEXT1', ?, 'x', 'text', '2026-09-04 10:00:00+00:00', 0, '', 0)", mediaTestChat, mediaTestChat); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.db.Exec(`PRAGMA user_version = 1; DELETE FROM schema_migrations WHERE name = 'undeclared_media_lengths_v1'; CREATE TRIGGER fail_length BEFORE UPDATE OF file_length ON messages BEGIN SELECT RAISE(ABORT, 'blocked migration'); END`); err != nil {
+	seedLegacyRow(t, ms.db, "DELETE FROM schema_migrations WHERE name = ?", undeclaredMediaLengthsMigration)
+	if _, err := ms.db.Exec(`PRAGMA user_version = 1; CREATE TRIGGER fail_length BEFORE UPDATE OF file_length ON messages BEGIN SELECT RAISE(ABORT, 'blocked migration'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateUndeclaredMediaLengths(ms.db); err == nil {
@@ -143,7 +144,10 @@ func BenchmarkUndeclaredMediaLengthMigration(b *testing.B) {
 		b.Fatal(err)
 	}
 	for i := 0; i < b.N; i++ {
-		if _, err := ms.db.Exec("UPDATE messages SET file_length = 0; DELETE FROM schema_migrations WHERE name = 'undeclared_media_lengths_v1'"); err != nil {
+		if _, err := ms.db.Exec("UPDATE messages SET file_length = 0"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := ms.db.Exec("DELETE FROM schema_migrations WHERE name = ?", undeclaredMediaLengthsMigration); err != nil {
 			b.Fatal(err)
 		}
 		b.StartTimer()
