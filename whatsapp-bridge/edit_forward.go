@@ -118,11 +118,12 @@ func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy) ht
 	}
 }
 
-// forwardDeps: the store row lookup, the media fetch and the send are injected.
+// forwardDeps: storage, recipient registration, media fetch and send are injected.
 type forwardDeps struct {
-	lookup   func(id, chatJID string) (content, mediaType string, found bool, err error)
-	download mediaDownloader
-	send     sendFunc
+	lookup           func(id, chatJID string) (content, mediaType string, found bool, err error)
+	resolveRecipient func(context.Context, http.ResponseWriter, string) (string, bool)
+	download         mediaDownloader
+	send             sendFunc
 }
 
 func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc {
@@ -161,7 +162,6 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			writeEditForward(w, http.StatusNotFound, editForwardResponse{Message: "Message not found in local archive"})
 			return
 		}
-		mediaPath := ""
 		switch mediaType {
 		case "", "poll", "reaction", "poll_vote":
 			if mediaType != "" {
@@ -172,8 +172,22 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 				writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "message has no text to forward"})
 				return
 			}
-		default:
-			ctx, cancel := requestContext(r, downloadDeadline)
+		}
+		// The typed target was checked before any registration lookup. Reuse
+		// /api/send's registered-number check before downloading media or sending.
+		if deps.resolveRecipient == nil {
+			writeError(w, http.StatusInternalServerError, "Recipient resolver is not configured")
+			return
+		}
+		sendCtx, cancelSend := requestContext(r, sendDeadline)
+		defer cancelSend()
+		to, ok = deps.resolveRecipient(sendCtx, w, to)
+		if !ok {
+			return
+		}
+		mediaPath := ""
+		if mediaType != "" {
+			ctx, cancel := context.WithTimeout(sendCtx, downloadDeadline)
 			defer cancel()
 			okDl, _, _, path, dlErr := deps.download(ctx, id, chat.String())
 			if dlErr != nil || !okDl {
@@ -190,8 +204,6 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			}
 			mediaPath = path
 		}
-		sendCtx, cancelSend := requestContext(r, sendDeadline)
-		defer cancelSend()
 		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Forward failed: " + msg})

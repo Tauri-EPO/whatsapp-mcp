@@ -58,7 +58,8 @@ func TestForwardKeepsPermanentDownloadCodes(t *testing.T) {
 	for _, cause := range []error{errMediaRefused, errMediaUnavailable} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			deps := forwardDeps{
-				lookup: ms.messageContentLookup,
+				lookup:           ms.messageContentLookup,
+				resolveRecipient: forwardRecipientAsTyped,
 				download: func(context.Context, string, string) (bool, string, string, string, error) {
 					return false, "", "", "", cause
 				},

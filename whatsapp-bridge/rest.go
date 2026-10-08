@@ -133,7 +133,10 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		b.Policy,
 	)))
 	mux.HandleFunc("/api/forward", mutate(handleForwardMessage(forwardDeps{
-		lookup:   messageStore.messageContentLookup,
+		lookup: messageStore.messageContentLookup,
+		resolveRecipient: func(ctx context.Context, w http.ResponseWriter, to string) (string, bool) {
+			return b.registeredRecipient(ctx, w, to, nil)
+		},
 		download: b.DownloadMedia,
 		send:     b.Send,
 	}, b.Policy)))

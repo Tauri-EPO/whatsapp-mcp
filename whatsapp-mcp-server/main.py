@@ -1812,6 +1812,8 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
     Text is re-sent as is; media is re-uploaded from the local cache (fetched first
     if needed) together with its caption. The copy arrives as a fresh message
     (no "Forwarded" label). Both chats must pass WHATSAPP_ALLOWED_CHATS.
+    A phone destination is resolved to WhatsApp's registered number; both the
+    typed and registered destination must pass the allow-list before media is fetched.
     Media failures are media_refused (unsafe cache identity) or media_unavailable
     (missing bytes or download fields), which should not be retried;
     bridge_unavailable is a temporary bridge/CDN failure worth retrying later.
