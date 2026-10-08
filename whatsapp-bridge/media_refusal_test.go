@@ -52,3 +52,27 @@ func TestMediaRefusalIsNamedCountedAndNotRequeued(t *testing.T) {
 		t.Fatalf("wrong REST contract: %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestForwardKeepsPermanentDownloadCodes(t *testing.T) {
+	ms := seedEditStore(t)
+	for _, cause := range []error{errMediaRefused, errMediaUnavailable} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			deps := forwardDeps{
+				lookup: ms.messageContentLookup,
+				download: func(context.Context, string, string) (bool, string, string, string, error) {
+					return false, "", "", "", cause
+				},
+				send: func(context.Context, string, string, string, string, string, string, []string) (bool, string, sentMessage) {
+					t.Fatal("refused media must not be sent")
+					return false, "", sentMessage{}
+				},
+			}
+			rec := httptest.NewRecorder()
+			handleForwardMessage(deps, chatPolicy{})(rec, httptest.NewRequest(http.MethodPost, "/api/forward",
+				strings.NewReader(`{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"PIC","to_chat_jid":"120363000000000001@g.us"}`)))
+			if rec.Code != http.StatusInternalServerError || downloadErrorCode(t, rec) != permanentMediaCode(cause) {
+				t.Fatalf("forward lost download classification: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}

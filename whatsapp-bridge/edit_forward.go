@@ -181,6 +181,10 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 				if dlErr != nil {
 					msg += ": " + dlErr.Error()
 				}
+				if code := permanentMediaCode(dlErr); code != "" {
+					writeErrorCode(w, http.StatusInternalServerError, code, msg)
+					return
+				}
 				writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: msg})
 				return
 			}

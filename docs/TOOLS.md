@@ -428,7 +428,7 @@ allow-list as the numbers above:
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |
 | `unavailable` | Rows whose hash carries a `media_unavailable` note: the bytes are not here and no download can ever bring them back — the sender's phone answered that it no longer has them, or the row was stored without the CDN fields |
 | `refused` | Rows whose exact `(chat_jid, message_id)` has a recorded `media_refused`; these leave the backlog while other copies of the hash remain eligible |
-| `backlog` | `messages` minus the rows carrying any of those three notes — what is actually left to do |
+| `backlog` | `messages` minus rows carrying any of those three notes or a recorded refusal — what is actually left to do |
 | `backlog_cached` | How many of the backlog have their bytes on disk. `backlog - backlog_cached` is what a batch would download first (`TRANSCRIBE_ON_INGEST_FETCH=1`, or `transcribe_audio`, which fetches on demand) |
 | `cached_examined` | How many rows the two cached counts looked at |
 
@@ -1243,12 +1243,20 @@ on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.
 
 An unsafe chat JID or message ID answers `media_refused`, before any transfer.
-The ingest worker remembers it in `notes.db`'s `media_refusals`, keyed by the
-exact `(chat_jid, message_id)`, and spends no failure strike once recorded.
+Manual download, read, transcription and forwarding calls, as well as the ingest
+worker, remember it in `notes.db`'s `media_refusals`, keyed by the exact
+`(chat_jid, message_id)`, and the worker spends no failure strike once recorded.
 This does not write a per-hash `media_unavailable` note: a forwarded copy with
 a safe identity remains fetchable. The synchronous image path does not queue
 a second attempt after either permanent code. `/metrics` counts identity
 refusals in `whatsapp_bridge_media_refusals_total`.
+
+`list_media` and each message in `get_media_notes` show `media_refusal` with
+`reason` and `updated_at` when recorded. **`clear_media_refusal(chat_jid,
+message_id)`** removes one refusal and returns `{success, chat_jid, message_id,
+deleted}`; only messages in allowed chats can be cleared. Use it after a bridge
+upgrade changes the path rule. A rule that still rejects the identity records
+the refusal again on the next fetch; other copies remain unaffected.
 
 ### `read_media`
 

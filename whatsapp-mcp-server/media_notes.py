@@ -2,10 +2,13 @@
 
 The bridge owns messages.db and the MCP server only reads it; anything the
 agent wants to remember about a file (summary, tags, keep/disposable, a
-transcript) needs a home of its own. notes.db is that home: a single table
+transcript) needs a home of its own. Media notes are
 keyed by the WhatsApp content hash (sha256 hex) rather than by message, so the
 same file forwarded into three chats has one note and the note survives the
 cached bytes being purged.
+
+Unsafe cache identities are dated in a separate media_refusals table keyed by
+message and chat, so a refusal does not hide another copy of the same file.
 
 Notes are only readable and writable for hashes the agent can see, meaning a
 message row carrying that hash exists in a chat allowed by
@@ -71,6 +74,7 @@ CREATE TABLE IF NOT EXISTS media_refusals (
     chat_jid TEXT NOT NULL,
     message_id TEXT NOT NULL,
     reason TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     PRIMARY KEY (chat_jid, message_id)
 );
 """
@@ -133,6 +137,10 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     conn = sqlite3.connect(path, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    if "updated_at" not in {row[1] for row in conn.execute("PRAGMA table_info(media_refusals)")}:
+        conn.execute("ALTER TABLE media_refusals ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE media_refusals SET updated_at = ?", (datetime.now(UTC).isoformat(),))
+        conn.commit()
     return conn
 
 
@@ -155,11 +163,62 @@ def record_media_refusal(message_id: str, chat_jid: str, reason: str) -> None:
     try:
         with conn:
             conn.execute(
-                "INSERT OR REPLACE INTO media_refusals (chat_jid, message_id, reason) VALUES (?, ?, ?)",
-                (chat_jid, message_id, reason),
+                "INSERT OR REPLACE INTO media_refusals (chat_jid, message_id, reason, updated_at) VALUES (?, ?, ?, ?)",
+                (chat_jid, message_id, reason, datetime.now(UTC).isoformat()),
             )
     finally:
         conn.close()
+
+
+def fetch_media_refusals(identities: Sequence[tuple[str, str]]) -> dict[tuple[str, str], dict[str, str]]:
+    """Refusals for an already policy-filtered page of (chat, message) identities."""
+    if not identities:
+        return {}
+    conn = _connect(create=False)
+    if conn is None:
+        return {}
+    found = {}
+    try:
+        for start in range(0, len(identities), SEARCH_BATCH):
+            batch = identities[start : start + SEARCH_BATCH]
+            rows = conn.execute(
+                "SELECT chat_jid, message_id, reason, updated_at FROM media_refusals "
+                f"WHERE (chat_jid, message_id) IN (VALUES {','.join('(?, ?)' for _ in batch)})",
+                [value for identity in batch for value in identity],
+            )
+            found.update(
+                {(chat, message): {"reason": reason, "updated_at": date} for chat, message, reason, date in rows}
+            )
+    finally:
+        conn.close()
+    return found
+
+
+def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """Clear one visible row's refusal so the ingest worker can try it again."""
+    whatsapp._require_allowed(chat_jid)
+    messages = whatsapp._connect_messages_db()
+    try:
+        if not messages.execute(
+            "SELECT 1 FROM messages WHERE chat_jid = ? AND id = ?", (chat_jid, message_id)
+        ).fetchone():
+            raise ToolError("not_found", "message not found")
+    finally:
+        messages.close()
+    conn = _connect(create=False)
+    deleted = False
+    if conn is not None:
+        try:
+            with conn:
+                deleted = (
+                    conn.execute(
+                        "DELETE FROM media_refusals WHERE chat_jid = ? AND message_id = ?", (chat_jid, message_id)
+                    ).rowcount
+                    > 0
+                )
+        finally:
+            conn.close()
+    return {"success": True, "chat_jid": chat_jid, "message_id": message_id, "deleted": deleted}
 
 
 def _rebuild_transcripts_fts(conn: sqlite3.Connection) -> None:
@@ -317,7 +376,7 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
             conn.close()
     except sqlite3.Error as exc:
         raise ToolError("internal", f"database error: {exc}") from exc
-    return [
+    messages = [
         {
             "message_id": r[0],
             "chat_jid": r[1],
@@ -329,6 +388,11 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+    refusals = fetch_media_refusals([(message["chat_jid"], message["message_id"]) for message in messages])
+    for message in messages:
+        if refusal := refusals.get((message["chat_jid"], message["message_id"])):
+            message["media_refusal"] = refusal
+    return messages
 
 
 # The one answer for a hash the agent may not look at: unknown and

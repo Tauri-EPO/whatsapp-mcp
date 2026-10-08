@@ -424,6 +424,10 @@ def list_media_page(
     cache = _CacheIndex()
     notes = media_notes.fetch_notes([row[9] for row in rows])
     items = [_row_to_item(row, cache, notes) for row in rows]
+    refusals = media_notes.fetch_media_refusals([(item["chat_jid"], item["message_id"]) for item in items])
+    for item in items:
+        if refusal := refusals.get((item["chat_jid"], item["message_id"])):
+            item["media_refusal"] = refusal
     next_cursor = encode_cursor({"k": "media", "o": offset + limit}) if has_more else None
     return PageResult(items, next_cursor, has_more)
 

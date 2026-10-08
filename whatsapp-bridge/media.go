@@ -94,6 +94,16 @@ var errMediaUnavailable = errors.New("the sender's phone no longer has this medi
 // Unlike errMediaUnavailable this says nothing about another copy's bytes.
 var errMediaRefused = errors.New("media path permanently refused")
 
+func permanentMediaCode(err error) string {
+	if errors.Is(err, errMediaRefused) {
+		return "media_refused"
+	}
+	if errors.Is(err, errMediaUnavailable) {
+		return "media_unavailable"
+	}
+	return ""
+}
+
 // permanentMediaError is an errMediaUnavailable that keeps its own wording.
 // The two causes are equally final but not interchangeable to whoever reads the
 // answer — "the phone declined the retry" is a file that once existed, "the
@@ -533,11 +543,8 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			// retry: name it so the caller records the miss once instead of
 			// asking again on every pass over the archive (issues #378, #392).
 			code := errorCode(http.StatusInternalServerError)
-			if errors.Is(err, errMediaUnavailable) {
-				code = "media_unavailable"
-			}
-			if errors.Is(err, errMediaRefused) {
-				code = "media_refused"
+			if named := permanentMediaCode(err); named != "" {
+				code = named
 			}
 			// The CDN turning down a recent message is the other end failing,
 			// and worth another try: 502, which the MCP server reads as

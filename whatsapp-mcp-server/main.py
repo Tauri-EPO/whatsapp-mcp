@@ -22,6 +22,7 @@ from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
 from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY
 from media_notes import annotate_media as notes_annotate_media
+from media_notes import clear_media_refusal as notes_clear_media_refusal
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
@@ -2020,6 +2021,8 @@ def list_media(
         and with as_text=true is not bound by that limit.
         After interpreting a file with has_notes=false, store what you understood with
         annotate_media(sha256, "summary", ...) so the next pass does not redo the work.
+        A refused row also carries media_refusal ({reason, updated_at}); use
+        clear_media_refusal to permit another try after a bridge path-rule change.
     """
     result = list_media_page(
         chat_jid=_optional_chats(chat_jid),
@@ -2105,10 +2108,25 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
 
     Returns:
         {"sha256", "notes": {key: {"value", "updated_at"}}, "messages": [{message_id, chat_jid,
-        chat_name, timestamp, media_type, filename, bytes}]} restricted to allowed chats; not_found
+        chat_name, timestamp, media_type, filename, bytes, media_refusal?}]} restricted to allowed chats; not_found
         when no visible message carries the hash
     """
     return notes_get_media_notes(sha256)
+
+
+@mcp.tool()
+@tool_errors
+def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """Remove a message's recorded media_refused error so ingest may try it again.
+
+    list_media and get_media_notes show media_refusal with reason and updated_at.
+    Clear it after a bridge upgrade changes the cache path rule; an unchanged
+    rule will refuse the next fetch again. Only a message in an allowed chat
+    can be cleared; other copies of its hash are unaffected.
+
+    Returns: {success, chat_jid, message_id, deleted}.
+    """
+    return notes_clear_media_refusal(chat_jid, message_id)
 
 
 @mcp.tool()
@@ -2401,7 +2419,10 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     the sender's phone to re-upload it. When that phone answers that it no longer
     has the file — or when the message was stored without the CDN fields a
     download needs — this fails with `media_unavailable`: that file is gone for
-    good, so do not retry it; `bridge_unavailable` is the one worth retrying.
+    good, so do not retry it. `media_refused` means this row cannot safely name a
+    cache file: it is recorded per message, so other copies remain usable.
+    list_media shows the dated refusal; clear_media_refusal allows another try
+    after the bridge's path rule changes. Retry `bridge_unavailable` later.
 
     Args:
         chat_jid: The JID of the chat containing the message

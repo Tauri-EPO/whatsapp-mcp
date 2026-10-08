@@ -588,6 +588,9 @@ What to know before turning it on:
   the bridge records the exact `(chat_jid, message_id)` in `notes.db`'s
   `media_refusals` table. Later ingest rounds skip that row, without a failure
   strike once recorded and without hiding other copies of the same audio hash.
+  Manual media tools record the same dated refusal even when ingest fetching is
+  off. `list_media` shows it; `clear_media_refusal(chat_jid, message_id)` removes
+  it after a bridge path-rule change so ingest can try again.
   `/metrics` counts these refusals as `whatsapp_bridge_media_refusals_total`.
 - **Uncached audio is skipped unless you ask for it.** By default a voice note
   whose bytes are not under the store directory (`WHATSAPP_MEDIA_AUTODOWNLOAD=false`,

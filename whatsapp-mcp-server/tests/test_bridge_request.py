@@ -136,7 +136,7 @@ class _Failed:
         return self._body
 
 
-def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch):
+def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch, paired_dbs):
     """`/api/download` answers 500 for both a CDN failure and a file the phone lost (#378)."""
     monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
     monkeypatch.setattr(whatsapp, "_policy_denied", lambda *_a, **_k: None, raising=False)

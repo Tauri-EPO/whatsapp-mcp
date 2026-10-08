@@ -4023,10 +4023,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
 
 # Codes the bridge may assert in its error body, because they say something no
-# HTTP status can: `media_unavailable` is /api/download's 500 for a file no
-# request can bring back — the sender's phone no longer has it (issue #378), or
-# the row has no CDN fields to download with (issue #392) — which the caller
-# must remember rather than retry. Every other failure keeps the status map.
+# HTTP status can: media_unavailable means missing bytes or download fields;
+# media_refused means an unsafe cache identity. Both download and forward name
+# these permanent failures. Every other failure keeps the status map.
 _BRIDGE_NAMED_CODES = frozenset({"media_unavailable", "media_refused"})
 
 
@@ -4053,7 +4052,7 @@ def _bridge_json(response) -> dict[str, Any]:
     failures, and 4xx/5xx (JSON or plain text) otherwise. A failure body may
     carry ``error: {"code", "message"}``; that code is honoured only for the
     handful of meanings finer than any status (``_BRIDGE_NAMED_CODES``, today
-    ``media_unavailable`` on ``/api/download``, issues #378 and #392). Everything else
+    ``media_unavailable`` / ``media_refused`` on download and forward). Everything else
     keeps the status map, so what the bridge already answers cannot change
     meaning because a handler picked a different word for it.
     """
@@ -4081,6 +4080,21 @@ def _bridge_json(response) -> dict[str, Any]:
     if "ok" in payload and not payload.get("ok"):
         raise ToolError("internal", message or "bridge reported failure")
     return payload
+
+
+def _bridge_media_json(response, message_id: str, chat_jid: str) -> dict[str, Any]:
+    """Remember per-row refusals for every manual or background media fetch."""
+    try:
+        return _bridge_json(response)
+    except ToolError as exc:
+        if exc.code == "media_refused":
+            import media_notes
+
+            try:
+                media_notes.record_media_refusal(message_id, chat_jid, exc.message[:500])
+            except (ToolError, sqlite3.Error) as note_error:
+                logger.warning("could not record media refusal: %s", note_error)
+        raise
 
 
 def _sent_info(result: dict[str, Any]) -> dict[str, Any]:
@@ -4717,7 +4731,9 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     """
     _require_allowed(chat_jid)
     payload = {"message_id": message_id, "chat_jid": chat_jid}
-    result = _bridge_json(_bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+    result = _bridge_media_json(
+        _bridge_request("POST", "/download", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S), message_id, chat_jid
+    )
     path = result.get("path")
     if path:
         logger.info("Media downloaded successfully: %s", path)
@@ -6453,11 +6469,13 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
         raise ToolError("invalid_argument", "chat_jid, message_id and to_chat_jid are required")
     _require_allowed(chat_jid)
     _require_allowed(to)
-    return _bridge_json(
+    return _bridge_media_json(
         _bridge_request(
             "POST",
             "/forward",
             json={"chat_jid": chat_jid, "message_id": message_id, "to_chat_jid": to},
             timeout=BRIDGE_MEDIA_TIMEOUT_S,
-        )
+        ),
+        message_id,
+        chat_jid,
     )
