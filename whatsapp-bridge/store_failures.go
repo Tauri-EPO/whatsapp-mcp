@@ -78,14 +78,7 @@ func (b *Bridge) waitStoreRetry(delay time.Duration) bool {
 	if b.storeRetryWait != nil {
 		return b.storeRetryWait(delay)
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-b.ctx.Done():
-		return false
-	}
+	return b.sleep(delay)
 }
 
 // noteStoreFailure records a row that is lost for good: one ERROR naming it,

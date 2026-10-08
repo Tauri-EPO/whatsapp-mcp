@@ -10,9 +10,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -55,15 +52,7 @@ const (
 // a negative or non-numeric value is an error so main() fails fast rather than
 // silently running with a default the operator did not write.
 func resolveGroupRosterSync(value string) (time.Duration, error) {
-	v := strings.TrimSpace(value)
-	if v == "" {
-		return groupRosterSyncInterval, nil
-	}
-	hours, err := strconv.Atoi(v)
-	if err != nil || hours < 0 {
-		return 0, fmt.Errorf("invalid %s=%q: expected a non-negative number of hours (0 disables)", groupRosterSyncEnv, value)
-	}
-	return time.Duration(hours) * time.Hour, nil
+	return resolveHoursEnv(groupRosterSyncEnv, value, groupRosterSyncInterval, 0)
 }
 
 // groupRosterSyncSummary renders the setting for the startup log.
@@ -71,7 +60,7 @@ func groupRosterSyncSummary(interval time.Duration) string {
 	if interval <= 0 {
 		return "off"
 	}
-	return fmt.Sprintf("every %d h", int(interval.Hours()))
+	return everyHoursSummary(interval)
 }
 
 // rosterFailures remembers the groups whose last refresh failed. Without it a

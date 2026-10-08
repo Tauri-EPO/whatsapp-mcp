@@ -100,6 +100,24 @@ type Bridge struct {
 	// group_events.go). 0 disables the pass, and group_members then only grows
 	// from /api/group/members, group events and group messages.
 	GroupRosterSync time.Duration
+	// SessionKeepalive is how often the device is briefly marked available so
+	// WhatsApp counts it as in use (WHATSAPP_SESSION_KEEPALIVE_HOURS,
+	// session_keepalive.go). 0 disables it, and WhatsApp then logs the device
+	// out about a month after pairing.
+	SessionKeepalive time.Duration
+	// The waits of the keepalive loop (session_keepalive.go); a test shortens
+	// them on its own Bridge.
+	SessionKeepaliveSettle time.Duration
+	SessionKeepalivePoll   time.Duration
+	SessionKeepaliveRetry  time.Duration
+	SessionPresenceHold    time.Duration
+	// sessionPresence and sessionReady are test seams: the presence sender
+	// (nil = the client) and "connected and logged in" (nil = the client).
+	sessionPresence presenceSender
+	sessionReady    func() bool
+	// keepaliveLoop is the keepalive's goroutine; Shutdown waits for it so a
+	// blip in progress still ends with "unavailable".
+	keepaliveLoop sync.WaitGroup
 	// StreamReplacedDelay is how long the reconnect after a StreamReplaced event
 	// waits, so this bridge does not ping-pong with the session that took its
 	// slot (events.go). Set once at startup; tests shorten it on their own
@@ -183,10 +201,15 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		Webhook:             newWebhookSender(bridgeToken, switches.WebhookEnabled),
 		RESTBind:            defaultBridgeBind,
 		GroupRosterSync:     groupRosterSyncInterval,
+		SessionKeepalive:    sessionKeepaliveInterval,
 		StreamReplacedDelay: defaultStreamReplacedDelay,
 
 		ReconnectInitialBackoff: defaultReconnectInitialBackoff,
 		ReconnectMaxBackoff:     defaultReconnectMaxBackoff,
+		SessionKeepaliveSettle:  defaultSessionKeepaliveSettle,
+		SessionKeepalivePoll:    defaultSessionKeepalivePoll,
+		SessionKeepaliveRetry:   defaultSessionKeepaliveRetry,
+		SessionPresenceHold:     defaultSessionPresenceHold,
 		HistoryVoteRetryDelays:  defaultHistoryVoteRetryDelays(),
 		StoreRetryDelays:        defaultStoreRetryDelays(),
 
@@ -220,6 +243,18 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	return b
 }
 
+// sleep waits for d and reports false when the bridge is shutting down.
+func (b *Bridge) sleep(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-b.ctx.Done():
+		return false
+	}
+}
+
 // Shutdown stops accepting REST requests, cancels background goroutines and
 // waits (bounded by timeout) for in-flight work. Order matters: drain HTTP
 // first so no handler touches the store after main closes it, then cancel
@@ -244,11 +279,14 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 			b.autoDownloads.wait()
 		}
 		b.mediaTransfers.wait()
+		// A keepalive blip in progress finishes with "unavailable" before the
+		// caller disconnects the client.
+		b.keepaliveLoop.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		b.Log.Warnf("Timed out waiting for history poll votes and media transfers; exiting anyway")
+		b.Log.Warnf("Timed out waiting for history poll votes, media transfers and the session keepalive; exiting anyway")
 	}
 }

@@ -26,6 +26,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival, and neither is a file whose message declares no length (or 0): there is nothing to check; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6`                          | How stale a cached group roster may get before the bridge refreshes it in the background, so `get_contact_chats` can answer "which groups is this person in?" without a live call per group. One group per second, only while connected, first pass a couple of minutes after start-up. `0` turns the pass off: rosters are then only cached when `list_group_members` is called, when a group join/leave/promote/demote event arrives, and when a group message comes from someone with no row yet. Refreshing is a read, so it keeps running under `WHATSAPP_READ_ONLY` |
+| `WHATSAPP_SESSION_KEEPALIVE_HOURS` | `12`                         | How often the bridge marks its linked device available for a few seconds, so WhatsApp counts it as in use and does not log it out about a month after pairing. `0` turns it off. See [Keeping the linked device](#keeping-the-linked-device) |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files. Set for both processes: the MCP server writes `media_base64` uploads and voice-note conversions under `<first root>/.uploads` for the bridge to read ([Outbound media](#outbound-media)) |
 | `WHATSAPP_EXPORT_DIR`  | `$WHATSAPP_STORE_DIR/exports`            | Where `export_messages` writes NDJSON archives. `out_path` is always resolved under this directory; anything escaping it is refused (see [Export directory](#export-directory)) |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
@@ -630,6 +631,36 @@ One line per non-empty batch goes to the MCP server log:
 ```
 transcribe_on_ingest: 50 examined, 10 pending, 9 transcribed, 1 failed in 41.2s
 ```
+
+## Keeping the linked device
+
+WhatsApp logs a linked device out when it has not been "opened" for about a
+month. The phone warns a day before, under Linked devices: the device "will be
+disconnected in 1 day, open WhatsApp on this device to keep it connected".
+A connection does not count as opening: a bridge that reconnects several times
+a day still shows its pairing time as its last connection.
+
+What does count is presence. So every `WHATSAPP_SESSION_KEEPALIVE_HOURS`
+(default 12, at most 168) the bridge marks its device available, waits five
+seconds and marks it unavailable again; the first time between one and two
+minutes after the session is connected and logged in, never while the QR code
+is showing. The interval is counted on the wall clock, so a host that slept
+through it catches up when it wakes; it is not remembered across restarts, so
+a restarted bridge sends one soon after it is back. The
+startup log says `Session keepalive: every 12 h`, each run logs
+`Session keepalive: told WhatsApp this linked device is in use`, and
+`whatsapp_bridge_session_keepalives_total` in `/metrics` counts them.
+
+For those seconds the account shows as online, contacts allowed to see it get a
+fresh "last seen", and the phone may hold a notification back. `0` turns the
+keepalive off; the device is then logged out about a month after pairing and
+the bridge needs a new QR scan (`messages.db` is kept). It runs under
+`WHATSAPP_READ_ONLY` as well: it keeps the session, it does not act on a chat.
+A bridge that is stopped while its device is marked available tries to mark
+it unavailable first, within three seconds; the disconnect that follows drops
+the presence on WhatsApp's side in any case. If this account's push name has
+not reached the bridge yet (a fresh pairing still syncing), the keepalive
+waits and says so once in the log.
 
 ## Bridge authentication and media paths
 

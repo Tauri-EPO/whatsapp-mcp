@@ -342,6 +342,23 @@ Two compose projects of this repo on one box
   [Authentication Issues](#authentication-issues). Two accounts need two
   stores, which two projects get by default.
 
+## The phone says the bridge "will be disconnected in 1 day"
+
+Under Linked devices the phone shows, for the bridge's device, "open WhatsApp
+on this device to keep it connected". WhatsApp logs a linked device out about a
+month after it was last opened, and a connection does not count as opening.
+
+A bridge from v2.1 on prevents it by itself (`WHATSAPP_SESSION_KEEPALIVE_HOURS`,
+see [Keeping the linked device](CONFIGURATION.md#keeping-the-linked-device)):
+check the log for `Session keepalive: told WhatsApp this linked device is in
+use` and reopen the Linked devices screen; the last connection of the device
+moves to that minute. If the variable is `0`, or the bridge is older, update
+and restart it before the day runs out.
+
+If the device was already logged out, the bridge exits and waits for a new QR
+scan: `docker compose logs -f bridge`, scan, done. The archive in `messages.db`
+is kept; only the session in `whatsapp.db` is replaced.
+
 ## Media downloads fail for one chat
 
 - **`download_media` answers `Failed to download media: failed to create chat
