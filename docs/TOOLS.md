@@ -756,7 +756,8 @@ remain text with no structured fields; ambiguous text is never parsed for a back
 For live shares, sequence zero or unset is the initial sample. A later positive
 sequence updates position fields only when it has the exact same message ID and
 chat key as an archived live location, with the same sender, sender namespace
-and ownership flag. The first description, author, timestamp,
+and ownership flag. A verified LID-to-phone alias may identify the same author;
+the archived author and namespace are retained. The first description, timestamp,
 quote and mentions remain; stale positions do not replace newer ones. Such live
 updates emit no new webhook. A distinct key is archived as its own row, including
 a later sample received without the original: no guessed relationship drops data.
@@ -987,7 +988,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
-- `quoted_sender_jid` (optional): Phone number or full JID of the author of the quoted message. [Supported phone formatting](#phone-numbers) is normalized; malformed provided identities are omitted with a warning. Provide it for group replies to identify the author; when unknown, the participant field is omitted.
+- `quoted_sender_jid` (optional): Phone number or full JID of the quoted author. [Supported phone formatting](#phone-numbers) is normalized; malformed provided identities are omitted with a warning. When omitted, the author comes from the stored row in the requested chat: sender plus its namespace, or this account's own JID for an own message. Stored LIDs use a known phone mapping; unmapped LIDs retain their namespace. If the archive has no known author, the participant field is omitted.
 - `quoted_content` (optional): Fallback text preview when the quoted message is absent from the local chat archive. A stored message in the same chat supplies its own text or typed media preview, including caption and retained document, voice-note or sticker presentation. Thumbnail bytes are not retained, and rendering of these previews on a phone has not been verified.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. [Supported phone formatting](#phone-numbers) is normalized before resolving a LID twin. Empty entries, multiple `@` parts and missing users/servers are omitted with a warning. Mentions do not address another conversation and are not checked against the conversation allow-list. For each entry the message text must contain a matching `@<number>` token after normalization (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs).

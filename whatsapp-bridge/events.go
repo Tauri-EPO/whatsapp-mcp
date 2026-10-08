@@ -298,13 +298,23 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// given up is one ERROR naming the message (ID and chat only, never the
 	// content) and a count on /metrics (store_failures.go).
 	stored := storeRow("message", func() error {
+		locationSender := storedSenderJID
+		if ex.location != nil && ex.location.Live {
+			var err error
+			locationSender, err = b.liveLocationSender(b.ctx, messageStore.db, msg.Info.ID, chatJID, storedSenderJID, msg.Info.IsFromMe)
+			if err != nil {
+				return err
+			}
+		}
 		return messageStore.Batch(func(batch *messageBatch) error {
 			var err error
-			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, locationSender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
 			return err
 		})
 	})
-	if rowConsumed {
+	// If the live-location ownership check cannot commit, withhold effects too:
+	// an unverified known key must not escape as an unstored webhook message.
+	if rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
 		return
 	}
 	if stored {

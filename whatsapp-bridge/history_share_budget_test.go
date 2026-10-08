@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -160,13 +159,24 @@ func TestHistoryShareOversizedWireRefusedWithWarnAndNoRows(t *testing.T) {
 			ms, _ := lockedProductionStore(t)
 			rec := installRecordingLogger(t)
 			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
-			wire := shareWireRows(historyShareMessageLimit + 1)
+			wire, err := proto.Marshal(shareHistoryFixture(historyShareMessageLimit + 1).Data)
+			if err != nil {
+				t.Fatal(err)
+			}
 			switch shape {
 			case "inflated bytes":
-				wire = bytes.Repeat([]byte{0}, historyShareInflatedLimit+1)
+				fixture := shareHistoryFixture(1)
+				fixture.Data.Conversations[0].Messages[0].Message.Message = &waE2E.Message{Conversation: proto.String(strings.Repeat("a", historyShareInflatedLimit))}
+				wire, err = proto.Marshal(fixture.Data)
+				if err != nil {
+					t.Fatal(err)
+				}
 			case "status message count":
 				field := (*waHistorySync.HistorySync)(nil).ProtoReflect().Descriptor().Fields().ByName("statusV3Messages").Number()
-				wire = nil
+				wire, err = proto.Marshal(&waHistorySync.HistorySync{SyncType: waHistorySync.HistorySync_RECENT.Enum(), Conversations: []*waHistorySync.Conversation{{ID: proto.String("120363000000000001@g.us")}}})
+				if err != nil {
+					t.Fatal(err)
+				}
 				for range historyShareMessageLimit + 1 {
 					wire = protowire.AppendTag(wire, field, protowire.BytesType)
 					wire = protowire.AppendBytes(wire, nil)
@@ -177,10 +187,17 @@ func TestHistoryShareOversizedWireRefusedWithWarnAndNoRows(t *testing.T) {
 				}
 			case "repeated metadata":
 				field := (*waHistorySync.HistorySync)(nil).ProtoReflect().Descriptor().Fields().ByName("conversations").Number()
-				wire = nil
+				wire, err = proto.Marshal(&waHistorySync.HistorySync{SyncType: waHistorySync.HistorySync_RECENT.Enum()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				conversation, err := proto.Marshal(&waHistorySync.Conversation{ID: proto.String("120363000000000001@g.us")})
+				if err != nil {
+					t.Fatal(err)
+				}
 				for range historyShareElementLimit + 1 {
 					wire = protowire.AppendTag(wire, field, protowire.BytesType)
-					wire = protowire.AppendBytes(wire, nil)
+					wire = protowire.AppendBytes(wire, conversation)
 				}
 			case "packed scalars":
 				fixture := shareHistoryFixture(1)

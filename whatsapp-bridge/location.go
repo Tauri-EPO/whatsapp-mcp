@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // Locations have no downloadable file. Old rendered text is deliberately not
@@ -69,6 +71,37 @@ func (p *messageLocation) update() bool {
 type locationWriter interface {
 	sqlExecer
 	QueryRow(query string, args ...any) *sql.Row
+}
+
+type locationAuthorReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// Preserve an archived LID author when a later trusted delivery resolves to
+// its verified PN alias. The transaction still checks the exact stored author,
+// namespace and ownership, so a row changed after this read is refused safely.
+func (b *Bridge) liveLocationSender(ctx context.Context, reader locationAuthorReader, id, chat, sender string, fromMe bool) (string, error) {
+	var user, server string
+	var own bool
+	err := reader.QueryRowContext(ctx, "SELECT sender,COALESCE(sender_server,''),is_from_me FROM messages WHERE id=? AND chat_jid=?", id, chat).Scan(&user, &server, &own)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sender, nil
+	}
+	if err != nil {
+		return sender, err
+	}
+	if server != types.HiddenUserServer || own != fromMe {
+		return sender, nil
+	}
+	previous := types.NewJID(user, server)
+	verified, err := lookupAltJID(ctx, b.Client, previous)
+	if err != nil {
+		return sender, err
+	}
+	if !verified.IsEmpty() && storedSender(verified.ToNonAD()) == sender {
+		return previous.String(), nil
+	}
+	return sender, nil
 }
 
 // A true result consumes a known key, including an author collision. It must
@@ -160,8 +193,7 @@ func (b *Bridge) historyLocationActivityTime(rows []*waHistorySync.HistorySyncMs
 			var original time.Time
 			if first, found := initial[info.GetKey().GetID()]; found {
 				stamp = first
-			} else if err := b.Store.db.QueryRow(`SELECT timestamp FROM messages WHERE id = ? AND chat_jid = ? AND media_type = 'location'
-				AND CASE WHEN json_valid(location) THEN json_extract(location, '$.live') = 1 ELSE 0 END`, info.GetKey().GetID(), chat).Scan(&original); err == nil {
+			} else if err := b.Store.db.QueryRow(`SELECT timestamp FROM messages WHERE id = ? AND chat_jid = ?`, info.GetKey().GetID(), chat).Scan(&original); err == nil {
 				stamp = original
 			}
 		}

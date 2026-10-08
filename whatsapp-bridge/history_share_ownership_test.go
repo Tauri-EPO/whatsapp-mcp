@@ -17,9 +17,9 @@ func TestHistoryShareOwnershipRelativeToReceiver(t *testing.T) {
 	selfLID := types.NewJID("100000000000006", types.HiddenUserServer)
 	unknownLID := types.NewJID("100000000000009", types.HiddenUserServer)
 	cases := []struct {
-		name, participant        string
+		name, participant         string
 		fromMe, keyOnly, wantSkip bool
-		wantSender, wantServer   string
+		wantSender, wantServer    string
 	}{
 		{"peer phone", phonePN.String(), true, false, false, phonePN.User, types.DefaultUserServer},
 		{"peer LID", phoneLID.String(), true, false, false, phonePN.User, types.DefaultUserServer},

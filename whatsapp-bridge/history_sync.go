@@ -268,6 +268,12 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						continue
 					}
 					msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
+					if !preserveExisting && ex.location != nil && ex.location.Live {
+						storedSenderJID, err = b.liveLocationSender(ctx, batch.tx, msgID, chatJID, storedSenderJID, isFromMe)
+						if err != nil {
+							return err
+						}
+					}
 
 					// quoted_message_id is not persisted: history sync does not
 					// carry a usable ContextInfo.

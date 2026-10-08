@@ -210,6 +210,47 @@ func TestLiveLocationConcurrentAuthorClaim(t *testing.T) {
 	}
 }
 
+func TestLiveLocationBusyFailureWithholdsEffects(t *testing.T) {
+	for _, sequence := range []int64{0, 3} {
+		t.Run(fmt.Sprintf("seq%d", sequence), func(t *testing.T) {
+			store := newLockedStore(t)
+			ms := store.ms
+			stamp := time.Unix(1772359200, 0)
+			if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
+				t.Fatal(err)
+			}
+			if err := persistMessage(ms, "BUSYLOCATION", phonePN.String(), phonePN.String(), stamp, false, extractMessage(livePosition(0, 0.25), stamp, "BUSYLOCATION"), true, testLogger()); err != nil {
+				t.Fatal(err)
+			}
+			before := locationRowSnapshot(t, ms, "BUSYLOCATION", phonePN.String())
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+			b.MediaAutoDownload, b.MediaMaxBytes = true, 0
+			b.autoDownloads = newMediaJobQueue(b.ctx, 0, 8, func(context.Context, mediaJob) { t.Error("unexpected worker") })
+			srv, posts, _ := contentKindsWebhook(t)
+			b.Webhook = newWebhookSender("", true)
+			b.Webhook.url = srv.URL
+			waits := 0
+			b.storeRetryWait = func(time.Duration) bool { waits++; return true }
+			incoming := livePosition(sequence, 0.9)
+			incoming.ImageMessage = &waE2E.ImageMessage{Caption: proto.String("incoming caption"), URL: proto.String("https://example.test/new"), MediaKey: []byte{4}, FileSHA256: []byte{5}, FileEncSHA256: []byte{6}, FileLength: proto.Uint64(9)}
+			event := buildTextMessage(phonePN, types.NewJID("5511888888888", types.DefaultUserServer), types.EmptyJID, types.EmptyJID, false, "")
+			event.Info.ID, event.Info.Timestamp, event.Message = "BUSYLOCATION", stamp.Add(time.Minute), incoming
+			store.lock(t)
+			b.handleMessage(event)
+			store.unlock(t)
+			if after := locationRowSnapshot(t, ms, "BUSYLOCATION", phonePN.String()); after != before {
+				t.Fatal("failed ownership check changed row")
+			}
+			if waits != len(b.StoreRetryDelays) || b.metrics.storeFailures.Load() != 1 {
+				t.Fatalf("bounded retry accounting changed: waits=%d failures=%d", waits, b.metrics.storeFailures.Load())
+			}
+			if posts.Load() != 0 || b.autoDownloads.queued() != 0 || b.metrics.messagesStored.Load() != 0 {
+				t.Fatalf("failed ownership check emitted effects: posts=%d jobs=%d stored=%d", posts.Load(), b.autoDownloads.queued(), b.metrics.messagesStored.Load())
+			}
+		})
+	}
+}
+
 func TestLiveLocationKeyPolicy(t *testing.T) {
 	for _, history := range []bool{false, true} {
 		t.Run(map[bool]string{false: "live", true: "history"}[history], func(t *testing.T) {
