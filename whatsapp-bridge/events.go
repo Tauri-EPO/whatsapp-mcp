@@ -312,7 +312,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	shouldForward := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe)
+	shouldForward := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) && !bareContentEnvelope(ex.inner, content)
 
 	if !shouldForward && b.Webhook.Enabled() && isStatusChat(resolvedChat) && !b.ForwardStatus {
 		logger.Debugf("Status update %s is not forwarded to the webhook: %s is off", msg.Info.ID, webhookForwardStatusEnv)
