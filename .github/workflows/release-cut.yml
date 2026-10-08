@@ -48,6 +48,8 @@ jobs:
   cut:
     name: Merge the release PR and dispatch release.yml
     runs-on: ubuntu-latest
+    # Three attempts of a CI run each; `gh run watch` has no bound of its own.
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -59,9 +61,13 @@ jobs:
           # returns a fork's pull request from a branch of that name. Only the
           # one release.yml opened from this repository is the release PR; the
           # job approves its runs and merges it.
-          number=$(gh pr list --state open --base main --head release-please--branches--main \
-            --json number,isCrossRepository,author \
-            --jq '[.[] | select(.isCrossRepository == false and .author.login == "app/github-actions")][0].number // empty')
+          prs=$(gh pr list --state open --base main --head release-please--branches--main \
+            --limit 100 --json number,isCrossRepository,author)
+          number=$(jq -r '[.[] | select(.isCrossRepository == false and .author.login == "app/github-actions")][0].number // empty' <<< "$prs")
+          if [ -z "$number" ] && [ "$(jq '[.[] | select(.isCrossRepository == false)] | length' <<< "$prs")" != "0" ]; then
+            echo "::error::A pull request from this repository's release branch is open but was not opened by github-actions; the cut will not touch it."
+            exit 1
+          fi
           if [ -z "$number" ]; then
             echo "No open release PR: nothing releasable since the last tag."
             echo "number=" >> "$GITHUB_OUTPUT"
@@ -167,6 +173,11 @@ jobs:
                       approved="$approved $id"
                       ;;
                   esac
+                  # A newer CI run that is still waiting outranks an older one
+                  # already picked (the PR was closed and reopened on this head).
+                  if [ "$path" = ".github/workflows/ci.yml" ]; then
+                    run=""
+                  fi
                   continue
                 fi
                 if [ "$path" = ".github/workflows/ci.yml" ]; then
@@ -182,7 +193,7 @@ jobs:
             fi
             echo "attempt $attempt: CI run $run on the release PR head $sha"
             if ! gh run watch "$run" --exit-status --interval 20; then
-              now=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+              now=$(gh pr view "$PR" --json headRefOid --jq .headRefOid) || now=$sha
               if [ "$now" != "$sha" ]; then
                 echo "::notice::attempt $attempt: the release branch moved during CI; going round again."
                 continue
@@ -194,7 +205,7 @@ jobs:
               # The merge state can lag the last check by a few seconds.
               state=UNKNOWN
               for _ in $(seq 1 12); do
-                state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus)
+                state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus) || state=UNKNOWN
                 case "$state" in UNKNOWN | BLOCKED) sleep 5 ;; *) break ;; esac
               done
               case "$state" in
