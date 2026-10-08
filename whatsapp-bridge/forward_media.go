@@ -13,8 +13,8 @@ import (
 )
 
 type forwardSource struct {
-	content, mediaType, filename string
-	presentation                 *mediaPresentation
+	content, mediaType, filename, id string
+	presentation                     *mediaPresentation
 }
 
 type forwardSourceKey struct{}
@@ -35,11 +35,29 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 		upload, contentType = whatsmeow.MediaImage, "image/webp"
 	case "audio":
 		upload, contentType = whatsmeow.MediaAudio, sniffMIME(data)
-		if contentType == "video/mp4" {
+		switch contentType {
+		case "video/mp4":
 			contentType = "audio/mp4"
+		case "audio/wave":
+			contentType = "audio/wav"
+		case "application/ogg":
+			contentType = "audio/ogg"
+			// The first Ogg packet declares its codec. The duration analyser
+			// also accepts non-Opus Ogg, so it cannot identify that codec.
+			if len(data) >= 27 && data[26] > 0 && data[5]&1 == 0 {
+				start := 27 + int(data[26])
+				if start+19 <= len(data) && data[27] >= 19 && string(data[start:start+8]) == "OpusHead" {
+					contentType = "audio/ogg; codecs=opus"
+				}
+			}
 		}
-		if len(data) >= 2 && data[0] == 0xff && data[1]&0xf6 == 0xf0 {
+		if len(data) >= 7 && data[0] == 0xff && data[1]&0xf6 == 0xf0 {
 			contentType = "audio/aac"
+		}
+		// MPEG audio frames without an ID3 tag: sync/version/layer, a real
+		// bitrate index and sample rate (ADTS has no MPEG audio layer).
+		if len(data) >= 4 && data[0] == 0xff && data[1]&0xe0 == 0xe0 && data[1]&0x18 != 0x08 && data[1]&0x06 != 0 && data[2]&0xf0 != 0 && data[2]&0xf0 != 0xf0 && data[2]&0x0c != 0x0c {
+			contentType = "audio/mpeg"
 		}
 	case "image", "video":
 		upload, contentType, _ = classifyMediaData(path, data)
@@ -82,7 +100,7 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 	case "document":
 		name, title := source.filename, source.filename
 		if p != nil {
-			name, title = "", ""
+			title = ""
 			if p.Name != nil {
 				name = *p.Name
 			}
@@ -92,7 +110,7 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 		}
 		// Legacy unnamed documents used a generated name in filename. Never
 		// expose that source ID/timestamp or the on-disk cache basename.
-		if p == nil && len(name) >= 24 && strings.HasPrefix(name, "document_") {
+		if (p == nil || p.Name == nil) && len(name) >= 24 && strings.HasPrefix(name, "document_") && (name[24:] == "" || name[24:] == "_"+source.id) {
 			if _, err := time.Parse("20060102_150405", name[9:24]); err == nil {
 				name, title = "", ""
 			}

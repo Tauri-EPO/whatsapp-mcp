@@ -238,7 +238,7 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 
 // messageContentLookup reads content and media_type for forwarding.
 func (store *MessageStore) messageContentLookup(id, chatJID string) (forwardSource, bool, error) {
-	var source forwardSource
+	source := forwardSource{id: id}
 	var presentation sql.NullString
 	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation)
 	if err != nil {

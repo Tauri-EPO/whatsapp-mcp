@@ -27,6 +27,7 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 			legacy                            bool
 			refused                           bool
 			refreshed                         bool
+			mimeOnlyReplay                    bool
 		}{
 			{name: "PNG document", kind: "document", mime: "image/png", filename: "image.png", title: "Quarterly report", data: []byte("\x89PNG\r\n\x1a\nfake")},
 			{name: "document path name", kind: "document", mime: "application/pdf", filename: `C:\fake\private\report.pdf`, title: "Report", data: []byte("%PDF-1.7 fake")},
@@ -38,8 +39,16 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 			{name: "static sticker", kind: "sticker", mime: "image/webp", data: []byte("RIFF\x10\x00\x00\x00WEBPVP8 fake")},
 			{name: "animated sticker", kind: "sticker", mime: "image/webp", data: []byte("RIFF\x10\x00\x00\x00WEBPVP8 fake"), animated: true},
 			{name: "legacy MP3", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio"), legacy: true},
+			{name: "legacy MP3 without ID3", kind: "audio", mime: "audio/mpeg", data: []byte("\xff\xfb\x90\x64fake MPEG audio"), legacy: true},
+			{name: "legacy Opus", kind: "audio", mime: "audio/ogg; codecs=opus", data: ogg, legacy: true},
+			{name: "legacy other Ogg", kind: "audio", mime: "audio/ogg", data: []byte("OggS\x00fake non-Opus container"), legacy: true},
+			{name: "legacy WAV", kind: "audio", mime: "audio/wav", data: []byte("RIFF\x10\x00\x00\x00WAVEfake"), legacy: true},
+			{name: "legacy AAC", kind: "audio", mime: "audio/aac", data: []byte("\xff\xf1\x50\x80\x01\x7f\xfcfake"), legacy: true},
+			{name: "legacy truncated AAC", kind: "audio", data: []byte("\xff\xf1"), legacy: true, refused: true},
 			{name: "legacy unnamed document", kind: "document", mime: "application/octet-stream", data: []byte("fake document"), legacy: true},
 			{name: "legacy generated-prefix original", kind: "document", mime: "application/pdf", filename: "document_report.pdf", title: "document_report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true},
+			{name: "legacy timestamped original", kind: "document", mime: "application/pdf", filename: "document_20260904_100000_report.pdf", title: "document_20260904_100000_report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true},
+			{name: "legacy MIME-only replay", kind: "document", mime: "application/pdf", filename: "report.pdf", data: []byte("%PDF-1.7 fake"), legacy: true, mimeOnlyReplay: true},
 			{name: "legacy unknown audio", kind: "audio", data: []byte("unknown audio bytes"), legacy: true, refused: true},
 			{name: "phone retry changes hash", kind: "audio", mime: "audio/mpeg", data: []byte("ID3 fake audio"), refreshed: true},
 		} {
@@ -51,6 +60,12 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				b.Connected = func() bool { return true }
 				ts := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 				if err := ms.StoreChat(efChat, "Alice", ts); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.StoreChat("120363000000000001@g.us", "Bob", ts); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.UpdateChatEphemeralSettings("120363000000000001@g.us", 86400, 1710000000); err != nil {
 					t.Fatal(err)
 				}
 				common := testUpload()
@@ -78,6 +93,13 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 				} else {
 					replayWriter(t, ms, batch, func(w messageWriter) error {
 						return persistMessage(w, "KIND1", efChat, "x", ts, false, ex, false, testLogger())
+					})
+				}
+				if tc.mimeOnlyReplay {
+					replay := proto.Clone(packet).(*waE2E.Message)
+					replay.DocumentMessage.FileName, replay.DocumentMessage.Title = nil, nil
+					replayWriter(t, ms, batch, func(w messageWriter) error {
+						return persistMessage(w, "KIND1", efChat, "x", ts, false, extractMessage(replay, ts, "KIND1"), false, testLogger())
 					})
 				}
 				folder := chatMediaDir(efChat)
@@ -111,6 +133,10 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 					kind, part := mediaPartOf(got)
 					if kind != tc.kind {
 						t.Fatalf("wire kind=%s want=%s", kind, tc.kind)
+					}
+					ctx := part.(interface{ GetContextInfo() *waE2E.ContextInfo }).GetContextInfo()
+					if ctx.GetExpiration() != 86400 || ctx.GetEphemeralSettingTimestamp() != 1710000000 {
+						t.Fatalf("destination expiration lost for %s: %v", tc.kind, ctx)
 					}
 					if part.(interface{ GetMimetype() string }).GetMimetype() != tc.mime {
 						t.Fatalf("wire MIME=%s want=%s", part.(interface{ GetMimetype() string }).GetMimetype(), tc.mime)

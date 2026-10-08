@@ -54,7 +54,9 @@ const insertMessageSQL = `INSERT INTO messages
 				THEN messages.timestamp ELSE excluded.timestamp END,
 			is_from_me = excluded.is_from_me,
 			media_type = CASE WHEN ` + replaceMediaSQL + ` THEN COALESCE(NULLIF(excluded.media_type, ''), messages.media_type) ELSE messages.media_type END,
-			filename = CASE WHEN ` + replaceMediaSQL + ` THEN COALESCE(NULLIF(excluded.filename, ''), messages.filename) ELSE messages.filename END,
+			filename = CASE WHEN ` + replaceMediaSQL + ` THEN CASE
+				WHEN excluded.media_type = 'document' AND :complete_media AND excluded.file_sha256 IS NOT messages.file_sha256
+				THEN excluded.filename ELSE COALESCE(NULLIF(excluded.filename, ''), messages.filename) END ELSE messages.filename END,
 			url = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.url ELSE messages.url END,
 			direct_path = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.direct_path ELSE messages.direct_path END,
 			media_key = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.media_key ELSE messages.media_key END,

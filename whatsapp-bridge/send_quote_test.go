@@ -149,7 +149,7 @@ func TestMediaContextInfo(t *testing.T) {
 		t.Errorf("no media, no context slot")
 	}
 	sticker := &waE2E.Message{StickerMessage: &waE2E.StickerMessage{}}
-	if mediaContextInfo(sticker) != nil {
-		t.Errorf("a sticker is not something this bridge sends")
+	if mediaContextInfo(sticker) != &sticker.StickerMessage.ContextInfo {
+		t.Errorf("a forwarded sticker needs its context slot")
 	}
 }

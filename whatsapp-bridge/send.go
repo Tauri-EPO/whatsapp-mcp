@@ -137,7 +137,7 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 			ContextInfo: mergeEphemeralContextInfo(nil, settings),
 		}
 	default:
-		// Image, video, document, audio: added to the context a send already
+		// Image, video, document, audio, sticker: added to an existing context
 		// put there (a quote, mentions), never in place of it.
 		if slot := mediaContextInfo(msg); slot != nil {
 			*slot = mergeEphemeralContextInfo(*slot, settings)
@@ -740,7 +740,7 @@ func buildOutboundMedia(mediaType whatsmeow.MediaType, mimeType, mediaPath strin
 }
 
 // mediaContextInfo returns the ContextInfo slot of the media message msg
-// holds (image, video, document or audio), or nil for anything else.
+// holds (image, video, document, audio or sticker), or nil for anything else.
 func mediaContextInfo(msg *waE2E.Message) **waE2E.ContextInfo {
 	switch {
 	case msg == nil:
@@ -753,6 +753,8 @@ func mediaContextInfo(msg *waE2E.Message) **waE2E.ContextInfo {
 		return &msg.DocumentMessage.ContextInfo
 	case msg.AudioMessage != nil:
 		return &msg.AudioMessage.ContextInfo
+	case msg.StickerMessage != nil:
+		return &msg.StickerMessage.ContextInfo
 	}
 	return nil
 }
@@ -800,6 +802,9 @@ func analyzeOggOpus(data []byte) (duration uint32, waveform []byte, err error) {
 		pageSize := 27 + numSegments
 		for _, segLen := range segmentTable {
 			pageSize += int(segLen)
+		}
+		if pageSize > len(data)-i {
+			return 0, nil, fmt.Errorf("truncated Ogg page body")
 		}
 
 		// Check if we're looking at an OpusHead packet (should be in first few pages)

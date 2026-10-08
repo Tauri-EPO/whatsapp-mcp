@@ -96,7 +96,7 @@ func TestMediaPresentationReplayAndAtomicity(t *testing.T) {
 				t.Fatal(err)
 			}
 			source, found, err = ms.messageContentLookup("PRESENT1", mediaTestChat)
-			if err != nil || !found || source.presentation != nil {
+			if err != nil || !found || source.presentation != nil || source.filename != "" {
 				t.Fatalf("presentation survived a changed hash: %+v err=%v", source, err)
 			}
 		})
