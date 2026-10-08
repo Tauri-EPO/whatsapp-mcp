@@ -64,6 +64,7 @@ whatsapp-mcp/
 │   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
 │   ├── location.go             # typed non-file locations and exact-key live position updates
 │   ├── history_share.go        # bounded shared-group history download/decode into canonical history sync
+│   ├── history_share_versions.go # transaction-bound row versions preserve intervening live/phone/edit changes
 │   ├── media_header.go         # template/buttons/interactive header media extraction
 │   ├── view_once.go            # view-once envelopes unwrapped and archived; the phone keeps its one view
 │   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
