@@ -355,6 +355,10 @@ use` and reopen the Linked devices screen; the last connection of the device
 moves to that minute. If the variable is `0`, or the bridge is older, update
 and restart it before the day runs out.
 
+Restarts now honour the last blip saved in the store's `.session-keepalive` file;
+the new INFO line says when the next blip is due. To force one after the session
+settles, delete that file in the store directory and restart the bridge.
+
 If the device was already logged out, the bridge exits and waits for a new QR
 scan: `docker compose logs -f bridge`, scan, done. The archive in `messages.db`
 is kept; only the session in `whatsapp.db` is replaced.

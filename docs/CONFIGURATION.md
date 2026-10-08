@@ -15,7 +15,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge |
-| `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`. Set the same value for both processes; absolute paths recommended for services |
+| `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
@@ -645,8 +645,11 @@ What does count is presence. So every `WHATSAPP_SESSION_KEEPALIVE_HOURS`
 seconds and marks it unavailable again; the first time between one and two
 minutes after the session is connected and logged in, never while the QR code
 is showing. The interval is counted on the wall clock, so a host that slept
-through it catches up when it wakes; it is not remembered across restarts, so
-a restarted bridge sends one soon after it is back. The
+through it catches up when it wakes. The last successful blip is saved in
+`.session-keepalive` (mode 0600) in the store directory; a restart waits for
+the remaining interval. A missing, unreadable or corrupt file means never,
+as does a timestamp ahead of the current clock (after a clock correction),
+so the first blip follows the normal settle delay and rewrites the state. The
 startup log says `Session keepalive: every 12 h`, each run logs
 `Session keepalive: told WhatsApp this linked device is in use`, and
 `whatsapp_bridge_session_keepalives_total` in `/metrics` counts them.

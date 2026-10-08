@@ -3,7 +3,7 @@ package main
 // Store directory resolution.
 //
 // Everything the bridge persists — whatsapp.db (session), messages.db, the
-// downloaded media tree, .bridge-token and .bridge.lock — lives under one
+// downloaded media tree, .bridge-token, .bridge.lock and .session-keepalive — lives under one
 // directory. It used to be hard-wired to "store/" relative to the working
 // directory, which silently created a second, empty store (and a second
 // pairing) whenever the binary was started from another folder. The

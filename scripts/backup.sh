@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Hot backup / restore of the compose store volume (session, messages.db,
-# media, .bridge-token) without stopping the bridge.
+# media, .bridge-token) without stopping the bridge. The .session-keepalive
+# timestamp is not backed up; restore discards it so an older session blips soon.
 #
 #   scripts/backup.sh backup  [DEST_DIR]        # default ./backups/<UTC timestamp>
 #   scripts/backup.sh restore SRC_DIR           # stack must be stopped first
@@ -98,7 +99,7 @@ cmd_restore() {
   echo "restoring $src -> volume $vol"
   run_alpine "$vol" "$src" '
     cd /store
-    rm -f ./*.db-wal ./*.db-shm .bridge.lock
+    rm -f ./*.db-wal ./*.db-shm .bridge.lock .session-keepalive
     for db in messages whatsapp notes; do
       [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db && chmod 600 ./$db.db
     done

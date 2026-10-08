@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -123,6 +127,7 @@ func (p *presenceRecorder) history() []types.Presence {
 // Bridge's own Shutdown, registered by testBridge, stops it and waits for it.
 func keepaliveBridge(t *testing.T, interval time.Duration, ready *atomic.Bool, rec *presenceRecorder) *Bridge {
 	t.Helper()
+	t.Setenv(storeDirEnv, t.TempDir())
 	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	b.SessionKeepalive = interval
 	b.SessionKeepaliveSettle = 2 * time.Millisecond
@@ -359,5 +364,298 @@ func TestSessionKeepalive_ShutdownDuringTheHoldStillSendsUnavailable(t *testing.
 	}
 	if err := offCtxErr.Load(); err != nil {
 		t.Errorf("the unavailable send ran under a dead context: %v", err)
+	}
+	if readSessionBlip(b.StoreRoot).IsZero() {
+		t.Fatal("shutdown during the hold did not remember the successful blip")
+	}
+}
+
+func TestSessionKeepalive_ClockCorrectionDiscardsFuturePersistedState(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	b.sessionNow = func() time.Time { return now }
+	b.SessionKeepaliveSettle = 0
+	if err := writeSessionBlip(b.StoreRoot, now.Add(90*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	b.startSessionKeepalive()
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("after correcting the clock: %q, want available", got)
+	}
+	rec.next(t)
+	b.Shutdown(5 * time.Second)
+	if got := readSessionBlip(b.StoreRoot); !got.Equal(now) {
+		t.Fatalf("state after clock correction = %v, want %v", got, now)
+	}
+}
+
+func TestSessionKeepalive_FailedAvailableDoesNotPersistABlip(t *testing.T) {
+	rec := newPresenceRecorder()
+	rec.fail = func(state types.Presence, _ int) error {
+		if state == types.PresenceAvailable {
+			return errors.New("socket closed")
+		}
+		return nil
+	}
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.startSessionKeepalive()
+	if got := rec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("after failed available: %q, want unavailable", got)
+	}
+	b.Shutdown(5 * time.Second)
+	if _, err := b.StoreRoot.Lstat(sessionKeepaliveFile); !os.IsNotExist(err) {
+		t.Fatalf("failed available created state: %v", err)
+	}
+}
+
+func TestSessionKeepalive_BackwardClockStepWhileRunningBlipsAgain(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	stamp := time.Date(2027, 10, 7, 12, 0, 0, 0, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	b.sessionNow = func() time.Time { return time.Unix(0, now.Load()) }
+	b.SessionKeepaliveSettle = 0
+	b.startSessionKeepalive()
+	rec.next(t)
+	rec.next(t)
+	rec.quiet(t, 20*time.Millisecond)
+	now.Store(stamp.AddDate(-1, 0, 0).UnixNano())
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("after backward clock step: %q, want available", got)
+	}
+	rec.next(t)
+	b.Shutdown(5 * time.Second)
+	if got := readSessionBlip(b.StoreRoot); !got.Equal(stamp.AddDate(-1, 0, 0)) {
+		t.Fatalf("saved blip after clock step = %v", got)
+	}
+}
+
+func TestSessionKeepalive_NewPairingDiscardsThePreviousTimestamp(t *testing.T) {
+	rec := newPresenceRecorder()
+	ready := readyFlag(false)
+	b := keepaliveBridge(t, 12*time.Hour, ready, rec)
+	b.Client = &whatsmeow.Client{Store: &store.Device{}}
+	if err := writeSessionBlip(b.StoreRoot, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.startSessionKeepalive()
+	if _, err := b.StoreRoot.Lstat(sessionKeepaliveFile); !os.IsNotExist(err) {
+		t.Fatalf("old pairing timestamp still present: %v", err)
+	}
+	rec.quiet(t, 20*time.Millisecond)
+	ready.Store(true)
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("newly paired session: %q, want available", got)
+	}
+	rec.next(t)
+	b.Shutdown(5 * time.Second)
+	if !strings.Contains(b.Log.(*recordingLogger).String(), "new pairing") {
+		t.Fatal("new pairing was not reported")
+	}
+}
+
+func TestSessionKeepalive_BackwardClockStepDoesNotPostponeAFailedAttempt(t *testing.T) {
+	rec := newPresenceRecorder()
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceAvailable && attempt == 1 {
+			return errors.New("socket closed")
+		}
+		return nil
+	}
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	b.SessionKeepaliveRetry = 5 * time.Minute
+	b.SessionKeepaliveSettle = 0
+	stamp := time.Date(2027, 10, 7, 12, 0, 0, 0, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	b.sessionNow = func() time.Time { return time.Unix(0, now.Load()) }
+	b.startSessionKeepalive()
+	if got := rec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("failed available: %q, want unavailable", got)
+	}
+	rec.quiet(t, 20*time.Millisecond)
+	now.Store(stamp.AddDate(-1, 0, 0).UnixNano())
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("after backward step: %q, want available", got)
+	}
+}
+
+func TestSessionKeepalive_FailedStateWriteKeepsTheInMemoryInterval(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	part := sessionKeepaliveFile + ".part"
+	if err := b.StoreRoot.Mkdir(part, storeDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.StoreRoot.WriteFile(part+"/occupied", []byte("x"), storeFileMode); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	b.sessionNow = func() time.Time { return time.Unix(0, now.Load()) }
+	b.SessionKeepaliveSettle = 0
+	b.startSessionKeepalive()
+	for round := 0; round < 6; round++ {
+		now.Store(stamp.Add(time.Duration(round) * b.SessionKeepalive).UnixNano())
+		if got := rec.next(t); got != types.PresenceAvailable {
+			t.Fatalf("round %d: %q, want available", round, got)
+		}
+		if got := rec.next(t); got != types.PresenceUnavailable {
+			t.Fatalf("round %d: %q, want unavailable", round, got)
+		}
+		rec.quiet(t, 20*time.Millisecond)
+	}
+	b.Shutdown(5 * time.Second)
+	if got := strings.Count(b.Log.(*recordingLogger).String(), "[WARN] Session keepalive: could not remember"); got != 6 {
+		t.Fatalf("write warnings = %d, want one per blip (6)", got)
+	}
+	if _, err := b.StoreRoot.Lstat(sessionKeepaliveFile); !os.IsNotExist(err) {
+		t.Fatalf("failed write left a timestamp: %v", err)
+	}
+}
+
+func TestSessionKeepalive_RestartWaitsForTheRemainingWallClockInterval(t *testing.T) {
+	stamp := time.Date(2026, 10, 7, 12, 0, 0, 123, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	clock := func() time.Time { return time.Unix(0, now.Load()) }
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	b.SessionKeepaliveSettle = 0
+	b.sessionNow = clock
+	b.startSessionKeepalive()
+	rec.next(t)                 // available
+	rec.next(t)                 // unavailable
+	b.Shutdown(5 * time.Second) // waits for the state write too
+	if got := readSessionBlip(b.StoreRoot); !got.Equal(stamp) {
+		t.Fatalf("saved blip = %v, want %v", got, stamp)
+	}
+	info, err := b.StoreRoot.Stat(sessionKeepaliveFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != storeFileMode {
+		t.Fatalf("state mode = %04o, want 0600", info.Mode().Perm())
+	}
+
+	restartedRec := newPresenceRecorder()
+	restarted := keepaliveBridge(t, 12*time.Hour, readyFlag(true), restartedRec)
+	restarted.StoreRoot = b.StoreRoot
+	restarted.SessionKeepaliveSettle = 0
+	restarted.sessionNow = clock
+	now.Store(stamp.Add(time.Hour).UnixNano())
+	restarted.startSessionKeepalive()
+	restartedRec.quiet(t, 20*time.Millisecond)
+	if log := restarted.Log.(*recordingLogger).String(); !strings.Contains(log, "last remembered blip "+stamp.Format(time.RFC3339Nano)) || !strings.Contains(log, "next due "+stamp.Add(12*time.Hour).Format(time.RFC3339Nano)) {
+		t.Fatalf("restart did not report the remembered time and next due time: %s", log)
+	}
+	now.Store(stamp.Add(12*time.Hour - time.Nanosecond).UnixNano())
+	restartedRec.quiet(t, 20*time.Millisecond)
+	now.Store(stamp.Add(12 * time.Hour).UnixNano())
+	if got := restartedRec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("at the interval boundary: %q, want available", got)
+	}
+	if got := restartedRec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("after available: %q, want unavailable", got)
+	}
+	restarted.Shutdown(5 * time.Second)
+	if got := readSessionBlip(b.StoreRoot); !got.Equal(stamp.Add(12 * time.Hour)) {
+		t.Fatalf("second saved blip = %v", got)
+	}
+}
+
+func TestSessionKeepalive_MissingOrCorruptStateIsRewrittenAfterTheBlip(t *testing.T) {
+	for _, value := range []string{"missing", "", "not a timestamp", strings.Repeat("x", 100)} {
+		t.Run(value, func(t *testing.T) {
+			rec := newPresenceRecorder()
+			b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+			if value != "missing" {
+				if err := b.StoreRoot.WriteFile(sessionKeepaliveFile, []byte(value), storeFileMode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := readSessionBlip(b.StoreRoot); !got.IsZero() {
+				t.Fatalf("invalid state read as %v", got)
+			}
+			b.startSessionKeepalive()
+			if got := rec.next(t); got != types.PresenceAvailable {
+				t.Fatalf("first presence = %q", got)
+			}
+			rec.next(t)
+			b.Shutdown(5 * time.Second)
+			if got := readSessionBlip(b.StoreRoot); got.IsZero() {
+				t.Fatal("successful blip did not replace the invalid state")
+			}
+		})
+	}
+}
+
+func TestSessionBlipStateRefusesLinksAndNeverWritesTheirTargets(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	stamp := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	outside := filepath.Join(t.TempDir(), "state")
+	original := []byte(stamp.Format(time.RFC3339Nano))
+	if err := os.WriteFile(outside, original, storeFileMode); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{sessionKeepaliveFile, sessionKeepaliveFile + ".part"} {
+		if err := root.Symlink(outside, name); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	if got := readSessionBlip(root); !got.IsZero() {
+		t.Fatal("state reader followed a symlink")
+	}
+	if err := writeSessionBlip(root, stamp.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outside) //nolint:gosec // outside is a fixed filename in t.TempDir, never user input
+	if err != nil || string(data) != string(original) {
+		t.Fatalf("link target changed: %q, %v", data, err)
+	}
+	if got := readSessionBlip(root); !got.Equal(stamp.Add(time.Hour)) {
+		t.Fatalf("replacement state = %v", got)
+	}
+	if err := root.Remove(sessionKeepaliveFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Mkdir(sessionKeepaliveFile, storeDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSessionBlip(root); !got.IsZero() {
+		t.Fatal("directory read as state")
+	}
+}
+
+func TestSessionBlipStateRefusesAnInternalLink(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	stamp := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	original := []byte(stamp.Format(time.RFC3339Nano))
+	if err := root.WriteFile("state-target", original, storeFileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Symlink("state-target", sessionKeepaliveFile); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := readSessionBlip(root); !got.IsZero() {
+		t.Fatal("state reader followed a link inside the store")
+	}
+	if err := writeSessionBlip(root, stamp.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := root.ReadFile("state-target")
+	if err != nil || string(data) != string(original) {
+		t.Fatalf("internal link target changed: %q, %v", data, err)
 	}
 }

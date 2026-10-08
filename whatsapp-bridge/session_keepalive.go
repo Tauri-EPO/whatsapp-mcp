@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -28,6 +32,8 @@ import (
 
 // sessionKeepaliveEnv sets how often the blip is sent, in hours.
 const sessionKeepaliveEnv = "WHATSAPP_SESSION_KEEPALIVE_HOURS"
+
+const sessionKeepaliveFile = ".session-keepalive"
 
 const (
 	// sessionKeepaliveInterval: the default for sessionKeepaliveEnv. Twice a
@@ -77,13 +83,24 @@ type presenceSender func(ctx context.Context, state types.Presence) error
 // startSessionKeepalive runs the loop in a goroutine Shutdown waits for.
 // SessionKeepalive <= 0 disables it.
 func (b *Bridge) startSessionKeepalive() {
+	// Capture pairing before the goroutine starts: pairing can change Store.ID.
+	unpaired := b.Client != nil && b.Client.Store.ID == nil
+	if unpaired && b.StoreRoot != nil {
+		if err := b.StoreRoot.Remove(sessionKeepaliveFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			b.Log.Warnf("Session keepalive: could not discard the previous pairing's timestamp: %v", err)
+		}
+	}
 	if b.SessionKeepalive <= 0 {
 		return
+	}
+	lastBlip, reason := readSessionBlipState(b.StoreRoot)
+	if unpaired {
+		lastBlip, reason = time.Time{}, "new pairing"
 	}
 	b.keepaliveLoop.Add(1)
 	go func() {
 		defer b.keepaliveLoop.Done()
-		b.runSessionKeepalive()
+		b.runSessionKeepalive(lastBlip, reason)
 	}()
 }
 
@@ -99,7 +116,7 @@ func (b *Bridge) startSessionKeepalive() {
 // that send fails, right away if "available" itself failed (whatsmeow
 // switches to active delivery receipts before it writes the frame), and on
 // the way out when the bridge is shutting down.
-func (b *Bridge) runSessionKeepalive() {
+func (b *Bridge) runSessionKeepalive(lastBlip time.Time, reason string) {
 	send := b.sessionPresence
 	if send == nil {
 		if b.Client == nil {
@@ -111,10 +128,22 @@ func (b *Bridge) runSessionKeepalive() {
 	if ready == nil {
 		ready = func() bool { return b.Client != nil && b.Client.IsConnected() && b.Client.IsLoggedIn() }
 	}
+	clock := b.sessionNow
+	if clock == nil {
+		clock = time.Now
+	}
+	switch {
+	case lastBlip.IsZero():
+		b.Log.Infof("Session keepalive: no last blip remembered (%s); the next is due once the session settles", reason)
+	case lastBlip.After(clock().Round(0)):
+		b.Log.Infof("Session keepalive: remembered blip is in the future; discarding it, the next is due once the session settles")
+	default:
+		b.Log.Infof("Session keepalive: last remembered blip %s; next due %s (once the session settles)",
+			lastBlip.UTC().Format(time.RFC3339Nano), lastBlip.Add(b.SessionKeepalive).UTC().Format(time.RFC3339Nano))
+	}
 
 	var (
 		readySince   time.Time // zero while the session is not ready
-		lastBlip     time.Time // the last "available" that went out
 		notBefore    time.Time // earliest next attempt after a failed one
 		noNameSince  time.Time // zero unless the push name is still missing
 		noNameWarned bool
@@ -140,7 +169,18 @@ func (b *Bridge) runSessionKeepalive() {
 
 		// Round(0) drops the monotonic reading: these comparisons must see
 		// the time a suspended host slept through.
-		now := time.Now().Round(0)
+		now := clock().Round(0)
+		// A backward clock step, at startup or while running, must not
+		// postpone a blip until the erroneous future time catches up.
+		if lastBlip.After(now) {
+			lastBlip = time.Time{}
+		}
+		if readySince.After(now) {
+			readySince = time.Time{}
+		}
+		if !notBefore.IsZero() && notBefore.Add(-b.SessionKeepaliveRetry).After(now) {
+			notBefore = time.Time{}
+		}
 		if !ready() {
 			readySince = time.Time{}
 			continue
@@ -190,18 +230,91 @@ func (b *Bridge) runSessionKeepalive() {
 		b.metrics.sessionKeepalives.Add(1)
 		b.Log.Infof("Session keepalive: told WhatsApp this linked device is in use")
 		stopping := !b.sleep(b.SessionPresenceHold)
-		if err := markUnavailable(b.ctx, send); err != nil {
+		offErr := markUnavailable(b.ctx, send)
+		// Disk I/O must not delay the hold or the unavailable send. Remember
+		// the successful available even if unavailable will need a retry.
+		if err := writeSessionBlip(b.StoreRoot, lastBlip); err != nil {
+			b.Log.Warnf("Session keepalive: could not remember the last blip: %v", err)
+		}
+		if offErr != nil {
 			if stopping {
-				b.Log.Warnf("Session keepalive: shutting down with the device still marked available: %v", err)
+				b.Log.Warnf("Session keepalive: shutting down with the device still marked available: %v", offErr)
 				return
 			}
-			b.Log.Warnf("Session keepalive: the device is still marked available, trying again: %v", err)
+			b.Log.Warnf("Session keepalive: the device is still marked available, trying again: %v", offErr)
 			pendingOff = true
 		}
 		if stopping {
 			return
 		}
 	}
+}
+
+// readSessionBlip treats missing, unreadable or corrupt state as never. Only a
+// regular file opened through the store root is read; links are not state.
+func readSessionBlip(root *os.Root) time.Time {
+	stamp, _ := readSessionBlipState(root)
+	return stamp
+}
+
+func readSessionBlipState(root *os.Root) (time.Time, string) {
+	if root == nil {
+		return time.Time{}, "store unavailable"
+	}
+	seen, err := root.Lstat(sessionKeepaliveFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, "no saved timestamp"
+	}
+	if err != nil {
+		return time.Time{}, "timestamp unreadable"
+	}
+	if !seen.Mode().IsRegular() {
+		return time.Time{}, "timestamp is not a regular file"
+	}
+	f, err := root.Open(sessionKeepaliveFile)
+	if err != nil {
+		return time.Time{}, "timestamp unreadable"
+	}
+	defer func() { _ = f.Close() }()
+	if opened, err := f.Stat(); err != nil || !os.SameFile(seen, opened) {
+		return time.Time{}, "timestamp changed while opening"
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil || len(data) > 64 {
+		return time.Time{}, "timestamp unreadable or oversized"
+	}
+	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}, "timestamp corrupt"
+	}
+	return stamp, ""
+}
+
+// writeSessionBlip replaces one timestamp atomically with a fresh owner-only
+// file. A stale temporary name is unlinked, never opened through, and rename
+// replaces a link under the final name without touching its target.
+func writeSessionBlip(root *os.Root, stamp time.Time) error {
+	if root == nil {
+		return errors.New("store directory unavailable")
+	}
+	part := sessionKeepaliveFile + ".part"
+	if err := root.Remove(part); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := root.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, storeFileMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Remove(part) }()
+	_, writeErr := f.WriteString(stamp.UTC().Format(time.RFC3339Nano) + "\n")
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return root.Rename(part, sessionKeepaliveFile)
 }
 
 // sendPresence sends one presence under a bounded context.
