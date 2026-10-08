@@ -41,7 +41,7 @@ func TestLiveLocationKeyPolicy(t *testing.T) {
 						Conversations: []*waHistorySync.Conversation{{ID: proto.String(chat.String()),
 							Messages: []*waHistorySync.HistorySyncMsg{{Message: &waWeb.WebMessageInfo{
 								Key:              &waCommon.MessageKey{ID: proto.String(id), RemoteJID: proto.String(chat.String()), FromMe: proto.Bool(false)},
-								MessageTimestamp: proto.Uint64(uint64(timestamp.Unix())), Message: m,
+								MessageTimestamp: proto.Uint64(uint64(timestamp.Unix())), Message: m, //nolint:gosec // fixed positive fake epoch, advanced by minutes only
 							}}},
 						}},
 					}})
@@ -131,7 +131,7 @@ func TestLocationNewestFirstHistoryAndMigration(t *testing.T) {
 		m := &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{SequenceNumber: proto.Int64(sequence), DegreesLatitude: proto.Float64(lat), DegreesLongitude: proto.Float64(0.5), Caption: proto.String("initial")}}
 		fixture.Data.Conversations[0].Messages[i].Message = &waWeb.WebMessageInfo{
 			Key:              &waCommon.MessageKey{ID: proto.String("CANONICAL"), RemoteJID: proto.String(phonePN.String()), FromMe: proto.Bool(false)},
-			MessageTimestamp: proto.Uint64(uint64(stamp.Unix() + offset)), Message: &waE2E.Message{EphemeralMessage: &waE2E.FutureProofMessage{Message: m}},
+			MessageTimestamp: proto.Uint64(uint64(stamp.Unix() + offset)), Message: &waE2E.Message{EphemeralMessage: &waE2E.FutureProofMessage{Message: m}}, //nolint:gosec // fixed positive fake epoch plus 0 or 60 seconds
 		}
 	}
 	b.handleHistorySync(fixture)

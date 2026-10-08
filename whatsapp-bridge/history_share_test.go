@@ -63,12 +63,13 @@ func encryptedShareServer(t *testing.T, b *Bridge, compressed []byte, tamper str
 	_, _ = mac.Write(cipher)
 	wire := append(cipher, mac.Sum(nil)[:10]...)
 	plainHash, wireHash := sha256.Sum256(compressed), sha256.Sum256(wire)
-	if tamper == "wire hash" {
+	switch tamper {
+	case "wire hash":
 		wire[0] ^= 1
-	} else if tamper == "MAC" {
+	case "MAC":
 		wire[len(wire)-1] ^= 1
 		wireHash = sha256.Sum256(wire)
-	} else if tamper == "plain hash" {
+	case "plain hash":
 		plainHash[0] ^= 1
 	}
 	requests := &atomic.Int32{}

@@ -162,8 +162,7 @@ func TestSharedContextLiveSQLiteAndWebhook(t *testing.T) {
 			if quote.String != "Q1" {
 				t.Errorf("SQLite quote=%q", quote.String)
 			}
-			var targets []string
-			targets = strings.Split(mentions.String, ",")
+			targets := strings.Split(mentions.String, ",")
 			if !reflect.DeepEqual(targets, []string{phonePN.User, phoneLID.User}) {
 				t.Errorf("SQLite mentions=%v", targets)
 			}
@@ -311,8 +310,7 @@ func TestSharedContextHistoryScope(t *testing.T) {
 		if quote.Valid {
 			t.Errorf("history quote scope changed: %q", quote.String)
 		}
-		var targets []string
-		targets = strings.Split(mentions, ",")
+		targets := strings.Split(mentions, ",")
 		if !reflect.DeepEqual(targets, []string{phonePN.User, phoneLID.User}) {
 			t.Errorf("history mentions=%v", targets)
 		}
