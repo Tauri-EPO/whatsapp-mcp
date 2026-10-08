@@ -1,11 +1,21 @@
 """Group management tools: payloads, validation, allow-list, bridge errors."""
 
+import json
+import threading
+from contextlib import asynccontextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import anyio
 import pytest
+from mcp.client.session import ClientSession
+from mcp.shared.memory import create_client_server_memory_streams
 
 import main
+import tool_policy
 import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
+from tool_policy import ToolPolicy
 
 GROUP = "120363000000000001@g.us"
 
@@ -93,3 +103,97 @@ def test_bridge_refusal_maps_to_code(monkeypatch):
     )
     out = main.leave_group(GROUP)
     assert out["error"]["code"] == "bridge_unavailable" and "not connected" in out["error"]["message"]
+
+
+@asynccontextmanager
+async def group_sdk_client():
+    """Reach tools/call over the real SDK protocol and registration adapter."""
+    server = main.mcp._lowlevel_server
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(server.run, *server_streams, server.create_initialization_options())
+            async with ClientSession(*client_streams) as client:
+                await client.initialize()
+                await client.list_tools()
+                yield client
+            tasks.cancel_scope.cancel()
+
+
+@pytest.fixture
+def group_http_bridge(monkeypatch):
+    """Use actual HTTP bytes between the MCP tool and a local bridge stand-in."""
+    observed = []
+    reply = {"status": 502, "payload": {}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            observed.append((self.path, body, self.headers.get("Authorization")))
+            payload = json.dumps(reply["payload"]).encode()
+            self.send_response(reply["status"])
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(whatsapp, "WHATSAPP_API_BASE_URL", f"http://127.0.0.1:{server.server_port}/api")
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
+    try:
+        yield reply, observed
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("stage", ["could not read group info", "set description failed"])
+async def test_update_group_partial_failure_through_sdk_and_http(group_http_bridge, stage):
+    reply, observed = group_http_bridge
+    message = f"group was renamed; {stage}: synthetic failure; retry only description"
+    reply["payload"] = {"success": False, "message": message, "changed": ["name"]}
+    async with group_sdk_client() as client:
+        result = await client.call_tool("update_group", {"chat_jid": GROUP, "name": "New group", "description": "new"})
+    assert result.is_error is True
+    envelope = json.loads(result.content[0].text)
+    assert envelope["error"] == {"code": "bridge_unavailable", "message": message}
+    assert "group was renamed" in envelope["error"]["message"]
+    assert observed == [
+        ("/api/group/subject", {"group_jid": GROUP, "name": "New group", "description": "new"}, "Bearer " + "t" * 32)
+    ]
+
+
+@pytest.mark.parametrize("description", ["new description", ""])
+async def test_update_group_description_only_retry_through_sdk_and_http(group_http_bridge, description):
+    reply, observed = group_http_bridge
+    reply.update(status=200, payload={"success": True, "group_jid": GROUP, "changed": ["description"]})
+    async with group_sdk_client() as client:
+        result = await client.call_tool("update_group", {"chat_jid": GROUP, "description": description})
+    assert not result.is_error
+    assert json.loads(result.content[0].text)["changed"] == ["description"]
+    assert observed == [("/api/group/subject", {"group_jid": GROUP, "description": description}, "Bearer " + "t" * 32)]
+
+
+@pytest.mark.parametrize("denial", ["chat", "read-only", "allow-list", "deny-list"])
+async def test_update_group_sdk_denies_before_http(monkeypatch, group_http_bridge, denial):
+    _, observed = group_http_bridge
+    if denial == "chat":
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
+    else:
+        policy = ToolPolicy(
+            read_only=denial == "read-only",
+            allow=frozenset({"send_reaction"}) if denial == "allow-list" else frozenset(),
+            deny=frozenset({"update_group"}) if denial == "deny-list" else frozenset(),
+        )
+        monkeypatch.setattr(tool_policy, "_active", policy)
+    async with group_sdk_client() as client:
+        result = await client.call_tool("update_group", {"chat_jid": GROUP, "name": "New group", "description": "new"})
+    assert result.is_error is True
+    assert json.loads(result.content[0].text)["error"]["code"] == "denied"
+    assert observed == []

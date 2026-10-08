@@ -233,6 +233,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "media_presentation", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.media_presentation: %w", err)
 	}
+	if err := ensureColumn(db, "messages", "location", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.location: %w", err)
+	}
 	// sender_server: the namespace messages.sender lives in ("s.whatsapp.net"
 	// or "lid"), NULL when it is unknown — rows an older bridge wrote, and
 	// senders that are not user JIDs at all (sender_namespace.go).

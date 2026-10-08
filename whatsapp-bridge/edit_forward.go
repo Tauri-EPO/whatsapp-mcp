@@ -166,7 +166,7 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			return
 		}
 		switch mediaType {
-		case "", "poll", "reaction", "poll_vote":
+		case "", "location", "poll", "reaction", "poll_vote":
 			if mediaType != "" {
 				writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "cannot forward a " + mediaType})
 				return

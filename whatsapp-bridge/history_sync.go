@@ -17,6 +17,11 @@ import (
 const historyBatchMessages = 500
 
 func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
+	b.handleHistorySyncWithShares(historySync, true)
+}
+
+// A decoded share uses the canonical importer without following nested bundles.
+func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, downloadShares bool) {
 	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -28,6 +33,8 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 		len(historySync.Data.Conversations),
 	)
 
+	// Recognition and network work must never be repeated inside a chunk retry.
+	b.recogniseHistoryShares(historySync.Data, downloadShares)
 	writeBatch := messageStore.Batch
 	if b.historyBatchWriter != nil {
 		writeBatch = b.historyBatchWriter
@@ -76,6 +83,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				continue
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
+			timestamp = b.historyLocationActivityTime(messages, chatJID, timestamp)
 
 			if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, name, timestamp) }); err != nil {
 				if b.historyStopping() {

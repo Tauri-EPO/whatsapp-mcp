@@ -279,6 +279,13 @@ def clean_untrusted(payload: Any, *, wrap: bool) -> Any:
                 result[key] = _wrap_notes(value) if wrap else value
             elif key in WRAPPED_KEYS and isinstance(value, str):
                 result[key] = wrap_text(value) if wrap else value
+            elif key == "location" and isinstance(value, dict):
+                cleaned = clean_untrusted(value, wrap=wrap)
+                if wrap:
+                    for field in ("address", "comment", "url"):
+                        if isinstance(cleaned.get(field), str):
+                            cleaned[field] = wrap_text(cleaned[field])
+                result[key] = cleaned
             else:
                 result[key] = clean_untrusted(value, wrap=wrap)
         return result

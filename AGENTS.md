@@ -62,10 +62,13 @@ whatsapp-mcp/
 │   ├── persist.go              # one extraction + storage path shared by live messages and history sync
 │   ├── store_failures.go       # a row that cannot be written: bounded retry on a busy database, one ERROR with ID + chat, a counter
 │   ├── content.go              # extract text/quotes/mentions/media/ephemeral from waE2E.Message
+│   ├── location.go             # typed non-file locations and exact-key live position updates
+│   ├── history_share.go        # bounded shared-group history download/decode into canonical history sync
 │   ├── media_header.go         # template/buttons/interactive header media extraction
 │   ├── view_once.go            # view-once envelopes unwrapped and archived; the phone keeps its one view
 │   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
 │   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member
+│   ├── outbound_quote.go       # same-chat typed quote previews and context-bound archive lookups
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
 │   ├── recipient_cache.go      # bounded, expiring typed -> registered number answers, cleared on reconnect
 │   ├── send_mime.go            # sniff MIME for category-named cached images/videos
@@ -92,6 +95,7 @@ whatsapp-mcp/
 │   ├── sender_namespace.go     # messages.sender_server: which namespace a stored sender is in + its backfill
 │   ├── chat_names.go           # chat name resolution; history sync never calls the network for one
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL; the text format prints one line per message (oneLineLogger)
+│   ├── sdk_log.go              # permanent SDK logger adapter redacts network-error URLs
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
 │   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS

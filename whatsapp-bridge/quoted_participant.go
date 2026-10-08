@@ -21,6 +21,10 @@ import (
 //
 // Same LID upgrade rule as resolveMentionJIDs; see AGENTS.md gotcha #1.
 func resolveQuotedParticipantJID(client *whatsmeow.Client, raw string) string {
+	return resolveQuotedParticipantJIDContext(context.Background(), client, raw)
+}
+
+func resolveQuotedParticipantJIDContext(ctx context.Context, client *whatsmeow.Client, raw string) string {
 	if raw == "" {
 		return ""
 	}
@@ -30,7 +34,7 @@ func resolveQuotedParticipantJID(client *whatsmeow.Client, raw string) string {
 		return ""
 	}
 	if jid.Server == types.DefaultUserServer {
-		if lid, err := lookupAltJID(context.Background(), client, jid.ToNonAD()); err == nil && !lid.IsEmpty() {
+		if lid, err := lookupAltJID(ctx, client, jid.ToNonAD()); err == nil && !lid.IsEmpty() {
 			return lid.String()
 		}
 	}

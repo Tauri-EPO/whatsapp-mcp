@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -205,6 +206,11 @@ type Bridge struct {
 	historyVotes sync.WaitGroup
 	// historyBatchWriter replaces the transaction runner in controlled tests.
 	historyBatchWriter func(func(*messageBatch) error) error
+	// One synchronous share import at a time; nested shares are recognised only.
+	historyShareGate chan struct{}
+	historyShareInit sync.Once
+	// nil uses the SDK; tests bypass paired media-connection discovery only.
+	historyShareDownload func(context.Context, *waE2E.HistorySyncNotification, whatsmeow.File) error
 	// httpServer is the REST listener, kept so Shutdown can drain it (rest.go).
 	httpServer *http.Server
 	// ctx is cancelled by Shutdown; long-lived goroutines (reconnect loop, retention

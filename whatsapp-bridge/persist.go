@@ -26,6 +26,7 @@ type messageWriter interface {
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
+	UpdateLiveLocation(id, chat string, p *messageLocation) (bool, error)
 }
 
 // extractedMessage is the storable view of a waE2E.Message.
@@ -51,6 +52,7 @@ type extractedMessage struct {
 
 	quotedID, quotedSender, quotedContent string
 	mentions                              []string
+	location                              *messageLocation
 }
 
 // extractMessage pulls text, media, poll, quote and mention data out of m.
@@ -83,6 +85,10 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	}
 	e.directPath = extractMediaDirectPath(e.inner)
 	e.hasLength = mediaLengthDeclared(e.inner)
+	e.location = locationOf(e.inner)
+	if e.location != nil {
+		e.mediaType = "location"
+	}
 	if e.poll = extractPollCreation(e.inner); e.poll != nil {
 		e.content = pollContent(e.poll)
 		e.mediaType = "poll"
@@ -102,6 +108,9 @@ func (e extractedMessage) empty() bool { return e.content == "" && e.mediaType =
 // Every failure reaches the retry owner. Live and history callers use a batch
 // so a failed auxiliary write cannot leave a partially committed message.
 func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool, _ waLog.Logger) error {
+	if matched, err := w.UpdateLiveLocation(id, chatJID, e.location); err != nil || matched {
+		return err
+	}
 	quotedID := ""
 	if quoted {
 		quotedID = e.quotedID
@@ -111,7 +120,7 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 		length = storedMediaLength(e.fileLen)
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner)}); err != nil {
+		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location}); err != nil {
 		return err
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of

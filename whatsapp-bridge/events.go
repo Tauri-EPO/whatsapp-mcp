@@ -277,21 +277,28 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	mentionedJIDs := ex.mentions
 
 	// Group history shared when a member is added has neither text nor media,
-	// so the gate below drops it. Say that it was seen and count it first: the
-	// blob is not downloaded or decoded yet, and without this line nothing
-	// tells whether the share ever reached this device (issue #468). Every
+	// so recognise it before the gate and import bundles through history sync.
+	// Every
 	// device of the group may see the message, the one that did the add
 	// included, hence from_me. Counts and timestamps only: never the
 	// receivers, the path or the keys.
-	if kind, meta := sharedGroupHistory(ex.inner); kind != "" {
-		b.metrics.groupHistoryShares.Add(1)
-		logger.Infof("Group history %s seen in %s (message %s, from_me=%t): %s; the shared messages are not downloaded or stored",
-			kind, chatJID, msg.Info.ID, msg.Info.IsFromMe, describeSharedGroupHistory(meta))
-	}
+	b.handleHistoryShare(ex.inner, chatJID, msg.Info.ID, msg.Info.IsFromMe)
 
 	// Skip if there's no content and no media
 	if ex.empty() {
 		return
+	}
+	// Later positions with the exact original key are updates, not new chat
+	// activity or webhook deliveries. Different keys continue through the row path.
+	if ex.location.update() {
+		matched := false
+		if !b.storeLive("live location", msg.Info.ID, chatJID, func() error {
+			var err error
+			matched, err = messageStore.UpdateLiveLocation(msg.Info.ID, chatJID, ex.location)
+			return err
+		}) || matched {
+			return
+		}
 	}
 
 	// Store message in database first so that downloadMedia (which queries the DB

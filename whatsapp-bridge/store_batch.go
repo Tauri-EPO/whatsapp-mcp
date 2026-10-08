@@ -51,8 +51,8 @@ const validPresentationSQL = `(CASE
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -92,7 +92,22 @@ const insertMessageSQL = `INSERT INTO messages
 					THEN json_patch(messages.media_presentation, excluded.media_presentation)
 					ELSE excluded.media_presentation END
 				ELSE excluded.media_presentation END ELSE messages.media_presentation END,
-			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`
+			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id),
+			-- History is newest-first: an initial sample replayed after a later
+			-- same-key sample supplies the original metadata, not an older position.
+			location = CASE WHEN excluded.media_type = 'location' AND messages.media_type = 'location'
+				AND CASE WHEN json_valid(messages.location) AND json_valid(excluded.location)
+					THEN json_extract(messages.location, '$.live') = 1
+					AND json_extract(messages.location, '$.sequence') > COALESCE(json_extract(excluded.location, '$.sequence'), 0) ELSE 0 END
+				THEN json_patch(excluded.location, json_object(
+					'latitude', COALESCE(json_extract(messages.location, '$.latitude'), json_extract(excluded.location, '$.latitude')),
+					'longitude', COALESCE(json_extract(messages.location, '$.longitude'), json_extract(excluded.location, '$.longitude')),
+					'accuracy_meters', COALESCE(json_extract(messages.location, '$.accuracy_meters'), json_extract(excluded.location, '$.accuracy_meters')),
+					'speed_mps', COALESCE(json_extract(messages.location, '$.speed_mps'), json_extract(excluded.location, '$.speed_mps')),
+					'bearing_degrees', COALESCE(json_extract(messages.location, '$.bearing_degrees'), json_extract(excluded.location, '$.bearing_degrees')),
+					'sequence', json_extract(messages.location, '$.sequence'),
+					'time_offset_seconds', json_extract(messages.location, '$.time_offset_seconds')))
+				ELSE COALESCE(excluded.location, messages.location) END`
 
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
@@ -200,13 +215,15 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	var path any
 	var pathText string
 	var presentation *mediaPresentation
+	var location *messageLocation
 	if len(options) > 0 {
 		pathText, presentation = options[0].directPath, options[0].presentation
+		location = options[0].location
 		if pathText != "" {
 			path = pathText
 		}
 	}
 	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(),
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(), location.column(),
 		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
 }

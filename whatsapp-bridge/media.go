@@ -138,7 +138,7 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 
 	// Get media info AND timestamp from the database
 	err = messageStore.db.QueryRow(
-		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp, filename, direct_path FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT COALESCE(media_type, ''), COALESCE(url, ''), media_key, file_sha256, file_enc_sha256, file_length, timestamp, filename, direct_path FROM messages WHERE id = ? AND chat_jid = ?",
 		messageID, chatJID,
 	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp, &originalName, &storedDirectPath)
 
@@ -152,7 +152,7 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	}
 
 	// Check if this is a media message
-	if mediaType == "" {
+	if mediaType != "image" && mediaType != "video" && mediaType != "audio" && mediaType != "document" && mediaType != "sticker" {
 		return false, "", "", "", fmt.Errorf("not a media message")
 	}
 
