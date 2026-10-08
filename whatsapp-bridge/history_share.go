@@ -86,7 +86,7 @@ func (b *Bridge) processHistoryShare(msg *waE2E.Message, chat, id string, fromMe
 	}
 	messages := b.historyShareMessages(ctx, data)
 	if ctx.Err() == nil && messages != nil {
-		b.handleHistorySyncWithShares(&events.HistorySync{Data: messages}, false)
+		b.handleHistorySyncWithShares(&events.HistorySync{Data: messages}, false, true)
 	}
 }
 

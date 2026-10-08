@@ -189,6 +189,12 @@ sync from the account's own phone still updates those fields. A shared row's
 `FromMe` flag belongs to the exporting participant, so the bridge resolves its
 original participant and recalculates ownership relative to the receiving
 account. Missing/invalid participant metadata never proves own-message status.
+Shared copies do
+not overwrite rows already archived from live delivery or the account's own
+phone, including a row arriving while the bundle is being decoded. The existing
+exact-key live-location policy updates position fields only. A bundle's own new
+rows may merge within that import; chat activity uses their committed stored
+timestamps, not an overlapping copy's timestamp.
 
 WhatsApp controls whether a share reaches this linked device; this path has
 synthetic encrypted HTTP test coverage, not a paired-phone guarantee. If the

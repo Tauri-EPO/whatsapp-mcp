@@ -17,11 +17,14 @@ import (
 const historyBatchMessages = 500
 
 func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
-	b.handleHistorySyncWithShares(historySync, true)
+	b.handleHistorySyncWithShares(historySync, true, false)
 }
 
 // A decoded share uses the canonical importer without following nested bundles.
-func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, downloadShares bool) {
+func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, downloadShares, preserveExisting bool) {
+	// Only rows introduced by this peer import may replay within it. Existing
+	// archive rows are checked again under the canonical IMMEDIATE transaction.
+	peerRows := make(map[string]map[string]struct{})
 	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -85,7 +88,12 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 			timestamp = b.historyLocationActivityTime(messages, chatJID, timestamp)
 
-			if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, name, timestamp) }); err != nil {
+			if err := b.retryBusy(func() error {
+				if preserveExisting {
+					return messageStore.EnsureChat(chatJID, name)
+				}
+				return messageStore.StoreChat(chatJID, name, timestamp)
+			}); err != nil {
 				if b.historyStopping() {
 					return
 				}
@@ -119,6 +127,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			storedInBatch := 0
+			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
 				for _, msg := range chunk {
 					if msg == nil || msg.Message == nil {
@@ -144,6 +153,29 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					// Skip messages with no content and no media
 					if ex.empty() {
 						continue
+					}
+
+					if preserveExisting {
+						_, previousChunk := peerRows[chatJID][histMsgID]
+						_, thisChunk := chunkPeerRows[histMsgID]
+						if !previousChunk && !thisChunk {
+							var exists bool
+							if err := batch.write(func() error {
+								return batch.tx.QueryRow("SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND chat_jid=?)", histMsgID, chatJID).Scan(&exists)
+							}); err != nil {
+								return err
+							}
+							if exists {
+								// The explicit exact-key location policy permits position
+								// updates only; never change its author/content/activity.
+								if ex.location.update() {
+									if _, err := batch.UpdateLiveLocation(histMsgID, chatJID, ex.location); err != nil {
+										return err
+									}
+								}
+								continue
+							}
+						}
 					}
 
 					// Determine sender. History-sync rows do not carry SenderAlt,
@@ -213,6 +245,9 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 						return err
 					} else {
 						storedInBatch++
+						if preserveExisting {
+							chunkPeerRows[histMsgID] = struct{}{}
+						}
 						// Per-message echo stays at DEBUG: user content out of INFO,
 						// and two lines per row would swamp a full sync.
 						if mediaType != "" {
@@ -231,6 +266,7 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 			commitChunk := func() error {
 				return b.retryBusy(func() error {
 					storedInBatch = 0
+					chunkPeerRows = make(map[string]struct{})
 					return writeBatch(storeChunk)
 				})
 			}
@@ -238,6 +274,14 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))
+				if preserveExisting {
+					if peerRows[chatJID] == nil {
+						peerRows[chatJID] = make(map[string]struct{})
+					}
+					for id := range chunkPeerRows {
+						peerRows[chatJID][id] = struct{}{}
+					}
+				}
 			}
 		chunks:
 			for start := 0; start < len(messages); start += historyBatchMessages {
@@ -294,6 +338,44 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 					defer b.historyVotes.Done()
 					b.storeHistoryPollVotes(chat, chatJID, votes, nil)
 				}(resolved, chatJID, pendingVotes)
+			}
+		}
+	}
+
+	if preserveExisting && !b.historyStopping() {
+		// Only committed rows introduced by this import contribute activity.
+		// Read final timestamps after all chunks: newest-first location samples
+		// may later recover their original time under the same exact key.
+		for chat, keys := range peerRows {
+			var newest time.Time
+			ids := make([]string, 0, historyBatchMessages)
+			refresh := func() error {
+				stamp, ok, err := messageStore.MaxMessageTimestamp(chat, ids)
+				if err == nil && ok && stamp.After(newest) {
+					newest = stamp
+				}
+				return err
+			}
+			var markerErr error
+			for id := range keys {
+				ids = append(ids, id)
+				if len(ids) == historyBatchMessages {
+					markerErr = b.retryBusy(refresh)
+					if markerErr != nil || b.historyStopping() {
+						break
+					}
+					ids = ids[:0]
+				}
+			}
+			if markerErr == nil && len(ids) > 0 && !b.historyStopping() {
+				markerErr = b.retryBusy(refresh)
+			}
+			if markerErr == nil && !newest.IsZero() && !b.historyStopping() {
+				markerErr = b.retryBusy(func() error { return messageStore.StoreChat(chat, "", newest) })
+			}
+			if markerErr != nil {
+				// Rows have committed; this is a marker failure, not row loss.
+				b.noteStoreFailure("shared history chat activity", "", chat, markerErr)
 			}
 		}
 	}
