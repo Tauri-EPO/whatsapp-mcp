@@ -100,6 +100,12 @@ sequenceDiagram
     Note over EXT: Process incoming message
 ```
 
+### Replayed media rows
+
+Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.
+
+An incomplete replay keeps the existing media category, filename and timestamp so an already cached file remains reachable. Partial credentials from different writes are never merged. This protects the downloadable snapshot independently of the replay's text content.
+
 ### The automatic media download budget
 
 Storing the message row always happens first and never waits for a file. Caching the media is background work with a fixed budget: **four downloads at a time, up to 256 messages waiting**, each bounded by a ten-minute timeout. Shutdown cancels the transfers in flight, discards the backlog and waits for the workers, so a burst of photos can neither open a hundred simultaneous transfers nor keep writing while the databases close.
