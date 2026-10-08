@@ -98,6 +98,7 @@ const insertMessageSQL = `INSERT INTO messages
 			location = CASE WHEN excluded.media_type = 'location' AND messages.media_type = 'location'
 				AND CASE WHEN json_valid(messages.location) AND json_valid(excluded.location)
 					THEN json_extract(messages.location, '$.live') = 1
+					AND json_extract(excluded.location, '$.live') = 1
 					AND json_extract(messages.location, '$.sequence') > COALESCE(json_extract(excluded.location, '$.sequence'), 0) ELSE 0 END
 				THEN json_patch(excluded.location, json_object(
 					'latitude', COALESCE(json_extract(messages.location, '$.latitude'), json_extract(excluded.location, '$.latitude')),

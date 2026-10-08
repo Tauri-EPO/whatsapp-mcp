@@ -211,6 +211,11 @@ func TestLocationUpsertCompatibility(t *testing.T) {
 			if err := persistMessage(ms, "COMPAT", chat, phonePN.String(), stamp, false, extractMessage(livePosition(0, 0.25), stamp, "COMPAT"), true, testLogger()); err != nil {
 				t.Fatal(err)
 			}
+			if kind == "same-author-static" {
+				if err := persistMessage(ms, "COMPAT", chat, phonePN.String(), stamp, false, extractMessage(livePosition(3, 0.4), stamp, "COMPAT"), true, testLogger()); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if kind == "legacy-text" {
 				if _, err := ms.db.Exec("UPDATE messages SET media_type=NULL, location=NULL WHERE id='COMPAT'"); err != nil {
 					t.Fatal(err)
@@ -232,6 +237,15 @@ func TestLocationUpsertCompatibility(t *testing.T) {
 			}
 			if content != ex.content || sender != phonePN.User || server != types.DefaultUserServer || own {
 				t.Fatalf("compatible upsert lost: %q %s %s %v", content, sender, server, own)
+			}
+			if kind == "same-author-static" {
+				var raw string
+				if err := ms.db.QueryRow("SELECT location FROM messages WHERE id='COMPAT'").Scan(&raw); err != nil {
+					t.Fatal(err)
+				}
+				if raw != ex.location.column().(string) {
+					t.Fatalf("static location inherited the live position: got=%s want=%s", raw, ex.location.column())
+				}
 			}
 		})
 	}
