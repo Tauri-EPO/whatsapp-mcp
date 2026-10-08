@@ -58,7 +58,6 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 	}
 	// Peer imports can introduce rows, never replace any existing archive row.
 	// Check existence under the canonical IMMEDIATE transaction on every replay.
-	peerRows := make(map[string]map[string]struct{})
 	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -206,50 +205,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						}
 					}
 
-					// Determine sender. History-sync rows do not carry SenderAlt,
-					// so any LID-based participant is resolved through the
-					// whatsmeow LID store (populated during live message handling).
-					var resolvedSender types.JID
-					isFromMe := false
-					if msg.Message.Key != nil {
-						if msg.Message.Key.FromMe != nil {
-							isFromMe = *msg.Message.Key.FromMe
-						}
-						var rawSender types.JID
-						switch {
-						case isFromMe && client.Store.ID != nil:
-							rawSender = client.Store.ID.ToNonAD()
-						case msg.Message.GetParticipant() != "" || msg.Message.Key.GetParticipant() != "":
-							// Modern history syncs carry the group sender in the top-level
-							// WebMessageInfo.participant, older ones in Key.participant;
-							// whatsmeow's ParseWebMessage checks them in this order too.
-							// Without this every group message was attributed to the group JID.
-							participant := msg.Message.GetParticipant()
-							if participant == "" {
-								participant = msg.Message.Key.GetParticipant()
-							}
-							if parsed, perr := types.ParseJID(participant); perr == nil {
-								rawSender = parsed
-							} else {
-								rawSender = types.JID{User: participant}
-							}
-						default:
-							rawSender = jid
-						}
-						var alt types.JID
-						if isFromMe && client.Store.ID != nil {
-							alt = client.Store.ID.ToNonAD()
-						}
-						if preserveExisting {
-							// The peer adapter already resolved attribution using the
-							// job context. Do not repeat that lookup without its deadline.
-							resolvedSender = rawSender
-						} else {
-							resolvedSender = resolveUserJID(client, rawSender, alt)
-						}
-					} else {
-						resolvedSender = jid
-					}
+					resolvedSender, isFromMe := b.historySender(msg.Message, jid, preserveExisting)
 					sender := resolvedSender.User
 					// The row records which namespace that user part belongs
 					// to, so a LID the store cannot map is not read back as a
@@ -299,6 +255,12 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						}
 					}
 				}
+				if preserveExisting && len(chunkPeerRows) > 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					return batch.storePeerHistoryActivity(chatJID, chunkPeerRows)
+				}
 				return nil
 			}
 			storedInChat := 0
@@ -314,14 +276,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))
-				if preserveExisting {
-					if peerRows[chatJID] == nil {
-						peerRows[chatJID] = make(map[string]struct{})
-					}
-					for id := range chunkPeerRows {
-						peerRows[chatJID][id] = struct{}{}
-					}
-				}
+
 			}
 		chunks:
 			for start := 0; start < len(messages); start += historyBatchMessages {
@@ -384,44 +339,6 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 		}
 	}
 
-	if preserveExisting && !stopping() {
-		// Only committed rows introduced by this import contribute activity.
-		// Read final timestamps after all chunks: newest-first location samples
-		// may later recover their original time under the same exact key.
-		for chat, keys := range peerRows {
-			var newest time.Time
-			ids := make([]string, 0, historyBatchMessages)
-			refresh := func() error {
-				stamp, ok, err := messageStore.MaxMessageTimestamp(chat, ids)
-				if err == nil && ok && stamp.After(newest) {
-					newest = stamp
-				}
-				return err
-			}
-			var markerErr error
-			for id := range keys {
-				ids = append(ids, id)
-				if len(ids) == historyBatchMessages {
-					markerErr = retry(refresh)
-					if markerErr != nil || stopping() {
-						break
-					}
-					ids = ids[:0]
-				}
-			}
-			if markerErr == nil && len(ids) > 0 && !stopping() {
-				markerErr = retry(refresh)
-			}
-			if markerErr == nil && !newest.IsZero() && !stopping() {
-				markerErr = retry(func() error { return messageStore.StoreChat(chat, "", newest) })
-			}
-			if markerErr != nil {
-				// Rows have committed; this is a marker failure, not row loss.
-				b.noteStoreFailure("shared history chat activity", "", chat, markerErr)
-			}
-		}
-	}
-
 	b.Log.Infof("History sync complete. Stored %d messages.", syncedCount)
 }
 
@@ -452,4 +369,38 @@ func (b *Bridge) historyStopping() bool {
 		return true
 	}
 	return false
+}
+
+// Peer attribution was resolved by the context-bound adapter; the account's
+// own phone keeps its canonical participant / own-account / LID precedence.
+func (b *Bridge) historySender(info *waWeb.WebMessageInfo, chat types.JID, peer bool) (types.JID, bool) {
+	if info.Key == nil {
+		return chat, false
+	}
+	own := info.Key.GetFromMe()
+	var raw types.JID
+	switch {
+	case own && b.Client.Store.ID != nil:
+		raw = b.Client.Store.ID.ToNonAD()
+	case info.GetParticipant() != "" || info.Key.GetParticipant() != "":
+		participant := info.GetParticipant()
+		if participant == "" {
+			participant = info.Key.GetParticipant()
+		}
+		if parsed, err := types.ParseJID(participant); err == nil {
+			raw = parsed
+		} else {
+			raw = types.JID{User: participant}
+		}
+	default:
+		raw = chat
+	}
+	if peer {
+		return raw, own
+	}
+	var alt types.JID
+	if own && b.Client.Store.ID != nil {
+		alt = b.Client.Store.ID.ToNonAD()
+	}
+	return resolveUserJID(b.Client, raw, alt), own
 }

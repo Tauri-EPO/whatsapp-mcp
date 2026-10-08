@@ -220,9 +220,10 @@ func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.H
 							return nil, skipped, err
 						}
 						alt = alt.ToNonAD()
-						if alt.Server == types.HostedServer {
+						switch alt.Server {
+						case types.HostedServer:
 							alt.Server = types.DefaultUserServer
-						} else if alt.Server == types.HostedLIDServer {
+						case types.HostedLIDServer:
 							alt.Server = types.HiddenUserServer
 						}
 						alternates[candidate] = alt

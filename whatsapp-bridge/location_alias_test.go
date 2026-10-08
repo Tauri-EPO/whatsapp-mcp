@@ -68,7 +68,7 @@ func TestLocationVerifiedAliasRetainsOriginalAuthor(t *testing.T) {
 }
 
 func TestPhoneLocationCollisionRetainsActivityAndReadMarker(t *testing.T) {
-	for _, kind := range []string{"text", "static", "foreign live"} {
+	for _, kind := range []string{"text", "static", "foreign live", "foreign initial"} {
 		t.Run(kind, func(t *testing.T) {
 			ms := newTestMessageStore(t)
 			chat := types.NewJID("120363000000000001", types.GroupServer)
@@ -83,7 +83,7 @@ func TestPhoneLocationCollisionRetainsActivityAndReadMarker(t *testing.T) {
 			switch kind {
 			case "static":
 				original = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.25), DegreesLongitude: proto.Float64(0.5)}}
-			case "foreign live":
+			case "foreign live", "foreign initial":
 				original, sender = livePosition(0, 0.25), selfPhone
 			}
 			if err := persistMessage(ms, "H0", chat.String(), sender.String(), stamp, false, extractMessage(original, stamp, "H0"), true, testLogger()); err != nil {
@@ -95,7 +95,11 @@ func TestPhoneLocationCollisionRetainsActivityAndReadMarker(t *testing.T) {
 			conversation := fixture.Data.Conversations[0]
 			conversation.UnreadCount = proto.Uint32(0)
 			row := conversation.Messages[0].Message
-			row.Participant, row.MessageTimestamp, row.Message = proto.String(phonePN.String()), proto.Uint64(1900000000), livePosition(3, 0.9)
+			sequence := int64(3)
+			if kind == "foreign initial" {
+				sequence = 0
+			}
+			row.Participant, row.MessageTimestamp, row.Message = proto.String(phonePN.String()), proto.Uint64(1900000000), livePosition(sequence, 0.9)
 			b.handleHistorySync(fixture)
 			var activity, read time.Time
 			if err := ms.db.QueryRow("SELECT last_message_time,last_read_time FROM chats WHERE jid=?", chat.String()).Scan(&activity, &read); err != nil {

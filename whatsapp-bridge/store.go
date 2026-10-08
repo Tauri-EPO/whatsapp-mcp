@@ -759,11 +759,15 @@ func (store *MessageStore) Close() error {
 // A zero lastMessageTime binds NULL, which the merge reads as "no news":
 // the row is created or renamed and its time is left alone (EnsureChat).
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+	return storeChatWith(store.db, jid, name, lastMessageTime)
+}
+
+func storeChatWith(ex sqlExecer, jid, name string, lastMessageTime time.Time) error {
 	var seen any
 	if !lastMessageTime.IsZero() {
 		seen = dbTime(lastMessageTime)
 	}
-	_, err := store.db.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
 		VALUES (?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
@@ -910,6 +914,14 @@ func (store *MessageStore) ValidateInboundMarkRead(chatJID, senderHint string, i
 // MaxMessageTimestamp returns the latest stored timestamp among the given
 // message IDs in chatJID. ok is false when none of the IDs are present.
 func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (time.Time, bool, error) {
+	return maxMessageTimestampWith(store.db, chatJID, ids)
+}
+
+type sqlRowQuerier interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+func maxMessageTimestampWith(ex sqlRowQuerier, chatJID string, ids []string) (time.Time, bool, error) {
 	if len(ids) == 0 {
 		return time.Time{}, false, nil
 	}
@@ -921,7 +933,7 @@ func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (ti
 		args = append(args, id)
 	}
 	var raw any
-	err := store.db.QueryRow(
+	err := ex.QueryRow(
 		`SELECT MAX(timestamp) FROM messages WHERE chat_jid = ? AND id IN (`+strings.Join(placeholders, ",")+`)`,
 		args...,
 	).Scan(&raw)

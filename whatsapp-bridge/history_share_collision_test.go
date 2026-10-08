@@ -31,6 +31,38 @@ func TestPeerHistoryJobCancellationStopsBetweenChunks(t *testing.T) {
 	if attempts != 2 || count != historyBatchMessages || b.metrics.historyMessages.Load() != historyBatchMessages || b.metrics.storeFailures.Load() != 0 || b.ctx.Err() != nil {
 		t.Fatalf("peer exceeded cancellation boundary or stopped bridge: attempts=%d rows=%d imported=%d failures=%d lifecycle=%v", attempts, count, b.metrics.historyMessages.Load(), b.metrics.storeFailures.Load(), b.ctx.Err())
 	}
+	var activity time.Time
+	if err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid='120363000000000001@g.us'").Scan(&activity); err != nil || !activity.Equal(time.Unix(1772359200, 0)) {
+		t.Fatalf("committed cancelled chunk lost activity: %v err=%v", activity, err)
+	}
+	// A replay that skips all keys already committed must retain their activity.
+	b.historyBatchWriter = nil
+	b.handleHistorySyncWithShares(shareHistoryFixture(historyBatchMessages), false, true)
+	var replayActivity time.Time
+	if err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid='120363000000000001@g.us'").Scan(&replayActivity); err != nil || !replayActivity.Equal(activity) {
+		t.Fatalf("replay lost committed activity: %v err=%v", replayActivity, err)
+	}
+}
+
+func TestPeerHistoryActivityFailureRollsBackRows(t *testing.T) {
+	ms := newTestMessageStore(t)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+	if _, err := ms.db.Exec(`CREATE TRIGGER reject_peer_activity BEFORE UPDATE OF last_message_time ON chats
+		WHEN NEW.last_message_time IS NOT NULL BEGIN SELECT RAISE(ABORT,'marker failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	b.handleHistorySyncWithShares(shareHistoryFixture(3), false, true)
+	var count int
+	var activity any
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid='120363000000000001@g.us'").Scan(&activity); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || activity != nil || b.metrics.historyMessages.Load() != 0 || b.metrics.storeFailures.Load() != 3 {
+		t.Fatalf("activity failure committed partial rows: rows=%d activity=%v imported=%d failures=%d", count, activity, b.metrics.historyMessages.Load(), b.metrics.storeFailures.Load())
+	}
 }
 
 func TestPeerLocationCannotUpdateExistingAuthor(t *testing.T) {
