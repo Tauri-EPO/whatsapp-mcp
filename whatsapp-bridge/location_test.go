@@ -181,6 +181,44 @@ func TestLiveLocationAuthorCollisions(t *testing.T) {
 	}
 }
 
+func TestLocationUpsertCompatibility(t *testing.T) {
+	for _, kind := range []string{"legacy-text", "same-author-text", "same-author-static"} {
+		t.Run(kind, func(t *testing.T) {
+			ms := newTestMessageStore(t)
+			stamp := time.Unix(1772359200, 0)
+			chat := phonePN.String()
+			if err := ms.EnsureChat(chat, "Alice"); err != nil {
+				t.Fatal(err)
+			}
+			if err := persistMessage(ms, "COMPAT", chat, phonePN.String(), stamp, false, extractMessage(livePosition(0, 0.25), stamp, "COMPAT"), true, testLogger()); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "legacy-text" {
+				if _, err := ms.db.Exec("UPDATE messages SET media_type=NULL, location=NULL WHERE id='COMPAT'"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			incoming := &waE2E.Message{Conversation: proto.String("replacement")}
+			if kind == "same-author-static" {
+				incoming = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.75), DegreesLongitude: proto.Float64(0.5)}}
+			}
+			ex := extractMessage(incoming, stamp, "COMPAT")
+			consumed, err := persistMessageResult(ms, "COMPAT", chat, phonePN.String(), stamp, false, ex, true, testLogger())
+			if err != nil || consumed {
+				t.Fatalf("compatible upsert refused: consumed=%v err=%v", consumed, err)
+			}
+			var content, sender, server string
+			var own bool
+			if err := ms.db.QueryRow("SELECT content,sender,sender_server,is_from_me FROM messages WHERE id='COMPAT'").Scan(&content, &sender, &server, &own); err != nil {
+				t.Fatal(err)
+			}
+			if content != ex.content || sender != phonePN.User || server != types.DefaultUserServer || own {
+				t.Fatalf("compatible upsert lost: %q %s %s %v", content, sender, server, own)
+			}
+		})
+	}
+}
+
 func TestLiveLocationConcurrentAuthorClaim(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms, err := NewMessageStore()

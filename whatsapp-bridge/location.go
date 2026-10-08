@@ -117,7 +117,7 @@ func updateLiveLocationWith(ex locationWriter, id, chat, sender string, fromMe b
 	user, server := splitSenderJID(sender)
 	var sameAuthor, locationRow bool
 	err := ex.QueryRow(`SELECT COALESCE(sender = ? AND sender_server IS ? AND is_from_me = ?, 0),
-		media_type = 'location' FROM messages WHERE id = ? AND chat_jid = ?`, user, server, fromMe, id, chat).Scan(&sameAuthor, &locationRow)
+		COALESCE(media_type, '') = 'location' FROM messages WHERE id = ? AND chat_jid = ?`, user, server, fromMe, id, chat).Scan(&sameAuthor, &locationRow)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
