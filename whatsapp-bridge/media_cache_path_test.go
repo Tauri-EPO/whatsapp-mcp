@@ -124,6 +124,24 @@ func TestCachedMediaIsTheSameThingForDownloadPurgeAndWebhook(t *testing.T) {
 			if (webhook == nil) != want {
 				t.Errorf("webhook: open error = %v, want cached = %v", webhook, want)
 			}
+			// Retention and usage enumerate cache files without DB rows. Some
+			// refusal fixtures also plant a separate real file in a valid chat;
+			// that file counts, while the refused row's alias or nested path does not.
+			wantFiles := 0
+			switch tc.name {
+			case "a regular file", "the chat directory is a symlink to another chat of the store", "the chat JID names a nested path":
+				wantFiles = 1
+			}
+			root := storeRootAt(t, storeDir())
+			_, _, files := storeUsage(root)
+			if files != wantFiles {
+				t.Fatalf("usage counted %d files, want %d", files, wantFiles)
+			}
+			// Every regular fixture is already older than this future cutoff.
+			removed, _, failed := sweepMedia(root, time.Hour, time.Now().Add(24*time.Hour))
+			if removed != wantFiles || failed != 0 {
+				t.Fatalf("retention removed=%d failed=%d, want %d/0", removed, failed, wantFiles)
+			}
 		})
 	}
 }

@@ -78,9 +78,9 @@ func TestAnalyzeOggOpus(t *testing.T) {
 			t.Fatal("expected error for empty data")
 		}
 	})
-	t.Run("duration from granule with OpusHead sample rate and pre-skip", func(t *testing.T) {
+	t.Run("duration from 48 kHz granules and pre-skip", func(t *testing.T) {
 		// A real ffmpeg first page is exactly 47 bytes: 27 header + 1 segment + 19 packet.
-		data := append(oggPage(0, 0, opusHead(312, 16000)), oggPage(1, 16000*3+312, []byte{0xfc})...)
+		data := append(oggPage(0, 0, opusHead(312, 16000)), oggPage(1, 48000*3+312, []byte{0xfc})...)
 		if len(data) != 47+29 {
 			t.Fatalf("test fixture size = %d", len(data))
 		}
@@ -88,9 +88,8 @@ func TestAnalyzeOggOpus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// With the default 48 kHz the same granule would read as 1 s.
 		if dur != 3 {
-			t.Errorf("duration = %d, want 3 (sample rate must come from OpusHead)", dur)
+			t.Errorf("duration = %d, want 3 (granules always count 48 kHz samples)", dur)
 		}
 		if len(wave) != 64 {
 			t.Errorf("waveform length = %d, want 64", len(wave))
@@ -117,7 +116,7 @@ func TestAnalyzeOggOpus(t *testing.T) {
 	t.Run("truncated page does not panic", func(t *testing.T) {
 		data := oggPage(0, 0, opusHead(0, 48000))
 		for cut := 4; cut < len(data); cut++ {
-			if _, _, err := analyzeOggOpus(data[:cut]); err != nil {
+			if _, _, err := analyzeOggOpus(bytes.Clone(data[:cut])); err != nil {
 				t.Errorf("cut %d: unexpected error %v", cut, err)
 			}
 		}

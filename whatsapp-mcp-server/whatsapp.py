@@ -4561,6 +4561,7 @@ def purge_media(
     media_type: str = "",
     dry_run: bool = True,
     summary_only: bool = False,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Ask the bridge to drop cached media bytes (rows untouched); dry run unless told otherwise.
 
@@ -4571,6 +4572,10 @@ def purge_media(
     chat_jid = (chat_jid or "").strip()
     media_type = (media_type or "").strip()
     normalized: list[dict[str, str]] = []
+    if len(items or []) > 1000:
+        raise ToolError("invalid_argument", "items must contain at most 1000 entries; use criteria for bulk purges")
+    if cursor and items:
+        raise ToolError("invalid_argument", "cursor belongs to criteria calls, not items")
     for item in items or []:
         if not isinstance(item, dict):
             raise ToolError("invalid_argument", "items must be a list of {message_id, chat_jid}")
@@ -4594,6 +4599,8 @@ def purge_media(
     if normalized:
         body["items"] = normalized
     else:
+        if cursor:
+            body["cursor"] = cursor
         if chat_jid:
             body["chat_jid"] = chat_jid
         if older_than_days:
@@ -4620,6 +4627,8 @@ def purge_media(
         "scan_truncated": bool(payload.get("scan_truncated", False)),
         "unreachable": int(payload.get("unreachable") or 0),
         "failed": int(payload.get("failed") or 0),
+        "next_cursor": payload.get("next_cursor") or None,
+        "examined": int(payload.get("examined") or 0),
     }
     if not summary_only:
         result["items"] = payload.get("items") or []

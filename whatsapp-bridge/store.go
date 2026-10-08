@@ -114,6 +114,7 @@ func NewMessageStore() (*MessageStore, error) {
 		-- idx_messages_chat_jid was a redundant prefix of the composite index.
 		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_messages_media_cursor ON messages(timestamp, id, chat_jid) WHERE media_type IN ('image','video','audio','document','sticker');
 		CREATE INDEX IF NOT EXISTS idx_chats_last_message ON chats(last_message_time);
 		-- Media inventory and notes (MCP server) group and look up rows by content
 		-- hash; text rows carry NULL, so a partial index stays small.

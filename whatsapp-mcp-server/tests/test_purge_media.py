@@ -36,7 +36,7 @@ BRIDGE_OK = {
     "success": True,
     "message": "Dry run: 1 cached file(s), 4096 bytes would be removed; repeat with dry_run=false to purge",
     "dry_run": True,
-    "matched": 2,
+    "matched": 1,
     "purged_files": 1,
     "purged_bytes": 4096,
     "truncated": False,
@@ -56,7 +56,7 @@ def test_items_form_is_dry_run_by_default(monkeypatch):
         "items": [{"message_id": "A", "chat_jid": CHAT}, {"message_id": "B", "chat_jid": CHAT}],
     }
     assert out["success"] and out["dry_run"] is True and out["purged_files"] == 1 and out["purged_bytes"] == 4096
-    assert out["matched"] == 2 and out["items"][1]["reason"] == "not cached" and "dry_run=false" in out["message"]
+    assert out["matched"] == 1 and out["items"][1]["reason"] == "not cached" and "dry_run=false" in out["message"]
 
 
 def test_criteria_form_sends_only_set_fields(monkeypatch):

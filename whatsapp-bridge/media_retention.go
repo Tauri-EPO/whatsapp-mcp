@@ -115,46 +115,31 @@ func isChatDir(entry os.DirEntry) bool {
 // bytes freed. Errors on individual files are counted, not fatal; a nil root
 // (the store could not be opened) counts as one failure.
 //
-// Both the walk and the delete go through the os.Root, so every path component
-// is resolved inside the store by the kernel: a symlink out of the store — or
-// one swapped in after the walk stat'd the entry — makes Remove fail instead of
-// deleting somebody else's file.
+// The shared cache walker pins each real chat directory and visits only plain
+// regular generated cache names directly inside it. Deletes use that same
+// directory handle; user files, .part downloads, nested directories and
+// symlinks are neither traversed nor removed.
 func sweepMedia(root *os.Root, maxAge time.Duration, now time.Time) (removed int, freed int64, failed int) {
-	if root == nil {
-		return 0, 0, 1
-	}
 	cutoff := now.Add(-maxAge)
-	fsys := root.FS()
-	entries, err := fs.ReadDir(fsys, ".")
-	if err != nil {
-		return 0, 0, 1
-	}
-	for _, entry := range entries {
-		if !isChatDir(entry) {
-			continue
+	if err := eachCachedMedia(root, func(_ string, file *cachedMedia) {
+		if !file.info.ModTime().Before(cutoff) {
+			return
 		}
-		_ = fs.WalkDir(fsys, entry.Name(), func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil || d.IsDir() {
-				return nil
-			}
-			info, statErr := d.Info()
-			if statErr != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
-				return nil
-			}
-			if rmErr := root.Remove(path); rmErr != nil {
-				failed++
-				return nil
-			}
-			removed++
-			freed += info.Size()
-			return nil
-		})
+		if err := file.Remove(); err != nil {
+			failed++
+			return
+		}
+		removed++
+		freed += file.info.Size()
+	}); err != nil {
+		failed++
 	}
 	return removed, freed, failed
 }
 
 // storeUsage measures the store directory through its os.Root. storeBytes
-// covers everything (databases included); mediaBytes only the chat directories.
+// covers all regular store files (databases and nested files included);
+// mediaBytes and mediaFiles use the same cache rule as download and purge.
 // A nil root measures nothing.
 func storeUsage(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int) {
 	if root == nil {
@@ -169,13 +154,11 @@ func storeUsage(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int) {
 			return nil
 		}
 		storeBytes += info.Size()
-		// fs paths are always slash-separated and relative to the root, so the
-		// first component is the chat directory without any filepath.Rel step.
-		if top := strings.SplitN(path, "/", 2)[0]; strings.Contains(top, "@") {
-			mediaBytes += info.Size()
-			mediaFiles++
-		}
 		return nil
+	})
+	_ = eachCachedMedia(root, func(_ string, file *cachedMedia) {
+		mediaBytes += file.info.Size()
+		mediaFiles++
 	})
 	return storeBytes, mediaBytes, mediaFiles
 }

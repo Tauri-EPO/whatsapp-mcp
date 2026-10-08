@@ -312,7 +312,7 @@ def cached_path(chat_jid: str, message_id: str) -> str | None:
     other file in the chat, and the answer is the directory as it is now, not a
     memoised scan — the bytes are opened right after this.
     """
-    name = media_inventory.lookup_cached_name(chat_jid, message_id)
+    name = media_inventory.lookup_cached_name(chat_jid, message_id, refuse_unsafe=True)
     if name is None:
         return None
     return _in_chat_dir(chat_jid, os.path.join(media_inventory.chat_media_dir(chat_jid), name))

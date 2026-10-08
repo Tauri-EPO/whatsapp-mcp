@@ -1696,11 +1696,23 @@ and text never appear.
 - `chat_jid` / `exclude_chat_jid` (optional): one chat or a list of them (see [Chat filters](#chat-filters)); default every allowed chat
 - `media_type` (optional): `image` | `video` | `audio` | `document` | `sticker`
 - `after` / `before` (optional): ISO-8601 bounds
-- `min_bytes` (optional): only files at least this large
+- `min_bytes` (optional): minimum actual safe cached size; uncached rows use
+  the declared WhatsApp length (unknown lengths are excluded)
 - `has_notes` (optional): `true` only files already annotated, `false` only files with no
   note yet (the backlog to interpret); omitted returns both
 - `sort` (optional): `size` (largest first, default), `date` (newest first) or `copies` (most forwarded first)
 - `limit` (default 50, max 200), `page`, `cursor`: pagination as in every list tool
+
+With `min_bytes`, a page examines at most 4096 candidates. Continue with
+`next_cursor` even if the page is empty. Sorting by size still uses declared
+lengths; `cached_bytes` reports actual bytes. Cached paths refuse links and
+nested names, using the same regular-file rule as the bridge.
+
+A listing used to drive deletions must continue by **cursor**, never numbered
+pages: removing cached files can change `min_bytes` matches, shifting numbered
+offsets past files you have not processed. Start with
+`list_media(min_bytes=1024, limit=50)` and continue using
+`list_media(min_bytes=1024, limit=50, cursor=previous["next_cursor"])`.
 
 Each item carries `message_id`, `chat_jid`, `chat_name`, `sender_jid`,
 `is_from_me`, `timestamp`, `media_type`, `filename`, `bytes` (the declared size: null when undeclared, 0 for an
@@ -2011,74 +2023,84 @@ an ordinary correction.
 
 ### `purge_media`
 
-Free disk space by dropping cached media bytes. Message rows, hashes and
-notes stay, nothing is sent to WhatsApp, and `download_media` can fetch a
-purged file again later (expired CDN links are recovered through the sender's
-phone). To remove a message itself use `delete_message`.
+Free disk space by dropping cached media bytes. Message rows, hashes and notes
+stay; `download_media` can fetch a purged file again later. Nothing is sent to
+WhatsApp. To remove a message itself use `delete_message`.
 
-**`dry_run` defaults to `true`.** The first call only reports what would be
-removed; call again with `dry_run=false` to delete. Check the `notes` field of
-`list_media` (or `get_media_notes`) before purging anything marked `keep`.
+**`dry_run` defaults to `true`.** It previews the next real call made with the
+same filters and **the same input cursor**, while the cache is unchanged. Check
+the `notes` field of `list_media` before purging anything marked `keep`.
 
-**Parameters** (name the files, or describe them):
+**Parameters:**
 
-- `items`: explicit `[{"message_id", "chat_jid"}]` from `list_media`
-- `chat_jid`, `older_than_days`, `min_bytes`, `media_type`: criteria resolved
-  by the bridge from `messages.db`; the bridge removes at most 500 files per
-  call (see [Purging a large set](#purging-a-large-set))
-- `dry_run` (default `true`)
-- `summary_only` (default `false`): leave `items` out and return the totals
-  only. A criteria call that matches 500 files otherwise answers with about
-  70 KB of per-file rows
+- `items`: explicit `[{"message_id", "chat_jid"}]` from `list_media`; or use criteria.
+- `chat_jid`, `older_than_days`, `min_bytes`, `media_type`: criteria resolved by
+  the bridge. `min_bytes` uses actual safe cached bytes, including rows whose
+  declared length is NULL, zero or understated. Uncached rows cannot be purged.
+- `dry_run` (default `true`): `false` deletes the selected files.
+- `cursor`: criteria continuation, returned as `next_cursor`; keep the same filters.
+- `summary_only` (default `false`): omit per-file `items` and return totals only.
 
-Returns `dry_run`, `message`, `matched`, `purged_files`, `purged_bytes`,
-`truncated`, `remaining`, `scan_truncated`, `unreachable` and `items`
-(`purged`, `bytes`, `file`, `reason` such as `not cached`,
-`not a media message`, `message not found`, denied chat); `items` is absent
-with `summary_only`. `matched` is the number of cached files the criteria form
-selected; on the `items` form it is the number of named rows that exist.
-Every deleted path is built by the bridge from a message row (`chat_jid`,
-`media_type`, `timestamp`, `id`), never from a client-supplied path, and is
-confined to the store directory. `WHATSAPP_ALLOWED_CHATS` applies (the MCP
-server refuses denied chats, the bridge answers 403 and skips denied rows).
+Both forms select at most **500 cached files**, not 500 named rows. Missing,
+uncached, denied and duplicate explicit entries do not consume file slots. Each
+criteria call examines at most 100000 allowed rows. An explicit request accepts
+at most **1000 named items** (HTTP 400 above it); the HTTP body is limited to
+**1048576 bytes**. Use criteria for bulk purges. The explicit form
+reports reasons for examined non-candidates and `remaining` counts named entries
+not examined; submit those remaining entries next. `matched` always means cached
+files selected, in either form. Duplicates have their own entry with reason
+`duplicate`; failed real removals are counted in `failed` in both forms.
+`purged_files` and `purged_bytes` report the preview
+or the successful deletions, not declared lengths.
 
-<a id="purging-a-large-set"></a>**Purging a large set.** The criteria form
-looks at the rows that match oldest first and counts only those whose file is
-**still cached**: a row whose bytes an earlier purge, the retention sweep or a
-cache wipe already removed costs a stat, not one of the 500 slots. So the same
-call, repeated, makes progress, and the loop ends by itself:
+Returns `dry_run`, `message`, `matched`, `purged_files`, `purged_bytes`, `truncated`,
+`remaining`, `next_cursor`, `examined`, `scan_truncated`, `unreachable`, `failed`
+and `items` (`message_id`, `chat_jid`, `purged`, `bytes`, `file`, `reason`).
 
-1. `purge_media(chat_jid="status@broadcast", summary_only=true)` — the dry run:
-   `purged_files` / `purged_bytes` are what the first real call removes
-   (exactly that set), `remaining` how many more matching cached files wait
-   behind it.
-2. `purge_media(chat_jid="status@broadcast", dry_run=false, summary_only=true)`,
-   **repeated while `truncated` is `true`**. `remaining` falls by up to 500 per
-   call; the call with `truncated: false` removed the last of them, and one more
-   reports `matched: 0`.
+<a id="purging-a-large-set"></a>**Purging a large set:**
 
-A call scans at most 100000 matching rows (the stats of the uncached ones are
-the cost). If it reaches that before finding a cached file, `scan_truncated` is
-`true`, `truncated` stays `true` and `purged_files` is 0 — repeating would
-repeat the same walk, so narrow the criteria (`media_type`, `min_bytes`,
-`older_than_days`) instead. `unreachable` counts matching rows whose cached path
-is refused: the cached name or the chat directory is a symlink (wherever it
-points, also to another file or chat of the store), the name is a directory, or
-the directory could not be opened. The reason reads `cached path does not
-resolve inside the store directory` in all of these cases, because the purge
-looks for a regular file in the chat's own directory and follows nothing, as
-the download does. The first 50 are listed in `items` with their reason, none
-of them uses a slot. `failed` counts selected files that could not be removed (a read-only
-directory, an immutable file); when a real call removes nothing and `failed`,
-`truncated` is `false` and the message says so, because repeating cannot help.
-Denied chats are skipped before they are probed and do not use the 100000-row
-ceiling. A criteria call keeps counting `remaining` after it has its 500 files,
-so it stats the rest of the matching rows too; it stops if the client
-disconnects. `unreachable` is also what a row with a corrupted chat path
-reports. Drop `summary_only` to see which rows and why. `remaining`,
-`scan_truncated`, `unreachable` and `failed` belong to the
-criteria form; the `items` form still takes the first 500 entries you name and
-reports `truncated` if you named more.
+1. Preview criteria without a cursor (or with the cursor of the current page).
+2. Make the real call with `dry_run=false` and **that same input cursor**.
+3. While `truncated` is true, pass the real call's `next_cursor` to the next
+   criteria call. An empty result with a cursor still needs continuation.
+
+The cursor seeks past the last examined `(timestamp, message_id, chat_jid)` and
+the next call does not rescan the prefix. Selection stops at the file or scan
+cap, without walking the remaining tail to count it. Criteria `remaining=-1`
+means that count is unknown; `remaining=0` means the scan reached the end.
+`truncated` is conservative at exactly 500 files, so a final continuation may
+return no files. `scan_truncated` distinguishes the scan cap from the file cap.
+Restart without a cursor to include new rows inserted before an earlier cursor,
+or to reconsider rows whose cache state changed after they were examined.
+
+`unreachable` counts refused criteria paths: a symlinked name or chat directory,
+a directory under the cached name, or an inaccessible directory. The first 50
+are listed with the neutral reason `cached path refused or inaccessible: expected
+a regular file in a real chat directory`. `failed` counts selected files that
+could not be removed; inspect their items and retry those IDs after correcting
+the filesystem problem. When all selected removals fail, `truncated` is false
+and the message says that repeating cannot help.
+
+Every path comes from an existing message row and uses a plain filename directly
+inside the chat's own pinned directory. The bridge follows no links, including
+links to another file or chat inside the store. Download, webhook, purge,
+retention and media usage use that same rule. **Links and nested files remain
+outside automatic cleanup:** stop the bridge and remove an unwanted link itself
+with your operating system's filesystem tools after checking its exact path;
+do not follow the link or remove its target. Remove unwanted nested directories
+manually after inspecting their contents. The bridge never unlinks these entries.
+Retention and media usage enumerate only generated cache names (media category,
+timestamp and cache suffix). User files and unfinished `.part` downloads are
+excluded from media totals and left untouched by retention, including old parts;
+`store_bytes` still includes their regular bytes.
+Documents named `model.part` cache under `.part.bin`; their temporary files end
+in `.part.bin.part`. Older completed `.part` caches remain untouched and are
+excluded from media totals; `download_media` fetches them again under the new
+name when requested. The sender's display filename remains `model.part`.
+
+`WHATSAPP_ALLOWED_CHATS`, tool policy and read-only mode apply on every call,
+including continuations. Denied chats are skipped before disk probes and do not
+consume the criteria probe budget. Message rows, hashes and notes stay intact.
 
 **Natural Language Examples:**
 

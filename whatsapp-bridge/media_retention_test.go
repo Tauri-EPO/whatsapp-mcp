@@ -55,8 +55,8 @@ func seedStore(t *testing.T, now time.Time) (string, map[string]string) {
 	paths := map[string]string{
 		"db":    filepath.Join(root, "messages.db"),
 		"token": filepath.Join(root, ".bridge-token"),
-		"old":   filepath.Join(chat, "20260101_old.jpg"),
-		"fresh": filepath.Join(chat, "20260904_fresh.jpg"),
+		"old":   filepath.Join(chat, mediaFileName("image", now.Add(-40*24*time.Hour), "OLD1", "")),
+		"fresh": filepath.Join(chat, mediaFileName("image", now, "FRESH1", "")),
 	}
 	for role, p := range paths {
 		if err := os.WriteFile(p, []byte(role+"-content"), 0o600); err != nil {
