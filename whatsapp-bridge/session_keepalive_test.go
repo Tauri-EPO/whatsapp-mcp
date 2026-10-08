@@ -456,6 +456,32 @@ func TestSessionKeepalive_NewPairingDiscardsThePreviousTimestamp(t *testing.T) {
 	}
 }
 
+func TestSessionKeepalive_BackwardClockStepDoesNotPostponeAFailedAttempt(t *testing.T) {
+	rec := newPresenceRecorder()
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceAvailable && attempt == 1 {
+			return errors.New("socket closed")
+		}
+		return nil
+	}
+	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)
+	b.SessionKeepaliveRetry = 5 * time.Minute
+	b.SessionKeepaliveSettle = 0
+	stamp := time.Date(2027, 10, 7, 12, 0, 0, 0, time.UTC)
+	var now atomic.Int64
+	now.Store(stamp.UnixNano())
+	b.sessionNow = func() time.Time { return time.Unix(0, now.Load()) }
+	b.startSessionKeepalive()
+	if got := rec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("failed available: %q, want unavailable", got)
+	}
+	rec.quiet(t, 20*time.Millisecond)
+	now.Store(stamp.AddDate(-1, 0, 0).UnixNano())
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("after backward step: %q, want available", got)
+	}
+}
+
 func TestSessionKeepalive_FailedStateWriteKeepsTheInMemoryInterval(t *testing.T) {
 	rec := newPresenceRecorder()
 	b := keepaliveBridge(t, 12*time.Hour, readyFlag(true), rec)

@@ -178,6 +178,9 @@ func (b *Bridge) runSessionKeepalive(lastBlip time.Time, reason string) {
 		if readySince.After(now) {
 			readySince = time.Time{}
 		}
+		if !notBefore.IsZero() && notBefore.Add(-b.SessionKeepaliveRetry).After(now) {
+			notBefore = time.Time{}
+		}
 		if !ready() {
 			readySince = time.Time{}
 			continue
