@@ -81,6 +81,9 @@ func runBridge(cfg bridgeConfig) int {
 
 	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
 	logger, clientLog, dbLog := newLoggerSet(cfg.LogLevel, cfg.JSONLogs)
+	if !cfg.PairingStdout {
+		clientLog = privatePairingLogger{clientLog}
+	}
 	bridgeLog = logger
 	logger.Infof("Starting WhatsApp client...")
 	logger.Infof("%s", buildInfo().String())

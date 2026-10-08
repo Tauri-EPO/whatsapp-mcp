@@ -46,7 +46,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_OPERATOR_TOKEN` | required when enabled | Random ASCII secret, 32-256 characters; distinct from the effective bridge token, including the stored fallback. Never use a placeholder. |
 | `WHATSAPP_OPERATOR_TOKEN_FILE` | empty | Alternative owner-only regular token file; symlinks, permissive modes and oversized files refused. Set token or file, never both. |
 | `WHATSAPP_OPERATOR_ALLOWED_HOSTS` | loopback hosts | Explicit comma-separated operator Hosts (`host` or `host:port`); wildcard refused. Browser Origin must match the listener's scheme and Host; native clients may omit it. |
-| `WHATSAPP_PAIRING_STDOUT` | `true` | Draw QR codes on stdout. Set false when using operator HTTP or exporting logs; the operator compose override defaults false. |
+| `WHATSAPP_PAIRING_STDOUT` | `true` | Draw QR codes on stdout. False also suppresses SDK DEBUG logs (QR payloads and raw protocol frames), while bridge/database DEBUG logs remain available. Set false for operator HTTP or exported logs; the operator compose override defaults false. |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |

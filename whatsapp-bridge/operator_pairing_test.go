@@ -32,6 +32,52 @@ type fakeOperatorClient struct {
 func newFakeOperatorClient() *fakeOperatorClient {
 	return &fakeOperatorClient{items: make(chan whatsmeow.QRChannelItem, 10)}
 }
+
+func TestOperatorPairCodeDoesNotOverwriteAsyncTransition(t *testing.T) {
+	for _, transition := range []string{"passkey_required", "completing"} {
+		t.Run(transition, func(t *testing.T) {
+			f := newOperatorPairingFixture(t)
+			f.client.codeStarted, f.client.codeRelease = make(chan struct{}), make(chan struct{})
+			f.client.items <- whatsmeow.QRChannelItem{Event: "code", Code: "FAKE-QR", Timeout: time.Minute}
+			state := f.stateHTTP(t, "awaiting_qr")
+			type result struct {
+				status int
+				body   string
+			}
+			done := make(chan result, 1)
+			go func() {
+				status, body := f.request(t, "POST", "pairing/code", fakeOperatorToken, `{"phone":"5511999999999"}`)
+				done <- result{status, body}
+			}()
+			select {
+			case <-f.client.codeStarted:
+			case <-time.After(time.Second):
+				t.Fatal("SDK PairPhone was not called")
+			}
+			if transition == "passkey_required" {
+				f.p.observe(state.Generation, whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{PublicKey: &types.WebAuthnPublicKey{Timeout: 60000}}})
+			} else if !f.p.beginCompletion(f.client) {
+				t.Fatal("completion was refused")
+			}
+			close(f.client.codeRelease)
+			select {
+			case result := <-done:
+				if result.status != 409 || strings.Contains(result.body, "FAKE-PAIR-CODE") {
+					t.Fatalf("stale code response: %+v", result)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("code response stalled")
+			}
+			current := f.p.snapshot()
+			if current.State != transition || current.PairCode != nil {
+				t.Fatalf("transition overwritten: %+v", current)
+			}
+			if transition == "completing" {
+				f.p.connectionEvent(&events.PairError{})
+			}
+		})
+	}
+}
 func (c *fakeOperatorClient) GetQRChannel(context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	return c.items, nil
 }

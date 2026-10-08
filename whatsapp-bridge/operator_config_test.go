@@ -14,7 +14,7 @@ import (
 const fakeOperatorToken = "fake-operator-token-0123456789abcdef"
 
 func operatorTestValues(overrides map[string]string) func(string) string {
-	values := map[string]string{operatorBindEnv: "127.0.0.1", operatorTokenEnv: fakeOperatorToken, "WHATSAPP_BRIDGE_TOKEN": "fake-data-plane-token-0123456789abcdef"}
+	values := map[string]string{operatorBindEnv: "127.0.0.1", operatorTokenEnv: fakeOperatorToken, "WHATSAPP_BRIDGE_TOKEN": "fake-data-plane-token-0123456789abcdef"} //nolint:gosec // Deliberately fake credentials for separate-token refusal tests.
 	for key, value := range overrides {
 		values[key] = value
 	}
@@ -102,7 +102,7 @@ func TestOperatorTokenFileIsBoundedPrivateAndDistinct(t *testing.T) {
 		t.Fatal("two token sources accepted")
 	}
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(path, 0o644); err != nil {
+		if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // Deliberately unsafe fixture mode; the next assertion requires refusal.
 			t.Fatal(err)
 		}
 		if _, err := readOperatorToken(path); err == nil {

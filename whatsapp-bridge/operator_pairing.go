@@ -390,7 +390,8 @@ func (p *operatorPairing) code(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.mu.Lock()
-	valid := generation == p.state.Generation && !p.paired() && p.now().Before(expires)
+	valid := generation == p.state.Generation && !p.paired() && !p.completing &&
+		(p.state.State == "awaiting_qr" || p.state.State == "code_issued") && p.now().Before(expires)
 	if valid {
 		p.state.State = "code_issued"
 		p.state.PairCode = &operatorCodeExpiry{ExpiresAt: expires}

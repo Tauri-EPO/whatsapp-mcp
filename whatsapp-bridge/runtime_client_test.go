@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,9 +9,22 @@ import (
 	"sync"
 	"testing"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
+
+func TestRuntimePrivatePairingLoggerDropsSDKCredentialsAtDebug(t *testing.T) {
+	var output bytes.Buffer
+	client := whatsmeow.NewClient(nil, privatePairingLogger{newJSONLogger("sdk", "DEBUG", &output)})
+	client.Log.Sub("QRChannel").Debugf("Emitting QR code %s", "FAKE-SECRET-QR")
+	client.Log.Sub("Recv").Sub("Frame").Debugf("%s", "FAKE-SECRET-PASSKEY")
+	client.Log.Debugf("Errored frame hex: %s", "FAKE-SECRET-FRAME")
+	client.Log.Sub("QRChannel").Infof("safe pairing transition")
+	if strings.Contains(output.String(), "FAKE-SECRET") || !strings.Contains(output.String(), "safe pairing transition") {
+		t.Fatalf("SDK credential filtering failed: %s", output.String())
+	}
+}
 
 func TestRuntimeClientHandoffRefreshesRealRESTIdentityAndIgnoresOldEvents(t *testing.T) {
 	first := newTestClientWithSelf(&mockLIDStore{}, types.NewJID("5511999999999", types.DefaultUserServer))

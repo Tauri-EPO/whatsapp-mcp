@@ -10,7 +10,18 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+// The SDK logs raw QR payloads and protocol frames at DEBUG. When pairing
+// stdout is disabled, suppress SDK debug at its root, before NewClient caches
+// its send/receive subloggers. Bridge and database debug logs remain available.
+type privatePairingLogger struct{ waLog.Logger }
+
+func (l privatePairingLogger) Debugf(string, ...any) {}
+func (l privatePairingLogger) Sub(module string) waLog.Logger {
+	return privatePairingLogger{l.Logger.Sub(module)}
+}
 
 // Client remains the initial client (and the test seam). Production handoffs
 // publish a new pointer atomically; no consumer writes or retains Client.
