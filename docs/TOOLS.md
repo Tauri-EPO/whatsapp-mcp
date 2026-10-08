@@ -554,7 +554,9 @@ Group messages shared when a member is added use a separate encrypted bundle.
 The bridge imports a received bundle automatically through history sync, on
 live delivery or history replay; `request_history` asks the account's own phone
 for older messages and cannot request that bundle by name. A share notice alone
-does not contain the messages. Compare the oldest stored message to confirm
+does not contain the messages. Imports are restricted to the originating group;
+a bundle containing another conversation is refused in full before any rows
+are written. Compare the oldest stored message to confirm
 import; the share counter only confirms recognition. See
 [missing group history](TROUBLESHOOTING.md#the-number-was-added-to-a-group-and-the-earlier-messages-are-missing)
 for download limits and failure diagnostics. Delivery to a paired phone has not

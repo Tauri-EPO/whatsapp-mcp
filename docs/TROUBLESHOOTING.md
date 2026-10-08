@@ -179,7 +179,10 @@ lists stay out of the bridge's share diagnostic. Imports are serialised and
 cancelled during shutdown, with a two-minute download/decode budget, a 16 MiB
 compressed limit and a 64 MiB inflated limit. Nested share messages are counted
 and logged but their bundles are not followed. Regular history chunk retries
-and store-failure accounting still apply after decoding.
+and store-failure accounting still apply after decoding. Only a group origin is
+accepted; every conversation and any explicit message chat key must match that
+group. A bundle containing another chat is refused in full before import, even
+when its encryption and hashes are valid.
 
 WhatsApp controls whether a share reaches this linked device; this path has
 synthetic encrypted HTTP test coverage, not a paired-phone guarantee. If the

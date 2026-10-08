@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
@@ -33,6 +34,9 @@ type Message struct {
 type MessageStore struct {
 	db   *sql.DB
 	waDB *sql.DB // whatsmeow's DB for contact name resolution fallback
+
+	insertMu   sync.Mutex
+	insertStmt *sql.Stmt // DB-owned, safe across callers; failed preparations are not cached
 
 	names     *chatNameCache  // resolved chat names + failed group lookups (chat_names.go)
 	groupInfo groupInfoLookup // live group metadata fetch; nil = no network
@@ -739,6 +743,11 @@ func (store *MessageStore) MigrateLegacyLIDSendersToPhones(whatsappDBPath string
 
 // Close the database connections
 func (store *MessageStore) Close() error {
+	store.insertMu.Lock()
+	if store.insertStmt != nil {
+		_ = store.insertStmt.Close()
+	}
+	store.insertMu.Unlock()
 	var waErr error
 	if store.waDB != nil {
 		waErr = store.waDB.Close()
@@ -1025,7 +1034,11 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 
 	// Single-row path; history sync uses Batch (store_batch.go) for the same
 	// statement inside one transaction.
-	_, err := store.db.Exec(insertMessageSQL, messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
+	stmt, err := store.messageInsertStatement()
+	if err != nil {
+		return err
+	}
+	_, err = stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
 		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
 	return err
 }
@@ -1220,4 +1233,21 @@ func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, str
 		err = lengthErr
 	}
 	return mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, length, err
+}
+
+// Preparing the same complex snapshot upsert for every single-row write costs
+// more than execution under the pure-Go SQLite driver. Reuse its DB statement;
+// each Exec keeps its existing implicit transaction and outer retry semantics.
+// A transient preparation failure must remain retryable, not poison the cache.
+func (store *MessageStore) messageInsertStatement() (*sql.Stmt, error) {
+	store.insertMu.Lock()
+	defer store.insertMu.Unlock()
+	if store.insertStmt == nil {
+		stmt, err := store.db.Prepare(insertMessageSQL)
+		if err != nil {
+			return nil, err
+		}
+		store.insertStmt = stmt
+	}
+	return store.insertStmt, nil
 }

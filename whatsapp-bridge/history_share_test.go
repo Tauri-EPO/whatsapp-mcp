@@ -31,6 +31,7 @@ import (
 func shareHistoryFixture(rows int) *events.HistorySync {
 	fixture := largeHistoryFixture(rows)
 	fixture.Data.SyncType = waHistorySync.HistorySync_RECENT.Enum()
+	fixture.Data.Conversations[0].ID = proto.String("120363000000000001@g.us")
 	return fixture
 }
 
@@ -126,7 +127,7 @@ func TestHistoryShareEncryptedHTTPToCanonicalSQLite(t *testing.T) {
 				msg.Message = message
 				b.handleMessage(msg)
 			} else {
-				outer := largeHistoryFixture(1)
+				outer := shareHistoryFixture(1)
 				outer.Data.Conversations[0].Messages[0].Message.Message = message
 				b.handleHistorySync(outer)
 			}
@@ -230,7 +231,7 @@ func TestHistoryShareNoticeAndNestedBundleDoNotDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle, requests := encryptedShareServer(t, b, compressShare(t, plain), "")
-	b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, phonePN.String(), "SHARE", false)
+	b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, "120363000000000001@g.us", "SHARE", false)
 	if requests.Load() != 1 || b.metrics.groupHistoryShares.Load() != 3 || strings.Count(rec.String(), "Group history") != 3 {
 		t.Fatalf("nested download/recognition: HTTP=%d shares=%d logs=%s", requests.Load(), b.metrics.groupHistoryShares.Load(), rec.String())
 	}
@@ -314,7 +315,7 @@ func TestHistoryShareIndependentImportsSerialiseAndShutdownStopsWaiter(t *testin
 			done := make(chan struct{}, 2)
 			for range 2 {
 				go func() {
-					b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, phonePN.String(), "SHARE", false)
+					b.handleHistoryShare(&waE2E.Message{MessageHistoryBundle: bundle}, "120363000000000001@g.us", "SHARE", false)
 					done <- struct{}{}
 				}()
 			}

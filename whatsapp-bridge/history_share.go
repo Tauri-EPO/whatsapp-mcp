@@ -11,6 +11,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
@@ -57,6 +58,10 @@ func (b *Bridge) processHistoryShare(msg *waE2E.Message, chat, id string, fromMe
 	if kind != "bundle" || !download || b.ctx.Err() != nil {
 		return
 	}
+	if !historyShareGroupOrigin(chat) {
+		b.Log.Warnf("Shared history import failed: originating group scope refused")
+		return
+	}
 	ctx, cancel := context.WithTimeout(b.ctx, historyShareTimeout)
 	defer cancel()
 	// Callers wait in their existing event path; no extra goroutines or queues.
@@ -74,9 +79,39 @@ func (b *Bridge) processHistoryShare(msg *waE2E.Message, chat, id string, fromMe
 		b.Log.Warnf("Shared history import failed: download, validation or decoding refused")
 		return
 	}
+	if !historyShareMatchesGroup(data, chat) {
+		b.Log.Warnf("Shared history import failed: conversation scope refused")
+		return
+	}
 	if ctx.Err() == nil {
 		b.handleHistorySyncWithShares(&events.HistorySync{Data: data}, false)
 	}
+}
+
+// The sender supplies both the media key and hashes: integrity proves the
+// bytes, not that a participant owns another conversation's history. Validate
+// the complete bundle before any canonical import can mutate archive state.
+func historyShareGroupOrigin(chat string) bool {
+	jid, err := canonicalChatJID(chat, false)
+	return err == nil && jid.Server == types.GroupServer && jid.String() == chat
+}
+
+func historyShareMatchesGroup(data *waHistorySync.HistorySync, chat string) bool {
+	if !historyShareGroupOrigin(chat) || len(data.GetConversations()) == 0 {
+		return false
+	}
+	for _, conversation := range data.GetConversations() {
+		if conversation.GetID() != chat {
+			return false
+		}
+		for _, row := range conversation.GetMessages() {
+			remote := row.GetMessage().GetKey().GetRemoteJID()
+			if remote != "" && remote != chat {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (b *Bridge) decodeHistoryShare(ctx context.Context, bundle *waE2E.MessageHistoryBundle, compressedLimit, inflatedLimit int64) (*waHistorySync.HistorySync, error) {
