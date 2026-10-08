@@ -448,6 +448,7 @@ def test_coverage_audio_is_scoped_by_chat(audio_archive):
         "transcribed": 0,
         "errors": 0,
         "unavailable": 0,
+        "refused": 0,
         "backlog": 1,
         "backlog_cached": 0,
     }
@@ -477,6 +478,7 @@ def test_coverage_audio_without_a_notes_db(archive):
         "transcribed": 0,
         "errors": 0,
         "unavailable": 0,
+        "refused": 0,
         "backlog": 1,
         "backlog_cached": 0,
     }

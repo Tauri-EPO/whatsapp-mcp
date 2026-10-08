@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS media_notes (
     PRIMARY KEY (sha256, key)
 );
 CREATE TABLE IF NOT EXISTS notes_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS media_refusals (
+    chat_jid TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (chat_jid, message_id)
+);
 """
 
 # --- Transcript index -------------------------------------------------------
@@ -128,6 +134,32 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     return conn
+
+
+def media_refusal_clause(conn: sqlite3.Connection, alias: str) -> str:
+    """SQL for an unrefused message; alias is an internal messages-table alias."""
+    if not conn.execute(
+        "SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_refusals'"
+    ).fetchone():
+        return "1"
+    return (
+        "NOT EXISTS (SELECT 1 FROM notesdb.media_refusals r "
+        f"WHERE r.chat_jid = {alias}.chat_jid AND r.message_id = {alias}.id)"
+    )
+
+
+def record_media_refusal(message_id: str, chat_jid: str, reason: str) -> None:
+    """Remember an unsafe row identity exactly, without suppressing its content hash."""
+    conn = _connect(create=True)
+    assert conn is not None
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO media_refusals (chat_jid, message_id, reason) VALUES (?, ?, ?)",
+                (chat_jid, message_id, reason),
+            )
+    finally:
+        conn.close()
 
 
 def _rebuild_transcripts_fts(conn: sqlite3.Connection) -> None:

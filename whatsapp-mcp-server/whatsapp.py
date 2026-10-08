@@ -4027,7 +4027,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 # request can bring back — the sender's phone no longer has it (issue #378), or
 # the row has no CDN fields to download with (issue #392) — which the caller
 # must remember rather than retry. Every other failure keeps the status map.
-_BRIDGE_NAMED_CODES = frozenset({"media_unavailable"})
+_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", "media_refused"})
 
 
 def _bridge_error_code(status: int) -> str:
@@ -4930,6 +4930,10 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     download needs (issue #392). Either way it leaves the backlog instead of
     being asked for on every pass.
 
+    `refused` counts unsafe row identities recorded in notes.db per message,
+    using the same predicate as the ingest worker; other copies of that hash
+    remain in the backlog until handled independently.
+
     Two cached counts, because they answer different questions: `cached` is how
     much of the audio in scope is on disk at all, and `backlog_cached` how much
     of the *backlog* is, so `backlog - backlog_cached` is what a batch would
@@ -4944,10 +4948,11 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     params = tuple(msg_params)
 
     note_params: tuple[Any, ...] = ()
-    transcribed_expr = error_expr = unavailable_expr = "0"
+    transcribed_expr = error_expr = unavailable_expr = refused_expr = "0"
     notes_path = media_notes.notes_db_path()
     if os.path.exists(notes_path):
         attach_notes_read_only(cur.connection, notes_path)
+        refused_expr = f"NOT ({media_notes.media_refusal_clause(cur.connection, 'messages')})"
         if cur.execute("SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'").fetchone():
             note_exists = (
                 "EXISTS (SELECT 1 FROM notesdb.media_notes n "
@@ -4965,11 +4970,13 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     # agent then transcribed by hand carries two — so subtracting them
     # separately would take that row off the backlog twice.
     handled_expr = "0" if not note_params else f"({transcribed_expr} OR {error_expr} OR {unavailable_expr})"
+    handled_expr = f"({handled_expr} OR {refused_expr})"
     cur.execute(
         f"""SELECT COUNT(*),
                    COALESCE(SUM({transcribed_expr}), 0),
                    COALESCE(SUM({error_expr}), 0),
                    COALESCE(SUM({unavailable_expr}), 0),
+                   COALESCE(SUM({refused_expr}), 0),
                    COALESCE(SUM({handled_expr}), 0)
               FROM messages WHERE {clause}""",
         # Each EXISTS probe carries its own key placeholder, in the order the
@@ -4977,7 +4984,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
         # three again for `handled`), then the scope.
         (*note_params, *note_params, *params),
     )
-    total, transcribed, errors, unavailable, handled_total = (int(value or 0) for value in cur.fetchone())
+    total, transcribed, errors, unavailable, refused, handled_total = (int(value or 0) for value in cur.fetchone())
 
     # Untranscribed rows first, then newest: when COVERAGE_AUDIO_MAX_ROWS bites,
     # the budget is spent on the rows the answer is about. The worker transcribes
@@ -5026,6 +5033,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
         "transcribed": transcribed,
         "errors": errors,
         "unavailable": unavailable,
+        "refused": refused,
         "backlog": total - handled_total,
         "backlog_cached": backlog_cached,
     }

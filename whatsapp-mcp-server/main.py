@@ -261,12 +261,13 @@ def coverage(
     nothing at all then, not that your contacts were silent.
 
     audio is the voice-note side of the same scope: {messages, cached,
-    transcribed, errors, unavailable, backlog, backlog_cached, cached_examined} —
+    transcribed, errors, unavailable, refused, backlog, backlog_cached, cached_examined} —
     inbound voice notes stored (the status feed "status@broadcast" is not
     counted: no batch walks it), how many have their bytes on disk, how many
     already have a transcript, a recorded failure (errors) or bytes no download
     brought here (unavailable: the sender's phone no longer has them, or the row
-    was stored without the fields a download needs), and
+    was stored without the fields a download needs), or an unsafe row identity
+    (refused: per message, leaving other copies of its hash fetchable), and
     backlog = the rest, what transcribe_audio or TRANSCRIBE_ON_INGEST would
     still work through. Ask
     it before starting a batch: backlog - backlog_cached is how many of those

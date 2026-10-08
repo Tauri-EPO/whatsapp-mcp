@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -357,7 +358,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to a background download so media is cached for future MCP tool calls
-			b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
+			if !errors.Is(dlErr, errMediaRefused) && !errors.Is(dlErr, errMediaUnavailable) {
+				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
+			}
 		}
 	case cacheOnArrival:
 		// Media that is not included in a webhook payload: cached in the

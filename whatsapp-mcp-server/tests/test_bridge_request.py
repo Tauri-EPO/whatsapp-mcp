@@ -148,6 +148,12 @@ def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch):
     assert exc.value.code == "media_unavailable"
     assert "NOT_FOUND" in exc.value.message
 
+    refused = _Failed(500, "media_refused", "unsafe message identity")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: refused)
+    with pytest.raises(ToolError) as exc:
+        whatsapp.download_media("MSG1", "5511999999999@s.whatsapp.net")
+    assert exc.value.code == "media_refused"
+
     # Without a name, the status still decides.
     cdn = _Failed(500, "internal", "Failed to download media: CDN says 410")
     monkeypatch.setattr(whatsapp.bridge_http, "post", lambda url, **kwargs: cdn)

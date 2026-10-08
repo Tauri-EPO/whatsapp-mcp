@@ -166,6 +166,7 @@ class Fetched:
     # no longer has them, or the row has no key). Empty for a failure worth
     # retrying.
     unavailable: str = ""
+    refused: str = ""  # unsafe row identity; other copies of the hash can still be fetched
 
 
 @dataclass(frozen=True)
@@ -259,12 +260,13 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
     if not os.path.exists(path):
         return "1", []
     whatsapp.attach_notes_read_only(conn, path)
+    refusal_clause = media_notes.media_refusal_clause(conn, "m")
     table = conn.execute("SELECT 1 FROM notesdb.sqlite_master WHERE type = 'table' AND name = 'media_notes'").fetchone()
     if not table:
-        return "1", []
+        return refusal_clause, []
     return (
         "NOT EXISTS (SELECT 1 FROM notesdb.media_notes n "
-        "WHERE n.sha256 = lower(hex(m.file_sha256)) AND n.key IN (?, ?, ?))",
+        "WHERE n.sha256 = lower(hex(m.file_sha256)) AND n.key IN (?, ?, ?)) AND " + refusal_clause,
         [TRANSCRIPT_KEY, TRANSCRIPT_ERROR_KEY, MEDIA_UNAVAILABLE_KEY],
     )
 
@@ -365,6 +367,9 @@ def find_pending(
     fields — gets a ``media_unavailable`` note instead, which takes it off the
     work list for good, and costs no strike: an archive of expired media would
     otherwise end every round after three rows (issues #378, #392).
+    An immutable unsafe identity (`media_refused`) is recorded per message,
+    without a failure strike once recorded or a per-hash unavailability note,
+    so another copy of the same audio remains fetchable.
     """
     batch = max(1, batch)
     page_limit = batch * CANDIDATE_FACTOR
@@ -411,6 +416,12 @@ def find_pending(
             fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
             path = fetched.path
             strike = path is None
+            if fetched.refused:
+                try:
+                    media_notes.record_media_refusal(message_id, chat_jid, fetched.refused[:MAX_ERROR_CHARS])
+                    strike = False
+                except (ToolError, sqlite3.Error) as exc:
+                    logger.warning("transcribe_on_ingest: could not record media refusal: %s", exc)
             if fetched.unavailable:
                 # Not the bridge failing: the phone answered, and the answer is
                 # final. Recording it is what makes the walk stop asking, and it
@@ -479,6 +490,8 @@ def _fetch_bytes(
     try:
         path = download(message_id, chat_jid)
     except ToolError as exc:
+        if exc.code == "media_refused":
+            return Fetched(refused=exc.message)
         if exc.code == MEDIA_UNAVAILABLE_CODE:
             # Expected on an old archive, and per file, so it stays at debug:
             # the round logs how many it recorded.
