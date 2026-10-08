@@ -216,6 +216,22 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		"uptime_seconds": int(time.Since(startedAt).Seconds()),
 		"timestamp":      time.Now().Unix(),
 	}
+	problem, pairingState := b.connectionSnapshot()
+	b.connectionMu.Lock()
+	body["connection_problem_persistence_failed"] = b.problemPersistenceFailed
+	b.connectionMu.Unlock()
+	if problem != nil {
+		body["connection_problem"] = problem
+		if problem.Kind == "banned" || problem.Kind == "locked" || problem.Kind == "client_outdated" {
+			body["status"] = "blocked"
+		}
+		if problem.Kind == "temporarily_banned" && problem.ExpiresAt != nil && b.connectionNow().Before(*problem.ExpiresAt) {
+			body["status"] = "temporarily_banned"
+		}
+	}
+	if pairingState != "" {
+		body["pairing_state"], body["status"] = pairingState, pairingState
+	}
 	if stats != nil {
 		storeBytes, mediaBytes, mediaFiles := stats.snapshot(time.Now())
 		body["store_bytes"] = storeBytes

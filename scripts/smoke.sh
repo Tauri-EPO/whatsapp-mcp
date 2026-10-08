@@ -133,7 +133,7 @@ bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
   # busybox wget: exit 0 with the body on a 2xx; on other statuses it prints
   # "server returned error: HTTP/1.1 503 Service Unavailable" and exits 1.
   local out rc
-  out=$(bridge_exec wget -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
+  out=$(bridge_exec wget -Y off -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
   rc=$?
   BRIDGE_BODY=""
   if [ "$rc" -eq 0 ]; then

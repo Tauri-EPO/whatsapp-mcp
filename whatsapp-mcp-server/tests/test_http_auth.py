@@ -180,13 +180,12 @@ class TestRateLimit:
         assert client.get("/mcp").status_code == 200
         assert client.get("/mcp").status_code == 429
 
-    def test_clients_are_independent_and_forwarded_for_wins(self):
+    def test_rotating_forwarded_for_exhausts_the_socket_bucket(self):
         from http_auth import RateLimitMiddleware
 
-        client = TestClient(RateLimitMiddleware(_ok_app, per_minute=1))
-        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.1, 10.0.0.1"}).status_code == 200
-        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.1"}).status_code == 429
-        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.2"}).status_code == 200
+        client = TestClient(RateLimitMiddleware(_ok_app, per_minute=1, clock=lambda: 0))
+        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.1"}).status_code == 200
+        assert client.get("/mcp", headers={"X-Forwarded-For": "100.64.0.2"}).status_code == 429
 
     def test_limiter_runs_before_auth(self):
         from mcp.server.mcpserver import MCPServer

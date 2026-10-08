@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -144,6 +145,10 @@ type WebhookPayload struct {
 
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
 func (w *webhookSender) sendPayload(payload WebhookPayload) {
+	w.sendJSON(context.Background(), payload)
+}
+
+func (w *webhookSender) sendJSON(ctx context.Context, payload any) {
 	// WEBHOOK_ENABLED=false turns outbound webhooks off entirely. An empty
 	// WEBHOOK_URL cannot serve that purpose: os.Getenv cannot tell "unset"
 	// from "explicitly empty", and empty deliberately falls back to
@@ -166,7 +171,7 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		bridgeLog.Errorf("building webhook request: %v", err)
 		return
@@ -191,8 +196,8 @@ func (w *webhookSender) sendPayload(payload WebhookPayload) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == 200 {
-		bridgeLog.Debugf("✓ Webhook sent for message from %s", payload.Sender)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		bridgeLog.Debugf("✓ Webhook sent")
 	} else {
 		w.countFailure()
 		bridgeLog.Warnf("Webhook failed with status %d", resp.StatusCode)

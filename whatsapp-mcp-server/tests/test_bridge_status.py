@@ -104,3 +104,42 @@ def test_unreachable_never_raises(monkeypatch):
     out = main.bridge_status()
     assert out["ok"] is False and "unreachable" in out["reason"] and "error" not in out
     assert "owner" not in out
+
+
+@pytest.mark.parametrize("kind,code", [("banned", 406), ("locked", 403), ("temporarily_banned", 402)])
+def test_account_problem_replaces_automatic_repair_advice(monkeypatch, kind, code):
+    problem = {"kind": kind, "code": code, "since": "2026-10-08T00:00:00Z"}
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "get",
+        _get(
+            {
+                "/health": Resp(
+                    200, {"status": "blocked", "connected": False, "paired": False, "connection_problem": problem}
+                ),
+                "/version": Resp(500, {}),
+                "/me": Resp(503, {}),
+            }
+        ),
+    )
+    out = main.bridge_status()
+    assert out["ok"] is False and out["connection_problem"] == problem
+    assert kind in out["reason"] and "scan the QR" not in out["reason"]
+
+
+@pytest.mark.parametrize("state", ["passkey_required", "passkey_confirm", "passkey_failed"])
+def test_passkey_state_reaches_the_mcp_tool(monkeypatch, state):
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "get",
+        _get(
+            {
+                "/health": Resp(200, {"status": state, "connected": True, "paired": False, "pairing_state": state}),
+                "/version": Resp(500, {}),
+                "/me": Resp(503, {}),
+            }
+        ),
+    )
+    out = main.bridge_status()
+    assert out["ok"] is False and out["pairing_state"] == state
+    assert "operator intervention" in out["reason"]

@@ -12,10 +12,13 @@ from errors import ToolError, tool_errors
 from export import export_messages as export_messages_to_disk
 from http_auth import (
     BearerTokenMiddleware,
+    ForwardedSchemeMiddleware,
+    ProxyNetworks,
     RateLimitMiddleware,
     resolve_http_token,
     resolve_max_body_bytes,
     resolve_rate_limit,
+    resolve_trusted_proxies,
     resolve_upload_max_bytes,
 )
 from http_upload import UploadApp
@@ -2722,6 +2725,7 @@ def build_http_app(
     token: str | None,
     rate_limit_per_minute: int = 0,
     upload_max_bytes: int = 64 * 1024 * 1024,
+    trusted_proxies: ProxyNetworks = (),
     **app_kwargs: Any,
 ):
     """Build the ASGI app for the http/sse transports.
@@ -2743,7 +2747,8 @@ def build_http_app(
     if token:
         app = BearerTokenMiddleware(app, token)
     if rate_limit_per_minute > 0:
-        app = RateLimitMiddleware(app, rate_limit_per_minute)
+        app = RateLimitMiddleware(app, rate_limit_per_minute, trusted_proxies=trusted_proxies)
+    app = ForwardedSchemeMiddleware(app, trusted_proxies)
     if metrics_enabled(os.getenv("WHATSAPP_MCP_METRICS")):
         # Outermost so /metrics answers without the MCP token and counts every
         # response, including 401/429 from the layers below. Its own optional
@@ -2817,6 +2822,7 @@ if __name__ == "__main__":
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
         rate_limit = resolve_rate_limit(os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None)
+        trusted_proxies = resolve_trusted_proxies(os.getenv("WHATSAPP_MCP_TRUSTED_PROXIES"))
         upload_max_bytes = resolve_upload_max_bytes(os.getenv("WHATSAPP_MCP_UPLOAD_MAX_BYTES"))
         app_kwargs: dict[str, Any] = {
             "host": host,
@@ -2859,9 +2865,16 @@ if __name__ == "__main__":
 
     uvicorn.run(
         build_http_app(
-            mcp, transport, token, rate_limit_per_minute=rate_limit, upload_max_bytes=upload_max_bytes, **app_kwargs
+            mcp,
+            transport,
+            token,
+            rate_limit_per_minute=rate_limit,
+            upload_max_bytes=upload_max_bytes,
+            trusted_proxies=trusted_proxies,
+            **app_kwargs,
         ),
         host=host,
         port=port,
         log_level="info",
+        proxy_headers=False,  # Preserve the socket peer for our explicit forwarding trust boundary.
     )

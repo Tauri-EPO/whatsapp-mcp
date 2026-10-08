@@ -372,7 +372,8 @@ class _BridgeHTTP:
         if self._client is None:
             # No redirects: the bridge never redirects, and following one could
             # replay a POST (with the bearer token) to an unexpected host.
-            self._client = httpx.Client(follow_redirects=False)
+            # Bridge credentials must not reach an inherited HTTP proxy.
+            self._client = httpx.Client(follow_redirects=False, trust_env=False)
         return self._client
 
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
@@ -5566,6 +5567,19 @@ def bridge_status() -> dict[str, Any]:
             if not status["paired"]
             else "bridge is paired but disconnected from WhatsApp; it reconnects automatically"
         )
+    problem = body.get("connection_problem")
+    status["connection_problem_persistence_failed"] = body.get("connection_problem_persistence_failed") is True
+    pairing_state = body.get("pairing_state")
+    if isinstance(problem, dict):
+        status["connection_problem"] = problem
+        kind = problem.get("kind")
+        if kind in ("banned", "locked", "client_outdated", "temporarily_banned"):
+            status["ok"] = False
+            status["reason"] = f"WhatsApp connection problem: {kind}; see docs/TROUBLESHOOTING.md"
+    if pairing_state in ("passkey_required", "passkey_confirm", "passkey_failed"):
+        status["pairing_state"] = pairing_state
+        status["ok"] = False
+        status["reason"] = f"WhatsApp pairing step: {pairing_state}; operator intervention required; see docs/DOCKER.md"
     try:
         version = _bridge_request("GET", "/version", timeout=10)
         if version.status_code == 200:

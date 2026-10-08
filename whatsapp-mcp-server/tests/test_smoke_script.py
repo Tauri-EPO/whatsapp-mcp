@@ -102,6 +102,12 @@ case "$cmd" in
       echo "<urlopen error [Errno 111] Connection refused>"; exit 1; }
     exit 0 ;;
   wget)
+    if [ "${FAKE_PROXY_TRAP:-}" = yes ]; then
+      case "$*" in
+        *"-Y off"*) ;;
+        *) echo "loopback credential sent to proxy" >&2; exit 77 ;;
+      esac
+    fi
     case "$*" in
       *"Bearer ${FAKE_EXPECT_TOKEN}"*) ;;
       *) echo "wget: server returned error: HTTP/1.1 401 Unauthorized" >&2; exit 1 ;;
@@ -240,6 +246,37 @@ def test_compose_mode_unpaired_exits_2(stack: Stack) -> None:
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert "not paired yet" in result.stdout
+
+
+def test_loopback_smoke_refuses_inherited_proxy(stack: Stack) -> None:
+    result = stack.run(
+        FAKE_COMPOSE_PS="  bridge: running healthy\n",
+        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
+        FAKE_PROXY_TRAP="yes",
+        http_proxy="http://proxy.example.invalid:3128",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
+    wget = tmp_path / "wget"
+    wget.write_text(
+        '#!/bin/sh\ncase "$*" in *"-Y off"*) exit 0;; *) exit 77;; esac\n',
+        encoding="utf-8",
+    )
+    wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
+    result = subprocess.run(
+        [BASH, str(ROOT / "whatsapp-bridge" / "docker-healthcheck.sh")],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
+            "WHATSAPP_BRIDGE_TOKEN": "bridge-token-0123456789",
+            "http_proxy": "http://proxy.example.invalid:3128",
+        },
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_project_mode_talks_to_the_containers(stack: Stack) -> None:

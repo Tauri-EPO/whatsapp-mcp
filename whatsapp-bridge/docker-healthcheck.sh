@@ -13,6 +13,7 @@ if [ -z "$token" ] && [ -r "$store/.bridge-token" ]; then
     token="$(cat "$store/.bridge-token")"
 fi
 
-exec wget -q -O /dev/null -T 4 \
+# This probe is always local: never send its bearer token to an HTTP proxy.
+exec wget -Y off -q -O /dev/null -T 4 \
     --header="Authorization: Bearer ${token}" \
     "http://127.0.0.1:${port}/api/health"

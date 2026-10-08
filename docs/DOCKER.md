@@ -61,7 +61,42 @@ A `200` with a `mcp-session-id` header means the server is up. A `421
 Misdirected Request` means the `Host` header you used is not allow-listed (see
 below).
 
+## Rate limiting behind a proxy
+
+With the shipped compose topology, a same-host proxy reaches the MCP through
+Docker's default-route gateway, rather than a loopback socket inside the
+container. To keep one rate-limit bucket per proxied caller, explicitly set
+`WHATSAPP_MCP_TRUSTED_PROXIES=gateway`. This resolves `/proc/net/route` at
+startup and trusts that one gateway address; resolution failure stops startup.
+Keep `WHATSAPP_MCP_BIND=127.0.0.1`, the compose default: gateway trust is safe
+only when the published port is loopback-bound and reachable by same-host
+processes, such as Tailscale Serve. Do not combine it with a LAN/public bind.
+
+For a server running directly on the host, `loopback` trusts a local proxy;
+for other proxy topologies use the proxy's narrow CIDR. The default is empty,
+so proxied callers share a socket-peer bucket until trust is configured.
+Proxies must append the actual caller or replace incoming forwarding headers.
+[Tailscale Serve replaces `X-Forwarded-For` with the caller's tailnet address](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go).
+
 ## Pairing (QR code)
+
+If WhatsApp asks for a passkey after scanning, `bridge_status` and
+`/api/health` report `pairing_state=passkey_required`, `passkey_confirm`, or
+`passkey_failed`. The challenge, assertion and confirmation code are never
+published in health or metrics. The bridge logs the step and stops automatic
+QR retries after it; it stays alive for diagnosis. Restart the bridge after
+resolving the phone's passkey prompt or account access in the official WhatsApp
+app. A headless bridge has no WebAuthn authenticator and cannot complete that
+challenge. A page on a generic server origin cannot assert a passkey for
+`whatsapp.com`; it requires a matching relying-party origin. There is currently
+no operator endpoint for assertions or manual confirmation.
+
+The pinned whatsmeow `c386243a72ba` includes passkey support from `b572e5b`;
+its QR channel automatically confirms `SkipHandoffUX` events. A manual
+confirmation remains pending, bounded by the attempt timeout. A passkey request
+uses its advertised timeout (milliseconds), capped at five minutes. Pairing by
+phone-number code, account/device eligibility and native helper workarounds
+have not been verified against a paired phone; no bypass is promised.
 
 The bridge prints the QR code to its stdout, which `docker compose logs`
 captures. On first start:

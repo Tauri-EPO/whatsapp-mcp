@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -251,6 +252,16 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	client.EnableAutoReconnect = false // All dials must respect the persisted connection problem.
+	client.DisableLoginAutoReconnect = true
+	client.Log = connectionProblemLogger{Logger: client.Log, bridge: bridge}
+	bridge.connectionProblem, err = readConnectionProblem(storeRoot)
+	if err != nil {
+		logger.Errorf("Refusing to connect with unreadable saved connection state: %v", err)
+		return 1
+	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = cfg.Bind, cfg.AllowedHosts
 	bridge.MediaRetention, bridge.MediaAutoDownloadStatus = cfg.MediaRetention, cfg.StatusMedia
 	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
@@ -291,35 +302,46 @@ func runBridge(cfg bridgeConfig) int {
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) { bridge.handleEvent(evt, reconnectChan) })
+	if client.Store.ID == nil {
+		bridge.notifyConnection("pairing_required", "unpaired", true, false)
+	}
 
 	// Connect, or pair over QR on a fresh store. Each attempt has its own
 	// deadline; a rotated-code timeout starts the next attempt at once
-	// (pairing.go). bridge.ctx lets a SIGTERM during pairing abort cleanly.
-	if err := connectOrPair(bridge.ctx, client, client.Store.ID != nil, pairingOptions{
-		attempts:       3,
-		attemptTimeout: 5 * time.Minute,
-		retryDelay:     5 * time.Second,
-		out:            os.Stdout,
-		log:            logger,
+	// (pairing.go). The signal context aborts pairing while the bridge lifecycle
+	// remains alive until Shutdown drains accepted REST requests.
+	if err := connectOrPair(exitCtx, client, client.Store.ID != nil, pairingOptions{
+		attempts:          3,
+		attemptTimeout:    5 * time.Minute,
+		retryDelay:        5 * time.Second,
+		out:               os.Stdout,
+		log:               logger,
+		beforeDial:        func() error { return bridge.waitConnectionAllowedContext(exitCtx) },
+		connectionContext: bridge.ctx,
+		state: func(state string) {
+			bridge.setPairingState(state)
+			if state == "" {
+				bridge.notifyConnection("paired", "pairing_succeeded", true, false)
+			}
+		},
 	}); err != nil {
-		logger.Errorf("%v", err)
-		return 1
-	}
-	bridgeLog.Infof("Successfully connected and authenticated!")
-
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	if !client.IsConnected() {
-		logger.Errorf("Failed to establish stable connection")
-		return 1
+		if errors.Is(err, context.Canceled) && exitCtx.Err() != nil {
+			logger.Infof("Shutting down during connection startup")
+			return 0
+		}
+		if !errors.Is(err, errPairingOperator) {
+			logger.Errorf("%v", err)
+			return 1
+		}
+		logger.Warnf("%v", err)
 	}
 
-	bridgeLog.Infof("Connected to WhatsApp! Type 'help' for commands.")
-
-	// Create a channel to keep the main goroutine alive
-	exitChan := make(chan os.Signal, 1)
-	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
+	// Authentication can still need the queued 515 handshake. Consume it in
+	// the gated reconnect loop while REST reports readiness, rather than
+	// exiting before the loop has had a chance to establish the session.
+	if client.IsLoggedIn() {
+		bridgeLog.Infof("Connected to WhatsApp! Type 'help' for commands.")
+	}
 
 	bridgeLog.Infof("REST server is running. Press Ctrl+C to disconnect and exit.")
 
@@ -327,7 +349,7 @@ func runBridge(cfg bridgeConfig) int {
 	go bridge.reconnectLoop(reconnectChan)
 
 	// Wait for termination signal
-	<-exitChan
+	<-exitCtx.Done()
 
 	bridgeLog.Infof("Shutting down: draining REST, stopping loops, disconnecting...")
 	return 0
