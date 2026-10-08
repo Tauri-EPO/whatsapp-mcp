@@ -14,14 +14,15 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
+| `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TIMEOUT_S` | `30`                                | Timeout for each MCP → bridge call; media upload/download use 120 s. Connection errors are retried twice, read timeouts are not |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
-| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable). A boolean; anything else stops the bridge |
-| `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false`                     | Cache the media of status updates (`status@broadcast`) as it arrives too. Off by default: a status post is stored and listed like any message, but its image, video or audio stays on WhatsApp's servers until `download_media` / `read_media` asks for it (while the link lives, about a day), and the webhook forwards a status image without its bytes. `true` caches the status feed like any chat. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns both off. `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true`                            | Cache inbound media as it arrives. `false` = only `download_media` fetches files (media-retry makes late fetches reliable), the image of a webhook event included: it is then forwarded without `mediaBase64`. A boolean; anything else stops the bridge |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false`                     | Cache the media of status updates (`status@broadcast`) as it arrives too. Off by default: a status post is stored and listed like any message, but its image, video or audio stays on WhatsApp's servers until `download_media` / `read_media` asks for it (while the link lives, about a day), and a status image forwarded to the webhook (`WEBHOOK_FORWARD_STATUS`) goes without its bytes. `true` caches the status feed like any chat. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns both off. `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Inbound files above this size are not cached on arrival, and neither is a file whose message declares no length (or 0): there is nothing to check; `download_media` still fetches them. `0` disables the limit |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days; message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6`                          | How stale a cached group roster may get before the bridge refreshes it in the background, so `get_contact_chats` can answer "which groups is this person in?" without a live call per group. One group per second, only while connected, first pass a couple of minutes after start-up. `0` turns the pass off: rosters are then only cached when `list_group_members` is called, when a group join/leave/promote/demote event arrives, and when a group message comes from someone with no row yet. Refreshing is a read, so it keeps running under `WHATSAPP_READ_ONLY` |
@@ -671,6 +672,23 @@ Every forwarded message is one `POST` with a JSON body: `sender`, `content`,
 when the message has them, and for an image `mediaType`, `mimeType`,
 `mediaFilename` and `mediaBase64`. Reactions arrive as their own event
 ([TOOLS.md](TOOLS.md#send_reaction)).
+
+`mediaBase64` is only there when the bridge cached the image on arrival. With
+`WHATSAPP_MEDIA_AUTODOWNLOAD=false`, or for an image above
+`WHATSAPP_MEDIA_MAX_BYTES`, nothing is downloaded for the webhook either: the
+event still arrives, with `mediaType: "image"` and the `messageId`, and the
+receiver fetches the file with `download_media` if it wants it. So an image
+event without `mediaBase64` is not an error by itself: it means "an image
+arrived and its bytes are not attached" (not cached by configuration, larger
+than the payload limit, or a download that failed).
+
+**Status updates are not forwarded.** The status feed (`status@broadcast`) is
+every contact's status posts, not a conversation, so by default none of it
+reaches the webhook: no text, no image, no reaction. The posts are still stored
+and readable with `list_messages(chat_jid="status@broadcast")`. Set
+`WEBHOOK_FORWARD_STATUS=true` for a receiver that wants the feed; a status
+image then carries its bytes only if `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true`
+has the bridge cache status media as well.
 
 `"stored": false` is added, to a message and to a reaction event alike, when
 the bridge could not write it to its

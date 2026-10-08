@@ -254,7 +254,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 					logger.Warnf("Failed to set reaction target: %v", err)
 				}
 			}
-			if b.ForwardSelf || !msg.Info.IsFromMe {
+			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
 			}
 		}
@@ -312,26 +312,40 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	shouldForward := b.Webhook.Enabled() && (b.ForwardSelf || !msg.Info.IsFromMe)
+	shouldForward := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe)
 
-	// For image messages that will be forwarded, download media synchronously so we
-	// can include the base64 payload in the webhook. Other media types (and images
-	// when webhook forwarding is disabled) download asynchronously for caching.
-	//
-	// Status updates are the exception to both: their media stays on the CDN
-	// unless WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS asks for it (issue #447), and
-	// the webhook then carries the image message without the payload, as it
-	// does when a download fails.
-	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
+	if !shouldForward && b.Webhook.Enabled() && isStatusChat(resolvedChat) && !b.ForwardStatus {
+		logger.Debugf("Status update %s is not forwarded to the webhook: %s is off", msg.Info.ID, webhookForwardStatusEnv)
+	}
+
 	// A message that was not stored has no row for downloadMedia to find: a
 	// download could only fail a second time and bury the store error under
 	// "failed to find message" (issue #454). The webhook below still goes out,
 	// or the text would be lost downstream too, and says "stored": false so the
 	// receiver does not look the message up (issue #518).
 	downloadable := stored && mediaComplete(ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc)
+
+	// Is this file written to the store as it arrives? One answer for both ways
+	// of doing it below: WHATSAPP_MEDIA_AUTODOWNLOAD off means no file until
+	// somebody asks (issue #484), status updates need
+	// WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS on top (issue #447), and with
+	// WHATSAPP_MEDIA_MAX_BYTES set a file above it is left for download_media,
+	// as is one whose message declares no length: there is nothing to hold
+	// against the cap (issue #474).
+	wanted := mediaType != "" && downloadable && b.MediaAutoDownload
+	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
+	noLength := b.MediaMaxBytes > 0 && fileLength == 0
+	tooLarge := b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes
+	cacheOnArrival := wanted && !skipStatusMedia && !noLength && !tooLarge
+
+	// An image that will be forwarded is downloaded synchronously, so the
+	// webhook can carry its bytes; everything else is cached in the background.
+	// When the file is not cached on arrival the webhook carries the image
+	// message without the payload, as it does when a download fails.
 	var imageData []byte
 	var imageMimeType string
-	if mediaType == "image" && downloadable && shouldForward && !skipStatusMedia {
+	switch {
+	case cacheOnArrival && mediaType == "image" && shouldForward:
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.Background(), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
@@ -343,31 +357,26 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to a background download so media is cached for future MCP tool calls
-			if b.MediaAutoDownload {
-				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
-			}
+			b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 		}
-	} else if mediaType != "" && downloadable && b.MediaAutoDownload && skipStatusMedia {
-		logger.Debugf("Not caching %s media of status update %s: %s is off (download_media still works)", mediaType, msg.Info.ID, mediaAutoDownloadStatusEnv)
-	} else if mediaType != "" && downloadable && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength == 0 {
-		// An empty file, or a message that did not say how long its file is:
-		// there is nothing to hold against the cap, so it is not fetched
-		// unasked. Asked for, it downloads like any other (issue #474).
-		logger.Infof("Skipping auto-download of %s media for message %s: no length declared to check against WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, b.MediaMaxBytes)
-	} else if mediaType != "" && downloadable && b.MediaAutoDownload && b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes {
-		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
-	} else if mediaType != "" && downloadable && b.MediaAutoDownload {
+	case cacheOnArrival:
 		// Media that is not included in a webhook payload: cached in the
 		// background by the bounded pool (media_budget.go), so a burst cannot
 		// start one transfer per message and shutdown can stop them all.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
+	case wanted && skipStatusMedia:
+		logger.Debugf("Not caching %s media of status update %s: %s is off (download_media still works)", mediaType, msg.Info.ID, mediaAutoDownloadStatusEnv)
+	case wanted && noLength:
+		logger.Infof("Skipping auto-download of %s media for message %s: no length declared to check against WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, b.MediaMaxBytes)
+	case wanted && tooLarge:
+		logger.Infof("Skipping auto-download of %s media for message %s: %d bytes exceeds WHATSAPP_MEDIA_MAX_BYTES=%d (download_media still works)", mediaType, msg.Info.ID, fileLength, b.MediaMaxBytes)
 	}
 
-	// Send webhook for incoming messages.
-	// Forward self-messages when FORWARD_SELF=true.
-	// Always forward image messages (even without a text caption) so the AI vision
-	// pipeline can analyse the image content.
+	// Send the webhook (forwardsToWebhook decided whether, above). An image is
+	// forwarded even without a caption, so the receiver knows it arrived: with
+	// its bytes when they were downloaded for the payload, without them when
+	// the file is not cached on arrival or the download failed.
 	hasText := content != ""
 	hasImage := mediaType == "image"
 

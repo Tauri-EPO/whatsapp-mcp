@@ -54,10 +54,14 @@ func webhookStartupMessage(switches bridgeSwitches) string {
 	if !switches.WebhookEnabled {
 		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
 	}
-	if switches.ForwardSelf {
-		return "FORWARD_SELF enabled: forwarding self messages to webhook"
+	status := "; status updates are not forwarded (WEBHOOK_FORWARD_STATUS)"
+	if switches.ForwardStatus {
+		status = "; WEBHOOK_FORWARD_STATUS enabled: status updates are forwarded too"
 	}
-	return "FORWARD_SELF disabled: self messages will NOT be forwarded"
+	if switches.ForwardSelf {
+		return "FORWARD_SELF enabled: forwarding self messages to webhook" + status
+	}
+	return "FORWARD_SELF disabled: self messages will NOT be forwarded" + status
 }
 
 // shutdownTimeout bounds the drain on SIGTERM; compose's stop_grace_period is 30s.

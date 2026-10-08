@@ -54,6 +54,10 @@ type Bridge struct {
 	DownloadMedia mediaDownloader
 	// ForwardSelf forwards self-sent messages to the webhook (FORWARD_SELF).
 	ForwardSelf bool
+	// ForwardStatus forwards status updates (status@broadcast) to the webhook
+	// (WEBHOOK_FORWARD_STATUS). Zero value = the feed stays off the webhook,
+	// which is for conversations (webhook.go: forwardsToWebhook).
+	ForwardStatus bool
 	// MetricsEnabled serves GET /metrics (WHATSAPP_METRICS, metrics.go).
 	MetricsEnabled bool
 	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
@@ -172,6 +176,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		Policy:              loadChatPolicy(),
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
 		ForwardSelf:         switches.ForwardSelf,
+		ForwardStatus:       switches.ForwardStatus,
 		MetricsEnabled:      switches.Metrics,
 		MediaAutoDownload:   switches.MediaAutoDownload,
 		MediaMaxBytes:       resolveMediaMaxBytes(os.Getenv(mediaMaxBytesEnv)),

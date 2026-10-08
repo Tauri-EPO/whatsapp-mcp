@@ -82,6 +82,7 @@ services:
       WEBHOOK_ENABLED: ${WEBHOOK_ENABLED:-false}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       FORWARD_SELF: ${FORWARD_SELF:-false}
+      WEBHOOK_FORWARD_STATUS: ${WEBHOOK_FORWARD_STATUS:-}
     volumes:
       - whatsapp-store:/app/store
       - ${WHATSAPP_OUTBOX:-./outbox}:/app/outbox

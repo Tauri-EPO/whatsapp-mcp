@@ -45,39 +45,44 @@ func parseBoolEnv(name, raw string, def bool) (bool, error) {
 // The names are constants ending in Env on purpose: that spelling is how
 // tests/test_env_docs.py finds the variables the bridge reads.
 const (
-	forwardSelfEnv    = "FORWARD_SELF"
-	webhookEnabledEnv = "WEBHOOK_ENABLED"
+	forwardSelfEnv          = "FORWARD_SELF"
+	webhookEnabledEnv       = "WEBHOOK_ENABLED"
+	webhookForwardStatusEnv = "WEBHOOK_FORWARD_STATUS"
 )
 
-// bridgeSwitches are the four switches that are on unless turned off. main()
-// loads them once, before anything is opened, and hands them to newBridge.
+// bridgeSwitches are the on/off knobs main() loads once, before anything is
+// opened, and hands to newBridge. The first four are on unless turned off; the
+// last is off unless asked for.
 type bridgeSwitches struct {
 	ForwardSelf       bool // FORWARD_SELF: self-sent messages reach the webhook
 	MediaAutoDownload bool // WHATSAPP_MEDIA_AUTODOWNLOAD: cache inbound media on arrival
 	WebhookEnabled    bool // WEBHOOK_ENABLED: outbound webhooks at all
 	Metrics           bool // WHATSAPP_METRICS: serve GET /metrics
+	ForwardStatus     bool // WEBHOOK_FORWARD_STATUS: status updates reach the webhook too
 }
 
-// loadBridgeSwitches reads the four from the environment.
+// loadBridgeSwitches reads them from the environment.
 func loadBridgeSwitches() (bridgeSwitches, error) {
 	return parseBridgeSwitches(os.Getenv)
 }
 
-// parseBridgeSwitches reads all four and reports every value it cannot read
+// parseBridgeSwitches reads them all and reports every value it cannot read
 // in one error, so an env file with two typos costs one restart, not two.
 func parseBridgeSwitches(getenv func(string) string) (bridgeSwitches, error) {
 	var sw bridgeSwitches
 	var unreadable []string
 	for _, s := range []struct {
 		name string
+		def  bool
 		dst  *bool
 	}{
-		{forwardSelfEnv, &sw.ForwardSelf},
-		{mediaAutoDownloadEnv, &sw.MediaAutoDownload},
-		{webhookEnabledEnv, &sw.WebhookEnabled},
-		{metricsEnv, &sw.Metrics},
+		{forwardSelfEnv, true, &sw.ForwardSelf},
+		{mediaAutoDownloadEnv, true, &sw.MediaAutoDownload},
+		{webhookEnabledEnv, true, &sw.WebhookEnabled},
+		{metricsEnv, true, &sw.Metrics},
+		{webhookForwardStatusEnv, false, &sw.ForwardStatus},
 	} {
-		value, err := parseBoolEnv(s.name, getenv(s.name), true)
+		value, err := parseBoolEnv(s.name, getenv(s.name), s.def)
 		if err != nil {
 			unreadable = append(unreadable, err.Error())
 		}

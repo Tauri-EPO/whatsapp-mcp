@@ -11,6 +11,8 @@ import (
 	"os"
 	"sync/atomic"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 // maxMediaBase64Bytes is the maximum file size that will be base64-encoded and
@@ -72,6 +74,15 @@ func newWebhookSender(token string, enabled bool) *webhookSender {
 
 // Enabled reports whether outbound webhooks are on (WEBHOOK_ENABLED at startup).
 func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
+
+// forwardsToWebhook is the one answer to "does this message go to the
+// webhook": outbound webhooks are on, a message of our own only with
+// FORWARD_SELF, and a status update only with WEBHOOK_FORWARD_STATUS. The
+// webhook is for conversations: without that opt-in a receiver got one event
+// per status post of every contact and had to know to drop it (issue #482).
+func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool) bool {
+	return b.Webhook.Enabled() && (b.ForwardSelf || !fromMe) && (b.ForwardStatus || !isStatusChat(chat))
+}
 
 // WebhookPayload represents the data sent to the webhook
 type WebhookPayload struct {
@@ -347,9 +358,6 @@ func (w *webhookSender) SendReactionWebhook(sender, chatJID string, isFromMe boo
 		ReactionRemoved:     &removed,
 	})
 }
-
-// In main.go, handleMessage forwards webhooks for messages with text content.
-// It will forward self-sent messages when the env var FORWARD_SELF=true.
 
 func (w *webhookSender) countFailure() {
 	if w != nil && w.failures != nil {
