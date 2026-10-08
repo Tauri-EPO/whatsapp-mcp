@@ -445,7 +445,8 @@ func TestResolveRecipientJID_GroupAndMalformed(t *testing.T) {
 func TestSendWhatsAppMessage_NotConnected(t *testing.T) {
 	installRecordingLogger(t)
 	client := newTestClient(&mockLIDStore{})
-	ok, msg, sent := sendWhatsAppMessage(context.Background(), client, nil, nil, "15551234567", "hi", "", "", "", "", nil)
+	b := &Bridge{Client: client, Connected: client.IsConnected}
+	ok, msg, sent := b.sendWhatsAppMessage(context.Background(), nil, "15551234567", "hi", "", "", "", "", nil)
 	if ok || msg != "Not connected to WhatsApp" || sent.ID != "" {
 		t.Errorf("got ok=%v msg=%q sent=%v", ok, msg, sent)
 	}

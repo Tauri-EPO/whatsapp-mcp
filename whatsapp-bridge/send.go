@@ -375,6 +375,29 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	return resolved
 }
 
+type outboundUploadFunc func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+type outboundSendFunc func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error)
+
+// sendBackend keeps Bridge defaults and injected calls on the shared sender.
+func (b *Bridge) sendBackend() sendFunc {
+	return func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+		return b.sendWhatsAppMessage(ctx, b.persistOutbound, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
+	}
+}
+
+func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersistence, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+	network := messageSendNetwork{connected: b.Connected, upload: b.uploadMedia, send: b.sendMessage}
+	if network.upload == nil {
+		network.upload = b.Client.Upload
+	}
+	if network.send == nil {
+		network.send = func(ctx context.Context, jid types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
+			return b.Client.SendMessage(ctx, jid, msg)
+		}
+	}
+	return sendWhatsAppMessageWithNetwork(ctx, b.Client, b.Store, persist, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions, network)
+}
+
 // messageSendNetwork isolates connection/upload/send I/O for the real sender.
 // Phone recipients still use client.GetUserInfo on a LID-map miss; tests using
 // this seam need a group recipient or a locally mapped phone recipient.
@@ -382,15 +405,6 @@ type messageSendNetwork struct {
 	connected func() bool
 	upload    func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	send      func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error)
-}
-
-func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string, sentMessage) {
-	network := messageSendNetwork{connected: client.IsConnected, upload: client.Upload,
-		send: func(ctx context.Context, to types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
-			return client.SendMessage(ctx, to, msg)
-		},
-	}
-	return sendWhatsAppMessageWithNetwork(ctx, client, messageStore, persist, recipient, message, mediaPath, quotedMsgID, quotedSenderJID, quotedContent, mentions, network)
 }
 
 func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string, network messageSendNetwork) (bool, string, sentMessage) {
@@ -920,7 +934,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 	defer cancel()
 	registered, err := canonicalRecipientJID(lookupCtx, func(ctx context.Context, jid types.JID) (types.JID, error) {
 		return lookupAltJID(ctx, b.Client, jid)
-	}, b.IsOnWhatsApp, recipient)
+	}, b.queryRegisteredNumber, recipient)
 	switch {
 	case errors.Is(err, errNotOnWhatsApp):
 		countFailure()
