@@ -78,7 +78,10 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	if cfg.Operator.Bind != "" && !isLoopbackBind(cfg.Bind) {
 		collect(errors.New("WHATSAPP_BRIDGE_BIND must remain loopback when WHATSAPP_OPERATOR_BIND is enabled"))
 	}
-	cfg.PairingStdout, err = parseBoolEnv(pairingStdoutEnv, getenv(pairingStdoutEnv), true)
+	if cfg.Operator.Bind != "" && cfg.Operator.Port == cfg.Port {
+		collect(errors.New("WHATSAPP_OPERATOR_PORT must differ from WHATSAPP_BRIDGE_PORT"))
+	}
+	cfg.PairingStdout, err = parseBoolEnv(pairingStdoutEnv, getenv(pairingStdoutEnv), cfg.Operator.Bind == "")
 	collect(err)
 	// The valid-name appendix is long; put it after every other variable.
 	cfg.Tools, err = newToolPolicy(getenv(allowToolsEnv), getenv(denyToolsEnv))

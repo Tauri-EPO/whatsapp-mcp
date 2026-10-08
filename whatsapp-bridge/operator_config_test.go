@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
@@ -11,7 +13,7 @@ import (
 	"testing"
 )
 
-const fakeOperatorToken = "fake-operator-token-0123456789abcdef"
+const fakeOperatorToken = "5bb46abd5967c7ca28b4df05606834ebe5f01266e25c595c73d8295a7e985569"
 
 func operatorTestValues(overrides map[string]string) func(string) string {
 	values := map[string]string{operatorBindEnv: "127.0.0.1", operatorTokenEnv: fakeOperatorToken, "WHATSAPP_BRIDGE_TOKEN": "fake-data-plane-token-0123456789abcdef"} //nolint:gosec // Deliberately fake credentials for separate-token refusal tests.
@@ -50,6 +52,7 @@ func TestOperatorConfigRefusesUnsafeBindsTokensAndPorts(t *testing.T) {
 		{operatorBindEnv: "0.0.0.0"}, {operatorBindEnv: "::"}, {operatorBindEnv: "[::]"}, {operatorBindEnv: "*"}, {operatorBindEnv: "127.0.0.1:8090"},
 		{operatorTokenEnv: ""}, {operatorTokenEnv: "short-secret"}, {operatorTokenEnv: strings.Repeat("a", 64)}, {operatorTokenEnv: "change-me-0123456789abcdefghijklmnop"},
 		{operatorTokenEnv: "fake-token-0123456789abcdef\nwith-space"}, {operatorTokenEnv: fakeOperatorToken, "WHATSAPP_BRIDGE_TOKEN": fakeOperatorToken},
+		{operatorTokenEnv: strings.Repeat("12345678", 8)}, {operatorTokenEnv: strings.Repeat("abcdefgh", 8)},
 		{operatorPortEnv: "0"}, {operatorPortEnv: "65536"}, {operatorPortEnv: "bad"}, {operatorAllowedHostsEnv: "*"}, {operatorAllowedHostsEnv: "*.example.test"},
 	} {
 		if _, err := parseOperatorConfig(operatorTestValues(values), noOperatorLookup); err == nil {
@@ -61,6 +64,41 @@ func TestOperatorConfigRefusesUnsafeBindsTokensAndPorts(t *testing.T) {
 		if err != nil || cfg.Bind == "" {
 			t.Fatalf("explicit bind refused: %v", err)
 		}
+	}
+}
+
+func TestOperatorTokenRequiresEncodedRandomBytes(t *testing.T) {
+	bytes, err := hex.DecodeString(fakeOperatorToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{fakeOperatorToken, base64.RawURLEncoding.EncodeToString(bytes)} {
+		if err := validateOperatorToken(token); err != nil {
+			t.Fatalf("fake encoded credential refused: %v", err)
+		}
+	}
+	for _, token := range []string{
+		base64.RawURLEncoding.EncodeToString(bytes[:31]),
+		base64.RawURLEncoding.EncodeToString(append(append([]byte(nil), bytes...), bytes...)),
+		fakeOperatorToken[:20] + "\n" + fakeOperatorToken[20:],
+		base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("abcdefgh", 4))),
+	} {
+		if err := validateOperatorToken(token); err == nil || !strings.Contains(err.Error(), "openssl rand -hex 32") {
+			t.Fatal("weak encoding accepted or generation guidance missing")
+		}
+	}
+}
+
+func TestOperatorConfigurationDefaultsPrivateAndRefusesPortCollision(t *testing.T) {
+	cfg, err := parseBridgeConfig(operatorTestValues(nil))
+	if err != nil || cfg.PairingStdout {
+		t.Fatalf("operator default exposes pairing stdout: %v", err)
+	}
+	if _, err := parseBridgeConfig(operatorTestValues(map[string]string{operatorPortEnv: "8080"})); err == nil {
+		t.Fatal("default data port collision accepted")
+	}
+	if _, err := parseBridgeConfig(operatorTestValues(map[string]string{operatorPortEnv: "8081", bridgePortEnv: "8081"})); err == nil {
+		t.Fatal("custom data port collision accepted")
 	}
 }
 

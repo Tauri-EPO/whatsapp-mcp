@@ -195,32 +195,67 @@ operator listener is enabled, prints only its pairing state, never credentials.
 
 ### Private operator network
 
-For an operator in a container, create a private external Docker network and
-attach only the operator client and the intended instances. Use a unique alias
-for each instance:
+For an operator in a container, create one private external Docker network
+per instance and attach only that operator client and instance. Use a unique
+alias for each instance:
 
 ```bash
 docker network create operator-private
 # In .env: WHATSAPP_OPERATOR_NETWORK=operator-private
 # WHATSAPP_OPERATOR_ALIAS=whatsapp-operator-example
-# WHATSAPP_OPERATOR_TOKEN=<separate generated secret>
+# WHATSAPP_OPERATOR_TOKEN=<output of openssl rand -hex 32>
 docker compose -f docker-compose.yml -f docker-compose.operator.yml up -d
 # From the operator container joined to operator-private:
 # http://whatsapp-operator-example:8090/operator/v1/health
 ```
 
 `docker-compose.operator.yml` binds the operator listener to the single IP
-resolved for that alias **on the operator network**, and includes that alias
-in its Host allow-list. It publishes no operator host port; wildcard binds and
-ambiguous DNS results fail startup. Port 8080 remains loopback and enabling the
-operator listener refuses a widened `WHATSAPP_BRIDGE_BIND`. If a separate proxy
-network is added to the bridge, use another alias there: 8090 is bound only to
-the operator interface and 8080 is unavailable from either network. Two
-instances may use the same port with different operator aliases. Docker network
-membership is the isolation boundary; do not attach other stacks to this
-private network. The base MCP host-port publication is unchanged here.
-Logout, runtime settings, transcription usage and MCP admin forwarding are
-separate work tracked in #643/#644/#637/#638; they are not routes on this listener.
+resolved for that alias **on the operator network** and includes the alias in
+its Host allow-list. It publishes no operator host port. Port 8080 stays on
+loopback; enabling the operator refuses a widened `WHATSAPP_BRIDGE_BIND`.
+The MCP container shares the bridge namespace, so joining a private network
+alone does not isolate the agent plane. This override also binds MCP port 8000
+to `whatsapp-mcp-data` on the project's default network, including its image
+healthcheck; it cannot answer on the operator interface. The base MCP host-port
+publication stays unchanged. Without this override the base MCP listener is
+`0.0.0.0`, reachable on every network joined to the shared namespace.
+
+Every member of a **shared** operator network can reach every operator listener
+on that network; separate tokens authenticate each instance. A per-instance
+operator network limits that reachability too. The default data-network alias
+must remain unique within each project's private default network. If a proxy
+network is added, use another alias there: 8090 accepts only on the operator
+interface, while 8080 and 8000 refuse connections to the proxy interface.
+
+For a file-backed operator secret, mount the file **only on the bridge**,
+outside `/app/store` and `/app/outbox`. The MCP process uses the same uid and
+can read files in those shared volumes, so they must never contain this secret.
+Create the file with `openssl rand -hex 32`, mode `0600`, owner uid 1000, and
+add an override such as:
+
+```yaml
+services:
+  bridge:
+    environment:
+      WHATSAPP_OPERATOR_TOKEN: ""
+      WHATSAPP_OPERATOR_TOKEN_FILE: /run/operator-secret/token
+    volumes:
+      - ./operator-secret:/run/operator-secret/token:ro
+```
+
+Do not add this mount to `mcp`. `scripts/smoke.sh` invokes the bridge binary's
+`--operator-status` probe: the credential is read from env/file inside that
+container, never put in argv or printed, and only the state name is returned.
+Operator enablement defaults `WHATSAPP_PAIRING_STDOUT` to false even without
+this override. SDK DEBUG is suppressed while the operator is enabled; bridge
+and database DEBUG remain available. Explicit stdout opt-in is for trusted
+console operators only.
+
+Logout, runtime settings, transcription usage and MCP admin forwarding remain
+separate work tracked in #643/#644/#637/#638. A private authenticated pairing
+response reports a bounded `failure_reason` after a passkey failure; health,
+metrics and INFO never expose that text. Real passkey eligibility and a native
+WhatsApp authenticator still need the live verification tracked in #487/#647.
 
 ## Configuration
 

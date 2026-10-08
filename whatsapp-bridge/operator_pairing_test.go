@@ -495,3 +495,21 @@ func TestOperatorPairingHTTPStrictBodyAndConcurrentRestart(t *testing.T) {
 	close(f.client.codeRelease)
 	<-done
 }
+
+func TestOperatorPasskeyFailureReasonSurvivesActorAndClearsOnRestart(t *testing.T) {
+	f := newOperatorPairingFixture(t)
+	f.client.items <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{PublicKey: &types.WebAuthnPublicKey{Timeout: 60000}}}
+	f.stateHTTP(t, "passkey_required")
+	f.client.items <- whatsmeow.QRChannelItem{Event: "error", Error: errors.New("fake verification rejected")}
+	state := f.stateHTTP(t, "passkey_failed")
+	if !strings.Contains(state.FailureReason, "fake verification rejected") || state.QR != nil || state.Passkey != nil {
+		t.Fatal("private failure reason or credential cleanup missing")
+	}
+	f.p.mu.Lock()
+	f.p.invalidateLocked("starting")
+	reason := f.p.state.FailureReason
+	f.p.mu.Unlock()
+	if reason != "" {
+		t.Fatal("new attempt retained old failure")
+	}
+}

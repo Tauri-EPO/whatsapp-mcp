@@ -8,10 +8,17 @@ services:
       WHATSAPP_OPERATOR_ALLOWED_HOSTS: ${WHATSAPP_OPERATOR_ALIAS:?set a unique operator alias per instance}
       WHATSAPP_PAIRING_STDOUT: ${WHATSAPP_PAIRING_STDOUT:-false}
     networks:
-      default: {}
+      default:
+        aliases: [whatsapp-mcp-data]
       operator:
         aliases:
           - ${WHATSAPP_OPERATOR_ALIAS:?set a unique operator alias per instance}
+
+  # The shared namespace does not itself isolate the MCP socket. Bind it to
+  # the default network only, so it never accepts on the operator interface.
+  mcp:
+    environment:
+      WHATSAPP_MCP_HOST: whatsapp-mcp-data
 
 networks:
   operator:

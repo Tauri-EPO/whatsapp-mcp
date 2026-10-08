@@ -14,7 +14,8 @@ import (
 )
 
 // The SDK logs raw QR payloads and protocol frames at DEBUG. When pairing
-// stdout is disabled, suppress SDK debug at its root, before NewClient caches
+// stdout is disabled or the operator listener is enabled, suppress SDK debug
+// at its root, before NewClient caches
 // its send/receive subloggers. Bridge and database debug logs remain available.
 type privatePairingLogger struct{ waLog.Logger }
 

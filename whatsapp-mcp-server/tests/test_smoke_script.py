@@ -98,11 +98,10 @@ case "$cmd" in
     [ -n "${FAKE_TOKEN_FILE:-}" ] || exit 1
     printf '%s\n' "$FAKE_TOKEN_FILE"
     exit 0 ;;
-  sh)
-    export WHATSAPP_OPERATOR_BIND="${FAKE_OPERATOR_BIND:-}"
-    export WHATSAPP_OPERATOR_TOKEN="fake-operator-token-0123456789abcdef"
-    export WHATSAPP_OPERATOR_TOKEN_FILE=""
-    exec bash "$@" ;;
+  whatsapp-bridge)
+    [ "$1" = "--operator-status" ] || exit 99
+    printf "%s\n" "${FAKE_OPERATOR_STATE:-disabled}"
+    exit 0 ;;
   python)   # the whisper probe, run inside the mcp container
     [ "${FAKE_WHISPER_REACHABLE:-yes}" = "yes" ] || {
       echo "<urlopen error [Errno 111] Connection refused>"; exit 1; }
@@ -564,6 +563,7 @@ def test_unpaired_smoke_reports_only_operator_state(stack: Stack) -> None:
         FAKE_READY="503",
         FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
         FAKE_OPERATOR_BIND="whatsapp-operator-example",
+        FAKE_OPERATOR_STATE="passkey_required",
         FAKE_OPERATOR_BODY='{"state":"passkey_required","qr":{"payload":"FAKE-QR-CREDENTIAL"},"confirmation_code":"FAKE-CODE-CREDENTIAL"}',
     )
     assert result.returncode == 2, result.stdout + result.stderr

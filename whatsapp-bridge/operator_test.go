@@ -105,7 +105,7 @@ func TestOperatorHTTPRefusesHostOriginAndAuditsWithoutCredentials(t *testing.T) 
 	if *calls != 2 {
 		t.Fatalf("accepted mutations=%d", *calls)
 	}
-	if strings.Count(audit.String(), "Operator POST") != 5 {
+	if strings.Count(audit.String(), "Operator POST") != 2 || !strings.Contains(audit.String(), "peer=127.0.0.1") {
 		t.Fatalf("audit lines=%s", audit)
 	}
 	for _, secret := range []string{fakeOperatorToken, "FAKE-QUERY-CREDENTIAL", "FAKE-BODY-CREDENTIAL", "FAKE-QR-CREDENTIAL", "FAKE-CODE-CREDENTIAL", "5511999999999"} {

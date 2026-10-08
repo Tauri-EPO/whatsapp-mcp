@@ -41,6 +41,7 @@ type operatorPairingState struct {
 	Passkey          *types.WebAuthnPublicKey `json:"passkey,omitempty"`
 	ConfirmationCode string                   `json:"confirmation_code,omitempty"`
 	StepExpiresAt    *time.Time               `json:"step_expires_at,omitempty"`
+	FailureReason    string                   `json:"failure_reason,omitempty"`
 }
 type operatorCodeExpiry struct {
 	ExpiresAt time.Time `json:"expires_at"`
@@ -82,6 +83,7 @@ func (p *operatorPairing) invalidateLocked(state string) {
 	p.state.State = state
 	p.state.QR, p.state.PairCode, p.state.Passkey = nil, nil, nil
 	p.state.ConfirmationCode, p.state.StepExpiresAt = "", nil
+	p.state.FailureReason = ""
 }
 
 func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem) {
@@ -123,7 +125,19 @@ func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem
 		p.invalidateLocked("paired")
 	default:
 		if evt.Event == "timeout" || evt.Error != nil {
+			passkey := strings.HasPrefix(p.state.State, "passkey_")
 			p.invalidateLocked("expired")
+			if passkey {
+				p.state.State = "passkey_failed"
+				p.state.FailureReason = "WhatsApp passkey step expired before verification; restart explicitly"
+				if evt.Error != nil {
+					reason := []rune(oneLine(evt.Error.Error()))
+					if len(reason) > 512 {
+						reason = append(reason[:512], []rune(" [truncated]")...)
+					}
+					p.state.FailureReason = "WhatsApp passkey step failed: " + string(reason)
+				}
+			}
 		}
 	}
 }
@@ -267,7 +281,12 @@ func (p *operatorPairing) run() {
 			cancelled := generation != p.state.Generation
 			if !cancelled {
 				if errors.Is(err, errPairingOperator) {
+					reason := p.state.FailureReason
 					p.invalidateLocked("passkey_failed")
+					p.state.FailureReason = reason
+					if reason == "" {
+						p.state.FailureReason = "WhatsApp passkey step ended before verification; restart explicitly"
+					}
 				} else {
 					p.invalidateLocked("expired")
 				}

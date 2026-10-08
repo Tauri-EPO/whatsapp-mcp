@@ -146,6 +146,10 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		out := &operatorStatusWriter{ResponseWriter: w}
+		peer, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			peer = "unknown"
+		}
 		// Only fixed known route names are logged, never a URL/query or payload.
 		if r.Method == http.MethodPost && mutations[r.URL.Path] {
 			defer func() {
@@ -153,12 +157,12 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 				if status == 0 {
 					status = http.StatusInternalServerError
 				}
-				logger.Infof("Operator POST %s outcome=%d", r.URL.Path, status)
+				if status == 401 || status == 403 || status == 429 {
+					logger.Debugf("Operator POST %s peer=%s outcome=%d", r.URL.Path, peer, status)
+				} else {
+					logger.Infof("Operator POST %s peer=%s outcome=%d", r.URL.Path, peer, status)
+				}
 			}()
-		}
-		peer, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			peer = "unknown"
 		}
 		if delay := peers.take(peer); delay != 0 {
 			limit(out, delay)

@@ -21,8 +21,11 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 
 The last problem is saved as the owner-only file `store/.connection-problem`.
 It survives container restarts. To explicitly retry a blocked account after
-resolving its restriction, stop the bridge, remove that single saved state
-file from its store volume, and restart. Keep the databases and account keys.
+resolving its restriction, an unpaired instance with the private operator
+listener can use authenticated `POST /operator/v1/pairing/restart`; a live
+paired session refuses this operation. Without that listener, stop the bridge,
+remove that single saved state file from its store volume, and restart. Keep
+the databases and account keys.
 Do not clear a temporary ban early. An unreadable/corrupt state stops startup
 before any connection or QR. `connection_problem_persistence_failed` in health
 reports a write error. Only account restrictions block dials on that error;
@@ -30,7 +33,6 @@ the gate retries their write while retaining the restriction in memory.
 Transient failures keep normal reconnect backoff. `client_outdated` records
 the build version, commit and whatsmeow identity; a different build clears
 only that class, preserving account bans and locks.
-Automatic pairing restart APIs remain deferred to the operator-plane work.
 Connection-event webhooks are available through
 `WEBHOOK_FORWARD_CONNECTION_EVENTS` ([payload and debounce](CONFIGURATION.md#connection-monitoring-contract)).
 Temporary-ban reasons 101, 102, 103, 104 and 106 are

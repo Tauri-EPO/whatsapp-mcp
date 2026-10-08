@@ -28,6 +28,8 @@ import (
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
+var operatorStatusFlag = flag.Bool("operator-status", false, "Probe operator pairing state using the configured secret; print state only")
+
 // printQRCode renders one pairing QR code to out. index is 1 for the first
 // code of a pairing session; later codes are redraws after whatsmeow rotated
 // the previous one, and are labelled so a reader of a scrolling log (e.g.
@@ -62,6 +64,9 @@ const shutdownTimeout = 10 * time.Second
 
 func main() {
 	flag.Parse()
+	if *operatorStatusFlag {
+		os.Exit(operatorStatusProbe(os.Getenv, os.Stdout))
+	}
 	os.Exit(run())
 }
 
@@ -81,7 +86,7 @@ func runBridge(cfg bridgeConfig) int {
 
 	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
 	logger, clientLog, dbLog := newLoggerSet(cfg.LogLevel, cfg.JSONLogs)
-	if !cfg.PairingStdout {
+	if cfg.Operator.Bind != "" || !cfg.PairingStdout {
 		clientLog = privatePairingLogger{clientLog}
 	}
 	bridgeLog = logger

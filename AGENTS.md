@@ -57,6 +57,7 @@ whatsapp-mcp/
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
 │   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
 │   ├── operator_config.go      # bounded operator configuration, token-file checks and single-interface bind
+│   ├── operator_probe.go        # credential-free argv/output for the operator smoke probe
 │   ├── operator_pairing.go     # HTTP pairing state, QR/code, explicit restart and passkey actions
 │   ├── runtime_client.go      # atomic client handoff, refreshed REST handlers and retired-event filtering
 │   ├── connection_problem.go   # classified connection failures, persisted ban expiry and dial blocking
@@ -322,10 +323,10 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge listens on |
 | `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback. |
 | `WHATSAPP_OPERATOR_PORT` | `8090` | Operator port; no host publication in compose. |
-| `WHATSAPP_OPERATOR_TOKEN` | required when enabled | Random ASCII secret, 32-256 characters; distinct from the effective bridge token, including the stored fallback. Never use a placeholder. |
+| `WHATSAPP_OPERATOR_TOKEN` | required when enabled | At least 32 random bytes encoded as 64 hex or 43-256 unpadded base64url characters; low-entropy/repeated values refused. Generate with `openssl rand -hex 32`. Distinct from the effective bridge token, including its stored fallback. |
 | `WHATSAPP_OPERATOR_TOKEN_FILE` | empty | Alternative owner-only regular token file; symlinks, permissive modes and oversized files refused. Set token or file, never both. |
 | `WHATSAPP_OPERATOR_ALLOWED_HOSTS` | loopback hosts | Explicit comma-separated operator Hosts (`host` or `host:port`); wildcard refused. Browser Origin must match the listener's scheme and Host; native clients may omit it. |
-| `WHATSAPP_PAIRING_STDOUT` | `true` | Draw QR codes on stdout. False also suppresses SDK DEBUG logs (QR payloads and raw protocol frames), while bridge/database DEBUG logs remain available. Set false for operator HTTP or exported logs; the operator compose override defaults false. |
+| `WHATSAPP_PAIRING_STDOUT` | `false` with operator enabled, otherwise `true` | Draw QR codes on stdout. False also suppresses SDK DEBUG logs (QR payloads and raw protocol frames), while bridge/database DEBUG logs remain available. Set false for operator HTTP or exported logs; the operator compose override defaults false. |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls; also signed onto outbound webhooks |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD` | `true` | Cache inbound media on arrival; `false` = fetch only on `/api/download` (`media_retention.go`). That includes the image the webhook payload would carry: with `false` the event goes out without `mediaBase64` and nothing is written (issue #484). `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge (`env_bool.go`) |
 | `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false` | Cache the media of status updates (`status@broadcast`) on arrival too. Off by default: the row is stored with its CDN fields, nothing is written under `store/status@broadcast/`, a status image forwarded to the webhook (`WEBHOOK_FORWARD_STATUS`) goes without its bytes, and `/api/download` still fetches a file on demand (`skipsStatusMedia` in `media_retention.go`, issue #447). `true` caches the status feed like any chat; `WHATSAPP_MEDIA_AUTODOWNLOAD=false` wins over it, on the webhook path too. Same strict boolean parse as `WHATSAPP_READ_ONLY` |

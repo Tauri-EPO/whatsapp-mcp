@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -104,20 +108,44 @@ func parseOperatorConfig(getenv func(string) string, lookup func(context.Context
 
 func validateOperatorToken(raw string) error {
 	token := strings.TrimSpace(raw)
-	unique := map[rune]bool{}
-	for _, char := range token {
-		if char <= ' ' || char > '~' {
-			return errors.New("WHATSAPP_OPERATOR_TOKEN must be a printable ASCII secret without whitespace")
-		}
-		unique[char] = true
-	}
-	if len(token) < 32 || len(token) > 256 || len(unique) < 8 {
-		return errors.New("WHATSAPP_OPERATOR_TOKEN requires a strong random secret of 32-256 characters")
+	refused := errors.New("WHATSAPP_OPERATOR_TOKEN requires at least 32 random bytes encoded as 64 hex or 43-256 unpadded base64url characters; generate one with openssl rand -hex 32")
+	if len(token) > 256 || strings.ContainsAny(token, " \r\n\t\v\f") {
+		return refused
 	}
 	for _, placeholder := range []string{"changeme", "change-me", "replace-me", "your-token", "password", "example"} {
 		if strings.Contains(strings.ToLower(token), placeholder) {
-			return errors.New("WHATSAPP_OPERATOR_TOKEN must not be a placeholder")
+			return refused
 		}
+	}
+	var decoded []byte
+	var err error
+	if len(token) == 64 {
+		decoded, err = hex.DecodeString(token)
+	}
+	if len(decoded) == 0 || err != nil {
+		decoded, err = base64.RawURLEncoding.Strict().DecodeString(token)
+	}
+	if err != nil || len(decoded) < 32 {
+		return refused
+	}
+	// This rejects obvious repetition; it cannot prove that an operator used
+	// a cryptographic generator. The documented generator is still required.
+	for period := 1; period <= len(decoded)/2; period++ {
+		if len(decoded)%period == 0 && bytes.Equal(decoded, bytes.Repeat(decoded[:period], len(decoded)/period)) {
+			return refused
+		}
+	}
+	counts := map[byte]int{}
+	for _, value := range decoded {
+		counts[value]++
+	}
+	entropy := 0.0
+	for _, count := range counts {
+		frequency := float64(count) / float64(len(decoded))
+		entropy -= frequency * math.Log2(frequency)
+	}
+	if len(counts) < 16 || entropy*float64(len(decoded)) < 128 {
+		return refused
 	}
 	return nil
 }
