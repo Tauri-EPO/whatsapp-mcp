@@ -117,20 +117,18 @@ func applyChatEphemeralSettings(msg *waE2E.Message, settings ChatEphemeralSettin
 	switch {
 	case msg.ExtendedTextMessage != nil:
 		msg.ExtendedTextMessage.ContextInfo = mergeEphemeralContextInfo(msg.ExtendedTextMessage.GetContextInfo(), settings)
-	case msg.ImageMessage != nil:
-		msg.ImageMessage.ContextInfo = mergeEphemeralContextInfo(msg.ImageMessage.GetContextInfo(), settings)
-	case msg.AudioMessage != nil:
-		msg.AudioMessage.ContextInfo = mergeEphemeralContextInfo(msg.AudioMessage.GetContextInfo(), settings)
-	case msg.VideoMessage != nil:
-		msg.VideoMessage.ContextInfo = mergeEphemeralContextInfo(msg.VideoMessage.GetContextInfo(), settings)
-	case msg.DocumentMessage != nil:
-		msg.DocumentMessage.ContextInfo = mergeEphemeralContextInfo(msg.DocumentMessage.GetContextInfo(), settings)
 	case msg.Conversation != nil:
 		text := msg.GetConversation()
 		msg.Conversation = nil
 		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{
 			Text:        proto.String(text),
 			ContextInfo: mergeEphemeralContextInfo(nil, settings),
+		}
+	default:
+		// Image, video, document, audio: added to the context a send already
+		// put there (a quote, mentions), never in place of it.
+		if slot := mediaContextInfo(msg); slot != nil {
+			*slot = mergeEphemeralContextInfo(*slot, settings)
 		}
 	}
 }
@@ -329,6 +327,13 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		return false, err.Error(), sentMessage{}
 	}
 
+	quote := outboundQuote{id: quotedMsgID, content: quotedContent}
+	if quotedMsgID != "" {
+		// Normalise to a JID recipients can match (bare numbers, LID upgrade);
+		// otherwise the quoted bubble shows "You" for everyone. See #13.
+		quote.participant = resolveQuotedParticipantJID(client, quotedSenderJID)
+	}
+
 	var msg *waE2E.Message
 	// What the upload returned, kept for the stored row: nothing else ever
 	// carries the key of a file this bridge sent (issue #449).
@@ -352,20 +357,16 @@ func sendWhatsAppMessage(ctx context.Context, client *whatsmeow.Client, messageS
 		// The length only: the response carries the media key.
 		bridgeLog.Debugf("Media uploaded (%d bytes)", upload.FileLength)
 
-		msg, err = buildMediaMessage(mediaType, mimeType, mediaPath, mediaData, upload, message)
+		// The message with its quote and mentions, and the caption that
+		// really travels with it: that text, not the one asked for, is what
+		// the row records below (issue #476).
+		msg, message, err = buildOutboundMedia(mediaType, mimeType, mediaPath, mediaData, upload, message, quote, mentionedJIDs)
 		if err != nil {
 			return false, err.Error(), sentMessage{}
 		}
 	} else {
-		quotedParticipant := ""
-		if quotedMsgID != "" {
-			// Normalise to a JID recipients can match (bare numbers, LID upgrade);
-			// otherwise the quoted bubble shows "You" for everyone. See #13.
-			quotedParticipant = resolveQuotedParticipantJID(client, quotedSenderJID)
-		}
-		msg = buildOutboundText(message, quotedMsgID, quotedParticipant, quotedContent, mentionedJIDs)
+		msg = buildOutboundText(message, quote.id, quote.participant, quote.content, mentionedJIDs)
 	}
-	attachCaptionMentions(msg, mentionedJIDs)
 
 	// Normalize @lid recipients to phone JID before the lookup. Chats are
 	// persisted under @s.whatsapp.net (handleMessage normalizes via
@@ -568,32 +569,71 @@ func buildMediaMessage(mediaType whatsmeow.MediaType, mimeType, mediaPath string
 // mentions someone. Only text quoting is supported: the quoted preview on
 // the recipient's device would need the original media's key/URL.
 func buildOutboundText(text, quotedMsgID, quotedParticipant, quotedContent string, mentionedJIDs []string) *waE2E.Message {
-	if quotedMsgID == "" && len(mentionedJIDs) == 0 {
+	ctx := outboundContextInfo(outboundQuote{id: quotedMsgID, participant: quotedParticipant, content: quotedContent}, mentionedJIDs)
+	if ctx == nil {
 		return &waE2E.Message{Conversation: proto.String(text)}
-	}
-	ctx := &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
-	if quotedMsgID != "" {
-		ctx.StanzaID = proto.String(quotedMsgID)
-		ctx.Participant = proto.String(quotedParticipant)
-		ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quotedContent)}
 	}
 	return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: ctx}}
 }
 
-// attachCaptionMentions puts mentions in media captions on the media
-// message's own ContextInfo (text messages carry them already).
-func attachCaptionMentions(msg *waE2E.Message, mentionedJIDs []string) {
-	if len(mentionedJIDs) == 0 {
-		return
+// outboundQuote is the message a send replies to: its ID, its author as a JID
+// recipients can match, and the text shown in the reply bubble. The zero value
+// is a send that quotes nothing.
+type outboundQuote struct {
+	id, participant, content string
+}
+
+// outboundContextInfo builds the ContextInfo of a send, the quote and the
+// mentions together, or nil when it has neither. Text and media messages both
+// get theirs from here, so a reply is a reply whatever it carries.
+func outboundContextInfo(quote outboundQuote, mentionedJIDs []string) *waE2E.ContextInfo {
+	if quote.id == "" && len(mentionedJIDs) == 0 {
+		return nil
 	}
+	ctx := &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+	if quote.id != "" {
+		ctx.StanzaID = proto.String(quote.id)
+		ctx.Participant = proto.String(quote.participant)
+		ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quote.content)}
+	}
+	return ctx
+}
+
+// buildOutboundMedia builds the media message of a send complete, with its
+// quote and its caption mentions, and returns next to it the caption that
+// travels with the file. A voice note carries no caption, so it mentions
+// nobody and its text is "": the caller stores what was sent, not what was
+// asked for.
+func buildOutboundMedia(mediaType whatsmeow.MediaType, mimeType, mediaPath string, mediaData []byte, upload whatsmeow.UploadResponse, caption string, quote outboundQuote, mentionedJIDs []string) (*waE2E.Message, string, error) {
+	msg, err := buildMediaMessage(mediaType, mimeType, mediaPath, mediaData, upload, caption)
+	if err != nil {
+		return nil, "", err
+	}
+	if msg.AudioMessage != nil {
+		caption, mentionedJIDs = "", nil
+	}
+	if slot := mediaContextInfo(msg); slot != nil {
+		*slot = outboundContextInfo(quote, mentionedJIDs)
+	}
+	return msg, caption, nil
+}
+
+// mediaContextInfo returns the ContextInfo slot of the media message msg
+// holds (image, video, document or audio), or nil for anything else.
+func mediaContextInfo(msg *waE2E.Message) **waE2E.ContextInfo {
 	switch {
+	case msg == nil:
+		return nil
 	case msg.ImageMessage != nil:
-		msg.ImageMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+		return &msg.ImageMessage.ContextInfo
 	case msg.VideoMessage != nil:
-		msg.VideoMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+		return &msg.VideoMessage.ContextInfo
 	case msg.DocumentMessage != nil:
-		msg.DocumentMessage.ContextInfo = &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
+		return &msg.DocumentMessage.ContextInfo
+	case msg.AudioMessage != nil:
+		return &msg.AudioMessage.ContextInfo
 	}
+	return nil
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file

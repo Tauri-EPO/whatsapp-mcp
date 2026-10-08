@@ -387,39 +387,6 @@ func TestBuildOutboundText(t *testing.T) {
 	}
 }
 
-func TestAttachCaptionMentions(t *testing.T) {
-	mentions := []string{"1555@s.whatsapp.net"}
-	for name, msg := range map[string]*waE2E.Message{
-		"image":    {ImageMessage: &waE2E.ImageMessage{}},
-		"video":    {VideoMessage: &waE2E.VideoMessage{}},
-		"document": {DocumentMessage: &waE2E.DocumentMessage{}},
-	} {
-		attachCaptionMentions(msg, mentions)
-		var got []string
-		switch name {
-		case "image":
-			got = msg.ImageMessage.GetContextInfo().GetMentionedJID()
-		case "video":
-			got = msg.VideoMessage.GetContextInfo().GetMentionedJID()
-		case "document":
-			got = msg.DocumentMessage.GetContextInfo().GetMentionedJID()
-		}
-		if len(got) != 1 {
-			t.Errorf("%s: mentions = %v", name, got)
-		}
-	}
-	audio := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{}}
-	attachCaptionMentions(audio, mentions)
-	if audio.AudioMessage.ContextInfo != nil {
-		t.Errorf("voice notes have no caption, must not get mentions")
-	}
-	text := &waE2E.Message{Conversation: proto.String("x")}
-	attachCaptionMentions(text, nil)
-	if text.GetConversation() != "x" {
-		t.Errorf("no-op without mentions")
-	}
-}
-
 func TestApplyChatEphemeralSettings_AllMessageKinds(t *testing.T) {
 	settings := ChatEphemeralSettings{Expiration: 86400, SettingTimestamp: 1710000000}
 	check := func(name string, ctx *waE2E.ContextInfo) {
