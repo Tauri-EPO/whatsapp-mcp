@@ -17,7 +17,7 @@ import (
 func TestMain(m *testing.M) {
 	// testBridge reads the switches the way main() does (testSwitches), so
 	// none of them may leak in from the shell or a compose env file.
-	for _, name := range []string{webhookEnabledEnv, forwardSelfEnv, mediaAutoDownloadEnv, metricsEnv, webhookForwardStatusEnv} {
+	for _, name := range []string{webhookEnabledEnv, forwardSelfEnv, mediaAutoDownloadEnv, metricsEnv, webhookForwardStatusEnv, webhookForwardChannelsEnv, webhookForwardBroadcastsEnv} {
 		_ = os.Unsetenv(name)
 	}
 	os.Exit(m.Run())

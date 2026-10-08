@@ -686,9 +686,10 @@ func TestHandleGroupMembersCachesRoster(t *testing.T) {
 // instead of sleeping a whole interval and re-stamping the same groups.
 func TestSyncGroupRostersBacksOffFailuresAndReportsLeftovers(t *testing.T) {
 	store := newTestMessageStore(t)
+	now := time.Now()
 	for _, jid := range []string{"120363000000000001@g.us", "120363000000000002@g.us"} {
 		if _, err := store.db.Exec(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`,
-			jid, jid, dbTime(time.Now())); err != nil {
+			jid, jid, dbTime(now)); err != nil {
 			t.Fatalf("seed chat: %v", err)
 		}
 	}
@@ -705,7 +706,6 @@ func TestSyncGroupRostersBacksOffFailuresAndReportsLeftovers(t *testing.T) {
 	b.Connected = func() bool { return true }
 	b.rosterFailures = newRosterFailures()
 
-	now := time.Now()
 	// Budget of one: the first group fails and spends it, so the second is
 	// left over.
 	refreshed, more := b.syncGroupRosters(context.Background(), now, 1, 0)

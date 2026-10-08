@@ -133,6 +133,8 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 		"webhook":             {WebhookEnabled: true},
 		"metrics":             {Metrics: true},
 		"forward status":      {ForwardStatus: true},
+		"forward channels":    {ForwardChannels: true},
+		"forward broadcasts":  {ForwardBroadcasts: true},
 		"none":                {},
 	}
 	for name, switches := range cases {
@@ -144,6 +146,8 @@ func TestNewBridgeAppliesEachSwitch(t *testing.T) {
 			WebhookEnabled:    b.Webhook.Enabled(),
 			Metrics:           b.MetricsEnabled,
 			ForwardStatus:     b.ForwardStatus,
+			ForwardChannels:   b.ForwardChannels,
+			ForwardBroadcasts: b.ForwardBroadcasts,
 		}
 		if got != switches {
 			t.Errorf("%s: the bridge runs with %+v, want %+v", name, got, switches)

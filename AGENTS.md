@@ -338,6 +338,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WEBHOOK_ENABLED` | `true` (compose: `false`) | Set to `false` to disable outbound webhooks entirely. Anything that is not a boolean stops the bridge |
 | `FORWARD_SELF` | `true` (compose: `false`) | Whether self-sent messages are forwarded to the webhook. Anything that is not a boolean stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false` | Forward status updates (`status@broadcast`: text, images, reactions) to the webhook too. Off by default: the webhook is for conversations, and the feed is one event per status post of every contact (`forwardsToWebhook` in `webhook.go`, issue #482). The posts are stored either way. With it on, a status image carries its bytes only when `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` is on as well. Anything that is not a boolean stops the bridge |
+| `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge |
+| `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds) |
 | `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`transcribe.py`). Wins over `WHISPER_BIN` |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |

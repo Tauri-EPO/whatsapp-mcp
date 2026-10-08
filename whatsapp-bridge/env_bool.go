@@ -44,20 +44,24 @@ func parseBoolEnv(name, raw string, def bool) (bool, error) {
 // The names are constants ending in Env on purpose: that spelling is how
 // tests/test_env_docs.py finds the variables the bridge reads.
 const (
-	forwardSelfEnv          = "FORWARD_SELF"
-	webhookEnabledEnv       = "WEBHOOK_ENABLED"
-	webhookForwardStatusEnv = "WEBHOOK_FORWARD_STATUS"
+	forwardSelfEnv              = "FORWARD_SELF"
+	webhookEnabledEnv           = "WEBHOOK_ENABLED"
+	webhookForwardStatusEnv     = "WEBHOOK_FORWARD_STATUS"
+	webhookForwardChannelsEnv   = "WEBHOOK_FORWARD_CHANNELS"
+	webhookForwardBroadcastsEnv = "WEBHOOK_FORWARD_BROADCASTS"
 )
 
 // bridgeSwitches are the on/off knobs main() loads once, before anything is
 // opened, and hands to newBridge. The first four are on unless turned off; the
-// last is off unless asked for.
+// remaining feed switches are off unless asked for.
 type bridgeSwitches struct {
 	ForwardSelf       bool // FORWARD_SELF: self-sent messages reach the webhook
 	MediaAutoDownload bool // WHATSAPP_MEDIA_AUTODOWNLOAD: cache inbound media on arrival
 	WebhookEnabled    bool // WEBHOOK_ENABLED: outbound webhooks at all
 	Metrics           bool // WHATSAPP_METRICS: serve GET /metrics
 	ForwardStatus     bool // WEBHOOK_FORWARD_STATUS: status updates reach the webhook too
+	ForwardChannels   bool // WEBHOOK_FORWARD_CHANNELS: channel posts reach the webhook too
+	ForwardBroadcasts bool // WEBHOOK_FORWARD_BROADCASTS: broadcast-list messages reach the webhook too
 }
 
 // parseBridgeSwitches reads them all and reports every value it cannot read
@@ -75,6 +79,8 @@ func parseBridgeSwitches(getenv func(string) string) (bridgeSwitches, error) {
 		{webhookEnabledEnv, true, &sw.WebhookEnabled},
 		{metricsEnv, true, &sw.Metrics},
 		{webhookForwardStatusEnv, false, &sw.ForwardStatus},
+		{webhookForwardChannelsEnv, false, &sw.ForwardChannels},
+		{webhookForwardBroadcastsEnv, false, &sw.ForwardBroadcasts},
 	} {
 		value, err := parseBoolEnv(s.name, getenv(s.name), s.def)
 		if err != nil {

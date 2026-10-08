@@ -75,13 +75,43 @@ func newWebhookSender(token string, enabled bool) *webhookSender {
 // Enabled reports whether outbound webhooks are on (WEBHOOK_ENABLED at startup).
 func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 
-// forwardsToWebhook is the one answer to "does this message go to the
-// webhook": outbound webhooks are on, a message of our own only with
-// FORWARD_SELF, and a status update only with WEBHOOK_FORWARD_STATUS. The
-// webhook is for conversations: without that opt-in a receiver got one event
-// per status post of every contact and had to know to drop it (issue #482).
+// forwardsToWebhook is shared by text, images and reactions. Status, channels
+// and broadcast lists are stored regardless, but require separate opt-ins to
+// reach a webhook intended for conversations. The global/self gates always win.
 func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool) bool {
-	return b.Webhook.Enabled() && (b.ForwardSelf || !fromMe) && (b.ForwardStatus || !isStatusChat(chat))
+	if !b.Webhook.Enabled() || (fromMe && !b.ForwardSelf) {
+		return false
+	}
+	if isStatusChat(chat) {
+		return b.ForwardStatus
+	}
+	switch chat.Server {
+	case types.NewsletterServer:
+		return b.ForwardChannels
+	case types.BroadcastServer:
+		return b.ForwardBroadcasts
+	case types.DefaultUserServer, types.HiddenUserServer, types.HostedServer, types.HostedLIDServer, types.GroupServer:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bridge) logWebhookWithheld(chat types.JID, id string) {
+	family, gate, on := "", "", false
+	switch {
+	case isStatusChat(chat):
+		family, gate, on = "status", webhookForwardStatusEnv, b.ForwardStatus
+	case chat.Server == types.NewsletterServer:
+		family, gate, on = "channel", webhookForwardChannelsEnv, b.ForwardChannels
+	case chat.Server == types.BroadcastServer:
+		family, gate, on = "broadcast list", webhookForwardBroadcastsEnv, b.ForwardBroadcasts
+	}
+	if gate == "" {
+		b.Log.Debugf("Message %s in %s not forwarded: namespace %q; WEBHOOK_ENABLED=%t FORWARD_SELF=%t", id, chat, chat.Server, b.Webhook.Enabled(), b.ForwardSelf)
+		return
+	}
+	b.Log.Debugf("Message %s in %s not forwarded: %s feed (%s=%t); WEBHOOK_ENABLED=%t FORWARD_SELF=%t", id, chat, family, gate, on, b.Webhook.Enabled(), b.ForwardSelf)
 }
 
 // WebhookPayload represents the data sent to the webhook

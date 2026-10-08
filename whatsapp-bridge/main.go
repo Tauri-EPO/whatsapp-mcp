@@ -49,6 +49,7 @@ func webhookStartupMessage(switches bridgeSwitches) string {
 	if switches.ForwardStatus {
 		status = "; WEBHOOK_FORWARD_STATUS enabled: status updates are forwarded too"
 	}
+	status += fmt.Sprintf("; channels forwarded=%t (%s); broadcast lists forwarded=%t (%s)", switches.ForwardChannels, webhookForwardChannelsEnv, switches.ForwardBroadcasts, webhookForwardBroadcastsEnv)
 	if switches.ForwardSelf {
 		return "FORWARD_SELF enabled: forwarding self messages to webhook" + status
 	}
