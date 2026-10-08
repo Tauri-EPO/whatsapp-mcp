@@ -16,7 +16,7 @@ import (
 
 func TestRuntimePrivatePairingLoggerDropsSDKCredentialsAtDebug(t *testing.T) {
 	var output bytes.Buffer
-	client := whatsmeow.NewClient(nil, privatePairingLogger{newJSONLogger("sdk", "DEBUG", &output)})
+	client := whatsmeow.NewClient(newTestClient(&mockLIDStore{}).Store, privatePairingLogger{newJSONLogger("sdk", "DEBUG", &output)})
 	client.Log.Sub("QRChannel").Debugf("Emitting QR code %s", "FAKE-SECRET-QR")
 	client.Log.Sub("Recv").Sub("Frame").Debugf("%s", "FAKE-SECRET-PASSKEY")
 	client.Log.Debugf("Errored frame hex: %s", "FAKE-SECRET-FRAME")
