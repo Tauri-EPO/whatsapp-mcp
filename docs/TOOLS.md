@@ -724,14 +724,14 @@ keeps its type label. Thumbnails are not archived for these text-only kinds.
 
 | Kind | How it reads |
 | --- | --- |
-| Event invitation | `Event` (or `Event canceled`), name, description, location, UTC start/end timestamps and join link |
-| Group invite | `Group invite`, group name, caption, group JID, direct invitation token and UTC expiration; the token is not a public join URL (the row's sender identifies the inviter) |
+| Event invitation | `Event` (or `Event canceled`), name, description, location, UTC start/end timestamps in 1970–2099 and join link |
+| Group invite | `Group invite`, group name, caption, group JID and UTC expiration; the direct invitation token is omitted |
 | Product | `Product`, title, description, body, footer, price and product URL |
 | Order | `Order`, title, message, order ID, item count and total; the opaque order token is omitted |
 | Sent payment | `Payment sent` and the note; opaque transaction data is omitted |
-| Payment request | `Payment request`, note and amount. `Amount1000` renders exact thousandths (for example `USD 1.500`); native `Money` retains its currency, integer `value` and `offset` without interpreting that scale |
-| List reply | `List reply`, title, description and selected row ID |
-| Interactive reply | `Interactive reply`, displayed text, native flow name and its response JSON |
+| Payment request | `Payment request`, note and amount. `Amount1000` renders two decimals when exact (for example `BRL 1.50`), otherwise three; only when absent, native `Money` retains its currency, integer `value` and `offset` without interpreting that scale |
+| List reply | `List reply`, title and description; selected row ID only when both displayed fields are empty |
+| Interactive reply | `Interactive reply`, displayed text, native flow name and response JSON capped at 4,096 characters including a truncation marker |
 | Button reply | Selected display text, or a button-reply label plus selected ID when display text is absent (regular and template buttons) |
 | Round video note | A normal `video` media row with its caption, direct path and download metadata; `has_media` sees it |
 

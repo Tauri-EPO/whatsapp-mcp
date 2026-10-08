@@ -723,6 +723,11 @@ when the message has them, and for an image `mediaType`, `mimeType`,
 `mediaFilename` and `mediaBase64`. Reactions arrive as their own event
 ([TOOLS.md](TOOLS.md#send_reaction)).
 
+Filled event/group invitations, product/order and payment messages, list/button
+and interactive replies are forwarded as the plain text documented in the
+[content table](TOOLS.md#list_messages); empty envelopes archived as a bare type
+label are withheld from the webhook.
+
 `mediaBase64` is only there when the bridge cached the image on arrival. With
 `WHATSAPP_MEDIA_AUTODOWNLOAD=false`, or for an image above
 `WHATSAPP_MEDIA_MAX_BYTES`, nothing is downloaded for the webhook either: the
