@@ -51,8 +51,11 @@ func TestMediaPresentationValidationIngressAndEgress(t *testing.T) {
 		{"name-10kb", "document", "application/pdf", func(p *mediaPresentation) { p.Name = proto.String(strings.Repeat("n", 10000)) }, func(p *mediaPresentation) bool { return p.Name != nil && *p.Name == strings.Repeat("n", 200) }},
 		{"title-10kb", "document", "application/pdf", func(p *mediaPresentation) { p.Title = proto.String(strings.Repeat("t", 10000)) }, func(p *mediaPresentation) bool { return p.Title != nil && *p.Title == strings.Repeat("t", 200) }},
 		{"title-unicode-bound", "document", "application/pdf", func(p *mediaPresentation) { p.Title = proto.String(strings.Repeat("界", 1000)) }, func(p *mediaPresentation) bool { return p.Title != nil && *p.Title == strings.Repeat("界", 200) }},
-		{"name-path-control-bidi", "document", "application/pdf", func(p *mediaPresentation) { p.Name = proto.String("C:\\fake\\private\\re\u202eport\x00.pdf") }, func(p *mediaPresentation) bool { return p.Name != nil && *p.Name == "report.pdf" }},
-		{"title-path-control-bidi", "document", "application/pdf", func(p *mediaPresentation) { p.Title = proto.String("C:\\fake\\private\\su\u2066mmary\x1f.txt") }, func(p *mediaPresentation) bool { return p.Title != nil && *p.Title == "summary.txt" }},
+		{"name-path-control-bidi", "document", "application/pdf", func(p *mediaPresentation) { p.Name = proto.String("C:\\fake\\private\\re\u202eport\x00.pdf") }, func(p *mediaPresentation) bool { return p.Name != nil && *p.Name == "C:\\fake\\private\\report.pdf" }},
+		{"title-path-control-bidi", "document", "application/pdf", func(p *mediaPresentation) { p.Title = proto.String("C:\\fake\\private\\su\u2066mmary\x1f.txt") }, func(p *mediaPresentation) bool { return p.Title != nil && *p.Title == "C:\\fake\\private\\summary.txt" }},
+		{"name-clock-punctuation", "document", "application/pdf", func(p *mediaPresentation) { p.Name = proto.String("Meeting 10:30.pdf") }, func(p *mediaPresentation) bool { return p.Name != nil && *p.Name == "Meeting 10:30.pdf" }},
+		{"name-display-punctuation", "document", "application/pdf", func(p *mediaPresentation) { p.Name = proto.String("a|b.pdf") }, func(p *mediaPresentation) bool { return p.Name != nil && *p.Name == "a|b.pdf" }},
+		{"title-display-punctuation", "document", "application/pdf", func(p *mediaPresentation) { p.Title = proto.String("Q3: results") }, func(p *mediaPresentation) bool { return p.Title != nil && *p.Title == "Q3: results" }},
 		{"document-mime-header-injection", "document", "application/pdf", func(p *mediaPresentation) { p.MIME = "text/html\r\nX-Evil: 1" }, func(p *mediaPresentation) bool { return p.MIME == "" }},
 		{"document-mime-parameters", "document", "application/pdf", func(p *mediaPresentation) { p.MIME = "text/html;charset=utf-8" }, func(p *mediaPresentation) bool { return p.MIME == "" }},
 		{"document-mime-whitespace", "document", "application/pdf", func(p *mediaPresentation) { p.MIME = " text/html " }, func(p *mediaPresentation) bool { return p.MIME == "" }},
@@ -129,6 +132,11 @@ func TestMediaPresentationValidationIngressAndEgress(t *testing.T) {
 				if strings.Contains(tc.name, "mime") {
 					if sent.MIME != tc.mime {
 						t.Fatalf("wire MIME=%q want=%q", sent.MIME, tc.mime)
+					}
+				} else if tc.name == "name-path-control-bidi" || tc.name == "name-clock-punctuation" || tc.name == "name-display-punctuation" {
+					want := map[string]string{"name-path-control-bidi": "report.pdf", "name-clock-punctuation": "30.pdf", "name-display-punctuation": "ab.pdf"}[tc.name]
+					if sent.Name == nil || *sent.Name != want {
+						t.Fatalf("wire filename=%v want=%s", sent.Name, want)
 					}
 				} else if !tc.check(&sent) {
 					t.Fatalf("%s wire validation failed", tc.name)

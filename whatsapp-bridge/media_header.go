@@ -11,23 +11,32 @@ type mediaHeader interface {
 // Protobuf getters are nil-safe, including typed nil headers. Top-level media
 // has already won in mediaPartOf; each structured header then supplies the same
 // CDN fields and filename through the canonical extraction path.
-func structuredHeaderMedia(msg *waE2E.Message) (string, cdnMedia) {
+func messageMediaHeaders(msg *waE2E.Message) []mediaHeader {
 	template := msg.GetTemplateMessage()
-	for _, header := range []mediaHeader{
+	return []mediaHeader{
 		template.GetHydratedTemplate(),
 		template.GetHydratedFourRowTemplate(),
 		template.GetFourRowTemplate(),
 		msg.GetButtonsMessage(),
 		msg.GetInteractiveMessage().GetHeader(),
 		template.GetInteractiveMessageTemplate().GetHeader(),
-	} {
+	}
+}
+
+func structuredHeaderMedia(msg *waE2E.Message) (string, cdnMedia) {
+	for _, header := range messageMediaHeaders(msg) {
+		var kind string
+		var part cdnMedia
 		switch {
 		case header.GetDocumentMessage() != nil:
-			return "document", header.GetDocumentMessage()
+			kind, part = "document", header.GetDocumentMessage()
 		case header.GetImageMessage() != nil:
-			return "image", header.GetImageMessage()
+			kind, part = "image", header.GetImageMessage()
 		case header.GetVideoMessage() != nil:
-			return "video", header.GetVideoMessage()
+			kind, part = "video", header.GetVideoMessage()
+		}
+		if part != nil && (part.GetURL() != "" || part.GetDirectPath() != "") && len(part.GetMediaKey()) != 0 {
+			return kind, part
 		}
 	}
 	return "", nil

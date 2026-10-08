@@ -1074,10 +1074,14 @@ document, and a WebP sticker stays a sticker (a legacy non-WebP sticker cache
 is forwarded as an image with its detected MIME). New archive rows retain the original
 document name/title, audio MIME/PTT/duration/waveform and sticker animation.
 An unnamed document uses `file`, without exposing its cache timestamp or source
-message ID. Names/titles use the outbound filename sanitizer: controls, bidi
-controls and path characters are stripped, and each is capped at 200 characters.
+message ID. Stored names/titles retain display punctuation, including colons
+and pipes; controls and bidi marks are stripped and each is capped at 200
+characters with a safe extension retained. Wire filenames also remove paths
+and filesystem punctuation; stored display titles retain their punctuation.
 Waveforms have exactly 64 bytes, duration is within 0–86400 seconds, and MIME
-is a parameter-free type/subtype allowed for the category; invalid fields are dropped.
+is a concrete type/subtype allowed for the category; invalid fields are dropped.
+The exact `audio/ogg; codecs=opus` exception is retained for Opus audio, and
+forwarded Ogg Opus bytes use that MIME with the stored PTT flag.
 Audio bytes are forwarded without conversion. Stored PTT is retained; legacy
 Ogg Opus stays a voice note, with duration and waveform computed from the bytes.
 Missing Opus duration/waveform in a newer row is computed too.

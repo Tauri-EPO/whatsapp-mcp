@@ -86,11 +86,11 @@ func (p *mediaPresentation) validated(kind string) *mediaPresentation {
 	q := *p
 	q.MIME = presentationMIME(kind, p.MIME)
 	if p.Name != nil {
-		name := cleanOutboundName(*p.Name)
+		name := cleanDisplayName(*p.Name)
 		q.Name = &name
 	}
 	if p.Title != nil {
-		title := cleanOutboundName(*p.Title)
+		title := cleanDisplayName(*p.Title)
 		q.Title = &title
 	}
 	if p.Seconds != nil && *p.Seconds > 86400 {
@@ -104,6 +104,9 @@ func (p *mediaPresentation) validated(kind string) *mediaPresentation {
 }
 
 func presentationMIME(kind, raw string) string {
+	if kind == "audio" && (strings.EqualFold(raw, "audio/ogg; codecs=opus") || strings.EqualFold(raw, "audio/ogg;codecs=opus")) {
+		return "audio/ogg; codecs=opus"
+	}
 	if len(raw) > 255 || strings.IndexFunc(raw, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
 		return ""
 	}

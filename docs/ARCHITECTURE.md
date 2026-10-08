@@ -189,11 +189,22 @@ Bounded document names retain their safe extension so replay does not change
 the existing cache identity used by download and purge.
 
 Validation runs at ingress and the wire sink: names/titles share the outbound
-filename sanitizer (controls/bidi/path characters removed, 200 characters),
+display sanitizer (controls/bidi removed, 200 characters and safe extension
+retained; punctuation stays). Wire filenames additionally remove paths and
+filesystem punctuation. The
 waveform is exactly 64 bytes, seconds is within 0–86400, and MIME is a whitespace-
-and parameter-free type/subtype permitted for that category (WebP only for
+and parameter-free type/subtype permitted for that category, except the exact
+`audio/ogg; codecs=opus` audio MIME (WebP only for
 stickers, audio/* for audio, any well-formed document type). Invalid fields are
 dropped. The LID-to-phone row copy keeps presentation and direct path together.
+
+Structured headers become media only with a URL/direct path and a key;
+thumbnail-only headers stay text. Template Format variants retain their body,
+and a header document caption supplies text when the body is empty. The shared
+extractor uses the SDK's envelope order for live and history: device-sent,
+bot-invoke, ephemeral, view-once variants, Lottie, document-with-caption and
+edited. Wrapper context is inherited on a local view without mutating the
+SDK-owned payload.
 
 The forward handler reads category, name and presentation together and reloads
 them after retrieval, since a phone retry can refresh the row. A changed retry

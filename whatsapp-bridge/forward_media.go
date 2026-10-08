@@ -67,6 +67,9 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 		contentType = p.MIME
 	}
 	if source.mediaType == "audio" {
+		if isOggOpus(data) {
+			contentType = "audio/ogg; codecs=opus"
+		}
 		parsed, _, err := mime.ParseMediaType(contentType)
 		if err != nil || !strings.HasPrefix(parsed, "audio/") {
 			return "", "", fmt.Errorf("cannot determine stored audio codec")
@@ -133,9 +136,12 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 		if (p == nil || p.Name == nil) && generatedMediaName(name) {
 			name, title = "", ""
 		}
+		if p == nil && title != "" {
+			title = outboundFileName(title)
+		}
 		msg, text, err := buildOutboundMedia(kind, contentType, name, data, upload, caption, quote, mentions)
 		if err == nil {
-			msg.DocumentMessage.Title = proto.String(cleanOutboundName(title))
+			msg.DocumentMessage.Title = proto.String(cleanDisplayName(title))
 		}
 		return msg, text, err
 	default:

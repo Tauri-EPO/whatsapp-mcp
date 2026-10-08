@@ -16,7 +16,7 @@ import (
 
 func mediaHeaderFixtures(kind string, part cdnMedia) map[string]*waE2E.Message {
 	hydrated := &waE2E.TemplateMessage_HydratedFourRowTemplate{HydratedContentText: proto.String("fake template body")}
-	legacy := &waE2E.TemplateMessage_FourRowTemplate{}
+	legacy := &waE2E.TemplateMessage_FourRowTemplate{Content: &waE2E.HighlyStructuredMessage{HydratedHsm: &waE2E.TemplateMessage{HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{HydratedContentText: proto.String("fake template body")}}}}
 	buttons := &waE2E.ButtonsMessage{ContentText: proto.String("fake buttons body")}
 	interactive := &waE2E.InteractiveMessage_Header{}
 	switch kind {
@@ -71,7 +71,7 @@ func TestStructuredHeaderMediaPersistsEveryCDNField(t *testing.T) {
 					ex := extractMessage(message, ts, "HEADER1")
 					// Media extraction preserves the existing text projection,
 					// including formats whose text was previously unsupported.
-					wantText := map[string]string{"hydrated": "fake template body", "buttons": "fake buttons body", "interactive": "fake interactive body"}[family]
+					wantText := map[string]string{"hydrated": "fake template body", "hydrated format": "fake template body", "legacy format": "fake template body", "buttons": "fake buttons body", "interactive": "fake interactive body", "interactive template": "fake interactive body"}[family]
 					if ex.content != wantText {
 						t.Fatalf("header text=%q want=%q", ex.content, wantText)
 					}

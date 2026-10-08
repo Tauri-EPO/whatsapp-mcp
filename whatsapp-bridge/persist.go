@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -28,7 +29,7 @@ type messageWriter interface {
 
 // extractedMessage is the storable view of a waE2E.Message.
 type extractedMessage struct {
-	// inner is the message with any view-once envelope removed; downstream
+	// inner is the message with SDK envelopes removed; downstream
 	// extractors (quotes, ephemeral settings, webhook media) should use it.
 	inner    *waE2E.Message
 	viewOnce bool
@@ -56,8 +57,18 @@ type extractedMessage struct {
 // will be stored (downloadMedia rebuilds the name from the stored row).
 func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage {
 	e := extractedMessage{inner: m}
-	if inner, wrapped := unwrapViewOnce(m); wrapped {
-		e.inner, e.viewOnce = inner, true
+	if m != nil {
+		// Reuse the pinned SDK's unwrap order without its final mutation of
+		// the inner MessageContextInfo. Inherit it on a local view instead.
+		rawView := *m
+		rawView.MessageContextInfo = nil
+		event := (&events.Message{RawMessage: &rawView}).UnwrapRaw()
+		e.inner, e.viewOnce = event.Message, event.IsViewOnce
+		if e.inner != nil && e.inner.MessageContextInfo == nil && m.MessageContextInfo != nil {
+			innerView := *e.inner
+			innerView.MessageContextInfo = m.MessageContextInfo
+			e.inner = &innerView
+		}
 	}
 	if e.inner == nil {
 		return e
@@ -68,7 +79,7 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	// original name with extractMediaInfo's generated cache fallback.
 	if _, part := mediaPartOf(e.inner); part != nil {
 		if doc, ok := part.(*waE2E.DocumentMessage); ok {
-			e.filename = cleanOutboundName(doc.GetFileName())
+			e.filename = cleanDisplayName(doc.GetFileName())
 		}
 	}
 	e.directPath = extractMediaDirectPath(e.inner)
