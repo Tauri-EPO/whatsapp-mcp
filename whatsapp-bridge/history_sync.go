@@ -123,36 +123,22 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				continue
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
-			// Any incoming kind can collide with an archived location. Defer
-			// own-phone markers until its bounded write transaction can check
-			// the current row, including a live row arriving after setup.
-			locationMarkers := !preserveExisting
 			var locationInitial map[locationSampleKey]time.Time
-			if locationMarkers {
+			if !preserveExisting {
 				locationInitial = b.historyLocationInitialTimes(messages, jid, timestamp)
 			}
-			markRead := conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
+			// Sparse chunks omit UnreadCount; only an explicit own-phone read
+			// state may advance the marker, after accepted rows are written.
+			markRead := !preserveExisting && conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
 			if err := retry(func() error {
-				if preserveExisting || locationMarkers {
-					return messageStore.EnsureChat(chatJID, name)
-				}
-				return messageStore.StoreChat(chatJID, name, timestamp)
+				return messageStore.EnsureChat(chatJID, name)
 			}); err != nil {
 				if stopping() {
 					return
 				}
 				b.noteHistoryLoss(messages, timestamp, chatJID, err)
 				continue
-			}
-			// Backfill read state only when WhatsApp explicitly reports unread
-			// metadata. Sparse history-sync chunks omit UnreadCount; the
-			// generated getter then returns 0 and would permanently mark the
-			// chat read under the monotonic merge.
-			if !locationMarkers && markRead {
-				if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
-					logger.Warnf("Failed to backfill read state for %s: %v", chatJID, err)
-				}
 			}
 			if err := messageStore.UpdateChatEphemeralSettings(
 				chatJID,
@@ -172,26 +158,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			storedInBatch := 0
 			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
-				if locationMarkers {
-					// Read ownership and activity after acquiring the same IMMEDIATE
-					// lock as the position update. A live original may have arrived
-					// since conversation setup, before this history transaction.
-					if err := batch.write(func() error {
-						stamp, err := b.historyLocationActivityTime(ctx, batch.tx, chunk, chatJID, timestamp, locationInitial)
-						if err != nil {
-							return err
-						}
-						if err := storeChatWith(batch.tx, chatJID, name, stamp); err != nil {
-							return err
-						}
-						if markRead {
-							return markChatReadWith(batch.tx, chatJID, stamp)
-						}
-						return nil
-					}); err != nil {
-						return err
-					}
-				}
+				ownedRows := make(map[string]struct{})
 				for _, msg := range chunk {
 					if preserveExisting && ctx.Err() != nil {
 						return ctx.Err()
@@ -268,16 +235,19 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 
 					// quoted_message_id is not persisted: history sync does not
 					// carry a usable ContextInfo.
-					err = persistMessage(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
+					var consumed bool
+					consumed, err = persistMessageResult(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
 					if err == nil {
 						err = batch.failure
 					}
 					if err != nil {
 						return err
-					} else {
+					} else if !consumed {
 						storedInBatch++
 						if preserveExisting {
 							chunkPeerRows[histMsgID] = struct{}{}
+						} else {
+							ownedRows[msgID] = struct{}{}
 						}
 						// Per-message echo stays at DEBUG: user content out of INFO,
 						// and two lines per row would swamp a full sync.
@@ -295,6 +265,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						return err
 					}
 					return batch.storePeerHistoryActivity(chatJID, chunkPeerRows)
+				}
+				if !preserveExisting && len(ownedRows) > 0 {
+					return batch.storeHistoryActivity(chatJID, name, ownedRows, markRead)
 				}
 				return nil
 			}

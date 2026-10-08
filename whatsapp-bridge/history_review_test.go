@@ -160,3 +160,58 @@ func TestPhoneLocationInitialTimestampAuthor(t *testing.T) {
 		}
 	}
 }
+
+func TestPhoneHistoryMarkersExcludeIntraChunkCollision(t *testing.T) {
+	for _, kind := range []string{"text", "static", "live"} {
+		t.Run(kind, func(t *testing.T) {
+			ms := newTestMessageStore(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+			const chat = "120363000000000001@g.us"
+			base := time.Unix(1700000000, 0)
+			if err := ms.StoreChat(chat, "group", base.Add(150*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.MarkChatRead(chat, base.Add(100*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.StoreMessage("UNREAD", chat, selfPhone.String(), "still unread", base.Add(150*time.Second), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+				t.Fatal(err)
+			}
+			fixture := shareHistoryFixture(3)
+			conversation := fixture.Data.Conversations[0]
+			conversation.UnreadCount = proto.Uint32(0)
+			timestamps := []uint64{1700000300, 1700000200, 1700000100}
+			for i, row := range conversation.Messages {
+				row.Message.Key.ID = proto.String("H0")
+				row.Message.Participant = proto.String(phonePN.String())
+				row.Message.MessageTimestamp = proto.Uint64(timestamps[i])
+			}
+			conversation.Messages[0].Message.Message = livePosition(3, 0.9)
+			collision := conversation.Messages[1].Message
+			collision.Participant = proto.String(selfPhone.String())
+			collision.Message = &waE2E.Message{Conversation: proto.String("foreign key claim")}
+			switch kind {
+			case "static":
+				collision.Message = &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(0.5), DegreesLongitude: proto.Float64(0.5)}}
+			case "live":
+				collision.Message = livePosition(4, 0.5)
+			}
+			conversation.Messages[2].Message.Message = livePosition(0, 0.25)
+			b.handleHistorySync(fixture)
+			var activity, read, saved time.Time
+			if err := ms.db.QueryRow("SELECT last_message_time,last_read_time FROM chats WHERE jid=?", chat).Scan(&activity, &read); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.db.QueryRow("SELECT timestamp FROM messages WHERE id='H0' AND chat_jid=?", chat).Scan(&saved); err != nil {
+				t.Fatal(err)
+			}
+			var unread int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages JOIN chats ON chats.jid=messages.chat_jid WHERE chat_jid=? AND timestamp>last_read_time", chat).Scan(&unread); err != nil {
+				t.Fatal(err)
+			}
+			if !activity.Equal(base.Add(150*time.Second)) || !read.Equal(saved) || !saved.Equal(base.Add(100*time.Second)) || unread != 1 {
+				t.Fatalf("rejected intra-chunk row advanced markers: activity=%v read=%v saved=%v unread=%d", activity, read, saved, unread)
+			}
+		})
+	}
+}

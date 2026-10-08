@@ -23,6 +23,12 @@ func (b *messageBatch) historyRowExists(id, chat string) (exists bool, err error
 // Rows and activity commit together, including a last chunk before shutdown
 // or expiry. Only the keys inserted by this transaction contribute activity.
 func (b *messageBatch) storePeerHistoryActivity(chat string, keys map[string]struct{}) error {
+	return b.storeHistoryActivity(chat, "", keys, false)
+}
+
+// Markers derive from the rows accepted in this transaction. A duplicate key
+// refused while replaying the chunk cannot contribute its claimed timestamp.
+func (b *messageBatch) storeHistoryActivity(chat, name string, keys map[string]struct{}, markRead bool) error {
 	ids := make([]string, 0, len(keys))
 	for id := range keys {
 		ids = append(ids, id)
@@ -32,6 +38,12 @@ func (b *messageBatch) storePeerHistoryActivity(chat string, keys map[string]str
 		if err != nil || !present {
 			return err
 		}
-		return storeChatWith(b.tx, chat, "", stamp)
+		if err := storeChatWith(b.tx, chat, name, stamp); err != nil {
+			return err
+		}
+		if markRead {
+			return markChatReadWith(b.tx, chat, stamp)
+		}
+		return nil
 	})
 }
