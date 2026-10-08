@@ -41,19 +41,16 @@ is still there for a client that does share the filesystem.
 from __future__ import annotations
 
 import base64
-import functools
 import json
 import mimetypes
 import os
 import sqlite3
-from collections.abc import Callable
 from typing import Any, NamedTuple
 from urllib.parse import quote
 
 from mcp_types import (
     AudioContent,
     BlobResourceContents,
-    CallToolResult,
     ContentBlock,
     EmbeddedResource,
     ImageContent,
@@ -66,7 +63,7 @@ import media_inventory
 import media_pdf
 import media_text
 import whatsapp
-from errors import ToolError
+from errors import ToolError, structured_errors
 from tool_policy import download_denied, offers_download
 from untrusted import clean_untrusted, wrap_enabled, wrap_text
 
@@ -541,37 +538,8 @@ def meta_block(sha256: str | None, mime: str, size: int, **extra: Any) -> TextCo
     )
 
 
-def content_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Make a block-returning tool report a failure on both channels.
-
-    A tool whose return annotation is content blocks publishes no output schema
-    (``func_metadata`` stops at ``_returns_content``), so the SDK has nowhere to
-    put the envelope ``@tool_errors`` builds: a client reading
-    ``structured_content`` and ignoring the text — the case
-    ``strict_args._refusal`` is written for — would see a failure as an empty
-    result. The envelope becomes the ``CallToolResult`` the SDK would otherwise
-    have built, with ``is_error`` set, which a bare list of blocks cannot carry
-    either. Goes *above* ``@tool_errors``::
-
-        @mcp.tool()
-        @content_tool
-        @tool_errors
-        @untrusted_content
-        def read_media(...): ...
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        result = fn(*args, **kwargs)
-        if isinstance(result, dict) and "error" in result:
-            return CallToolResult(
-                content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
-                structured_content=result,
-                is_error=True,
-            )
-        return result
-
-    return wrapper
+# Preserve the existing decorator import used by main and media callers.
+content_tool = structured_errors
 
 
 def _extracted_blocks(path: str, mime: str, max_pages: int) -> tuple[list[ContentBlock], dict[str, Any]]:

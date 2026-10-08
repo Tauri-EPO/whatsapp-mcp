@@ -33,6 +33,10 @@ classifiers = [
 dependencies = [
     # MCP Python SDK v2 (FastMCP renamed to MCPServer, transport config on run()).
     "mcp[cli]>=2.3.0,<3",
+    # Validate error envelopes against the advertised success schema without
+    # retrieving remote refs. Both packages already ship with the MCP SDK.
+    "jsonschema>=4.26.0",
+    "referencing>=0.37.0",
     # Bridge REST and whisper-server client (whatsapp.py, transcribe.py). Not the
     # SDK's HTTP stack: mcp brings its own client, httpx2, and uv.lock carries both.
     "httpx>=0.28",

@@ -114,6 +114,13 @@ Every tool returns its documented payload on success. On failure it returns one 
 {"error": {"code": "not_found", "message": "No chat 123@s.whatsapp.net in the archive"}}
 ```
 
+On the MCP wire, failures set `isError=true` and carry this envelope in the text
+block. `structuredContent` also carries it when the advertised output schema
+accepts it; schemas requiring a successful list or other required fields use a
+text-only error so clients can validate every structured result. SDK argument
+validation and output-conversion failures follow the same rule. Row projections and `omit_nulls` shape only
+the page's items, preserving its pagination envelope.
+
 | `code` | Meaning | What to do |
 | --- | --- | --- |
 | `not_found` | The chat, message, contact or file is not in the archive; or a send went to a number that has no WhatsApp account | Check the JID/ID (both come from `list_messages` / `list_chats` rows), or the number |
