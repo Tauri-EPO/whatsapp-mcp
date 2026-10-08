@@ -47,14 +47,14 @@ func TestResolveSessionKeepalive(t *testing.T) {
 	}
 }
 
-// The roster sync shares the parser: its accepted spellings must not move.
-func TestResolveGroupRosterSync_KeepsItsSpellingsAndGainsABound(t *testing.T) {
-	for value, want := range map[string]time.Duration{"": groupRosterSyncInterval, "0": 0, "6": 6 * time.Hour, "8760": 8760 * time.Hour} {
+// The roster sync shares the parser: what it accepts must not move.
+func TestResolveGroupRosterSync_KeepsItsSpellings(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": groupRosterSyncInterval, "0": 0, "6": 6 * time.Hour, "10000": 10000 * time.Hour} {
 		if got, err := resolveGroupRosterSync(value); err != nil || got != want {
 			t.Errorf("resolveGroupRosterSync(%q) = %v, %v; want %v", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"-1", "x", "9999999999"} {
+	for _, value := range []string{"-1", "x", "1.5"} {
 		if _, err := resolveGroupRosterSync(value); err == nil {
 			t.Errorf("resolveGroupRosterSync(%q) was accepted", value)
 		}
@@ -126,7 +126,7 @@ func keepaliveBridge(t *testing.T, interval time.Duration, ready *atomic.Bool, r
 	b := testBridge(t, nil, nil, installRecordingLogger(t))
 	b.SessionKeepalive = interval
 	b.SessionKeepaliveSettle = 2 * time.Millisecond
-	b.SessionKeepalivePoll = 2 * time.Millisecond
+	b.SessionKeepalivePoll = time.Millisecond
 	b.SessionKeepaliveRetry = 2 * time.Millisecond
 	b.SessionPresenceHold = time.Millisecond
 	b.sessionPresence = rec.send
@@ -185,6 +185,13 @@ func TestSessionKeepalive_AFailedAvailableIsRetriedSoonAndNotCounted(t *testing.
 	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
 	b.startSessionKeepalive()
 
+	// whatsmeow switches to active delivery receipts before it writes the
+	// frame, so each failed "available" is followed by an "unavailable".
+	for attempt := 1; attempt <= 2; attempt++ {
+		if got := rec.next(t); got != types.PresenceUnavailable {
+			t.Fatalf("after failed attempt %d: %q, want unavailable to undo it", attempt, got)
+		}
+	}
 	if got := rec.next(t); got != types.PresenceAvailable {
 		t.Fatalf("after two failures: %q, want available", got)
 	}
@@ -208,6 +215,9 @@ func TestSessionKeepalive_SurvivesASendThatFailsWithContextCanceled(t *testing.T
 	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
 	b.startSessionKeepalive()
 
+	if got := rec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("after the cancelled write: %q, want unavailable to undo it", got)
+	}
 	if got := rec.next(t); got != types.PresenceAvailable {
 		t.Fatalf("after a cancelled write: %q, want available on the retry", got)
 	}
@@ -226,6 +236,7 @@ func TestSessionKeepalive_NoPushNameYetIsWaitedOutQuietly(t *testing.T) {
 	log := installRecordingLogger(t)
 	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
 	b.Log = log
+	b.SessionKeepaliveRetry = time.Hour // the patience before it is reported
 	b.startSessionKeepalive()
 
 	if got := rec.next(t); got != types.PresenceAvailable {
@@ -261,6 +272,55 @@ func TestSessionKeepalive_AFailedUnavailableIsRetriedAloneAndCountedOnce(t *test
 	}
 	if n := b.metrics.sessionKeepalives.Load(); n != 1 {
 		t.Errorf("sessionKeepalives = %d, want 1", n)
+	}
+}
+
+// A push name that never comes must not disable the keepalive in silence: one
+// WARN once the patience is over, not one per poll.
+func TestSessionKeepalive_APushNameThatStaysMissingIsReportedOnce(t *testing.T) {
+	rec := newPresenceRecorder()
+	rec.fail = func(state types.Presence, attempt int) error {
+		if state == types.PresenceAvailable && attempt <= 40 {
+			return whatsmeow.ErrNoPushName
+		}
+		return nil
+	}
+	log := installRecordingLogger(t)
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.Log = log
+	b.startSessionKeepalive()
+
+	if got := rec.next(t); got != types.PresenceAvailable {
+		t.Fatalf("once the push name was there: %q, want available", got)
+	}
+	if n := strings.Count(log.String(), "push name"); n != 1 {
+		t.Errorf("%d log lines about the push name, want exactly one WARN:\n%s", n, log.String())
+	}
+	if got := rec.history(); got[0] != types.PresenceAvailable {
+		t.Errorf("sent %v: a refused available changes nothing in whatsmeow, so there is nothing to undo", got)
+	}
+}
+
+// The bridge is told to stop while "available" is on its way out: the frame
+// may still reach WhatsApp, so "unavailable" is sent before the loop returns.
+func TestSessionKeepalive_ShutdownWhileAvailableIsBeingSentStillSendsUnavailable(t *testing.T) {
+	rec := newPresenceRecorder()
+	b := keepaliveBridge(t, time.Hour, readyFlag(true), rec)
+	b.sessionPresence = func(ctx context.Context, state types.Presence) error {
+		if state == types.PresenceAvailable {
+			b.cancel()
+			return fmt.Errorf("failed to write frame: %w", context.Canceled)
+		}
+		return rec.send(ctx, state)
+	}
+	b.startSessionKeepalive()
+
+	if got := rec.next(t); got != types.PresenceUnavailable {
+		t.Fatalf("%q, want unavailable", got)
+	}
+	b.keepaliveLoop.Wait()
+	if got := rec.history(); len(got) != 1 {
+		t.Errorf("sent %v, want only the one unavailable: the loop must stop, not retry", got)
 	}
 }
 

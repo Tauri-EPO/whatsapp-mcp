@@ -115,9 +115,9 @@ type Bridge struct {
 	// (nil = the client) and "connected and logged in" (nil = the client).
 	sessionPresence presenceSender
 	sessionReady    func() bool
-	// sessionKeepalive is the loop's goroutine; Shutdown waits for it so a
+	// keepaliveLoop is the keepalive's goroutine; Shutdown waits for it so a
 	// blip in progress still ends with "unavailable".
-	sessionKeepalive sync.WaitGroup
+	keepaliveLoop sync.WaitGroup
 	// StreamReplacedDelay is how long the reconnect after a StreamReplaced event
 	// waits, so this bridge does not ping-pong with the session that took its
 	// slot (events.go). Set once at startup; tests shorten it on their own
@@ -243,6 +243,18 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	return b
 }
 
+// sleep waits for d and reports false when the bridge is shutting down.
+func (b *Bridge) sleep(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-b.ctx.Done():
+		return false
+	}
+}
+
 // Shutdown stops accepting REST requests, cancels background goroutines and
 // waits (bounded by timeout) for in-flight work. Order matters: drain HTTP
 // first so no handler touches the store after main closes it, then cancel
@@ -269,7 +281,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 		b.mediaTransfers.wait()
 		// A keepalive blip in progress finishes with "unavailable" before the
 		// caller disconnects the client.
-		b.sessionKeepalive.Wait()
+		b.keepaliveLoop.Wait()
 		close(done)
 	}()
 	select {
