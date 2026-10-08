@@ -265,9 +265,11 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			return
 		}
 		if req.ChatJID != "" {
-			if _, ok := authorizeChat(w, b.Policy, req.ChatJID, false); !ok {
+			chat, ok := authorizeChat(w, b.Policy, req.ChatJID, false)
+			if !ok {
 				return
 			}
+			req.ChatJID = chat.String()
 		}
 
 		var rows []mediaRow
@@ -286,10 +288,12 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "message_id and chat_jid are required"})
 					continue
 				}
-				if strings.Count(item.ChatJID, "@") > 1 {
-					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "malformed chat target: more than one '@'"})
+				chat, err := canonicalChatJID(item.ChatJID, false)
+				if err != nil {
+					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: err.Error()})
 					continue
 				}
+				item.ChatJID = chat.String()
 				if !b.Policy.Allows(item.ChatJID) {
 					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "chat not in " + chatPolicyEnv})
 					continue

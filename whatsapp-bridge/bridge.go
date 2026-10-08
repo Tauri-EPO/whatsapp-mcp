@@ -246,6 +246,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		return sendWhatsAppMessage(ctx, b.Client, b.Store, b.persistOutbound, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions)
 	}
 	b.IsOnWhatsApp = client.IsOnWhatsApp
+	b.chatPresence = client.SendChatPresence
 	b.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
 		os.Exit(code)

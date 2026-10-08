@@ -105,13 +105,26 @@ func (p chatPolicy) Allows(target string) bool {
 // permit bare digit-only phones; other endpoints require a full JID. Never
 // parse first: ParseJID discards extra @ parts, and String hides an empty user.
 func authorizeChat(w http.ResponseWriter, policy chatPolicy, raw string, allowPhone bool) (types.JID, bool) {
-	if strings.Count(raw, "@") > 1 {
-		writeError(w, http.StatusBadRequest, "malformed chat target: more than one '@'")
+	jid, err := canonicalChatJID(raw, allowPhone)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return types.EmptyJID, false
 	}
-	if allowPhone && !strings.Contains(raw, "@") && !isPhoneDigits(raw) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("%q is not a phone number: use the country code and ASCII digits, or a digits-only @s.whatsapp.net JID", raw))
+	if rejectByChatPolicy(w, policy, jid.String()) {
 		return types.EmptyJID, false
+	}
+	return jid, true
+}
+
+// canonicalChatJID validates a chat target before parsing can discard identity.
+// All consumers must use this returned JID, including per-item purge results.
+func canonicalChatJID(raw string, allowPhone bool) (types.JID, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.Count(raw, "@") > 1 {
+		return types.EmptyJID, fmt.Errorf("malformed chat target: more than one '@'")
+	}
+	if allowPhone && !strings.Contains(raw, "@") && !isPhoneDigits(raw) {
+		return types.EmptyJID, fmt.Errorf("%q is not a phone number: use the country code and ASCII digits, or a digits-only @s.whatsapp.net JID", raw)
 	}
 	var jid types.JID
 	var err error
@@ -121,21 +134,17 @@ func authorizeChat(w http.ResponseWriter, policy chatPolicy, raw string, allowPh
 		jid, err = types.ParseJID(raw)
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid chat JID: "+err.Error())
-		return types.EmptyJID, false
+		return types.EmptyJID, fmt.Errorf("invalid chat JID: %w", err)
 	}
 	if jid.User == "" || jid.Server == "" {
-		writeError(w, http.StatusBadRequest, "malformed chat target: a user and server are required")
-		return types.EmptyJID, false
+		return types.EmptyJID, fmt.Errorf("malformed chat target: a user and server are required")
 	}
-	if strings.ContainsAny(jid.User, ":.") {
-		writeError(w, http.StatusBadRequest, "Invalid chat JID: malformed user")
-		return types.EmptyJID, false
+	user := strings.SplitN(raw, "@", 2)[0]
+	if strings.ContainsAny(user, ":.") || strings.ContainsAny(jid.User, ":.") {
+		return types.EmptyJID, fmt.Errorf("invalid chat JID: malformed user or device-suffixed chat target")
 	}
-	if rejectByChatPolicy(w, policy, jid.String()) {
-		return types.EmptyJID, false
-	}
-	return jid, true
+	jid.Server = strings.ToLower(jid.Server)
+	return jid.ToNonAD(), nil
 }
 
 func (p chatPolicy) warnInvalidEntries(logger waLog.Logger) {

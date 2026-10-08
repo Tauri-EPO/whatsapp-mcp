@@ -42,7 +42,7 @@ func TestFormattedForwardPolicyBeforeSend(t *testing.T) {
 			},
 			send: func(_ context.Context, to, _, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
 				sent++
-				if to != "5511999999999" {
+				if to != "5511999999999@s.whatsapp.net" {
 					t.Fatalf("forward target %q differs from the checked number", to)
 				}
 				return true, "sent", sentMessage{}
@@ -64,7 +64,7 @@ func TestForwardTrimsDestinationBeforePolicy(t *testing.T) {
 	const source = "120363000000000001@g.us"
 	for _, tc := range []struct{ raw, want string }{
 		{" " + source + " ", source},
-		{"5511999999999\n", "5511999999999"},
+		{"5511999999999\n", "5511999999999@s.whatsapp.net"},
 	} {
 		var addressed string
 		deps := forwardDeps{

@@ -150,9 +150,11 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			writeEditForward(w, http.StatusBadRequest, editForwardResponse{Message: "to_chat_jid is required"})
 			return
 		}
-		if _, ok := authorizeChat(w, policy, to, true); !ok {
+		typed, ok := authorizeChat(w, policy, to, true)
+		if !ok {
 			return
 		}
+		to = typed.String()
 		content, mediaType, found, err := deps.lookup(id, chat.String())
 		if err != nil {
 			writeEditForward(w, http.StatusInternalServerError, editForwardResponse{Message: "Failed to look up message: " + err.Error()})

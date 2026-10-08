@@ -106,6 +106,7 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		req.ChatJID = chat.String()
 		if chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer && chat.Server != types.GroupServer {
 			writeError(w, http.StatusBadRequest, "Only direct chats and groups can be archived")
 			return

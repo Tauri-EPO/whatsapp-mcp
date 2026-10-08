@@ -422,9 +422,11 @@ func handlePollResults(store *MessageStore, policy chatPolicy) http.HandlerFunc 
 			_ = json.NewEncoder(w).Encode(PollResultsResponse{Message: "message_id and chat_jid are required", Options: []PollOptionTally{}, Votes: []PollVoteEntry{}})
 			return
 		}
-		if _, ok := authorizeChat(w, policy, chatJID, false); !ok {
+		chat, ok := authorizeChat(w, policy, chatJID, false)
+		if !ok {
 			return
 		}
+		chatJID = chat.String()
 		resp, err := store.PollResults(messageID, chatJID)
 		if errors.Is(err, sql.ErrNoRows) {
 			w.WriteHeader(http.StatusNotFound)

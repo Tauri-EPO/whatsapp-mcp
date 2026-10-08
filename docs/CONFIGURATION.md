@@ -190,7 +190,9 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   `/api/mark-read`, `/api/delete`, `/api/chat/archive`, `/api/poll`, all four
   group-management routes, `/api/group/members`, `/api/history`, `/api/download`
   and media-purge criteria (HTTP 403 for policy refusal, HTTP 400 for malformed
-  targets). Per-item purge reports its own refusal reason. An MCP-side bug cannot
+  targets, including device-suffixed chat JIDs). Handlers use the canonical
+  trimmed JID with a lower-cased server that the policy approved. Per-item purge
+  applies the same rule and reports its own refusal reason. An MCP-side bug cannot
   reach a chat you did not enable. Set the variable for **both** processes
   (the compose file passes it to both containers).
 - A send or forward destination written as a bare number goes to the number WhatsApp has registered, which

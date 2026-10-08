@@ -372,7 +372,7 @@ func TestSendWhenTheRegisteredNumberCannotBeChecked(t *testing.T) {
 			if rec := postSend(mux, dialledNumber); rec.Code != http.StatusOK {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 			}
-			if want := []string{dialledNumber}; !reflect.DeepEqual(*sentTo, want) {
+			if want := []string{dialledJID.String()}; !reflect.DeepEqual(*sentTo, want) {
 				t.Errorf("sent to %v, want the recipient as typed %v", *sentTo, want)
 			}
 			if log := sendLog(b); !strings.Contains(log, "[WARN] could not check the number with WhatsApp") || !strings.Contains(log, "as typed") {
