@@ -29,12 +29,14 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+MEDIA_REFUSED_CODE = "media_refused"
+
 ERROR_CODES = (
     "not_found",
     "denied",
     "bridge_unavailable",
     "media_unavailable",
-    "media_refused",
+    MEDIA_REFUSED_CODE,
     "invalid_argument",
     "conflict",
     "too_large",
@@ -46,6 +48,9 @@ logger = logging.getLogger("whatsapp_mcp")
 
 class ToolError(Exception):
     """Raised anywhere below a tool to produce the error envelope."""
+
+    # Internal fetch receipt, never serialized: None means not attempted.
+    _media_refusal_recorded: bool | None = None
 
     def __init__(self, code: str, message: str, **extra: Any) -> None:
         if code not in ERROR_CODES:

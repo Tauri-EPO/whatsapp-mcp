@@ -22,7 +22,7 @@ import endpoint_cert
 import media_upload
 import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry
-from errors import ToolError
+from errors import MEDIA_REFUSED_CODE, ToolError
 from phone import br_mobile_alternate, phone_digits
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
@@ -4026,7 +4026,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 # HTTP status can: media_unavailable means missing bytes or download fields;
 # media_refused means an unsafe cache identity. Both download and forward name
 # these permanent failures. Every other failure keeps the status map.
-_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", "media_refused"})
+_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", MEDIA_REFUSED_CODE})
 
 
 def _bridge_error_code(status: int) -> str:
@@ -4084,17 +4084,24 @@ def _bridge_json(response) -> dict[str, Any]:
 
 def _bridge_media_json(response, message_id: str, chat_jid: str) -> dict[str, Any]:
     """Remember per-row refusals for every manual or background media fetch."""
-    try:
-        return _bridge_json(response)
-    except ToolError as exc:
-        if exc.code == "media_refused":
-            import media_notes
+    import media_notes
 
+    try:
+        result = _bridge_json(response)
+    except ToolError as exc:
+        if exc.code == MEDIA_REFUSED_CODE:
+            exc._media_refusal_recorded = False
             try:
-                media_notes.record_media_refusal(message_id, chat_jid, exc.message[:500])
+                media_notes.record_media_refusal(message_id, chat_jid, exc.message)
+                exc._media_refusal_recorded = True
             except (ToolError, sqlite3.Error) as note_error:
                 logger.warning("could not record media refusal: %s", note_error)
         raise
+    try:
+        media_notes.forget_media_refusal(message_id, chat_jid)
+    except (ToolError, sqlite3.Error) as note_error:
+        logger.warning("could not clear media refusal after successful fetch: %s", note_error)
+    return result
 
 
 def _sent_info(result: dict[str, Any]) -> dict[str, Any]:

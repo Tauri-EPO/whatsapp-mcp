@@ -233,6 +233,8 @@ injection away from sending. With read-only on there is no send tool to call.
   `notes.db`, local state owned by the MCP server, never WhatsApp. A read-only
   assistant still needs somewhere to keep its own working memory, and a triage
   pass that cannot record what it concluded has to derive it again next time.
+- `clear_media_refusal` — clears one dated row in `notes.db`'s `media_refusals`
+  table, without contacting WhatsApp.
 
 Two deliberate calls at the edges:
 

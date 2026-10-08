@@ -48,6 +48,7 @@ TRANSCRIPT_ERROR_KEY = "transcript_error"
 # time it comes round; clearing the note asks again.
 MEDIA_UNAVAILABLE_KEY = "media_unavailable"
 MAX_VALUE_BYTES = 64 * 1024
+MAX_REFUSAL_CHARS = 500
 MAX_KEY_LEN = 64
 MAX_SEARCH_LIMIT = 200
 # How many matching note rows a search pulls off its cursor before enriching
@@ -137,10 +138,6 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     conn = sqlite3.connect(path, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    if "updated_at" not in {row[1] for row in conn.execute("PRAGMA table_info(media_refusals)")}:
-        conn.execute("ALTER TABLE media_refusals ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
-        conn.execute("UPDATE media_refusals SET updated_at = ?", (datetime.now(UTC).isoformat(),))
-        conn.commit()
     return conn
 
 
@@ -164,17 +161,20 @@ def record_media_refusal(message_id: str, chat_jid: str, reason: str) -> None:
         with conn:
             conn.execute(
                 "INSERT OR REPLACE INTO media_refusals (chat_jid, message_id, reason, updated_at) VALUES (?, ?, ?, ?)",
-                (chat_jid, message_id, reason, datetime.now(UTC).isoformat()),
+                (chat_jid, message_id, reason[:MAX_REFUSAL_CHARS], datetime.now(UTC).isoformat()),
             )
     finally:
         conn.close()
 
 
-def fetch_media_refusals(identities: Sequence[tuple[str, str]]) -> dict[tuple[str, str], dict[str, str]]:
+def fetch_media_refusals(
+    identities: Sequence[tuple[str, str]], *, conn: sqlite3.Connection | None = None
+) -> dict[tuple[str, str], dict[str, str]]:
     """Refusals for an already policy-filtered page of (chat, message) identities."""
     if not identities:
         return {}
-    conn = _connect(create=False)
+    owned = conn is None
+    conn = conn or _connect(create=False)
     if conn is None:
         return {}
     found = {}
@@ -190,21 +190,33 @@ def fetch_media_refusals(identities: Sequence[tuple[str, str]]) -> dict[tuple[st
                 {(chat, message): {"reason": reason, "updated_at": date} for chat, message, reason, date in rows}
             )
     finally:
-        conn.close()
+        if owned:
+            conn.close()
     return found
 
 
 def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Clear one visible row's refusal so the ingest worker can try it again."""
+    normalized = ((chat_jid or "").strip(), (message_id or "").strip())
+    if not all(normalized):
+        raise ToolError("invalid_argument", "chat_jid and message_id are required")
     whatsapp._require_allowed(chat_jid)
     messages = whatsapp._connect_messages_db()
     try:
-        if not messages.execute(
-            "SELECT 1 FROM messages WHERE chat_jid = ? AND id = ?", (chat_jid, message_id)
-        ).fetchone():
+        for identity in [(chat_jid, message_id), normalized]:
+            if messages.execute("SELECT 1 FROM messages WHERE chat_jid = ? AND id = ?", identity).fetchone():
+                chat_jid, message_id = identity
+                break
+        else:
             raise ToolError("not_found", "message not found")
     finally:
         messages.close()
+    deleted = forget_media_refusal(message_id, chat_jid)
+    return {"success": True, "chat_jid": chat_jid, "message_id": message_id, "deleted": deleted}
+
+
+def forget_media_refusal(message_id: str, chat_jid: str) -> bool:
+    """Forget a refusal after a successful fetch or an already authorized clear."""
     conn = _connect(create=False)
     deleted = False
     if conn is not None:
@@ -218,7 +230,7 @@ def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
                 )
         finally:
             conn.close()
-    return {"success": True, "chat_jid": chat_jid, "message_id": message_id, "deleted": deleted}
+    return deleted
 
 
 def _rebuild_transcripts_fts(conn: sqlite3.Connection) -> None:
@@ -388,10 +400,6 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
-    refusals = fetch_media_refusals([(message["chat_jid"], message["message_id"]) for message in messages])
-    for message in messages:
-        if refusal := refusals.get((message["chat_jid"], message["message_id"])):
-            message["media_refusal"] = refusal
     return messages
 
 
@@ -413,12 +421,13 @@ def require_visible_hash(sha256: str) -> None:
         raise ToolError("not_found", NOT_VISIBLE_MESSAGE)
 
 
-def fetch_notes(hashes: list[str]) -> dict[str, dict[str, str]]:
+def fetch_notes(hashes: list[str], *, conn: sqlite3.Connection | None = None) -> dict[str, dict[str, str]]:
     """Notes for many hashes at once: {sha256: {key: value}}. Missing notes.db means no notes."""
     wanted = sorted({h for h in hashes if h})
     if not wanted:
         return {}
-    conn = _connect(create=False)
+    owned = conn is None
+    conn = conn or _connect(create=False)
     if conn is None:
         return {}
     try:
@@ -426,11 +435,23 @@ def fetch_notes(hashes: list[str]) -> dict[str, dict[str, str]]:
             f"SELECT sha256, key, value FROM media_notes WHERE sha256 IN ({','.join('?' * len(wanted))})", wanted
         ).fetchall()
     finally:
-        conn.close()
+        if owned:
+            conn.close()
     out: dict[str, dict[str, str]] = {}
     for sha, key, value in rows:
         out.setdefault(sha, {})[key] = value
     return out
+
+
+def fetch_media_annotations(hashes: list[str], identities: Sequence[tuple[str, str]]) -> tuple[dict, dict]:
+    """Hash notes and row refusals for a visible page, sharing one connection."""
+    conn = _connect(create=False)
+    if conn is None:
+        return {}, {}
+    try:
+        return fetch_notes(hashes, conn=conn), fetch_media_refusals(identities, conn=conn)
+    finally:
+        conn.close()
 
 
 def _like_literal(value: str) -> str:
@@ -536,6 +557,12 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
                 "SELECT key, value, updated_at FROM media_notes WHERE sha256 = ? ORDER BY key", (sha,)
             ):
                 notes[key] = {"value": value, "updated_at": updated_at}
+            refusals = fetch_media_refusals(
+                [(message["chat_jid"], message["message_id"]) for message in messages], conn=conn
+            )
+            for message in messages:
+                if refusal := refusals.get((message["chat_jid"], message["message_id"])):
+                    message["media_refusal"] = refusal
         finally:
             conn.close()
     return {"sha256": sha, "notes": notes, "messages": messages}

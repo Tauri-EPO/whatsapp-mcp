@@ -1005,6 +1005,10 @@ Edit the text of a message this account sent (WhatsApp accepts edits for about 1
 
 Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
 
+An unsafe media identity answers `media_refused`; missing bytes or download
+fields answer `media_unavailable`. Do not retry those permanent media failures.
+`bridge_unavailable` remains the temporary bridge/CDN failure to retry later.
+
 ### `mark_messages_read`
 
 Send WhatsApp read receipts (the blue ticks). This is a visible side effect on
@@ -1251,12 +1255,16 @@ a safe identity remains fetchable. The synchronous image path does not queue
 a second attempt after either permanent code. `/metrics` counts identity
 refusals in `whatsapp_bridge_media_refusals_total`.
 
+### `clear_media_refusal`
+
 `list_media` and each message in `get_media_notes` show `media_refusal` with
 `reason` and `updated_at` when recorded. **`clear_media_refusal(chat_jid,
 message_id)`** removes one refusal and returns `{success, chat_jid, message_id,
 deleted}`; only messages in allowed chats can be cleared. Use it after a bridge
 upgrade changes the path rule. A rule that still rejects the identity records
 the refusal again on the next fetch; other copies remain unaffected.
+`updated_at` is when the row was last refused. A later successful media fetch
+clears the refusal automatically, so cached audio can be transcribed again.
 
 ### `read_media`
 

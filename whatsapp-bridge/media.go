@@ -149,7 +149,7 @@ func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (
 	if err := checkMediaPathComponents(chatDir, filename); err != nil {
 		b.Log.Warnf("Refusing to cache media for message %q in chat %q: %v", messageID, chatJID, err)
 		b.metrics.mediaRefusals.Add(1)
-		return false, "", "", "", fmt.Errorf("%w: %v", errMediaRefused, err)
+		return false, "", "", "", fmt.Errorf("%w: %w", errMediaRefused, err)
 	}
 	// Everything below — the directory, the cache lookup, the temp file and the
 	// rename — goes through the store root, so the kernel keeps it inside the

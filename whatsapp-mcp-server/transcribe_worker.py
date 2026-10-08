@@ -70,7 +70,7 @@ from typing import Any
 import media_inventory
 import media_notes
 import whatsapp
-from errors import ToolError
+from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
 from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, DOWNLOAD_TOOL, load_tool_policy, parse_bool_env
 from transcribe import BackendUnavailableError, TranscriptionError, load_config, transcribe_file
@@ -167,6 +167,7 @@ class Fetched:
     # retrying.
     unavailable: str = ""
     refused: str = ""  # unsafe row identity; other copies of the hash can still be fetched
+    refusal_recorded: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -417,11 +418,13 @@ def find_pending(
             path = fetched.path
             strike = path is None
             if fetched.refused:
-                try:
-                    media_notes.record_media_refusal(message_id, chat_jid, fetched.refused[:MAX_ERROR_CHARS])
-                    strike = False
-                except (ToolError, sqlite3.Error) as exc:
-                    logger.warning("transcribe_on_ingest: could not record media refusal: %s", exc)
+                strike = fetched.refusal_recorded is not True
+                if fetched.refusal_recorded is None:  # injected fetcher did not attempt to record
+                    try:
+                        media_notes.record_media_refusal(message_id, chat_jid, fetched.refused)
+                        strike = False
+                    except (ToolError, sqlite3.Error) as exc:
+                        logger.warning("transcribe_on_ingest: could not record media refusal: %s", exc)
             if fetched.unavailable:
                 # Not the bridge failing: the phone answered, and the answer is
                 # final. Recording it is what makes the walk stop asking, and it
@@ -490,8 +493,8 @@ def _fetch_bytes(
     try:
         path = download(message_id, chat_jid)
     except ToolError as exc:
-        if exc.code == "media_refused":
-            return Fetched(refused=exc.message)
+        if exc.code == MEDIA_REFUSED_CODE:
+            return Fetched(refused=exc.message, refusal_recorded=exc._media_refusal_recorded)
         if exc.code == MEDIA_UNAVAILABLE_CODE:
             # Expected on an old archive, and per file, so it stays at debug:
             # the round logs how many it recorded.

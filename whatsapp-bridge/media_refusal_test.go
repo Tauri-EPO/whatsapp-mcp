@@ -42,7 +42,7 @@ func TestMediaRefusalIsNamedCountedAndNotRequeued(t *testing.T) {
 		t.Fatalf("missing metric: %s", metrics.Body.String())
 	}
 	_, _, _, _, err := b.downloadMedia(context.Background(), msg.Info.ID, phonePN.String())
-	if !errors.Is(err, errMediaRefused) || errors.Is(err, errMediaUnavailable) {
+	if !errors.Is(err, errMediaRefused) || !errors.Is(err, errMediaPath) || errors.Is(err, errMediaUnavailable) {
 		t.Fatalf("wrong classification: %v", err)
 	}
 	response := httptest.NewRecorder()

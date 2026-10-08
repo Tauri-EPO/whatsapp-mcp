@@ -1,6 +1,7 @@
 """Manual tools and default ingest agree on dated, visible, clearable refusals."""
 
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ import transcribe_worker
 import whatsapp
 from tests.conftest import ALICE, BOB
 from tests.test_bridge_request import _Failed
+from tests.test_transcribe_ingest import _add_audio
 
 SHA = "aa" * 32
 
@@ -69,12 +71,99 @@ def test_clear_and_listing_respect_chat_policy(refused_archive, monkeypatch):
     assert (BOB, "BAD/ID") in media_notes.fetch_media_refusals([(BOB, "BAD/ID")])
 
 
-def test_an_undated_refusal_store_migrates_once(refused_archive):
-    with sqlite3.connect(media_notes.notes_db_path()) as conn:
+def test_clear_validates_and_normalizes_its_arguments(refused_archive):
+    for chat, message in [("", ""), (ALICE, " "), (" ", "SAFE1")]:
+        assert main.clear_media_refusal(chat, message)["error"]["code"] == "invalid_argument"
+    media_notes.record_media_refusal("SAFE1", ALICE, "unsafe message identity")
+    assert main.clear_media_refusal(" " + ALICE + " ", " SAFE1 ")["deleted"]
+
+
+def test_clear_prefers_the_exact_stored_identity(refused_archive):
+    message_id = "\nBAD/ID\n"
+    with refused_archive.messages() as conn:
         conn.execute(
-            "CREATE TABLE media_refusals (chat_jid TEXT, message_id TEXT, reason TEXT, PRIMARY KEY(chat_jid, message_id))"
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) "
+            "VALUES (?, ?, 'x', '', '2026-09-04 10:00:00', 0)",
+            (message_id, ALICE),
         )
-        conn.execute("INSERT INTO media_refusals VALUES (?, 'BAD/ID', 'unsafe message identity')", (ALICE,))
-    first = media_notes.fetch_media_refusals([(ALICE, "BAD/ID")])
-    assert first[ALICE, "BAD/ID"]["updated_at"].endswith("+00:00")
-    assert media_notes.fetch_media_refusals([(ALICE, "BAD/ID")]) == first
+    assert main.download_media(ALICE, message_id)["error"]["code"] == "media_refused"
+    media_notes.record_media_refusal("BAD/ID", ALICE, "unsafe message identity")
+    result = main.clear_media_refusal(ALICE, message_id)
+    assert result["deleted"] and result["message_id"] == message_id
+    assert set(media_notes.fetch_media_refusals([(ALICE, message_id), (ALICE, "BAD/ID")])) == {(ALICE, "BAD/ID")}
+
+
+def test_successful_fetch_clears_only_its_refusal_and_cached_audio_is_transcribed(refused_archive, monkeypatch):
+    assert main.download_media(ALICE, "SAFE1")["error"]["code"] == "media_refused"
+    media_notes.record_media_refusal("BAD/ID", ALICE, "unsafe message identity")
+    directory = refused_archive.messages_db.parent / ALICE
+    directory.mkdir()
+    cached = directory / "audio_20260904_100000_SAFE1.ogg"
+    cached.write_bytes(b"opus")
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "post",
+        lambda *args, **kwargs: SimpleNamespace(
+            status_code=200, text="", json=lambda: {"success": True, "path": str(cached)}
+        ),
+    )
+    assert main.download_media(ALICE, "SAFE1")["file_path"] == str(cached)
+    seen = []
+
+    def transcribe(path):
+        seen.append(path)
+        return {"text": "spoken words", "backend": "server"}
+
+    assert transcribe_worker.run_once(10, fetch=False, transcribe=transcribe).transcribed == 1
+    assert seen == [str(cached)]
+    assert main.get_media_notes(SHA)["notes"]["transcript"]["value"] == "spoken words"
+    items = {(item["chat_jid"], item["message_id"]): item for item in main.list_media()["items"]}
+    assert items[ALICE, "SAFE1"]["cached"] and "media_refusal" not in items[ALICE, "SAFE1"]
+    assert "media_refusal" in items[ALICE, "BAD/ID"]
+    assert whatsapp.coverage()["audio"]["backlog"] == 0
+
+
+@pytest.mark.parametrize("unwritable", [False, True])
+def test_default_ingest_records_once_and_keeps_write_failures_bounded(paired_dbs, monkeypatch, unwritable):
+    for message in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message, ALICE, cached=False)
+    records, requests = [], []
+    original = media_notes.record_media_refusal
+
+    def record(message_id, chat_jid, reason):
+        records.append((message_id, chat_jid))
+        if unwritable or records.count((message_id, chat_jid)) > 1:
+            raise sqlite3.OperationalError("database is locked")
+        original(message_id, chat_jid, reason)
+
+    def response(*args, **kwargs):
+        requests.append(kwargs["json"]["message_id"])
+        return _Failed(500, "media_refused", "unsafe message identity")
+
+    monkeypatch.setattr(media_notes, "record_media_refusal", record)
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", response)
+    transcribe_worker.find_pending(10, fetch=True)
+    expected = transcribe_worker.MAX_FETCH_FAILURES if unwritable else 4
+    assert len(records) == len(requests) == expected
+    assert len(set(records)) == expected
+
+
+def test_notes_enrichment_opens_one_connection_per_page_and_note_write(refused_archive, monkeypatch):
+    media_notes.record_media_refusal("BAD/ID", ALICE, "unsafe message identity")
+    original = media_notes._connect
+    connections = []
+
+    def connect(create):
+        connections.append(create)
+        return original(create)
+
+    monkeypatch.setattr(media_notes, "_connect", connect)
+    for operation in [
+        lambda: main.annotate_media(SHA, "summary", "voice note"),
+        main.list_media,
+        lambda: main.get_media_notes(SHA),
+    ]:
+        connections.clear()
+        assert "error" not in operation()
+        assert len(connections) == 1
