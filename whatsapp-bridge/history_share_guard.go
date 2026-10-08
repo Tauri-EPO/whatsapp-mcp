@@ -7,10 +7,13 @@ import (
 
 // Called inside the canonical IMMEDIATE transaction. Peer bundles may add a
 // missing key, but may not replace either an older row or one from this import.
+// Local deletion removes only the message row; retained poll metadata remains
+// authoritative and must not be replaced by a peer's creation/options.
 func (b *messageBatch) historyRowExists(id, chat string) (exists bool, err error) {
 	err = b.write(func() error {
 		var present int
-		queryErr := b.tx.QueryRow("SELECT 1 FROM messages WHERE id=? AND chat_jid=?", id, chat).Scan(&present)
+		queryErr := b.tx.QueryRow(`SELECT 1 FROM messages WHERE id=? AND chat_jid=?
+			UNION ALL SELECT 1 FROM polls WHERE message_id=? AND chat_jid=? LIMIT 1`, id, chat, id, chat).Scan(&present)
 		if errors.Is(queryErr, sql.ErrNoRows) {
 			return nil
 		}
