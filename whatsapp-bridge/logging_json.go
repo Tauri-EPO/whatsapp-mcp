@@ -6,6 +6,7 @@ package main
 // waLog.Stdout does, so the whatsmeow client uses it too.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,9 +45,30 @@ func (l *jsonLogger) log(level, msg string, args ...any) {
 		"module": l.module,
 		"msg":    fmt.Sprintf(msg, args...),
 	})
+	line = terminalSafeJSON(line)
 	l.mu.Lock()
 	_, _ = l.out.Write(append(line, '\n'))
 	l.mu.Unlock()
+}
+
+// terminalSafeJSON rewrites the characters json.Marshal leaves as they are and a
+// terminal acts on (DEL, the C1 controls with their own line break and escape
+// introducer, the bidirectional controls that reorder text) as JSON escapes.
+// The line decodes to the same message; it only stops carrying those bytes.
+func terminalSafeJSON(line []byte) []byte {
+	risky := func(r rune) bool { return r == 0x7F || (r >= 0x80 && r <= 0x9F) || reordersText(r) }
+	if !bytes.ContainsFunc(line, risky) {
+		return line
+	}
+	var b bytes.Buffer
+	for _, r := range string(line) {
+		if risky(r) {
+			fmt.Fprintf(&b, "%cu%04x", '\\', r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.Bytes()
 }
 
 func (l *jsonLogger) Warnf(msg string, args ...any)  { l.log("WARN", msg, args...) }
@@ -72,5 +94,5 @@ func newLoggerSet(level string, jsonFormat bool) (bridge, client, db waLog.Logge
 	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		color = true
 	}
-	return waLog.Stdout("Bridge", level, color), waLog.Stdout("Client", level, color), waLog.Stdout("Database", "INFO", color)
+	return newTextLogger("Bridge", level, color), newTextLogger("Client", level, color), newTextLogger("Database", "INFO", color)
 }
