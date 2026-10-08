@@ -29,6 +29,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
+from private_files import notes_connection
 from whatsapp import CHAT_POLICY, parse_db_time
 
 logger = logging.getLogger(__name__)
@@ -133,10 +134,9 @@ def notes_db_path() -> str:
 def _connect(create: bool) -> sqlite3.Connection | None:
     """Open notes.db; with create=False a missing file yields None instead of an empty database."""
     path = notes_db_path()
-    if not create and not os.path.exists(path):
+    conn = notes_connection(path, create=create, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
+    if conn is None:
         return None
-    conn = sqlite3.connect(path, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     return conn
 

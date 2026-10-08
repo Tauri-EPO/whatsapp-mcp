@@ -242,9 +242,9 @@ class TestPdf:
 
     def test_a_long_list_of_failures_is_summarised_in_the_note(self, documents, monkeypatch):
         count = media_text.MAX_UNREADABLE_LISTED + 5
-        _cache("document_20260904_100000_PDF1.pdf", make_pdf(["ok"] + ["x"] * count))
+        _cache("document_20260904_100000_PDF1.pdf", make_pdf(["ok"] + ["x"] * count + ["ok"] * count))
         self._failing_pages(monkeypatch, set(range(1, count + 1)))
-        blocks = media_read.read_media(ALICE, "PDF1", as_text=True, max_pages=count + 1)
+        blocks = media_read.read_media(ALICE, "PDF1", as_text=True, max_pages=2 * count + 1)
         assert "and 5 more" in _texts(blocks)[-1]
         assert len(_meta(blocks)["pages_failed"]) == count
 

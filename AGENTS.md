@@ -138,6 +138,7 @@ whatsapp-mcp/
 │   ├── media_resource.py       # MediaResourceServer: the whatsapp://media/<chat>/<id> resource, and the resource_link on list_media rows
 │   ├── media_notes.py          # notes.db (MCP-owned): agent notes keyed by sha256; annotate/get/search_media_notes; clear_media_refusal; media_refusals; transcripts_fts
 │   ├── notes.py                # notes.db: versioned notes on chats/contacts/messages (media via media_notes)
+│   ├── private_files.py        # MCP-owned notes/export/upload permissions and shared notes connection factory
 │   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
 │   ├── observability.py        # WHATSAPP_MCP_LOG_FORMAT=json + the MCP /metrics middleware

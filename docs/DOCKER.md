@@ -160,8 +160,21 @@ keeps `0750`, one you created for a bind mount keeps what `mkdir` gave it, and
 `chmod -R go-rwx <store>` tightens those by hand. Both processes therefore have
 to run as the same user, which the images and the compose file do (uid 1000, no
 `user:` override); an MCP server started under another account that relied on
-group access to `messages.db` loses it at the next bridge start. `notes.db` and
-the exports are written by the MCP server and are not covered by this.
+group access to `messages.db` loses it at the next bridge start.
+
+The MCP server creates its own `notes.db`, `-wal` / `-shm`, export archives and
+uploaded bytes `0600`, and directories it creates for exports and uploads
+`0700`, independent of the host umask. At startup it tightens existing notes
+files and recognizable owned export/upload artifacts to these modes, with one aggregate log
+line. It skips links inside those trees and leaves the bridge's store directory
+and databases alone. Both processes must keep the same uid so the bridge can
+read uploaded bytes; the bridge never opens `notes.db`.
+
+Migration recognizes generated `messages-...-<timestamp>.ndjson` archives and
+custom paths recorded in `.mcp-export-artifacts`. Older custom archives with no
+ownership record retain their modes; tighten those explicitly if needed.
+Shared export directories keep their modes when they contain unrelated entries.
+An unsafe upload tree is skipped at startup, while upload operations still refuse it.
 
 A chat directory replaced by a symlink is not written to: see
 [the store root](./ARCHITECTURE.md#the-store-root).

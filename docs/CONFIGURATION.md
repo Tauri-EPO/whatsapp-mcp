@@ -852,6 +852,14 @@ every message that was stored.
 
 ### Outbound media
 
+The first media root's configured spelling must identify the same outbox in
+both processes. The MCP server confines local IO to its resolved root, but
+passes the configured spelling to the bridge for owned uploads and conversions.
+For example, `/srv/outbox` may be a symlink to `/mnt/example-storage/outbox` in
+the MCP namespace while the bridge mounts the same files only at `/srv/outbox`.
+Links beneath `.uploads` are refused. Caller-supplied paths outside owned
+uploads retain their spelling, including paths in the remaining media roots.
+
 Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set

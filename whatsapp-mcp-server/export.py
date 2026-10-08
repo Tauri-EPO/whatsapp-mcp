@@ -23,6 +23,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
+from private_files import private_makedirs, private_open, record_export
 from whatsapp import MessageFilters, message_columns
 
 logger = logging.getLogger("whatsapp_mcp")
@@ -72,7 +73,7 @@ def resolve_export_path(out_path: str | None, chat_jid: str | Sequence[str] | No
     """
     root = export_dir()
     try:
-        os.makedirs(root, exist_ok=True)
+        private_makedirs(root)
     except OSError as exc:
         raise ToolError(
             "internal",
@@ -93,7 +94,7 @@ def resolve_export_path(out_path: str | None, chat_jid: str | Sequence[str] | No
         )
     if os.path.isdir(target):
         raise ToolError("invalid_argument", f"{candidate!r} is a directory")
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    private_makedirs(os.path.dirname(target))
     return target
 
 
@@ -157,7 +158,7 @@ def export_messages(
             )
             # Batched, never fetchall(): a 100k-message export holds one batch
             # in memory at a time.
-            with open(partial, "w", encoding="utf-8", newline="\n") as handle:
+            with private_open(partial, "w", encoding="utf-8", newline="\n") as handle:
                 while rows := cur.fetchmany(EXPORT_BATCH):
                     messages = [whatsapp._row_to_message(row) for row in rows]
                     notes = whatsapp.fetch_media_notes(messages)
@@ -183,6 +184,7 @@ def export_messages(
         raise ToolError("internal", f"could not write {target}: {exc}") from exc
 
     os.replace(partial, target)
+    record_export(os.path.realpath(export_dir()), target)
     return {
         "path": target,
         "count": count,

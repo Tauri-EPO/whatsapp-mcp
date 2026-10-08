@@ -164,18 +164,29 @@ def _pdf(path: str, wanted: int) -> Extracted:
         reader = PdfReader(path)
         pages = reader.pages
         total = len(pages)
+        root = getattr(reader, "root_object", {})
+        page_tree = root.get("/Pages", {})
+        if hasattr(page_tree, "get_object"):
+            page_tree = page_tree.get_object()
+        declared = page_tree.get("/Count", total)
+        if isinstance(declared, int) and declared > max(total * 2, 1):
+            raise ToolError(
+                "invalid_argument",
+                "this PDF has a damaged page tree; try read_media(as_images=true) or ask for a repaired original",
+            )
+    except ToolError:
+        raise
     except Exception as exc:  # noqa: BLE001 - a malformed file is bad input, not a server fault
         # pypdf raises PyPdfError subclasses for a broken file, but also
         # KeyError/ValueError from deep inside the parser on a truncated one.
         # The class only, like the per-page failures below: a parser message can
         # quote the file, and the file is whatever a stranger sent.
         raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}") from exc
-    # No failure budget on purpose (issue #533): the attempts are bounded by
-    # max_pages (500 at most) and the 64 MiB the file may weigh, and stopping
-    # after N failures would make pages_failed and pages_total mean "not
-    # attempted" as well as "unreadable". The cost of a failing page against a
-    # healthy one was not measured; revisit with a number if a hostile file turns
-    # out slower to fail than to read.
+    # A real 500-page missing-Kids fixture took 0.55 s versus 0.25 s healthy
+    # (#555). pypdf silently discarded 499 missing pages, so reject a severe
+    # declared/flattened count mismatch above rather than report one-page success.
+    # Attempts remain bounded by max_pages (500) and 64 MiB; inspect every
+    # attempted page so minority failures retain precise page numbers.
     # Page by page: one page pypdf refuses (a font with an oversized /Widths, a
     # stream that trips its recovery limit) must not cost the pages around it.
     texts: list[tuple[int, str]] = []
@@ -187,7 +198,7 @@ def _pdf(path: str, wanted: int) -> Extracted:
             raise  # a server fault, not a page the parser refuses: do not go on to the next one
         except Exception as exc:  # noqa: BLE001 - same as above, per page
             unreadable.append({"page": index + 1, "error": type(exc).__name__})
-    if unreadable and not texts:
+    if len(unreadable) > min(total, wanted) / 2:
         raise ToolError(
             "invalid_argument",
             f"this PDF could not be read as text: {_unreadable_sentence(unreadable)}",

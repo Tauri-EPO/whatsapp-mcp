@@ -4590,7 +4590,7 @@ def send_file(
                 "For a file on another machine, POST /upload and use upload_id (http/sse), "
                 "or provide media_base64 with filename.",
             )
-        payload = {"recipient": recipient, "media_path": media_path}
+        payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(media_path)}
         if caption:
             payload["message"] = caption
         if dry_run:
@@ -4609,7 +4609,10 @@ def send_file(
     data = media_upload.decode_inline(media_base64)
     if dry_run:
         upload_dir = media_upload.upload_dir()
-        payload = {"recipient": recipient, "media_path": os.path.join(upload_dir, "<upload>", name)}
+        payload = {
+            "recipient": recipient,
+            "media_path": media_upload.bridge_media_path(os.path.join(upload_dir, "<upload>", name), preview=True),
+        }
         if caption:
             payload["message"] = caption
         media = {
@@ -4623,7 +4626,7 @@ def send_file(
     path = media_upload.write_inline(data, name)
     result: dict[str, Any] = {}
     try:
-        payload = {"recipient": recipient, "media_path": path}
+        payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(path)}
         if caption:
             payload["message"] = caption
         result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
@@ -4680,7 +4683,7 @@ def send_audio_message(
             except Exception as e:
                 raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
             cleanup.append(path)
-        payload = {"recipient": recipient, "media_path": path}
+        payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(path)}
         result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
     finally:
         for stale in cleanup:
