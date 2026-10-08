@@ -538,21 +538,10 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 
 // store persists the outbound row with these media columns.
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
-	if err := messageStore.StoreMessage(
+	return messageStore.StoreMessage(
 		id, chatJID, senderJID, content, timestamp, true,
-		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID,
-	); err != nil {
-		return err
-	}
-	// The upload's direct path is the one the recipients were sent
-	// (buildMediaMessage), so it is the one this row downloads by. The row is
-	// stored either way: without the path the download uses the url's.
-	if m.directPath != "" {
-		if err := messageStore.SetDirectPath(id, chatJID, m.directPath); err != nil {
-			bridgeLog.Warnf("failed to store the media direct path of outbound message %s: %v", id, err)
-		}
-	}
-	return nil
+		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID, m.directPath,
+	)
 }
 
 // buildMediaMessage wraps an upload result in the waE2E message for its

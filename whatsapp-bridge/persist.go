@@ -19,10 +19,9 @@ import (
 type messageWriter interface {
 	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
-		quotedMessageId string) error
+		quotedMessageId string, directPath ...string) error
 	MarkViewOnce(messageID, chatJID string) error
 	SetMentions(messageID, chatJID, mentions string) error
-	SetDirectPath(messageID, chatJID, directPath string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
 }
 
@@ -88,16 +87,8 @@ func persistMessage(w messageWriter, id, chatJID, sender string, ts time.Time, f
 		quotedID = e.quotedID
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen, quotedID); err != nil {
+		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, e.fileLen, quotedID, e.directPath); err != nil {
 		return err
-	}
-	// The direct path rides in a side update too, so StoreMessage keeps its
-	// signature. It is written whenever the message says where its media is,
-	// empty included: a row must not keep the path of a url it no longer has.
-	if e.directPath != "" || e.url != "" {
-		if err := w.SetDirectPath(id, chatJID, e.directPath); err != nil {
-			logger.Warnf("Failed to store the media direct path for message %s: %v", id, err)
-		}
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of
 	// messages carry any, and the write then costs nothing on the rest

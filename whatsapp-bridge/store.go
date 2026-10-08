@@ -967,7 +967,7 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 // messages.sender_server unset (splitSenderJID, sender_namespace.go).
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
-	quotedMessageId string) error {
+	quotedMessageId string, directPath ...string) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -976,7 +976,7 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	// Single-row path; history sync uses Batch (store_batch.go) for the same
 	// statement inside one transaction.
 	_, err := store.db.Exec(insertMessageSQL, messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId)...)
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, directPath...)...)
 	return err
 }
 
