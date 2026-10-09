@@ -1037,7 +1037,7 @@ func TestStatusRESTStreamsBeyondClientReadTimeout(t *testing.T) {
 	defer once.Do(func() { _ = conn.Close() })
 	b.RuntimeDefaults = nil
 	b.RESTAllowedHosts = "127.0.0.1"
-	server := httptest.NewServer(b.newRESTMux(8080, purgeToken))
+	server := httptest.NewServer(requestLog(b.runtimeRESTHandler(8080, purgeToken), b.metrics))
 	defer server.Close()
 	go func() { time.Sleep(31 * time.Second); once.Do(func() { _ = conn.Close() }) }()
 	code, result := mediaHTTPRequest(t, server, "POST", "/api/media/purge", `{"scope":"status","dry_run":false}`, purgeToken)
@@ -1057,7 +1057,7 @@ func TestStatusRESTStreamingMCPHelper(t *testing.T) {
 	b.RESTAllowedHosts = "127.0.0.1"
 	cached := seedOperatorMedia(t, b, "MCPSTREAM", "status@broadcast", "image", time.Hour, 4)
 	b.Store.db.SetMaxOpenConns(1)
-	mux := b.newRESTMux(8080, purgeToken)
+	mux := requestLog(b.runtimeRESTHandler(8080, purgeToken), b.metrics)
 	done := make(chan struct{}, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := b.Store.db.Conn(r.Context())
@@ -1086,5 +1086,99 @@ func TestStatusRESTStreamingMCPHelper(t *testing.T) {
 	var rows int
 	if err := b.Store.db.QueryRow("SELECT COUNT(*) FROM messages WHERE id='MCPSTREAM'").Scan(&rows); err != nil || rows != 1 {
 		t.Fatal("MCP purge changed rows", rows, err)
+	}
+}
+
+func TestStatusPurgeThroughProductionRESTMiddleware(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.RESTAllowedHosts = "127.0.0.1"
+	cached := seedOperatorMedia(t, b, "PRODUCTION", "status@broadcast", "image", time.Hour, 4)
+	server := httptest.NewServer(requestLog(b.runtimeRESTHandler(8080, purgeToken), b.metrics))
+	defer server.Close()
+	for _, dry := range []bool{true, false} {
+		code, result := mediaHTTPRequest(t, server, "POST", "/api/media/purge", fmt.Sprintf(`{"scope":"status","dry_run":%t}`, dry), purgeToken)
+		if code != 200 || result["success"] != true || result["purged_bytes"] != float64(4) || fileExists(cached) != dry {
+			t.Fatal(code, result)
+		}
+	}
+}
+
+func TestManualHTTPDownloadRetriesSharedAutomaticAccountingContention(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.RuntimeDefaults = nil
+	b.MediaQuotaBytes = 1
+	b.RESTAllowedHosts = "127.0.0.1"
+	b.Connected = func() bool { return true }
+	seedOperatorMedia(t, b, "MANUALBUSY", purgeChat, "image", time.Hour, 4)
+	row, err := b.Store.MediaRow("MANUALBUSY", purgeChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := purgeOne(b.StoreRoot, row, false); !res.Purged {
+		t.Fatal(res)
+	}
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, file whatsmeow.File) error { _, err := file.Write([]byte("1234")); return err })
+	}
+	leaseRelease, err := b.lockMediaQuota(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leaseRelease()
+	b.mediaQuotaMu.Lock()
+	var once sync.Once
+	defer once.Do(b.mediaQuotaMu.Unlock)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	starter := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := b.DownloadMedia(context.WithValue(withAutomaticCache(ctx), quotaTryKey{}, true), "MANUALBUSY", purgeChat)
+		starter <- err
+	}()
+	key := filepath.Join(storeDir(), chatMediaRel(purgeChat), mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename))
+	for b.mediaTransfers.waiting(key) != 1 {
+		if ctx.Err() != nil {
+			t.Fatal("automatic transfer not admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	server := httptest.NewServer(requestLog(b.runtimeRESTHandler(8080, purgeToken), b.metrics))
+	defer server.Close()
+	response := make(chan *http.Response, 1)
+	errorsOut := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/api/download", strings.NewReader(`{"message_id":"MANUALBUSY","chat_jid":"`+purgeChat+`"}`))
+		req.Header.Set("Authorization", "Bearer "+purgeToken)
+		resp, err := server.Client().Do(req)
+		response <- resp
+		errorsOut <- err
+	}()
+	for b.mediaTransfers.waiting(key) != 2 {
+		if ctx.Err() != nil {
+			once.Do(b.mediaQuotaMu.Unlock)
+			t.Fatal("manual request did not join automatic transfer")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	once.Do(b.mediaQuotaMu.Unlock)
+	if err := <-starter; !errors.Is(err, errMediaQuotaBusy) {
+		t.Fatal("wrong automatic refusal", err)
+	}
+	resp := <-response
+	err = <-errorsOut
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || result["success"] != true {
+		t.Fatal("uncapped waiter did not retry", resp.StatusCode, result)
+	}
+	_, used, files := storeUsage(b.StoreRoot)
+	if used != 4 || files != 1 {
+		t.Fatal(used, files)
 	}
 }

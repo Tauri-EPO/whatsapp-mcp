@@ -118,7 +118,7 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	for {
 		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
-		if automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota)) || ctx.Err() != nil {
+		if automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota) && !errors.Is(err, errMediaQuotaBusy)) || ctx.Err() != nil {
 			return ok, kind, name, path, err
 		}
 		// An uncapped waiter retries after the capped starter cleans up.
