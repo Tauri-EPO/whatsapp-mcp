@@ -190,7 +190,10 @@ func (b *Bridge) streamMediaPurge(w http.ResponseWriter, r *http.Request, req op
 			_ = write(append(ending, '}'))
 			return
 		case <-ctx.Done():
-			return
+			// AfterFunc's deadline callback can be delayed or canceled before
+			// it runs. Explicitly abort so incomplete JSON can never complete
+			// as a successful HTTP response (including through the MCP client).
+			panic(http.ErrAbortHandler)
 		}
 	}
 }

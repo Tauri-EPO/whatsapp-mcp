@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,8 +26,9 @@ type quotaBudgetKey struct{}
 type quotaTryKey struct{}
 type quotaPathKey struct{}
 type mediaQuotaReservation struct {
-	path  string
-	bytes uint64
+	path     string
+	bytes    uint64
+	finished atomic.Bool
 }
 
 func (b *Bridge) lockMediaQuota(ctx context.Context) (func(), error) {
@@ -224,6 +225,10 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 	var used uint64
 	active := map[string]bool{}
 	for reservation := range b.mediaQuotaReservations {
+		if reservation.finished.Load() {
+			delete(b.mediaQuotaReservations, reservation)
+			continue
+		}
 		used += reservation.bytes
 		active[reservation.path] = true
 	}
@@ -323,13 +328,12 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 	}
 	b.mediaQuotaReservations[reservation] = true
 	release()
-	var once sync.Once
 	return withMediaLimit(ctx, limit), func() {
-		once.Do(func() {
-			unlock, _ := b.lockMediaQuota(context.Background())
-			delete(b.mediaQuotaReservations, reservation)
-			unlock()
-		})
+		// Cleanup must never wait behind disk accounting while owning the
+		// detached transfer's client reader gate. The next admission removes
+		// finished reservations and counts their actual published files. If
+		// this finishes during an active scan, its snapshot stays conservative.
+		reservation.finished.Store(true)
 	}, nil
 }
 

@@ -778,6 +778,81 @@ func TestLocalQuotaSlowNetworkDoesNotBlockInboundImage(t *testing.T) {
 	}
 }
 
+func TestLocalQuotaCompletedTransferDoesNotWaitForAccounting(t *testing.T) {
+	for _, expires := range []bool{false, true} {
+		t.Run(fmt.Sprint(expires), func(t *testing.T) {
+			b := newSettingsBridge(t)
+			b.RuntimeDefaults = nil
+			b.MediaQuotaBytes = 10
+			seedOperatorMedia(t, b, "FINISH", purgeChat, "image", time.Minute, 4)
+			row, err := b.Store.MediaRow("FINISH", purgeChat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res := purgeOne(b.StoreRoot, row, false); !res.Purged {
+				t.Fatal(res)
+			}
+			entered, finish, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var finishOnce sync.Once
+			defer func() { finishOnce.Do(func() { close(finish) }); b.mediaTransfers.wait() }()
+			b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				close(entered)
+				defer close(returned)
+				if expires {
+					<-ctx.Done()
+					return 0, ctx.Err()
+				}
+				<-finish
+				return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, file whatsmeow.File) error { _, err := file.Write([]byte("1234")); return err })
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, _, _, _, err := b.DownloadMedia(context.WithValue(withAutomaticCache(ctx), quotaTryKey{}, true), "FINISH", purgeChat)
+				result <- err
+			}()
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("transfer never reserved bytes and reached the network")
+			}
+			// A concurrent accounting scan owns this lease. The real detached
+			// transfer must still publish its result and release its client gate.
+			unlock, err := b.lockMediaQuota(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var unlockOnce sync.Once
+			defer unlockOnce.Do(unlock)
+			finishOnce.Do(func() { close(finish) })
+			<-returned
+			drained := make(chan struct{})
+			go func() { b.mediaTransfers.wait(); close(drained) }()
+			select {
+			case <-drained:
+			case <-time.After(500 * time.Millisecond):
+				unlockOnce.Do(unlock)
+				<-drained
+				t.Fatal("finished transfer retained client gate behind unrelated accounting")
+			}
+			if !b.clientGate.TryLock() {
+				t.Fatal("finished transfer retained client reader gate")
+			}
+			b.clientGate.Unlock()
+			if err := <-result; (expires && !errors.Is(err, context.DeadlineExceeded)) || (!expires && err != nil) {
+				t.Fatal(err)
+			}
+			unlockOnce.Do(unlock)
+			_, release, err := b.acquireMediaQuota(t.Context(), 6)
+			if err != nil {
+				t.Fatal("finished reservation was not reconciled with actual files", err)
+			}
+			release()
+		})
+	}
+}
+
 func TestLocalQuotaConcurrentNetworkReservations(t *testing.T) {
 	b := newSettingsBridge(t)
 	b.RuntimeDefaults = nil
@@ -1086,6 +1161,80 @@ func TestStatusRESTStreamingMCPHelper(t *testing.T) {
 	var rows int
 	if err := b.Store.db.QueryRow("SELECT COUNT(*) FROM messages WHERE id='MCPSTREAM'").Scan(&rows); err != nil || rows != 1 {
 		t.Fatal("MCP purge changed rows", rows, err)
+	}
+}
+
+type delayedPurgeDeadlineWriter struct {
+	http.ResponseWriter
+	release <-chan struct{}
+}
+
+func (w *delayedPurgeDeadlineWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *delayedPurgeDeadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.After(time.Now()) {
+		// Force the scheduler interleaving where AfterFunc has not applied the
+		// expired socket deadline before the handler returns. Real HTTP must
+		// still abort rather than successfully finish an incomplete JSON body.
+		<-w.release
+	}
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+}
+
+func TestMediaPurgeTimeoutAbortsIncompleteHTTPResponse(t *testing.T) {
+	for _, operator := range []bool{false, true} {
+		t.Run(fmt.Sprint(operator), func(t *testing.T) {
+			b := newSettingsBridge(t)
+			b.RuntimeDefaults = nil
+			b.RESTAllowedHosts = "127.0.0.1"
+			b.Archive.Timeout = 100 * time.Millisecond
+			cached := seedOperatorMedia(t, b, "TIMEOUT", "status@broadcast", "image", time.Hour, 4)
+			b.Store.db.SetMaxOpenConns(1)
+			conn, err := b.Store.db.Conn(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			handler := requestLog(b.runtimeRESTHandler(8080, purgeToken), b.metrics)
+			endpoint, body, token := "/api/media/purge", `{"scope":"status","dry_run":false}`, purgeToken
+			if operator {
+				handler = newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, operatorRoutes{mediaPurge: b.handleOperatorMediaPurge}, b.Log)
+				endpoint, body, token = "/operator/v1/media/purge", `{"type":"status","dry_run":false}`, fakeOperatorToken
+			}
+			releaseDeadline := make(chan struct{})
+			defer close(releaseDeadline)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handler.ServeHTTP(&delayedPurgeDeadlineWriter{w, releaseDeadline}, r)
+			}))
+			defer server.Close()
+			server.Client().Timeout = 3 * time.Second
+			req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+endpoint, strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			response, err := server.Client().Do(req)
+			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Fatal("unexpected transport failure", err)
+				}
+				if !fileExists(cached) {
+					t.Fatal("blocked purge deleted a file")
+				}
+				return
+			}
+			defer func() { _ = response.Body.Close() }()
+			data, readErr := io.ReadAll(response.Body)
+			if readErr == nil {
+				var result map[string]any
+				if json.Unmarshal(data, &result) != nil || (result["ok"] != false && result["success"] != false) {
+					t.Fatal("timeout completed HTTP 200 with an unfinished or successful JSON body")
+				}
+			}
+			if !fileExists(cached) {
+				t.Fatal("blocked purge deleted a file")
+			}
+		})
 	}
 }
 
