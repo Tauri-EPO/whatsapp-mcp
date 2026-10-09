@@ -55,6 +55,16 @@ type Bridge struct {
 	operatorServer             *http.Server
 	sessionDB                  *sql.DB // Startup-owned session pool, observed without acquiring a connection.
 	Store                      *MessageStore
+	HistoryLimits              historyLimits
+	historyProgress            historyProgress
+	SnapshotDir                string
+	Archive                    archiveConfig
+	snapshotSpace              func(*os.File) (uint64, error)
+	snapshotPrune              func(context.Context, *os.Root, *os.File, string, int) error
+	exportBusy                 atomic.Bool
+	snapshotBusy               atomic.Bool
+	archiveSessionMu           sync.Mutex
+	archiveSessionReaders      [2]*archiveSessionRead
 	Log                        waLog.Logger
 
 	// StoreRoot is the store directory opened as an os.Root (store_dir.go).

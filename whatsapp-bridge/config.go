@@ -31,6 +31,9 @@ type bridgeConfig struct {
 	JSONLogs                     bool
 	Operator                     operatorConfig
 	PairingStdout                bool
+	History                      historyLimits
+	SnapshotDir                  string
+	Archive                      archiveConfig
 }
 
 func loadBridgeConfig() (bridgeConfig, error) { return parseBridgeConfig(os.Getenv) }
@@ -49,6 +52,16 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 		}
 	}
 	var err error
+	cfg.History, err = parseHistoryLimits(getenv)
+	collect(err)
+	cfg.SnapshotDir = strings.TrimSpace(getenv("WHATSAPP_SNAPSHOT_DIR"))
+	cfg.Archive, err = parseArchiveConfig(getenv)
+	collect(err)
+	store := strings.TrimSpace(getenv(storeDirEnv))
+	if store == "" {
+		store = defaultStoreDir
+	}
+	collect(validateSnapshotLocation(cfg.SnapshotDir, store, cfg.MediaRoots))
 	cfg.Switches, err = parseBridgeSwitches(getenv)
 	collect(err)
 	if value := getenv(bridgePortEnv); value != "" {

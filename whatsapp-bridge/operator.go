@@ -15,6 +15,7 @@ import (
 )
 
 type operatorRoutes struct {
+	export, snapshot                               http.HandlerFunc
 	health, ready, pairing                         http.HandlerFunc
 	code, restart, passkeyResponse, passkeyConfirm http.HandlerFunc
 	settings, logout                               http.HandlerFunc
@@ -112,6 +113,8 @@ func (w *operatorStatusWriter) Flush() {
 	}
 }
 
+func (w *operatorStatusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.Logger) http.Handler {
 	allowed, warning := buildHostAllowList(cfg.Port, cfg.Bind, cfg.AllowedHosts)
 	if warning != "" {
@@ -124,6 +127,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		handler      http.HandlerFunc
 	}{
 		{"health", "GET", routes.health}, {"ready", "GET", routes.ready}, {"pairing", "GET", routes.pairing},
+		{"export", "GET", routes.export}, {"snapshot", "POST", routes.snapshot},
 		{"pairing/code", "POST", routes.code}, {"pairing/restart", "POST", routes.restart},
 		{"pairing/passkey/response", "POST", routes.passkeyResponse}, {"pairing/passkey/confirm", "POST", routes.passkeyConfirm},
 		{"settings", "", routes.settings}, {"logout", "POST", routes.logout},
@@ -170,7 +174,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if (r.Method == http.MethodPost || r.Method == http.MethodPatch) && mutations[r.URL.Path] {
+		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
 			audited := false
 			audit := func() {
 				if audited {

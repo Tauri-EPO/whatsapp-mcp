@@ -68,6 +68,15 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_SESSION_KEEPALIVE_HOURS` | `12`                         | How often the bridge marks its linked device available for a few seconds, so WhatsApp counts it as in use and does not log it out about a month after pairing. `0` turns it off. See [Keeping the linked device](#keeping-the-linked-device) |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files. Set for both processes: the MCP server writes `media_base64` uploads and voice-note conversions under `<first root>/.uploads` for the bridge to read ([Outbound media](#outbound-media)) |
 | `WHATSAPP_EXPORT_DIR`  | `$WHATSAPP_STORE_DIR/exports`            | Where `export_messages` writes NDJSON archives. `out_path` is always resolved under this directory; anything escaping it is refused (see [Export directory](#export-directory)) |
+| `WHATSAPP_HISTORY_SYNC_DAYS` | empty (phone default) | Positive days requested on a fresh pair; enables full sync. Mutually exclusive with `--full-history-pair`. |
+| `WHATSAPP_HISTORY_SYNC_SIZE_MB` | empty (phone default) | Positive MiB requested on a fresh pair; enables full sync. The phone may ignore this limit. |
+| `WHATSAPP_HISTORY_SYNC_STORAGE_QUOTA_MB` | empty (phone default) | Positive MiB storage quota requested on a fresh pair; enables full sync. |
+| `WHATSAPP_HISTORY_MAX_AGE_DAYS` | empty (off) | Positive maximum age for every history ingest, including on-demand and shared history; live messages stay unaffected. |
+| `WHATSAPP_STORE_WARN_BYTES` | empty (off) | Positive store-size threshold; cached health warning, WARN on each upward crossing and store event with connection webhooks enabled. |
+| `WHATSAPP_SNAPSHOT_DIR` | empty (off) | Private operator snapshot directory; 0700/0600. Startup refuses symlinks, world-writable directories and locations inside store, outbox or media roots. Bridge-only mount. |
+| `WHATSAPP_SNAPSHOT_KEEP` | `7` | Retain newest 1-10000 snapshot sets; remove older sets only after a successful snapshot. |
+| `WHATSAPP_SNAPSHOT_SESSION` | `false` | Separate HTTP opt-in for credential-bearing `?session=true` snapshots; otherwise 403. CLI `--session` remains explicit authorization. Operator logout removes session snapshots and interrupted session copies from the configured snapshot directory. |
+| `WHATSAPP_OPERATOR_EXPORT_TIMEOUT_MIN` | `30` | Export and snapshot deadline, including CLI, in minutes (1-1440). Long exports retain read transactions and may grow WAL files. |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_LOG_LEVEL`   | `INFO`                                   | Bridge log level (`DEBUG`, `INFO`, `WARN`, `ERROR`) for bridge and whatsmeow client lines. `DEBUG` also echoes every stored message |
 | `WHATSAPP_LOG_FORMAT`  | `text`                                   | `json` writes bridge log lines as JSON objects (`ts`, `level`, `module`, `msg`) for Loki/Elastic/journald. In `text`, each physical line has the real timestamp, module and level. Multiline messages (including panic stacks) use `[continued]` after the prefix; a terminal newline ends the last record. Other control characters and bidi overrides stay escaped. Literal backslashes are doubled, so untruncated escaped payloads are reversible. Each line, including its prefix and newline, is capped at 8 KiB with `[truncated]`, preserving complete escapes and Unicode characters. The marker denotes truncation at the cap; the same literal text in a shorter message is ordinary content. Ordinary Unicode and directional marks are retained. In `json` the decoded `msg` is the original text, and the few characters JSON would leave raw that a terminal acts on are written as JSON escapes |
@@ -1039,6 +1048,43 @@ mcp:
 | `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
 
 ## Requesting full history
+
+For a bounded fresh pair, set `WHATSAPP_HISTORY_SYNC_DAYS=30`,
+`WHATSAPP_HISTORY_SYNC_SIZE_MB=128` and/or
+`WHATSAPP_HISTORY_SYNC_STORAGE_QUOTA_MB=256`. Any one enables the full-sync
+request; omitted fields retain the SDK default. These are positive 32-bit
+integers and affect only a new pairing handshake, including an operator restart
+of an unpaired device. Startup refuses these settings together with
+`--full-history-pair`. Do not re-pair an existing account solely to change an
+ingest guard.
+
+The phone can exceed the requested window. `WHATSAPP_HISTORY_MAX_AGE_DAYS=90`
+drops old rows before history ingest, including edits, poll votes and shared
+history notices; live messages remain unaffected. It does not delete existing
+rows. `whatsapp_bridge_history_dropped_total{reason="age"}` counts dropped
+messages, with one content-free INFO summary per affected 500-message chunk.
+Health exposes `history_sync: {state, progress, conversations, messages}`:
+idle before a notification, syncing below 100 and complete at 100, following
+the phone's reported progress. Counts accumulate across phone notifications
+since startup; shared-peer imports do not change phone progress.
+
+`whatsapp_bridge_db_bytes{db="messages"|"whatsapp"}` measures each main file
+plus WAL. `whatsapp_bridge_messages_rows` counts the covering primary-key index;
+both refresh with the five-minute store-usage cache. Set
+`WHATSAPP_STORE_WARN_BYTES` to expose `store_warning` and log one WARN per
+upward crossing; connection webhook opt-in also sends
+`{"type":"store","state":"above_threshold"}`. Reads of health/metrics trigger
+the cached measurement, so monitor one of them regularly.
+
+Estimate disk per instance from these gauges after a representative sync:
+message text, indexes and SQLite page overhead vary with chat activity, and
+cached media often dominates. Multiply measured per-instance growth by the
+number of instances and leave room for WAL and temporary backup copies.
+Media retention frees media files only, and the history guard caps future
+ingest only. SQLite reuses freed pages; deleting rows does not shrink the main
+file. A maintenance `VACUUM` needs free disk and a write lock; an online
+operator snapshot compacts its copy without replacing the live database.
+
 
 whatsmeow's default pairing asks for "recent sync" — roughly the last 3 months, with the exact window decided by the phone. If you want to pull more history at pair time:
 

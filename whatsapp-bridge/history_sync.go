@@ -27,6 +27,13 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 }
 
 func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, historySync *events.HistorySync, downloadShares, preserveExisting bool) {
+	if historySync == nil || historySync.Data == nil {
+		return
+	}
+	if !preserveExisting {
+		b.historyProgress.update(historySync.Data.GetSyncType(), historySync.Data.GetProgress(), len(historySync.Data.Conversations), 0)
+	}
+	historySync = &events.HistorySync{Data: b.boundedHistory(historySync.Data, time.Now())}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -333,6 +340,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))
+				if !preserveExisting {
+					b.historyProgress.update(historySync.Data.GetSyncType(), historySync.Data.GetProgress(), 0, int64(storedInBatch))
+				}
 
 			}
 		chunks:

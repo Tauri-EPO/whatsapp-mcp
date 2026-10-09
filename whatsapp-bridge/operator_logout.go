@@ -73,6 +73,13 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	p.b.operatorLogout.Store(true)
 	p.b.operatorRetiredClient.Store(p.b.currentClient())
+	ctx, cancel = context.WithTimeout(actionCtx, time.Second)
+	archivesDrained := p.b.cancelArchiveSessionReads(ctx)
+	cancel()
+	if !archivesDrained {
+		writeErrorCode(w, 503, "archive_busy", "Session archive readers are still closing; retry operator logout")
+		return
+	}
 	p.mu.Lock()
 	p.state.Generation++
 	p.invalidateLocked("logged_out_by_operator")
@@ -116,6 +123,10 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	// A server refusal or caller cancellation must never skip local destruction.
 	ctx, cancel = context.WithTimeout(actionCtx, 5*time.Second)
 	err = p.b.wipeOperatorSession(ctx)
+	snapshotsRemoved, snapshotErr := removeSessionSnapshots(p.b.SnapshotDir)
+	if err == nil {
+		err = snapshotErr
+	}
 	if err == nil {
 		_, err = p.b.Store.db.ExecContext(ctx, "UPDATE operator_state SET local_session_wiped=1 WHERE id=1")
 	}
@@ -127,7 +138,7 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	p.b.clientGate.Unlock()
 	p.b.historyVoteSessionGate.Unlock()
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"server_unlinked": serverUnlinked, "local_session_wiped": false})
+		writeJSON(w, 500, map[string]any{"server_unlinked": serverUnlinked, "local_session_wiped": false, "session_snapshots_removed": snapshotsRemoved})
 		p.b.Log.Errorf("Operator logout local session wipe failed; instance remains parked")
 		return
 	}
@@ -141,7 +152,8 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	p.b.recipientNumbers.clear()
 	p.b.notifyConnection("logged_out", "operator", true, true)
-	response := fmt.Sprintf("{\"server_unlinked\":%t,\"local_session_wiped\":true}\n", serverUnlinked)
+	p.b.Log.Infof("Operator logout removed session snapshots: count=%d", snapshotsRemoved)
+	response := fmt.Sprintf("{\"server_unlinked\":%t,\"local_session_wiped\":true,\"session_snapshots_removed\":%d}\n", serverUnlinked, snapshotsRemoved)
 	// Exit immediately after flushing: a fixed length avoids a truncated chunked body.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprint(len(response)))
