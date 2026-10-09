@@ -5,6 +5,7 @@ package main
 // waWeb.WebMessageInfo rows instead of live events.
 
 import (
+	"context"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -17,6 +18,46 @@ import (
 const historyBatchMessages = 500
 
 func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
+	b.handleHistorySyncWithShares(historySync, true, false)
+}
+
+// A decoded share uses the canonical importer without following nested bundles.
+func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, downloadShares, preserveExisting bool) {
+	b.handleHistorySyncWithSharesContext(b.ctx, historySync, downloadShares, preserveExisting)
+}
+
+func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, historySync *events.HistorySync, downloadShares, preserveExisting bool) {
+	stopping := func() bool {
+		return (preserveExisting && ctx.Err() != nil) || b.historyStopping()
+	}
+	retry := b.retryBusy
+	if preserveExisting {
+		retry = func(write func() error) error {
+			return retryBusyWithWait(func() error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return write()
+			}, b.StoreRetryDelays, func(delay time.Duration) bool {
+				if ctx.Err() != nil {
+					return false
+				}
+				if b.storeRetryWait != nil {
+					return b.storeRetryWait(delay) && ctx.Err() == nil
+				}
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+					return false
+				case <-timer.C:
+					return true
+				}
+			})
+		}
+	}
+	// Peer imports can introduce rows, never replace any existing archive row.
+	// Check existence under the canonical IMMEDIATE transaction on every replay.
 	client, messageStore, logger := b.Client, b.Store, b.Log
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -28,13 +69,22 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 		len(historySync.Data.Conversations),
 	)
 
+	// Recognise once outside retries. Queue bundles only after this phone sync's
+	// own rows have completed; imported peer history never follows nested shares.
+	b.recogniseHistoryShares(historySync.Data, false)
+	if downloadShares {
+		defer b.queueHistoryShares(historySync.Data)
+	}
 	writeBatch := messageStore.Batch
+	if preserveExisting {
+		writeBatch = func(write func(*messageBatch) error) error { return messageStore.BatchContext(ctx, write) }
+	}
 	if b.historyBatchWriter != nil {
 		writeBatch = b.historyBatchWriter
 	}
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
-		if b.historyStopping() {
+		if stopping() {
 			return
 		}
 		// Parse JID from the conversation
@@ -59,7 +109,11 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 
 		// Get appropriate chat name by passing the history sync conversation directly
 		// History sync never fetches group metadata (see chat_names.go).
-		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", false, logger)
+		nameContext := context.Background()
+		if preserveExisting {
+			nameContext = ctx
+		}
+		name := getChatNameContext(nameContext, client, messageStore, resolved, chatJID, conversation, "", false, logger)
 
 		// Process messages
 		messages := conversation.Messages
@@ -76,31 +130,34 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				continue
 			}
 			timestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
+			var locationInitial map[locationSampleKey]time.Time
+			if !preserveExisting {
+				locationInitial = b.historyLocationInitialTimes(messages, jid, timestamp)
+			}
+			// Sparse chunks omit UnreadCount; only an explicit own-phone read
+			// state may advance the marker, after accepted rows are written.
+			markRead := !preserveExisting && conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
-			if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, name, timestamp) }); err != nil {
-				if b.historyStopping() {
+			if err := retry(func() error {
+				if preserveExisting {
+					return storeChatWith(contextExecer{db: messageStore.db, ctx: ctx}, chatJID, name, time.Time{})
+				}
+				return messageStore.EnsureChat(chatJID, name)
+			}); err != nil {
+				if stopping() {
 					return
 				}
 				b.noteHistoryLoss(messages, timestamp, chatJID, err)
 				continue
 			}
-			// Backfill read state only when WhatsApp explicitly reports unread
-			// metadata. Sparse history-sync chunks omit UnreadCount; the
-			// generated getter then returns 0 and would permanently mark the
-			// chat read under the monotonic merge.
-			if conversation.UnreadCount != nil &&
-				conversation.GetUnreadCount() == 0 &&
-				!conversation.GetMarkedAsUnread() {
-				if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
-					logger.Warnf("Failed to backfill read state for %s: %v", chatJID, err)
+			if !preserveExisting {
+				if err := messageStore.UpdateChatEphemeralSettings(
+					chatJID,
+					conversation.GetEphemeralExpiration(),
+					conversation.GetEphemeralSettingTimestamp(),
+				); err != nil {
+					logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 				}
-			}
-			if err := messageStore.UpdateChatEphemeralSettings(
-				chatJID,
-				conversation.GetEphemeralExpiration(),
-				conversation.GetEphemeralSettingTimestamp(),
-			); err != nil {
-				logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 			}
 
 			// Poll votes are decoded after the loop so the poll rows exist
@@ -111,8 +168,13 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			storedInBatch := 0
+			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
+				ownedRows := make(map[string]struct{})
 				for _, msg := range chunk {
+					if preserveExisting && ctx.Err() != nil {
+						return ctx.Err()
+					}
 					if msg == nil || msg.Message == nil {
 						continue
 					}
@@ -138,44 +200,17 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						continue
 					}
 
-					// Determine sender. History-sync rows do not carry SenderAlt,
-					// so any LID-based participant is resolved through the
-					// whatsmeow LID store (populated during live message handling).
-					var resolvedSender types.JID
-					isFromMe := false
-					if msg.Message.Key != nil {
-						if msg.Message.Key.FromMe != nil {
-							isFromMe = *msg.Message.Key.FromMe
+					if preserveExisting {
+						exists, err := batch.historyRowExists(histMsgID, chatJID)
+						if err != nil {
+							return err
 						}
-						var rawSender types.JID
-						switch {
-						case isFromMe && client.Store.ID != nil:
-							rawSender = client.Store.ID.ToNonAD()
-						case msg.Message.GetParticipant() != "" || msg.Message.Key.GetParticipant() != "":
-							// Modern history syncs carry the group sender in the top-level
-							// WebMessageInfo.participant, older ones in Key.participant;
-							// whatsmeow's ParseWebMessage checks them in this order too.
-							// Without this every group message was attributed to the group JID.
-							participant := msg.Message.GetParticipant()
-							if participant == "" {
-								participant = msg.Message.Key.GetParticipant()
-							}
-							if parsed, perr := types.ParseJID(participant); perr == nil {
-								rawSender = parsed
-							} else {
-								rawSender = types.JID{User: participant}
-							}
-						default:
-							rawSender = jid
+						if exists {
+							continue
 						}
-						var alt types.JID
-						if isFromMe && client.Store.ID != nil {
-							alt = client.Store.ID.ToNonAD()
-						}
-						resolvedSender = resolveUserJID(client, rawSender, alt)
-					} else {
-						resolvedSender = jid
 					}
+
+					resolvedSender, isFromMe := b.historySender(msg.Message, jid, preserveExisting)
 					sender := resolvedSender.User
 					// The row records which namespace that user part belongs
 					// to, so a LID the store cannot map is not read back as a
@@ -194,17 +229,38 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						continue
 					}
 					msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
+					if !preserveExisting && ex.location != nil && ex.location.Live {
+						storedSenderJID, err = b.liveLocationSender(ctx, batch.tx, msgID, chatJID, storedSenderJID, isFromMe)
+						if err != nil {
+							return err
+						}
+						if ex.location.update() {
+							key := locationSampleKey{id: msgID, sender: storedSenderJID, fromMe: isFromMe}
+							if first, found := locationInitial[key]; found {
+								// An initial sample in a later chunk supplies this
+								// same author's original time. Store it with the row
+								// so a stopped import keeps committed markers coherent.
+								msgTimestamp = first
+							}
+						}
+					}
 
 					// quoted_message_id is not persisted: history sync does not
 					// carry a usable ContextInfo.
-					err = persistMessage(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
+					var consumed bool
+					consumed, err = persistMessageResult(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
 					if err == nil {
 						err = batch.failure
 					}
 					if err != nil {
 						return err
-					} else {
+					} else if !consumed {
 						storedInBatch++
+						if preserveExisting {
+							chunkPeerRows[histMsgID] = struct{}{}
+						} else {
+							ownedRows[msgID] = struct{}{}
+						}
 						// Per-message echo stays at DEBUG: user content out of INFO,
 						// and two lines per row would swamp a full sync.
 						if mediaType != "" {
@@ -216,13 +272,23 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						}
 					}
 				}
+				if preserveExisting && len(chunkPeerRows) > 0 {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					return batch.storePeerHistoryActivity(chatJID, chunkPeerRows)
+				}
+				if !preserveExisting && len(ownedRows) > 0 {
+					return batch.storeHistoryActivity(chatJID, name, ownedRows, markRead)
+				}
 				return nil
 			}
 			storedInChat := 0
 			processed := len(messages)
 			commitChunk := func() error {
-				return b.retryBusy(func() error {
+				return retry(func() error {
 					storedInBatch = 0
+					chunkPeerRows = make(map[string]struct{})
 					return writeBatch(storeChunk)
 				})
 			}
@@ -230,10 +296,11 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))
+
 			}
 		chunks:
 			for start := 0; start < len(messages); start += historyBatchMessages {
-				if b.historyStopping() {
+				if stopping() {
 					return
 				}
 				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
@@ -242,7 +309,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 					countCommitted()
 					continue
 				}
-				if b.historyStopping() {
+				if stopping() {
 					return
 				}
 				if isBusyError(batchErr) {
@@ -254,7 +321,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				// A bad row must not cost its good neighbours. Each replay remains
 				// atomic with its auxiliary writes and owns one retry budget.
 				for index, msg := range chunk {
-					if b.historyStopping() {
+					if stopping() {
 						return
 					}
 					chunk = []*waHistorySync.HistorySyncMsg{msg}
@@ -263,7 +330,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 						countCommitted()
 						continue
 					}
-					if b.historyStopping() {
+					if stopping() {
 						return
 					}
 					if isBusyError(rowErr) {
@@ -276,7 +343,9 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 			}
 			logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
 			for _, msg := range messages[:processed] {
-				if msg != nil && msg.Message != nil && msg.Message.Message.GetPollUpdateMessage() != nil {
+				// A peer knows a group's poll secret and cannot authenticate another
+				// voter's identity. Only the account's own phone history imports votes.
+				if !preserveExisting && msg != nil && msg.Message != nil && msg.Message.Message.GetPollUpdateMessage() != nil {
 					pendingVotes = append(pendingVotes, msg.Message)
 				}
 			}
@@ -284,7 +353,7 @@ func (b *Bridge) handleHistorySync(historySync *events.HistorySync) {
 				b.historyVotes.Add(1)
 				go func(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo) {
 					defer b.historyVotes.Done()
-					b.storeHistoryPollVotes(chat, chatJID, votes, nil)
+					b.storeHistoryPollVotes(chat, chatJID, votes, nil, historyVoteMarkers{name: name, read: markRead})
 				}(resolved, chatJID, pendingVotes)
 			}
 		}
@@ -320,4 +389,38 @@ func (b *Bridge) historyStopping() bool {
 		return true
 	}
 	return false
+}
+
+// Peer attribution was resolved by the context-bound adapter; the account's
+// own phone keeps its canonical participant / own-account / LID precedence.
+func (b *Bridge) historySender(info *waWeb.WebMessageInfo, chat types.JID, peer bool) (types.JID, bool) {
+	if info.Key == nil {
+		return chat, false
+	}
+	own := info.Key.GetFromMe()
+	var raw types.JID
+	switch {
+	case own && b.Client.Store.ID != nil:
+		raw = b.Client.Store.ID.ToNonAD()
+	case info.GetParticipant() != "" || info.Key.GetParticipant() != "":
+		participant := info.GetParticipant()
+		if participant == "" {
+			participant = info.Key.GetParticipant()
+		}
+		if parsed, err := types.ParseJID(participant); err == nil {
+			raw = parsed
+		} else {
+			raw = types.JID{User: participant}
+		}
+	default:
+		raw = chat
+	}
+	if peer {
+		return raw, own
+	}
+	var alt types.JID
+	if own && b.Client.Store.ID != nil {
+		alt = b.Client.Store.ID.ToNonAD()
+	}
+	return resolveUserJID(b.Client, raw, alt), own
 }

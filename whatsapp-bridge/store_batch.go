@@ -8,6 +8,7 @@ package main
 // without holding the write lock for an entire conversation.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -51,8 +52,8 @@ const validPresentationSQL = `(CASE
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -92,12 +93,29 @@ const insertMessageSQL = `INSERT INTO messages
 					THEN json_patch(messages.media_presentation, excluded.media_presentation)
 					ELSE excluded.media_presentation END
 				ELSE excluded.media_presentation END ELSE messages.media_presentation END,
-			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`
+			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id),
+			-- History is newest-first: an initial sample replayed after a later
+			-- same-key sample supplies the original metadata, not an older position.
+			location = CASE WHEN excluded.media_type = 'location' AND messages.media_type = 'location'
+				AND CASE WHEN json_valid(messages.location) AND json_valid(excluded.location)
+					THEN json_extract(messages.location, '$.live') = 1
+					AND json_extract(excluded.location, '$.live') = 1
+					AND json_extract(messages.location, '$.sequence') > COALESCE(json_extract(excluded.location, '$.sequence'), 0) ELSE 0 END
+				THEN json_patch(excluded.location, json_object(
+					'latitude', COALESCE(json_extract(messages.location, '$.latitude'), json_extract(excluded.location, '$.latitude')),
+					'longitude', COALESCE(json_extract(messages.location, '$.longitude'), json_extract(excluded.location, '$.longitude')),
+					'accuracy_meters', COALESCE(json_extract(messages.location, '$.accuracy_meters'), json_extract(excluded.location, '$.accuracy_meters')),
+					'speed_mps', COALESCE(json_extract(messages.location, '$.speed_mps'), json_extract(excluded.location, '$.speed_mps')),
+					'bearing_degrees', COALESCE(json_extract(messages.location, '$.bearing_degrees'), json_extract(excluded.location, '$.bearing_degrees')),
+					'sequence', json_extract(messages.location, '$.sequence'),
+					'time_offset_seconds', json_extract(messages.location, '$.time_offset_seconds')))
+				ELSE COALESCE(excluded.location, messages.location) END`
 
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
 type messageBatch struct {
-	tx      *sql.Tx
+	tx      *contextTransaction
+	ctx     context.Context
 	stmt    *sql.Stmt
 	failure error // first failed write; never issue more SQL after a possible rollback
 }
@@ -105,16 +123,22 @@ type messageBatch struct {
 // Batch runs fn inside a transaction with a prepared message insert and
 // commits when fn and every write succeed (rolls back otherwise).
 func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
-	tx, err := store.db.Begin()
+	return store.BatchContext(context.Background(), fn)
+}
+
+// BatchContext retains the normal transaction/replay contract while allowing
+// peer imports to cancel connection waits and every statement on shutdown.
+func (store *MessageStore) BatchContext(ctx context.Context, fn func(b *messageBatch) error) error {
+	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin batch: %w", err)
 	}
-	stmt, err := tx.Prepare(insertMessageSQL)
+	stmt, err := tx.PrepareContext(ctx, insertMessageSQL)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("prepare batch insert: %w", err)
 	}
-	b := &messageBatch{tx: tx, stmt: stmt}
+	b := &messageBatch{tx: &contextTransaction{Tx: tx, ctx: ctx}, ctx: ctx, stmt: stmt}
 	err = fn(b)
 	if err == nil {
 		err = b.failure
@@ -129,6 +153,28 @@ func (store *MessageStore) Batch(fn func(b *messageBatch) error) error {
 		return fmt.Errorf("commit batch: %w", err)
 	}
 	return nil
+}
+
+type contextTransaction struct {
+	*sql.Tx
+	ctx context.Context
+}
+
+func (tx *contextTransaction) Exec(query string, args ...any) (sql.Result, error) {
+	return tx.ExecContext(tx.ctx, query, args...)
+}
+
+func (tx *contextTransaction) QueryRow(query string, args ...any) *sql.Row {
+	return tx.QueryRowContext(tx.ctx, query, args...)
+}
+
+type contextExecer struct {
+	db  *sql.DB
+	ctx context.Context
+}
+
+func (ex contextExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return ex.db.ExecContext(ex.ctx, query, args...)
 }
 
 // SQLite can roll back a transaction on a write error without invalidating
@@ -149,7 +195,7 @@ func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timesta
 		return nil
 	}
 	return b.write(func() error {
-		_, err := b.stmt.Exec(messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
+		_, err := b.stmt.ExecContext(b.ctx, messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
 			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
 		return err
 	})
@@ -200,13 +246,15 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	var path any
 	var pathText string
 	var presentation *mediaPresentation
+	var location *messageLocation
 	if len(options) > 0 {
 		pathText, presentation = options[0].directPath, options[0].presentation
+		location = options[0].location
 		if pathText != "" {
 			path = pathText
 		}
 	}
 	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(),
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(), location.column(),
 		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
 }

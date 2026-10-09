@@ -350,6 +350,9 @@ func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, r
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return types.EmptyJID, err
+	}
 	return recipientJID, nil
 }
 
@@ -358,8 +361,15 @@ func resolveRecipientJIDContext(ctx context.Context, client *whatsmeow.Client, r
 // contribute both the phone JID and, when known, its LID form so the mention
 // renders regardless of the group's addressing mode.
 func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
+	return resolveMentionJIDsContext(context.Background(), client, mentions)
+}
+
+func resolveMentionJIDsContext(ctx context.Context, client *whatsmeow.Client, mentions []string) []string {
 	var resolved []string
 	for _, mention := range mentions {
+		if ctx.Err() != nil {
+			break
+		}
 		jid, err := normalizedUserJID(mention)
 		if err != nil {
 			bridgeLog.Warnf("skipping unparseable mention %q: %v", mention, err)
@@ -367,7 +377,7 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 		}
 		resolved = append(resolved, jid.String())
 		if jid.Server == types.DefaultUserServer {
-			if lid, err := lookupAltJID(context.Background(), client, jid); err == nil && !lid.IsEmpty() {
+			if lid, err := lookupAltJID(ctx, client, jid); err == nil && !lid.IsEmpty() {
 				resolved = append(resolved, lid.String())
 			}
 		}
@@ -408,11 +418,14 @@ type messageSendNetwork struct {
 }
 
 func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string, network messageSendNetwork) (bool, string, sentMessage) {
+	if err := ctx.Err(); err != nil {
+		return false, err.Error(), sentMessage{}
+	}
 	if !network.connected() {
 		return false, notConnectedMessage, sentMessage{}
 	}
 
-	mentionedJIDs := resolveMentionJIDs(client, mentions)
+	mentionedJIDs := resolveMentionJIDsContext(ctx, client, mentions)
 
 	settingsLookupJID, err := parseRecipientJID(recipient)
 	if err != nil {
@@ -425,7 +438,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
 	storageJID := settingsLookupJID
 
-	recipientJID, err := resolveRecipientJID(client, recipient)
+	recipientJID, err := resolveRecipientJIDContext(ctx, client, recipient)
 	if err != nil {
 		return false, err.Error(), sentMessage{}
 	}
@@ -434,7 +447,22 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	if quotedMsgID != "" {
 		// Normalise to a JID recipients can match (bare numbers, LID upgrade);
 		// otherwise the quoted bubble shows "You" for everyone. See #13.
-		quote.participant = resolveQuotedParticipantJID(client, quotedSenderJID)
+		quote.participant = resolveQuotedParticipantJIDContext(ctx, client, quotedSenderJID)
+	}
+	chatJID, err := outboundLookupChatJID(ctx, client, settingsLookupJID)
+	if err != nil {
+		return false, err.Error(), sentMessage{}
+	}
+	quote, err = messageStore.loadOutboundQuote(ctx, client, chatJID.String(), quote, quotedSenderJID == "")
+	if err != nil {
+		return false, fmt.Sprintf("Error loading quoted message: %v", err), sentMessage{}
+	}
+	settings, err := messageStore.outboundChatSettings(ctx, chatJID.String())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Sprintf("Error loading chat settings: %v", err), sentMessage{}
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err.Error(), sentMessage{}
 	}
 
 	var msg *waE2E.Message
@@ -456,6 +484,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		}
 
 		// Upload media to WhatsApp servers
+		if err := ctx.Err(); err != nil {
+			return false, err.Error(), sentMessage{}
+		}
 		upload, err = network.upload(ctx, mediaData, mediaType)
 		if err != nil {
 			return false, fmt.Sprintf("Error uploading media: %v", err), sentMessage{}
@@ -471,22 +502,15 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 			return false, err.Error(), sentMessage{}
 		}
 	} else {
-		msg = buildOutboundText(message, quote.id, quote.participant, quote.content, mentionedJIDs)
+		msg = buildOutboundTextWithQuote(message, quote, mentionedJIDs)
 	}
 
-	// Normalize @lid recipients to phone JID before the lookup. Chats are
-	// persisted under @s.whatsapp.net (handleMessage normalizes via
-	// resolveLIDChat); without this step, an API caller passing an @lid
-	// recipient would silently miss the disappearing-message settings row.
-	settings, err := messageStore.GetChatEphemeralSettings(resolveUserJID(client, settingsLookupJID, types.EmptyJID).String())
-	if err != nil && err != sql.ErrNoRows {
-		return false, fmt.Sprintf("Error loading chat settings: %v", err), sentMessage{}
-	}
-	if err == nil {
-		applyChatEphemeralSettings(msg, settings)
-	}
+	applyChatEphemeralSettings(msg, settings)
 
 	// Send message
+	if err := ctx.Err(); err != nil {
+		return false, err.Error(), sentMessage{}
+	}
 	resp, err := network.send(ctx, recipientJID, msg)
 
 	if err != nil {
@@ -687,10 +711,14 @@ func buildMediaMessage(mediaType whatsmeow.MediaType, mimeType, mediaPath string
 
 // buildOutboundText returns a plain Conversation for bare text, or an
 // ExtendedTextMessage carrying ContextInfo when the text quotes a message or
-// mentions someone. Only text quoting is supported: the quoted preview on
-// the recipient's device would need the original media's key/URL.
+// mentions someone. Legacy callers supply a text preview; the real sender
+// passes the stored typed preview through buildOutboundTextWithQuote.
 func buildOutboundText(text, quotedMsgID, quotedParticipant, quotedContent string, mentionedJIDs []string) *waE2E.Message {
-	ctx := outboundContextInfo(outboundQuote{id: quotedMsgID, participant: quotedParticipant, content: quotedContent}, mentionedJIDs)
+	return buildOutboundTextWithQuote(text, outboundQuote{id: quotedMsgID, participant: quotedParticipant, content: quotedContent}, mentionedJIDs)
+}
+
+func buildOutboundTextWithQuote(text string, quote outboundQuote, mentionedJIDs []string) *waE2E.Message {
+	ctx := outboundContextInfo(quote, mentionedJIDs)
 	if ctx == nil {
 		return &waE2E.Message{Conversation: proto.String(text)}
 	}
@@ -702,6 +730,7 @@ func buildOutboundText(text, quotedMsgID, quotedParticipant, quotedContent strin
 // is a send that quotes nothing.
 type outboundQuote struct {
 	id, participant, content string
+	preview                  *waE2E.Message
 }
 
 // outboundContextInfo builds the ContextInfo of a send, the quote and the
@@ -714,8 +743,13 @@ func outboundContextInfo(quote outboundQuote, mentionedJIDs []string) *waE2E.Con
 	ctx := &waE2E.ContextInfo{MentionedJID: mentionedJIDs}
 	if quote.id != "" {
 		ctx.StanzaID = proto.String(quote.id)
-		ctx.Participant = proto.String(quote.participant)
+		if quote.participant != "" {
+			ctx.Participant = proto.String(quote.participant)
+		}
 		ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quote.content)}
+		if quote.preview != nil {
+			ctx.QuotedMessage = quote.preview
+		}
 	}
 	return ctx
 }

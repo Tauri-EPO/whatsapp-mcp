@@ -270,13 +270,31 @@ func (b *Bridge) handlePollVote(ctx context.Context, evt *events.Message, chatJI
 // is the row's: the caller reports it (store_failures.go), with a retry on the
 // live path.
 func (store *MessageStore) storePollVoteMessage(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger) error {
-	if err := store.StoreMessage(id, chatJID, sender, content, ts, fromMe, "poll_vote", pollID, "", nil, nil, nil, 0, ""); err != nil {
-		return err
-	}
-	if err := store.SetTargetMessageID(id, chatJID, pollID); err != nil {
-		logger.Warnf("Failed to set poll vote target: %v", err)
-	}
-	return nil
+	_, err := store.storePollVoteMessageResult(id, chatJID, sender, content, ts, fromMe, pollID, logger)
+	return err
+}
+
+type historyVoteMarkers struct {
+	name string
+	read bool
+}
+
+func (store *MessageStore) storePollVoteMessageResult(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger, markers ...historyVoteMarkers) (consumed bool, err error) {
+	err = store.Batch(func(batch *messageBatch) error {
+		ex := extractedMessage{content: content, mediaType: "poll_vote", filename: pollID, hasLength: true}
+		consumed, err = persistMessageResult(batch, id, chatJID, sender, ts, fromMe, ex, false, logger)
+		if err != nil || consumed {
+			return err
+		}
+		if err := batch.write(func() error { return setTargetMessageIDWith(batch.tx, id, chatJID, pollID) }); err != nil {
+			return err
+		}
+		if len(markers) > 0 {
+			return batch.storeHistoryActivity(chatJID, markers[0].name, map[string]struct{}{id: {}}, markers[0].read)
+		}
+		return nil
+	})
+	return consumed, err
 }
 
 // defaultHistoryVoteRetryDelays paces retries while whatsmeow is still writing
@@ -293,7 +311,7 @@ func defaultHistoryVoteRetryDelays() []time.Duration {
 // sync for one conversation. Runs after the conversation's messages (and
 // therefore the poll rows) are stored; each vote retries briefly when the
 // poll secret is not there yet and is recorded as undecodable otherwise.
-func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo, done chan<- struct{}) {
+func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo, done chan<- struct{}, markers ...historyVoteMarkers) {
 	defer func() {
 		if done != nil {
 			close(done)
@@ -318,8 +336,9 @@ func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*
 					return b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp)
 				})
 				b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
-					return b.Store.storePollVoteMessage(evt.Info.ID, chatJID, storedSender(resolvedSender),
-						pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log)
+					_, err := b.Store.storePollVoteMessageResult(evt.Info.ID, chatJID, storedSender(resolvedSender),
+						pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log, markers...)
+					return err
 				})
 				break
 			}

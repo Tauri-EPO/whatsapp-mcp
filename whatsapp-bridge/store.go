@@ -233,6 +233,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "media_presentation", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.media_presentation: %w", err)
 	}
+	if err := ensureColumn(db, "messages", "location", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.location: %w", err)
+	}
 	// sender_server: the namespace messages.sender lives in ("s.whatsapp.net"
 	// or "lid"), NULL when it is unknown — rows an older bridge wrote, and
 	// senders that are not user JIDs at all (sender_namespace.go).
@@ -519,7 +522,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	insertResult, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
-			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation
+			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation, location,
+			quoted_message_id, mentions, deleted_at, view_once, target_message_id
 		)
 		SELECT
 			msg.id,
@@ -537,7 +541,13 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			msg.file_enc_sha256,
 			msg.file_length,
 			msg.direct_path,
-			msg.media_presentation
+			msg.media_presentation,
+			msg.location,
+			msg.quoted_message_id,
+			msg.mentions,
+			msg.deleted_at,
+			msg.view_once,
+			msg.target_message_id
 		FROM messages msg
 		JOIN tmp_lid_to_phone m ON m.lid_jid = msg.chat_jid;
 	`)
@@ -749,11 +759,15 @@ func (store *MessageStore) Close() error {
 // A zero lastMessageTime binds NULL, which the merge reads as "no news":
 // the row is created or renamed and its time is left alone (EnsureChat).
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+	return storeChatWith(store.db, jid, name, lastMessageTime)
+}
+
+func storeChatWith(ex sqlExecer, jid, name string, lastMessageTime time.Time) error {
 	var seen any
 	if !lastMessageTime.IsZero() {
 		seen = dbTime(lastMessageTime)
 	}
-	_, err := store.db.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
 		VALUES (?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
@@ -805,7 +819,11 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 // inserts only its own column, leaving name/last_message_time NULL so a receipt
 // arriving before any StoreChat call doesn't fabricate placeholder metadata.
 func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
-	_, err := store.db.Exec(
+	return markChatReadWith(store.db, jid, readAt)
+}
+
+func markChatReadWith(ex sqlExecer, jid string, readAt time.Time) error {
+	_, err := ex.Exec(
 		`INSERT INTO chats (jid, last_read_time)
 		VALUES (?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
@@ -900,6 +918,14 @@ func (store *MessageStore) ValidateInboundMarkRead(chatJID, senderHint string, i
 // MaxMessageTimestamp returns the latest stored timestamp among the given
 // message IDs in chatJID. ok is false when none of the IDs are present.
 func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (time.Time, bool, error) {
+	return maxMessageTimestampWith(store.db, chatJID, ids)
+}
+
+type sqlRowQuerier interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+func maxMessageTimestampWith(ex sqlRowQuerier, chatJID string, ids []string) (time.Time, bool, error) {
 	if len(ids) == 0 {
 		return time.Time{}, false, nil
 	}
@@ -911,7 +937,7 @@ func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (ti
 		args = append(args, id)
 	}
 	var raw any
-	err := store.db.QueryRow(
+	err := ex.QueryRow(
 		`SELECT MAX(timestamp) FROM messages WHERE chat_jid = ? AND id IN (`+strings.Join(placeholders, ",")+`)`,
 		args...,
 	).Scan(&raw)
@@ -1170,7 +1196,11 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 // `filename` still carries the same value for one release so older readers
 // keep working; new readers use target_message_id.
 func (store *MessageStore) SetTargetMessageID(id, chatJID, target string) error {
-	_, err := store.db.Exec(`UPDATE messages SET target_message_id = ? WHERE id = ? AND chat_jid = ?`, target, id, chatJID)
+	return setTargetMessageIDWith(store.db, id, chatJID, target)
+}
+
+func setTargetMessageIDWith(ex sqlExecer, id, chatJID, target string) error {
+	_, err := ex.Exec(`UPDATE messages SET target_message_id = ? WHERE id = ? AND chat_jid = ?`, target, id, chatJID)
 	return err
 }
 

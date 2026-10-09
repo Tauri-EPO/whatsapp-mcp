@@ -424,24 +424,7 @@ func extractVCardPhones(vcard string) []string {
 // fresh history sync. Returns the zero ChatEphemeralSettings when no
 // ContextInfo is present (e.g. plain Conversation, ProtocolMessage).
 func extractChatEphemeralFromMessage(msg *waE2E.Message) ChatEphemeralSettings {
-	if msg == nil {
-		return ChatEphemeralSettings{}
-	}
-	var ctx *waE2E.ContextInfo
-	switch {
-	case msg.ExtendedTextMessage != nil:
-		ctx = msg.ExtendedTextMessage.GetContextInfo()
-	case msg.ImageMessage != nil:
-		ctx = msg.ImageMessage.GetContextInfo()
-	case msg.AudioMessage != nil:
-		ctx = msg.AudioMessage.GetContextInfo()
-	case videoMessageOf(msg) != nil:
-		ctx = videoMessageOf(msg).GetContextInfo()
-	case msg.DocumentMessage != nil:
-		ctx = msg.DocumentMessage.GetContextInfo()
-	case msg.StickerMessage != nil:
-		ctx = msg.StickerMessage.GetContextInfo()
-	}
+	ctx := sharedContextInfo(msg)
 	if ctx == nil {
 		return ChatEphemeralSettings{}
 	}
@@ -453,24 +436,7 @@ func extractChatEphemeralFromMessage(msg *waE2E.Message) ChatEphemeralSettings {
 
 // Extract quoted message info from ContextInfo
 func extractQuotedMessageInfo(msg *waE2E.Message) (quotedMessageId string, quotedSender string, quotedContent string) {
-	if msg == nil {
-		return "", "", ""
-	}
-
-	var contextInfo *waE2E.ContextInfo
-
-	// Check all message types that can have ContextInfo
-	if extText := msg.GetExtendedTextMessage(); extText != nil {
-		contextInfo = extText.GetContextInfo()
-	} else if img := msg.GetImageMessage(); img != nil {
-		contextInfo = img.GetContextInfo()
-	} else if vid := videoMessageOf(msg); vid != nil {
-		contextInfo = vid.GetContextInfo()
-	} else if doc := msg.GetDocumentMessage(); doc != nil {
-		contextInfo = doc.GetContextInfo()
-	} else if aud := msg.GetAudioMessage(); aud != nil {
-		contextInfo = aud.GetContextInfo()
-	}
+	contextInfo := sharedContextInfo(msg)
 
 	if contextInfo == nil {
 		return "", "", ""
@@ -496,28 +462,62 @@ func extractQuotedMessageInfo(msg *waE2E.Message) (quotedMessageId string, quote
 
 // extractMentionedJIDs returns native WhatsApp mention targets from ContextInfo.
 func extractMentionedJIDs(msg *waE2E.Message) []string {
-	if msg == nil {
-		return nil
-	}
-
-	var contextInfo *waE2E.ContextInfo
-	if extText := msg.GetExtendedTextMessage(); extText != nil {
-		contextInfo = extText.GetContextInfo()
-	} else if img := msg.GetImageMessage(); img != nil {
-		contextInfo = img.GetContextInfo()
-	} else if vid := videoMessageOf(msg); vid != nil {
-		contextInfo = vid.GetContextInfo()
-	} else if doc := msg.GetDocumentMessage(); doc != nil {
-		contextInfo = doc.GetContextInfo()
-	} else if aud := msg.GetAudioMessage(); aud != nil {
-		contextInfo = aud.GetContextInfo()
-	}
+	contextInfo := sharedContextInfo(msg)
 
 	if contextInfo == nil || len(contextInfo.MentionedJID) == 0 {
 		return nil
 	}
 
 	return append([]string(nil), contextInfo.MentionedJID...)
+}
+
+// sharedContextInfo reads supported conversational families, never protocol
+// wrappers or payment authority. The enclosing context wins over a media header;
+// nil getters also cover sparse templates. SDK envelope unwrapping belongs to
+// extractMessage, so this does not change raw-history handling.
+func sharedContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	for _, ctx := range []*waE2E.ContextInfo{
+		msg.GetExtendedTextMessage().GetContextInfo(),
+		msg.GetImageMessage().GetContextInfo(),
+		videoMessageOf(msg).GetContextInfo(),
+		msg.GetDocumentMessage().GetContextInfo(),
+		msg.GetAudioMessage().GetContextInfo(),
+		msg.GetStickerMessage().GetContextInfo(),
+		msg.GetContactMessage().GetContextInfo(),
+		msg.GetContactsArrayMessage().GetContextInfo(),
+		msg.GetLocationMessage().GetContextInfo(),
+		msg.GetLiveLocationMessage().GetContextInfo(),
+		msg.GetEventMessage().GetContextInfo(),
+		msg.GetGroupInviteMessage().GetContextInfo(),
+		msg.GetProductMessage().GetContextInfo(),
+		msg.GetOrderMessage().GetContextInfo(),
+		msg.GetListResponseMessage().GetContextInfo(),
+		msg.GetInteractiveResponseMessage().GetContextInfo(),
+		msg.GetTemplateMessage().GetContextInfo(),
+		msg.GetButtonsMessage().GetContextInfo(),
+		msg.GetInteractiveMessage().GetContextInfo(),
+		msg.GetListMessage().GetContextInfo(),
+		msg.GetButtonsResponseMessage().GetContextInfo(),
+		msg.GetTemplateButtonReplyMessage().GetContextInfo(),
+		msg.GetPollCreationMessage().GetContextInfo(),
+		msg.GetPollCreationMessageV2().GetContextInfo(),
+		msg.GetPollCreationMessageV3().GetContextInfo(),
+		msg.GetPollCreationMessageV5().GetContextInfo(),
+		msg.GetPollCreationMessageV6().GetContextInfo(),
+		msg.GetTemplateMessage().GetInteractiveMessageTemplate().GetContextInfo(),
+	} {
+		if ctx != nil {
+			return ctx
+		}
+	}
+	for _, header := range messageMediaHeaders(msg) {
+		for _, ctx := range []*waE2E.ContextInfo{header.GetImageMessage().GetContextInfo(), header.GetVideoMessage().GetContextInfo(), header.GetDocumentMessage().GetContextInfo()} {
+			if ctx != nil {
+				return ctx
+			}
+		}
+	}
+	return nil
 }
 
 // Extract media info from a message. Filenames embed the message ID so that

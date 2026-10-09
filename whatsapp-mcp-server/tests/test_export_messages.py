@@ -191,8 +191,9 @@ def test_streams_in_batches_without_fetchall(store, monkeypatch):
 def test_export_fields_match_the_real_conversion(store):
     """EXPORT_FIELDS drifting from msg_to_dict would silently break `fields`."""
     conn = sqlite3.connect(str(store / "messages.db"))
+    cursor = conn.cursor()
     row = conn.execute(
-        f"SELECT {whatsapp.MESSAGE_COLUMNS} FROM messages JOIN chats ON messages.chat_jid = chats.jid "
+        f"SELECT {whatsapp.message_columns(cursor)} FROM messages JOIN chats ON messages.chat_jid = chats.jid "
         "WHERE messages.id = 'a3'"
     ).fetchone()
     conn.close()

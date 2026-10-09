@@ -222,8 +222,8 @@ func TestHandleMessage_StoresSharedLocation(t *testing.T) {
 	if want := "📍 Padaria Estrela — Rua das Flores, 10 (-23.550520, -46.633308)"; content != want {
 		t.Errorf("content = %q, want %q", content, want)
 	}
-	if mediaType.String != "" {
-		t.Errorf("a location carries no file, media_type = %q", mediaType.String)
+	if mediaType.String != "location" {
+		t.Errorf("a location is typed without a file, media_type = %q", mediaType.String)
 	}
 	if n := queryMessageCount(ms, phonePN.String()); n != 2 {
 		t.Errorf("stored rows = %d, want 2", n)
@@ -249,7 +249,7 @@ func TestExtractMessage_LocationIsNotEmpty(t *testing.T) {
 		Name:             proto.String("Padaria Estrela"),
 	}
 	e := extractMessage(&waE2E.Message{LocationMessage: loc}, time.Now(), "L1")
-	if e.empty() || e.mediaType != "" || !strings.Contains(e.content, "Padaria Estrela") {
+	if e.empty() || e.mediaType != "location" || e.location == nil || !strings.Contains(e.content, "Padaria Estrela") {
 		t.Errorf("location extraction = %+v", e)
 	}
 	reply := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{

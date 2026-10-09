@@ -131,7 +131,7 @@ def test_a_repeated_hit_gets_one_window(db):
     try:
         cursor = conn.cursor()
         cursor.execute(
-            f"SELECT {whatsapp.MESSAGE_COLUMNS} FROM messages JOIN chats ON chats.jid = messages.chat_jid"
+            f"SELECT {whatsapp.message_columns(cursor)} FROM messages JOIN chats ON chats.jid = messages.chat_jid"
             " WHERE messages.id = 'a3' AND messages.chat_jid = ?",
             (CHAT_A,),
         )
@@ -200,7 +200,7 @@ def _window_instructions(tmp_path, rows: int, hits: int = 20) -> tuple[int, dict
     try:
         cursor = conn.cursor()
         cursor.execute(
-            f"SELECT {whatsapp.MESSAGE_COLUMNS} FROM messages JOIN chats ON chats.jid = messages.chat_jid"
+            f"SELECT {whatsapp.message_columns(cursor)} FROM messages JOIN chats ON chats.jid = messages.chat_jid"
             " WHERE messages.content = 'hit' ORDER BY messages.timestamp DESC, messages.id DESC LIMIT ?",
             (hits,),
         )
@@ -250,7 +250,9 @@ def test_context_side_query_pins_the_indexed_join_order(tmp_path, newest_first):
         params.extend([index, jids[index % len(jids)], "2024-01-01 10:00:00+00:00"])
     conn = sqlite3.connect(path)
     try:
-        sql = whatsapp._context_side_sql(values, newest_first, include_deleted=True, columns=whatsapp.MESSAGE_COLUMNS)
+        sql = whatsapp._context_side_sql(
+            values, newest_first, include_deleted=True, columns=whatsapp.message_columns(conn.cursor())
+        )
         plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, (*params, 5))]
     finally:
         conn.close()

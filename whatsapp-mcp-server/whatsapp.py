@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import os.path
 import pathlib
@@ -242,8 +243,9 @@ _FTS_TOKEN_RE = re.compile(r"\S+")
 
 # Schema probes (does chats.last_read_time exist? is messages_fts usable?) ran
 # on every call. The answer only changes when the bridge migrates the file, so
-# cache it per database path and invalidate when the file's mtime/size move.
-_schema_cache: dict[tuple[str, str], tuple[tuple[float, int], Any]] = {}
+# cache it per database path and SQLite schema version. WAL-only migrations
+# may leave the main file mtime/size untouched; the reader must observe them.
+_schema_cache: dict[tuple[str, str], tuple[tuple[float, int, int], Any]] = {}
 _schema_cache_lock = threading.Lock()
 
 
@@ -255,8 +257,8 @@ def _db_signature(path: str) -> tuple[float, int]:
         return (0.0, 0)
 
 
-def _schema_memo(kind: str, path: str, compute):
-    sig = _db_signature(path)
+def _schema_memo(kind: str, path: str, compute, *, schema: sqlite3.Connection | sqlite3.Cursor):
+    sig = (*_db_signature(path), schema.execute("PRAGMA main.schema_version").fetchone()[0])
     with _schema_cache_lock:
         hit = _schema_cache.get((kind, path))
         if hit is not None and hit[0] == sig:
@@ -274,7 +276,7 @@ def _reset_schema_cache() -> None:
 
 def _fts_available(conn: sqlite3.Connection) -> bool:
     """True when messages_fts exists and this SQLite build can read it (memoised per file)."""
-    return _schema_memo("fts", MESSAGES_DB_PATH, lambda: _fts_available_uncached(conn))
+    return _schema_memo("fts", MESSAGES_DB_PATH, lambda: _fts_available_uncached(conn), schema=conn)
 
 
 def _fts_available_uncached(conn: sqlite3.Connection) -> bool:
@@ -412,6 +414,44 @@ def _bridge_request(method: str, path: str, *, timeout: float | None = None, **k
     raise AssertionError("unreachable")
 
 
+MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+
+
+def _location_fields(raw: str | None) -> dict[str, Any] | None:
+    if not raw or len(raw) > 65536:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(value, dict) or type(value.get("live")) is not bool:
+        return None
+    result: dict[str, Any] = {"live": value["live"]}
+    for key in ("name", "address", "url", "comment"):
+        if isinstance(value.get(key), str):
+            result[key] = value[key]
+    for key, low, high in (
+        ("latitude", -90, 90),
+        ("longitude", -180, 180),
+        ("speed_mps", 0, 3.4028235e38),
+        ("bearing_degrees", 0, 360),
+        ("accuracy_meters", 0, 4294967295),
+        ("sequence", 0, 9223372036854775807),
+        ("time_offset_seconds", 0, 4294967295),
+    ):
+        number = value.get(key)
+        if key in ("accuracy_meters", "bearing_degrees", "sequence", "time_offset_seconds") and type(number) is not int:
+            continue
+        if (
+            isinstance(number, (int, float))
+            and not isinstance(number, bool)
+            and low <= number <= high
+            and math.isfinite(number)
+        ):
+            result[key] = number
+    return result
+
+
 @dataclass
 class Message:
     timestamp: datetime
@@ -448,6 +488,8 @@ class Message:
     # file across forwards and keys the agent's media notes (see media_inventory).
     bytes: int | None = None
     sha256: str | None = None
+    # Native location fields; NULL on old text-only rows, never reconstructed.
+    location: dict[str, Any] | None = None
 
 
 # One column list and one mapper for every query that yields Message rows.
@@ -457,18 +499,16 @@ MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
     "messages.deleted_at, messages.view_once, messages.target_message_id, "
-    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server"
+    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location"
 )
 
 
 def message_columns(cursor: sqlite3.Cursor) -> str:
     """MESSAGE_COLUMNS as this store can answer it.
 
-    messages.sender_server is the newest column the bridge adds (#375), and a
-    messages.db written by an older one does not have it yet. Reads must keep
-    working there, so the column is selected as NULL — which is what the
-    readers already treat as "namespace not recorded". The width of the row
-    never changes, so _row_to_message is untouched.
+    Older bridges may lack sender_server or location. Select NULL for those
+    fields so all readers keep the same projection and old archives remain
+    readable without the MCP server changing the bridge-owned schema.
     """
     has_column = _schema_memo(
         "messages.sender_server",
@@ -476,12 +516,22 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
         # Iterated, not fetchall()'d: this runs on the caller's cursor, and
         # export.py's guard against buffering a whole archive watches for it.
         lambda: "sender_server" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        schema=cursor,
     )
-    return MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
+    columns = MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
+    has_location = _schema_memo(
+        "messages.location",
+        MESSAGES_DB_PATH,
+        lambda: "location" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        schema=cursor,
+    )
+    return columns if has_location else columns.replace("messages.location", "NULL")
 
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
+    if len(row) == 16:  # legacy callers that materialized the old projection
+        row = (*row, None)
     (
         timestamp,
         sender,
@@ -499,6 +549,7 @@ def _row_to_message(row: tuple) -> Message:
         file_length,
         sha256,
         sender_server,
+        location,
     ) = row
     return Message(
         timestamp=parse_db_time(timestamp),
@@ -519,6 +570,7 @@ def _row_to_message(row: tuple) -> Message:
         target_message_id=target,
         bytes=int(file_length) if file_length is not None else None,
         sha256=sha256 or None,
+        location=_location_fields(location),
     )
 
 
@@ -897,7 +949,7 @@ def fetch_media_notes(messages: Sequence[Message]) -> dict[str, dict[str, str]]:
     """
     from media_notes import fetch_notes
 
-    hashes = [m.sha256 for m in messages if m.sha256 and m.media_type and not _is_pointer_row(m)]
+    hashes = [m.sha256 for m in messages if m.sha256 and m.media_type in MEDIA_TYPES]
     return fetch_notes(hashes) if hashes else {}
 
 
@@ -1021,7 +1073,7 @@ def msg_to_dict(
                 sender_name = sender_phone
                 sender_display = label
 
-    is_media = bool(message.media_type) and not _is_pointer_row(message)
+    is_media = message.media_type in MEDIA_TYPES
     sha256 = message.sha256 if is_media else None
 
     row: dict[str, Any] = {
@@ -1041,6 +1093,7 @@ def msg_to_dict(
         # the chat nor this message (issue #379).
         "chat_name": chat_display_name(message.chat_jid, message.chat_name),
         "media_type": message.media_type,
+        "location": message.location if message.media_type == "location" else None,
         "filename": (message.filename or None) if is_media else None,
         "target_message_id": _target_id(message),
         "reaction_to_message_id": (_target_id(message) if message.media_type == "reaction" else None),
@@ -1224,6 +1277,7 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
         "chats.last_read_time",
         MESSAGES_DB_PATH,
         lambda: "last_read_time" in {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()},
+        schema=cursor,
     )
     return f"{table_alias}.last_read_time" if has_column else "NULL"
 
@@ -1234,6 +1288,7 @@ def _has_mentions_column(cursor: sqlite3.Cursor) -> bool:
         "messages.mentions",
         MESSAGES_DB_PATH,
         lambda: "mentions" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()},
+        schema=cursor,
     )
 
 
@@ -1330,7 +1385,7 @@ def _closing_message_clause(alias: str) -> tuple[str, list[str]]:
     """
     text, strip_params = _own_mention_stripped(alias)
     placeholders = ",".join("?" * len(CLOSING_MESSAGES))
-    clause = f"({alias}.media_type IS 'sticker' OR rtrim(lower(trim(COALESCE({text}, ''))), '.! ') IN ({placeholders}))"
+    clause = f"({alias}.media_type IS 'sticker' OR ({alias}.media_type IS NOT 'location' AND rtrim(lower(trim(COALESCE({text}, ''))), '.! ') IN ({placeholders})))"
     return clause, [*strip_params, *CLOSING_MESSAGES]
 
 
@@ -2173,7 +2228,6 @@ def _fetch_context_windows(
 
 # Media rows the archive actually stores a file for. `reaction` and `poll_vote`
 # also live in messages.media_type but are pointer rows (gotcha 3), never media.
-MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
 POINTER_MEDIA_TYPES = ("reaction", "poll_vote")
 
 # A direct conversation is one-to-one with another person: a phone JID or the
@@ -2401,10 +2455,12 @@ class MessageFilters:
 
     def _media_predicate(self) -> tuple[str | None, list[Any]]:
         media_type = (self.media_type or "").strip() or None
-        if media_type is not None and media_type not in MEDIA_TYPES:
-            raise ToolError("invalid_argument", f"media_type must be one of {', '.join(MEDIA_TYPES)}")
+        if media_type is not None and media_type not in (*MEDIA_TYPES, "location"):
+            raise ToolError("invalid_argument", f"media_type must be one of {', '.join((*MEDIA_TYPES, 'location'))}")
         if media_type is not None:
-            if self.has_media is False:
+            if media_type == "location" and self.has_media is True:
+                raise ToolError("invalid_argument", "locations have no downloadable media; use has_media=False")
+            if media_type != "location" and self.has_media is False:
                 raise ToolError("invalid_argument", "has_media=False cannot be combined with a media_type")
             return "messages.media_type = ?", [media_type]
         if self.has_media is None:
@@ -2738,7 +2794,7 @@ def list_messages_page(
             marker count as entirely unread.
         from_me: True for messages you sent, False for inbound only, None for both
         has_media: True for messages carrying a file, False for text-only
-        media_type: One of image/video/audio/document/sticker (implies has_media=True)
+        media_type: A file kind (implies has_media=True), or location (no file)
         exclude_groups: Keep direct conversations only (@s.whatsapp.net / @lid),
             dropping @g.us groups, @broadcast lists, @newsletter channels and
             @bot chats

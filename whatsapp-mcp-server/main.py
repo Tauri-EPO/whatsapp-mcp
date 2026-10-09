@@ -753,10 +753,12 @@ def list_messages(
                  only, None (default) for both. unread_only already implies
                  inbound; unread_only=True with from_me=True is an error, not an
                  empty page.
-        has_media: True for messages carrying a file, False for text-only messages,
-                 None (default) for both. Reactions and poll votes never count as media.
+        has_media: True for messages carrying a file, False for messages without a file,
+                 None (default) for both. Locations, reactions and poll votes have no file.
         media_type: Restrict to one kind of file: "image", "video", "audio",
-                 "document" or "sticker". Implies has_media=True.
+                 "document" or "sticker" (implies has_media=True), or "location"
+                 (no file, compatible with has_media=False). Location fields are
+                 returned in a structured location object; old text remains untyped.
         exclude_groups: True keeps direct conversations only (@s.whatsapp.net / @lid),
                  dropping @g.us groups, @broadcast lists, @newsletter channels
                  and @bot chats
@@ -898,8 +900,8 @@ def message_stats(
                  transcripts included). group_by="month" then plots a topic over
                  time; group_by="chat" says where it is discussed.
         from_me: True for what you sent, False for inbound only, None for both
-        has_media: True for messages carrying a file, False for text-only
-        media_type: "image", "video", "audio", "document" or "sticker"
+        has_media: True for messages carrying a file, False for messages without a file
+        media_type: "image", "video", "audio", "document", "sticker" or "location" (no file)
         exclude_groups: True counts direct conversations only (@s.whatsapp.net / @lid),
                  dropping groups, broadcast lists, channels and bots
         include_deleted: False drops revoked messages from the counts (default True)
@@ -984,8 +986,8 @@ def export_messages(
                  deleted_at, view_once, bytes, sha256, notes). Default: all of them
         sender_jid: Only messages from this sender
         from_me: True for what you sent, False for inbound only, None for both
-        has_media: True for messages carrying a file, False for text-only
-        media_type: "image", "video", "audio", "document" or "sticker"
+        has_media: True for messages carrying a file, False for messages without a file
+        media_type: "image", "video", "audio", "document", "sticker" or "location" (no file)
         exclude_groups: True exports direct conversations only (@s.whatsapp.net / @lid),
                  dropping groups, broadcast lists, channels and bots
         include_deleted: False drops revoked messages (default True)
@@ -1660,6 +1662,11 @@ def manage_group_participants(chat_jid: str, action: str, participants: list[str
 @mutating_tool
 def update_group(chat_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
     """Rename a WhatsApp group and/or change its description (admin only).
+
+    Name is applied first. If reading group info or setting the description
+    then fails, the error says the group was renamed; retry only description.
+    A successful result includes changed fields. Description changes refresh
+    the roster cache; a group without a topic ID needs an extra SDK info read.
 
     Whatever you pass becomes the real group description, visible to every
     member: send the text itself, never a topic copied out of a tool result with
