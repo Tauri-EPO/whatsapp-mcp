@@ -103,6 +103,7 @@ py-modules = [
     "parent_watchdog",
     "phone",
     "private_files",
+    "runtime_settings",
     "strict_args",
     "tool_policy",
     "transcribe",

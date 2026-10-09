@@ -25,6 +25,7 @@ func TestOperatorStatusProbeUsesDirectHTTPAndPrintsNoCredentials(t *testing.T) {
 		exit   int
 	}{
 		{200, `{"state":"passkey_required","qr":{"payload":"FAKE-QR-CREDENTIAL"},"confirmation_code":"FAKE-CODE"}`, "passkey_required\n", 0},
+		{200, `{"state":"logged_out_by_operator"}`, "logged_out_by_operator\n", 0},
 		{401, `{"state":"passkey_required"}`, "", 1},
 		{200, `{"state":"forged\nlog"}`, "", 1},
 		{302, `{"state":"passkey_required"}`, "", 1},

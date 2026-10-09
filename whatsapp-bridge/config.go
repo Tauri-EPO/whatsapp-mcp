@@ -23,6 +23,7 @@ type bridgeConfig struct {
 	RosterSync, SessionKeepalive time.Duration
 	ReadOnly                     readOnlyPolicy
 	Tools                        toolPolicy
+	RuntimeDefaults              map[string]runtimeSetting
 	MediaMaxBytes                uint64
 	MediaRoots                   string
 	DeviceName                   string
@@ -82,6 +83,8 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 		collect(errors.New("WHATSAPP_OPERATOR_PORT must differ from WHATSAPP_BRIDGE_PORT"))
 	}
 	cfg.PairingStdout, err = parseBoolEnv(pairingStdoutEnv, getenv(pairingStdoutEnv), cfg.Operator.Bind == "")
+	collect(err)
+	cfg.RuntimeDefaults, err = runtimeDefaults(getenv)
 	collect(err)
 	// The valid-name appendix is long; put it after every other variable.
 	cfg.Tools, err = newToolPolicy(getenv(allowToolsEnv), getenv(denyToolsEnv))

@@ -102,8 +102,10 @@ var unenforcedTools = []string{
 
 // toolPolicy is the parsed pair of lists. The zero value allows everything.
 type toolPolicy struct {
-	allow map[string]bool
-	deny  map[string]bool
+	allow      map[string]bool
+	deny       map[string]bool
+	allowLabel string
+	denyLabels map[string]string
 }
 
 // knownTools is every name the two lists accept.
@@ -196,8 +198,14 @@ func (p toolPolicy) refusal(path string) string {
 			return ""
 		}
 		env := allowToolsEnv + " is set and does not list it"
+		if p.allowLabel != "" {
+			env = p.allowLabel + " does not list it"
+		}
 		if p.deny[name] {
 			env = denyToolsEnv + " lists it"
+			if label := p.denyLabels[name]; label != "" {
+				env = label
+			}
 		}
 		reasons = append(reasons, name+" ("+env+")")
 	}

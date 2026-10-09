@@ -5349,6 +5349,9 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     import media_notes
 
     clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE}"
+    from runtime_settings import ingest_chat_clause
+
+    clause += f" AND {ingest_chat_clause('messages.chat_jid')}"
     params = tuple(msg_params)
 
     note_params: tuple[Any, ...] = ()
@@ -5845,6 +5848,12 @@ def bridge_status() -> dict[str, Any]:
     so the agent can tell "bridge unreachable" from "nothing matched".
     """
     status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL, "whisper": _whisper_status()}
+    from runtime_settings import ingest_setting
+
+    try:
+        status["transcription_ingest_chats"] = ingest_setting()
+    except (OSError, sqlite3.Error, ValueError):
+        status["transcription_ingest_chats"] = {"error": "Runtime setting unavailable"}
     status.update(_endpoint_cert_status())
     try:
         health = _bridge_request("GET", "/health", timeout=10)

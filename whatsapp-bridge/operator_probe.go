@@ -45,7 +45,7 @@ func operatorStatusProbe(getenv func(string) string, out io.Writer) int {
 		return 1
 	}
 	switch state.State {
-	case "starting", "awaiting_qr", "code_issued", "completing", "paired", "connected", "expired", "logged_out", "passkey_required", "passkey_submitted", "passkey_confirm", "passkey_failed":
+	case "starting", "awaiting_qr", "code_issued", "completing", "paired", "connected", "expired", "logged_out", "logged_out_by_operator", "passkey_required", "passkey_submitted", "passkey_confirm", "passkey_failed":
 		_, _ = fmt.Fprintln(out, state.State)
 		return 0
 	default:

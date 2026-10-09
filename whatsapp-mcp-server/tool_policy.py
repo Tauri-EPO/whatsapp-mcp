@@ -50,8 +50,9 @@ from __future__ import annotations
 
 import functools
 import os
+import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from errors import ToolError
@@ -104,6 +105,8 @@ class ToolPolicy:
     read_only: bool = False
     allow: frozenset[str] = frozenset()
     deny: frozenset[str] = frozenset()
+    allow_source: str = field(default=ALLOW_TOOLS_ENV, compare=False)
+    deny_sources: Mapping[str, str] = field(default_factory=dict, compare=False)
 
     def allows(self, name: str) -> bool:
         if name in self.deny:
@@ -118,9 +121,11 @@ class ToolPolicy:
 
     def denial_message(self, name: str) -> str:
         if name in self.deny:
+            if name in self.deny_sources:
+                return f"{name} is disabled: {self.deny_sources[name]} denies it"
             return f"{name} is disabled: it is listed in {DENY_TOOLS_ENV}"
         if self.allow and name not in self.allow:
-            return f"{name} is disabled: {ALLOW_TOOLS_ENV} is set and does not list it"
+            return f"{name} is disabled: {self.allow_source} is set and does not list it"
         return (
             f"{name} is disabled: {READ_ONLY_ENV} is set, so this server may read WhatsApp "
             f"but not act on it. Report the draft to the user and let them send it."
@@ -165,12 +170,15 @@ def load_tool_policy(env: Mapping[str, str] | None = None) -> ToolPolicy:
 
 
 _active: ToolPolicy | None = None
+_runtime = False
+_runtime_known: frozenset[str] = frozenset()
 
 
 def set_active_policy(policy: ToolPolicy | None) -> None:
     """Install the policy the call-time guard checks (None = resolve from env again)."""
-    global _active
+    global _active, _runtime
     _active = policy
+    _runtime = False
 
 
 def active_policy() -> ToolPolicy:
@@ -186,7 +194,38 @@ def active_policy() -> ToolPolicy:
             _active = load_tool_policy()
         except ValueError:
             _active = ToolPolicy(read_only=True)
+    if _runtime:
+        import runtime_settings
+
+        try:
+            snapshot = runtime_settings.snapshot(require_store=True)
+            settings = snapshot["settings"]
+            policy = ToolPolicy(
+                read_only=_active.read_only,
+                allow=frozenset(settings["tools.allow"]["value"]),
+                deny=frozenset(settings["tools.deny"]["value"]),
+                allow_source=snapshot["allow_source"],
+                deny_sources=snapshot["deny_origins"],
+            )
+            policy.validate(_runtime_known)
+            return policy
+        except (OSError, ValueError, sqlite3.Error):
+            raise ToolError("denied", "Runtime tool policy unavailable") from None
     return _active
+
+
+def install_runtime_tool_policy(server: Any, policy: ToolPolicy) -> None:
+    """Retain registered tools so runtime clears can restore their visibility."""
+    global _runtime, _runtime_known
+    set_active_policy(policy)
+    _runtime_known = registered_tool_names(server)
+    policy.validate(_runtime_known)
+    _runtime = True
+    server.runtime_tool_policy = True
+
+
+def runtime_policy_enabled() -> bool:
+    return _runtime
 
 
 def offers_download() -> bool:

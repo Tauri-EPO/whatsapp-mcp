@@ -240,6 +240,11 @@ func (b *Bridge) startLabelSync() {
 		}
 		go func() {
 			defer b.labelSyncWait.Done()
+			b.clientGate.RLock()
+			defer b.clientGate.RUnlock()
+			if b.operatorLogout.Load() {
+				return
+			}
 			ctx, cancel := context.WithTimeout(b.ctx, timeout)
 			defer cancel()
 			// Recheck eligibility after waiting for an outbound writer: the cache

@@ -556,18 +556,22 @@ def test_compose_mode_reads_whisper_url_from_dot_env(stack: Stack) -> None:
     assert "compose exec -T mcp python" in stack.docker_calls()
 
 
-def test_unpaired_smoke_reports_only_operator_state(stack: Stack) -> None:
+@pytest.mark.parametrize("operator_state", ["passkey_required", "logged_out_by_operator"])
+def test_unpaired_smoke_reports_only_operator_state(stack: Stack, operator_state: str) -> None:
     result = stack.run(
         FAKE_COMPOSE_PS="  bridge: running healthy\n",
         FAKE_HEALTH_BODY=UNPAIRED,
         FAKE_READY="503",
         FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
         FAKE_OPERATOR_BIND="whatsapp-operator-example",
-        FAKE_OPERATOR_STATE="passkey_required",
+        FAKE_OPERATOR_STATE=operator_state,
         FAKE_OPERATOR_BODY='{"state":"passkey_required","qr":{"payload":"FAKE-QR-CREDENTIAL"},"confirmation_code":"FAKE-CODE-CREDENTIAL"}',
     )
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "Operator pairing state: passkey_required" in result.stdout
+    assert f"Operator pairing state: {operator_state}" in result.stdout
+    if operator_state == "logged_out_by_operator":
+        assert "Restart pairing explicitly" in result.stdout
+        assert "scan the QR code" not in result.stdout
     assert "FAKE-QR-CREDENTIAL" not in result.stdout + result.stderr
     assert "FAKE-CODE-CREDENTIAL" not in result.stdout + result.stderr
     assert "fake-operator-token" not in result.stdout + result.stderr

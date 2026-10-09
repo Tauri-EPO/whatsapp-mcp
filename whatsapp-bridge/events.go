@@ -731,6 +731,9 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.LoggedOut:
+		if b.operatorLogout.Load() {
+			return
+		}
 		b.recipientNumbers.clear()
 		code := int(v.Reason)
 		if !v.OnConnect && code == 0 {
@@ -747,6 +750,9 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		b.Exit(fmt.Sprintf("device logged out by the phone (reason: %v); exiting so the next start pairs again", v.Reason), exitCodeLoggedOut)
 
 	case *events.Disconnected:
+		if b.operatorLogout.Load() {
+			return
+		}
 		b.recipientNumbers.clear()
 		b.notifyConnection("disconnected", "transport_lost", false, false)
 		b.Log.Warnf("⚠️  Disconnected from WhatsApp servers, will attempt reconnection...")

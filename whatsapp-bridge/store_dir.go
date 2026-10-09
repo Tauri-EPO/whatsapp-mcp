@@ -153,6 +153,7 @@ const (
 	// Every messages.db transaction writes (batches, rosters and migrations).
 	// Acquire its WAL writer before FTS can turn a deferred read into BUSY.
 	messagesWriterOptions = sqliteWriterOptions + "&_txlock=immediate"
+	sessionWriterOptions  = sqliteWriterOptions + "&_pragma=secure_delete(1)"
 	sqliteReadOnlyOptions = "mode=ro&_pragma=busy_timeout(5000)&" + sqliteTimeFormat
 )
 
@@ -182,7 +183,7 @@ func boundPool(db *sql.DB, conns int) {
 // openSessionDB opens whatsmeow's session database (whatsapp.db) with its pool
 // bounded; main hands it to sqlstore.NewWithDB.
 func openSessionDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite", sqliteURI(whatsmeowDBPath(), sqliteWriterOptions))
+	db, err := sql.Open("sqlite", sqliteURI(whatsmeowDBPath(), sessionWriterOptions))
 	if err != nil {
 		return nil, err
 	}

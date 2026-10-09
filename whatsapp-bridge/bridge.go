@@ -75,7 +75,17 @@ type Bridge struct {
 	// Tools refuses the mutating endpoints whose MCP tools are not allowed
 	// (WHATSAPP_ALLOW_TOOLS / WHATSAPP_DENY_TOOLS, tool_policy.go). Zero value =
 	// unrestricted; main() parses it and refuses to start on an unknown name.
-	Tools toolPolicy
+	Tools                 toolPolicy
+	RuntimeDefaults       map[string]runtimeSetting
+	settingsMu            sync.Mutex
+	settingsWarnMu        sync.Mutex
+	settingsWarned        map[string]int64
+	operatorLogout        atomic.Bool
+	operatorSessionWiped  atomic.Bool
+	operatorRetiredClient atomic.Pointer[whatsmeow.Client]
+	logoutClient          func(context.Context) error
+	wipeSession           func(context.Context) error
+	logoutDrainTimeout    time.Duration // Zero selects the production one-second bound.
 	// PollVoteDecrypt decodes PollUpdateMessage payloads; nil = votes are skipped.
 	PollVoteDecrypt pollVoteDecrypter
 	// DownloadMedia fetches media for a stored message (defaults to downloadMedia).
@@ -218,10 +228,12 @@ type Bridge struct {
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
 	// History vote batches form one FIFO chain outside the SDK callback.
-	historyVotes       sync.WaitGroup
-	historyVoteMu      sync.Mutex
-	historyVoteTail    chan struct{}
-	historyVoteStopped bool
+	historyVotes  sync.WaitGroup
+	historyVoteMu sync.Mutex
+	// Vote decoding must drain for logout without blocking a client handoff.
+	historyVoteSessionGate sync.RWMutex
+	historyVoteTail        chan struct{}
+	historyVoteStopped     bool
 	// In-flight history attempts/retries, one latest candidate per tally key.
 	historyVoteOrderMu  sync.Mutex
 	historyPendingVotes map[historyVoteKey]*historyVoteWork

@@ -46,12 +46,11 @@ from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware,
 from parent_watchdog import install_stdio_parent_watchdog
 from private_files import tighten_existing_artifacts
 from tool_policy import (
-    apply_tool_policy,
+    install_runtime_tool_policy,
     load_tool_policy,
     mutating_tool,
     offers_download,
     registered_tool_names,
-    set_active_policy,
 )
 from transcribe import TranscriptionError, transcribe_file
 from transcribe import load_config as load_whisper_config
@@ -2854,9 +2853,9 @@ if __name__ == "__main__":
     tighten_existing_artifacts(notes_db_path(), os.path.realpath(export_dir()), upload_dir())
 
     # Operation-level access control (WHATSAPP_READ_ONLY, WHATSAPP_ALLOW_TOOLS,
-    # WHATSAPP_DENY_TOOLS; tool_policy.py). Blocked tools are unregistered here,
-    # before any transport starts, so they never appear in tools/list; mutating
-    # tools refuse at call time as well. A value we cannot parse — an unreadable
+    # WHATSAPP_DENY_TOOLS; tool_policy.py). Keep the full registration so a
+    # runtime clear can restore a tool; list and call guards read one snapshot
+    # before every operation. A value we cannot parse — an unreadable
     # boolean or a tool name that does not exist — stops the process rather than
     # running with a policy the operator did not mean.
     try:
@@ -2865,10 +2864,13 @@ if __name__ == "__main__":
         # Read here only to reject a value we cannot parse before serving; the
         # tools themselves consult the environment per call (untrusted.py).
         _wrap_untrusted = parse_wrap_env(os.getenv(WRAP_ENV))
+        import runtime_settings
+
+        runtime_settings.capture_environment()
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    set_active_policy(_tool_policy)
-    _removed_tools = apply_tool_policy(mcp, _tool_policy)
+    install_runtime_tool_policy(mcp, _tool_policy)
+    _removed_tools = sorted(name for name in registered_tool_names(mcp) if not _tool_policy.allows(name))
     logging.getLogger("whatsapp_mcp").info("%s", _tool_policy.summary(_removed_tools))
     logging.getLogger("whatsapp_mcp").info(
         "%s=%s: message content, names and notes %s",

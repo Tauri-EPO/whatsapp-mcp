@@ -65,7 +65,11 @@ class UploadApp:
         await response(scope, receive, send)
 
     async def upload(self, request: Request) -> JSONResponse:
-        if not any(active_policy().allows(name) for name in ("send_file", "send_audio_message")):
+        try:
+            policy = active_policy()
+        except ToolError:
+            return refusal("denied", "Runtime tool policy unavailable", 403)
+        if not any(policy.allows(name) for name in ("send_file", "send_audio_message")):
             return refusal("denied", "File sending is disabled", 403)
         if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() == "multipart/form-data":
             return refusal("invalid_argument", "Send raw bytes with --data-binary, not multipart/form-data", 415)

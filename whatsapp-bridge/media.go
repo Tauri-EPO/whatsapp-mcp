@@ -281,6 +281,17 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	// transfer, every caller waits for its result (media_inflight.go). Counters
 	// and the success log therefore count transfers, not callers.
 	if _, err := b.mediaTransfers.do(ctx, absPath, func() (int64, error) {
+		// The transfer outlives its HTTP waiter. Own a gate for its entire
+		// detached lifetime, including a retry that selects the current client.
+		// Never wait behind a queued writer: the waiter may already hold a
+		// reader gate and be waiting for this goroutine to publish its result.
+		if !b.clientGate.TryRLock() {
+			return 0, errors.New("client operation busy; retry download")
+		}
+		defer b.clientGate.RUnlock()
+		if b.operatorLogout.Load() {
+			return 0, errors.New("device parked by operator logout")
+		}
 		// Deliberately shadowed: everything below runs under the detached
 		// transfer context, never under the context of one of the callers.
 		ctx, cancel := transferContext(b.ctx, ctx)

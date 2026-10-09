@@ -359,7 +359,13 @@ func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed type
 	// Read before the request: see storeGroupRoster on why the sweep stamp
 	// must predate anything the event feed can write while it is in flight.
 	at := time.Now()
+	b.clientGate.RLock()
+	if b.operatorLogout.Load() {
+		b.clientGate.RUnlock()
+		return false
+	}
 	info, err := b.Store.groupInfo(fetchCtx, parsed)
+	b.clientGate.RUnlock()
 	if err != nil {
 		// Left groups and transient failures both land here; neither is worth
 		// an operator-visible line once every six hours. The failure is

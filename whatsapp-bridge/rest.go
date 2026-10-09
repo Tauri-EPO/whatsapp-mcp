@@ -76,7 +76,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// with it; reads keep plain auth, so a new route has to be classified when it
 	// is added — and endpointTools must gain a row for it.
 	mutate := func(h http.HandlerFunc) http.HandlerFunc {
-		return auth(b.ReadOnly.guard(b.Tools.guard(h)))
+		return auth(b.ReadOnly.guard(b.runtimeToolGuard(h)))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/labels", auth(requireMethod(http.MethodGet, handleLabels(messageStore, b.Policy, func(ctx context.Context, chat types.JID) (types.JID, error) {

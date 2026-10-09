@@ -99,6 +99,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe inbound voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
+| `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` or `direct` (phone/LID one-to-one chats only). Set for both processes. Worker and `coverage().audio` share this scope; explicit group `transcribe_audio` remains available. Runtime key `transcription.ingest_chats` overrides it. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
 | `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)*                    | Let the background worker download uncached audio from the bridge instead of skipping it. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `FFMPEG_TIMEOUT_S`     | `120`                                    | Timeout for each ffmpeg conversion (`send_audio_message` encode, whisper WAV prep) |
@@ -595,7 +596,69 @@ whisper-server only accepts `POST` there, and its `404` is proof enough that it
 is listening), the CLI backend a look at the binary and the model file on disk.
 Nothing about it can make `bridge_status` fail.
 
+## Runtime overrides
+
+The private operator listener serves `GET` and `PATCH /operator/v1/settings`.
+It uses its separate operator token, Host/Origin checks, rate limits and audit;
+neither bridge `/api` nor MCP HTTP exposes it, and it is never an MCP tool.
+Both processes must share `messages.db` and the same environment defaults.
+The bridge owns writes to the `runtime_settings` table in that database; the
+MCP process opens it read-only. `notes.db` remains MCP-owned.
+
+| Priority | Source returned by GET | Lifetime |
+| --- | --- | --- |
+| 1 | `runtime` | Saved override, survives restarts until cleared |
+| 2 | `env` | Startup environment, restored by PATCH null |
+| 3 | `default` | Built-in value when neither override nor env is set |
+
+Deploy-time tool lists remain a capability floor: effective deny is the union
+of `WHATSAPP_DENY_TOOLS` and runtime `tools.deny`. Effective allow is narrowed
+by the deploy allow-list when one is set; runtime cannot reopen a deploy-denied
+or read-only tool. GET returns these effective lists; `runtime` identifies an
+applied override even when the deploy floor removes some of its entries.
+
+GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
+"source": "default" }, ... } }`. PATCH accepts a flat JSON object:
+
+```json
+{"tools.allow":["list_messages","transcribe_audio"],"tools.deny":[],"transcription.ingest_chats":"direct"}
+```
+
+The current keys are `tools.allow`, `tools.deny` (arrays of registered tool
+names; an empty array removes only the runtime restriction), and
+`transcription.ingest_chats` (`all` or `direct`). Tool-list validation reuses
+the environment parsers. Unknown keys, bad types or invalid values return 400
+and write nothing, including in a multi-key PATCH. `{"tools.allow":null}`
+clears that override. Null tombstones preserve the monotonically increasing
+version even when the final override is cleared; each atomic PATCH advances
+the version once. INFO audits include key and source transition, never values.
+Bridge `/metrics` exposes `whatsapp_runtime_settings_version`.
+
+After a rollback, unknown saved tool names are dropped with one WARN naming
+the key, without printing its value. An invalid saved value falls back to
+env/default and can always be cleared by PATCH null. An unreadable
+`tools.allow` fails closed: only the deploy allow-list can remain enabled;
+without an explicit deploy allow-list every tool is denied until repaired.
+An unavailable database still fails closed in both processes.
+
+Both lists apply together at the next MCP `tools/list`/tool call and bridge
+request, without restarting either process. The worker uses the next cycle;
+runtime tool denial pauses its transcription/fetching and clearing it permits
+the next cycle again. An in-flight operation may finish under its admitted
+snapshot. `WHATSAPP_READ_ONLY` still wins over both lists, and
+`WHATSAPP_ALLOWED_CHATS` still bounds the chat scope; both remain env-only.
+Operator settings and logout stay available under read-only.
+
 ## Transcribing voice notes as they arrive
+
+`TRANSCRIBE_ON_INGEST_CHATS=direct` skips groups, newsletters and broadcast
+lists in the worker and in the audio backlog of `coverage`. Phone and LID
+direct chats remain subject to `WHATSAPP_ALLOWED_CHATS`. Default `all` keeps
+the existing selection. Changing the scope takes effect on the next worker
+cycle. Returning to `all` exposes old group audio to the existing backlog walk:
+cached files can be transcribed; uncached files require the existing
+`TRANSCRIBE_ON_INGEST_FETCH` option. The switch performs no independent backfill.
+
 
 `transcribe_audio` transcribes the one message an agent asks about, so a
 voice-heavy account stays unsearchable until somebody walks it by hand.

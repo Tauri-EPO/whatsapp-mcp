@@ -60,6 +60,20 @@ def remaining():
     return list(root.iterdir()) if root.exists() else []
 
 
+def test_upload_policy_read_failure_is_denied_without_storing(monkeypatch):
+    import http_upload
+
+    def unavailable():
+        raise ToolError("denied", "Runtime tool policy unavailable")
+
+    monkeypatch.setattr(http_upload, "active_policy", unavailable)
+    with client(stateless_http=True, json_response=True) as c:
+        response = c.post("/upload", content=b"fake bytes", headers=HEADERS)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "denied"
+    assert remaining() == []
+
+
 @pytest.mark.parametrize("tool,filename", [("send_file", "report.pdf"), ("send_audio_message", "voice.ogg")])
 def test_upload_then_real_mcp_send_removes_file(monkeypatch, tool, filename):
     content = b"%PDF-fake\n" + b"x" * (5 * 1024 * 1024)
