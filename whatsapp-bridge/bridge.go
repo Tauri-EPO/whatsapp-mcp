@@ -40,11 +40,18 @@ type Bridge struct {
 	connectionEventWait        func(context.Context, time.Duration) bool
 	connectionMu               sync.Mutex
 	connectionProblem          *ConnectionProblem
+	connectionChanged          chan struct{}
+	connectionBlocked          func() // Test observation of a parked dial gate.
 	pairingState               string
 	problemPersistenceFailed   bool
 	problemNow                 func() time.Time
 	problemWait                func(time.Duration) error
 	Client                     *whatsmeow.Client
+	runtimeClient              atomic.Pointer[whatsmeow.Client]
+	clientGate                 sync.RWMutex
+	runtimePaired              atomic.Bool
+	operatorPairing            *operatorPairing
+	operatorServer             *http.Server
 	Store                      *MessageStore
 	Log                        waLog.Logger
 
@@ -323,6 +330,11 @@ func (b *Bridge) sleep(d time.Duration) bool {
 func (b *Bridge) Shutdown(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if b.operatorServer != nil {
+		if err := b.operatorServer.Shutdown(ctx); err != nil {
+			b.Log.Warnf("Operator server did not drain cleanly: %v", err)
+		}
+	}
 	if b.httpServer != nil {
 		if err := b.httpServer.Shutdown(ctx); err != nil {
 			b.Log.Warnf("REST server did not drain cleanly: %v", err)
@@ -330,6 +342,13 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.labelSyncOnce.Do(func() {})
 	b.cancel()
+	if b.operatorPairing != nil && b.operatorPairing.started.Load() {
+		select {
+		case <-b.operatorPairing.done:
+		case <-ctx.Done():
+			b.Log.Warnf("Pairing controller did not stop before shutdown deadline")
+		}
+	}
 	b.stopConnectionEvents()
 	// Seal submission before the bounded drain joins cancelled peer imports.
 	b.historyShareMu.Lock()

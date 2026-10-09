@@ -105,6 +105,29 @@ func TestContactEventRefreshesBothMappedNamespaces(t *testing.T) {
 	}
 }
 
+func TestContactEventUsesReplacementClientMapping(t *testing.T) {
+	phone := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	ms := newTestMessageStore(t)
+	for _, jid := range []types.JID{phone, lid} {
+		if err := ms.StoreChat(jid.String(), jid.User, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := newTestClient(&mockLIDStore{})
+	second := newTestClient(&mockLIDStore{lidByPN: map[types.JID]types.JID{phone: lid}, pnByLID: map[types.JID]types.JID{lid: phone}})
+	b := testBridge(t, first, ms, testLogger())
+	reconnect := make(chan bool, 1)
+	b.installClient(first, false, reconnect)
+	b.installClient(second, false, reconnect)
+	b.handleClientEvent(second, &events.PushName{JID: phone, NewPushName: "Alice"}, reconnect)
+	for _, jid := range []types.JID{phone, lid} {
+		if got := storedChatName(t, ms, jid.String()); got != "Alice" {
+			t.Fatalf("active client's mapped chat %s kept %q", jid, got)
+		}
+	}
+}
+
 func TestPlaceholderNameCASPreservesConcurrentRealRename(t *testing.T) {
 	ms := newTestMessageStore(t)
 	phone := "5511999999999@s.whatsapp.net"

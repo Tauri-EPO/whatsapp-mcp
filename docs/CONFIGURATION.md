@@ -41,6 +41,12 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_BRIDGE_BIND`  | `127.0.0.1`                              | Address the bridge REST API listens on. `0.0.0.0` / `::` to expose it to other containers or hosts (pair with `WHATSAPP_BRIDGE_ALLOWED_HOSTS`) |
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)*                 | Comma-separated `Host` values accepted besides loopback (`host` = any port, `host:port` exact, `*` any). Off-loopback binds refuse non-loopback Hosts until this names them |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
+| `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback. |
+| `WHATSAPP_OPERATOR_PORT` | `8090` | Operator port; no host publication in compose. |
+| `WHATSAPP_OPERATOR_TOKEN` | required when enabled | At least 32 random bytes encoded as 64 hex or 43-256 unpadded base64url characters; low-entropy/repeated values refused. Generate with `openssl rand -hex 32`. Distinct from the effective bridge token, including its stored fallback. |
+| `WHATSAPP_OPERATOR_TOKEN_FILE` | empty | Alternative owner-only regular token file; symlinks, permissive modes and oversized files refused. Set token or file, never both. |
+| `WHATSAPP_OPERATOR_ALLOWED_HOSTS` | loopback hosts | Explicit comma-separated operator Hosts (`host` or `host:port`); wildcard refused. Browser Origin must match the listener's scheme and Host; native clients may omit it. |
+| `WHATSAPP_PAIRING_STDOUT` | `false` with operator enabled, otherwise `true` | Draw QR codes on stdout. False also suppresses SDK DEBUG logs (QR payloads and raw protocol frames), while bridge/database DEBUG logs remain available. Set false for operator HTTP or exported logs; the operator compose override defaults false. |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |

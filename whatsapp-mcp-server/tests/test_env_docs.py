@@ -23,6 +23,8 @@ COMPOSE_ONLY = {
     "WHATSAPP_OUTBOX",
     "WHATSAPP_IMAGE_TAG",
     "WHATSAPP_IMAGE_REGISTRY",
+    "WHATSAPP_OPERATOR_NETWORK",
+    "WHATSAPP_OPERATOR_ALIAS",
 }
 # Set by the runtime or the image, never by an operator.
 INTERNAL = {"WHATSAPP_MCP_VERSION"}

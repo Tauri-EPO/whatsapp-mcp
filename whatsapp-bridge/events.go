@@ -128,7 +128,7 @@ func (o *originalTimestamps) take(id string) (time.Time, bool) {
 }
 
 func (b *Bridge) handleMessage(msg *events.Message) {
-	client, messageStore, logger := b.Client, b.Store, b.Log
+	client, messageStore, logger := b.currentClient(), b.Store, b.Log
 	// View-once envelopes hide the real media one level down. Work on a local
 	// copy of the event with the envelope removed so every extractor below
 	// sees the real message and other handlers keep the original untouched.
@@ -498,7 +498,7 @@ func callChatJID(meta types.BasicCallMeta) string {
 // notifying linked devices, so events observed here are always inbound and
 // isFromMe stays false. We keep the branch anyway in case behavior changes.
 func (b *Bridge) handleCallOffer(meta types.BasicCallMeta, callType string, isGroup bool) {
-	client, logger := b.Client, b.Log
+	client, logger := b.currentClient(), b.Log
 	chatJID := callChatJID(meta)
 
 	fromJID := ""
@@ -581,7 +581,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// Persist read state so consumers can distinguish genuine unread
 		// from "latest message is inbound". Only our own reads count.
 		if isSelfReadReceipt(v) {
-			chatJID := resolveLIDChat(b.Client, v.Chat, v.SenderAlt, v.RecipientAlt, v.IsFromMe).String()
+			chatJID := resolveLIDChat(b.currentClient(), v.Chat, v.SenderAlt, v.RecipientAlt, v.IsFromMe).String()
 			// Prefer the acknowledged messages' timestamps over the
 			// receipt event time so out-of-order delivery cannot advance
 			// the marker past an unread message.
@@ -716,7 +716,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		// Another WhatsApp Web session took our slot. whatsmeow treats this
 		// as a "permanent" disconnect and suppresses the Disconnected event,
 		// so we must handle it explicitly. Wait briefly to avoid ping-ponging
-		// with the other b.Client, then reconnect.
+		// with the other b.currentClient(), then reconnect.
 		//
 		// The delay is read here, not inside the goroutine: the field is
 		// configuration, and reading it on the event path keeps the timer
@@ -810,11 +810,12 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 			if err := b.waitConnectionAllowed(); err != nil {
 				return
 			}
+			b.clientGate.RLock()
 			if b.forceReconnect.Swap(false) {
 				if b.Disconnect != nil {
 					b.Disconnect()
-				} else if b.Client != nil {
-					b.Client.Disconnect()
+				} else if b.currentClient() != nil {
+					b.currentClient().Disconnect()
 				}
 			}
 			if !b.Connected() {
@@ -842,6 +843,7 @@ func (b *Bridge) reconnectLoop(reconnectChan chan bool) {
 				b.Log.Infof("Already connected, skipping reconnection")
 				reconnectBackoff = b.ReconnectInitialBackoff
 			}
+			b.clientGate.RUnlock()
 
 		case <-b.ctx.Done():
 			return
