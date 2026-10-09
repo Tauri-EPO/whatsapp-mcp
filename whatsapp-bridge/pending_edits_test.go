@@ -1110,3 +1110,189 @@ func TestPendingEditHostedSenderNamespaces(t *testing.T) {
 		}
 	}
 }
+
+func TestPendingEditHistoryRevalidatesConcurrentAlias(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	ms, _ := lockedProductionStore(t)
+	session, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundPool(session, sessionPoolConns)
+	t.Cleanup(func() { _ = session.Close() })
+	if _, err := session.Exec("CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY,pn TEXT); INSERT INTO whatsmeow_lid_map VALUES (?,?)", phoneLID.User, phonePN.User); err != nil {
+		t.Fatal(err)
+	}
+	b := testBridge(t, newTestClient(sqlstore.NewWithDB(session, "sqlite", testLogger()).LIDMap), ms, testLogger())
+	var held []*sql.Conn
+	for range sessionPoolConns {
+		conn, err := session.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, conn)
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	chat := types.NewJID("120363000000000001", types.GroupServer)
+	fixture := largeHistoryFixture(2)
+	conversation := fixture.Data.Conversations[0]
+	conversation.ID = proto.String(chat.String())
+	conversation.Messages[0].Message.Participant = proto.String(phonePN.String())
+	conversation.Messages[1].Message.Participant = proto.String(phoneLID.String())
+	done := make(chan struct{})
+	go func() { defer close(done); b.handleHistorySync(fixture) }()
+	deadline := time.After(5 * time.Second)
+	for session.Stats().WaitCount == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("second original never blocked in the session pool")
+		default:
+			runtime.Gosched()
+		}
+	}
+	// The first original was prepared with no pending candidates; the second
+	// original's real SDK read keeps the archive writer free for this edit.
+	stamp := time.Unix(1772359200, 0)
+	edit := extractMessage(pendingEditMessage("H0", "concurrenteditword", stamp.Add(time.Minute), true), stamp, "H0").edit
+	if err := ms.ApplyMessageEdit(chat.String(), phoneLID.String(), false, edit, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if pendingCount(t, ms) != 1 {
+		t.Fatal("concurrent edit was not retained before releasing the session pool")
+	}
+	for _, conn := range held {
+		_ = conn.Close()
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("history did not finish after the session pool was released")
+	}
+	assertPendingArchive(t, ms, "H0", chat.String(), "concurrenteditword", selfPhone.User, stamp.Add(time.Minute).UnixMilli())
+	if pendingCount(t, ms) != 0 || b.metrics.storeFailures.Load() != 0 {
+		t.Fatalf("pending=%d failures=%d", pendingCount(t, ms), b.metrics.storeFailures.Load())
+	}
+}
+
+func TestPendingEditLivePhoneSenderLIDHint(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	for _, mode := range []string{"incoming", "incoming-hosted", "incoming-dm", "incoming-dm-hosted", "incoming-dm-wrong-chat", "wrong-namespace", "own-untrusted-peer"} {
+		t.Run(mode, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+			chat := types.NewJID("120363000000000001", types.GroupServer)
+			editChat := chat
+			if strings.Contains(mode, "-dm") {
+				chat, editChat = phonePN, phoneLID
+				if mode == "incoming-dm-wrong-chat" {
+					chat = selfPhone
+				}
+			}
+			stamp := time.Unix(1772359200, 0)
+			own := mode == "own-untrusted-peer"
+			edit := extractMessage(pendingEditMessage("HINT-TARGET", "trustedhintword", stamp.Add(time.Minute), true), stamp, "HINT-TARGET").edit
+			if err := ms.ApplyMessageEdit(editChat.String(), phoneLID.String(), own, edit, stamp); err != nil {
+				t.Fatal(err)
+			}
+			if pendingCount(t, ms) != 1 {
+				t.Fatal("hint edit was not retained before the original")
+			}
+			sender, alt := phonePN, phoneLID
+			if own {
+				sender = selfPhone
+			} else if strings.HasSuffix(mode, "-hosted") {
+				sender, alt = types.NewJID(phonePN.User, types.HostedServer), types.NewJID(phoneLID.User, types.HostedLIDServer)
+			} else if mode == "wrong-namespace" {
+				alt = types.NewJID(phoneLID.User, types.DefaultUserServer)
+			}
+			original := buildTextMessage(chat, sender, alt, types.EmptyJID, own, "originalword")
+			original.Info.ID, original.Info.Timestamp = "HINT-TARGET", stamp
+			b.handleEvent(original, nil)
+			text, mentions, editStamp := "trustedhintword", selfPhone.User, stamp.Add(time.Minute).UnixMilli()
+			if mode == "wrong-namespace" || mode == "own-untrusted-peer" || mode == "incoming-dm-wrong-chat" {
+				text, mentions, editStamp = "originalword", "", 0
+			}
+			assertPendingArchive(t, ms, original.Info.ID, chat.String(), text, mentions, editStamp)
+			if mode == "incoming-dm-wrong-chat" && pendingCount(t, ms) != 1 {
+				t.Fatal("unrelated DM consumed the pending edit")
+			}
+		})
+	}
+}
+
+func TestPendingEditPreparationRollbackRetryAndExhaustion(t *testing.T) {
+	for _, mode := range []string{"rollback", "retry-and-repeat", "exhaustion"} {
+		t.Run(mode, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{lidByPN: map[types.JID]types.JID{phonePN: phoneLID}}), ms, testLogger())
+			chat := types.NewJID("120363000000000001", types.GroupServer).String()
+			if err := ms.EnsureChat(chat, "Alice"); err != nil {
+				t.Fatal(err)
+			}
+			stamp := time.Unix(1772359200, 0)
+			_, _, stale, err := b.preparePendingEdit(b.ctx, "ATOMIC-TARGET", chat, phonePN.String(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edit := extractMessage(pendingEditMessage("ATOMIC-TARGET", "atomiceditword", stamp.Add(time.Minute), true), stamp, "ATOMIC-TARGET").edit
+			if err := ms.ApplyMessageEdit(chat, phoneLID.String(), false, edit, stamp); err != nil {
+				t.Fatal(err)
+			}
+			attempts := 0
+			write := func() error {
+				attempts++
+				alias, chatAlias, prepared := "", "", stale
+				if attempts > 1 || mode == "exhaustion" {
+					var err error
+					alias, chatAlias, prepared, err = b.preparePendingEdit(b.ctx, "ATOMIC-TARGET", chat, phonePN.String(), false)
+					if err != nil {
+						return err
+					}
+				}
+				if mode == "exhaustion" {
+					authors := []string{"5511888888888@s.whatsapp.net", "11234567890@s.whatsapp.net", "5511999999999@s.whatsapp.net"}
+					if err := ms.ApplyMessageEdit(chat, authors[attempts-1], false, edit, stamp); err != nil {
+						return err
+					}
+				}
+				return ms.BatchContext(b.ctx, func(batch *messageBatch) error {
+					if err := batch.StoreMessage(storedMessage{ID: "ATOMIC-PROBE", ChatJID: chat, Sender: phonePN.String(), Content: "probeword", Timestamp: stamp}); err != nil {
+						return err
+					}
+					original := storedMessage{ID: "ATOMIC-TARGET", ChatJID: chat, Sender: phonePN.String(), Content: "originalword", Timestamp: stamp, EditAuthorAlias: alias, EditChatAlias: chatAlias, EditPreparation: prepared}
+					if err := batch.StoreMessage(original); err != nil {
+						return err
+					}
+					return batch.StoreMessage(original) // same-key replay inside a chunk
+				})
+			}
+			if mode == "rollback" {
+				if err := write(); err != errPendingEditPreparationChanged {
+					t.Fatalf("stale preparation error=%v", err)
+				}
+			} else {
+				stored := b.storeLive("message", "ATOMIC-TARGET", chat, func() error { return retryPendingEditPreparation(write) })
+				if stored != (mode == "retry-and-repeat") {
+					t.Fatalf("stored=%v attempts=%d", stored, attempts)
+				}
+			}
+			if mode == "retry-and-repeat" {
+				if attempts != 2 || pendingCount(t, ms) != 0 {
+					t.Fatalf("attempts=%d pending=%d", attempts, pendingCount(t, ms))
+				}
+				assertPendingArchive(t, ms, "ATOMIC-TARGET", chat, "atomiceditword", selfPhone.User, stamp.Add(time.Minute).UnixMilli())
+				return
+			}
+			var rows, fts int
+			if err := ms.db.QueryRow("SELECT (SELECT COUNT(*) FROM messages),(SELECT COUNT(*) FROM messages_fts)").Scan(&rows, &fts); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 0 || fts != 0 || pendingCount(t, ms) < 1 {
+				t.Fatalf("rollback rows=%d FTS=%d pending=%d", rows, fts, pendingCount(t, ms))
+			}
+			if mode == "exhaustion" && (attempts != 3 || b.metrics.storeFailures.Load() != 1) {
+				t.Fatalf("attempts=%d failures=%d", attempts, b.metrics.storeFailures.Load())
+			}
+		})
+	}
+}

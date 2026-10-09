@@ -19,6 +19,44 @@ const (
 	pendingEditMaxBytes  = 64 << 10
 )
 
+type pendingEditPreparation struct {
+	identities string
+	readAt     int64
+}
+
+type pendingEditPreparationError string
+
+func (e pendingEditPreparationError) Error() string { return string(e) }
+
+const errPendingEditPreparationChanged pendingEditPreparationError = "pending edit identities changed before original persistence"
+
+// Content/version changes need no new SDK lookup, but a new typed author or
+// chat does. Observe the identity set before preparing aliases and recheck it
+// under the writer; no SDK read or archive cursor crosses that boundary.
+const pendingEditIdentitiesSQL = `SELECT json_group_array(json_array(chat_jid,sender,sender_server)) FROM (
+	SELECT chat_jid,sender,sender_server FROM pending_edits
+	WHERE target_id=? AND is_from_me=? AND expires_ms>? ORDER BY chat_jid,sender,sender_server)`
+
+func (b *Bridge) preparePendingEdit(ctx context.Context, id, chat, sender string, own bool) (string, string, *pendingEditPreparation, error) {
+	prepared := &pendingEditPreparation{readAt: b.Store.pendingEditNow().UnixMilli()}
+	if err := b.Store.db.QueryRowContext(ctx, pendingEditIdentitiesSQL, id, own, prepared.readAt).Scan(&prepared.identities); err != nil {
+		return "", "", nil, err
+	}
+	authorAlias, chatAlias, err := b.pendingEditAlias(ctx, id, chat, sender, own)
+	return authorAlias, chatAlias, prepared, err
+}
+
+func retryPendingEditPreparation(write func() error) error {
+	var err error
+	for range 3 {
+		err = write()
+		if !errors.Is(err, errPendingEditPreparationChanged) {
+			return err
+		}
+	}
+	return err // preserve pending state and report one bounded persistence failure
+}
+
 // No chat FK: an edit alone must not create an archive chat or message.
 // Arrival/expiry are epoch milliseconds, independent of the protocol timestamp.
 const pendingEditsSchema = `CREATE TABLE IF NOT EXISTS pending_edits (

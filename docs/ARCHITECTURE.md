@@ -257,6 +257,19 @@ pending LID chat keys from the session map too, preparing those reads before its
 archive transaction, retaining the newest edit and earliest arrival/expiry when
 keys merge, and applying the same caps without creating orphan chats.
 
+Original preparation records the pending typed identity set. The writer checks
+that set before storing the original; a concurrently committed edit with a new
+author/chat causes rollback and fresh alias preparation outside the transaction.
+Live writes and history batches make at most three preparation attempts per
+write, independently of the existing bounded BUSY retries. If identities keep
+changing, persistence reports a bounded failure and retains pending state rather
+than silently discarding it. Same-key original replays within a batch share its
+validated snapshot. Incoming phone-sender deliveries also use a verified LID
+`SenderAlt`, including hosted namespaces; an outgoing peer alternative cannot
+authorize an edit of the account's own message.
+The same hint supplies the DM chat alias only when that sender identifies the
+chat itself; it cannot join another DM or a group with the pending chat.
+
 Pending state expires 24 hours after its first arrival (epoch milliseconds,
 independent of the protocol timestamp). Newer versions and replays do not renew
 that deadline. Expired entries are removed at startup and on the next edit or

@@ -315,7 +315,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// A busy database is tried again a bounded number of times; a write that is
 	// given up is one ERROR naming the message (ID and chat only, never the
 	// content) and a count on /metrics (store_failures.go).
-	writeMessage := func() error {
+	writePreparedMessage := func() error {
 		locationSender := storedSenderJID
 		if ex.edit != nil || ex.location != nil && ex.location.Live {
 			var err error
@@ -333,7 +333,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		}
 		if ex.edit == nil {
 			var err error
-			ex.editAuthorAlias, ex.editChatAlias, err = b.pendingEditAlias(lookupCtx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
+			ex.editAuthorAlias, ex.editChatAlias, ex.editPreparation, err = b.preparePendingEdit(lookupCtx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					return err
@@ -346,6 +346,18 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				resolvedSender.Server == types.DefaultUserServer && locationSender == storedSender(resolvedSender) {
 				ex.editAuthorAlias = msg.Info.Sender.ToNonAD().String()
 			}
+			// Incoming PN deliveries can carry the verified reverse LID hint.
+			// An outgoing SenderAlt may identify the peer, never our own author.
+			if ex.editAuthorAlias == "" && !msg.Info.IsFromMe && locationSender == storedSender(resolvedSender) {
+				author, authorOK := pendingEditUserJID(msg.Info.Sender.String())
+				alt, altOK := pendingEditUserJID(msg.Info.SenderAlt.String())
+				if authorOK && altOK && author.Server == types.DefaultUserServer && alt.Server == types.HiddenUserServer {
+					ex.editAuthorAlias = alt.String()
+					if chat, ok := pendingEditUserJID(chatJID); ok && chat == author && ex.editChatAlias == "" {
+						ex.editChatAlias = alt.String()
+					}
+				}
+			}
 			if ex.editChatAlias == "" && msg.Info.Chat.Server == types.HiddenUserServer && resolvedChat.Server == types.DefaultUserServer {
 				ex.editChatAlias = msg.Info.Chat.ToNonAD().String()
 			}
@@ -356,6 +368,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			return err
 		})
 	}
+	writeMessage := func() error { return retryPendingEditPreparation(writePreparedMessage) }
 	var stored bool
 	if ex.edit != nil {
 		// An edit updates an existing target; it must not create an empty chat

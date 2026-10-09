@@ -30,6 +30,7 @@ type storedMessage struct {
 	Mentions                            string
 	EditAuthorAlias                     string // verified outside the writer, never inferred from digits
 	EditChatAlias                       string // verified alternative DM chat, prepared before the writer
+	EditPreparation                     *pendingEditPreparation
 }
 
 // sqlExecer is satisfied by *sql.DB and *sql.Tx.
@@ -144,6 +145,12 @@ type messageBatch struct {
 	failure        error // first failed write; never issue more SQL after a possible rollback
 	pendingChecked bool
 	pendingActive  bool
+	editPrepared   map[pendingOriginalKey]bool
+}
+
+type pendingOriginalKey struct {
+	id  string
+	own bool
 }
 
 // Batch runs fn inside a transaction with a prepared message insert and
@@ -219,6 +226,20 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 		return nil
 	}
 	return b.write(func() error {
+		key := pendingOriginalKey{id: message.ID, own: message.IsFromMe}
+		if prepared := message.EditPreparation; prepared != nil && !b.editPrepared[key] {
+			var current string
+			if err := b.tx.QueryRow(pendingEditIdentitiesSQL, message.ID, message.IsFromMe, prepared.readAt).Scan(&current); err != nil {
+				return err
+			}
+			if current != prepared.identities {
+				return errPendingEditPreparationChanged
+			}
+			if b.editPrepared == nil {
+				b.editPrepared = make(map[pendingOriginalKey]bool)
+			}
+			b.editPrepared[key] = true // later same-key rows see only this batch's effects
+		}
 		_, err := b.stmt.ExecContext(b.ctx, messageArgs(message)...)
 		if err != nil {
 			return err

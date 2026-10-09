@@ -167,13 +167,14 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			type preparedSender struct {
-				jid       types.JID
-				stored    string
-				wire      string
-				alias     string
-				chatAlias string
-				own       bool
-				err       error
+				jid             types.JID
+				stored          string
+				wire            string
+				alias           string
+				chatAlias       string
+				editPreparation *pendingEditPreparation
+				own             bool
+				err             error
 			}
 			prepared := make(map[*waHistorySync.HistorySyncMsg]preparedSender)
 			storedInBatch := 0
@@ -235,6 +236,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					ex.retryChat, ex.retrySender = jid.String(), ready.wire
 					ex.editAuthorAlias = ready.alias
 					ex.editChatAlias = ready.chatAlias
+					ex.editPreparation = ready.editPreparation
 
 					// Store message
 					msgID := ""
@@ -303,23 +305,28 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			commitChunk := func(reprepare bool) error {
 				attempt := 0
 				return retry(func() error {
-					if reprepare || attempt > 0 {
-						// Re-read only failed preparations, outside the write transaction.
-						for _, row := range chunk {
-							ready := prepared[row]
-							if ready.err != nil {
-								ready.stored, ready.err = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, storedSender(ready.jid), ready.own)
+					return retryPendingEditPreparation(func() error {
+						if reprepare || attempt > 0 {
+							// Failed reads and stale alias snapshots refresh outside the writer.
+							for _, row := range chunk {
+								if row == nil || row.Message == nil {
+									continue
+								}
+								ready := prepared[row]
+								if ready.err != nil {
+									ready.stored, ready.err = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, storedSender(ready.jid), ready.own)
+								}
 								if ready.err == nil {
-									ready.alias, ready.chatAlias, ready.err = b.pendingEditAlias(ctx, row.Message.GetKey().GetID(), chatJID, ready.stored, ready.own)
+									ready.alias, ready.chatAlias, ready.editPreparation, ready.err = b.preparePendingEdit(ctx, row.Message.GetKey().GetID(), chatJID, ready.stored, ready.own)
 								}
 								prepared[row] = ready
 							}
 						}
-					}
-					attempt++
-					storedInBatch = 0
-					chunkPeerRows = make(map[string]struct{})
-					return writeBatch(storeChunk)
+						attempt++
+						storedInBatch = 0
+						chunkPeerRows = make(map[string]struct{})
+						return writeBatch(storeChunk)
+					})
 				})
 			}
 			countCommitted := func() {
@@ -336,7 +343,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
 				prepared = make(map[*waHistorySync.HistorySyncMsg]preparedSender)
 				// Resolve session-store identities and location aliases before Begin.
-				// Writers use prepared identities; only failed reads refresh before a retry.
+				// Writers recheck pending identity sets; retries refresh outside the writer.
 				for _, row := range chunk {
 					if row == nil || row.Message == nil {
 						continue
@@ -363,10 +370,11 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					}
 					alias := ""
 					chatAlias := ""
+					var editPreparation *pendingEditPreparation
 					if preparationErr == nil {
-						alias, chatAlias, preparationErr = b.pendingEditAlias(ctx, row.Message.GetKey().GetID(), chatJID, stored, own)
+						alias, chatAlias, editPreparation, preparationErr = b.preparePendingEdit(ctx, row.Message.GetKey().GetID(), chatJID, stored, own)
 					}
-					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, alias: alias, chatAlias: chatAlias, own: own, err: preparationErr}
+					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, alias: alias, chatAlias: chatAlias, editPreparation: editPreparation, own: own, err: preparationErr}
 				}
 				if stopping() {
 					return

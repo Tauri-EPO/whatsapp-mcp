@@ -31,6 +31,7 @@ type messageWriter interface {
 type extractedMessage struct {
 	editAuthorAlias string // verified author alternative prepared before the writer
 	editChatAlias   string // verified chat alternative prepared before the writer
+	editPreparation *pendingEditPreparation
 	// inner is the message with SDK envelopes removed; downstream
 	// extractors (quotes, ephemeral settings, webhook media) should use it.
 	inner    *waE2E.Message
@@ -148,6 +149,7 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 	if err := w.StoreMessage(storedMessage{
 		EditAuthorAlias: e.editAuthorAlias,
 		EditChatAlias:   e.editChatAlias,
+		EditPreparation: e.editPreparation,
 		ID:              id,
 		ChatJID:         chatJID,
 		Sender:          sender,
