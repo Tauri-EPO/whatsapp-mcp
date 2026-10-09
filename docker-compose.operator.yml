@@ -17,6 +17,7 @@ services:
   # agent-plane boundary; keep unauthenticated counts off this private network.
   mcp:
     environment:
+      WHATSAPP_OPERATOR_BIND: ${WHATSAPP_OPERATOR_ALIAS:?set a unique operator alias per instance}
       WHATSAPP_MCP_METRICS: "false"
 
 networks:

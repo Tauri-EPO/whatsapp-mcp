@@ -5875,6 +5875,13 @@ def bridge_status() -> dict[str, Any]:
         status["transcription_ingest_chats"] = ingest_setting()
     except (OSError, sqlite3.Error, ValueError):
         status["transcription_ingest_chats"] = {"error": "Runtime setting unavailable"}
+    from transcription_usage import current_usage
+
+    try:
+        status["transcription_usage"] = current_usage()
+        status["transcription_usage"]["minutes"] = status["transcription_usage"]["seconds"] / 60
+    except (OSError, sqlite3.Error, ValueError):
+        status["transcription_usage"] = {"error": "Transcription usage unavailable"}
     status.update(_endpoint_cert_status())
     try:
         health = _bridge_request("GET", "/health", timeout=10)

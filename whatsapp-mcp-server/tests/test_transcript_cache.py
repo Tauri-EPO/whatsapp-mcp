@@ -57,6 +57,7 @@ def test_transcript_is_stored_then_served_from_the_cache(audio_store, monkeypatc
 
     second = main.transcribe_audio(chat_jid=ALICE, message_id="AUD1")
     assert second["cached"] is True and second["stored"] is False
+    assert second["duration_s"] is None  # legacy transcripts remain usable
     assert (second["text"], second["language"], second["backend"]) == ("take 1", "pt", "server")
     assert seen["runs"] == [f"/store/{ALICE}/AUD1.ogg"]  # whisper ran once
     assert len(seen["downloads"]) == 1  # and the file was fetched once

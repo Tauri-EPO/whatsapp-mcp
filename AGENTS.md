@@ -55,6 +55,7 @@ whatsapp-mcp/
 │   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
+│   ├── operator_mcp.go         # bounded bridge-authenticated forwarding to the loopback MCP admin listener
 │   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
 │   ├── history_limits.go         # bounded pairing requests, history age guard and progress
 │   ├── archive_stats.go          # database size gauges, row count and threshold crossings
@@ -170,6 +171,8 @@ whatsapp-mcp/
 │   ├── private_files.py        # MCP-owned notes/export/upload permissions and shared notes connection factory
 │   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
+│   ├── operator_admin.py       # loopback-only bridge-token reads for operator usage and activity
+│   ├── transcription_usage.py # MCP-owned durable UTC usage and atomic quota admission
 │   ├── observability.py        # WHATSAPP_MCP_LOG_FORMAT=json + the MCP /metrics middleware
 │   ├── parent_watchdog.py      # stdio: exit once the parent process is gone (WHATSAPP_PARENT_WATCHDOG_S)
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
@@ -422,6 +425,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
+| `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
+| `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)* | MCP-server-only: background thread that transcribes inbound voice notes as they arrive (`transcribe_worker.py`) instead of waiting for an agent to call `transcribe_audio`. Reads `messages.db`, writes the same `transcript` / `transcript_lang` / `transcript_backend` notes into `notes.db`, idempotent by sha256, concurrency one. Costs CPU on this machine; with no whisper backend configured it stays off with a warning, and so it does when the tool policy does not offer `transcribe_audio` (a policy that hides `download_media` only turns the fetch path off). The status feed (`status@broadcast`) is not walked: its voice notes are neither fetched nor transcribed in the background, whatever `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` says, and `coverage().audio` leaves them out (issue #447). Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300` | Seconds between batches (values below 5 are raised to 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` preserves the existing audio scope; `direct` walks phone/LID one-to-one chats only. Runtime key `transcription.ingest_chats` overrides it through GET/PATCH `/operator/v1/settings`, stored in bridge-owned `messages.db`; worker and coverage share the filter. Set for both processes. |
@@ -433,7 +438,7 @@ Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`) are documented in `.
 
 When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
 
-Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats` and the four `send.*` limits are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
+Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats`, `transcription.monthly_max_minutes`, `transcription.cap_scope` and the four `send.*` limits are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send/transcription boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
 
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 

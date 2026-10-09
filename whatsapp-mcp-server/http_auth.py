@@ -188,15 +188,24 @@ def verify_static_token(presented: str | None, expected: str | None, *, allow_an
     refuse with 503, without logging credentials. No persisted rotation falls
     back to deployment policy. ASGI consumers run this bounded read in a thread.
     """
+    return _static_token_authentication(presented, expected, allow_anonymous=allow_anonymous)[0]
+
+
+def _static_token_authentication(
+    presented: str | None, expected: str | None, *, allow_anonymous: bool = False
+) -> tuple[bool, bool]:
+    """Return acceptance and identity proof from the same saved-auth snapshot."""
     from datetime import datetime
 
     state = _rotation_state(expected, allow_missing_anonymous=allow_anonymous)
     if state is None:
-        return allow_anonymous if expected is None else token_matches(presented, expected)
+        authenticated = expected is not None and token_matches(presented, expected)
+        return (allow_anonymous if expected is None else authenticated), authenticated
     digest = hashlib.sha256((presented or "").encode("utf-8")).hexdigest()
     current_match = secrets.compare_digest(digest, state["current"])
     previous_match = secrets.compare_digest(digest, state["previous"])
-    return bool(presented) and (current_match or (previous_match and datetime.now(UTC) < state["until"]))
+    authenticated = bool(presented) and (current_match or (previous_match and datetime.now(UTC) < state["until"]))
+    return authenticated, authenticated
 
 
 async def authentication_unavailable_response(send: Send, cause: str) -> None:
@@ -237,8 +246,8 @@ class BearerTokenMiddleware:
             await self.app(scope, receive, send)
             return
         try:
-            accepted = await asyncio.to_thread(
-                verify_static_token,
+            accepted, authenticated = await asyncio.to_thread(
+                _static_token_authentication,
                 _bearer_from_headers(scope.get("headers", [])),
                 self._token,
                 allow_anonymous=self._token is None,
@@ -247,7 +256,13 @@ class BearerTokenMiddleware:
             await authentication_unavailable_response(send, str(exc))
             return
         if accepted:
-            await self.app(scope, receive, send)
+            from operator_admin import authenticated_transport
+
+            marker = authenticated_transport.set(authenticated)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                authenticated_transport.reset(marker)
             return
         body = b'{"error":"unauthorized","message":"Missing or invalid bearer token"}'
         await send(

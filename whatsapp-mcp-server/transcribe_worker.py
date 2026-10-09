@@ -86,6 +86,9 @@ from transcribe import BackendUnavailableError, TranscriptionError, load_config,
 from whatsapp import CHAT_POLICY
 
 logger = logging.getLogger("whatsapp_mcp")
+# One blocked head, not an unbounded duration cache. File identity is rechecked
+# each round so replacement/purge/new work cannot inherit an old pause.
+_blocked_quota: tuple[tuple[Any, ...], float] | None = None
 
 ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
@@ -588,7 +591,7 @@ def _log_fetch_problem(quiet: bool, message: str) -> None:
 
 
 def _default_transcribe(path: str) -> dict[str, Any]:
-    return transcribe_file(path, config=load_config())
+    return transcribe_file(path, config=load_config(), source="ingest")
 
 
 def _record_failure(sha256: str, reason: str) -> None:
@@ -639,11 +642,16 @@ def run_once(
     still transcribed. Only an answer about *this* file writes
     ``transcript_error``.
     """
+    global _blocked_quota
     transcribe = transcribe or _default_transcribe
     started = time.monotonic()
     try:
+        from transcription_usage import QuotaExceededError, ingest_quota_exhausted
+
         policy = active_policy() if runtime_policy_enabled() else load_tool_policy()
         if not policy.allows(TRANSCRIBE_TOOL):
+            return BatchResult(0, 0, 0, position=position)
+        if ingest_quota_exhausted():
             return BatchResult(0, 0, 0, position=position)
         fetch = fetch and policy.allows(DOWNLOAD_TOOL)
         selection = find_pending(batch, fetch=fetch, download=download, position=position)
@@ -663,11 +671,26 @@ def run_once(
             logger.warning("transcribe_on_ingest: runtime policy unavailable; round paused")
             return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         try:
+            info = os.stat(candidate.path)
+            identity = (candidate.path, candidate.sha256, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            required = _blocked_quota[1] if _blocked_quota and _blocked_quota[0] == identity else 0
+            if ingest_quota_exhausted(required):
+                return BatchResult(len(pending), transcribed, failed, selection.examined, position)
             result = transcribe(candidate.path)
             text = str(result.get("text") or "").strip()
             if not text:
                 raise TranscriptionError("whisper returned no text")
             store_transcript(candidate.sha256, {**result, "text": text})
+        except ToolError as exc:
+            if exc.code == "transcription_quota_exceeded":
+                if isinstance(exc, QuotaExceededError):
+                    _blocked_quota = (identity, exc.required_seconds)
+                return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+            logger.warning("transcribe_on_ingest: accounting unavailable; round paused")
+            return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+        except sqlite3.Error:
+            logger.warning("transcribe_on_ingest: accounting or cache unavailable; round paused")
+            return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         except BackendUnavailableError as exc:
             # Not this file's failure, so no note. One request the server choked
             # on must not stop the batch, and a server that is down must not be

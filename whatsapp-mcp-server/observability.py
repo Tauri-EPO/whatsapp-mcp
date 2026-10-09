@@ -11,10 +11,12 @@ status class, and process uptime in the Prometheus text exposition format.
 
 from __future__ import annotations
 
+import asyncio
 import bisect
 import hmac
 import json
 import logging
+import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict
@@ -160,7 +162,16 @@ class Metrics:
                     for k, n in sorted(self.http_requests.items())
                 ],
             ]
-        return "\n".join(lines) + "\n"
+        from transcription_usage import metrics_text
+
+        try:
+            transcription = metrics_text()
+        except (OSError, sqlite3.Error, ValueError):
+            transcription = (
+                "# HELP whatsapp_mcp_transcription_usage_available Whether durable transcription accounting is readable.\n"
+                "# TYPE whatsapp_mcp_transcription_usage_available gauge\nwhatsapp_mcp_transcription_usage_available 0\n"
+            )
+        return "\n".join(lines) + "\n" + transcription
 
 
 metrics = Metrics()
@@ -191,7 +202,7 @@ class MetricsMiddleware:
             elif not self._authorized(scope):
                 status, body = 401, b""
             else:
-                status, body = 200, self.registry.render().encode("utf-8")
+                status, body = 200, (await asyncio.to_thread(self.registry.render)).encode("utf-8")
             headers = [
                 (b"content-type", b"text/plain; version=0.0.4; charset=utf-8"),
                 (b"content-length", str(len(body)).encode()),

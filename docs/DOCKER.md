@@ -345,10 +345,12 @@ this override. SDK DEBUG is suppressed while the operator is enabled; bridge
 and database DEBUG remain available. Explicit stdout opt-in is for trusted
 console operators only.
 
-Operator `GET/PATCH /operator/v1/settings` changes `tools.allow`, `tools.deny`
-and `transcription.ingest_chats` without a restart. See the precedence and
+Operator `GET/PATCH /operator/v1/settings` changes `tools.allow`, `tools.deny`,
+the three `transcription.*` keys and the four `send.*` limits without a restart.
+Deploy-time limits remain floors or ceilings the runtime can only tighten.
+See the precedence and
 atomic PATCH contract in [Runtime overrides](CONFIGURATION.md#runtime-overrides).
-Transcription caps and send limits remain tracked in #637/#635. A private authenticated pairing
+A private authenticated pairing
 response reports a bounded `failure_reason` after a passkey failure; health,
 metrics and INFO never expose that text. Real passkey eligibility and a native
 WhatsApp authenticator still need the live verification tracked in #487/#647.
@@ -1254,3 +1256,22 @@ docker run -d --name mcp --network container:bridge -v whatsapp-store:/app/store
 
 The MCP image defaults to the HTTP transport bound to `0.0.0.0:8000` **inside
 the container**; publish that port thoughtfully.
+
+
+### MCP-owned operator reads
+
+When `WHATSAPP_OPERATOR_BIND` is enabled, the MCP service starts its admin
+listener on **127.0.0.1:8091** inside the shared bridge network namespace.
+Do not publish this port or proxy it. Only the bridge calls it with its bridge
+token; the operator token and token file are never passed to MCP. Configure a
+separate `WHATSAPP_MCP_TOKEN` when enabling operator reads so the MCP bearer cannot
+be used on admin. If that token is absent/shared, or port 8091 is occupied, MCP
+logs one warning and keeps serving its data plane without admin: operator usage
+returns 503 and health activity is null. Free the port or set a distinct MCP
+token to enable admin after a restart. Port 8091 is reserved when the operator
+is enabled; choosing it for `WHATSAPP_MCP_PORT` fails with a configuration error.
+The stdio transport never starts an admin listener. Operator clients continue to use a single bridge URL/token for
+`GET /operator/v1/transcription/usage` and health (`last_mcp_call_at`, null until
+an authenticated MCP tool call, or while MCP is unavailable). Runtime settings
+remain bridge-owned; UTC monthly metering is MCP-owned in `notes.db` and is
+included in the existing store backup. See CONFIGURATION.md for caps and scopes.

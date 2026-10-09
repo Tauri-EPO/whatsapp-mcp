@@ -20,6 +20,8 @@ type operatorRoutes struct {
 	code, restart, passkeyResponse, passkeyConfirm http.HandlerFunc
 	settings, logout                               http.HandlerFunc
 	sendUsage, mcpToken                            http.HandlerFunc
+
+	transcriptionUsage http.HandlerFunc
 }
 
 type operatorBucket struct {
@@ -133,6 +135,8 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		{"pairing/passkey/response", "POST", routes.passkeyResponse}, {"pairing/passkey/confirm", "POST", routes.passkeyConfirm},
 		{"settings", "", routes.settings}, {"logout", "POST", routes.logout},
 		{"send/usage", "GET", routes.sendUsage}, {"mcp-token", "", routes.mcpToken},
+
+		{"transcription/usage", "GET", routes.transcriptionUsage},
 	} {
 		path := "/operator/v1/" + route.name
 		if route.method == http.MethodPost || route.name == "settings" || route.name == "mcp-token" {
