@@ -34,6 +34,7 @@ type markReadFunc func(ctx context.Context, ids []types.MessageID, readAt time.T
 // PN -> LID rewrite applied to the JIDs a receipt is addressed with
 // (resolveRecipientJID in production).
 type markReadDeps struct {
+	allowSend  func(http.ResponseWriter, *http.Request, string) bool
 	store      *MessageStore
 	policy     chatPolicy
 	connected  func() bool
@@ -66,6 +67,7 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		client := b.currentClient()
 		markReadHandler(markReadDeps{
+			allowSend: b.allowSendAction,
 			store:     b.Store,
 			policy:    b.Policy,
 			connected: b.Connected,
@@ -176,6 +178,9 @@ func markListedRead(w http.ResponseWriter, r *http.Request, deps markReadDeps, r
 
 	ctx, cancel := requestContext(r, actionDeadline)
 	defer cancel()
+	if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(ctx), receiptChat.String()) {
+		return
+	}
 	if err := deps.markRead(ctx, messageIDs, readAt, receiptChat, receiptSender); err != nil {
 		writeMarkRead(w, http.StatusInternalServerError, MarkReadResponse{Message: err.Error()})
 		return
@@ -238,7 +243,8 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 	}
 	truncated := overflow != nil
 	if len(pending) == 0 {
-		writeMarkRead(w, http.StatusOK, MarkReadResponse{Success: true, Message: "No unread inbound messages in that range"})
+		warning := persistAcknowledgedReceiptPrefix(deps, req.ChatJID, upTo)
+		writeMarkRead(w, http.StatusOK, MarkReadResponse{Success: true, Message: "No unread inbound messages in that range" + warning})
 		return
 	}
 
@@ -280,6 +286,13 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 		for start := 0; start < len(group.ids); start += markReadBatch {
 			end := min(start+markReadBatch, len(group.ids))
 			chunk := group.ids[start:end]
+			if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(ctx), receiptChat.String()) {
+				// A refusal can follow completed batches. Preserve their safe
+				// prefix so the next call cannot spend its budget resending them.
+				persistRefusedReceiptProgress(deps, req.ChatJID, pending, acked, overflow)
+				_ = persistAcknowledgedReceiptPrefix(deps, req.ChatJID, upTo)
+				return
+			}
 			if err := deps.markRead(ctx, chunk, readAt, receiptChat, receiptSender); err != nil {
 				failure, fatal = err, true
 				break
@@ -298,6 +311,9 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 	warning := ""
 	if covered > 0 {
 		warning = persistReadMarker(deps, req.ChatJID, pending[covered-1].Timestamp)
+	}
+	if warning == "" {
+		warning = persistAcknowledgedReceiptPrefix(deps, req.ChatJID, upTo)
 	}
 
 	if failure != nil {
@@ -431,8 +447,45 @@ func persistReadMarker(deps markReadDeps, chatJID string, readAt time.Time) stri
 	return ""
 }
 
+func persistAcknowledgedReceiptPrefix(deps markReadDeps, chatJID string, upTo time.Time) string {
+	readAt, err := deps.store.AcknowledgedReceiptPrefix(chatJID, upTo)
+	if err != nil {
+		deps.log.Warnf("Failed to read saved receipt progress: %v", err)
+		return " (archive update failed; saved receipt progress remains available for retry)"
+	}
+	if readAt.IsZero() {
+		return ""
+	}
+	return persistReadMarker(deps, chatJID, readAt)
+}
+
 func writeMarkRead(w http.ResponseWriter, status int, resp MarkReadResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// A timestamp cannot record acknowledgements within a tied second. Persist
+// the completed IDs and safe timestamp prefix together before returning a
+// budget refusal, so retrying after reset/restart never repeats those receipts.
+func persistRefusedReceiptProgress(deps markReadDeps, chat string, pending []unreadInboundMessage, acked map[string]bool, overflow *unreadInboundMessage) {
+	if len(acked) == 0 {
+		return
+	}
+	covered := coveredPrefix(pending, acked, overflow)
+	_ = deps.storeWrite("read receipt progress", "", chat, func() error {
+		return deps.store.Batch(func(batch *messageBatch) error {
+			for _, msg := range pending {
+				if acked[msg.ID] {
+					if _, err := batch.tx.Exec("UPDATE messages SET read_receipt_sent=1 WHERE chat_jid=? AND id=? AND is_from_me=0", chat, msg.ID); err != nil {
+						return err
+					}
+				}
+			}
+			if covered > 0 {
+				return markChatReadWith(batch.tx, chat, pending[covered-1].Timestamp)
+			}
+			return nil
+		})
+	})
 }

@@ -16,7 +16,7 @@ from http_auth import (
     BearerTokenMiddleware,
     ForwardedSchemeMiddleware,
     ProxyNetworks,
-    RateLimitMiddleware,
+    RuntimeRateLimitMiddleware,
     resolve_http_token,
     resolve_max_body_bytes,
     resolve_rate_limit,
@@ -249,6 +249,7 @@ def bridge_status() -> dict[str, Any]:
     endpoint_cert_days_left for the published HTTPS endpoint (endpoint_cert_error
     when the handshake fails): a low or negative days_left is why other clients
     cannot connect while this session still works.
+    Includes send_usage: UTC send/new-chat/refusal counts and effective send limits.
     Read-only; never fails, so it is safe to call before anything else.
     """
     return whatsapp_bridge_status()
@@ -1575,6 +1576,9 @@ def send_message(
         With dry_run=true: {"success": true, "dry_run": true, "endpoint", "payload" (the exact
         JSON body), "recipient_jid" (resolved), "recipient_name"} and no message_id, because
         nothing was sent.
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     # Validate input
     if not chat_jid:
@@ -1609,6 +1613,9 @@ def send_reaction(
 
     Returns:
         A dictionary containing success status and a status message
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     success, status_message = whatsapp_send_reaction(chat_jid, message_id, emoji, from_me, sender_jid)
     return {"success": success, "message": status_message}
@@ -1669,6 +1676,8 @@ def manage_group_participants(chat_jid: str, action: str, participants: list[str
 
     Returns:
         {"success": true, "group_jid", "participants": [{jid, phone_number, is_admin, ...}]}
+
+    A rate_limited error means stop and report; split oversized participant batches.
     """
     return whatsapp_manage_group_participants(chat_jid, action, participants)
 
@@ -1855,6 +1864,9 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
 
     Returns:
         A dictionary containing success status and a status message
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     success, status_message = whatsapp_delete_message(chat_jid, message_id, for_everyone)
     return {"success": success, "message": status_message, "for_everyone": for_everyone}
@@ -1882,6 +1894,9 @@ def edit_message(chat_jid: str, message_id: str, text: str, dry_run: bool = Fals
     Returns:
         The bridge's result, or with dry_run=true {"success": true, "dry_run": true,
         "endpoint", "payload" (the exact JSON body), "recipient_jid", "recipient_name"}.
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     return whatsapp_edit_message(chat_jid, message_id, text, dry_run=dry_run)
 
@@ -1910,6 +1925,9 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
 
     Returns:
         {"success": true, "message_id": ..., "chat_jid": ..., "timestamp": ...} of the new message
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     return whatsapp_forward_message(chat_jid, message_id, to_chat_jid)
 
@@ -1964,6 +1982,9 @@ def mark_messages_read(
         If message warns that the archive update failed, the remote receipts
         already succeeded: do not repeat them. Warnings from both halves of a
         merged phone/LID chat are retained.
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     return whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp, up_to_timestamp)
 
@@ -2030,6 +2051,9 @@ def send_file(
         payload that is not base64 or too large as invalid_argument; the bridge
         additionally confines media_path to WHATSAPP_MEDIA_ROOTS, which only a real
         send checks.
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
 
     # Call the whatsapp_send_file function
@@ -2075,6 +2099,9 @@ def send_audio_message(
 
     Returns:
         A dictionary containing success status and a status message
+
+    A rate_limited error means stop and report to the operator; split an oversized
+    batch rather than retrying it. Optional actions count when configured.
     """
     success, status_message, sent = whatsapp_audio_voice_message(
         chat_jid, media_path, media_base64=media_base64, filename=filename, upload_id=upload_id
@@ -2821,7 +2848,7 @@ def build_http_app(
     server: MCPServer,
     transport: str,
     token: str | None,
-    rate_limit_per_minute: int = 0,
+    rate_limit_per_minute: int | None = None,
     upload_max_bytes: int = 64 * 1024 * 1024,
     trusted_proxies: ProxyNetworks = (),
     **app_kwargs: Any,
@@ -2852,7 +2879,7 @@ def build_http_app(
         oauth_middleware = OAuthMiddleware(
             app,
             verifier,
-            rate_limit_per_minute,
+            resolve_rate_limit(None, True) if rate_limit_per_minute is None else rate_limit_per_minute,
             app_kwargs.get("max_request_body_size", 4 * 1024 * 1024),
             trusted_proxies,
         )
@@ -2863,10 +2890,9 @@ def build_http_app(
         # before it turns an authorization-service outage into a plain 500.
         sdk_app.user_middleware.insert(0, Middleware(OAuthSDKAvailabilityMiddleware, reject=oauth_middleware._error))
         app = oauth_middleware
-    elif token:
-        app = BearerTokenMiddleware(app, token)
-    if rate_limit_per_minute > 0 and not verifier:
-        app = RateLimitMiddleware(app, rate_limit_per_minute, trusted_proxies=trusted_proxies)
+    else:
+        app = BearerTokenMiddleware(app, token, runtime_rotation=True)
+        app = RuntimeRateLimitMiddleware(app, rate_limit_per_minute, token, trusted_proxies=trusted_proxies)
     app = ForwardedSchemeMiddleware(app, trusted_proxies)
     if metrics_enabled(os.getenv("WHATSAPP_MCP_METRICS")):
         # Outermost so /metrics answers without the MCP token and counts every
@@ -2998,7 +3024,7 @@ if __name__ == "__main__":
             mcp,
             transport,
             token,
-            rate_limit_per_minute=rate_limit,
+            rate_limit_per_minute=rate_limit if (os.getenv("WHATSAPP_MCP_RATE_LIMIT") or "").strip() else None,
             upload_max_bytes=upload_max_bytes,
             trusted_proxies=trusted_proxies,
             **app_kwargs,

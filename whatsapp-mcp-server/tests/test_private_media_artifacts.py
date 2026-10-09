@@ -335,6 +335,7 @@ def test_new_upload_folder_mode_is_independent_of_restrictive_umask(tmp_path, mo
 
 
 @POSIX
+@pytest.mark.usefixtures("auth_runtime_store")
 def test_configured_symlink_spelling_for_inline_preview_http_id_and_audio(tmp_path, monkeypatch):
     physical = tmp_path / "mnt" / "example-storage" / "outbox"
     physical.mkdir(parents=True)

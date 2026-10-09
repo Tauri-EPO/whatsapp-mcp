@@ -205,10 +205,10 @@ func TestOutboundBusyBoundAndNonBusyErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			release := func() {}
-			if busy {
-				release = lock()
-			} else if _, err := ms.db.Exec("CREATE TRIGGER refuse_outbound BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'constraint');END"); err != nil {
-				t.Fatal(err)
+			if !busy {
+				if _, err := ms.db.Exec("CREATE TRIGGER refuse_outbound BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'constraint');END"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			waits := 0
 			rec := installRecordingLogger(t)
@@ -228,6 +228,11 @@ func TestOutboundBusyBoundAndNonBusyErrors(t *testing.T) {
 			var persistErr error
 			b.Send = func(_ context.Context, recipient, message, _, _, _, _ string, _ []string) (bool, string, sentMessage) {
 				remoteSends++ // remote acceptance, followed by real local persistence
+				if busy {
+					// Budget reservation must succeed first; this fixture exercises
+					// archive failure after remote acceptance, not admission failure.
+					release = lock()
+				}
 				sent := sentMessage{ID: "OUT1", Timestamp: now}
 				sent.ChatJID, persistErr = b.persistOutbound(phonePN, sent, message, outboundMedia{}, "")
 				return true, outboundSendStatus(recipient, persistErr), sent

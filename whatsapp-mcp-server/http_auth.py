@@ -12,11 +12,17 @@ This mirrors what the Go bridge does for its own REST API (see auth.go).
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import ipaddress
+import json
+import logging
 import secrets
+import sqlite3
 import threading
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +113,110 @@ def token_matches(presented: str | None, expected: str) -> bool:
     return secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
+class AuthStateUnavailableError(RuntimeError):
+    """A bounded, credential-free cause for operator diagnosis."""
+
+
+_AUTH_WARN_LOCK = threading.Lock()
+_AUTH_WARN_AT = float("-inf")
+_AUTH_REQUIRED_STORES: set[str] = set()
+
+
+def _warn_auth_unavailable(cause: str) -> None:
+    global _AUTH_WARN_AT
+    with _AUTH_WARN_LOCK:
+        now = time.monotonic()
+        if now - _AUTH_WARN_AT < 60:
+            return
+        _AUTH_WARN_AT = now
+    logging.getLogger("whatsapp_mcp").warning("Authentication state unavailable: %s", cause)
+
+
+def _rotation_state(expected: str | None, *, allow_missing_anonymous: bool = False) -> dict | None:
+    from datetime import datetime
+
+    import whatsapp
+
+    store = str(whatsapp.MESSAGES_DB_PATH)
+    try:
+        exists = Path(whatsapp.MESSAGES_DB_PATH).exists()
+    except OSError:
+        raise AuthStateUnavailableError("messages database inaccessible") from None
+    if not exists:
+        if expected is None and allow_missing_anonymous and store not in _AUTH_REQUIRED_STORES:
+            return None  # A fresh loopback/explicit-off store has no rotation.
+        raise AuthStateUnavailableError("messages database missing")
+    try:
+        conn = sqlite3.connect(whatsapp._read_only_uri(whatsapp.MESSAGES_DB_PATH), timeout=0.1, uri=True)
+        try:
+            try:
+                row = conn.execute("SELECT value FROM runtime_settings WHERE key='auth.mcp_token'").fetchone()
+            except sqlite3.OperationalError as exc:
+                if str(exc) == "no such table: runtime_settings":
+                    if store in _AUTH_REQUIRED_STORES:
+                        raise AuthStateUnavailableError("authentication registry missing") from None
+                    return None  # Before the bridge-owned registry migration.
+                raise
+        finally:
+            conn.close()
+        if not row or row[0] == "null":
+            _AUTH_REQUIRED_STORES.discard(store)  # Operator DELETE restores deployment policy.
+            return None
+        state = json.loads(row[0])
+        current, previous = state["current"], state["previous"]
+        for value in (current, previous):
+            if not isinstance(value, str) or (value and (len(value) != 64 or len(bytes.fromhex(value)) != 32)):
+                raise ValueError("invalid hash")
+        if not current:
+            raise ValueError("missing current hash")
+        until = datetime.fromisoformat(state["previous_valid_until"].replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            raise ValueError("missing timezone")
+        state["until"] = until
+        _AUTH_REQUIRED_STORES.add(store)
+        return state
+    except sqlite3.Error:
+        raise AuthStateUnavailableError("messages database unreadable") from None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise AuthStateUnavailableError("saved rotation invalid") from None
+
+
+def verify_static_token(presented: str | None, expected: str | None, *, allow_anonymous: bool = False) -> bool:
+    """Read operator rotation, including OAuth's static path.
+
+    Raise AuthStateUnavailableError for unavailable/corrupt saved auth; callers must
+    refuse with 503, without logging credentials. No persisted rotation falls
+    back to deployment policy. ASGI consumers run this bounded read in a thread.
+    """
+    from datetime import datetime
+
+    state = _rotation_state(expected, allow_missing_anonymous=allow_anonymous)
+    if state is None:
+        return allow_anonymous if expected is None else token_matches(presented, expected)
+    digest = hashlib.sha256((presented or "").encode("utf-8")).hexdigest()
+    current_match = secrets.compare_digest(digest, state["current"])
+    previous_match = secrets.compare_digest(digest, state["previous"])
+    return bool(presented) and (current_match or (previous_match and datetime.now(UTC) < state["until"]))
+
+
+async def authentication_unavailable_response(send: Send, cause: str) -> None:
+    """Shared static/OAuth 503 response with a bounded, sanitized diagnostic."""
+    _warn_auth_unavailable(cause)
+    body = b'{"error":"authentication_state_unavailable","message":"authentication state unavailable"}'
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 503,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
 class BearerTokenMiddleware:
     """Pure-ASGI middleware: 401 unless the request carries the expected bearer token.
 
@@ -116,8 +226,8 @@ class BearerTokenMiddleware:
     error instead of an HTML page.
     """
 
-    def __init__(self, app: ASGIApp, token: str):
-        if not token:
+    def __init__(self, app: ASGIApp, token: str | None, *, runtime_rotation: bool = False):
+        if not token and not runtime_rotation:
             raise ValueError("BearerTokenMiddleware requires a non-empty token")
         self.app = app
         self._token = token
@@ -126,7 +236,17 @@ class BearerTokenMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        if token_matches(_bearer_from_headers(scope.get("headers", [])), self._token):
+        try:
+            accepted = await asyncio.to_thread(
+                verify_static_token,
+                _bearer_from_headers(scope.get("headers", [])),
+                self._token,
+                allow_anonymous=self._token is None,
+            )
+        except AuthStateUnavailableError as exc:
+            await authentication_unavailable_response(send, str(exc))
+            return
+        if accepted:
             await self.app(scope, receive, send)
             return
         body = b'{"error":"unauthorized","message":"Missing or invalid bearer token"}'
@@ -357,3 +477,58 @@ class RateLimitMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+class RuntimeRateLimitMiddleware:
+    """Always installed; runtime bearer rotation activates the default throttle."""
+
+    def __init__(self, app: ASGIApp, per_minute: int | None, token: str | None, trusted_proxies: ProxyNetworks = ()):
+        self.app, self.limit, self.token = app, per_minute, token
+        self.limited = RateLimitMiddleware(
+            app, per_minute or DEFAULT_RATE_LIMIT_PER_MINUTE, trusted_proxies=trusted_proxies
+        )
+        self._state_stamp = None
+        self._state_active = False
+        self._state_checked_at = float("-inf")
+        self._state_clock = time.monotonic
+        self._state_refresh: asyncio.Task[bool] | None = None
+
+    def _read_runtime_active(self) -> bool:
+        import whatsapp
+
+        path = str(whatsapp.MESSAGES_DB_PATH)
+        stamps = []
+        for name in (path, path + "-wal"):
+            try:
+                info = Path(name).stat()
+                stamps.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+            except OSError as exc:
+                stamps.append(exc.errno)
+        stamp = (path, tuple(stamps))
+        now = self._state_clock()
+        if (
+            stamp != self._state_stamp
+            or now - self._state_checked_at >= 1
+            or (not self._state_active and path in _AUTH_REQUIRED_STORES)
+        ):
+            try:
+                state = _rotation_state(None, allow_missing_anonymous=True)
+                self._state_active = state is not None
+            except AuthStateUnavailableError:
+                self._state_active = True
+            self._state_stamp = stamp
+            self._state_checked_at = now
+        return self._state_active
+
+    async def _runtime_active(self) -> bool:
+        # One shared worker checks file metadata; unchanged stores need no
+        # SQLite query. Credential verification behind the limiter stays fresh.
+        if self._state_refresh is None or self._state_refresh.done():
+            self._state_refresh = asyncio.create_task(asyncio.to_thread(self._read_runtime_active))
+        return await asyncio.shield(self._state_refresh)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        active = self.token is not None if self.limit is None else bool(self.limit)
+        if self.limit is None and self.token is None and scope.get("type") == "http":
+            active = await self._runtime_active()
+        await (self.limited if active else self.app)(scope, receive, send)
