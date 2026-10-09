@@ -1,6 +1,7 @@
 """Group management tools: payloads, validation, allow-list, bridge errors."""
 
 import json
+import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,46 @@ from errors import ToolError
 from tool_policy import ToolPolicy
 
 GROUP = "120363000000000001@g.us"
+
+
+@pytest.mark.parametrize("action", ["add", "remove", "promote", "demote"])
+@pytest.mark.parametrize("identity", ["phone", "lid", "alternate_lid"])
+async def test_participant_boundary_through_sdk_and_http(monkeypatch, group_http_bridge, tmp_path, action, identity):
+    reply, observed = group_http_bridge
+    reply.update(status=200, payload={"success": True})
+    pn, lid = "5511999999999", "100000000000007@lid"
+    alternate_lid = "100000000000008@lid"
+    db = tmp_path / "whatsapp.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE whatsmeow_lid_map (lid TEXT, pn TEXT)")
+        conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (lid.split("@")[0], pn))
+        conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (alternate_lid.split("@")[0], "551199999999"))
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(db))
+    entry = {"phone": pn, "lid": lid, "alternate_lid": alternate_lid}[identity]
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([GROUP, entry]))
+    async with group_sdk_client() as client:
+        denied = await client.call_tool(
+            "manage_group_participants",
+            {
+                "chat_jid": GROUP,
+                "action": action,
+                "participants": [pn, "5511888888888"],
+            },
+        )
+        assert denied.is_error
+        assert json.loads(denied.content[0].text)["error"]["code"] == "denied"
+        assert observed == []
+        allowed = await client.call_tool(
+            "manage_group_participants",
+            {
+                "chat_jid": GROUP,
+                "action": action,
+                "participants": ["+55 (11) 99999-9999", "551199999999", lid],
+            },
+        )
+        assert not allowed.is_error
+    assert len(observed) == 1
+    assert observed[0][1]["participants"] == ["+55 (11) 99999-9999", "551199999999", lid]
 
 
 class Resp:

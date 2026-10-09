@@ -10,6 +10,7 @@ package main
 // targets are still refused before parsing can discard part of their identity.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -99,6 +100,64 @@ func (p chatPolicy) Allows(target string) bool {
 	}
 	_, ok := p.servers[n[strings.LastIndex(n, "@")+1:]]
 	return ok
+}
+
+// allowsIdentity is used for participants and webhook sources, whose known
+// phone/LID twins and Brazilian mobile spellings denote the same user. Send
+// destinations retain their separate typed/registered-number checks.
+func (p chatPolicy) allowsIdentity(ctx context.Context, jid types.JID, twin lidForPNFunc) bool {
+	if !p.restricted {
+		return true
+	}
+	queue := []types.JID{jid.ToNonAD()}
+	seen := map[types.JID]bool{}
+	for len(queue) > 0 {
+		j := queue[0]
+		queue = queue[1:]
+		if seen[j] || j.IsEmpty() {
+			continue
+		}
+		seen[j] = true
+		if p.Allows(j.String()) {
+			return true
+		}
+		if j.Server != types.DefaultUserServer && j.Server != types.HiddenUserServer {
+			continue
+		}
+		if j.Server == types.DefaultUserServer {
+			if alt := brMobileAlternate(j.User); alt != "" {
+				queue = append(queue, types.NewJID(alt, j.Server))
+			}
+		}
+		if twin != nil {
+			if alt, err := twin(ctx, j); err == nil && !alt.IsEmpty() {
+				queue = append(queue, alt.ToNonAD())
+			}
+		}
+	}
+	return false
+}
+
+// Keep the mobile ranges identical to phone.py; landlines have no twin.
+func brMobileAlternate(number string) string {
+	if !isPhoneDigits(number) || (len(number) != 12 && len(number) != 13) ||
+		!strings.HasPrefix(number, "55") || number[2] == '0' || number[3] == '0' {
+		return ""
+	}
+	subscriber := number[4:]
+	if len(number) == 13 {
+		if subscriber[0] != '9' {
+			return ""
+		}
+		subscriber = subscriber[1:]
+	}
+	if subscriber[0] < '6' || subscriber[0] > '9' {
+		return ""
+	}
+	if len(number) == 13 {
+		return number[:4] + subscriber
+	}
+	return number[:4] + "9" + subscriber
 }
 
 // authorizeChat is the one HTTP authorization boundary. Recipient endpoints

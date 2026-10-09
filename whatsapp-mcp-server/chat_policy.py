@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from errors import ToolError
+from phone import br_mobile_alternate, normalize_recipient
 
 ENV_VAR = "WHATSAPP_ALLOWED_CHATS"
 DEFAULT_USER_SERVER = "s.whatsapp.net"
@@ -94,6 +95,30 @@ class ChatPolicy:
         if normalized in self.exact:
             return True
         return normalized.rpartition("@")[2] in self.servers
+
+    def require_participant(self, raw: str, twins: Iterable[str] = ()) -> None:
+        """Authorize one participant and its known local identity spellings.
+
+        This does not change the typed/registered checks for sends.
+        """
+        if not self.restricted:
+            return
+        target = normalize_recipient(raw).strip()
+        validate_chat_target(target)
+        if any(c in target.split("@", 1)[0] for c in ":."):
+            raise ToolError("invalid_argument", "participant must not have a device suffix")
+        jid = normalize_chat_entry(target)
+        user, _, server = jid.rpartition("@")
+        if not user or any(c in user for c in " :.\t") or server not in (DEFAULT_USER_SERVER, "lid"):
+            raise ToolError("invalid_argument", "participant must be a phone number or user JID")
+        for candidate in (jid, *twins):
+            if self.allows(candidate):
+                return
+            number, _, namespace = candidate.rpartition("@")
+            if namespace == DEFAULT_USER_SERVER and (alternate := br_mobile_alternate(number)):
+                if self.allows(f"{alternate}@{namespace}"):
+                    return
+        raise ToolError("denied", f"Participant {raw!r} is not in {ENV_VAR}")
 
     def sql_clause(self, column: str) -> tuple[str, list[str]]:
         """SQL predicate restricting ``column`` (a chat JID column) to allowed chats.

@@ -25,6 +25,7 @@ import (
 
 // groupOps is the slice of the whatsmeow client the handlers need.
 type groupOps struct {
+	twin               lidForPNFunc
 	updateParticipants func(ctx context.Context, jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
 	setName            func(ctx context.Context, jid types.JID, name string) error
 	getInfo            groupInfoFetcher
@@ -65,6 +66,10 @@ func liveGroupOps(client groupManagementClient, connected func() bool) groupOps 
 		return nil
 	}
 	return groupOps{
+		twin: func(ctx context.Context, jid types.JID) (types.JID, error) {
+			sdk, _ := client.(*whatsmeow.Client)
+			return lookupAltJID(ctx, sdk, jid)
+		},
 		updateParticipants: func(ctx context.Context, jid types.JID, p []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
 			if err := online(); err != nil {
 				return nil, err
@@ -159,14 +164,23 @@ func parseGroupRequest(w http.ResponseWriter, r *http.Request, policy chatPolicy
 }
 
 // parseParticipants accepts phone numbers or JIDs.
-func parseParticipants(raw []string) ([]types.JID, error) {
+func parseParticipants(raw []string, policies ...chatPolicy) ([]types.JID, error) {
 	out := make([]types.JID, 0, len(raw))
 	for _, item := range raw {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
 		}
-		jid, err := normalizedUserJID(item)
+		normalized, err := normalizePhoneRecipient(item)
+		if err != nil {
+			return nil, err
+		}
+		jid, err := normalizedUserJID(normalized)
+		if err == nil && len(policies) > 0 && policies[0].restricted {
+			// Restricted operations validate the complete envelope before
+			// checking identity; unrestricted calls retain their old parsing.
+			jid, err = canonicalChatJID(normalized, true)
+		}
 		if err != nil || jid.User == "" || strings.ContainsAny(jid.User, " @") ||
 			(jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
 			return nil, errors.New("invalid participant " + item + " (use a phone number or a user JID)")
@@ -192,10 +206,19 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 			writeGroupError(w, http.StatusBadRequest, "action must be one of add, remove, promote, demote")
 			return
 		}
-		participants, err := parseParticipants(req.Participants)
+		participants, err := parseParticipants(req.Participants, policy)
 		if err != nil {
 			writeGroupError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// Validate the entire batch before the single WhatsApp mutation. All
+		// four actions share this boundary; group permission alone never
+		// grants permission to act on an outside participant.
+		for _, participant := range participants {
+			if !policy.allowsIdentity(r.Context(), participant, ops.twin) {
+				writeGroupError(w, http.StatusForbidden, "participant "+participant.String()+" is not in "+chatPolicyEnv)
+				return
+			}
 		}
 		result, err := ops.updateParticipants(r.Context(), jid, participants, action)
 		if err != nil {

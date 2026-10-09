@@ -87,7 +87,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB)                   | Maximum raw file size for `POST /upload`, enforced while streaming; independent of the JSON-RPC body limit. Positive integer up to 268435456 (256 MiB shared budget); uploads expire in one hour |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_PUBLIC_URL`  | *(unset)*                                | URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`, or a bare `host` / `host:port`). Makes `bridge_status` report the expiry of that endpoint's TLS certificate. See [Watching the published certificate](#watching-the-published-certificate) |
-| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and again by the bridge on send/react/chat/archive/chat/label/mark-read/typing |
+| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and bridge, including every group participant and the source chat of message webhooks |
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
 | `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
 | `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
@@ -275,6 +275,14 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
   The bridge caches positive registered-number answers for one hour (up to 256 entries, cleared on connection, disconnection or logout), so a re-registered number may keep its old spelling until then; both allow-list checks still run on every cache hit.
 - Contact search (`search_contacts`) is not filtered: it reads the address
   book, not conversations.
+
+Group participant changes (`add`, `remove`, `promote`, `demote`) require both
+the group and every participant to be allowed. A participant may match a known
+local phone/LID twin or the other Brazilian mobile ninth-digit spelling;
+landlines do not gain an alias. One outside participant refuses the whole batch
+before any WhatsApp mutation, and the MCP tool returns `denied` before calling
+the bridge. This path uses local identities, without introducing a registered
+number lookup; send/forward retain the two checks described above.
 
 Unset keeps today's behaviour (everything allowed).
 
@@ -797,6 +805,14 @@ rejects unauthenticated forwards only once its `WHATSAPP_BRIDGE_TOKEN` is set
 to the matching value.
 
 ### What the webhook receives
+
+With `WHATSAPP_ALLOWED_CHATS` set, a message or reaction must come from an
+allowed chat before its payload is built or media is read for the webhook.
+Known local phone/LID twins and Brazilian mobile ninth-digit spellings match
+the same identity. A denied event produces no POST; archive storage and ordinary
+background media caching keep their existing rules. `FORWARD_SELF`, status,
+broadcast and channel opt-ins below must also pass within this boundary.
+Without an allow-list, webhook delivery keeps its existing behavior.
 
 Direct user chats (`@s.whatsapp.net` or `@lid`) and groups (`@g.us`) are
 forwarded by default. Empty or unrecognized chat namespaces are withheld;

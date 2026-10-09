@@ -1031,6 +1031,14 @@ The formatting and registered-number lookup rules apply to `send_message`, `send
 
 Add, remove, promote or demote members of a group you administer. Outbound; `remove` is irreversible.
 
+With `WHATSAPP_ALLOWED_CHATS`, the group and **every participant** must be
+authorized for all four actions. Known local phone/LID twins and Brazilian
+mobile ninth-digit spellings count as one identity. One outside participant
+refuses the whole call with `denied` before a bridge round trip; the bridge
+repeats the check before changing WhatsApp. Without an allow-list behavior is
+unchanged. Group changes use local identities, without a registered-number
+lookup; send/forward keep their separate typed and registered checks.
+
 **Parameters:** `chat_jid` (group JID), `action` (`add` | `remove` | `promote` | `demote`), `participants` (phone numbers with country code or user JIDs). Returns the affected participants with their admin flags.
 
 ### `update_group`

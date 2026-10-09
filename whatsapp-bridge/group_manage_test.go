@@ -65,6 +65,50 @@ func groupPost(t *testing.T, h http.HandlerFunc, body string) (int, groupRespons
 
 const mgGroup = "120363000000000001@g.us"
 
+func TestGroupParticipantsAllowList(t *testing.T) {
+	for _, action := range []string{"add", "remove", "promote", "demote"} {
+		t.Run(action, func(t *testing.T) {
+			calls := &groupCalls{}
+			h := handleGroupParticipants(fakeGroupOps(calls, nil), parseChatPolicy(mgGroup+",5511999999999"))
+			code, _ := groupPost(t, h, `{"group_jid":"`+mgGroup+`","action":"`+action+`","participants":["5511999999999","5511888888888"]}`)
+			if code != http.StatusForbidden || len(calls.participants) != 0 {
+				t.Fatalf("mixed batch: status %d, effects %+v", code, calls)
+			}
+			code, resp := groupPost(t, h, `{"group_jid":"`+mgGroup+`","action":"`+action+`","participants":["+55 (11) 99999-9999","551199999999"]}`)
+			if code != http.StatusOK || !resp.Success || len(calls.participants) != 2 {
+				t.Fatalf("allowed batch: status %d, response %+v, effects %+v", code, resp, calls)
+			}
+		})
+	}
+}
+
+func TestGroupParticipantsIdentityTwins(t *testing.T) {
+	for _, tc := range []struct {
+		policy, participant string
+		allowed             bool
+	}{
+		{phonePN.String(), phoneLID.String(), true},
+		{phoneLID.String(), phonePN.String(), true},
+		{"551199999999", "5511999999999", true},
+		{"551133334444", "5511999999999", false},
+		{mgGroup, phoneLID.String(), false},
+	} {
+		t.Run(tc.policy+"/"+tc.participant, func(t *testing.T) {
+			calls := &groupCalls{}
+			ops := fakeGroupOps(calls, nil)
+			client := newTestClient(&mockLIDStore{lidByPN: map[types.JID]types.JID{phonePN: phoneLID}, pnByLID: map[types.JID]types.JID{phoneLID: phonePN}})
+			ops.twin = liveGroupOps(client, func() bool { return true }).twin
+			code, _ := groupPost(t, handleGroupParticipants(ops, parseChatPolicy(mgGroup+","+tc.policy)), `{"group_jid":"`+mgGroup+`","action":"add","participants":["`+tc.participant+`"]}`)
+			if tc.allowed && (code != http.StatusOK || len(calls.participants) != 1) {
+				t.Fatalf("allowed identity: %d %+v", code, calls)
+			}
+			if !tc.allowed && (code != http.StatusForbidden || len(calls.participants) != 0) {
+				t.Fatalf("denied identity: %d %+v", code, calls)
+			}
+		})
+	}
+}
+
 func TestGroupParticipantsAddAndPromote(t *testing.T) {
 	calls := &groupCalls{}
 	h := handleGroupParticipants(fakeGroupOps(calls, nil), chatPolicy{})
@@ -99,6 +143,19 @@ func TestGroupParticipantsValidation(t *testing.T) {
 	h(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET → %d", rec.Code)
+	}
+}
+
+func TestGroupParticipantsUnrestrictedParsingUnchanged(t *testing.T) {
+	for _, entry := range []string{"", mgGroup + ",5511999999999"} {
+		calls := &groupCalls{}
+		code, _ := groupPost(t, handleGroupParticipants(fakeGroupOps(calls, nil), parseChatPolicy(entry)), `{"group_jid":"`+mgGroup+`","action":"add","participants":["5511999999999:1@s.whatsapp.net"]}`)
+		if entry == "" && (code != http.StatusOK || len(calls.participants) != 1 || calls.participants[0].Device != 1) {
+			t.Fatalf("unrestricted parsing changed: %d %+v", code, calls)
+		}
+		if entry != "" && (code != http.StatusBadRequest || len(calls.participants) != 0) {
+			t.Fatalf("restricted malformed participant reached WhatsApp: %d %+v", code, calls)
+		}
 	}
 }
 

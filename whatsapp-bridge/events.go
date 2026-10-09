@@ -267,7 +267,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			if rowConsumed {
 				return
 			}
-			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
+			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat) {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
 			} else {
 				b.logWebhookWithheld(resolvedChat, msg.Info.ID)
@@ -356,9 +356,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	shouldForward := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) && !bareContentEnvelope(ex.inner, content)
+	shouldForward := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat) && !bareContentEnvelope(ex.inner, content)
 
-	if !b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
+	if !b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat) {
 		b.logWebhookWithheld(resolvedChat, msg.Info.ID)
 	}
 
