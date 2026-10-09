@@ -70,6 +70,11 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false`                     | Cache the media of status updates (`status@broadcast`) as it arrives and after a successful status send. Off by default: a status post is stored and listed like any message, but its image, video or audio stays on WhatsApp's servers until `download_media` / `read_media` asks for it (while the link lives, about a day), and a status image forwarded to the webhook (`WEBHOOK_FORWARD_STATUS`) goes without its bytes. `true` caches the status feed like any chat. `WHATSAPP_MEDIA_AUTODOWNLOAD=false` turns both off. `1/true/yes/on` or `0/false/no/off`; anything else stops the bridge |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB)                 | Automatic caching refuses both a declared size above the limit and a transfer whose actual bytes exceed it. An undeclared length is skipped only while a nonzero cap is set; an explicitly empty file is allowed. With `0`, undeclared lengths are cached too. `download_media` still fetches either on request. `0` disables the limit. A decimal unsigned integer (up to `18446744073709551615`); malformed values stop startup |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days (`0`–`106751`; `0` keeps forever); message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
+| `WHATSAPP_MEDIA_STATUS_RETENTION_DAYS` | empty (global retention) | Status-only retention, 0-106751 whole days; 0 keeps status forever. Recommend 1-2 days. Conversation media still follows the global retention. |
+| `WHATSAPP_MEDIA_PURGE_STATUS_ON_START` | `false` | One-shot status cache purge on upgrade; keeps rows and reports orphans without deleting them. Completion marker in bridge-owned messages.db metadata; failed removals are retried next start. Respects read-only and purge_media tool policy. |
+| `WHATSAPP_MEDIA_QUOTA_BYTES` | empty / `0` (off) | Local automatic-cache byte ceiling; excludes in-progress files. Cache transfers serialize while enabled and actual plaintext is bounded by remaining capacity. Existing/on-demand downloads retain local behavior; streaming without caching and S3 are pending #649. Runtime key media.quota_bytes may tighten a nonzero deployment ceiling, never disable or raise it. |
+| `WHATSAPP_MEDIA_QUOTA_EVICT_TYPES` | empty (off) | Comma-separated image, video, audio, document, sticker, status. At the local automatic quota, remove oldest cached files of these types only; status is a separate bucket and needs status explicitly. Runtime key media.quota_evict_types is an array, restricted to the explicit deploy list when present. |
+| `WHATSAPP_MEDIA_QUOTA_EVICT_TARGET_PERCENT` | `90` | Local eviction low-water target, 1-99; runtime key media.quota_evict_target_percent can only lower an explicit deploy value. If eligible files cannot free enough, automatic caching pauses. Rows stay. |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6`                          | How stale a cached group roster may get before the bridge refreshes it in the background, so `get_contact_chats` can answer "which groups is this person in?" without a live call per group. One group per second, only while connected, first pass a couple of minutes after start-up. A number of hours too large to represent as a duration is refused at startup. `0` turns the pass off: rosters are then only cached when `list_group_members` is called, when a group join/leave/promote/demote event arrives, and when a group message comes from someone with no row yet. Refreshing is a read, so it keeps running under `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_SESSION_KEEPALIVE_HOURS` | `12`                         | How often the bridge marks its linked device available for a few seconds, so WhatsApp counts it as in use and does not log it out about a month after pairing. `0` turns it off. See [Keeping the linked device](#keeping-the-linked-device) |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files. Set for both processes: the MCP server writes `media_base64` uploads and voice-note conversions under `<first root>/.uploads` for the bridge to read ([Outbound media](#outbound-media)) |
@@ -630,6 +635,62 @@ whisper-server only accepts `POST` there, and its `404` is proof enough that it
 is listening), the CLI backend a look at the binary and the model file on disk.
 Nothing about it can make `bridge_status` fail.
 
+## Status media and disk usage
+
+Status media once accounted for 53% of a measured 10.2 GB archive (5.4 GB in
+4,337 files); another instance measured 77%. These are historical measurements,
+not a forecast for your account. Check your own split with `get_media_stats`,
+`bridge_status` (`media_status_bytes`, `media_status_files`, `media_status_share`)
+or the private operator's `GET /operator/v1/media/usage?limit=20`.
+Metrics `whatsapp_bridge_media_cached_bytes` and `..._files` split
+`scope="status"` from `scope="chats"` on the existing size refresh.
+
+Upgrade note: the default remains off and existing status files are retained.
+Reclaim their space with `purge_media(scope="status", dry_run=true)` followed by
+`dry_run=false` with the same input. The shortcut internally pages through the
+whole feed, including large uncached tails; the conversation chat allow-list does
+not hide the feed from this cleanup. Read-only and tool denial still apply.
+Generated files with no matching row are reported as `orphan_files` / `orphan_bytes`
+and kept unless `include_orphans=true` is explicit. Symlinks, user files, nested
+paths and unfinished downloads are always refused or ignored.
+
+With the bridge stopped, `whatsapp-bridge purge-status-media --dry-run` previews
+the same set, and `whatsapp-bridge purge-status-media` deletes it; add
+`--include-orphans` only to remove row-less generated cache files too. The CLI
+holds the instance lock, refuses a running bridge and honors runtime tool policy.
+For fleet upgrades, `WHATSAPP_MEDIA_PURGE_STATUS_ON_START=true` performs the
+row-backed purge once and records a completion marker in `messages.db` metadata.
+It never writes `notes.db`. Orphans remain reported and retained.
+
+Set `WHATSAPP_MEDIA_STATUS_RETENTION_DAYS=1` or `2` to age out status-only bytes,
+including on-demand downloads. Empty inherits global retention; explicit 0 keeps
+status forever. Message rows remain: recent status media becomes fetch-on-demand,
+but older bytes may be gone after WhatsApp drops them. Orphans cannot be fetched
+from the archive because they have no row.
+
+The private operator also serves `POST /operator/v1/media/purge` with a required
+`type` (`image`, `video`, `audio`, `document`, `sticker`, `status`, or explicit
+`all`), optional `chat_jid` and `older_than_days`, and `dry_run` (default true).
+It returns `files`, `freed_bytes`, orphan counts and failures. The operator already
+has full-archive export authority, so per-chat usage exposes only JIDs and byte
+counts within that authority; it adds no contact names, message content or file
+paths. This control-plane cleanup remains available under data-plane read-only,
+chat and tool restrictions, as export/settings do. Both endpoints require the
+separate operator token and normal Host/Origin, rate-limit and audit checks;
+they are absent from bridge REST and MCP.
+
+These endpoints measure the current local layout through the canonical safe-cache
+helpers. Usage includes generated orphan files, with status as a disjoint type
+bucket; `by_type` sums to total bytes and `by_chat` is ordered and limited (1-100).
+There is no shared-object catalog, S3 backend or dedupe saving field yet (#649).
+Local eviction is off by default; selecting types deletes their oldest cached
+files down to the low-water target before admitting an automatic cache write.
+A full quota with no eligible bytes pauses automatic caching. On-demand downloads
+continue to cache locally, so they can exceed this automatic ceiling; #649 owns
+streaming without caching, S3 and dedupe-aware purge/eviction. Eviction counters
+are `whatsapp_bridge_media_evicted_bytes_total{type}`; health exposes
+`media_quota_bytes` and `media_caching_paused`.
+
 ## Runtime overrides
 
 The private operator listener serves `GET` and `PATCH /operator/v1/settings`.
@@ -658,7 +719,19 @@ GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
 {"tools.allow":["list_messages","transcribe_audio"],"tools.deny":[],"transcription.ingest_chats":"direct"}
 ```
 
-The nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
+Media keys are `media.autodownload_status` (boolean), `media.quota_bytes`
+(unsigned bytes), `media.quota_evict_types` (type array) and
+`media.quota_evict_target_percent` (1-99). Status is off by default: absent env
+permits runtime opt-in, explicit `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=false`
+cannot be widened, and true permits runtime off/on. `WHATSAPP_MEDIA_AUTODOWNLOAD=false`
+still wins. Quota 0/empty means unlimited; a nonzero deploy quota can only be
+lowered at runtime, including after PATCH null. An explicit deploy eviction list
+restricts runtime to its subset; an explicit target percent can only be lowered.
+Bridge consumers read each saved setting before the next automatic cache transfer;
+settings survive restart and GET reports effective values. Media keys are bridge
+settings and do not need defaults in the MCP process.
+
+The other nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
 names; an empty array removes only the runtime restriction),
 `transcription.ingest_chats` (`all` or `direct`),
 `transcription.monthly_max_minutes` (0..525600), `transcription.cap_scope`

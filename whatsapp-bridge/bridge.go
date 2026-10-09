@@ -125,7 +125,13 @@ type Bridge struct {
 	MediaAutoDownloadStatus bool
 	// MediaMaxBytes: files larger than this are not automatically cached
 	// (WHATSAPP_MEDIA_MAX_BYTES); /api/download still fetches them on demand.
-	MediaMaxBytes uint64
+	MediaMaxBytes           uint64
+	MediaQuotaBytes         uint64
+	MediaEvictTypes         []string
+	mediaQuotaMu            sync.Mutex
+	mediaQuotaLease         chan struct{} // initialization guarded by mediaQuotaMu
+	mediaQuotaNeedsLowWater atomic.Bool   // health reads must not wait for a transfer lease
+	StatusRetention         *time.Duration
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
 	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.

@@ -146,12 +146,17 @@ func (b *Bridge) runAutoDownload(ctx context.Context, job mediaJob) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, autoDownloadTimeout)
 	defer cancel()
-	success, _, _, path, err := b.DownloadMedia(withMediaLimit(ctx, b.MediaMaxBytes), job.messageID, job.chatJID)
+	if job.chatJID == "status@broadcast" && !b.statusMediaEnabled(ctx) {
+		return
+	}
+	success, _, _, path, err := b.DownloadMedia(withAutomaticCache(withMediaLimit(ctx, b.MediaMaxBytes)), job.messageID, job.chatJID)
 	switch {
 	case success && err == nil:
 		b.Log.Infof("✅ Auto-downloaded media: %s", path)
 	case errors.Is(err, errAutoMediaLimit):
 		b.recordAutoSizeSkip(job.messageID, job.chatJID)
+	case errors.Is(err, errMediaQuota):
+		b.Log.Debugf("Automatic media caching paused at local quota")
 	case err != nil:
 		b.Log.Warnf("❌ Auto-download failed for message %s in %s: %v", job.messageID, job.chatJID, err)
 	default:

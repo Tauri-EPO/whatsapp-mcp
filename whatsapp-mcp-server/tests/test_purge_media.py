@@ -8,6 +8,15 @@ CHAT = "5511888888888@s.whatsapp.net"
 OTHER = "120363000000000001@g.us"
 
 
+def test_status_scope_bypasses_conversation_filter_and_reports_orphans(monkeypatch):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([CHAT]))
+    payload = {"success": True, "purged_files": 620, "purged_bytes": 620, "orphan_files": 1, "orphan_bytes": 3}
+    calls = _bridge(monkeypatch, payload)
+    result = main.purge_media(scope="status", include_orphans=True)
+    assert result == payload
+    assert calls[0][1] == {"scope": "status", "dry_run": True, "include_orphans": True}
+
+
 class Resp:
     def __init__(self, status=200, payload=None, text=""):
         self.status_code = status

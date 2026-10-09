@@ -60,13 +60,15 @@ type PurgeItem struct {
 }
 
 type MediaPurgeRequest struct {
-	Items         []PurgeItem `json:"items"`
-	ChatJID       string      `json:"chat_jid"`
-	OlderThanDays int         `json:"older_than_days"`
-	MinBytes      int64       `json:"min_bytes"`
-	MediaType     string      `json:"media_type"`
-	DryRun        *bool       `json:"dry_run"`
-	Cursor        string      `json:"cursor"`
+	Scope          string      `json:"scope"`
+	IncludeOrphans bool        `json:"include_orphans"`
+	Items          []PurgeItem `json:"items"`
+	ChatJID        string      `json:"chat_jid"`
+	OlderThanDays  int         `json:"older_than_days"`
+	MinBytes       int64       `json:"min_bytes"`
+	MediaType      string      `json:"media_type"`
+	DryRun         *bool       `json:"dry_run"`
+	Cursor         string      `json:"cursor"`
 }
 
 type PurgeResult struct {
@@ -324,6 +326,19 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			return
 		}
 		dryRun := req.DryRun == nil || *req.DryRun
+		if req.Scope != "" || req.IncludeOrphans {
+			if req.Scope != "status" || len(req.Items) > 0 || req.Cursor != "" || req.ChatJID != "" || req.MediaType != "" || req.OlderThanDays != 0 || req.MinBytes != 0 {
+				writeError(w, 400, "scope=status is a standalone purge shortcut")
+				return
+			}
+			result, err := b.purgeOperatorMedia(r.Context(), operatorMediaPurge{Type: "status", Chat: "status@broadcast", DryRun: req.DryRun, IncludeOrphans: req.IncludeOrphans})
+			if err != nil {
+				writeError(w, 503, "Status purge incomplete")
+				return
+			}
+			writeJSON(w, 200, map[string]any{"success": true, "dry_run": result.DryRun, "purged_files": result.Files, "purged_bytes": result.FreedBytes, "orphan_files": result.OrphanFiles, "orphan_bytes": result.OrphanBytes, "failed": result.Failed, "matched": result.Files, "truncated": false})
+			return
+		}
 		if len(req.Items) > purgeMaxItems {
 			writePurgeResponse(w, http.StatusBadRequest, MediaPurgeResponse{Message: fmt.Sprintf("items must contain at most %d entries; use criteria for bulk purges", purgeMaxItems), DryRun: dryRun})
 			return

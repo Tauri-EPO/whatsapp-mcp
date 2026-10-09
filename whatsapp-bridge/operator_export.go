@@ -336,5 +336,6 @@ func (b *Bridge) handleExport() http.HandlerFunc {
 func (b *Bridge) operatorRoutes() operatorRoutes {
 	routes := b.operatorPairing.routes()
 	routes.export, routes.snapshot = b.handleExport(), b.handleSnapshot()
+	routes.mediaUsage, routes.mediaPurge = b.handleOperatorMediaUsage, b.handleOperatorMediaPurge
 	return routes
 }

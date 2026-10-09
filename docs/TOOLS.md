@@ -2796,4 +2796,10 @@ of repeatedly retrying. `bridge_status.send_usage` reports UTC daily counts and
 effective limits. Oversized batches return `limit_exceeds_batch` with no retry
 delay; split the batch. See [send budgets](CONFIGURATION.md#outbound-send-budgets-and-mcp-token-rotation).
 
+Status cleanup: `purge_media(scope="status", dry_run=true)` previews the full feed
+internally, regardless of the conversation allow-list; `dry_run=false` removes
+only bytes, keeping rows. Other criteria/items/cursor cannot accompany scope.
+Orphans are reported separately and kept unless `include_orphans=true`; they have
+no row to re-fetch. Tool and read-only restrictions still apply.
+
 Transcription results include `duration_s`, `provider` and `model`; successful uncached runs are metered in notes.db. Cache hits return stored metadata; legacy transcripts have null duration_s when no duration was recorded. A monthly cap with scope `all` returns `transcription_quota_exceeded` before provider upload when the file does not fit. `bridge_status.transcription_usage` reports UTC monthly usage and remaining quota.

@@ -259,10 +259,19 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["operator_pairing_state"] = b.operatorPairing.snapshot().State
 	}
 	if stats != nil {
-		storeBytes, mediaBytes, mediaFiles := stats.snapshot(time.Now())
+		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles := stats.snapshotScoped(time.Now())
 		body["store_bytes"] = storeBytes
 		body["media_bytes"] = mediaBytes
 		body["media_files"] = mediaFiles
+		body["media_status_bytes"], body["media_status_files"] = statusBytes, statusFiles
+		share := float64(0)
+		if mediaBytes > 0 {
+			share = float64(statusBytes) / float64(mediaBytes)
+		}
+		body["media_status_share"] = share
+		if quota, types, target, err := b.mediaQuotaSettings(b.ctx); err == nil {
+			body["media_quota_bytes"], body["media_caching_paused"] = quota, b.mediaCachingPaused(quota, mediaBytes, types, target)
+		}
 		_, _, _, warning := b.archiveStats(time.Now())
 		body["store_warning"] = warning
 	}

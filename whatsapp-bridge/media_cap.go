@@ -67,6 +67,11 @@ func (b *Bridge) cacheOutboundMedia(ctx context.Context, sent sentMessage, media
 			defer cached.Close()
 			return cached.info.Size(), nil
 		}
+		_, release, err := b.acquireMediaQuota(b.ctx, uint64(len(data)))
+		if err != nil {
+			return 0, err
+		}
+		defer release()
 		return writeMediaFile(root, rel, func(f *os.File) error {
 			if err := b.ctx.Err(); err != nil {
 				return err

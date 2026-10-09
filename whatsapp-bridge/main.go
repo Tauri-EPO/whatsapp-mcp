@@ -67,6 +67,9 @@ func main() {
 // runCLI is the actual startup sequence, including process-wide creation policy.
 func runCLI() int {
 	privateProcessUmask()
+	if len(os.Args) > 1 && os.Args[1] == "purge-status-media" {
+		return purgeStatusCLI(os.Args[2:], os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "snapshot" {
 		level := resolveLogLevel(os.Getenv(logLevelEnv))
 		if jsonLogsEnabled(os.Getenv(logFormatEnv)) {
@@ -288,6 +291,13 @@ func runBridge(cfg bridgeConfig) int {
 	bridge.SendIncludeActions, bridge.MCPEnvHash = cfg.SendIncludeActions, cfg.MCPEnvHash
 	if cfg.MCPFallbackBridge {
 		bridge.MCPEnvHash = tokenHash(bridgeToken)
+	}
+	bridge.StatusRetention = cfg.StatusRetention
+	if cfg.PurgeStatusOnStart {
+		if err := bridge.purgeStatusOnStart(); err != nil {
+			logger.Errorf("Status startup purge incomplete: %v", err)
+			return 1
+		}
 	}
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)

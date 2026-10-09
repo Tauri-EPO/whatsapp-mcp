@@ -434,7 +434,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	switch {
 	case cacheOnArrival && mediaType == "image" && shouldForward:
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, dlName, dlPath, dlErr := b.DownloadMedia(withMediaLimit(context.Background(), b.MediaMaxBytes), msg.Info.ID, chatJID)
+		success, _, dlName, dlPath, dlErr := b.DownloadMedia(withAutomaticCache(withMediaLimit(context.Background(), b.MediaMaxBytes)), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			// One read through the store root gives the sniffed MIME type and
 			// the bytes for the payload, which must hash to what the message

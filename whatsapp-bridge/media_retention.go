@@ -63,8 +63,11 @@ func isStatusChat(chat types.JID) bool {
 // status media needs both switches. The row keeps its CDN fields, so
 // /api/download still fetches the file on demand.
 func (b *Bridge) skipsStatusMedia(chat types.JID) bool {
-	cachedOnArrival := b.MediaAutoDownload && b.MediaAutoDownloadStatus
-	return isStatusChat(chat) && !cachedOnArrival
+	if !isStatusChat(chat) {
+		return false
+	}
+	cachedOnArrival := b.MediaAutoDownload && b.statusMediaEnabled(b.ctx)
+	return !cachedOnArrival
 }
 
 // resolveMediaRetention parses WHATSAPP_MEDIA_RETENTION_DAYS. Zero means
@@ -120,9 +123,16 @@ func isChatDir(entry os.DirEntry) bool {
 // directory handle; user files, .part downloads, nested directories and
 // symlinks are neither traversed nor removed.
 func sweepMedia(root *os.Root, maxAge time.Duration, now time.Time) (removed int, freed int64, failed int) {
-	cutoff := now.Add(-maxAge)
-	if err := eachCachedMedia(root, func(_ string, file *cachedMedia) {
-		if !file.info.ModTime().Before(cutoff) {
+	return sweepMediaWithStatus(root, maxAge, nil, now)
+}
+
+func sweepMediaWithStatus(root *os.Root, maxAge time.Duration, statusAge *time.Duration, now time.Time) (removed int, freed int64, failed int) {
+	if err := eachCachedMedia(root, func(chat string, file *cachedMedia) {
+		age := maxAge
+		if chat == "status@broadcast" && statusAge != nil {
+			age = *statusAge
+		}
+		if age <= 0 || !file.info.ModTime().Before(now.Add(-age)) {
 			return
 		}
 		if err := file.Remove(); err != nil {
@@ -142,8 +152,13 @@ func sweepMedia(root *os.Root, maxAge time.Duration, now time.Time) (removed int
 // mediaBytes and mediaFiles use the same cache rule as download and purge.
 // A nil root measures nothing.
 func storeUsage(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int) {
+	storeBytes, mediaBytes, mediaFiles, _, _ = storeUsageByScope(root)
+	return
+}
+
+func storeUsageByScope(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int, statusBytes int64, statusFiles int) {
 	if root == nil {
-		return 0, 0, 0
+		return
 	}
 	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
@@ -156,11 +171,15 @@ func storeUsage(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int) {
 		storeBytes += info.Size()
 		return nil
 	})
-	_ = eachCachedMedia(root, func(_ string, file *cachedMedia) {
+	_ = eachCachedMedia(root, func(chat string, file *cachedMedia) {
 		mediaBytes += file.info.Size()
 		mediaFiles++
+		if chat == "status@broadcast" {
+			statusBytes += file.info.Size()
+			statusFiles++
+		}
 	})
-	return storeBytes, mediaBytes, mediaFiles
+	return
 }
 
 // storeStats caches storeUsage so /api/health stays cheap under Docker's
@@ -172,6 +191,8 @@ type storeStats struct {
 	store                             int64
 	media                             int64
 	files                             int
+	statusBytes                       int64
+	statusFiles                       int
 	dbMeasuredAt                      time.Time
 	messagesBytes, sessionBytes, rows int64
 	warning                           bool
@@ -181,13 +202,18 @@ func newStoreStats(root *os.Root) *storeStats { return &storeStats{root: root} }
 
 // snapshot returns the cached usage, refreshing it when older than storeUsageTTL.
 func (s *storeStats) snapshot(now time.Time) (storeBytes, mediaBytes int64, mediaFiles int) {
+	storeBytes, mediaBytes, mediaFiles, _, _ = s.snapshotScoped(now)
+	return
+}
+
+func (s *storeStats) snapshotScoped(now time.Time) (int64, int64, int, int64, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.measuredAt.IsZero() || now.Sub(s.measuredAt) > storeUsageTTL {
-		s.store, s.media, s.files = storeUsage(s.root)
+		s.store, s.media, s.files, s.statusBytes, s.statusFiles = storeUsageByScope(s.root)
 		s.measuredAt = now
 	}
-	return s.store, s.media, s.files
+	return s.store, s.media, s.files, s.statusBytes, s.statusFiles
 }
 
 // invalidate forces the next snapshot to re-measure (called after a sweep).
@@ -202,11 +228,11 @@ func (s *storeStats) invalidate() {
 // b.ctx is cancelled (Shutdown). b.MediaRetention <= 0 disables it.
 func (b *Bridge) runMediaRetention() {
 	maxAge := b.MediaRetention
-	if maxAge <= 0 {
+	if maxAge <= 0 && (b.StatusRetention == nil || *b.StatusRetention <= 0) {
 		return
 	}
 	sweep := func() {
-		removed, freed, failed := sweepMedia(b.StoreRoot, maxAge, time.Now())
+		removed, freed, failed := sweepMediaWithStatus(b.StoreRoot, maxAge, b.StatusRetention, time.Now())
 		b.storeStats.invalidate()
 		if removed > 0 || failed > 0 {
 			b.Log.Infof("Media retention: removed %d files (%d bytes) older than %s, %d failures", removed, freed, maxAge, failed)

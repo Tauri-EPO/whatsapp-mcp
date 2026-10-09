@@ -29,6 +29,8 @@ type metricsRegistry struct {
 	mediaDownloadFails atomic.Int64
 	mediaAutoSizeSkips atomic.Int64
 	mediaRefusals      atomic.Int64
+	mediaQuotaRefusals atomic.Int64
+	mediaEvicted       map[string]uint64
 	webhookFailures    atomic.Int64
 	reconnects         atomic.Int64
 
@@ -56,8 +58,9 @@ func (b *Bridge) renderMetrics() string {
 	connected := b.Connected()
 	paired := b.isPaired()
 	storeBytes, mediaBytes, mediaFiles := int64(0), int64(0), 0
+	statusBytes, statusFiles := int64(0), 0
 	if b.storeStats != nil {
-		storeBytes, mediaBytes, mediaFiles = b.storeStats.snapshot(time.Now())
+		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles = b.storeStats.snapshotScoped(time.Now())
 	}
 	bool01 := func(v bool) int {
 		if v {
@@ -110,6 +113,8 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_store_bytes", "Bytes under the store directory (databases + media).", "gauge", fmt.Sprint(storeBytes))
 	add("whatsapp_bridge_media_bytes", "Bytes of cached media.", "gauge", fmt.Sprint(mediaBytes))
 	add("whatsapp_bridge_media_files", "Cached media files.", "gauge", fmt.Sprint(mediaFiles))
+	out = append(out, "# HELP whatsapp_bridge_media_cached_bytes Cached bytes by scope.", "# TYPE whatsapp_bridge_media_cached_bytes gauge", fmt.Sprintf("whatsapp_bridge_media_cached_bytes{scope=\"status\"} %d", statusBytes), fmt.Sprintf("whatsapp_bridge_media_cached_bytes{scope=\"chats\"} %d", mediaBytes-statusBytes), "# HELP whatsapp_bridge_media_cached_files Cached files by scope.", "# TYPE whatsapp_bridge_media_cached_files gauge", fmt.Sprintf("whatsapp_bridge_media_cached_files{scope=\"status\"} %d", statusFiles), fmt.Sprintf("whatsapp_bridge_media_cached_files{scope=\"chats\"} %d", mediaFiles-statusFiles))
+	out = append(out, b.mediaQuotaMetrics()...)
 	add("whatsapp_bridge_messages_stored_total", "Inbound/outbound messages written from live events.", "counter", fmt.Sprint(m.messagesStored.Load()))
 	add("whatsapp_bridge_session_keepalives_total", "Times the device was marked available and unavailable again so WhatsApp counts it as in use.", "counter", fmt.Sprint(m.sessionKeepalives.Load()))
 	add("whatsapp_bridge_history_messages_total", "Messages written from history sync.", "counter", fmt.Sprint(m.historyMessages.Load()))

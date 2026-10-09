@@ -118,7 +118,7 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	for {
 		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
-		if mediaLimit(ctx) != 0 || !errors.Is(err, errAutoMediaLimit) || ctx.Err() != nil {
+		if automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota)) || ctx.Err() != nil {
 			return ok, kind, name, path, err
 		}
 		// An uncapped waiter retries after the capped starter cleans up.
@@ -296,6 +296,14 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		// transfer context, never under the context of one of the callers.
 		ctx, cancel := transferContext(b.ctx, ctx)
 		defer cancel()
+		if automaticCache(ctx) {
+			bounded, release, err := b.acquireMediaQuota(ctx, length)
+			if err != nil {
+				return 0, err
+			}
+			defer release()
+			ctx = bounded
+		}
 		written, err := b.transferMedia(ctx, downloader, relPath)
 		if status := cdnRefusalStatus(err); status != 0 {
 			// What the next report has to be read from: the status, how old
@@ -341,6 +349,10 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			}
 		}
 		if err != nil {
+			if bounded, _ := ctx.Value(quotaBudgetKey{}).(bool); bounded && errors.Is(err, errAutoMediaLimit) {
+				b.metrics.mediaQuotaRefusals.Add(1)
+				return 0, errMediaQuota
+			}
 			if !errors.Is(err, errAutoMediaLimit) {
 				b.metrics.mediaDownloadFails.Add(1)
 			}
