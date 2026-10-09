@@ -1067,6 +1067,72 @@ func TestLocalQuotaSynchronousAccountingContentionFallsBack(t *testing.T) {
 	}
 }
 
+func TestLocalQuotaSynchronousRuntimeAccountingHasShortBudget(t *testing.T) {
+	b := newSettingsBridge(t)
+	network := make(chan struct{}, 1)
+	b.mediaTransfer = func(context.Context, whatsmeow.DownloadableMessage, string) (int64, error) {
+		network <- struct{}{}
+		return 0, errors.New("bounded accounting must not reach the network")
+	}
+	server := settingsServer(t, b)
+	settingsRequest(t, server, "PATCH", `{"media.quota_bytes":10}`)
+	seedOperatorMedia(t, b, "ACCOUNTING", purgeChat, "image", time.Hour, 4)
+	row, err := b.Store.MediaRow("ACCOUNTING", purgeChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := purgeOne(b.StoreRoot, row, false); !res.Purged {
+		t.Fatal(res)
+	}
+	b.Store.db.SetMaxOpenConns(1)
+	b.mediaQuotaMu.Lock()
+	var initializeOnce sync.Once
+	defer initializeOnce.Do(b.mediaQuotaMu.Unlock)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := b.DownloadMedia(context.WithValue(withAutomaticCache(ctx), quotaTryKey{}, true), "ACCOUNTING", purgeChat)
+		result <- err
+	}()
+	key := filepath.Join(storeDir(), chatMediaRel(purgeChat), mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename))
+	for b.mediaTransfers.waiting(key) != 1 {
+		if ctx.Err() != nil {
+			t.Fatal("automatic transfer never reached accounting")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The row lookup has completed; pin the sole database connection before
+	// releasing quota initialization, so only runtime accounting is blocked.
+	conn, err := b.Store.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var connectionOnce sync.Once
+	defer connectionOnce.Do(func() { _ = conn.Close() })
+	initializeOnce.Do(b.mediaQuotaMu.Unlock)
+	select {
+	case err := <-result:
+		if !errors.Is(err, errMediaQuotaBusy) {
+			t.Fatal("sync accounting reached network or returned the wrong refusal", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		connectionOnce.Do(func() { _ = conn.Close() })
+		<-result
+		t.Fatal("sync media path waited indefinitely for runtime accounting")
+	}
+	b.mediaTransfers.wait()
+	select {
+	case <-network:
+		t.Fatal("busy runtime accounting reached the network")
+	default:
+	}
+	if !b.clientGate.TryLock() {
+		t.Fatal("bounded accounting retained its client reader gate")
+	}
+	b.clientGate.Unlock()
+}
+
 func TestLocalQuotaPauseLogIsRateLimited(t *testing.T) {
 	b := newSettingsBridge(t)
 	b.RuntimeDefaults = nil
@@ -1196,10 +1262,12 @@ func TestMediaPurgeTimeoutAbortsIncompleteHTTPResponse(t *testing.T) {
 			}
 			defer func() { _ = conn.Close() }()
 			handler := requestLog(b.runtimeRESTHandler(8080, purgeToken), b.metrics)
-			endpoint, body, token := "/api/media/purge", `{"scope":"status","dry_run":false}`, purgeToken
+			endpoint, body := "/api/media/purge", `{"scope":"status","dry_run":false}`
+			authValue := purgeToken
 			if operator {
 				handler = newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, operatorRoutes{mediaPurge: b.handleOperatorMediaPurge}, b.Log)
-				endpoint, body, token = "/operator/v1/media/purge", `{"type":"status","dry_run":false}`, fakeOperatorToken
+				endpoint, body = "/operator/v1/media/purge", `{"type":"status","dry_run":false}`
+				authValue = fakeOperatorToken
 			}
 			releaseDeadline := make(chan struct{})
 			defer close(releaseDeadline)
@@ -1212,7 +1280,7 @@ func TestMediaPurgeTimeoutAbortsIncompleteHTTPResponse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Authorization", "Bearer "+authValue)
 			response, err := server.Client().Do(req)
 			if err != nil {
 				if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {

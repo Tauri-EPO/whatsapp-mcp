@@ -195,18 +195,31 @@ func (b *Bridge) mediaQuotaSettings(ctx context.Context) (uint64, []string, int,
 // from that walk, preventing both double counting and eviction before release.
 // On-demand downloads keep the existing local behavior pending #649 streaming.
 func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (context.Context, func(), error) {
-	release, err := b.lockMediaQuota(ctx)
-	if err != nil {
-		return ctx, func() {}, err
+	accountingCtx := ctx
+	try, _ := ctx.Value(quotaTryKey{}).(bool)
+	if try {
+		var cancel context.CancelFunc
+		accountingCtx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
 	}
-	if err := ctx.Err(); err != nil {
-		release()
-		return ctx, func() {}, err
+	accountingError := func(err error) error {
+		if try && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return errMediaQuotaBusy
+		}
+		return err
 	}
-	quota, types, target, err := b.mediaQuotaSettings(ctx)
+	release, err := b.lockMediaQuota(accountingCtx)
+	if err != nil {
+		return ctx, func() {}, accountingError(err)
+	}
+	if err := accountingCtx.Err(); err != nil {
+		release()
+		return ctx, func() {}, accountingError(err)
+	}
+	quota, types, target, err := b.mediaQuotaSettings(accountingCtx)
 	if err != nil {
 		release()
-		return ctx, func() {}, err
+		return ctx, func() {}, accountingError(err)
 	}
 	if quota == 0 {
 		b.mediaQuotaNeedsLowWater.Store(false)
@@ -238,7 +251,7 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 		at               time.Time
 	}
 	var candidates []candidate
-	err = eachCachedMediaContext(ctx, b.StoreRoot, func(chat string, file *cachedMedia) {
+	err = eachCachedMediaContext(accountingCtx, b.StoreRoot, func(chat string, file *cachedMedia) {
 		if active[path.Join(chat, file.name)] {
 			return
 		}
@@ -255,7 +268,7 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 	})
 	if err != nil {
 		release()
-		return ctx, func() {}, err
+		return ctx, func() {}, accountingError(err)
 	}
 	if used >= quota || incoming > quota-used || b.mediaQuotaNeedsLowWater.Load() {
 		low := mediaQuotaLowWater(quota, target)
@@ -267,7 +280,7 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 		})
 		var freed uint64
 		for _, file := range candidates {
-			if ctx.Err() != nil {
+			if accountingCtx.Err() != nil {
 				break
 			}
 			if used <= low && incoming <= quota-used {
@@ -300,9 +313,9 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 		// cleanup or a settings change brings usage under the new low-water mark.
 		b.mediaQuotaNeedsLowWater.Store(len(types) > 0 && used > low)
 	}
-	if ctx.Err() != nil {
+	if accountingCtx.Err() != nil {
 		release()
-		return ctx, func() {}, ctx.Err()
+		return ctx, func() {}, accountingError(accountingCtx.Err())
 	}
 	if used >= quota || incoming > quota-used || b.mediaQuotaNeedsLowWater.Load() {
 		b.recordQuotaPause()

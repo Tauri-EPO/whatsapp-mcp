@@ -696,10 +696,13 @@ Local eviction is off by default; selecting types deletes their oldest cached
 files down to the low-water target before admitting an automatic cache write.
 Automatic transfers reserve their declared plaintext length under a short accounting
 lease before any network work; unknown-length transfers reserve the available
-budget. Actual plaintext is capped at the reservation, which is released after
-publication or failure. Independent transfers run concurrently within the quota.
-Synchronous webhook images try accounting without waiting and queue only on
-contention; quota refusals are not queued.
+budget. Actual plaintext is capped at the reservation. Completion marks the
+reservation atomically, so cleanup never waits behind a disk scan; the next
+admission reconciles it with actual published files. Independent transfers run
+concurrently within the quota. Synchronous webhook images try the lease without
+waiting and give database/disk accounting a 100 ms budget, then fall back to the
+queue on contention or that deadline; quota refusals are not queued. The short
+accounting budget does not shorten the network transfer deadline.
 A full quota with no eligible bytes pauses automatic caching. On-demand downloads
 continue to cache locally, so they can exceed this automatic ceiling; #649 owns
 streaming without caching, S3 and dedupe-aware purge/eviction. Eviction counters
