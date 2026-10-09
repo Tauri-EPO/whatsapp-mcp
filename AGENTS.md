@@ -61,6 +61,9 @@ whatsapp-mcp/
 │   ├── operator_export.go        # operator-only, read-transaction streamed portable archive
 │   ├── operator_zip.go           # constant-memory ZIP64 with replayed central directory
 │   ├── operator_snapshot.go      # read-only source VACUUM INTO, private snapshot files and CLI
+│   ├── operator_archive_config.go # archive retention, session opt-in, timeout and destination confinement
+│   ├── snapshot_space_unix.go # snapshot filesystem free space and directory flush on POSIX
+│   ├── snapshot_space_windows.go # snapshot free space and publication on Windows
 │   ├── operator_session_read.go  # bounded archive-reader cancellation before operator logout
 │   ├── operator_config.go      # bounded operator configuration, token-file checks and single-interface bind
 │   ├── operator_probe.go        # credential-free argv/output for the operator smoke probe

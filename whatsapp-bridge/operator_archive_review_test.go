@@ -165,6 +165,20 @@ func TestSnapshotLocationAndArchiveConfiguration(t *testing.T) {
 			t.Fatal("unsafe snapshot location accepted")
 		}
 	}
+	_, err := parseBridgeConfig(func(name string) string {
+		switch name {
+		case storeDirEnv:
+			return " " + store + " "
+		case "WHATSAPP_SNAPSHOT_DIR":
+			return filepath.Join(store, "backups")
+		case "WHATSAPP_MEDIA_ROOTS":
+			return media
+		}
+		return ""
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside store") {
+		t.Fatal("whitespace store setting bypasses snapshot confinement")
+	}
 	if err := validateSnapshotLocation(filepath.Join(base, "backups"), store, media); err != nil {
 		t.Fatal(err)
 	}
@@ -200,6 +214,40 @@ func TestSnapshotLocationAndArchiveConfiguration(t *testing.T) {
 	}
 }
 
+func TestRetentionFailurePreservesNewCompletedSnapshot(t *testing.T) {
+	b, server := archiveFixture(t, true)
+	if _, err := snapshotStores(t.Context(), b.StoreRoot, b.SnapshotDir, false); err != nil {
+		t.Fatal(err)
+	}
+	files, err := snapshotStores(t.Context(), b.StoreRoot, b.SnapshotDir, false, snapshotOptions{keep: 1, prune: func(root *os.Root, dir *os.File, current string, keep int) error {
+		if err := pruneSnapshotSets(root, dir, current, keep); err != nil {
+			return err
+		}
+		return errors.New("injected directory sync failure after real pruning")
+	}})
+	if !errors.Is(err, errSnapshotRetention) {
+		t.Fatalf("unexpected error=%v", err)
+	}
+	entries, readErr := os.ReadDir(b.SnapshotDir)
+	if readErr != nil || len(entries) != 2 {
+		t.Fatalf("retention failure destroyed completed snapshot: files=%d err=%v", len(entries), readErr)
+	}
+	if len(files) != 2 {
+		t.Fatal("retention warning lost snapshot result")
+	}
+	b.snapshotPrune = func(*os.Root, *os.File, string, int) error { return errors.New("injected retention fault") }
+	response := archiveRequest(t, server, "POST", "/operator/v1/snapshot")
+	var result struct {
+		Files   []snapshotFile
+		Warning bool `json:"retention_warning"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&result)
+	_ = response.Body.Close()
+	if err != nil || response.StatusCode != 200 || !result.Warning || len(result.Files) != 2 {
+		t.Fatalf("retention result status=%d warning=%t files=%d err=%v", response.StatusCode, result.Warning, len(result.Files), err)
+	}
+}
+
 func TestSnapshotSessionRequiresHTTPOptIn(t *testing.T) {
 	b, server := archiveFixture(t, false)
 	response := archiveRequest(t, server, "POST", "/operator/v1/snapshot?session=true")
@@ -208,6 +256,14 @@ func TestSnapshotSessionRequiresHTTPOptIn(t *testing.T) {
 	if response.StatusCode != 403 || !strings.Contains(string(body), "WHATSAPP_SNAPSHOT_SESSION") {
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
+	directory := b.SnapshotDir
+	b.SnapshotDir = ""
+	response = archiveRequest(t, server, "POST", "/operator/v1/snapshot?session=true")
+	_ = response.Body.Close()
+	if response.StatusCode != 403 {
+		t.Fatal("missing directory bypassed default-off session policy")
+	}
+	b.SnapshotDir = directory
 	b.Archive.Session = true
 	response = archiveRequest(t, server, "POST", "/operator/v1/snapshot?session=true")
 	var result struct{ Files []snapshotFile }

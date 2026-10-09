@@ -57,7 +57,7 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	cfg.SnapshotDir = strings.TrimSpace(getenv("WHATSAPP_SNAPSHOT_DIR"))
 	cfg.Archive, err = parseArchiveConfig(getenv)
 	collect(err)
-	store := getenv(storeDirEnv)
+	store := strings.TrimSpace(getenv(storeDirEnv))
 	if store == "" {
 		store = defaultStoreDir
 	}

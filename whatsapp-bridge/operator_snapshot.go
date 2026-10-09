@@ -144,13 +144,18 @@ func privateSnapshotDir(directory string) (*os.Root, *os.File, error) {
 }
 
 var errSnapshotSpace = errors.New("insufficient snapshot filesystem space")
+var errSnapshotRetention = errors.New("snapshot retained; retention cleanup failed")
 
 type snapshotOptions struct {
 	keep      int
 	freeBytes func(*os.File) (uint64, error)
+	prune     func(*os.Root, *os.File, string, int) error
 }
 
 func snapshotRequiredBytes(source *os.Root, session bool) (uint64, error) {
+	if source == nil {
+		return 0, errors.New("store unavailable")
+	}
 	var size uint64
 	for _, name := range []string{"messages.db", "notes.db", "whatsapp.db"} {
 		if name == "whatsapp.db" && !session {
@@ -187,13 +192,16 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 		return nil, err
 	}
 	defer func() { _ = root.Close(); _ = dir.Close() }()
-	opt := snapshotOptions{keep: 7, freeBytes: snapshotFreeBytes}
+	opt := snapshotOptions{keep: 7, freeBytes: snapshotFreeBytes, prune: pruneSnapshotSets}
 	if len(options) > 0 {
 		if options[0].keep > 0 {
 			opt.keep = options[0].keep
 		}
 		if options[0].freeBytes != nil {
 			opt.freeBytes = options[0].freeBytes
+		}
+		if options[0].prune != nil {
+			opt.prune = options[0].prune
 		}
 	}
 	required, err := snapshotRequiredBytes(source, session)
@@ -213,8 +221,9 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 	}
 	prefix := "snapshot-" + time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(nonce[:]) + "-"
 	var created []string
+	published := false
 	defer func() {
-		if err != nil {
+		if err != nil && !published {
 			for _, name := range created {
 				_ = root.Remove(name)
 			}
@@ -284,8 +293,9 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 			return nil, err
 		}
 	}
-	if err := pruneSnapshotSets(root, dir, prefix, opt.keep); err != nil {
-		return nil, err
+	published = true
+	if err := opt.prune(root, dir, prefix, opt.keep); err != nil {
+		return files, errors.Join(errSnapshotRetention, err)
 	}
 	return files, nil
 }
@@ -422,12 +432,12 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 			writeError(w, 400, "Snapshot accepts only session=true|false and an empty body")
 			return
 		}
-		if b.SnapshotDir == "" {
-			writeError(w, 503, "WHATSAPP_SNAPSHOT_DIR is not configured")
-			return
-		}
 		if session && !b.Archive.Session {
 			writeError(w, 403, "Session snapshots require WHATSAPP_SNAPSHOT_SESSION=true")
+			return
+		}
+		if b.SnapshotDir == "" {
+			writeError(w, 503, "WHATSAPP_SNAPSHOT_DIR is not configured")
 			return
 		}
 		if !b.snapshotBusy.CompareAndSwap(false, true) {
@@ -450,8 +460,8 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 			}
 			defer release()
 		}
-		files, err := snapshotStores(ctx, b.StoreRoot, b.SnapshotDir, session, snapshotOptions{keep: b.Archive.Keep, freeBytes: b.snapshotSpace})
-		if err != nil {
+		files, err := snapshotStores(ctx, b.StoreRoot, b.SnapshotDir, session, snapshotOptions{keep: b.Archive.Keep, freeBytes: b.snapshotSpace, prune: b.snapshotPrune})
+		if err != nil && !errors.Is(err, errSnapshotRetention) {
 			b.Log.Warnf("Operator snapshot failed")
 			if errors.Is(err, errSnapshotSpace) {
 				writeError(w, 507, "Snapshot refused: insufficient free space for databases, WAL and safety margin")
@@ -460,8 +470,13 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 			writeError(w, 500, "Snapshot failed; no complete snapshot was retained")
 			return
 		}
+		result := map[string]any{"files": files}
+		if errors.Is(err, errSnapshotRetention) {
+			b.Log.Warnf("Operator snapshot retained; retention cleanup failed")
+			result["retention_warning"] = true
+		}
 		b.Log.Infof("Operator snapshot: files=%d session=%t duration_ms=%d", len(files), session, time.Since(start).Milliseconds())
-		writeJSON(w, 200, map[string]any{"files": files})
+		writeJSON(w, 200, result)
 	}
 }
 
@@ -491,13 +506,18 @@ func snapshotCLI(args []string, out io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 	files, err := snapshotStores(ctx, source, *directory, *session, snapshotOptions{keep: cfg.Keep})
-	if err != nil {
+	if err != nil && !errors.Is(err, errSnapshotRetention) {
 		_, _ = fmt.Fprintln(os.Stderr, "Snapshot failed")
 		return 1
 	}
 	returnCode := 0
+	result := map[string]any{"files": files}
+	if errors.Is(err, errSnapshotRetention) {
+		bridgeLog.Warnf("Operator snapshot CLI retained; retention cleanup failed")
+		result["retention_warning"] = true
+	}
 	bridgeLog.Infof("Operator snapshot CLI: files=%d session=%t", len(files), *session)
-	if err := json.NewEncoder(out).Encode(map[string]any{"files": files}); err != nil {
+	if err := json.NewEncoder(out).Encode(result); err != nil {
 		returnCode = 1
 	}
 	return returnCode

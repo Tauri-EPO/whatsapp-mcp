@@ -244,7 +244,9 @@ or any configured media root. The Linux image pins the output directory
 during SQLite writes. Each file is written as `.partial`, flushed, renamed
 to its final name and followed by a directory flush; interrupted files must
 never be restored. The newest `WHATSAPP_SNAPSHOT_KEEP` sets (default 7) are
-retained, with older sets removed only after success. Before writing, the
+retained, with older sets removed only after success. A retention failure
+keeps the newly published set, returns its hashes with `retention_warning:true`
+and emits a WARN so the operator can remove older sets. Before writing, the
 snapshot filesystem must have twice the selected database plus WAL bytes,
 plus 16 MiB free for work space and growth; otherwise HTTP returns 507. This
 is a preflight estimate, not a reservation against concurrent disk users.

@@ -60,6 +60,7 @@ type Bridge struct {
 	SnapshotDir                string
 	Archive                    archiveConfig
 	snapshotSpace              func(*os.File) (uint64, error)
+	snapshotPrune              func(*os.Root, *os.File, string, int) error
 	exportBusy                 atomic.Bool
 	snapshotBusy               atomic.Bool
 	archiveSessionMu           sync.Mutex

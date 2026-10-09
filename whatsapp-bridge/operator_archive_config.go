@@ -17,20 +17,12 @@ type archiveConfig struct {
 
 func parseArchiveConfig(getenv func(string) string) (archiveConfig, error) {
 	cfg := archiveConfig{Keep: 7, Timeout: 30 * time.Minute}
-	for _, field := range []struct {
-		name   string
-		target *int
-		max    int
-	}{
-		{"WHATSAPP_SNAPSHOT_KEEP", &cfg.Keep, 10000},
-	} {
-		if value := getenv(field.name); value != "" {
-			n, err := strconv.Atoi(value)
-			if err != nil || n < 1 || n > field.max {
-				return cfg, errors.New(field.name + " must be between 1 and 10000")
-			}
-			*field.target = n
+	if value := getenv("WHATSAPP_SNAPSHOT_KEEP"); value != "" {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 || n > 10000 {
+			return cfg, errors.New("WHATSAPP_SNAPSHOT_KEEP must be between 1 and 10000")
 		}
+		cfg.Keep = n
 	}
 	if value := getenv("WHATSAPP_OPERATOR_EXPORT_TIMEOUT_MIN"); value != "" {
 		n, err := strconv.Atoi(value)
