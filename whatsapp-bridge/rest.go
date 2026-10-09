@@ -79,6 +79,21 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		return auth(b.ReadOnly.guard(b.Tools.guard(h)))
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/labels", auth(requireMethod(http.MethodGet, handleLabels(messageStore, b.Policy, func(ctx context.Context, chat types.JID) (types.JID, error) {
+		if client == nil || client.Store == nil || client.Store.LIDs == nil {
+			return types.EmptyJID, nil
+		}
+		if chat.Server == types.HiddenUserServer {
+			return client.Store.LIDs.GetPNForLID(ctx, chat)
+		}
+		if chat.Server == types.DefaultUserServer {
+			return client.Store.LIDs.GetLIDForPN(ctx, chat)
+		}
+		return types.EmptyJID, nil
+	}))))
+	mux.HandleFunc("/api/chat/label", mutate(requireMethod(http.MethodPost, handleLabelChat(labelDeps{store: messageStore, policy: b.Policy, connected: func() bool { return b.Connected() }, resolve: func(ctx context.Context, raw string) (types.JID, error) {
+		return resolveRecipientJIDContext(ctx, client, raw)
+	}, send: b.sendAppState}))))
 
 	// On-demand history sync endpoint (see history_ondemand.go). Mutating: it
 	// asks the phone to push history and writes the rows into messages.db.

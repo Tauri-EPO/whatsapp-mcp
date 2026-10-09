@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
@@ -106,6 +107,11 @@ type Bridge struct {
 	sendMessage outboundSendFunc
 	// chatPresence records typing targets in tests; nil uses Client.SendChatPresence.
 	chatPresence chatPresenceSender
+	// LabelResync is the regular snapshot fetch; startLabelSync owns its gate.
+	LabelResync        func(context.Context) error
+	LabelResyncTimeout time.Duration
+	labelSyncOnce      sync.Once
+	labelSyncWait      sync.WaitGroup
 	// SendAppState is the raw client call; sendAppState serializes writers.
 	SendAppState appStateSendFunc
 	appStateGate chan struct{}
@@ -229,6 +235,7 @@ type Bridge struct {
 // bridgeToken is the REST bearer token, also attached to outbound webhooks;
 // storeRoot is the open store directory (main() owns opening and closing it).
 func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root, switches bridgeSwitches) *Bridge {
+	client.EmitAppStateEventsOnFullSync = true
 	b := &Bridge{
 		Client:              client,
 		Disconnect:          client.Disconnect,
@@ -268,6 +275,10 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		startedAt:      time.Now(),
 		storeStats:     newStoreStats(storeRoot),
 		metrics:        newMetricsRegistry(),
+	}
+	b.LabelResyncTimeout = actionDeadline
+	b.LabelResync = func(ctx context.Context) error {
+		return client.FetchAppState(ctx, appstate.WAPatchRegular, true, false)
 	}
 	b.Policy.warnInvalidEntries(logger)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
@@ -317,6 +328,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 			b.Log.Warnf("REST server did not drain cleanly: %v", err)
 		}
 	}
+	b.labelSyncOnce.Do(func() {})
 	b.cancel()
 	b.stopConnectionEvents()
 	// Seal submission before the bounded drain joins cancelled peer imports.
@@ -333,6 +345,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 			shares.stop()
 		}
 		b.historyVotes.Wait()
+		b.labelSyncWait.Wait()
 		// Media transfers outlive the request that started them, so they are
 		// waited on here too: the lifecycle context above already aborted them
 		// and stopped the auto-download workers.

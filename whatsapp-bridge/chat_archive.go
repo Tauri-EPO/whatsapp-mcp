@@ -171,34 +171,35 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
 			return
 		}
-		if err := deps.send(ctx, appstate.BuildArchive(target, *req.Archived, ts, key)); err != nil {
-			var notSent appStateNotSentError
-			if errors.As(err, &notSent) {
-				writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired waiting for writer; nothing sent; safe to retry")
-				return
-			}
-			// At the pinned whatsmeow version this prefix is produced only after
-			// the server accepted the patch, when its subsequent fetch failed.
-			if strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:") {
-				writeJSON(w, http.StatusOK, map[string]any{"success": true, "archived": *req.Archived, "sent": true, "confirmed": false,
-					"warning": "Patch accepted; app-state confirmation failed. Do not retry automatically."})
-				return
-			}
-			if errors.Is(err, whatsmeow.ErrAppStateUpdate) || errors.Is(err, whatsmeow.ErrNotConnected) ||
-				err.Error() == "no app state keys found, creating app state keys is not yet supported" {
-				writeErrorCode(w, http.StatusServiceUnavailable, "bridge_unavailable", "Chat archive was not applied; safe to retry after resolving the bridge error: "+err.Error())
-				return
-			}
-			writeError(w, http.StatusBadGateway, "Chat archive outcome is unknown; do not retry automatically: "+err.Error())
+		writeAppStateResult(w, deps.send(ctx, appstate.BuildArchive(target, *req.Archived, ts, key)), map[string]any{"archived": *req.Archived}, "Chat archive")
+	}
+}
+
+func writeAppStateResult(w http.ResponseWriter, err error, payload map[string]any, action string) {
+	if err != nil {
+		var notSent appStateNotSentError
+		if errors.As(err, &notSent) {
+			writeErrorCode(w, 408, "bridge_unavailable", action+" request expired waiting for writer; nothing sent; safe to retry")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "archived": *req.Archived, "sent": true, "confirmed": false})
+		// This pinned-library prefix proves acceptance before confirmation failed.
+		if strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:") {
+			payload["warning"] = "Patch accepted; app-state confirmation failed. Do not retry automatically."
+		} else if errors.Is(err, whatsmeow.ErrAppStateUpdate) || errors.Is(err, whatsmeow.ErrNotConnected) || err.Error() == "no app state keys found, creating app state keys is not yet supported" {
+			writeErrorCode(w, 503, "bridge_unavailable", action+" was not applied; safe to retry after resolving the bridge error: "+err.Error())
+			return
+		} else {
+			writeError(w, 502, action+" outcome is unknown; do not retry automatically: "+err.Error())
+			return
+		}
 	}
+	payload["success"], payload["sent"], payload["confirmed"] = true, true, false
+	writeJSON(w, 200, payload)
 }
 
 // One app-state writer per bridge: the library reads a collection version
 // before sending without holding its sync lock. Waiting also obeys the request.
-func (b *Bridge) sendAppState(ctx context.Context, patch appstate.PatchInfo) error {
+func (b *Bridge) withAppStateWriter(ctx context.Context, operation func(context.Context) error) error {
 	select {
 	case b.appStateGate <- struct{}{}:
 	case <-ctx.Done():
@@ -208,5 +209,9 @@ func (b *Bridge) sendAppState(ctx context.Context, patch appstate.PatchInfo) err
 	if err := ctx.Err(); err != nil {
 		return appStateNotSentError{err}
 	}
-	return b.SendAppState(ctx, patch)
+	return operation(ctx)
+}
+
+func (b *Bridge) sendAppState(ctx context.Context, patch appstate.PatchInfo) error {
+	return b.withAppStateWriter(ctx, func(ctx context.Context) error { return b.SendAppState(ctx, patch) })
 }

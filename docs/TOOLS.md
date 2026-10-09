@@ -2,7 +2,7 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -1086,6 +1086,43 @@ retrying either case. Hidden and refused in read-only mode.
 The LID index spelling was observed on two paired accounts (six and four direct
 chat settings, counts only). End-to-end archive on a paired phone and message
 range key matching, including group participant spelling, remain unverified.
+
+### `list_labels`
+
+Read the locally cached WhatsApp Business label catalog, even when the bridge is
+disconnected. **Parameters:** `chat_jid` (optional full JID; only labels currently
+associated with that chat), `include_deleted` (optional, default `false`). Returns
+`{"labels": [{"id": "1", "name": "Alice", "color": 3, "deleted": false}]}`.
+A global catalog exposes label definitions, not which chats use them. A chat
+filter observes the chat allow-list and merges only verified permitted PN/LID twins.
+Across those twins, the newest association wins; equal-time twins prefer removal.
+Names are sanitized as untrusted text; use the stable ID when acting on a label.
+
+Labels belong to WhatsApp Business accounts. An ordinary account normally has an
+empty catalog (`{"labels": []}`); labeling with an unknown ID returns `not_found`.
+The cache receives label-edit and chat-association app-state events. On a connected
+paired bridge with an empty catalog, one bounded asynchronous full sync of the
+regular collection is attempted per process, so reads may initially be empty.
+Deleted labels and removed associations retain tombstones to prevent older replay
+from resurrecting them; equal-millisecond replay favors deletion/removal. Incoming
+association JIDs retain their original namespace. Message labels are not included.
+
+### `label_chat`
+
+Request applying or removing an existing Business label on a direct chat or group.
+**Parameters:** `chat_jid`, `label` (ID or exact name), `labeled` (optional, default
+`true`; use `false` to remove). The ID takes precedence over a matching name.
+An ambiguous name returns `invalid_argument`; unknown/deleted labels return
+`not_found`. Labels cannot be created, renamed or deleted by this tool.
+
+Requires a connected bridge. Returns `success`, `label_id`, the requested
+`labeled` state, `sent=true` and `confirmed=false`: this does not confirm the
+phone state, and the local cache changes only when app-state events arrive.
+HTTP 408 means nothing sent and safe to retry; a definite bridge rejection says
+not applied and safe to retry after resolving the bridge error. An unknown
+outcome or accepted-patch confirmation warning requires checking the phone
+before retrying. Hidden and refused in read-only mode. Not exercised against
+a paired Business account.
 
 ### `send_typing`
 

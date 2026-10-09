@@ -148,6 +148,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	if _, err := db.Exec(pollsSchema); err != nil {
 		t.Fatalf("failed to create poll tables: %v", err)
 	}
+	if _, err := db.Exec(labelsSchema); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		t.Fatalf("failed to create group_members table: %v", err)
 	}
@@ -618,6 +621,8 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.DownloadMedia = b.downloadMedia
 	b.autoDownloads = newMediaJobQueue(b.ctx, autoDownloadWorkers, autoDownloadQueue, b.runAutoDownload)
+	b.LabelResyncTimeout = actionDeadline
+	b.LabelResync = func(context.Context) error { return nil }
 	b.Connect = func() error { return nil }
 	b.Connected = func() bool { return b.Client != nil && b.Client.IsConnected() }
 	b.Send = b.sendBackend()

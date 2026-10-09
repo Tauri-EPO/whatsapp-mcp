@@ -254,6 +254,12 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
+	if _, err := applyNamedMigration(db, "labels_schema_v1", func(tx *sql.Tx) error {
+		_, err := tx.Exec(labelsSchema)
+		return err
+	}); err != nil {
+		return fmt.Errorf("failed to ensure label tables: %w", err)
+	}
 	// Run data rewrites after their tables and columns exist. Each owns an
 	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {
