@@ -208,14 +208,15 @@ def test_auth_reader_does_not_block_event_loop(auth_store, monkeypatch):
     import http_auth
 
     entered, release = threading.Event(), threading.Event()
-    verify = http_auth.verify_static_token
+    verify = http_auth._rotation_state
 
     def held(*args, **kwargs):
         entered.set()
         assert release.wait(2)
         return verify(*args, **kwargs)
 
-    monkeypatch.setattr(http_auth, "verify_static_token", held)
+    # Observe the real saved-auth reader shared by bool and identity receipts.
+    monkeypatch.setattr(http_auth, "_rotation_state", held)
 
     async def probe():
         messages = []
