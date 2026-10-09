@@ -401,8 +401,11 @@ A client receives HTTP 401 with a `resource_metadata` challenge, fetches
 the same document), discovers the issuer and completes authorization with that
 provider. JWTs require RS256 or ES256, a trusted `kid`, signature, exact issuer,
 audience, nonempty subject, expiry, not-before when present and base scopes.
+Clock claims have 60 seconds of skew leeway. A configured static bearer with
+exactly two dots is refused at startup in OAuth mode; use an opaque static secret.
 Discovery/JWKS fetches have an eight-second total budget, a 256 KiB response
 ceiling, no redirects or ambient credentials, and a five-minute key cache.
+An unknown `kid` can refresh keys at most once per five-second cooldown window.
 Set `WHATSAPP_MCP_OAUTH_JWKS_URL` to override discovery when necessary.
 
 For opaque tokens and prompt revocation, use RFC 7662 introspection instead:
@@ -418,7 +421,11 @@ passes the path but does not mount an operator's file automatically. The client
 ID also accepts `_FILE`. Set a value or its file, never both; do not combine
 introspection with an explicit JWKS URL. Requests use Basic auth. Only valid
 `active=true` responses with the resource audience are cached, keyed by a token
-hash, for at most 60 seconds (and at most 1024 entries). Revocation becomes
+hash, for at most 60 seconds (and at most 1024 entries). Cache hits never wait
+behind other tokens; same-token fetches share one flight, with at most four
+remote introspections in flight and HTTP 503 when that bound is reached.
+When present, introspection `token_type` must be `access_token` (case-insensitive).
+Revocation becomes
 visible within that window. An unreachable or invalid authorization service
 fails closed with HTTP 503. Claims, raw access tokens and secrets are not logged
 or forwarded to the bridge; downstream bridge authentication remains separate.
@@ -519,9 +526,15 @@ Supply the API key in the deployment environment. A remote endpoint receives
 the audio as a third-party processor; this provider stays off until selected.
 The tool and `TRANSCRIBE_ON_INGEST` share the provider and cache provider/model
 in `notes.db`. There is no fallback, redirect, environment proxy or netrc auth.
-Original Opus/OGG is uploaded when it fits within 25 MB; oversized files are
-converted to mono Opus and split into ordered ten-minute parts, each checked
-against that limit. Oversized source inputs are limited to 256 MiB and 24 hours.
+Only transcoded, metadata-free mono Opus/OGG audio is uploaded, never original
+file bytes. All inputs are converted and split into ordered ten-minute parts,
+each capped at 25 MB; sources are capped at 256 MiB and 24 hours. Non-audio
+inputs fail before any upload. Explicit `file_path` values must resolve inside
+the store or `WHATSAPP_MEDIA_ROOTS`, for both providers; escaping symlinks are denied.
+`WHISPER_TIMEOUT_S` is one whole-file HTTP budget (default 300 seconds), covering
+the probe, conversion and all uploads. The split also has a duration-scaled
+limit of `max(FFMPEG_TIMEOUT_S, 10 + duration_seconds / 10)`, capped by that
+remaining whole-file budget. The packaged ffmpeg supplies the duration probe.
 `scripts/smoke.sh` sends only an authenticated HEAD probe, without audio.
 401/403, 408, 429, 5xx and transport failures are backend outages and leave no
 `transcript_error`; a 400 file rejection parks that file for review.

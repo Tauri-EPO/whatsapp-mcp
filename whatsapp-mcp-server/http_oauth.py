@@ -45,6 +45,8 @@ MAX_TOKEN_BYTES = 16 * 1024
 JWKS_TTL = 300
 INTROSPECTION_TTL = 60
 MAX_CACHE_ENTRIES = 1024
+CLOCK_LEEWAY = 60
+MAX_INTROSPECTIONS = 4
 ALGORITHMS = ("RS256", "ES256")
 CLIENT_ID_FILE_ENV = "WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID_FILE"
 SECRET_FILE_ENV = "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET_FILE"
@@ -177,14 +179,22 @@ def load_oauth_config(env: Any = None) -> OAuthConfig | None:
 
 
 class OAuthTokenVerifier(TokenVerifier):
+    @staticmethod
+    def validate_static_token(static_token: str | None) -> None:
+        if static_token and static_token.count(".") == 2:
+            raise ValueError("WHATSAPP_MCP_TOKEN must not have two dots when OAuth is enabled")
+
     def __init__(self, config: OAuthConfig, static_token: str | None = None):
+        self.validate_static_token(static_token)
         self.config = config
         self.static_token = static_token
         self._lock = asyncio.Lock()
         self._keys: list[dict[str, Any]] = []
         self._keys_until = 0.0
         self._retry_after = 0.0
+        self._refresh_after = 0.0
         self._introspection: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+        self._introspection_flights: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
     def accepts_static(self, token: str) -> bool:
         """Single hook for later runtime rotation; never classify a JWT as static."""
@@ -219,15 +229,24 @@ class OAuthTokenVerifier(TokenVerifier):
         except (httpx.HTTPError, httpx.InvalidURL, ValueError):
             raise AuthorizationUnavailableError("Authorization service unavailable") from None
 
-    async def _jwks(self, before_fetch: Callable[[], None] | None = None) -> list[dict[str, Any]]:
+    async def _jwks(
+        self, before_fetch: Callable[[], None] | None = None, kid: str | None = None
+    ) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if now < self._keys_until and (
+            not kid or any(k.get("kid") == kid for k in self._keys) or now < self._refresh_after
+        ):
+            return self._keys  # cached known keys never wait for rotation I/O
         async with self._lock:
             now = time.monotonic()
             if now < self._keys_until:
-                return self._keys
+                if not kid or any(k.get("kid") == kid for k in self._keys) or now < self._refresh_after:
+                    return self._keys
             if now < self._retry_after:
                 raise AuthorizationUnavailableError("Authorization service unavailable")
             if before_fetch:
                 before_fetch()
+            self._refresh_after = now + 5
             try:
                 url = self.config.jwks_url
                 if not url:
@@ -268,25 +287,36 @@ class OAuthTokenVerifier(TokenVerifier):
 
     async def _inspect(self, token: str, before_fetch: Callable[[], None] | None = None) -> dict[str, Any]:
         key = hashlib.sha256(token.encode()).hexdigest()
-        async with self._lock:
-            now = time.monotonic()
-            cached = self._introspection.get(key)
-            if cached and cached[0] > now:
-                return cached[1]
-            self._introspection.pop(key, None)
-            if before_fetch:
-                before_fetch()  # inside the lock: queued guesses cannot bypass it
-            payload = await self._fetch(self.config.introspection_url or "", {"token": token})
-            # Validate before caching: only successful authorization is remembered.
-            if payload.get("active") is True and self._access(token, payload) is not None:
-                self._introspection[key] = (now + INTROSPECTION_TTL, payload)
-                while len(self._introspection) > MAX_CACHE_ENTRIES:
-                    self._introspection.popitem(last=False)
-            return payload
+        cached = self._introspection.get(key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]  # never waits behind another token's remote I/O
+        self._introspection.pop(key, None)
+        flight = self._introspection_flights.get(key)
+        if flight is None:
+            if len(self._introspection_flights) >= MAX_INTROSPECTIONS:
+                raise AuthorizationUnavailableError("Authorization service busy")
+            # No await between lookup/insertion: single flight on this event loop.
+            flight = asyncio.create_task(self._inspect_fetch(token, key, before_fetch))
+            self._introspection_flights[key] = flight
+            flight.add_done_callback(lambda _done: self._introspection_flights.pop(key, None))
+        return await asyncio.shield(flight)
+
+    async def _inspect_fetch(self, token: str, key: str, before_fetch: Callable[[], None] | None) -> dict[str, Any]:
+        if before_fetch:
+            before_fetch()
+        payload = await self._fetch(self.config.introspection_url or "", {"token": token})
+        if payload.get("active") is True and self._access(token, payload) is not None:
+            self._introspection[key] = (time.monotonic() + INTROSPECTION_TTL, payload)
+            while len(self._introspection) > MAX_CACHE_ENTRIES:
+                self._introspection.popitem(last=False)
+        return payload
 
     def _access(self, token: str, claims: dict[str, Any]) -> AccessToken | None:
-        sub, aud, exp, nbf = (claims.get(k) for k in ("sub", "aud", "exp", "nbf"))
+        sub, aud, exp, nbf, iat = (claims.get(k) for k in ("sub", "aud", "exp", "nbf", "iat"))
         now = time.time()
+        token_type = claims.get("token_type")
+        if token_type is not None and (not isinstance(token_type, str) or token_type.lower() != "access_token"):
+            return None
         if not isinstance(sub, str) or not sub or len(sub) > 1024:
             return None
         if self.config.subjects and sub not in self.config.subjects:
@@ -299,7 +329,7 @@ class OAuthTokenVerifier(TokenVerifier):
             return None
         if aud != self.config.audience and not (isinstance(aud, list) and self.config.audience in aud):
             return None
-        for value in (exp, nbf):
+        for value in (exp, nbf, iat):
             if value is not None and (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -307,7 +337,11 @@ class OAuthTokenVerifier(TokenVerifier):
                 or not math.isfinite(value)
             ):
                 return None
-        if exp is not None and exp <= now or nbf is not None and nbf > now:
+        if (
+            exp is not None
+            and exp <= now - CLOCK_LEEWAY
+            or any(v is not None and v > now + CLOCK_LEEWAY for v in (nbf, iat))
+        ):
             return None
         scope = claims.get("scope", "")
         if not isinstance(scope, str):
@@ -320,7 +354,8 @@ class OAuthTokenVerifier(TokenVerifier):
             client_id=client_id,
             subject=sub,
             scopes=scopes,
-            expires_at=int(exp) if exp is not None else None,
+            # Native SDK expiry checks must observe the same clock-skew window.
+            expires_at=int(exp + CLOCK_LEEWAY) if exp is not None else None,
             resource=self.config.audience,
             claims={
                 "iss": self.config.issuer,
@@ -349,7 +384,7 @@ class OAuthTokenVerifier(TokenVerifier):
             alg = header.get("alg")
             if alg not in ALGORITHMS or not isinstance(header.get("kid"), str) or header.get("crit"):
                 return None
-            keys = await self._jwks(before_fetch)
+            keys = await self._jwks(before_fetch, header["kid"])
             candidates = [
                 k
                 for k in keys
@@ -368,6 +403,7 @@ class OAuthTokenVerifier(TokenVerifier):
                 algorithms=[alg],
                 issuer=self.config.issuer,
                 audience=self.config.audience,
+                leeway=CLOCK_LEEWAY,
                 options={"require": ["iss", "sub", "exp", "aud"]},
             )
             return self._access(token, claims)
@@ -408,12 +444,16 @@ class OAuthMiddleware:
         )
 
     def _guard_fetch(self, scope: Scope) -> None:
-        if self.peer_limiter:
-            wait = self.peer_limiter.wait_time(client_key(scope, self.peer_limiter._trusted_proxies))
+        if self.peer_limiter and not scope.get("oauth_verification_reserved"):
+            key = client_key(scope, self.peer_limiter._trusted_proxies)
+            wait = self.peer_limiter._take(key)
             if wait > 0:
                 raise VerificationRateLimitError(wait)
+            scope["oauth_verification_reserved"] = key
 
     async def _limited(self, scope: Scope, send: Send, peer: bool = False) -> bool:
+        if peer and scope.pop("oauth_verification_reserved", None):
+            return False  # already reserved before remote verification
         limiter = self.peer_limiter if peer else self.limiter
         if not limiter:
             return False
@@ -487,6 +527,9 @@ class OAuthMiddleware:
             if not await self._limited(scope, send, peer=True):
                 await self._error(send, 401)
             return
+        reservation = scope.pop("oauth_verification_reserved", None)
+        if reservation and self.peer_limiter:
+            self.peer_limiter.refund(reservation)
         if not (access.claims or {}).get("static"):
             scope["oauth_subject"] = access.subject
         if await self._limited(scope, send):
@@ -505,7 +548,14 @@ class OAuthMiddleware:
                         return
                     body.extend(message.get("body", b""))
                     if len(body) > self.max_body:
-                        await self._error(send, 413)
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 413,
+                                "headers": [(b"content-type", b"application/json")],
+                            }
+                        )
+                        await send({"type": "http.response.body", "body": b'{"error":"body_too_large"}'})
                         return
                     if not message.get("more_body", False):
                         break

@@ -53,7 +53,7 @@ from tool_policy import (
     offers_download,
     registered_tool_names,
 )
-from transcribe import TranscriptionError, transcribe_file
+from transcribe import TranscriptionError, confine_audio_path, transcribe_file
 from transcribe import load_config as load_whisper_config
 from transcribe_worker import install_ingest_worker
 from triage import mark_handled as triage_mark_handled
@@ -2743,9 +2743,11 @@ def transcribe_audio(
     Pass either message_id + chat_jid (the audio is downloaded via the bridge first;
     where download_media is disabled only a voice note already in the store can be
     transcribed, anything else fails with `denied`) or an absolute file_path that is
-    already on disk. Configure WHISPER_URL or WHISPER_BIN + WHISPER_MODEL for
+    already on disk inside the store or WHATSAPP_MEDIA_ROOTS (symlinks resolved).
+    Configure WHISPER_URL or WHISPER_BIN + WHISPER_MODEL for
     whisper.cpp, or opt in with WHATSAPP_TRANSCRIPTION_PROVIDER=openai_compatible
-    and WHATSAPP_TRANSCRIPTION_URL/MODEL. A remote HTTP provider receives the audio
+    and WHATSAPP_TRANSCRIPTION_URL/MODEL. A remote HTTP provider receives only
+    reencoded, metadata-free Opus audio under one whole-file WHISPER_TIMEOUT_S budget
     as a third-party processor; redirects and automatic fallbacks are disabled.
     **bridge_status().whisper says whether this
     deployment has one**: when it reports configured=false (or reachable=false) every
@@ -2761,7 +2763,7 @@ def transcribe_audio(
     Args:
         chat_jid: JID of the chat containing the message
         message_id: ID of the audio/voice message to transcribe
-        file_path: Alternative to message_id/chat_jid: path of an audio file on disk.
+        file_path: Alternative to message_id/chat_jid: audio inside the store or media roots.
                    A file transcribed this way has no message row, so it is not cached.
         language: ISO-639-1 code; default WHISPER_LANGUAGE (pt) or WHATSAPP_TRANSCRIPTION_LANGUAGE (auto)
         force: Re-run whisper even when a transcript is stored, and replace it
@@ -2772,6 +2774,8 @@ def transcribe_audio(
         summarising, add your own annotate_media(sha256, "summary", ...) on top.
     """
     sha256: str | None = None
+    if file_path:
+        file_path = confine_audio_path(file_path)
     if message_id and chat_jid:
         stored_notes = _stored_transcript_notes(chat_jid, message_id)
         sha256 = stored_notes["sha256"]
@@ -2926,6 +2930,8 @@ if __name__ == "__main__":
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
         oauth_config = load_oauth_config()
+        if oauth_config:
+            OAuthTokenVerifier.validate_static_token(token)
         rate_limit = resolve_rate_limit(
             os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None or oauth_config is not None
         )

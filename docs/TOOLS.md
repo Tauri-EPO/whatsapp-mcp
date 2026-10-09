@@ -1454,7 +1454,8 @@ See [HTTP provider](DOCKER.md#http-provider) for configuration.
 - `message_id` + `chat_jid`: the audio message (downloaded via the bridge first, or read
   from the store when `download_media` is disabled — see
   [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)), **or**
-- `file_path`: absolute path of an audio file already on disk
+- `file_path`: absolute audio path inside the store or `WHATSAPP_MEDIA_ROOTS`;
+  symlinks are resolved and paths outside those roots are denied for both providers
 - `language` (optional): ISO-639-1 code, default `WHISPER_LANGUAGE` (`pt`); `auto` to detect
 - `force` (optional, default `false`): transcribe again and replace a stored transcript
 
@@ -1465,9 +1466,12 @@ whisper.cpp `whisper-server` you run yourself, see
 is reported by [`bridge_status`](#bridge_status) under `whisper`: check it before
 walking a folder of voice notes, because without a backend every call here fails
 identically. Whisper audio is normalised to 16 kHz WAV with ffmpeg. The HTTP
-provider uses `WHATSAPP_TRANSCRIPTION_LANGUAGE` (default auto), uploads original
-audio up to 25 MB and compresses/splits larger inputs into ordered mono Opus
-parts. `WHISPER_TIMEOUT_S` bounds both providers. Returns `text`, `language`, `backend`,
+provider uses `WHATSAPP_TRANSCRIPTION_LANGUAGE` (default auto) and uploads only
+transcoded, metadata-free mono Opus/OGG in ordered ten-minute parts, each capped
+at 25 MB. Invalid non-audio files fail before upload; original bytes are never
+sent. Sources are capped at 256 MiB and 24 hours. For HTTP, `WHISPER_TIMEOUT_S`
+bounds the whole file including probing, conversion and all parts, rather than
+restarting per part. Returns `text`, `language`, `backend`,
 `file_path`, `sha256`, `cached` (the answer came from the cache) and `stored`
 (this run wrote the transcript).
 

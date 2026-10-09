@@ -327,6 +327,13 @@ class RateLimitMiddleware:
             tokens = min(self.capacity, tokens + (now - last) * self.refill_per_second)
             return max(0.0, (1.0 - tokens) / self.refill_per_second)
 
+    def refund(self, key: str) -> None:
+        """Release the verification reservation after successful authentication."""
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (self.capacity, now))
+            self._buckets[key] = (min(self.capacity, tokens + (now - last) * self.refill_per_second + 1), now)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)

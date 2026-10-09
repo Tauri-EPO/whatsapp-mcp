@@ -5,20 +5,21 @@ default, with their existing language and failure semantics. The opt-in
 openai_compatible provider reimplements upstream VGP #247 against this fork:
 an explicit endpoint, no ambient credentials/proxies/redirects/fallbacks,
 bounded multipart uploads and provider/model notes. Remote endpoints receive
-the audio; original Opus/OGG is used when it fits, otherwise mono Opus chunks.
+only transcoded metadata-free mono Opus chunks, never the original file bytes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -377,32 +378,64 @@ def probe_http_provider(config: WhisperConfig, key: str | None = None) -> bool:
         return False
 
 
-def _http_parts(source: str, work_dir: str) -> list[Path]:
+def confine_audio_path(source: str) -> str:
+    """Explicit tool paths resolve inside the archive or configured media roots."""
+    import whatsapp
+    from errors import ToolError
+    from media_upload import configured_media_root
+
+    try:
+        path = Path(source).expanduser()
+        if not path.is_absolute():
+            raise ValueError
+        path = path.resolve()
+        raw = os.getenv("WHATSAPP_MEDIA_ROOTS", "")
+        roots = [Path(whatsapp.MESSAGES_DB_PATH).resolve().parent]
+        roots.extend(Path(p.strip()).expanduser().resolve() for p in raw.split(os.pathsep) if p.strip())
+        if not raw.strip():
+            roots.append(Path(configured_media_root()).resolve())
+        if not any(path.is_relative_to(root) for root in roots):
+            raise ValueError
+    except (OSError, RuntimeError, ValueError):
+        raise ToolError("denied", "Audio file_path must stay inside the store or configured media roots") from None
+    return str(path)
+
+
+def _remaining(deadline: float) -> float:
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise BackendUnavailableError("HTTP transcription exceeded whole-file deadline")
+    return seconds
+
+
+def _http_parts(source: str, work_dir: str, deadline: float) -> list[Path]:
     path = Path(source)
     size = path.stat().st_size
-    if size <= HTTP_UPLOAD_LIMIT:
-        return [path]
     if size > MAX_HTTP_AUDIO_BYTES:
         raise TranscriptionError("HTTP transcription input exceeds 256 MiB")
     try:
+        # Restrict demuxers/protocols: playlists cannot fetch other local files
+        # or remote URLs. Probe with the already packaged ffmpeg, no ffprobe.
+        input_args = [
+            "-protocol_whitelist",
+            "file,pipe",
+            "-format_whitelist",
+            "ogg,wav,mp3,flac,aac,mov,matroska,amr,aiff,au",
+            "-i",
+            source,
+        ]
         duration = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                source,
-            ],
+            ["ffmpeg", "-nostdin", "-hide_banner", *input_args],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            check=True,
-            timeout=ffmpeg_timeout_s(),
+            timeout=min(ffmpeg_timeout_s(), _remaining(deadline)),
         )
-        seconds = float(duration.stdout.strip())
+        match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", duration.stderr)
+        if not match or "Audio:" not in duration.stderr:
+            raise TranscriptionError("HTTP transcription input is not supported audio")
+        hours, minutes, fraction = (float(v) for v in match.groups())
+        seconds = hours * 3600 + minutes * 60 + fraction
         if not 0 < seconds <= MAX_HTTP_AUDIO_SECONDS:
             raise TranscriptionError("HTTP transcription audio duration must be at most 24 hours")
         # 32 kbit/s mono, ten-minute parts: far below 25 MB, in chronological order.
@@ -413,8 +446,13 @@ def _http_parts(source: str, work_dir: str) -> list[Path]:
                 "-hide_banner",
                 "-loglevel",
                 "error",
-                "-i",
-                source,
+                *input_args,
+                "-map",
+                "0:a:0",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
                 "-vn",
                 "-ac",
                 "1",
@@ -436,11 +474,14 @@ def _http_parts(source: str, work_dir: str) -> list[Path]:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
-            timeout=ffmpeg_timeout_s(),
+            timeout=min(_remaining(deadline), max(ffmpeg_timeout_s(), 10 + seconds / 10)),
         )
     except FileNotFoundError:
-        raise BackendUnavailableError("HTTP transcription requires ffmpeg and ffprobe for oversized audio") from None
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+        raise BackendUnavailableError("HTTP transcription requires ffmpeg") from None
+    except subprocess.TimeoutExpired:
+        _remaining(deadline)
+        raise TranscriptionError("HTTP transcription audio preparation exceeded its duration-scaled limit") from None
+    except (subprocess.CalledProcessError, ValueError):
         raise TranscriptionError("HTTP transcription could not prepare this audio") from None
     parts = sorted(Path(work_dir).glob("part-*.ogg"))
     if not parts or len(parts) > 145 or any(p.stat().st_size > HTTP_UPLOAD_LIMIT for p in parts):
@@ -477,9 +518,7 @@ async def _transcribe_http_request(source: Path, config: WhisperConfig, language
                     "POST",
                     config.url or "",
                     headers=headers,
-                    files={
-                        "file": (source.name, audio, mimetypes.guess_type(source.name)[0] or "application/octet-stream")
-                    },
+                    files={"file": (source.name, audio, "audio/ogg")},
                     data=data,
                 ) as response:
                     status = response.status_code
@@ -517,9 +556,12 @@ def transcribe_file(audio_path: str, language: str | None = None, config: Whispe
     lang = (language or "").strip() or config.language
 
     if backend == "openai_compatible":
+        deadline = time.monotonic() + config.timeout_s
         with tempfile.TemporaryDirectory(prefix="wa-http-transcribe-") as tmp:
-            parts = _http_parts(audio_path, tmp)
-            text = " ".join(_transcribe_http(part, config, lang) for part in parts)
+            parts = _http_parts(audio_path, tmp, deadline)
+            text = " ".join(
+                _transcribe_http(part, replace(config, timeout_s=_remaining(deadline)), lang) for part in parts
+            )
         return {"text": text, "language": lang, "backend": backend, "provider": config.provider, "model": config.model}
 
     with tempfile.TemporaryDirectory(prefix="wa-whisper-") as tmp:

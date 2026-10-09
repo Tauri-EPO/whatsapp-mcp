@@ -47,7 +47,7 @@ def test_downloads_via_bridge_then_transcribes(monkeypatch):
     assert seen["tx"] == ("/store/c/audio.ogg", "pt", "cfg")
 
 
-def test_file_path_skips_the_bridge_and_defaults_language(monkeypatch):
+def test_file_path_skips_the_bridge_and_defaults_language(monkeypatch, tmp_path):
     _config(monkeypatch)
     monkeypatch.setattr(
         main, "whatsapp_download_media", lambda *a: (_ for _ in ()).throw(AssertionError("must not download"))
@@ -55,8 +55,10 @@ def test_file_path_skips_the_bridge_and_defaults_language(monkeypatch):
     monkeypatch.setattr(
         main, "transcribe_file", lambda path, language=None, config=None: {"text": "x", "language": language}
     )
-    out = main.transcribe_audio(file_path="/tmp/a.ogg")
-    assert out["success"] and out["file_path"] == "/tmp/a.ogg" and out["language"] is None
+    monkeypatch.setenv("WHATSAPP_MEDIA_ROOTS", str(tmp_path))
+    path = str(tmp_path / "a.ogg")
+    out = main.transcribe_audio(file_path=path)
+    assert out["success"] and out["file_path"] == path and out["language"] is None
 
 
 def test_download_failure_is_internal_error(monkeypatch):
@@ -66,21 +68,23 @@ def test_download_failure_is_internal_error(monkeypatch):
     assert out["error"]["code"] == "internal" and "download" in out["error"]["message"].lower()
 
 
-def test_transcription_errors_map_to_codes(monkeypatch):
+def test_transcription_errors_map_to_codes(monkeypatch, tmp_path):
     _config(monkeypatch)
+    monkeypatch.setenv("WHATSAPP_MEDIA_ROOTS", str(tmp_path))
 
     def missing(path, language=None, config=None):
         raise FileNotFoundError(f"Audio file not found: {path}")
 
     monkeypatch.setattr(main, "transcribe_file", missing)
-    out = main.transcribe_audio(file_path="/tmp/gone.ogg")
-    assert out["error"]["code"] == "not_found" and out["file_path"] == "/tmp/gone.ogg"
+    missing_path = str(tmp_path / "gone.ogg")
+    out = main.transcribe_audio(file_path=missing_path)
+    assert out["error"]["code"] == "not_found" and out["file_path"] == missing_path
 
     def broken(path, language=None, config=None):
         raise TranscriptionError("No whisper backend configured")
 
     monkeypatch.setattr(main, "transcribe_file", broken)
-    out = main.transcribe_audio(file_path="/tmp/a.ogg")
+    out = main.transcribe_audio(file_path=str(tmp_path / "a.ogg"))
     assert out["error"]["code"] == "internal" and "whisper backend" in out["error"]["message"]
 
 
