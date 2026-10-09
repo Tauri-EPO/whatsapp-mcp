@@ -120,10 +120,20 @@ func (b *Bridge) bindRuntimeClient() {
 // Each mux captures one client. A handoff rebuilds the captured handlers, while
 // requests already accepted finish with their own mux and disconnected client.
 func (b *Bridge) runtimeRESTHandler(port int, token string) http.Handler {
+	statusMux := http.NewServeMux()
+	allowedHosts, _ := buildHostAllowList(port, b.RESTBind, b.RESTAllowedHosts)
+	b.registerStatusEndpoints(statusMux, func(h http.HandlerFunc) http.HandlerFunc {
+		return withAuth(token, allowedHosts, h)
+	})
 	var mu sync.Mutex
 	var previous *whatsmeow.Client
 	var handler http.Handler
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health", "/api/ready", "/api/version", "/metrics":
+			statusMux.ServeHTTP(w, r)
+			return
+		}
 		b.clientGate.RLock()
 		defer b.clientGate.RUnlock()
 		mu.Lock()
