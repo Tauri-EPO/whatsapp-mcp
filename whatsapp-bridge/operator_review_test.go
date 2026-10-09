@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
@@ -74,6 +76,98 @@ func TestReconnectQueuedWriterAndConcurrentLogoutComplete(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("reconnect did not stop")
+	}
+}
+
+func TestOperatorLogoutDrainsDetachedDownloadAfterHTTPWaiterCancels(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.Connected = func() bool { return true }
+	seedMediaRowIn(t, b.Store, mediaTestChat, "DETACHED")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var finished atomic.Bool
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		b.mediaTransfers.wait()
+	})
+	b.mediaTransfer = func(context.Context, whatsmeow.DownloadableMessage, string) (int64, error) {
+		close(entered)
+		<-release
+		finished.Store(true)
+		return 0, errors.New("fake transfer complete")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := httptest.NewRequest("POST", "http://127.0.0.1:8080/api/download", strings.NewReader(`{"message_id":"DETACHED","chat_jid":"5511999999999@s.whatsapp.net"}`)).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+readOnlyTestToken)
+	handler := b.runtimeRESTHandler(8080, readOnlyTestToken)
+	waiterDone := make(chan struct{})
+	go func() { handler.ServeHTTP(httptest.NewRecorder(), r); close(waiterDone) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("transfer did not start")
+	}
+	cancel()
+	select {
+	case <-waiterDone:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP waiter did not cancel")
+	}
+	b.logoutDrainTimeout = 30 * time.Millisecond
+	b.logoutClient = func(context.Context) error { return nil }
+	b.wipeSession = func(context.Context) error {
+		if !finished.Load() {
+			t.Error("wipe overlapped detached transfer")
+		}
+		return nil
+	}
+	p := newOperatorPairing(b.ctx, b, newFakeOperatorClient(), nil, func() bool { return true }, b.Connected, io.Discard, make(chan bool, 1))
+	w := httptest.NewRecorder()
+	p.logout(w, httptest.NewRequest("POST", "/operator/v1/logout", strings.NewReader(`{"after":"idle"}`)))
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "client_busy") {
+		t.Fatalf("detached drain=%d %s", w.Code, w.Body.String())
+	}
+	close(release)
+	b.mediaTransfers.wait()
+	w = httptest.NewRecorder()
+	p.logout(w, httptest.NewRequest("POST", "/operator/v1/logout", strings.NewReader(`{"after":"idle"}`)))
+	if w.Code != 200 {
+		t.Fatalf("retry=%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDetachedDownloadDoesNotWaitBehindQueuedClientWriter(t *testing.T) {
+	b := newSettingsBridge(t)
+	seedMediaRowIn(t, b.Store, mediaTestChat, "QUEUED")
+	b.clientGate.RLock()
+	done := make(chan struct{})
+	go func() { b.clientGate.Lock(); b.clientGate.Unlock(); close(done) }()
+	deadline := time.Now().Add(time.Second)
+	for b.clientGate.TryRLock() {
+		b.clientGate.RUnlock()
+		if time.Now().After(deadline) {
+			t.Fatal("writer did not queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	result := startDownload(context.Background(), b, "QUEUED", mediaTestChat)
+	select {
+	case res := <-result:
+		if res.err == nil || !strings.Contains(res.err.Error(), "busy") {
+			t.Fatalf("queued writer result=%+v", res)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("detached transfer nested read gate deadlocked")
+	}
+	b.clientGate.RUnlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not finish")
 	}
 }
 
