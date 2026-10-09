@@ -7,6 +7,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp_types import ContentBlock
+from starlette.middleware import Middleware
 
 from errors import ToolError, tool_errors
 from export import export_dir
@@ -22,7 +23,7 @@ from http_auth import (
     resolve_trusted_proxies,
     resolve_upload_max_bytes,
 )
-from http_oauth import OAuthMiddleware, OAuthTokenVerifier, load_oauth_config
+from http_oauth import OAuthMiddleware, OAuthSDKScopeMiddleware, OAuthTokenVerifier, load_oauth_config
 from http_upload import UploadApp
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
@@ -2839,15 +2840,20 @@ def build_http_app(
         app = server.sse_app(**app_kwargs)
     else:
         app = server.streamable_http_app(**app_kwargs)
+    sdk_app = app
     app = UploadApp(app, security, upload_max_bytes)
     if verifier:
-        app = OAuthMiddleware(
+        oauth_middleware = OAuthMiddleware(
             app,
             verifier,
             rate_limit_per_minute,
             app_kwargs.get("max_request_body_size", 4 * 1024 * 1024),
             trusted_proxies,
         )
+        # SDK AuthenticationMiddleware -> AuthContextMiddleware -> scope guard
+        # -> transport. Check scopes from its principal, including resources.
+        sdk_app.user_middleware.append(Middleware(OAuthSDKScopeMiddleware, reject=oauth_middleware._error))
+        app = oauth_middleware
     elif token:
         app = BearerTokenMiddleware(app, token)
     if rate_limit_per_minute > 0 and not verifier:

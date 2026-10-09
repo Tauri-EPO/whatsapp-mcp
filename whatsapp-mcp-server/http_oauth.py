@@ -15,7 +15,7 @@ import math
 import os
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
@@ -23,6 +23,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import jwt
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import AuthSettings
@@ -426,6 +427,22 @@ def required_tool_scope(config: OAuthConfig, name: str) -> str:
     return config.send_scope if name in mutating_tools() else config.read_scope
 
 
+class OAuthSDKScopeMiddleware:
+    """Check operation scopes after the SDK authenticates the current token."""
+
+    def __init__(self, app: ASGIApp, reject: Callable[[Send, int, list[str] | None], Awaitable[None]]) -> None:
+        self.app = app
+        self.reject = reject
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        access = get_access_token()
+        required = scope.get("oauth_required_scopes", [])
+        if scope.get("type") == "http" and access is not None and not set(required).issubset(access.scopes):
+            await self.reject(send, 403, required)
+            return
+        await self.app(scope, receive, send)
+
+
 class OAuthMiddleware:
     def __init__(
         self,
@@ -594,4 +611,7 @@ class OAuthMiddleware:
             if not required.issubset(access.scopes):
                 await self._error(send, 403, sorted(set(config.scopes) | required))
                 return
+            # A body can outlast the cache: SDK authentication may then obtain
+            # newer claims. Its inner guard must authorize that exact snapshot.
+            scope["oauth_required_scopes"] = sorted(set(config.scopes) | required)
         await self.app(scope, receive, send)
