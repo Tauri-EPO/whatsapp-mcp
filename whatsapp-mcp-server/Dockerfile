@@ -51,6 +51,7 @@ RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin a
 # ffmpeg: send_audio_message converts arbitrary audio to Opus/OGG voice notes,
 # transcribe_audio resamples to 16 kHz WAV. Static build, linux/amd64 + arm64.
 COPY --from=mwader/static-ffmpeg:7.1 /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=mwader/static-ffmpeg:7.1 /ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
 COPY --from=build --chown=app:app /app/.venv /app/.venv

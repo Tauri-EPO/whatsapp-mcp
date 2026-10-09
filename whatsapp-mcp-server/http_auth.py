@@ -238,6 +238,8 @@ def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
     Invalid chains fail closed to the peer. Never accept a client's leftmost
     claim across an untrusted hop, or forwarding from an untrusted socket.
     """
+    if scope.get("oauth_subject"):
+        return "oauth:" + scope["oauth_subject"]
     client = scope.get("client")
     peer = client[0] if client else "unknown"
     try:

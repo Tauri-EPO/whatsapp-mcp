@@ -40,6 +40,8 @@ dependencies = [
     # Bridge REST and whisper-server client (whatsapp.py, transcribe.py). Not the
     # SDK's HTTP stack: mcp brings its own client, httpx2, and uv.lock carries both.
     "httpx>=0.28",
+    # SDK already ships PyJWT/cryptography; declare the JWT verifier's direct dependency.
+    "pyjwt[crypto]>=2.15.0,<3",
     # read_media(as_text=True): turn the documents WhatsApp carries into text on
     # this side, so a 5 MiB clinical PDF costs the agent a few dozen KB instead
     # of 7 MiB of base64 it cannot read. One small library per format, no OCR
@@ -87,6 +89,7 @@ py-modules = [
     "errors",
     "export",
     "http_auth",
+    "http_oauth",
     "http_upload",
     "main",
     "mcp_config",

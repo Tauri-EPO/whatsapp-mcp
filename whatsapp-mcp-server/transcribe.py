@@ -1,33 +1,25 @@
-"""Local voice-note transcription via whisper.cpp.
+"""Voice-note transcription shared by the MCP tool and ingest worker.
 
-Fork-specific feature (upstream lists transcription as out of scope). Two
-backends, both fully local, selected by environment variables:
-
-- ``WHISPER_URL``  – a running whisper.cpp ``whisper-server`` inference endpoint,
-  e.g. ``http://127.0.0.1:8178/inference`` (the ``whisper`` compose profile
-  starts one). Preferred: the model stays loaded between calls.
-- ``WHISPER_BIN``  – path to a whisper.cpp CLI binary (``whisper-cli`` or the
-  legacy ``main``), used with ``WHISPER_MODEL`` (path to a ``ggml-*.bin`` file).
-
-If ``WHISPER_URL`` is set it wins. Other knobs:
-
-- ``WHISPER_LANGUAGE``  – ISO-639-1 code passed to whisper (default ``pt``;
-  ``auto`` lets whisper detect).
-- ``WHISPER_TIMEOUT_S`` – per-transcription timeout in seconds (default 300).
-
-Input audio is always normalised to 16 kHz mono PCM WAV with ffmpeg first,
-which is what whisper.cpp expects regardless of backend.
+The existing WHISPER_URL or WHISPER_BIN/MODEL whisper.cpp backends remain the
+default, with their existing language and failure semantics. The opt-in
+openai_compatible provider reimplements upstream VGP #247 against this fork:
+an explicit endpoint, no ambient credentials/proxies/redirects/fallbacks,
+bounded multipart uploads and provider/model notes. Remote endpoints receive
+the audio; original Opus/OGG is used when it fits, otherwise mono Opus chunks.
 """
 
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -50,6 +42,10 @@ STATUS_PROBE_TIMEOUT_S = 2.0
 # answers. A plain 500 is left out on purpose: whisper.cpp reports an inference
 # it could not finish that way, which *is* about the file it was given.
 OUTAGE_STATUSES = frozenset({404, 405, 501, 502, 503, 504})
+HTTP_UPLOAD_LIMIT = 25_000_000
+HTTP_RESPONSE_LIMIT = 1024 * 1024
+MAX_HTTP_AUDIO_BYTES = 256 * 1024 * 1024
+MAX_HTTP_AUDIO_SECONDS = 24 * 60 * 60
 
 
 class TranscriptionError(RuntimeError):
@@ -78,9 +74,12 @@ class WhisperConfig:
     model: str | None
     language: str
     timeout_s: int
+    provider: str = "whisper_cpp"
 
     @property
     def backend(self) -> str | None:
+        if self.provider == "openai_compatible":
+            return "openai_compatible" if self.url and self.model else None
         if self.url:
             return "server"
         if self.binary:
@@ -103,6 +102,10 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
     """Read the WHISPER_* variables (from ``env`` or ``os.environ``)."""
     get = _env_reader(env)
 
+    provider = get("WHATSAPP_TRANSCRIPTION_PROVIDER") or "whisper_cpp"
+    if provider not in ("whisper_cpp", "openai_compatible"):
+        raise BackendUnavailableError("WHATSAPP_TRANSCRIPTION_PROVIDER must be whisper_cpp or openai_compatible")
+
     timeout_raw = get("WHISPER_TIMEOUT_S")
     try:
         timeout_s = int(timeout_raw) if timeout_raw else DEFAULT_TIMEOUT_S
@@ -111,6 +114,29 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
     if timeout_s <= 0:
         raise TranscriptionError(f"Invalid WHISPER_TIMEOUT_S={timeout_raw!r}; must be positive")
 
+    if provider == "openai_compatible":
+        url, model = get("WHATSAPP_TRANSCRIPTION_URL"), get("WHATSAPP_TRANSCRIPTION_MODEL")
+        if not url or not model:
+            raise BackendUnavailableError(
+                "HTTP transcription requires WHATSAPP_TRANSCRIPTION_URL and WHATSAPP_TRANSCRIPTION_MODEL"
+            )
+        try:
+            parts = urlsplit(url)
+            valid = (
+                parts.scheme in ("http", "https")
+                and parts.hostname
+                and not parts.username
+                and not parts.password
+                and not parts.fragment
+            )
+            parts.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise BackendUnavailableError(
+                "WHATSAPP_TRANSCRIPTION_URL must be a full HTTP(S) endpoint without credentials"
+            )
+        return WhisperConfig(url, None, model, get("WHATSAPP_TRANSCRIPTION_LANGUAGE") or "auto", timeout_s, provider)
     return WhisperConfig(
         url=get("WHISPER_URL"),
         binary=get("WHISPER_BIN"),
@@ -187,6 +213,26 @@ def describe_status(
     one it refuses to start whatever the variable says.
     """
     get = _env_reader(env)
+    if get("WHATSAPP_TRANSCRIPTION_PROVIDER") not in (None, "whisper_cpp"):
+        try:
+            config = load_config(env)
+        except TranscriptionError:
+            return {
+                "configured": False,
+                "backend": "openai_compatible",
+                "reachable": False,
+                "model": None,
+                "on_ingest": False,
+            }
+        return {
+            "configured": True,
+            "backend": config.backend,
+            "provider": config.provider,
+            "endpoint_host": urlsplit(config.url or "").hostname,
+            "reachable": probe_http_provider(config, get("WHATSAPP_TRANSCRIPTION_API_KEY")),
+            "model": config.model,
+            "on_ingest": _on_ingest_requested(get(ON_INGEST_ENV)),
+        }
     url, binary, model = get("WHISPER_URL"), get("WHISPER_BIN"), get("WHISPER_MODEL")
     backend = "url" if url else ("bin" if binary else None)
     reachable: bool | None = None
@@ -316,6 +362,137 @@ def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> 
             os.unlink(txt_path)
 
 
+def probe_http_provider(config: WhisperConfig, key: str | None = None) -> bool:
+    """Authenticated HEAD only; no audio or ambient credentials are sent."""
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        with httpx.Client(trust_env=False, follow_redirects=False, timeout=STATUS_PROBE_TIMEOUT_S) as client:
+            with client.stream("HEAD", config.url or "", headers=headers) as response:
+                return (
+                    response.status_code not in (401, 403, 408, 429)
+                    and response.status_code < 500
+                    and not 300 <= response.status_code < 400
+                )
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+        return False
+
+
+def _http_parts(source: str, work_dir: str) -> list[Path]:
+    path = Path(source)
+    size = path.stat().st_size
+    if size <= HTTP_UPLOAD_LIMIT:
+        return [path]
+    if size > MAX_HTTP_AUDIO_BYTES:
+        raise TranscriptionError("HTTP transcription input exceeds 256 MiB")
+    try:
+        duration = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                source,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=ffmpeg_timeout_s(),
+        )
+        seconds = float(duration.stdout.strip())
+        if not 0 < seconds <= MAX_HTTP_AUDIO_SECONDS:
+            raise TranscriptionError("HTTP transcription audio duration must be at most 24 hours")
+        # 32 kbit/s mono, ten-minute parts: far below 25 MB, in chronological order.
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                source,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "32k",
+                "-f",
+                "segment",
+                "-segment_time",
+                "600",
+                "-reset_timestamps",
+                "1",
+                "-y",
+                str(Path(work_dir) / "part-%04d.ogg"),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+            timeout=ffmpeg_timeout_s(),
+        )
+    except FileNotFoundError:
+        raise BackendUnavailableError("HTTP transcription requires ffmpeg and ffprobe for oversized audio") from None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError):
+        raise TranscriptionError("HTTP transcription could not prepare this audio") from None
+    parts = sorted(Path(work_dir).glob("part-*.ogg"))
+    if not parts or len(parts) > 145 or any(p.stat().st_size > HTTP_UPLOAD_LIMIT for p in parts):
+        raise TranscriptionError("HTTP transcription chunk exceeds upload limits")
+    return parts
+
+
+def _transcribe_http(source: Path, config: WhisperConfig, language: str) -> str:
+    data = {"model": config.model or "", "response_format": "json"}
+    if language and language != "auto":
+        data["language"] = language
+    key = os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY", "").strip()
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        with (
+            httpx.Client(
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(config.timeout_s, connect=min(10, config.timeout_s)),
+            ) as client,
+            source.open("rb") as audio,
+        ):
+            with client.stream(
+                "POST",
+                config.url or "",
+                headers=headers,
+                files={
+                    "file": (source.name, audio, mimetypes.guess_type(source.name)[0] or "application/octet-stream")
+                },
+                data=data,
+            ) as response:
+                status = response.status_code
+                if status in (401, 403, 404, 405, 408, 429) or status >= 500 or 300 <= status < 400:
+                    raise BackendUnavailableError(f"HTTP transcription backend returned HTTP {status}")
+                if not 200 <= status < 300:
+                    raise TranscriptionError(f"HTTP transcription backend rejected this file (HTTP {status})")
+                body, started = bytearray(), time.monotonic()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > HTTP_RESPONSE_LIMIT or time.monotonic() - started > config.timeout_s:
+                        raise BackendUnavailableError("HTTP transcription backend response exceeds limits")
+                payload = json.loads(body)
+    except (httpx.HTTPError, httpx.InvalidURL):
+        raise BackendUnavailableError("HTTP transcription backend request failed") from None
+    except ValueError:
+        raise TranscriptionError("HTTP transcription backend returned invalid JSON") from None
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise TranscriptionError("HTTP transcription backend returned no non-empty text field")
+    return text.strip()
+
+
 def transcribe_file(audio_path: str, language: str | None = None, config: WhisperConfig | None = None) -> dict:
     """Transcribe an audio file with the configured whisper backend.
 
@@ -328,6 +505,12 @@ def transcribe_file(audio_path: str, language: str | None = None, config: Whispe
     if backend is None:
         raise BackendUnavailableError(describe_setup_help())
     lang = (language or "").strip() or config.language
+
+    if backend == "openai_compatible":
+        with tempfile.TemporaryDirectory(prefix="wa-http-transcribe-") as tmp:
+            parts = _http_parts(audio_path, tmp)
+            text = " ".join(_transcribe_http(part, config, lang) for part in parts)
+        return {"text": text, "language": lang, "backend": backend, "provider": config.provider, "model": config.model}
 
     with tempfile.TemporaryDirectory(prefix="wa-whisper-") as tmp:
         wav_path = convert_to_wav16k(audio_path, os.path.join(tmp, "audio.wav"))

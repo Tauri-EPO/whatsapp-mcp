@@ -298,6 +298,25 @@ rm -f "$hdrs" "$body"
 # loopback, and a service name resolves on the networks the bridge is on. No
 # URL: this deployment does not transcribe over HTTP, and step 5 is skipped
 # (WHISPER_BIN deployments have no URL either and are not probed).
+transcription_provider=${WHATSAPP_TRANSCRIPTION_PROVIDER:-}
+[ -n "$transcription_provider" ] || transcription_provider=$(mcp_env WHATSAPP_TRANSCRIPTION_PROVIDER)
+if [ "$transcription_provider" = openai_compatible ]; then
+  step "5. HTTP transcription provider"
+  if [ "$MODE" = project ] && [ -z "$MCP_CTR" ]; then
+    echo "  skipped: no mcp container to probe from"
+  elif mcp_exec python -c 'from transcribe import load_config, probe_http_provider
+import os, sys
+try:
+    ok = probe_http_provider(load_config(), os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY"))
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+' </dev/null; then
+    green "  configured endpoint reachable (authenticated HEAD; no audio sent)"
+  else
+    fail "HTTP transcription provider does not answer" "check the configured endpoint, model and API key inside the mcp container"
+  fi
+fi
 [ -n "${WHISPER_URL:-}" ] || WHISPER_URL=$(mcp_env WHISPER_URL)
 whisper_addr=""    # host[:port] of WHISPER_URL; empty when no URL is set
 if [ -n "${WHISPER_URL:-}" ]; then
@@ -321,7 +340,7 @@ except Exception as exc:
 ' "$1" 2>&1 </dev/null
 }
 
-if [ -n "$whisper_addr" ]; then
+if [ -n "$whisper_addr" ] && [ "$transcription_provider" != openai_compatible ]; then
   step "5. whisper"
   if [ "$MODE" = "project" ] && [ -z "$MCP_CTR" ]; then
     echo "  skipped: no mcp container to probe from"
