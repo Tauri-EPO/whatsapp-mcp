@@ -279,7 +279,10 @@ func (p *operatorPairing) run() {
 			}
 			p.mu.Lock()
 			cancelled := generation != p.state.Generation
-			if !cancelled {
+			recovered := !cancelled && p.paired()
+			if recovered {
+				p.invalidateLocked("paired")
+			} else if !cancelled {
 				if errors.Is(err, errPairingOperator) {
 					reason := p.state.FailureReason
 					p.invalidateLocked("passkey_failed")
@@ -292,17 +295,20 @@ func (p *operatorPairing) run() {
 				}
 			}
 			p.mu.Unlock()
-			if cancelled || errors.Is(err, errPairingOperator) {
+			if cancelled {
 				break
 			}
 			problem, _ := p.b.connectionSnapshot()
-			if p.paired() {
+			if recovered {
+				// Final device save can succeed after the passkey deadline. The
+				// QR consumer's stale failure must not park this valid session.
+				p.b.setPairingState("")
 				if !problem.restrictsAccount() {
 					p.b.scheduleReconnect(p.reconnect)
 				}
 				break // Retain the paired device; only the gated consumer may redial.
 			}
-			if problem.restrictsAccount() {
+			if errors.Is(err, errPairingOperator) || problem.restrictsAccount() {
 				break
 			}
 			if attempt < p.state.Attempts {

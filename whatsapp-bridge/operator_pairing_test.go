@@ -518,6 +518,40 @@ func TestOperatorPasskeyFailureReasonSurvivesActorAndClearsOnRestart(t *testing.
 	}
 }
 
+func TestOperatorPasskeyDeadlineRecoversSavedDeviceThroughReconnect(t *testing.T) {
+	f := newOperatorPairingFixture(t)
+	var retries atomic.Int64
+	f.b.Connect = func() error { retries.Add(1); f.connected.Store(true); return nil }
+	f.b.Disconnect = f.client.Disconnect
+	f.b.ReconnectInitialBackoff, f.b.ReconnectMaxBackoff = time.Millisecond, time.Millisecond
+	loopDone := make(chan struct{})
+	go func() { defer close(loopDone); f.b.reconnectLoop(f.p.reconnect) }()
+	t.Cleanup(func() { f.b.cancel(); <-loopDone })
+	f.client.items <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{PublicKey: &types.WebAuthnPublicKey{Challenge: []byte("fake-challenge"), RelyingPartID: "whatsapp.com", Timeout: 1000}}}
+	f.stateHTTP(t, "passkey_required")
+	f.p.mu.Lock()
+	f.p.state.State = "passkey_submitted"
+	f.p.mu.Unlock()
+	if !f.p.beginCompletion(f.client) {
+		t.Fatal("passkey device save was not admitted")
+	}
+	// Hold final device save until the QR consumer has handled the deadline.
+	f.wait(t, func(operatorPairingState) bool { return f.client.disconnects.Load() > 0 })
+	f.paired.Store(true)
+	f.b.runtimeClient.Store(f.b.Client)
+	f.b.runtimePaired.Store(true)
+	f.p.connectionEvent(&events.PairSuccess{})
+	f.wait(t, func(operatorPairingState) bool { return f.connected.Load() })
+	_, gate := f.b.connectionSnapshot()
+	if gate != "" || retries.Load() != 1 || f.client.connects.Load() != 1 {
+		t.Fatalf("saved device did not recover through one reconnect: gate=%s retries=%d", gate, retries.Load())
+	}
+	status, _ := f.request(t, "GET", "ready", fakeOperatorToken, "")
+	if status != 200 {
+		t.Fatalf("saved device readiness=%d", status)
+	}
+}
+
 func TestOperatorRestartPreservesBanArrivingAfterValidation(t *testing.T) {
 	f := newOperatorPairingFixture(t)
 	f.b.cancel()
