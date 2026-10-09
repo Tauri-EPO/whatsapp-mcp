@@ -30,11 +30,26 @@ func TestArchivePatch(t *testing.T) {
 			store := newTestMessageStore(t)
 			ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 			for _, id := range []string{"M2", "M1"} {
-				if err := store.StoreMessage(id, tc.chat, tc.sender, "hello", ts, tc.fromMe, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := store.StoreMessage(storedMessage{
+					ID:         id,
+					ChatJID:    tc.chat,
+					Sender:     tc.sender,
+					Content:    "hello",
+					Timestamp:  ts,
+					IsFromMe:   tc.fromMe,
+					FileLength: 0,
+				}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := store.StoreMessage("M3", tc.chat, tc.sender, "older", ts.Add(-time.Hour), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := store.StoreMessage(storedMessage{
+				ID:         "M3",
+				ChatJID:    tc.chat,
+				Sender:     tc.sender,
+				Content:    "older",
+				Timestamp:  ts.Add(-time.Hour),
+				FileLength: 0,
+			}); err != nil {
 				t.Fatal(err)
 			}
 			calls := 0
@@ -101,7 +116,14 @@ func TestArchiveFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestMessageStore(t)
 			if tc.seed {
-				if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := store.StoreMessage(storedMessage{
+					ID:         "M1",
+					ChatJID:    archiveTestChat,
+					Sender:     archiveTestChat,
+					Content:    "hello",
+					Timestamp:  time.Now(),
+					FileLength: 0,
+				}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -162,7 +184,14 @@ func TestArchiveUnknownGroupAnchorRejected(t *testing.T) {
 	for _, sender := range []string{"120363000000000001", "100000000000001", "", group} {
 		t.Run(sender, func(t *testing.T) {
 			store := newTestMessageStore(t)
-			if err := store.StoreMessage("M1", group, sender, "history", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := store.StoreMessage(storedMessage{
+				ID:         "M1",
+				ChatJID:    group,
+				Sender:     sender,
+				Content:    "history",
+				Timestamp:  time.Now(),
+				FileLength: 0,
+			}); err != nil {
 				t.Fatal(err)
 			}
 			calls := 0
@@ -192,7 +221,15 @@ func TestArchiveTwinsAndPointerRows(t *testing.T) {
 				{"PN", archiveTestChat, "", ts.Add(-time.Hour)}, {"LID", lid, "", ts},
 				{"REACTION", lid, "reaction", ts.Add(time.Hour)}, {"VOTE", lid, "poll_vote", ts.Add(2 * time.Hour)},
 			} {
-				if err := store.StoreMessage(row.id, row.chat, lid, "hello", row.ts, false, row.kind, "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := store.StoreMessage(storedMessage{
+					ID:         row.id,
+					ChatJID:    row.chat,
+					Sender:     lid,
+					Content:    "hello",
+					Timestamp:  row.ts,
+					MediaType:  row.kind,
+					FileLength: 0,
+				}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -232,7 +269,14 @@ func TestArchiveOutcomeAndTargetRefusals(t *testing.T) {
 		}
 	}
 	store := newTestMessageStore(t)
-	if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := store.StoreMessage(storedMessage{
+		ID:         "M1",
+		ChatJID:    archiveTestChat,
+		Sender:     archiveTestChat,
+		Content:    "hello",
+		Timestamp:  time.Now(),
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	deps := archiveDeps{store: store, connected: func() bool { return true }, resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
@@ -281,7 +325,14 @@ func TestArchiveResolutionDeadline(t *testing.T) {
 func TestArchiveParticipantCancellation(t *testing.T) {
 	store := newTestMessageStore(t)
 	group := "120363000000000001@g.us"
-	if err := store.StoreMessage("M1", group, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := store.StoreMessage(storedMessage{
+		ID:         "M1",
+		ChatJID:    group,
+		Sender:     archiveTestChat,
+		Content:    "hello",
+		Timestamp:  time.Now(),
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -307,7 +358,14 @@ func TestArchiveDefiniteRejections(t *testing.T) {
 		errors.New("no app state keys found, creating app state keys is not yet supported")} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			store := newTestMessageStore(t)
-			if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := store.StoreMessage(storedMessage{
+				ID:         "M1",
+				ChatJID:    archiveTestChat,
+				Sender:     archiveTestChat,
+				Content:    "hello",
+				Timestamp:  time.Now(),
+				FileLength: 0,
+			}); err != nil {
 				t.Fatal(err)
 			}
 			deps := archiveDeps{store: store, connected: func() bool { return true },
@@ -325,7 +383,14 @@ func TestArchiveDefiniteRejections(t *testing.T) {
 
 func TestArchiveAcceptedPatchDisconnectedConfirmation(t *testing.T) {
 	store := newTestMessageStore(t)
-	if err := store.StoreMessage("M1", archiveTestChat, archiveTestChat, "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := store.StoreMessage(storedMessage{
+		ID:         "M1",
+		ChatJID:    archiveTestChat,
+		Sender:     archiveTestChat,
+		Content:    "hello",
+		Timestamp:  time.Now(),
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	deps := archiveDeps{store: store, connected: func() bool { return true },

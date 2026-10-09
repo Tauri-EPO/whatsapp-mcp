@@ -1031,18 +1031,11 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 // which is what every bridge write path passes, so the row records which
 // namespace the sender lives in — or the bare user part, which leaves
 // messages.sender_server unset (splitSenderJID, sender_namespace.go).
-func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, options ...messageMediaOptions) error {
-	// Only store if there's actual content or media
-	if content == "" && mediaType == "" {
+func (store *MessageStore) StoreMessage(message storedMessage) error {
+	if message.Content == "" && message.MediaType == "" {
 		return nil
 	}
-
-	// Single-row path; history sync uses Batch (store_batch.go) for the same
-	// statement inside one transaction.
-	_, err := store.db.Exec(insertMessageSQL, messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
+	_, err := store.db.Exec(insertMessageSQL, messageArgs(message)...)
 	return err
 }
 

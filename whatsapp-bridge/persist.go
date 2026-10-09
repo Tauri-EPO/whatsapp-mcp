@@ -20,11 +20,8 @@ import (
 // (one transaction for a live row or a bounded history chunk). Both take the sender as
 // the full resolved JID; see StoreMessage (store.go).
 type messageWriter interface {
-	StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-		mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-		quotedMessageId string, options ...messageMediaOptions) error
+	StoreMessage(message storedMessage) error
 	MarkViewOnce(messageID, chatJID string) error
-	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
 	UpdateLiveLocation(id, chat, sender string, fromMe bool, p *messageLocation) (bool, error)
 }
@@ -136,17 +133,25 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 	if e.hasLength {
 		length = storedMediaLength(e.fileLen)
 	}
-	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location}); err != nil {
+	if err := w.StoreMessage(storedMessage{
+		ID:              id,
+		ChatJID:         chatJID,
+		Sender:          sender,
+		Content:         e.content,
+		Timestamp:       ts,
+		IsFromMe:        fromMe,
+		MediaType:       e.mediaType,
+		Filename:        e.filename,
+		URL:             e.url,
+		MediaKey:        e.mediaKey,
+		FileSHA256:      e.fileSHA,
+		FileEncSHA256:   e.fileEnc,
+		FileLength:      length,
+		QuotedMessageID: quotedID,
+		Mentions:        mentionsColumn(e.mentions),
+		Media:           messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location},
+	}); err != nil {
 		return false, err
-	}
-	// Mentions ride in a side update rather than the insert: only a minority of
-	// messages carry any, and the write then costs nothing on the rest
-	// (mentions.go).
-	if mentions := mentionsColumn(e.mentions); mentions != "" {
-		if err := w.SetMentions(id, chatJID, mentions); err != nil {
-			return false, fmt.Errorf("mentions: %w", err)
-		}
 	}
 	if e.poll != nil {
 		if err := w.StorePoll(id, chatJID, e.poll, ts); err != nil {

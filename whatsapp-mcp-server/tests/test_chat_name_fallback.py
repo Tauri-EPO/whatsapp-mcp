@@ -46,7 +46,7 @@ def test_list_chats_uses_the_phone_book_for_unnamed_chats(unnamed_chats):
     assert chats[BOB]["name"] == "Bob Silva"
     assert chats[BOB]["name_source"] == "contacts"
     # No name at all; business_name is the last resort of the chain.
-    assert chats[CARLA]["name"] == "Carla Consultoria"
+    assert chats[CARLA]["name"] == "Carol Consultoria"
     assert chats[CARLA]["name_source"] == "contacts"
 
 
@@ -123,13 +123,13 @@ def test_cached_names_skip_the_contact_store_entirely(unnamed_chats, monkeypatch
 
     monkeypatch.setattr(whatsapp, "_connect_whatsmeow_db", recording_connect)
     chats = _by_jid(whatsapp.list_chats(limit=50))
-    assert chats[CARLA]["name"] == "Carla Consultoria"
+    assert chats[CARLA]["name"] == "Carol Consultoria"
     assert executed == []
 
 
 def test_get_chat_and_direct_chat_resolve_too(unnamed_chats):
     chat = whatsapp.get_chat(CARLA)
-    assert chat["name"] == "Carla Consultoria"
+    assert chat["name"] == "Carol Consultoria"
     assert chat["name_source"] == "contacts"
 
     direct = whatsapp.get_direct_chat_by_contact(BOB_PN)
@@ -139,7 +139,7 @@ def test_get_chat_and_direct_chat_resolve_too(unnamed_chats):
 
 def test_get_contact_chats_resolves_too(unnamed_chats):
     chats = _by_jid(whatsapp.get_contact_chats(CARLA))
-    assert chats[CARLA]["name"] == "Carla Consultoria"
+    assert chats[CARLA]["name"] == "Carol Consultoria"
     assert chats[CARLA]["name_source"] == "contacts"
 
 

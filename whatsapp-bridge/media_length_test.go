@@ -73,7 +73,15 @@ func TestMediaLengthMigrationIsAtomicAndDoesNotEraseNewZeroes(t *testing.T) {
 	if err := ms.db.QueryRow("SELECT file_length FROM messages WHERE id = 'TEXT1'").Scan(&length); err != nil || !length.Valid || length.Int64 != 0 {
 		t.Fatalf("legacy non-media length=%v err=%v", length, err)
 	}
-	if err := ms.StoreMessage("EMPTY1", mediaTestChat, "x", "", time.Now(), false, "document", "empty.bin", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "EMPTY1",
+		ChatJID:    mediaTestChat,
+		Sender:     "x",
+		Timestamp:  time.Now(),
+		MediaType:  "document",
+		Filename:   "empty.bin",
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateUndeclaredMediaLengths(ms.db); err != nil {

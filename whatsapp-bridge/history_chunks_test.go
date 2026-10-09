@@ -67,7 +67,7 @@ func TestHistoryCommitsChunksAndAllowsLiveWriteBetweenThem(t *testing.T) {
 
 func TestHistoryNonBusyFailureReplaysRowsAndLosesOnlyTheBadRow(t *testing.T) {
 	for _, sideUpdate := range []bool{false, true} {
-		t.Run(map[bool]string{false: "message insert", true: "mentions update"}[sideUpdate], func(t *testing.T) {
+		t.Run(map[bool]string{false: "message insert", true: "mentions snapshot"}[sideUpdate], func(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
 			ms, err := NewMessageStore()
 			if err != nil {
@@ -78,11 +78,11 @@ func TestHistoryNonBusyFailureReplaysRowsAndLosesOnlyTheBadRow(t *testing.T) {
 			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
 			// Roll back the second transaction after ten writes; replay must rescue
 			// every good neighbour while the bad row stays absent.
-			triggerAction := "INSERT"
+			condition := "new.id='H510'"
 			if sideUpdate {
-				triggerAction = "UPDATE OF mentions"
+				condition += " AND new.mentions IS NOT NULL"
 			}
-			if _, err := ms.db.Exec(fmt.Sprintf("CREATE TRIGGER fail_history BEFORE %s ON messages WHEN new.id='H510' BEGIN SELECT RAISE(ROLLBACK,'simulated rollback');END", triggerAction)); err != nil {
+			if _, err := ms.db.Exec("CREATE TRIGGER fail_history BEFORE INSERT ON messages WHEN " + condition + " BEGIN SELECT RAISE(ROLLBACK,'simulated rollback');END"); err != nil {
 				t.Fatal(err)
 			}
 			const total = 1501
@@ -160,13 +160,27 @@ func TestBatchRejectsIgnoredSideWriteErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = ms.Batch(func(batch *messageBatch) error {
-				if err := batch.StoreMessage("FAIL", phonePN.String(), phonePN.User, "history searchable", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := batch.StoreMessage(storedMessage{
+					ID:         "FAIL",
+					ChatJID:    phonePN.String(),
+					Sender:     phonePN.User,
+					Content:    "history searchable",
+					Timestamp:  time.Now(),
+					FileLength: 0,
+				}); err != nil {
 					return err
 				}
 				// A caller that ignores an auxiliary write error must still get
 				// a failed transaction, with no tail autocommitted after rollback.
 				_ = batch.SetMentions("FAIL", phonePN.String(), phonePN.String())
-				_ = batch.StoreMessage("TAIL", phonePN.String(), phonePN.User, "history searchable", time.Now(), false, "", "", "", nil, nil, nil, 0, "")
+				_ = batch.StoreMessage(storedMessage{
+					ID:         "TAIL",
+					ChatJID:    phonePN.String(),
+					Sender:     phonePN.User,
+					Content:    "history searchable",
+					Timestamp:  time.Now(),
+					FileLength: 0,
+				})
 				return nil
 			})
 			if err == nil {
@@ -206,7 +220,14 @@ func TestLiveEventRetriesDuringHistoryAndCommitsBetweenChunks(t *testing.T) {
 		err := ms.Batch(func(batch *messageBatch) error {
 			if firstBatch {
 				first = false
-				if err := batch.StoreMessage("MARKER", phonePN.String(), phonePN.User, "marker searchable", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := batch.StoreMessage(storedMessage{
+					ID:         "MARKER",
+					ChatJID:    phonePN.String(),
+					Sender:     phonePN.User,
+					Content:    "marker searchable",
+					Timestamp:  time.Now(),
+					FileLength: 0,
+				}); err != nil {
 					return err
 				}
 				close(writerHeld)

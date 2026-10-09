@@ -66,7 +66,7 @@ def test_get_group_members_passes_the_owner_block_through(monkeypatch):
         "phone_number": "5511888888888",
         "lid": "777@lid",
         # a zero-width space in a name is never legitimate: the untrusted layer drops it
-        "name": "A​na",
+        "name": "E​ve",
     }
     monkeypatch.setattr(
         whatsapp.bridge_http,
@@ -86,7 +86,7 @@ def test_get_group_members_passes_the_owner_block_through(monkeypatch):
 
     assert result["owner"] == owner
     assert result["owner_jid"] == owner["jid"]
-    assert clean_untrusted(result, wrap=False)["owner"]["name"] == "Ana"
+    assert clean_untrusted(result, wrap=False)["owner"]["name"] == "Eve"
 
 
 def test_get_group_members_rejects_non_group(monkeypatch):

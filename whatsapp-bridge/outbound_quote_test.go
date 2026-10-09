@@ -65,7 +65,21 @@ func TestReplyRESTWireStoredPreview(t *testing.T) {
 					if kind == "other-chat" {
 						quoteChat = phonePN.String()
 					}
-					if err := b.Store.StoreMessage("QPRE", quoteChat, phonePN.String(), caption, time.Now(), false, mediaKind, "document_20261008_120000_QPRE", "https://example.com/media", []byte("secret-key"), []byte("fake-sha"), []byte("encrypted-sha"), uint64(10), "", messageMediaOptions{presentation: p}); err != nil {
+					if err := b.Store.StoreMessage(storedMessage{
+						ID:            "QPRE",
+						ChatJID:       quoteChat,
+						Sender:        phonePN.String(),
+						Content:       caption,
+						Timestamp:     time.Now(),
+						MediaType:     mediaKind,
+						Filename:      "document_20261008_120000_QPRE",
+						URL:           "https://example.com/media",
+						MediaKey:      []byte("secret-key"),
+						FileSHA256:    []byte("fake-sha"),
+						FileEncSHA256: []byte("encrypted-sha"),
+						FileLength:    uint64(10),
+						Media:         messageMediaOptions{presentation: p},
+					}); err != nil {
 						t.Fatal(err)
 					}
 					if kind == "invalid-presentation" {
@@ -216,7 +230,14 @@ func TestReplyRESTWireStoredAuthor(t *testing.T) {
 					quoteChat = phonePN.String()
 				}
 				if !tc.missing {
-					if err := b.Store.StoreMessage("QAUTHOR", quoteChat, tc.sender, "private stored text", time.Now(), tc.own, "", "", "", nil, nil, nil, nil, ""); err != nil {
+					if err := b.Store.StoreMessage(storedMessage{
+						ID:        "QAUTHOR",
+						ChatJID:   quoteChat,
+						Sender:    tc.sender,
+						Content:   "private stored text",
+						Timestamp: time.Now(),
+						IsFromMe:  tc.own,
+					}); err != nil {
 						t.Fatal(err)
 					}
 					if tc.full {
@@ -343,7 +364,13 @@ func TestReplyHTTPDisconnectCancelsLIDLookupsBeforeUpload(t *testing.T) {
 				payload.QuotedMessageID, payload.QuotedSenderJID, lids.blockPN = "Q1", phonePN.String(), phonePN
 			case "stored-author":
 				payload.QuotedMessageID, lids.blockPN = "Q1", phonePN
-				if err := b.Store.StoreMessage("Q1", payload.Recipient, phonePN.String(), "original", time.Now(), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+				if err := b.Store.StoreMessage(storedMessage{
+					ID:        "Q1",
+					ChatJID:   payload.Recipient,
+					Sender:    phonePN.String(),
+					Content:   "original",
+					Timestamp: time.Now(),
+				}); err != nil {
 					t.Fatal(err)
 				}
 			case "mention":

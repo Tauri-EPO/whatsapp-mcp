@@ -36,9 +36,6 @@ import (
 	"strings"
 )
 
-// tokenFileMode is read/write for owner only — never group/other readable.
-const tokenFileMode = 0o600
-
 // The bridge auth token lives at tokenFilePath() inside the store directory
 // (see store_dir.go). The MCP server reads this file as a fallback when
 // WHATSAPP_BRIDGE_TOKEN is unset.
@@ -89,7 +86,7 @@ func loadOrCreateBridgeToken() (token string, freshlyGenerated bool, err error) 
 	if mkErr := os.MkdirAll(filepath.Dir(tokenFilePath()), storeDirMode); mkErr != nil {
 		return "", false, fmt.Errorf("create token dir: %w", mkErr)
 	}
-	if writeErr := os.WriteFile(tokenFilePath(), []byte(newToken+"\n"), tokenFileMode); writeErr != nil {
+	if writeErr := os.WriteFile(tokenFilePath(), []byte(newToken+"\n"), storeFileMode); writeErr != nil {
 		return "", false, fmt.Errorf("write %s: %w", tokenFilePath(), writeErr)
 	}
 	return newToken, true, nil

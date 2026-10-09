@@ -21,8 +21,11 @@ CI logs of a public repository are public too.
 
 from __future__ import annotations
 
+import ast
+import json
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -198,6 +201,124 @@ def describe(name: str, number: int, shape: str) -> str:
     return f"{name}:{number}: {shape}"
 
 
+# Common examples rather than a list of anybody's actual contacts. Never add
+# a private name here: this list and all test failures are public.
+COMMON_FIRST_NAMES = set(
+    """
+ana bruno carla joao jose maria john jane peter mary sarah james michael
+robert david daniel thomas susan linda patricia elizabeth jennifer fernando
+carlos marcos paulo pedro julia luiza amanda beatriz lucas diego renata
+rafael gabriel gustavo alice bob carol dave eve
+""".split()
+)
+ALLOWED_FAKE_NAMES = {"alice", "bob", "carol", "dave", "eve", "john doe", "jane doe"}
+
+
+def normalized_name_text(text):
+    return "".join(
+        c
+        for c in unicodedata.normalize("NFKD", text.casefold())
+        if not unicodedata.combining(c) and unicodedata.category(c) != "Cf"
+    )
+
+
+def denied_fixture_names(text):
+    """Report a shape, never the matched name or original string."""
+    normalized = normalized_name_text(text)
+    for allowed in sorted(ALLOWED_FAKE_NAMES, key=len, reverse=True):
+        normalized = re.sub(r"(?<!\w)" + re.escape(allowed).replace(r"\ ", r"\s+") + r"(?!\w)", " ", normalized)
+    return any(token in COMMON_FIRST_NAMES for token in re.findall(r"\w+", normalized))
+
+
+GO_LITERAL = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|`[^`]*`', re.S)
+
+
+def json_fixture_strings(value):
+    # JSON escapes must not hide fixture names. Paths/shape reports stay value-free.
+    if isinstance(value, str):
+        yield 1, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from json_fixture_strings(key)
+            yield from json_fixture_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from json_fixture_strings(item)
+
+
+def fixture_strings(name, text):
+    """Yield decoded literal values with source line numbers; ignore comments."""
+    if name.endswith("_test.go"):
+        for match in GO_LITERAL.finditer(text):
+            value = match.group()
+            if value.startswith("/"):
+                continue
+            if value.startswith("`"):
+                value = value[1:-1]
+            else:
+                try:
+                    value = ast.literal_eval(value)
+                except (SyntaxError, ValueError):
+                    # A literal that Python cannot decode remains visible,
+                    # rather than silently falling outside the name check.
+                    value = value[1:-1]
+            yield text.count("\n", 0, match.start()) + 1, value
+    elif name.endswith(".py") and "/tests/" in "/" + name:
+        tree = ast.parse(text)
+        docstrings = set()
+        registry_literals = set()
+        if name == OWN_PATH:
+            for assignment in ast.walk(tree):
+                if isinstance(assignment, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id in {"COMMON_FIRST_NAMES", "ALLOWED_FAKE_NAMES"}
+                    for target in assignment.targets
+                ):
+                    registry_literals.update(
+                        id(node) for node in ast.walk(assignment.value) if isinstance(node, ast.Constant)
+                    )
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.body and isinstance(node.body[0], ast.Expr):
+                    first = node.body[0].value
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        docstrings.add(id(first))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in docstrings
+                and id(node) not in registry_literals
+            ):
+                yield node.lineno, node.value
+    elif any(part in {"fixtures", "testdata"} for part in name.split("/")):
+        # Serialized fixtures and sample payloads can carry names outside code.
+        if name.endswith((".json", ".jsonl", ".yaml", ".yml", ".txt", ".csv", ".xml")):
+            if name.endswith(".json"):
+                try:
+                    yield from json_fixture_strings(json.loads(text))
+                except (ValueError, TypeError):
+                    for line, value in enumerate(text.splitlines(), 1):
+                        yield line, value
+            elif name.endswith(".jsonl"):
+                for line, value in enumerate(text.splitlines(), 1):
+                    try:
+                        for _, item in json_fixture_strings(json.loads(value)):
+                            yield line, item
+                    except (ValueError, TypeError):
+                        yield line, value
+            else:
+                for line, value in enumerate(text.splitlines(), 1):
+                    yield line, value
+
+
+def unlisted_fixture_names(name, text):
+    return [
+        (line, "a common first name in a fixture")
+        for line, value in fixture_strings(name, text)
+        if denied_fixture_names(value)
+    ]
+
+
 def tracked_files() -> list[str]:
     if not (ROOT / ".git").exists():
         pytest.skip("not a git checkout (sdist, tarball): nothing tracked to scan")
@@ -307,3 +428,44 @@ def test_allow_lists_have_no_stale_entries(corpus):
     stale = sorted(entry for entry in FAKE_NUMBERS | FAKE_GROUPS | FAKE_HOSTS if not used(entry))
     # the entries are the fakes the repository already publishes, so naming them is fine
     assert not stale, f"allow-listed but not used by any other tracked file: {len(stale)} entries, e.g. {stale[:3]}"
+
+
+def test_fixtures_use_allowed_fake_names(corpus):
+    """Common names are a public heuristic; review still checks arbitrary names."""
+    assert len(corpus) >= 100
+    problems = [
+        describe(name, line, shape)
+        for name, source in corpus.items()
+        for line, shape in unlisted_fixture_names(name, source)
+    ]
+    assert not problems, "Fixture names must use the public fake allow-list; values are never printed:\n" + "\n".join(
+        problems
+    )
+
+
+def test_name_guard_denies_common_names_and_allows_reviewed_fakes():
+    sample = sorted(COMMON_FIRST_NAMES - ALLOWED_FAKE_NAMES)[0]
+    assert denied_fixture_names(sample.upper())
+    assert denied_fixture_names(sample[0] + "\u200b" + sample[1:])
+    assert not denied_fixture_names("prefix" + sample + "suffix")
+    assert all(not denied_fixture_names(name) for name in ALLOWED_FAKE_NAMES)
+    assert denied_fixture_names("ma" + "r\u00eda")
+
+
+def test_fixture_literal_parser_covers_escaped_raw_and_multiline_values():
+    sample = sorted(COMMON_FIRST_NAMES - ALLOWED_FAKE_NAMES)[0]
+    encoded = "".join(f"\\u{ord(char):04x}" for char in sample)
+    go = "package main\n// ignored " + sample + '\nvar first="' + encoded + '"\nvar second=`' + sample + "`\n"
+    assert len(unlisted_fixture_names("fixture_test.go", go)) == 2
+    python = (
+        '"""prose ' + sample + '"""\nfirst="' + encoded + '"\nsecond=r"' + sample + '"\nthird="""' + sample + '"""\n'
+    )
+    assert len(unlisted_fixture_names("tests/fixture.py", python)) == 3
+    assert not unlisted_fixture_names("production.py", 'value="' + sample + '"')
+    assert unlisted_fixture_names("fixtures/payload.json", '{"name":"' + sample + '"}') == [
+        (1, "a common first name in a fixture")
+    ]
+    assert unlisted_fixture_names("fixtures/escaped.json", '{"name":"' + encoded + '"}')
+    assert unlisted_fixture_names("fixtures/escaped.jsonl", '{"name":"' + encoded + '"}')
+    report = describe("fixtures/payload.json", 1, "a common first name in a fixture")
+    assert sample not in report

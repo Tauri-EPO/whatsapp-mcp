@@ -148,7 +148,14 @@ func TestMessageStorePoolQueuesAndDrainsAllRows(t *testing.T) {
 				return
 			}
 			for i := 0; i < perChat; i++ {
-				recordError("message", ms.StoreMessage(fmt.Sprintf("M%d", i), chat, "5511999999999", "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""))
+				recordError("message", ms.StoreMessage(storedMessage{
+					ID:         fmt.Sprintf("M%d", i),
+					ChatJID:    chat,
+					Sender:     "5511999999999",
+					Content:    "hello",
+					Timestamp:  time.Now(),
+					FileLength: 0,
+				}))
 			}
 		}(c)
 	}
@@ -251,7 +258,14 @@ func TestConcurrentMessageWritersAccountForEveryBoundedRetryLoss(t *testing.T) {
 				chat := fmt.Sprintf("5511999990%03d@s.whatsapp.net", row/perChat)
 				id := fmt.Sprintf("M%d", row%perChat)
 				err := b.retryBusy(func() error {
-					return ms.StoreMessage(id, chat, "5511999999999", "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, "")
+					return ms.StoreMessage(storedMessage{
+						ID:         id,
+						ChatJID:    chat,
+						Sender:     "5511999999999",
+						Content:    "hello",
+						Timestamp:  time.Now(),
+						FileLength: 0,
+					})
 				})
 				if err != nil {
 					b.noteStoreFailure("message", id, chat, err)

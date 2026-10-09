@@ -34,7 +34,7 @@ def _stamp(**delta):
 def store(tmp_path, monkeypatch):
     """Four chats, all waiting: they spoke last and nobody answered."""
     path = tmp_path / "messages.db"
-    chats = [(ALICE, "Alice"), (BOB, "Bob"), (CARLA, "Carla"), (VIVO, "Vivo")]
+    chats = [(ALICE, "Alice"), (BOB, "Bob"), (CARLA, "Carol"), (VIVO, "Vivo")]
     messages = [
         ("a1", ALICE, _stamp(days=2), "preciso do orçamento", None),
         ("b1", BOB, _stamp(days=3), "e aí, decidiu?", None),

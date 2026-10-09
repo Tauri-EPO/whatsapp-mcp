@@ -252,14 +252,14 @@ class TestNameFields:
 
     # A newline that forges a row boundary, a right-to-left override that
     # reverses what follows, and a zero-width space that splits a word.
-    HOSTILE = "Ana\nBob\u202eevil\u200b"
-    CLEANED = "AnaBobevil"
+    HOSTILE = "Eve\nBob\u202eevil\u200b"
+    CLEANED = "EveBobevil"
 
     def test_control_characters_and_bidi_overrides_go(self):
         assert sanitize_name(self.HOSTILE) == self.CLEANED
 
     def test_an_ordinary_name_is_returned_unchanged(self):
-        assert sanitize_name("Ana Maria (trabalho)") == "Ana Maria (trabalho)"
+        assert sanitize_name("Eve Carol (trabalho)") == "Eve Carol (trabalho)"
         assert sanitize_name("Zé 🇧🇷") == "Zé 🇧🇷"
         assert sanitize_name("") == ""
 
@@ -271,7 +271,7 @@ class TestNameFields:
     def test_the_tag_block_of_a_subdivision_flag_survives(self):
         """A Scottish flag is a base emoji plus six U+E00xx tag characters, all Cf."""
         scotland = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
-        assert sanitize_name(f"Ana {scotland}") == f"Ana {scotland}"
+        assert sanitize_name(f"Eve {scotland}") == f"Eve {scotland}"
 
     def test_a_long_name_is_capped(self):
         capped = sanitize_name("x" * 5_000)
@@ -394,13 +394,13 @@ class TestProseFields:
         page = {
             "group_jid": "1@g.us",
             "topic": self.HOSTILE,
-            "items": [{"jid": "2@s.whatsapp.net", "name": "Ana"}],
+            "items": [{"jid": "2@s.whatsapp.net", "name": "Eve"}],
             "next_cursor": None,
         }
         out = wrapped(page)
         assert out["topic"] == f"{OPEN_TAG}{self.CLEANED}{CLOSE_TAG}"
         assert out["group_jid"] == "1@g.us"
-        assert out["items"][0] == {"jid": "2@s.whatsapp.net", "name": "Ana"}
+        assert out["items"][0] == {"jid": "2@s.whatsapp.net", "name": "Eve"}
 
 
 class TestProseThroughATool:

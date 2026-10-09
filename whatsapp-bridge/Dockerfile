@@ -8,7 +8,7 @@
 # generated REST token under /app/store. Mount a volume there or you will have
 # to re-pair on every container recreation. See docs/DOCKER.md.
 
-FROM golang:1.27-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -18,9 +18,11 @@ COPY . .
 # static binary that cross-compiles to arm64 with a flag.
 # Build identity for /api/version: `docker compose build` passes GIT_SHA/VERSION
 # from .env (see docs/DOCKER.md); CI passes the commit SHA.
+ARG TARGETOS
+ARG TARGETARCH
 ARG GIT_SHA=unknown
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GIT_SHA}" -o /out/whatsapp-bridge .
 
 FROM alpine:3.24

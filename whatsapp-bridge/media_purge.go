@@ -160,8 +160,8 @@ func (store *MessageStore) MediaRow(messageID, chatJID string) (mediaRow, error)
 // type. It walks them oldest first, handing each to fn until fn returns false
 // or maxScan allowed rows have been read; scanCut reports that more rows
 // may remain past maxScan. min_bytes is checked against cached bytes by the
-// caller, never against the sender-declared SQL length. Streaming, because the caller probes the disk for every row and
-// keeps only the few it will remove; fn must not touch the database.
+// caller, never against the sender-declared SQL length. Rows are drained in bounded pages and the cursor is closed before callbacks,
+// so disk work never holds a database connection and fn may query the database.
 func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
 	clauses := []string{"media_type IN ('image','video','audio','document','sticker')"}
 	var args []any
@@ -175,41 +175,61 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 		clauses = append(clauses, "timestamp < ?")
 		args = append(args, dbTime(before))
 	}
-	if after.ID != "" {
-		clauses = append(clauses, "(timestamp, id, chat_jid) > (?, ?, ?)")
-		args = append(args, after.Timestamp, after.ID, after.Chat)
-	}
 	if mediaType != "" {
 		clauses = append(clauses, "media_type = ?")
 		args = append(args, mediaType)
 	}
-	rows, err := store.db.Query(
-		`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, '') FROM messages WHERE `+strings.Join(clauses, " AND ")+ //nolint:gosec // every clause is a literal written above; the values travel in args as bound parameters
-			` ORDER BY timestamp ASC, id ASC, chat_jid ASC`, args...)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = rows.Close() }()
+	const pageSize = 256
 	scanned := 0
-	for rows.Next() {
-		var row mediaRow
-		if err := rows.Scan(&row.ID, &row.ChatJID, &row.MediaType, &row.Timestamp, &row.Filename); err != nil {
+	for {
+		pageClauses := append([]string(nil), clauses...)
+		pageArgs := append([]any(nil), args...)
+		if after.ID != "" {
+			pageClauses = append(pageClauses, "(timestamp, id, chat_jid) > (?, ?, ?)")
+			pageArgs = append(pageArgs, after.Timestamp, after.ID, after.Chat)
+		}
+		rows, err := store.db.Query(
+			`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, ''), CAST(timestamp AS TEXT) FROM messages WHERE `+strings.Join(pageClauses, " AND ")+ //nolint:gosec // Literal clauses and bound values only; the limit is fixed.
+				` ORDER BY timestamp ASC, id ASC, chat_jid ASC LIMIT 256`, pageArgs...)
+		if err != nil {
 			return false, err
 		}
-		// A denied chat's row is skipped before anything touches the disk, so it
-		// does not use the scan budget either: the ceiling is on probes.
-		if !policy.Allows(row.ChatJID) {
-			continue
+		page := make([]mediaRow, 0, pageSize)
+		for rows.Next() {
+			var row mediaRow
+			var rawTimestamp string
+			if err := rows.Scan(&row.ID, &row.ChatJID, &row.MediaType, &row.Timestamp, &row.Filename, &rawTimestamp); err != nil {
+				_ = rows.Close()
+				return false, err
+			}
+			page = append(page, row)
+			// SQL order uses the original spelling, even for a legacy timestamp.
+			after = purgeCursor{Timestamp: rawTimestamp, ID: row.ID, Chat: row.ChatJID}
 		}
-		if scanned >= maxScan {
-			return true, nil
+		rowErr := rows.Err()
+		closeErr := rows.Close()
+		if rowErr != nil {
+			return false, rowErr
 		}
-		scanned++
-		if !fn(row) {
-			return true, nil // conservatively report an unexamined tail
+		if closeErr != nil {
+			return false, closeErr
+		}
+		for _, row := range page {
+			if !policy.Allows(row.ChatJID) {
+				continue
+			}
+			if scanned >= maxScan {
+				return true, nil
+			}
+			scanned++
+			if !fn(row) {
+				return true, nil
+			}
+		}
+		if len(page) < pageSize {
+			return false, nil
 		}
 	}
-	return false, rows.Err()
 }
 
 // purgeOne removes (or, in dry-run, measures) the cached file of one row.

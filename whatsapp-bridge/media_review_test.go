@@ -179,7 +179,20 @@ func TestPartDocumentCacheLifecycle(t *testing.T) {
 	if err := ms.StoreChat(mediaTestChat, "Alice", ts); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("PART1", mediaTestChat, "x", "document", ts, false, "document", "model.part", url, key, sha, enc, length, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:            "PART1",
+		ChatJID:       mediaTestChat,
+		Sender:        "x",
+		Content:       "document",
+		Timestamp:     ts,
+		MediaType:     "document",
+		Filename:      "model.part",
+		URL:           url,
+		MediaKey:      key,
+		FileSHA256:    sha,
+		FileEncSHA256: enc,
+		FileLength:    length,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.StoreRoot.MkdirAll(mediaTestChat, 0o700); err != nil {

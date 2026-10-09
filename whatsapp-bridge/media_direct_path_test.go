@@ -177,8 +177,19 @@ func seedDocumentRow(t *testing.T, ms *MessageStore, id, directPath string, ts t
 	if err := ms.StoreChat(mediaTestChat, "", ts); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage(id, mediaTestChat, "5511999999999@s.whatsapp.net", "", ts, false, "document", doc.GetFileName(),
-		doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength(), ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:            id,
+		ChatJID:       mediaTestChat,
+		Sender:        "5511999999999@s.whatsapp.net",
+		Timestamp:     ts,
+		MediaType:     "document",
+		Filename:      doc.GetFileName(),
+		URL:           doc.GetURL(),
+		MediaKey:      doc.GetMediaKey(),
+		FileSHA256:    doc.GetFileSHA256(),
+		FileEncSHA256: doc.GetFileEncSHA256(),
+		FileLength:    doc.GetFileLength(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if directPath != "" {

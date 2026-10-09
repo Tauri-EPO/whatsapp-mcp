@@ -18,7 +18,15 @@ func seedMessage(t *testing.T, ms *MessageStore, id, chatJID string, fromMe bool
 	if err := ms.StoreChat(chatJID, "chat", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage(id, chatJID, "5511999999999", "hello", time.Now(), fromMe, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         id,
+		ChatJID:    chatJID,
+		Sender:     "5511999999999",
+		Content:    "hello",
+		Timestamp:  time.Now(),
+		IsFromMe:   fromMe,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -174,7 +174,13 @@ func TestPhoneHistoryMarkersExcludeIntraChunkCollision(t *testing.T) {
 			if err := ms.MarkChatRead(chat, base.Add(100*time.Second)); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.StoreMessage("UNREAD", chat, selfPhone.String(), "still unread", base.Add(150*time.Second), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{
+				ID:        "UNREAD",
+				ChatJID:   chat,
+				Sender:    selfPhone.String(),
+				Content:   "still unread",
+				Timestamp: base.Add(150 * time.Second),
+			}); err != nil {
 				t.Fatal(err)
 			}
 			fixture := shareHistoryFixture(3)

@@ -1,17 +1,16 @@
 package main
 
-// In the text log format nothing a stanza carries can start a second line or
-// drive the terminal (issue #492).
+// Text continuations always carry a real prefix and marker; other hostile
+// controls cannot drive the terminal (issues #492 and #568).
 
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"os"
-	"os/exec"
-	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // What a hostile push name or message ID looks like: a line break followed by
@@ -25,12 +24,11 @@ func TestOneLine(t *testing.T) {
 	unchanged := []string{
 		"",
 		"Updating chat name from PushName for sender@lid: Old -> New",
-		"João da Silva — São Paulo",
+		"Alice da Silva — Example City",
 		"family 👨‍👩‍👧 group",       // zero-width joiners inside an emoji sequence
 		"שלום עולם, مرحبا بالعالم", // right-to-left scripts, no bidi control
 		"日本語のグループ",
 		"a\ttabbed\tline",
-		`a Windows path C:\store\messages.db and a literal \n`,
 		// The directional marks right-to-left keyboards put next to a word.
 		"name" + string(rune(0x200F)),
 		string(rune(0x200E)) + "name" + string(rune(0x061C)),
@@ -41,18 +39,19 @@ func TestOneLine(t *testing.T) {
 		}
 	}
 	escaped := map[string]string{
-		"a\nb":                     `a\nb`,
-		"a\r\nb":                   `a\r\nb`,
-		"a\x00b":                   `a\x00b`,
-		"red \x1b[31malert\x1b[0m": `red \x1b[31malert\x1b[0m`, // a terminal escape sequence
-		"a\x7fb":                   `a\x7fb`,
-		"a\u0085b":                 `a\u0085b`, // NEL, the C1 "next line"
-		"a\u2028b\u2029c":          `a\u2028b\u2029c`,
-		"user\u202egpj.exe":        `user\u202egpj.exe`, // right-to-left override
-		"a\u2066b\u2069":           `a\u2066b\u2069`,
-		"bad \xff byte":            `bad \xff byte`,
-		"é\nü":                     `é\nü`, // the text around an escape is kept as it is
-		forgedName:                 `x\n12:00:00.000 [Bridge ERROR] the store was wiped`,
+		`C:\store\messages.db and \n`: `C:\\store\\messages.db and \\n`,
+		"a\nb":                        `a\nb`,
+		"a\r\nb":                      `a\r\nb`,
+		"a\x00b":                      `a\x00b`,
+		"red \x1b[31malert\x1b[0m":    `red \x1b[31malert\x1b[0m`, // a terminal escape sequence
+		"a\x7fb":                      `a\x7fb`,
+		"a\u0085b":                    `a\u0085b`, // NEL, the C1 "next line"
+		"a\u2028b\u2029c":             `a\u2028b\u2029c`,
+		"user\u202egpj.exe":           `user\u202egpj.exe`, // right-to-left override
+		"a\u2066b\u2069":              `a\u2066b\u2069`,
+		"bad \xff byte":               `bad \xff byte`,
+		"é\nü":                        `é\nü`, // the text around an escape is kept as it is
+		forgedName:                    `x\n12:00:00.000 [Bridge ERROR] the store was wiped`,
 	}
 	// An embedded run, the way some clients wrap a phone number: U+202A ... U+202C.
 	escaped[string(rune(0x202A))+"+00 0000"+string(rune(0x202C))] = "\\u202a+00 0000\\u202c"
@@ -63,74 +62,6 @@ func TestOneLine(t *testing.T) {
 		}
 		if strings.ContainsAny(got, "\n\r\x1b\x00") {
 			t.Errorf("oneLine(%q) still carries a control character: %q", in, got)
-		}
-	}
-}
-
-const (
-	textLoggerHelperEnv = "WAMCP_TEXT_LOGGER_HELPER"
-	// The child prints these around its log calls, so whatever else a test
-	// binary writes to stdout (TestMain, the PASS line) is not counted.
-	textLoggerBegin = "=== text logger output begins"
-	textLoggerEnd   = "=== text logger output ends"
-)
-
-// TestTextLoggerHelperProcess is not a test of its own: it is the child
-// TestTextLoggerPrintsOneLinePerCall starts, so the real text loggers write to
-// a real stdout that the parent reads, without swapping os.Stdout under the
-// other tests of the package.
-func TestTextLoggerHelperProcess(t *testing.T) {
-	if os.Getenv(textLoggerHelperEnv) != "1" {
-		return
-	}
-	fmt.Println(textLoggerBegin)
-	defer fmt.Println(textLoggerEnd)
-	bridge, client, db := newLoggerSet("INFO", false)
-	bridge.Infof("Updating chat name from PushName for %s: %s -> %s", "sender@lid", "Old Name", forgedName)
-	bridge.Warnf("Media URL expired for %s (%v); requesting media retry", forgedID, "403")
-	client.Sub("Socket").Warnf("unexpected frame from %s", forgedName)
-	db.Errorf("%s", forgedName)
-	bridge.Debugf("below the level, never printed: %s", forgedName)
-	bridge.Infof("an ordinary name: %s", "João 👨‍👩‍👧 שלום")
-}
-
-var textLogLine = regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} \[(Bridge|Client/Socket|Database) (INFO|WARN|ERROR)\] `)
-
-func TestTextLoggerPrintsOneLinePerCall(t *testing.T) {
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(self, "-test.run=^TestTextLoggerHelperProcess$") //nolint:gosec // the test binary re-running one of its own tests
-	cmd.Env = append(os.Environ(), textLoggerHelperEnv+"=1")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("helper process: %v\n%s", err, out)
-	}
-	text := strings.ReplaceAll(string(out), "\r\n", "\n")
-	_, text, begun := strings.Cut(text, textLoggerBegin+"\n")
-	text, _, ended := strings.Cut(text, textLoggerEnd+"\n")
-	if !begun || !ended {
-		t.Fatalf("the helper did not print both markers:\n%s", out)
-	}
-	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("five calls at or above INFO must print five lines, got %d:\n%s", len(lines), out)
-	}
-	for i, line := range lines {
-		if !textLogLine.MatchString(line) {
-			t.Errorf("line %d does not start like a log line of the logger that printed it: %q", i, line)
-		}
-	}
-	for i, want := range []string{
-		`[Bridge INFO] Updating chat name from PushName for sender@lid: Old Name -> x\n12:00:00.000 [Bridge ERROR] the store was wiped`,
-		`[Bridge WARN] Media URL expired for 3EB0\r\n12:00:00.000 [Bridge INFO] paired a new device (403); requesting media retry`,
-		`[Client/Socket WARN] unexpected frame from x\n12:00:00.000`,
-		`[Database ERROR] x\n12:00:00.000`,
-		`[Bridge INFO] an ordinary name: João 👨‍👩‍👧 שלום`,
-	} {
-		if !strings.Contains(lines[i], want) {
-			t.Errorf("line %d = %q, want it to contain %q", i, lines[i], want)
 		}
 	}
 }
@@ -158,7 +89,7 @@ func TestJSONLoggerKeepsTheMessageAsItIs(t *testing.T) {
 // decoded, and nothing in the line a terminal would act on.
 func TestJSONLoggerLineCarriesNoTerminalControl(t *testing.T) {
 	hostile := "name" + string(rune(0x7F)) + string(rune(0x85)) + string(rune(0x9B)) + "31m" + string(rune(0x202E)) + "gpj.exe" + string(rune(0x2066))
-	ordinary := "Jo" + string(rune(0xE3)) + "o " + string(rune(0x200F))
+	ordinary := "Caf" + string(rune(0xE9)) + " " + string(rune(0x200F))
 	var buf bytes.Buffer
 	l := newJSONLogger("bridge", "INFO", &buf)
 	l.Infof("%s / %s", hostile, ordinary)
@@ -182,17 +113,93 @@ func TestJSONLoggerLineCarriesNoTerminalControl(t *testing.T) {
 	}
 }
 
-// The level is checked before the message is formatted, and a sub-logger keeps
-// both the level and the escaping.
-func TestOneLineLoggerHonoursTheLevelAndWrapsSubLoggers(t *testing.T) {
-	rec := &recordingLogger{}
-	l := oneLineLogger{inner: rec, min: levelRank["WARN"]}
-	l.Debugf("d %s", forgedName)
-	l.Infof("i %s", forgedName)
-	l.Warnf("w %s", forgedName)
-	l.Sub("Socket").Errorf("e %s", forgedName)
-	want := "[WARN] w " + oneLine(forgedName) + "\n[ERROR] e " + oneLine(forgedName) + "\n"
-	if got := rec.String(); got != want {
-		t.Errorf("recorded %q, want %q", got, want)
+func TestTextLoggerMarksEveryContinuationAndKeepsStackReadable(t *testing.T) {
+	var out bytes.Buffer
+	logger := newTextWriter("Bridge", "INFO", &out, false)
+	logger.Errorf("recovered panic: %s\ngoroutine 1 [running]:\n\tfile.go:42\n%s", "fake failure", forgedName)
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("stack lines=%d", len(lines))
+	}
+	for index, line := range lines {
+		_, payload, ok := strings.Cut(line, " [Bridge ERROR] ")
+		if !ok {
+			t.Fatal("line lost its real prefix")
+		}
+		if index > 0 && !strings.HasPrefix(payload, textLogContinuation) {
+			t.Fatal("forged unmarked continuation")
+		}
+		if strings.ContainsAny(line, "\r\x1b\x00") {
+			t.Fatal("unsafe control in rendered line")
+		}
+	}
+	if !strings.Contains(lines[2], "[continued] \tfile.go:42") || !strings.Contains(lines[4], "[continued] 12:00:00.000 [Bridge ERROR]") {
+		t.Fatal("stack or hostile continuation not readable and marked")
+	}
+}
+
+type textCountingStringer struct{ calls *int }
+
+func (s textCountingStringer) String() string { *s.calls++; return "fake formatted value" }
+
+func TestTextLoggerFormatsOnceAndPreservesSubloggerLevel(t *testing.T) {
+	var out bytes.Buffer
+	logger := newTextWriter("Client", "WARN", &out, false)
+	calls := 0
+	logger.Debugf("%s", textCountingStringer{&calls})
+	logger.Sub("Socket").Infof("%s", textCountingStringer{&calls})
+	if calls != 0 || out.Len() != 0 {
+		t.Fatal("discarded payload was formatted")
+	}
+	logger.Sub("Socket").Warnf("%s", textCountingStringer{&calls})
+	if calls != 1 || !strings.Contains(out.String(), "[Client/Socket WARN] fake formatted value") {
+		t.Fatal("level, formatting or submodule changed")
+	}
+}
+
+func TestTextLoggerCapsCompleteLinesAtUTF8Boundary(t *testing.T) {
+	for _, input := range []string{strings.Repeat("é", textLogMaxLine), strings.Repeat("\\", textLogMaxLine), strings.Repeat(" ", textLogMaxLine)} {
+		var out bytes.Buffer
+		newTextWriter(strings.Repeat("界", 1000), "INFO", &out, false).Infof("%s\nsecond", input)
+		for _, line := range strings.SplitAfter(out.String(), "\n") {
+			if line == "" {
+				continue
+			}
+			if len(line) > textLogMaxLine || !utf8.ValidString(line) {
+				t.Fatal("line cap or UTF-8 boundary violated")
+			}
+		}
+		if !strings.Contains(out.String(), textLogTruncated) || !strings.Contains(out.String(), "[continued] second") {
+			t.Fatal("truncation or continuation marker missing")
+		}
+	}
+}
+
+func TestTextLoggerKeepsConcurrentCallsTogether(t *testing.T) {
+	var out bytes.Buffer
+	logger := newTextWriter("Bridge", "INFO", &out, false)
+	var done sync.WaitGroup
+	for index := range 32 {
+		done.Add(1)
+		go func() { defer done.Done(); logger.Sub("Worker").Infof("call %d\ntail %d", index, index) }()
+	}
+	done.Wait()
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 64 {
+		t.Fatalf("lines=%d", len(lines))
+	}
+	for index := 0; index < len(lines); index += 2 {
+		_, head, _ := strings.Cut(lines[index], "call ")
+		if !strings.HasSuffix(lines[index+1], "[continued] tail "+head) {
+			t.Fatal("concurrent calls interleaved")
+		}
+	}
+}
+
+func TestOneLineEscapesAreReversible(t *testing.T) {
+	input := "fake \\n versus newline\n and \r and \x1b plus é"
+	decoded, err := strconv.Unquote("\"" + strings.ReplaceAll(oneLine(input), "\"", "\\\"") + "\"")
+	if err != nil || decoded != input {
+		t.Fatal("literal escapes cannot be distinguished from controls")
 	}
 }
