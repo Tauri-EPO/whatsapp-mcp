@@ -64,11 +64,12 @@ jobs:
           TZ=America/Sao_Paulo go test ./...
       - name: Race detector
         # Own step so its cost and its failures are legible. The shipped binary
-        # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it; the
-        # suite takes about ten seconds this way (issue #351).
+        # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it
+        # (issue #351). The suite is one package and takes about nine minutes
+        # under -race, so go test's default ten-minute timeout no longer fits.
         run: |
           cd whatsapp-bridge
-          go test -race ./...
+          go test -race -timeout 25m ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
