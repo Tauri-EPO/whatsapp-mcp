@@ -15,6 +15,7 @@ import (
 )
 
 type operatorRoutes struct {
+	mediaUsage, mediaPurge                         http.HandlerFunc
 	export, snapshot                               http.HandlerFunc
 	health, ready, pairing                         http.HandlerFunc
 	code, restart, passkeyResponse, passkeyConfirm http.HandlerFunc
@@ -131,6 +132,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 	}{
 		{"health", "GET", routes.health}, {"ready", "GET", routes.ready}, {"pairing", "GET", routes.pairing},
 		{"export", "GET", routes.export}, {"snapshot", "POST", routes.snapshot},
+		{"media/usage", "GET", routes.mediaUsage}, {"media/purge", "POST", routes.mediaPurge},
 		{"pairing/code", "POST", routes.code}, {"pairing/restart", "POST", routes.restart},
 		{"pairing/passkey/response", "POST", routes.passkeyResponse}, {"pairing/passkey/confirm", "POST", routes.passkeyConfirm},
 		{"settings", "", routes.settings}, {"logout", "POST", routes.logout},

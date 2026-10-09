@@ -77,6 +77,9 @@ type statusRecorder struct {
 	status int
 }
 
+// ResponseController must reach the listener's flush and deadline methods.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)

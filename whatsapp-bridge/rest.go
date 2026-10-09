@@ -222,6 +222,14 @@ func (b *Bridge) registerStatusEndpoints(mux *http.ServeMux, auth func(http.Hand
 
 // healthStatus is the body of /api/health and /api/ready.
 func (b *Bridge) healthStatus() map[string]interface{} {
+	base := b.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	// Optional runtime metadata shares one short budget. Liveness must still
+	// answer when a maintenance request owns every database connection.
+	ctx, cancel := context.WithTimeout(base, 100*time.Millisecond)
+	defer cancel()
 	startedAt, stats := b.startedAt, b.storeStats
 	connected := b.Connected()
 	paired := b.isPaired()
@@ -259,17 +267,24 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["operator_pairing_state"] = b.operatorPairing.snapshot().State
 	}
 	if stats != nil {
-		storeBytes, mediaBytes, mediaFiles := stats.snapshot(time.Now())
+		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles := stats.snapshotScoped(time.Now())
 		body["store_bytes"] = storeBytes
 		body["media_bytes"] = mediaBytes
 		body["media_files"] = mediaFiles
+		body["media_status_bytes"], body["media_status_files"] = statusBytes, statusFiles
+		share := float64(0)
+		if mediaBytes > 0 {
+			share = float64(statusBytes) / float64(mediaBytes)
+		}
+		body["media_status_share"] = share
+		if quota, types, target, err := b.mediaQuotaSettings(ctx); err == nil {
+			body["media_quota_bytes"], body["media_caching_paused"] = quota, b.mediaCachingPaused(quota, mediaBytes, types, target)
+		}
 		_, _, _, warning := b.archiveStats(time.Now())
 		body["store_warning"] = warning
 	}
 	body["history_sync"] = b.historyProgress.snapshot()
 	if b.Store != nil {
-		ctx, cancel := context.WithTimeout(b.ctx, 100*time.Millisecond)
-		defer cancel()
 		if usage, err := b.sendUsageSnapshot(ctx); err == nil {
 			body["send_usage"] = usage
 		}

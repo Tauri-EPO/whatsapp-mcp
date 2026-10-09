@@ -118,7 +118,7 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	for {
 		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
-		if mediaLimit(ctx) != 0 || !errors.Is(err, errAutoMediaLimit) || ctx.Err() != nil {
+		if automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota) && !errors.Is(err, errMediaQuotaBusy)) || ctx.Err() != nil {
 			return ok, kind, name, path, err
 		}
 		// An uncapped waiter retries after the capped starter cleans up.
@@ -296,6 +296,14 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		// transfer context, never under the context of one of the callers.
 		ctx, cancel := transferContext(b.ctx, ctx)
 		defer cancel()
+		if automaticCache(ctx) {
+			bounded, release, err := b.acquireMediaQuota(context.WithValue(ctx, quotaPathKey{}, relPath), length)
+			if err != nil {
+				return 0, err
+			}
+			defer release()
+			ctx = bounded
+		}
 		written, err := b.transferMedia(ctx, downloader, relPath)
 		if status := cdnRefusalStatus(err); status != 0 {
 			// What the next report has to be read from: the status, how old
@@ -341,6 +349,10 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			}
 		}
 		if err != nil {
+			if bounded, _ := ctx.Value(quotaBudgetKey{}).(bool); bounded && errors.Is(err, errAutoMediaLimit) {
+				b.metrics.mediaQuotaRefusals.Add(1)
+				return 0, errMediaQuota
+			}
 			if !errors.Is(err, errAutoMediaLimit) {
 				b.metrics.mediaDownloadFails.Add(1)
 			}
@@ -403,6 +415,11 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 var errMediaPath = errors.New("refusing media path")
 
 func checkMediaPathComponents(chatDir, filename string) error {
+	// A sender-controlled document ID can otherwise name another transfer's
+	// temporary leaf. Temporary files are never cached media or purge targets.
+	if strings.HasSuffix(filename, ".part") {
+		return fmt.Errorf("%w: temporary media leaf", errMediaPath)
+	}
 	for _, c := range []struct{ what, name string }{{"chat JID", chatDir}, {"message ID", filename}} {
 		if c.name == "" || c.name == "." || strings.Contains(c.name, "..") || strings.ContainsAny(c.name, `/\`) || strings.ContainsFunc(c.name, unicode.IsControl) {
 			return fmt.Errorf("%w: the %s does not name a single file inside the store directory", errMediaPath, c.what)

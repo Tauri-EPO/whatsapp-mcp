@@ -88,7 +88,7 @@ func settingDefinitions() []settingDefinition {
 	toolEnv := func(raw string) (any, error) {
 		return sortedNames(parseToolList(raw)), nil // Config validates names once, last.
 	}
-	return []settingDefinition{
+	return append([]settingDefinition{
 		sendSetting("send.rate_per_minute", sendRateMinuteEnv),
 		sendSetting("send.rate_per_day", sendRateDayEnv),
 		sendSetting("send.new_chats_per_day", sendNewChatsEnv),
@@ -120,7 +120,7 @@ func settingDefinitions() []settingDefinition {
 			}
 			return parseIngestChats(value)
 		}, func(raw string) (any, error) { return parseIngestChats(raw) }},
-	}
+	}, mediaSettingDefinitions()...)
 }
 
 func sendSetting(key, env string) settingDefinition {
@@ -142,17 +142,22 @@ func sendSetting(key, env string) settingDefinition {
 
 func runtimeDefaults(getenv func(string) string) (map[string]runtimeSetting, error) {
 	out := map[string]runtimeSetting{}
+	var problems []string
 	for _, def := range settingDefinitions() {
 		setting := runtimeSetting{Value: def.defaultValue, Source: "default"}
 		if raw := getenv(def.env); strings.TrimSpace(raw) != "" {
 			var err error
 			setting.Value, err = def.parseEnv(raw)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", def.env, err)
+				problems = append(problems, fmt.Sprintf("%s: %s", def.env, err))
+				continue
 			}
 			setting.Source = "env"
 		}
 		out[def.key] = setting
+	}
+	if len(problems) > 0 {
+		return nil, errors.New(strings.Join(problems, "; "))
 	}
 	return out, nil
 }
@@ -227,6 +232,7 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 	}
 	applyRuntimeToolFloor(&out, defaults, closedAllow)
 	applyRuntimeSendCeiling(&out, defaults)
+	applyRuntimeMediaCeilings(&out, defaults)
 
 	capKey, scopeKey := "transcription.monthly_max_minutes", "transcription.cap_scope"
 	if ceiling, ok := defaults[capKey].Value.(float64); ok {

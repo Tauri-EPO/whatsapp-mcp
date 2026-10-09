@@ -2507,6 +2507,8 @@ def purge_media(
     dry_run: bool = True,
     summary_only: bool = False,
     cursor: str | None = None,
+    scope: str = "",
+    include_orphans: bool = False,
 ) -> dict[str, Any]:
     """Free disk space by dropping cached media bytes; message rows, hashes and notes stay.
 
@@ -2539,6 +2541,10 @@ def purge_media(
         summary_only: true leaves `items` out and returns only the totals (use it
             on criteria calls that match hundreds of files)
         cursor: Criteria continuation returned as next_cursor; empty starts at the beginning
+        scope: "status" purges the entire status feed in one call, regardless of the
+            conversation allow-list; omit all other filters. Tool/read-only policy still applies.
+        include_orphans: With scope=status, also remove generated cached files with no row;
+            these are reported separately and cannot be fetched again from the archive.
 
     Returns:
         {"dry_run", "message", "matched", "purged_files", "purged_bytes", "truncated",
@@ -2560,6 +2566,8 @@ def purge_media(
         dry_run=dry_run,
         summary_only=summary_only,
         cursor=cursor,
+        scope=scope,
+        include_orphans=include_orphans,
     )
 
 

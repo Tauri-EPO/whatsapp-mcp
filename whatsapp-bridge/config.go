@@ -20,6 +20,8 @@ type bridgeConfig struct {
 	Bind, AllowedHosts           string
 	MediaRetention               time.Duration
 	StatusMedia                  bool
+	StatusRetention              *time.Duration
+	PurgeStatusOnStart           bool
 	RosterSync, SessionKeepalive time.Duration
 	ReadOnly                     readOnlyPolicy
 	Tools                        toolPolicy
@@ -78,6 +80,10 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	cfg.MediaRetention, err = resolveMediaRetention(getenv(mediaRetentionEnv))
 	collect(err)
 	cfg.StatusMedia, err = resolveStatusAutoDownload(getenv(mediaAutoDownloadStatusEnv))
+	collect(err)
+	cfg.StatusRetention, err = resolveStatusRetention(getenv(statusRetentionEnv))
+	collect(err)
+	cfg.PurgeStatusOnStart, err = parseBoolEnv(purgeStatusOnStartEnv, getenv(purgeStatusOnStartEnv), false)
 	collect(err)
 	cfg.RosterSync, err = resolveGroupRosterSync(getenv(groupRosterSyncEnv))
 	collect(err)
