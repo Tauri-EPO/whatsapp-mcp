@@ -1284,6 +1284,7 @@ and resumes once each in the logs, retrying next cycle after a UTC month rollove
 or a permitted cap raise. Explicit calls subject to the cap return
 `transcription_quota_exceeded`; cached transcripts cost no additional usage.
 `ingest` counts only ingest seconds against the cap; `all` counts both sources.
+Audio with no decoded samples is refused before contacting either provider.
 Duration comes from the decoded PCM sample count (including all chained Ogg streams), using the packaged ffmpeg without retaining decoded files. Successful whole-file calls count duration and one request, including forced
 retranscriptions; failures record an error outcome and release their reservation.
 Atomic SQLite reservations bound concurrent tool/worker admission. Reservations

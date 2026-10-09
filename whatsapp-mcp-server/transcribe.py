@@ -595,6 +595,8 @@ def transcribe_file(
         prepared = convert_to_wav16k(audio_path, os.path.join(tmp, "audio.wav"))
         with wave.open(prepared, "rb") as audio:
             duration = audio.getnframes() / audio.getframerate()
+        if duration <= 0:
+            raise TranscriptionError("Audio contains no decoded samples")
         with admission(duration, config.provider, model, source):
             result = _transcribe_wav(prepared, config, (language or "").strip() or config.language)
             if not isinstance(result.get("text"), str) or not result["text"].strip():

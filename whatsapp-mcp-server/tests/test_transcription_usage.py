@@ -67,6 +67,36 @@ def test_exact_decimal_quota_fits_real_decoded_files(
     assert len(provider["calls"]) == 3
 
 
+@pytest.mark.parametrize("provider_name", ["whisper_cpp", "openai_compatible"])
+@pytest.mark.parametrize("cap_case", ["none", "zero", "exhausted"])
+@pytest.mark.parametrize("source_kind", ["tool", "ingest"])
+def test_zero_duration_never_contacts_provider(
+    provider, runtime_archive, monkeypatch, tmp_path, provider_name, cap_case, source_kind
+):
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", provider_name)
+    monkeypatch.setenv("WHATSAPP_MEDIA_ROOTS", str(tmp_path))
+    if provider_name == "whisper_cpp":
+        monkeypatch.setenv("WHISPER_URL", provider["url"])
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    cap = {"none": None, "zero": 0, "exhausted": 1 / 60}[cap_case]
+    patch(runtime_archive, {"transcription.monthly_max_minutes": cap, "transcription.cap_scope": "all"})
+    if cap_case == "exhausted":
+        valid = tmp_path / "valid.wav"
+        _audio(valid, 1)
+        assert transcribe.transcribe_file(str(valid), source=source_kind)["duration_s"] == 1
+    before = usage.current_usage()
+    calls = len(provider["calls"])
+    empty = tmp_path / "empty.wav"
+    _audio(empty, 0)
+    if source_kind == "tool":
+        assert "error" in main.transcribe_audio(file_path=str(empty))
+    else:
+        with pytest.raises(transcribe.TranscriptionError):
+            transcribe.transcribe_file(str(empty), source=source_kind)
+    assert len(provider["calls"]) == calls
+    assert usage.current_usage() == before
+
+
 def test_admin_non_ascii_tokens_and_headers_never_crash(paired_dbs, monkeypatch):
     monkeypatch.setenv("WHATSAPP_OPERATOR_BIND", "operator.example")
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "fake-bridge-0123456789abcdef")
