@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal"
-	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -215,7 +214,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	// Create client instance
-	client := whatsmeow.NewClient(deviceStore, sdkSafeLogger{clientLog})
+	client := newRuntimeClient(deviceStore, clientLog)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return 1
@@ -288,7 +287,7 @@ func runBridge(cfg bridgeConfig) int {
 			// Only an explicitly unpaired restart reaches this factory. Deleted
 			// SDK clients cannot be reused, and old QR contexts cannot disconnect
 			// this new client's socket.
-			freshClient := whatsmeow.NewClient(container.NewDevice(), clientLog)
+			freshClient := newRuntimeClient(container.NewDevice(), clientLog)
 			bridge.installClient(freshClient, false, reconnectChan)
 			return freshClient, nil
 		}, bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)

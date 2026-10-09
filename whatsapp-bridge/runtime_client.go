@@ -8,10 +8,17 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+// Wrap the root before the SDK caches child loggers, both on startup and on
+// operator restarts. URL-error redaction must survive every client handoff.
+func newRuntimeClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
+	return whatsmeow.NewClient(device, sdkSafeLogger{logger})
+}
 
 // The SDK logs raw QR payloads and protocol frames at DEBUG. When pairing
 // stdout is disabled or the operator listener is enabled, suppress SDK debug
