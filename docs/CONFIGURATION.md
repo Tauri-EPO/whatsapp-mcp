@@ -1142,7 +1142,7 @@ Caveats:
   as the anchor. Chats with no local messages return `404`; send or receive one
   message first.
 - Messages the phone has deleted are not recoverable, as above.
-# Outbound send budgets and MCP token rotation
+## Outbound send budgets and MCP token rotation
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -1155,7 +1155,11 @@ Caveats:
 All numeric limits accept integers 0–2147483647, with empty/0 disabling the limit.
 The operator `PATCH /operator/v1/settings` accepts `send.rate_per_minute`,
 `send.rate_per_day`, `send.new_chats_per_day`, `send.min_interval_ms`.
-Precedence is runtime > env > default; `null` restores the env/default value.
+Deploy-time send rates and new-chat caps are ceilings: when both env and runtime
+are positive, the smaller limit applies. Runtime `0` or `null` cannot lift an env
+cap; runtime may impose a limit where env has none. The minimum interval is a
+floor: the larger env/runtime delay applies. GET settings labels the binding
+value's source as `env`, `runtime` or `default`.
 These limits cover `/api/send` (text/file/audio), `/api/forward` and group
 participant additions (one reservation per added participant). `/api/poll` is a
 read-only results endpoint; there is currently no outbound poll-creation route.
@@ -1170,8 +1174,15 @@ First contact means no message in either direction for the canonical chat or its
 PN/LID twin, and no prior send reservation. It counts once, even if several sends
 follow or the archive could not be written. Daily counts reset at midnight UTC,
 independent of `TZ`; the minute bucket and minimum interval survive restart too.
-Concurrent requests share one atomic reservation. A group batch larger than a
-configured minute burst must be split by the operator.
+Acknowledged receipt IDs persist after a partial rate refusal, so tied timestamps
+resume without duplicate receipts after a reset or restart. History replay keeps
+that progress; listed-ID receipts remain an explicit request to send.
+Concurrent requests share one atomic reservation. When every limit is off,
+counting is best-effort: database/identity lookup failures warn and increment
+`whatsapp_bridge_send_count_skipped_total` without refusing the send. With any
+limit enabled, an unavailable reservation refuses the send before network effects.
+A batch larger than a total minute/day/new-chat cap returns `limit_exceeds_batch`
+with `retry_after_s:null`, no `Retry-After`, and instructions to split the batch.
 
 Refusals return 429 with `Retry-After` and `send_rate_limited`, `limit`,
 `retry_after_s`. MCP returns `rate_limited` and tells the agent to stop and report
@@ -1193,8 +1204,14 @@ rotation); a second rotation drops the oldest. The current/previous hashes and
 expiry persist in a private runtime row and override the deploy token immediately
 on new HTTP requests, surviving restart. `DELETE /operator/v1/mcp-token` restores
 the deploy token/auth mode. Existing requests are allowed to finish.
-An unavailable authentication database or registry refuses all requests; it
-never implicitly restores the deployment token or anonymous access.
+Unreadable or corrupt authentication state fails closed with HTTP 503,
+`authentication state unavailable` and one credential-free WARN per minute.
+SQLite reads run in a thread with a 100 ms busy timeout. A pre-registry store
+(no `runtime_settings` table) has no persisted rotation and uses env auth rules;
+a missing database preserves an explicitly anonymous deployment. A missing
+database on a token-protected deployment returns 503. Runtime rotation also
+activates the default 120 requests/minute credential-guessing throttle when the
+deployment started anonymously; explicit `WHATSAPP_MCP_RATE_LIMIT` still wins.
 `GET /operator/v1/settings` never includes hashes, and PATCH cannot change the
 private auth key. INFO audits show only eight-character hash prefixes and expiry.
 Neither route is an MCP tool or a bridge data-plane endpoint. Both require the

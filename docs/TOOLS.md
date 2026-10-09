@@ -2788,8 +2788,10 @@ CREATE TABLE calls (
   expose media type directly (it's buried in the binary call data). Group
   calls via `CallOfferNotice` include a `Media` field and are recorded
   accurately as voice or video.
+
 Outbound sends share the bridge's instance budget (text, file/audio, forwards and
 group participant additions). A `rate_limited` tool error includes
 `retry_after_s` and the exhausted limit; stop and report to the operator instead
 of repeatedly retrying. `bridge_status.send_usage` reports UTC daily counts and
-effective limits. See [send budgets](CONFIGURATION.md#outbound-send-budgets-and-mcp-token-rotation).
+effective limits. Oversized batches return `limit_exceeds_batch` with no retry
+delay; split the batch. See [send budgets](CONFIGURATION.md#outbound-send-budgets-and-mcp-token-rotation).

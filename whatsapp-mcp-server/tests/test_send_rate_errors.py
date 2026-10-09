@@ -53,3 +53,16 @@ def test_send_429_real_http_tool_envelope(monkeypatch):
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def test_oversized_batch_has_no_finite_retry(monkeypatch):
+    import httpx
+
+    response = httpx.Response(
+        429, json={"error": "send_rate_limited", "limit": "limit_exceeds_batch", "retry_after_s": None}
+    )
+    with pytest.raises(ToolError) as error:
+        whatsapp._bridge_json(response)
+    assert error.value.code == "rate_limited"
+    assert error.value.extra["retry_after_s"] is None
+    assert "split the batch" in error.value.message

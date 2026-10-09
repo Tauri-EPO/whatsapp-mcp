@@ -141,6 +141,9 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (string, int
 			reason, delay = name, max(1, int(math.Ceil(seconds)))
 		}
 	}
+	if (s.DayLimit > 0 && count > s.DayLimit) || (s.MinuteLimit > 0 && count > s.MinuteLimit) || (s.NewChatsLimit > 0 && fresh > s.NewChatsLimit) {
+		reason = "limit_exceeds_batch"
+	}
 	if s.DayLimit > 0 && s.Today+count > s.DayLimit {
 		refuse("per_day", s.ResetsAt.Sub(now).Seconds())
 	}
@@ -185,9 +188,40 @@ func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...st
 	}
 	ctx, cancel := requestContext(r, sendDeadline)
 	defer cancel()
+	// Read-only settings checks do not acquire the WAL writer. With budgets off,
+	// accounting must not change whether an otherwise valid send can proceed.
+	var snapshot runtimeSettingsSnapshot
+	var err error
+	if b.RuntimeDefaults != nil {
+		snapshot, err = b.settingsSnapshot(ctx)
+	}
+	if err != nil {
+		writeErrorCode(w, 503, "send_usage_unavailable", "Send limits unavailable; do not send")
+		return false
+	}
+	enabled := false
+	for key, value := range snapshot.Settings {
+		if strings.HasPrefix(key, "send.") && value.Value.(int64) > 0 {
+			enabled = true
+		}
+	}
+	if !enabled {
+		var countCancel context.CancelFunc
+		ctx, countCancel = context.WithTimeout(ctx, 100*time.Millisecond)
+		defer countCancel()
+	}
 	reason, delay, err := b.reserveSend(ctx, targets)
 	if err != nil {
+		if !enabled {
+			b.sendCountSkipped.Add(1)
+			b.Log.Warnf("Send usage counting skipped: store or identity lookup unavailable; limits are off")
+			return true
+		}
 		writeErrorCode(w, 503, "send_usage_unavailable", "Send budget unavailable; do not send")
+		return false
+	}
+	if reason == "limit_exceeds_batch" {
+		writeJSON(w, 429, map[string]any{"success": false, "error": "send_rate_limited", "limit": reason, "retry_after_s": nil, "message": "Batch exceeds a send limit; split the batch before sending"})
 		return false
 	}
 	if reason != "" {
@@ -223,17 +257,19 @@ func (b *Bridge) handleSendUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bridge) sendMetrics() string {
+	skipped := fmt.Sprintf("# TYPE whatsapp_bridge_send_count_skipped_total counter\nwhatsapp_bridge_send_count_skipped_total %d\n", b.sendCountSkipped.Load())
 	if b.Store == nil {
-		return ""
+		return skipped
 	}
 	// Scrapes must still expose pool pressure while database connections are held.
 	ctx, cancel := context.WithTimeout(b.ctx, 100*time.Millisecond)
 	defer cancel()
 	usage, err := b.sendUsageSnapshot(ctx)
 	if err != nil {
-		return ""
+		return skipped
 	}
 	var out strings.Builder
+	out.WriteString(skipped)
 	_, _ = fmt.Fprintf(&out, "# TYPE whatsapp_bridge_send_today gauge\nwhatsapp_bridge_send_today %d\n# TYPE whatsapp_bridge_send_new_chats_today gauge\nwhatsapp_bridge_send_new_chats_today %d\n# TYPE whatsapp_bridge_send_rate_limited_total counter\n# TYPE whatsapp_bridge_send_refusals_total counter\n", usage.Today, usage.NewChatsToday)
 	rows, err := b.Store.db.QueryContext(ctx, "SELECT reason,total FROM send_refusals")
 	if err != nil {
@@ -248,20 +284,14 @@ func (b *Bridge) sendMetrics() string {
 			totals[name] = total
 		}
 	}
-	for _, reason := range []string{"per_minute", "per_day", "new_chats_per_day", "min_interval"} {
+	for _, reason := range []string{"per_minute", "per_day", "new_chats_per_day", "min_interval", "limit_exceeds_batch"} {
 		_, _ = fmt.Fprintf(&out, "whatsapp_bridge_send_rate_limited_total{limit=%q} %d\nwhatsapp_bridge_send_refusals_total{reason=%q} %d\n", reason, totals[reason], reason, totals[reason])
 	}
 	return out.String()
 }
 
 func (b *Bridge) allowParticipantAdds(w http.ResponseWriter, r *http.Request, targets ...string) bool {
-	canonical := make([]string, 0, len(targets))
-	for _, target := range targets {
-		recipient, ok := b.registeredRecipient(r.Context(), w, target, nil)
-		if !ok {
-			return false
-		}
-		canonical = append(canonical, recipient)
-	}
-	return b.allowSend(w, r, canonical...)
+	// The handler already applies allowsIdentity to the complete batch. Counting
+	// uses parsed PN/LID identities; it must never add DM policy or network probes.
+	return b.allowSend(w, r, targets...)
 }

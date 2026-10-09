@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 
 import main
 import whatsapp
-from http_auth import BearerTokenMiddleware, verify_static_token
+from http_auth import AuthStateUnavailableError, BearerTokenMiddleware, RuntimeRateLimitMiddleware, verify_static_token
 from tests.conftest import PairedStore
 from tests.test_http_auth import TestBuildHttpApp as BuildProbe
 from tests.test_http_auth import _ok_app
@@ -82,35 +82,54 @@ def test_rotation_http_grace_expiry_second_rotation_restart_delete(auth_store):
     assert response(client, THIRD).status_code == 401
 
 
-def test_corrupt_or_unreadable_auth_fails_closed(auth_store):
+@pytest.mark.parametrize("damage", ["corrupt_rotation", "invalid_database", "missing_database", "locked_database"])
+def test_auth_unavailable_is_503_warns_without_credentials(auth_store, caplog, monkeypatch, damage):
+    import http_auth
+
+    monkeypatch.setattr(http_auth, "_AUTH_WARN_AT", float("-inf"))
     rotate(auth_store)
-    with closing(auth_store.messages()) as conn, conn:
-        conn.execute("UPDATE runtime_settings SET value='{}' WHERE key='auth.mcp_token'")
-    assert not verify_static_token(OLD, OLD)
-    Path(whatsapp.MESSAGES_DB_PATH).write_bytes(b"not a database")
-    assert not verify_static_token(OLD, OLD)
+    lock = None
+    if damage == "corrupt_rotation":
+        with closing(auth_store.messages()) as conn, conn:
+            conn.execute("UPDATE runtime_settings SET value='{}' WHERE key='auth.mcp_token'")
+    elif damage == "invalid_database":
+        Path(whatsapp.MESSAGES_DB_PATH).write_bytes(b"not a database")
+    elif damage == "missing_database":
+        Path(whatsapp.MESSAGES_DB_PATH).unlink()
+    else:
+        lock = auth_store.messages()
+        lock.execute("PRAGMA journal_mode=DELETE")
+        lock.execute("BEGIN EXCLUSIVE")
+    try:
+        client = TestClient(BearerTokenMiddleware(_ok_app, OLD))
+        for _ in range(2):
+            result = response(client, OLD)
+            assert result.status_code == 503
+            assert result.json()["message"] == "authentication state unavailable"
+        warnings = [r for r in caplog.records if "Authentication state unavailable" in r.message]
+        assert len(warnings) == 1
+        assert all(value not in caplog.text for value in (OLD, NEW, digest(NEW)))
+        with pytest.raises(AuthStateUnavailableError):
+            verify_static_token(OLD, OLD)
+    finally:
+        if lock is not None:
+            lock.rollback()
+            lock.close()
 
 
 @pytest.mark.parametrize("expected", [OLD, None])
-def test_missing_store_or_registry_never_restores_deploy_auth(auth_store, expected):
-    client = TestClient(BearerTokenMiddleware(_ok_app, expected, runtime_rotation=True))
-    rotate(auth_store, until=datetime.now(UTC) - timedelta(seconds=1))
-    assert response(client, OLD).status_code == 401
-    assert response(client, NEW).status_code == 200
-    path = Path(whatsapp.MESSAGES_DB_PATH)
-    saved = path.with_suffix(".saved")
-    path.rename(saved)
-    try:
-        assert response(client, OLD).status_code == 401
-        assert client.get("/mcp").status_code == 401
-        fresh = TestClient(BearerTokenMiddleware(_ok_app, expected, runtime_rotation=True))
-        assert response(fresh, OLD).status_code == 401
-    finally:
-        saved.rename(path)
+def test_pre_registry_store_falls_back_to_deploy_policy(auth_store, expected):
     with closing(auth_store.messages()) as conn, conn:
         conn.execute("DROP TABLE runtime_settings")
-    assert response(client, OLD).status_code == 401
-    assert client.get("/mcp").status_code == 401
+    client = TestClient(BearerTokenMiddleware(_ok_app, expected, runtime_rotation=True))
+    assert response(client, OLD).status_code == 200
+    assert client.get("/mcp").status_code == (200 if expected is None else 401)
+
+
+def test_missing_database_preserves_explicit_anonymous_mode(auth_store):
+    Path(whatsapp.MESSAGES_DB_PATH).unlink()
+    client = TestClient(BearerTokenMiddleware(_ok_app, None, runtime_rotation=True))
+    assert client.get("/mcp").status_code == 200
 
 
 def test_rotation_enforces_auth_when_initially_disabled(auth_store):
@@ -147,3 +166,57 @@ def test_auth_reader_uses_read_only_connection(auth_store):
     with pytest.raises(sqlite3.OperationalError, match="readonly"):
         conn.execute("DELETE FROM runtime_settings")
     conn.close()
+
+
+@pytest.mark.parametrize("configured", [None, 0, 2])
+def test_rotation_activates_default_guessing_throttle(auth_store, configured):
+    bearer = BearerTokenMiddleware(_ok_app, None, runtime_rotation=True)
+    limited = RuntimeRateLimitMiddleware(bearer, configured, None)
+    limited.limited._clock = lambda: 1.0
+    client = TestClient(limited)
+    if configured is None:
+        for _ in range(121):
+            assert client.get("/mcp").status_code == 200
+    rotate(auth_store, previous=None)
+    count = configured or 120
+    for _ in range(count):
+        assert response(client, "fake-wrong-token").status_code == 401
+    assert response(client, "fake-wrong-token").status_code == (401 if configured == 0 else 429)
+
+
+def test_auth_reader_does_not_block_event_loop(auth_store, monkeypatch):
+    import asyncio
+    import threading
+
+    import http_auth
+
+    entered, release = threading.Event(), threading.Event()
+    verify = http_auth.verify_static_token
+
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(http_auth, "verify_static_token", held)
+
+    async def probe():
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        task = asyncio.create_task(
+            BearerTokenMiddleware(_ok_app, OLD)(
+                {"type": "http", "headers": [(b"authorization", f"Bearer {OLD}".encode())]}, None, send
+            )
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert not task.done()
+        finally:
+            release.set()
+        await task
+        assert messages[0]["status"] == 200
+
+    asyncio.run(probe())

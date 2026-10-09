@@ -188,7 +188,20 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 		return out, err
 	}
 	applyRuntimeToolFloor(&out, defaults, closedAllow)
+	applyRuntimeSendCeiling(&out, defaults)
 	return out, nil
+}
+
+// Deployment send budgets can only be tightened by runtime settings.
+func applyRuntimeSendCeiling(out *runtimeSettingsSnapshot, defaults map[string]runtimeSetting) {
+	for _, key := range []string{"send.rate_per_minute", "send.rate_per_day", "send.new_chats_per_day", "send.min_interval_ms"} {
+		deploy := defaults[key]
+		setting := out.Settings[key]
+		env, runtime := deploy.Value.(int64), setting.Value.(int64)
+		if env > 0 && (runtime == 0 || (key == "send.min_interval_ms" && runtime < env) || (key != "send.min_interval_ms" && runtime > env)) {
+			out.Settings[key] = deploy
+		}
+	}
 }
 
 // Deployment policy is the permanent ceiling of runtime capability. Empty

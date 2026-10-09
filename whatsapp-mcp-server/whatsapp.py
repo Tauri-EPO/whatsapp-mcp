@@ -4384,6 +4384,13 @@ def _bridge_json(response) -> dict[str, Any]:
     )
     if response.status_code != 200:
         if response.status_code == 429:
+            if payload.get("limit") == "limit_exceeds_batch":
+                raise ToolError(
+                    "rate_limited",
+                    "Batch exceeds a send limit; split the batch before sending",
+                    limit="limit_exceeds_batch",
+                    retry_after_s=None,
+                )
             retry = payload.get("retry_after_s") or getattr(response, "headers", {}).get("Retry-After", 1)
             try:
                 retry = max(1, int(retry))

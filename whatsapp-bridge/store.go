@@ -245,6 +245,7 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}
 	for column, spec := range map[string]string{
 		"message_edit_timestamp": "INTEGER NOT NULL DEFAULT 0",
+		"read_receipt_sent":      "INTEGER NOT NULL DEFAULT 0",
 		"media_retry_chat":       "TEXT",
 		"media_retry_sender":     "TEXT",
 	} {
@@ -1047,7 +1048,7 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 	}
 
 	query := `SELECT id, sender, timestamp FROM messages
-		WHERE chat_jid = ? AND is_from_me = 0 AND deleted_at IS NULL AND timestamp <= ?`
+		WHERE chat_jid = ? AND is_from_me = 0 AND read_receipt_sent = 0 AND deleted_at IS NULL AND timestamp <= ?`
 	args := []any{chatJID, dbTime(upTo)}
 	if strings.TrimSpace(marker.String) != "" {
 		query += ` AND timestamp > ?`

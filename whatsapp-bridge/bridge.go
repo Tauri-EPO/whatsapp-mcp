@@ -88,6 +88,7 @@ type Bridge struct {
 	Tools                 toolPolicy
 	RuntimeDefaults       map[string]runtimeSetting
 	sendMu                sync.Mutex
+	sendCountSkipped      atomic.Uint64
 	sendNow               func() time.Time
 	SendIncludeActions    bool
 	MCPEnvHash            string

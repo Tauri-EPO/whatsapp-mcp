@@ -288,9 +288,7 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 			if deps.allowSend != nil && !deps.allowSend(w, r, receiptChat.String()) {
 				// A refusal can follow completed batches. Preserve their safe
 				// prefix so the next call cannot spend its budget resending them.
-				if covered := coveredPrefix(pending, acked, overflow); covered > 0 {
-					_ = persistReadMarker(deps, req.ChatJID, pending[covered-1].Timestamp)
-				}
+				persistRefusedReceiptProgress(deps, req.ChatJID, pending, acked, overflow)
 				return
 			}
 			if err := deps.markRead(ctx, chunk, readAt, receiptChat, receiptSender); err != nil {
@@ -448,4 +446,29 @@ func writeMarkRead(w http.ResponseWriter, status int, resp MarkReadResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// A timestamp cannot record acknowledgements within a tied second. Persist
+// the completed IDs and safe timestamp prefix together before returning a
+// budget refusal, so retrying after reset/restart never repeats those receipts.
+func persistRefusedReceiptProgress(deps markReadDeps, chat string, pending []unreadInboundMessage, acked map[string]bool, overflow *unreadInboundMessage) {
+	if len(acked) == 0 {
+		return
+	}
+	covered := coveredPrefix(pending, acked, overflow)
+	_ = deps.storeWrite("read receipt progress", "", chat, func() error {
+		return deps.store.Batch(func(batch *messageBatch) error {
+			for _, msg := range pending {
+				if acked[msg.ID] {
+					if _, err := batch.tx.Exec("UPDATE messages SET read_receipt_sent=1 WHERE chat_jid=? AND id=? AND is_from_me=0", chat, msg.ID); err != nil {
+						return err
+					}
+				}
+			}
+			if covered > 0 {
+				return markChatReadWith(batch.tx, chat, pending[covered-1].Timestamp)
+			}
+			return nil
+		})
+	})
 }

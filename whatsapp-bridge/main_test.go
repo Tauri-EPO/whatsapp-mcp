@@ -106,6 +106,7 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			content TEXT,
 			timestamp TIMESTAMP,
 			is_from_me BOOLEAN,
+            read_receipt_sent INTEGER NOT NULL DEFAULT 0,
 			media_type TEXT,
 			filename TEXT,
 			url TEXT,
