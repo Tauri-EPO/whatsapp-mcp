@@ -60,6 +60,7 @@ CLOSE_TAG = "</untrusted>"
 # with a different meaning.
 WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "value", "replaced"})
 
+# Business label names use the same untrusted name sanitization.
 # Result keys holding a short label somebody else chose: a contact's push name,
 # the "Name (phone)" spelling of a sender, the bucket label of message_stats, a
 # poll option. Decision on issue #273: they stay *outside* the envelope even

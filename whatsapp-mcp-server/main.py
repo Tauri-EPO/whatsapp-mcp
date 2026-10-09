@@ -141,6 +141,9 @@ from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
+    label_chat as whatsapp_label_chat,
+)
+from whatsapp import (
     leave_group as whatsapp_leave_group,
 )
 from whatsapp import (
@@ -148,6 +151,9 @@ from whatsapp import (
 )
 from whatsapp import (
     list_chats_page as whatsapp_list_chats,
+)
+from whatsapp import (
+    list_labels as whatsapp_list_labels,
 )
 from whatsapp import (
     list_messages_page as whatsapp_list_messages,
@@ -1706,6 +1712,53 @@ def leave_group(chat_jid: str) -> dict[str, Any]:
         chat_jid: The group JID
     """
     return whatsapp_leave_group(chat_jid)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def list_labels(chat_jid: str | None = None, include_deleted: bool = False) -> dict[str, Any]:
+    """Read the local WhatsApp Business label catalog; no connected bridge is needed.
+
+    With chat_jid, return only the labels currently associated with that allowed
+    chat, merging verified permitted phone/LID twins. Without it, return label
+    definitions without exposing which chats use them. Deleted labels are hidden
+    unless include_deleted=True. Names are untrusted; prefer the stable id when
+    calling label_chat. Entries include the protocol type, immutable flag and
+    optional predefined_id; immutable entries cannot be applied or removed.
+    An older bridge or pending startup sync may leave the cache empty. Which
+    list types non-Business accounts receive is unverified. Message labels are excluded.
+
+    Args:
+        chat_jid: Optional full direct-chat or group JID
+        include_deleted: Include cached deleted label definitions
+    """
+    return whatsapp_list_labels(chat_jid, include_deleted)
+
+
+@mcp.tool()
+@tool_errors
+@mutating_tool
+def label_chat(chat_jid: str, label: str, labeled: bool = True) -> dict[str, Any]:
+    """Apply an existing WhatsApp Business label to a chat, or remove it with labeled=False.
+
+    label accepts a stable id or an exact name from list_labels; id takes
+    precedence. Names match their raw or sanitized display form; collisions
+    across either form return invalid_argument: use the id. Unknown or
+    deleted labels return not_found. This cannot create, rename or delete labels.
+    Immutable entries return invalid_argument. Requires a connected bridge.
+    Returns the requested state with sent=True, confirmed=False, not phone
+    confirmation. The read cache changes only when app-state events arrive.
+    HTTP 408 means nothing sent and safe to retry. Definite bridge rejections say
+    not applied and safe to retry after resolving the error. Unknown outcomes or
+    confirmation warnings require inspecting the phone before retrying.
+
+    Args:
+        chat_jid: Full direct-chat or group JID
+        label: Existing label ID or exact name from list_labels
+        labeled: True to apply (default); False to remove
+    """
+    return whatsapp_label_chat(chat_jid, label, labeled)
 
 
 @mcp.tool()

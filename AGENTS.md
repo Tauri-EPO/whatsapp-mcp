@@ -93,6 +93,7 @@ whatsapp-mcp/
 │   ├── me.go                   # GET /api/me: the account's own phone JID and LID (authenticated)
 │   ├── chat_actions.go         # /api/react, /api/typing
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
+│   ├── labels.go               # cached Business labels, chat associations, REST endpoints and startup sync
 │   ├── chat_archive.go         # /api/chat/archive: archive/unarchive anchored to the newest stored message
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── umask_unix.go           # startup-only POSIX owner-only creation mask
@@ -178,7 +179,7 @@ whatsapp-mcp/
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
 
-Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `group_members`, `messages_fts`, `schema_migrations` (bridge-owned, one row per applied one-off migration)) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus per-message `media_refusals` (dated cache-identity refusals), `notes_meta` and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never opens it — the "never create FTS from Python" rule is about `messages.db` only.
+Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `group_members`, `labels`, `chat_labels`, `messages_fts`, `schema_migrations` (bridge-owned, one row per applied one-off migration)) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus per-message `media_refusals` (dated cache-identity refusals), `notes_meta` and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never opens it — the "never create FTS from Python" rule is about `messages.db` only.
 
 Compose topology: the `mcp` container joins the bridge's network namespace (`network_mode: service:bridge`), so the bridge keeps its loopback bind and loopback-only Host allow-list; the MCP port is published on the bridge service. An alternative topology is issue #58.
 
@@ -424,6 +425,7 @@ Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing priva
 | Change how tool results are marked as untrusted | `whatsapp-mcp-server/untrusted.py` (+ the allow-list in `tests/test_untrusted_content.py`) |
 | Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`; the whisper server itself is not in the repo (`docs/DOCKER.md` shows how to run one next to the stack) |
 | Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
+| Change Business label caching / chat labelling | `whatsapp-bridge/labels.go`, `events.go`, `whatsapp-mcp-server/whatsapp.py` |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
 | Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`, row backfills, and independent named `schema_migrations` markers via `migration_markers.go`; use `applyNamedMigration` to commit a one-off rewrite and its marker in the same transaction; timestamps explicitly record completion after bounded idempotent chunks; never gate a rewrite on legacy `user_version`); FTS in `fts.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |

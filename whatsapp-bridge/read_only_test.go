@@ -90,6 +90,7 @@ var readOnlyMutatingEndpoints = []struct {
 	{"/api/typing", `{"chat_jid":"5511999999999@s.whatsapp.net","is_typing":true}`},
 	{"/api/mark-read", `{"chat_jid":"5511999999999@s.whatsapp.net","message_ids":["M1"]}`},
 	{"/api/chat/archive", `{"chat_jid":"5511999999999@s.whatsapp.net","archived":true}`},
+	{"/api/chat/label", `{"chat_jid":"5511999999999@s.whatsapp.net","label_id":"1","labeled":true}`},
 	{"/api/delete", `{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"M1","for_everyone":true}`},
 	{"/api/edit", `{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"M1","text":"new"}`},
 	{"/api/forward", `{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"M1","to_chat_jid":"120363000000000001@g.us"}`},

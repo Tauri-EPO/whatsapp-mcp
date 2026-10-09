@@ -107,7 +107,7 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_messages_stored_total", "Inbound/outbound messages written from live events.", "counter", fmt.Sprint(m.messagesStored.Load()))
 	add("whatsapp_bridge_session_keepalives_total", "Times the device was marked available and unavailable again so WhatsApp counts it as in use.", "counter", fmt.Sprint(m.sessionKeepalives.Load()))
 	add("whatsapp_bridge_history_messages_total", "Messages written from history sync.", "counter", fmt.Sprint(m.historyMessages.Load()))
-	add("whatsapp_bridge_message_store_failures_total", "Message, history, chat and call rows or archive updates that could not be written.", "counter", fmt.Sprint(m.storeFailures.Load()))
+	add("whatsapp_bridge_message_store_failures_total", "Message, history, chat, call and label rows or archive updates that could not be written.", "counter", fmt.Sprint(m.storeFailures.Load()))
 	add("whatsapp_bridge_group_history_shares_total", "Group history bundle and notice messages seen (a member was added with history sharing); logged, not decoded.", "counter", fmt.Sprint(m.groupHistoryShares.Load()))
 	add("whatsapp_bridge_messages_sent_total", "Successful /api/send calls.", "counter", fmt.Sprint(m.messagesSent.Load()))
 	add("whatsapp_bridge_send_failures_total", "Failed /api/send calls.", "counter", fmt.Sprint(m.sendFailures.Load()))
