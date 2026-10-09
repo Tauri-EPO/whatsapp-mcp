@@ -57,7 +57,7 @@ func (store *MessageStore) SetMentions(messageID, chatJID, mentions string) erro
 }
 
 func setMentionsWith(ex sqlExecer, messageID, chatJID, mentions string) error {
-	_, err := ex.Exec(`UPDATE messages SET mentions = ? WHERE id = ? AND chat_jid = ?`, mentions, messageID, chatJID)
+	_, err := ex.Exec(`UPDATE messages SET mentions = ? WHERE id = ? AND chat_jid = ? AND message_edit_timestamp = 0`, mentions, messageID, chatJID)
 	return err
 }
 

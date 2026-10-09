@@ -133,7 +133,10 @@ func TestHistoryShareOverlapPreservesAuthoritativeRows(t *testing.T) {
 						t.Errorf("overlap affected side tables/chat/count: rows=%d polls=%d content=%q activity=%q history=%d HTTP=%d", count, polls, content, activity, b.metrics.historyMessages.Load(), requests.Load())
 					}
 					calls := 0
-					edit := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) error { calls++; return nil }, chatPolicy{}, b.storeLive)
+					edit := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) (int64, error) {
+						calls++
+						return time.Now().UnixMilli(), nil
+					}, chatPolicy{}, b.storeLive)
 					rec := httptest.NewRecorder()
 					edit(rec, httptest.NewRequest(http.MethodPost, "/api/edit", strings.NewReader(`{"chat_jid":"120363000000000001@g.us","message_id":"H0","text":"Verified edit"}`)))
 					if rec.Code != http.StatusOK || calls != 1 {
@@ -241,7 +244,10 @@ func TestHistoryShareInterveningAuthority(t *testing.T) {
 						event.Info.ID, event.Info.Timestamp, event.Message = "H0", time.Unix(1700000000, 0), message
 						b.handleMessage(event)
 						calls := 0
-						handler := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) error { calls++; return nil }, chatPolicy{}, b.storeLive)
+						handler := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) (int64, error) {
+							calls++
+							return time.Now().UnixMilli(), nil
+						}, chatPolicy{}, b.storeLive)
 						rec := httptest.NewRecorder()
 						handler(rec, httptest.NewRequest(http.MethodPost, "/api/edit", strings.NewReader(`{"chat_jid":"120363000000000001@g.us","message_id":"H0","text":"Authoritative intervening text"}`)))
 						if rec.Code != http.StatusOK || calls != 1 {

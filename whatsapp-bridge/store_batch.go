@@ -12,6 +12,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 // sqlExecer is satisfied by *sql.DB and *sql.Tx.
@@ -52,8 +54,8 @@ const validPresentationSQL = `(CASE
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location, media_retry_chat, media_retry_sender)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -65,7 +67,8 @@ const insertMessageSQL = `INSERT INTO messages
 			END,
 			-- Incomplete media stubs carry no replacement caption. Reaction
 			-- removal still writes empty content; complete media may do so too.
-			content = CASE WHEN NOT :complete_media AND excluded.content = '' AND messages.media_type IN
+			content = CASE WHEN messages.message_edit_timestamp > 0 THEN messages.content
+				WHEN NOT :complete_media AND excluded.content = '' AND messages.media_type IN
 				('image', 'video', 'audio', 'document', 'sticker')
 				THEN messages.content ELSE excluded.content END,
 			-- The timestamp also names the cached file. Move it with the
@@ -80,6 +83,8 @@ const insertMessageSQL = `INSERT INTO messages
 				THEN excluded.filename ELSE COALESCE(NULLIF(excluded.filename, ''), messages.filename) END ELSE messages.filename END,
 			url = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.url ELSE messages.url END,
 			direct_path = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.direct_path ELSE messages.direct_path END,
+			media_retry_chat = COALESCE(messages.media_retry_chat, excluded.media_retry_chat),
+			media_retry_sender = COALESCE(messages.media_retry_sender, excluded.media_retry_sender),
 			media_key = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.media_key ELSE messages.media_key END,
 			file_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_sha256 ELSE messages.file_sha256 END,
 			file_enc_sha256 = CASE WHEN ` + replaceMediaSQL + ` THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
@@ -247,14 +252,23 @@ func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFro
 	var pathText string
 	var presentation *mediaPresentation
 	var location *messageLocation
+	var retryChat, retrySender string
 	if len(options) > 0 {
 		pathText, presentation = options[0].directPath, options[0].presentation
 		location = options[0].location
+		retryChat, retrySender = options[0].retryChat, options[0].retrySender
 		if pathText != "" {
 			path = pathText
 		}
 	}
+	// A group JID is the history sender fallback when participant fields are
+	// absent, not a verified retry participant. Leave it unset so a later
+	// fully attributed delivery can populate the actual wire sender.
+	if wire, err := types.ParseJID(retrySender); err != nil ||
+		(wire.Server != types.DefaultUserServer && wire.Server != types.HiddenUserServer) {
+		retrySender = ""
+	}
 	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(), location.column(),
-		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(), location.column(), retryChat, retrySender,
+		sql.Named("complete_media", mediaComplete(chatJID, url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
 }

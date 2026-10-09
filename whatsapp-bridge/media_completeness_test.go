@@ -52,7 +52,7 @@ func TestMediaComplete(t *testing.T) {
 		{"nothing at all", "", "", nil, nil, nil, false},
 	}
 	for _, tc := range cases {
-		if got := mediaComplete(tc.url, tc.directPath, tc.key, tc.sha, tc.enc); got != tc.want {
+		if got := mediaComplete(mediaTestChat, tc.url, tc.directPath, tc.key, tc.sha, tc.enc); got != tc.want {
 			t.Errorf("%s: mediaComplete = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -154,7 +154,7 @@ func TestExtractMessageKeepsADirectPathOnlyMessageAsItCame(t *testing.T) {
 	if ex.directPath != fixtureDirectPath || ex.url != "" {
 		t.Errorf("direct path only: url %q, path %q, want the path and no url", ex.url, ex.directPath)
 	}
-	if !mediaComplete(ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc) {
+	if !mediaComplete(mediaTestChat, ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc) {
 		t.Errorf("a message with a direct path, a key and both hashes is complete")
 	}
 }

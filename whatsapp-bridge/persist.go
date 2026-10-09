@@ -27,6 +27,7 @@ type messageWriter interface {
 	SetMentions(messageID, chatJID, mentions string) error
 	StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error
 	UpdateLiveLocation(id, chat, sender string, fromMe bool, p *messageLocation) (bool, error)
+	ApplyMessageEdit(chat, sender string, fromMe bool, edit *waE2E.ProtocolMessage, fallback time.Time) error
 }
 
 // extractedMessage is the storable view of a waE2E.Message.
@@ -53,6 +54,8 @@ type extractedMessage struct {
 	quotedID, quotedSender, quotedContent string
 	mentions                              []string
 	location                              *messageLocation
+	edit                                  *waE2E.ProtocolMessage
+	retryChat, retrySender                string
 }
 
 // extractMessage pulls text, media, poll, quote and mention data out of m.
@@ -72,6 +75,10 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 		e.inner, e.viewOnce = event.Message, event.IsViewOnce
 	}
 	if e.inner == nil {
+		return e
+	}
+	if p := e.inner.GetProtocolMessage(); p != nil && p.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
+		e.edit = p
 		return e
 	}
 	e.content = extractTextContent(e.inner)
@@ -102,7 +109,7 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 }
 
 // empty reports a message with nothing to store (no text, no media).
-func (e extractedMessage) empty() bool { return e.content == "" && e.mediaType == "" }
+func (e extractedMessage) empty() bool { return e.edit == nil && e.content == "" && e.mediaType == "" }
 
 // persistMessage writes the row plus its poll and view-once side tables.
 // Every failure reaches the retry owner. Live and history callers use a batch
@@ -122,6 +129,9 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 		})
 		return consumed, err
 	}
+	if e.edit != nil {
+		return true, w.ApplyMessageEdit(chatJID, sender, fromMe, e.edit, ts)
+	}
 	if matched, err := w.UpdateLiveLocation(id, chatJID, sender, fromMe, e.location); err != nil || matched {
 		if matched && err == nil {
 			logger.Debugf("Consumed location update or author collision for %s in %s", id, chatJID)
@@ -137,7 +147,7 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 		length = storedMediaLength(e.fileLen)
 	}
 	if err := w.StoreMessage(id, chatJID, sender, e.content, ts, fromMe,
-		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location}); err != nil {
+		e.mediaType, e.filename, e.url, e.mediaKey, e.fileSHA, e.fileEnc, length, quotedID, messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location, retryChat: e.retryChat, retrySender: e.retrySender}); err != nil {
 		return false, err
 	}
 	// Mentions ride in a side update rather than the insert: only a minority of

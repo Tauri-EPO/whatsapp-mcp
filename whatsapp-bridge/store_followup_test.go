@@ -46,7 +46,10 @@ func TestPostEffectArchiveWritesRetryWithoutRepeatingRemoteEffect(t *testing.T) 
 				var success bool
 				var message string
 				if action == "edit" {
-					codeResp, resp := efPost(t, handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) error { effect(); return nil }, chatPolicy{}, b.storeLive), `{"chat_jid":"`+phonePN.String()+`","message_id":"POST1","text":"new content"}`)
+					codeResp, resp := efPost(t, handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) (int64, error) {
+						effect()
+						return time.Now().UnixMilli(), nil
+					}, chatPolicy{}, b.storeLive), `{"chat_jid":"`+phonePN.String()+`","message_id":"POST1","text":"new content"}`)
 					code, success, message = codeResp, resp.Success, resp.Message
 				} else {
 					rr, resp := postDelete(handleDeleteMessage(ms, func(context.Context, types.JID, types.MessageID) error { effect(); return nil }, chatPolicy{}, b.storeLive), `{"chat_jid":"`+phonePN.String()+`","message_id":"POST1","for_everyone":true}`)

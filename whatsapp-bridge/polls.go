@@ -279,6 +279,49 @@ type historyVoteMarkers struct {
 	read bool
 }
 
+type historyVoteJob struct {
+	client  *whatsmeow.Client
+	chat    types.JID
+	chatJID string
+	votes   []*waWeb.WebMessageInfo
+	markers historyVoteMarkers
+}
+
+// Submit after all ordinary rows in a payload. One FIFO chain preserves vote
+// order across conversations and payloads without pinning the SDK callback,
+// which must download later notifications before their secrets can appear.
+func (b *Bridge) queueHistoryPollVotes(jobs []historyVoteJob) {
+	if len(jobs) == 0 {
+		return
+	}
+	b.historyVoteMu.Lock()
+	if b.historyVoteStopped || b.ctx.Err() != nil {
+		b.historyVoteMu.Unlock()
+		return
+	}
+	previous, done := b.historyVoteTail, make(chan struct{})
+	b.historyVoteTail = done
+	b.historyVotes.Add(1)
+	b.historyVoteMu.Unlock()
+	go func() {
+		defer b.historyVotes.Done()
+		defer close(done)
+		if previous != nil {
+			select {
+			case <-previous:
+			case <-b.ctx.Done():
+				return
+			}
+		}
+		for _, job := range jobs {
+			if b.ctx.Err() != nil {
+				return
+			}
+			b.storeHistoryPollVotesForClient(job.client, job.chat, job.chatJID, job.votes, nil, job.markers)
+		}
+	}()
+}
+
 func (store *MessageStore) storePollVoteMessageResult(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger, markers ...historyVoteMarkers) (consumed bool, err error) {
 	err = store.Batch(func(batch *messageBatch) error {
 		ex := extractedMessage{content: content, mediaType: "poll_vote", filename: pollID, hasLength: true}
@@ -307,52 +350,82 @@ func defaultHistoryVoteRetryDelays() []time.Duration {
 	return []time.Duration{2 * time.Second, 10 * time.Second}
 }
 
-// storeHistoryPollVotes decodes PollUpdateMessage rows delivered by history
-// sync for one conversation. Runs after the conversation's messages (and
-// therefore the poll rows) are stored; each vote retries briefly when the
-// poll secret is not there yet and is recorded as undecodable otherwise.
-func (b *Bridge) storeHistoryPollVotes(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo, done chan<- struct{}, markers ...historyVoteMarkers) {
+// A queued vote belongs to the client that delivered its payload. A handoff
+// retires it like a late SDK event; decryption never holds the handoff gate.
+func (b *Bridge) storeHistoryPollVotesForClient(client *whatsmeow.Client, chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo, done chan<- struct{}, markers ...historyVoteMarkers) {
 	defer func() {
 		if done != nil {
 			close(done)
 		}
 	}()
+	if client == nil {
+		return
+	}
 	for _, web := range votes {
-		evt, err := b.currentClient().ParseWebMessage(chat, web)
+		if b.ctx.Err() != nil || b.currentClient() != client {
+			return
+		}
+		evt, err := client.ParseWebMessage(chat, web)
 		if err != nil {
 			b.Log.Warnf("Could not parse history poll vote %s: %v", web.GetKey().GetID(), err)
 			continue
 		}
-		resolvedSender := resolveUserJID(b.currentClient(), evt.Info.Sender, types.EmptyJID)
+		resolvedSender := resolveUserJIDContext(b.ctx, client, evt.Info.Sender, types.EmptyJID)
+		if b.ctx.Err() != nil {
+			return
+		}
 		sender := resolvedSender.User
 		for attempt := 0; ; attempt++ {
-			pollID, names, derr := decodePollVote(context.Background(), b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
+			pollID, names, derr := decodePollVote(b.ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
+			if b.ctx.Err() != nil || b.currentClient() != client {
+				return
+			}
 			if pollID == "" {
 				break
 			}
 			if derr == nil {
-				// A background goroutine, so the retry costs the event path nothing.
-				b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
-					return b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp)
-				})
-				b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
-					_, err := b.Store.storePollVoteMessageResult(evt.Info.ID, chatJID, storedSender(resolvedSender),
-						pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log, markers...)
-					return err
-				})
+				// Decryption finished outside any archive write transaction.
+				if !b.writeHistoryVoteForClient(client, func() {
+					b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+						return b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp)
+					})
+					b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
+						_, err := b.Store.storePollVoteMessageResult(evt.Info.ID, chatJID, storedSender(resolvedSender),
+							pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log, markers...)
+						return err
+					})
+				}) {
+					return
+				}
 				break
 			}
 			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(b.HistoryVoteRetryDelays) {
-				time.Sleep(b.HistoryVoteRetryDelays[attempt])
+				if !b.sleep(b.HistoryVoteRetryDelays[attempt]) {
+					return
+				}
 				continue
 			}
-			b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)
-			b.storeLive("undecodable history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
-				return b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, evt.Info.Timestamp)
-			})
+			if !b.writeHistoryVoteForClient(client, func() {
+				b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)
+				b.storeLive("undecodable history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+					return b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, evt.Info.Timestamp)
+				})
+			}) {
+				return
+			}
 			break
 		}
 	}
+}
+
+func (b *Bridge) writeHistoryVoteForClient(client *whatsmeow.Client, write func()) bool {
+	b.clientGate.RLock()
+	defer b.clientGate.RUnlock()
+	if b.ctx.Err() != nil || b.currentClient() != client {
+		return false
+	}
+	write()
+	return true
 }
 
 // --- /api/poll --------------------------------------------------------------

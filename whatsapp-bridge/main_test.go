@@ -122,6 +122,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			direct_path TEXT,
 			media_presentation TEXT,
 			location TEXT,
+			message_edit_timestamp INTEGER NOT NULL DEFAULT 0,
+			media_retry_chat TEXT,
+			media_retry_sender TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);

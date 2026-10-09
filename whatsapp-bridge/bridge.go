@@ -88,14 +88,14 @@ type Bridge struct {
 	ForwardBroadcasts bool
 	// MetricsEnabled serves GET /metrics (WHATSAPP_METRICS, metrics.go).
 	MetricsEnabled bool
-	// MediaAutoDownload caches inbound media as it arrives (WHATSAPP_MEDIA_AUTODOWNLOAD).
+	// MediaAutoDownload caches inbound media and successfully sent files (WHATSAPP_MEDIA_AUTODOWNLOAD).
 	MediaAutoDownload bool
 	// MediaAutoDownloadStatus extends it to the status feed
 	// (WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS, media_retention.go). Zero value =
 	// status media is stored as a row and fetched only on demand; main() parses
 	// it and refuses to start on a value it cannot read.
 	MediaAutoDownloadStatus bool
-	// MediaMaxBytes: inbound files larger than this are not auto-downloaded
+	// MediaMaxBytes: files larger than this are not automatically cached
 	// (WHATSAPP_MEDIA_MAX_BYTES); /api/download still fetches them on demand.
 	MediaMaxBytes uint64
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
@@ -209,8 +209,11 @@ type Bridge struct {
 	autoDownloads *mediaJobQueue
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
-	// historyVotes tracks background decoding of history-sync poll votes (polls.go).
-	historyVotes sync.WaitGroup
+	// History vote batches form one FIFO chain outside the SDK callback.
+	historyVotes       sync.WaitGroup
+	historyVoteMu      sync.Mutex
+	historyVoteTail    chan struct{}
+	historyVoteStopped bool
 	// historyBatchWriter replaces the transaction runner in controlled tests.
 	historyBatchWriter func(func(*messageBatch) error) error
 	// Peer history has a separate one-worker, one-waiting-job budget.
@@ -330,6 +333,9 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 		}
 	}
 	b.cancel()
+	b.historyVoteMu.Lock()
+	b.historyVoteStopped = true
+	b.historyVoteMu.Unlock()
 	if b.operatorPairing != nil && b.operatorPairing.started.Load() {
 		select {
 		case <-b.operatorPairing.done:
