@@ -25,6 +25,7 @@ import transcribe
 from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry, validate_chat_target
 from errors import MEDIA_REFUSED_CODE, ToolError
 from phone import br_mobile_alternate, br_national_mobile_alternate, normalize_recipient, phone_digits
+from untrusted import sanitize_name
 
 # All diagnostics go through logging (stderr). Never use print here: on the stdio
 # transport stdout is the MCP protocol channel and stray output breaks it.
@@ -6899,4 +6900,123 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
         ),
         message_id,
         chat_jid,
+    )
+
+
+def _label_chat_jid(chat_jid: str) -> str:
+    target = (chat_jid or "").strip()
+    if (
+        target.count("@") != 1
+        or not all(target.rsplit("@", 1))
+        or any(c in target.split("@", 1)[0] for c in ":. ")
+        or target.rsplit("@", 1)[1].lower() not in {"s.whatsapp.net", "lid", "g.us"}
+    ):
+        raise ToolError("invalid_argument", "chat_jid must be a full JID")
+    target = normalize_chat_entry(target)
+    _require_allowed(target)
+    return target
+
+
+def _label_chat_aliases(target: str) -> list[str]:
+    aliases = [target]
+    user, server = target.rsplit("@", 1)
+    lookup = {
+        "s.whatsapp.net": ("lid", "pn", "lid"),
+        "lid": ("pn", "lid", "s.whatsapp.net"),
+    }.get(server)
+    if lookup is None or not os.path.isfile(WHATSMEOW_DB_PATH):
+        return aliases
+    column, key, twin_server = lookup
+    conn = None
+    try:
+        conn = _connect_whatsmeow_db()
+        row = conn.execute(f"SELECT {column} FROM whatsmeow_lid_map WHERE {key} = ?", (user,)).fetchone()
+        if row and row[0]:
+            twin = f"{row[0]}@{twin_server}"
+            if CHAT_POLICY.allows(twin):
+                aliases.append(twin)
+    except sqlite3.Error:
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+    return aliases
+
+
+def _labels_available(conn: sqlite3.Connection) -> bool:
+    # Probe every time: an upgraded bridge can create the tables in its WAL
+    # without changing the main database file's mtime or size.
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='labels'").fetchone())
+
+
+def list_labels(chat_jid: str | None = None, include_deleted: bool = False) -> dict[str, Any]:
+    target = _label_chat_jid(chat_jid) if chat_jid is not None else None
+    query = "SELECT id, name, color, deleted, type, immutable, predefined_id FROM labels l WHERE (NOT deleted OR ?)"
+    args: list[Any] = [include_deleted]
+    if target is not None:
+        aliases = _label_chat_aliases(target)
+        # An older positive twin must not override a newer removal.
+        query += (
+            " AND (SELECT c.labeled FROM chat_labels c WHERE c.label_id=l.id"
+            f" AND c.chat_jid IN ({_placeholders(aliases)})"
+            " ORDER BY c.action_ms DESC, c.labeled ASC LIMIT 1)=1"
+        )
+        args.extend(aliases)
+    conn = _connect_messages_db()
+    try:
+        if not _labels_available(conn):
+            return {"labels": []}
+        rows = conn.execute(query + " ORDER BY id", args).fetchall()
+        return {
+            "labels": [
+                {
+                    "id": id_,
+                    "name": name,
+                    "color": color,
+                    "deleted": bool(deleted),
+                    "type": type_,
+                    "immutable": bool(immutable),
+                    "predefined_id": predefined_id,
+                }
+                for id_, name, color, deleted, type_, immutable, predefined_id in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+def label_chat(chat_jid: str, label: str, labeled: bool = True) -> dict[str, Any]:
+    target = _label_chat_jid(chat_jid)
+    needle = label or ""
+    if not needle.strip():
+        raise ToolError("invalid_argument", "label must be an id or an exact name")
+    conn = _connect_messages_db()
+    try:
+        if not _labels_available(conn):
+            raise ToolError("not_found", "Unknown label; use list_labels")
+        row = conn.execute("SELECT id, deleted, immutable FROM labels WHERE id=?", (needle,)).fetchone()
+        if row is not None:
+            if row[1]:
+                raise ToolError("not_found", "Label is deleted")
+            label_id = row[0]
+            immutable = row[2]
+        else:
+            clean_needle = sanitize_name(needle)
+            rows = [
+                (id_, immutable)
+                for id_, name, immutable in conn.execute("SELECT id, name, immutable FROM labels WHERE NOT deleted")
+                if name == needle or sanitize_name(name) == clean_needle
+            ]
+            if not rows:
+                raise ToolError("not_found", "Unknown label; use list_labels")
+            if len(rows) != 1:
+                raise ToolError("invalid_argument", "Ambiguous label name; use its id from list_labels")
+            label_id = rows[0][0]
+            immutable = rows[0][1]
+        if immutable:
+            raise ToolError("invalid_argument", "Label is immutable and cannot be applied or removed")
+    finally:
+        conn.close()
+    return _bridge_json(
+        _bridge_request("POST", "/chat/label", json={"chat_jid": target, "label_id": label_id, "labeled": labeled})
     )

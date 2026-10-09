@@ -58,6 +58,7 @@ def plain(payload):
 
 # Tools whose result can carry message content, contact/group names or notes.
 EXPECTED_UNTRUSTED = {
+    "list_labels",
     "list_messages",
     "get_message_context",
     "list_unread",
@@ -97,6 +98,7 @@ EXPECTED_UNTRUSTED = {
 # The rest: they return counts, timestamps, paths, status flags or an echo of
 # what this agent itself just wrote — nothing a third party authored.
 EXPECTED_TRUSTED = {
+    "label_chat",
     "archive_chat",
     "bridge_status",
     "clear_media_refusal",
