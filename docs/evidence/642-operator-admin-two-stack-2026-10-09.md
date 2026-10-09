@@ -2,11 +2,11 @@
 
 Observed on 2026-10-09 with Docker Engine 29.8.1 / Compose 5.5.1,
 Windows Docker Desktop Linux engine. The runtime sources match PR #675's
-locally verified Go/Python sources; only the proxy smoke's operator port
-changed after that verification. Bridge image:
+locally verified Go/Python sources, including rejection of zero-frame audio.
+The run was repeated after that audio fix. Bridge image:
 `sha256:a28a3d888d200d5a02e5f240a18f1db4dfb6cb1756fc03d98dc14fd3adf52484`;
 MCP image:
-`sha256:d0996034f810f6308999b9929853ac605db7f6702830d1acc8e231f7a824b3a8`.
+`sha256:c85ba117aad55f8de51aaab8b1043983ce6b10cfeb7e5715a5babf90c62d759e`.
 
 The disposable `scripts/smoke-proxy.sh` run used cached local images and a
 sanitized environment, first proxy-only and then proxy+operator, with two
@@ -37,18 +37,18 @@ cases skipped; the 21 native Compose/docs contracts cover CLI parsing.
 Selected output, with no credentials:
 
 ```text
-wamcp-proxy-56643-operator-a:8090 health -> 200 from independent operator-network container
-wamcp-proxy-56643-operator-a:8090 transcription/usage -> 200 from independent operator-network container
-wamcp-proxy-56643-operator-a: missing/data-plane/MCP token -> 401
-wamcp-proxy-56643-operator-b:8090 health -> 200 from independent operator-network container
-wamcp-proxy-56643-operator-b:8090 transcription/usage -> 200 from independent operator-network container
-wamcp-proxy-56643-operator-b: missing/data-plane/MCP token -> 401
-actual stack -> wamcp-proxy-56643-b:8080 ECONNREFUSED
-actual stack -> wamcp-proxy-56643-b:8090 ECONNREFUSED
-actual stack -> wamcp-proxy-56643-b:8091 ECONNREFUSED
-actual stack -> wamcp-proxy-56643-a:8080 ECONNREFUSED
-actual stack -> wamcp-proxy-56643-a:8090 ECONNREFUSED
-actual stack -> wamcp-proxy-56643-a:8091 ECONNREFUSED
+wamcp-proxy-63096-operator-a:8090 health -> 200 from independent operator-network container
+wamcp-proxy-63096-operator-a:8090 transcription/usage -> 200 from independent operator-network container
+wamcp-proxy-63096-operator-a: missing/data-plane/MCP token -> 401
+wamcp-proxy-63096-operator-b:8090 health -> 200 from independent operator-network container
+wamcp-proxy-63096-operator-b:8090 transcription/usage -> 200 from independent operator-network container
+wamcp-proxy-63096-operator-b: missing/data-plane/MCP token -> 401
+actual stack -> wamcp-proxy-63096-b:8080 ECONNREFUSED
+actual stack -> wamcp-proxy-63096-b:8090 ECONNREFUSED
+actual stack -> wamcp-proxy-63096-b:8091 ECONNREFUSED
+actual stack -> wamcp-proxy-63096-a:8080 ECONNREFUSED
+actual stack -> wamcp-proxy-63096-a:8090 ECONNREFUSED
+actual stack -> wamcp-proxy-63096-a:8091 ECONNREFUSED
 proxy smoke -> PASS (two projects, both override combinations, unpaired)
 ```
 
@@ -63,6 +63,6 @@ peer still returned 200/session/serverInfo, and missing/other-instance MCP
 tokens returned 401 in both modes.
 
 After the script completed, independent Docker container, volume and network
-listings for `wamcp-proxy-56643` were empty. The MCP/bridge namespace still
+listings for `wamcp-proxy-63096` were empty. The MCP/bridge namespace still
 shares port 8000 on joined networks; separating the agent plane is #678,
 outside #642's operator-route acceptance.
