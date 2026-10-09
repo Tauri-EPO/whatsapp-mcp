@@ -234,6 +234,70 @@ def test_http_deadline_includes_accounting_writer_wait(provider, paired_dbs, mon
         conn.close()
 
 
+@pytest.mark.parametrize("outcome", ["success", "error"])
+def test_http_completion_reconciles_after_writer_recovery(provider, runtime_archive, monkeypatch, tmp_path, outcome):
+    import time
+
+    monkeypatch.setenv("WHISPER_TIMEOUT_S", "3")
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 0.05, "transcription.cap_scope": "all"})
+    source = tmp_path / "recovery.wav"
+    _audio(source, 1)
+    original_http = transcribe._transcribe_http
+    writers = []
+
+    def contended_http(*args, **kwargs):
+        conn = sqlite3.connect(media_notes.notes_db_path())
+        conn.execute("BEGIN IMMEDIATE")
+        writers.append(conn)
+        return original_http(*args, **kwargs)
+
+    monkeypatch.setattr(transcribe, "_transcribe_http", contended_http)
+    provider["delay"] = 4 if outcome == "error" else 0
+    started = time.monotonic()
+    try:
+        if outcome == "error":
+            with pytest.raises(transcribe.BackendUnavailableError, match="deadline"):
+                transcribe.transcribe_file(str(source))
+        else:
+            with pytest.raises(transcribe.BackendUnavailableError, match="accounting pending"):
+                transcribe.transcribe_file(str(source))
+        assert time.monotonic() - started < 3.6
+        token, month = writers[0].execute("SELECT id,month FROM transcription_reservations").fetchone()
+        assert writers[0].execute("SELECT COUNT(*) FROM transcription_usage").fetchone()[0] == 0
+    finally:
+        for conn in writers:
+            conn.rollback()
+            conn.close()
+    until = time.monotonic() + 5
+    while usage._pending.unfinished_tasks and time.monotonic() < until:
+        time.sleep(0.05)
+    assert usage._pending.unfinished_tasks == 0
+    value = usage.current_usage()
+    assert value["seconds"] == value["requests"] == (1 if outcome == "success" else 0)
+    assert value["remaining_seconds"] == (2 if outcome == "success" else 3)
+    assert f'provider="openai_compatible",outcome="{outcome}"}} 1' in usage.metrics_text()
+    with usage._connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM transcription_reservations").fetchone()[0] == 0
+        usage._finish(
+            conn,
+            usage.Completion(
+                media_notes.notes_db_path(), token, month, 1, "openai_compatible", "fake-speech-model", "tool", outcome
+            ),
+        )
+    assert usage.current_usage() == value  # replay is idempotent
+
+
+def test_accounting_admission_bounds_inflight_and_deferred_work(paired_dbs, monkeypatch):
+    monkeypatch.setattr(usage, "_completion_slots", threading.BoundedSemaphore(1))
+    with usage.admission(1, "whisper_cpp", "unknown", "tool"):
+        with pytest.raises(ToolError, match="accounting busy"):
+            with usage.admission(1, "whisper_cpp", "unknown", "tool"):
+                pytest.fail("accounting queue admission exceeded its bound")
+    with usage.admission(1, "whisper_cpp", "unknown", "tool"):
+        pass
+    assert usage.current_usage()["requests"] == 2
+
+
 def test_month_clock_is_utc_even_when_tz_differs(monkeypatch):
     class Clock:
         @staticmethod
@@ -328,6 +392,63 @@ def test_corrupt_optional_usage_preserves_bridge_status_and_other_metrics(paired
     assert "whatsapp_mcp_uptime_seconds " in text
     assert "whatsapp_mcp_transcription_usage_available 0" in text
     assert "whatsapp_mcp_transcription_seconds_total{" not in text
+
+
+def test_real_mcp_http_responds_while_legacy_notes_metrics_waits_for_writer(paired_dbs, monkeypatch):
+    import time
+
+    from private_files import notes_connection
+
+    writer = notes_connection(media_notes.notes_db_path(), create=True, timeout=5)
+    with writer:
+        writer.execute("CREATE TABLE legacy_notes (value TEXT)")
+    writer.execute("BEGIN IMMEDIATE")
+    entered = threading.Event()
+    original_render = observability.Metrics.render
+
+    def observe(registry):
+        entered.set()
+        return original_render(registry)
+
+    monkeypatch.setattr(observability.Metrics, "render", observe)
+    monkeypatch.setenv("WHATSAPP_MCP_METRICS", "true")
+    server = StrictArgumentServer("metrics-contention")
+
+    @server.tool()
+    def echo() -> dict:
+        return {"ok": True}
+
+    app = main.build_http_app(
+        server, "streamable-http", "fake-mcp-token-0123456789", host="0.0.0.0", json_response=True, stateless_http=True
+    )
+    headers = {"Authorization": "Bearer fake-mcp-token-0123456789", "Accept": "application/json, text/event-stream"}
+    try:
+        with TestClient(app) as client, concurrent.futures.ThreadPoolExecutor(1) as pool:
+            scrape = pool.submit(client.get, "/metrics")
+            try:
+                assert entered.wait(2)
+                started = time.monotonic()
+                response = client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "echo", "arguments": {}},
+                    },
+                )
+                assert response.status_code == 200 and not response.json()["result"]["isError"]
+                assert time.monotonic() - started < 1.5
+                assert not scrape.done()  # the real SQLite writer still blocks schema creation
+            finally:
+                writer.rollback()
+            response = scrape.result(timeout=3)
+            assert response.status_code == 200
+            assert "whatsapp_mcp_transcription_usage_available 1" in response.text
+    finally:
+        writer.rollback()
+        writer.close()
 
 
 def test_admin_real_socket_auth_host_origin_only_routes_and_no_mcp_surface(paired_dbs):

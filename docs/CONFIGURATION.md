@@ -1266,6 +1266,12 @@ or a permitted cap raise. Explicit calls subject to the cap return
 Duration comes from the decoded PCM sample count (including all chained Ogg streams), using the packaged ffmpeg without retaining decoded files. Successful whole-file calls count duration and one request, including forced
 retranscriptions; failures record an error outcome and release their reservation.
 Atomic SQLite reservations bound concurrent tool/worker admission. Reservations
+whose completion hits write contention are reconciled by one background worker
+after the database recovers; admission plus deferred completions are bounded to
+256. Calls fail clearly until accounting is durable, and pending reservations
+continue to reduce the remaining quota. Reconciliation is idempotent and does
+not extend the HTTP call deadline.
+Reservations
 left by a crashed process remain conservatively charged for that UTC month;
 they cannot cause a restart to reopen an uncertain quota. Transcript notes also
 store `duration_s`, `transcript_model` and `transcript_provider`.

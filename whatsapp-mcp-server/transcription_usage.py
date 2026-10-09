@@ -5,12 +5,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import queue
 import re
 import sqlite3
 import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from errors import ToolError
@@ -30,6 +32,10 @@ CREATE TABLE IF NOT EXISTS transcription_outcomes (
 logger = logging.getLogger("whatsapp_mcp")
 _pause_lock = threading.Lock()
 _paused = False
+_completion_slots = threading.BoundedSemaphore(256)
+_pending = queue.Queue(maxsize=256)
+_reconciler_lock = threading.Lock()
+_reconciler_started = False
 
 
 def month_now() -> str:
@@ -39,7 +45,11 @@ def month_now() -> str:
 def _connection(create=True, timeout: float = 5):
     conn = notes_connection(notes_db_path(), create=create, timeout=timeout)
     if conn is not None:
-        conn.executescript(SCHEMA)
+        try:
+            conn.executescript(SCHEMA)
+        except BaseException:
+            conn.close()
+            raise
     return conn
 
 
@@ -165,11 +175,73 @@ def _pause(value):
             logger.info("transcribe_on_ingest: monthly quota %s", "paused" if value else "resumed")
 
 
+@dataclass(frozen=True)
+class Completion:
+    path: str
+    token: str
+    month: str
+    seconds: float
+    provider: str
+    model: str
+    source: str
+    outcome: str
+
+
+def _finish(conn, entry):
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM transcription_reservations WHERE id=?", (entry.token,)).fetchone():
+            return  # A repeated completion cannot increment counters twice.
+        if entry.outcome == "success":
+            conn.execute(
+                "INSERT INTO transcription_usage VALUES (?,?,?,?,?,1) ON CONFLICT(month,provider,model,source) "
+                "DO UPDATE SET seconds=seconds+excluded.seconds,requests=requests+1",
+                (entry.month, entry.provider, entry.model, entry.source, entry.seconds),
+            )
+        conn.execute(
+            "INSERT INTO transcription_outcomes VALUES (?,?,1) ON CONFLICT(provider,outcome) "
+            "DO UPDATE SET requests=requests+1",
+            (entry.provider, entry.outcome),
+        )
+        conn.execute("DELETE FROM transcription_reservations WHERE id=?", (entry.token,))
+
+
+def _reconcile():
+    while True:
+        entry = _pending.get()
+        while True:
+            try:
+                conn = notes_connection(entry.path, create=False, timeout=0.05)
+                if conn is not None:
+                    try:
+                        _finish(conn, entry)
+                    finally:
+                        conn.close()
+                break
+            except (sqlite3.Error, OSError):
+                time.sleep(0.25)
+        _completion_slots.release()
+        _pending.task_done()
+
+
+def _defer(entry):
+    global _reconciler_started
+    _pending.put_nowait(entry)  # Admission slots bound in-flight plus deferred work.
+    with _reconciler_lock:
+        if not _reconciler_started:
+            threading.Thread(target=_reconcile, name="transcription-accounting", daemon=True).start()
+            _reconciler_started = True
+
+
 @contextlib.contextmanager
 def admission(seconds: float, provider: str, model: str, source: str, *, deadline=None):
+    if not _completion_slots.acquire(blocking=False):
+        raise ToolError("internal", "Transcription accounting busy; retry after the database recovers")
     conn = None
+    deferred = False
     try:
         month, (cap, scope), token = month_now(), limits(deadline), uuid.uuid4().hex
+        path = notes_db_path()
         conn = _connection(timeout=_budget(deadline))
         assert conn is not None
         conn.execute(f"PRAGMA busy_timeout={max(1, int(_budget(deadline) * 1000))}")
@@ -189,22 +261,27 @@ def admission(seconds: float, provider: str, model: str, source: str, *, deadlin
             yield
             outcome = "success"
         finally:
-            if deadline is not None:
-                conn.execute(f"PRAGMA busy_timeout={max(1, int(min(5, max(0, deadline - time.monotonic())) * 1000))}")
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                if outcome == "success":
+            entry = Completion(path, token, month, seconds, provider, model, source, outcome)
+            try:
+                if deadline is not None:
                     conn.execute(
-                        "INSERT INTO transcription_usage VALUES (?,?,?,?,?,1) ON CONFLICT(month,provider,model,source) "
-                        "DO UPDATE SET seconds=seconds+excluded.seconds,requests=requests+1",
-                        (month, provider, model, source, seconds),
+                        f"PRAGMA busy_timeout={max(1, int(min(5, max(0, deadline - time.monotonic())) * 1000))}"
                     )
-                conn.execute(
-                    "INSERT INTO transcription_outcomes VALUES (?,?,1) ON CONFLICT(provider,outcome) "
-                    "DO UPDATE SET requests=requests+1",
-                    (provider, outcome),
-                )
-                conn.execute("DELETE FROM transcription_reservations WHERE id=?", (token,))
+                _finish(conn, entry)
+            except sqlite3.Error:
+                _defer(entry)
+                deferred = True
+                if outcome == "success":
+                    # Do not report success before its accounting is durable.
+                    if deadline is not None:
+                        from transcribe import BackendUnavailableError
+
+                        raise BackendUnavailableError(
+                            "HTTP transcription accounting pending database recovery"
+                        ) from None
+                    raise ToolError(
+                        "internal", "Transcription accounting pending database recovery; retry later"
+                    ) from None
     except sqlite3.Error:
         if deadline is not None and deadline - time.monotonic() < 0.01:
             from transcribe import BackendUnavailableError
@@ -216,6 +293,8 @@ def admission(seconds: float, provider: str, model: str, source: str, *, deadlin
     finally:
         if conn is not None:
             conn.close()
+        if not deferred:
+            _completion_slots.release()
 
 
 def metrics_text():
