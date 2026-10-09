@@ -84,12 +84,15 @@ If WhatsApp asks for a passkey after scanning, `bridge_status` and
 `/api/health` report `pairing_state=passkey_required`, `passkey_confirm`, or
 `passkey_failed`. The challenge, assertion and confirmation code are never
 published in health or metrics. The bridge logs the step and stops automatic
-QR retries after it; it stays alive for diagnosis. Restart the bridge after
-resolving the phone's passkey prompt or account access in the official WhatsApp
+QR retries after it; it stays alive for diagnosis. Resolve the phone's
+passkey prompt or account access in the official WhatsApp
 app. A headless bridge has no WebAuthn authenticator and cannot complete that
 challenge. A page on a generic server origin cannot assert a passkey for
-`whatsapp.com`; it requires a matching relying-party origin. There is currently
-no operator endpoint for assertions or manual confirmation.
+`whatsapp.com`; it requires a matching relying-party origin. The optional
+operator endpoints below forward an assertion obtained by an external native
+helper with that relying-party support; they do not create one or provide a
+browser authenticator. Without such a helper, use the official phone flow and
+restart the attempt after resolving the account's requirements.
 
 The pinned whatsmeow `c386243a72ba` includes passkey support from `b572e5b`;
 its QR channel automatically confirms `SkipHandoffUX` events. A manual
@@ -98,8 +101,12 @@ uses its advertised timeout (milliseconds), capped at five minutes. Pairing by
 phone-number code, account/device eligibility and native helper workarounds
 have not been verified against a paired phone; no bypass is promised.
 
-The bridge prints the QR code to its stdout, which `docker compose logs`
-captures. On first start:
+By default the bridge prints the QR code to stdout, which `docker compose logs`
+captures. These QR codes are credentials: set `WHATSAPP_PAIRING_STDOUT=false`
+when logs leave the host, and use operator HTTP. Setting an operator bind
+defaults stdout pairing to false, including outside Compose; without an
+operator the existing log flow remains the default.
+On first start with log pairing:
 
 ```bash
 docker compose up -d bridge
@@ -119,6 +126,139 @@ docker compose up -d
 
 The session lives in the `whatsapp-store` volume, so restarts and image
 rebuilds do **not** require re-pairing. Deleting the volume does.
+
+### Pairing over private operator HTTP
+
+The operator listener is off unless `WHATSAPP_OPERATOR_BIND` is set. It requires
+a separate random secret (generate with `openssl rand -hex 32`), refuses weak
+or placeholder tokens and a token equal to the effective bridge token (including
+`store/.bridge-token`), and never serves data-plane routes or MCP tools.
+For local use, bind `127.0.0.1`, port `8090`, set
+`WHATSAPP_OPERATOR_TOKEN` and `WHATSAPP_PAIRING_STDOUT=false`. Alternatively set
+`WHATSAPP_OPERATOR_TOKEN_FILE` to a regular file mounted read-only, owned by the
+container uid 1000 and mode 0600; no symlinks or default world-readable secret
+files. Choose token or file, never both. The data-plane token cannot pair and
+the operator token cannot send messages. Read-only/tool policies do not narrow
+the operator routes; possession of this separate credential grants pairing.
+
+```bash
+# Run from the host for a loopback listener, or an operator container below.
+# OPERATOR_TOKEN is the separate secret; do not use a real value in shell history.
+curl -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  http://127.0.0.1:8090/operator/v1/pairing
+curl -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"phone":"5511999999999"}' \
+  http://127.0.0.1:8090/operator/v1/pairing/code
+curl -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  http://127.0.0.1:8090/operator/v1/pairing/restart
+```
+
+`GET pairing` returns state, attempt/attempts, generation and the current
+`qr: {payload, sequence, expires_at}`. Render only that current payload; it
+rotates and becomes null when expired, passkey steps start, or pairing succeeds.
+`POST pairing/code` reuses the connected QR attempt and returns an eight-character
+WhatsApp code for Linked Devices > Link with phone number. At most three calls
+per attempt; the fourth is 429. A paired client, inactive QR or concurrent action
+is 409. The returned `expires_at` is a conservative local deadline tied to the
+current QR, **not a promise about WhatsApp's undocumented pairing-code TTL**.
+After three exhausted attempts the process remains alive with `expired`;
+`restart` returns 202, invalidates credentials and creates a fresh client.
+It refuses paired devices, an unexpired temporary ban and an outdated build.
+An active attempt, including the SDK's final device-save step (`completing`),
+must finish first; restart does not replace a device that finishes linking.
+Locked/banned recovery requires this explicit operator action after resolving
+the account restriction; restarting does not bypass WhatsApp enforcement.
+
+`GET health`/`GET ready` are credential-free and authenticated here. All operator
+responses use `Cache-Control: no-store`. Health and metrics never expose a QR,
+phone number, pairing code, assertion or confirmation code. INFO audit lines
+contain only the fixed mutating route, response status and socket peer;
+authentication, origin and rate-limit refusals log at DEBUG. Limits are 120
+requests/minute per socket peer before authentication and 60/minute for the
+authenticated token; forwarded headers do not change the peer. Browser Origin
+must exactly match the listener's scheme and Host, and Host must be explicitly
+allowed; native clients may omit Origin. No CORS or forwarded-origin trust is
+enabled. These examples use native/backend clients on the private network.
+
+For a passkey step, `GET pairing` exposes `passkey` request options and
+`step_expires_at` only on this authenticated private listener. An external
+authenticator must generate the assertion for `whatsapp.com`. Submit
+`{"generation":N,"assertion":{...WebAuthnResponse...}}` to
+`POST pairing/passkey/response`; mismatched challenge, relying-party hash,
+origin, expired generation and replay are refused. WhatsApp verifies the
+signature. If state becomes `passkey_confirm`, compare `confirmation_code`
+with the phone and send `{"generation":N,"code":"the-compared-code"}` to
+`POST pairing/passkey/confirm`. The SDK handles `SkipHandoffUX` itself and this
+route never duplicates it. These HTTP paths are exercised with fake events;
+native authenticator availability and actual phone eligibility remain unverified.
+Neither phone-number linking nor these endpoints promise avoidance of a
+passkey challenge. `scripts/smoke.sh` keeps exit 2 while unpaired and, when the
+operator listener is enabled, prints only its pairing state, never credentials.
+
+### Private operator network
+
+For an operator in a container, create one private external Docker network
+per instance and attach only that operator client and instance. Use a unique
+alias for each instance:
+
+```bash
+docker network create operator-private
+# In .env: WHATSAPP_OPERATOR_NETWORK=operator-private
+# WHATSAPP_OPERATOR_ALIAS=whatsapp-operator-example
+# WHATSAPP_OPERATOR_TOKEN=<output of openssl rand -hex 32>
+docker compose -f docker-compose.yml -f docker-compose.operator.yml up -d
+# From the operator container joined to operator-private:
+# http://whatsapp-operator-example:8090/operator/v1/health
+```
+
+`docker-compose.operator.yml` binds the operator listener to the single IP
+resolved for that alias **on the operator network** and includes the alias in
+its Host allow-list. It publishes no operator host port. Port 8080 stays on
+loopback; enabling the operator refuses a widened `WHATSAPP_BRIDGE_BIND`.
+The MCP container shares the bridge namespace, so joining a private network
+does not isolate the agent plane. MCP port 8000 remains bound to `0.0.0.0`,
+reachable on every joined network and authenticated with the MCP bearer token.
+The override disables MCP `/metrics` to avoid exposing unauthenticated counts.
+Re-enable metrics only with a separate `WHATSAPP_MCP_METRICS_TOKEN` in a custom
+override. The MCP host-port publication stays unchanged; a split namespace and
+proxy-only agent listener remain separate work in #634.
+
+Every member of a **shared** operator network can reach every operator listener
+on that network; separate tokens authenticate each instance. A per-instance
+operator network limits that reachability too. Shared-network peers can also
+reach each MCP listener; its token is the authentication boundary. If a proxy
+network is added, use another alias there: 8090 accepts only on the operator
+interface and 8080 remains loopback, while MCP 8000 remains token-gated.
+
+For a file-backed operator secret, mount the file **only on the bridge**,
+outside `/app/store` and `/app/outbox`. The MCP process uses the same uid and
+can read files in those shared volumes, so they must never contain this secret.
+Create the file with `openssl rand -hex 32`, mode `0600`, owner uid 1000, and
+add an override such as:
+
+```yaml
+services:
+  bridge:
+    environment:
+      WHATSAPP_OPERATOR_TOKEN: ""
+      WHATSAPP_OPERATOR_TOKEN_FILE: /run/operator-secret/token
+    volumes:
+      - ./operator-secret:/run/operator-secret/token:ro
+```
+
+Do not add this mount to `mcp`. `scripts/smoke.sh` invokes the bridge binary's
+`--operator-status` probe: the credential is read from env/file inside that
+container, never put in argv or printed, and only the state name is returned.
+Operator enablement defaults `WHATSAPP_PAIRING_STDOUT` to false even without
+this override. SDK DEBUG is suppressed while the operator is enabled; bridge
+and database DEBUG remain available. Explicit stdout opt-in is for trusted
+console operators only.
+
+Logout, runtime settings, transcription usage and MCP admin forwarding remain
+separate work tracked in #643/#644/#637/#638. A private authenticated pairing
+response reports a bounded `failure_reason` after a passkey failure; health,
+metrics and INFO never expose that text. Real passkey eligibility and a native
+WhatsApp authenticator still need the live verification tracked in #487/#647.
 
 ## Configuration
 

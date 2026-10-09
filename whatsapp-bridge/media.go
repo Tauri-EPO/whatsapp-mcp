@@ -345,7 +345,7 @@ func (b *Bridge) transferMedia(ctx context.Context, msg whatsmeow.DownloadableMe
 	if b.mediaTransfer != nil {
 		return b.mediaTransfer(ctx, msg, relPath)
 	}
-	return downloadToPath(ctx, b.StoreRoot, b.Client, msg, relPath)
+	return downloadToPath(ctx, b.StoreRoot, b.currentClient(), msg, relPath)
 }
 
 // mediaComplete reports whether a message carries what a download needs:
@@ -364,7 +364,7 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 	if b.mediaRetryDownload != nil {
 		return b.mediaRetryDownload(ctx, messageID, chatJID, downloader, root, relPath)
 	}
-	return downloadViaMediaRetry(ctx, b.Client, b.Store, b.mediaRetry, messageID, chatJID, downloader, root, relPath)
+	return downloadViaMediaRetry(ctx, b.currentClient(), b.Store, b.mediaRetry, messageID, chatJID, downloader, root, relPath)
 }
 
 // checkMediaPathComponents refuses a chat directory or a media file name that

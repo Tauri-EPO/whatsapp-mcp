@@ -187,10 +187,11 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 	}
 	add(primary)
 	add(hint)
-	if alt, err := lookupAltJID(context.Background(), b.Client, primary.ToNonAD()); err == nil {
+	client := b.currentClient()
+	if alt, err := lookupAltJID(context.Background(), client, primary.ToNonAD()); err == nil {
 		add(alt)
 	}
-	self := ownUsers(b.Client)
+	self := ownUsers(client)
 	for chatJID, target := range targets {
 		b.storeLive("contact name", "", chatJID, func() error {
 			var existing string
@@ -204,7 +205,7 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 				return nil
 			}
 			b.Store.names.invalidate(chatJID)
-			name := GetChatName(b.Client, b.Store, target, chatJID, nil, "", false, b.Log)
+			name := GetChatName(client, b.Store, target, chatJID, nil, "", false, b.Log)
 			if strings.TrimSpace(name) == "" || isPlaceholderName(name, target, self) {
 				name = strings.TrimSpace(eventName)
 			}

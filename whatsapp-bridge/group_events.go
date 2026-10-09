@@ -126,7 +126,7 @@ func (b *Bridge) resolveRosterRows(rows []groupMemberRow) []groupMemberRow {
 			continue
 		}
 		lid := types.JID{User: rows[i].LID, Server: types.HiddenUserServer}
-		if pn := resolveUserJID(b.Client, lid, types.EmptyJID); pn.Server == types.DefaultUserServer {
+		if pn := resolveUserJID(b.currentClient(), lid, types.EmptyJID); pn.Server == types.DefaultUserServer {
 			rows[i].Phone, rows[i].User = pn.User, pn.User
 		}
 	}
@@ -189,7 +189,7 @@ func (b *Bridge) applyGroupParticipantChanges(v *events.GroupInfo) {
 	now := time.Now()
 
 	if len(v.Join) > 0 {
-		if err := b.Store.AddGroupMembers(group, groupMemberEventRows(b.Client, v.Join), now); err != nil {
+		if err := b.Store.AddGroupMembers(group, groupMemberEventRows(b.currentClient(), v.Join), now); err != nil {
 			b.Log.Warnf("Failed to record joins in %s: %v", group, err)
 		}
 	}
@@ -217,17 +217,17 @@ func (b *Bridge) applyGroupParticipantChanges(v *events.GroupInfo) {
 		if leftAt.IsZero() {
 			leftAt = now
 		}
-		if err := b.Store.RemoveGroupMembers(group, groupMemberEventRows(b.Client, v.Leave), leftAt); err != nil {
+		if err := b.Store.RemoveGroupMembers(group, groupMemberEventRows(b.currentClient(), v.Leave), leftAt); err != nil {
 			b.Log.Warnf("Failed to record departures from %s: %v", group, err)
 		}
 	}
 	if len(v.Promote) > 0 {
-		if err := b.Store.SetGroupMemberAdmin(group, groupMemberEventRows(b.Client, v.Promote), true); err != nil {
+		if err := b.Store.SetGroupMemberAdmin(group, groupMemberEventRows(b.currentClient(), v.Promote), true); err != nil {
 			b.Log.Warnf("Failed to record promotions in %s: %v", group, err)
 		}
 	}
 	if len(v.Demote) > 0 {
-		if err := b.Store.SetGroupMemberAdmin(group, groupMemberEventRows(b.Client, v.Demote), false); err != nil {
+		if err := b.Store.SetGroupMemberAdmin(group, groupMemberEventRows(b.currentClient(), v.Demote), false); err != nil {
 			b.Log.Warnf("Failed to record demotions in %s: %v", group, err)
 		}
 	}
@@ -243,14 +243,14 @@ func (b *Bridge) applyGroupParticipantChanges(v *events.GroupInfo) {
 // roster then keeps answering "yes, they are a member" of a group we can no
 // longer see, until the group is deleted from the archive by hand.
 func (b *Bridge) leftGroup(leaving []types.JID) bool {
-	if b.Client == nil || b.Client.Store == nil {
+	if b.currentClient() == nil || b.currentClient().Store == nil {
 		return false
 	}
 	selves := map[string]struct{}{}
-	if id := b.Client.Store.ID; id != nil {
+	if id := b.currentClient().Store.ID; id != nil {
 		selves[id.ToNonAD().User] = struct{}{}
 	}
-	if lid := b.Client.Store.LID; !lid.IsEmpty() {
+	if lid := b.currentClient().Store.LID; !lid.IsEmpty() {
 		selves[lid.ToNonAD().User] = struct{}{}
 	}
 	if len(selves) == 0 {
@@ -260,7 +260,7 @@ func (b *Bridge) leftGroup(leaving []types.JID) bool {
 		if _, ok := selves[jid.ToNonAD().User]; ok {
 			return true
 		}
-		if _, ok := selves[resolveUserJID(b.Client, jid, types.EmptyJID).User]; ok {
+		if _, ok := selves[resolveUserJID(b.currentClient(), jid, types.EmptyJID).User]; ok {
 			return true
 		}
 	}
@@ -281,7 +281,7 @@ func (b *Bridge) noteGroupSender(chatJID string, sender types.JID, now time.Time
 	if b.rosterFailures.recent(chatJID, now, groupRosterRetryAfter) {
 		return
 	}
-	row, ok := groupMemberRowFromJID(b.Client, sender)
+	row, ok := groupMemberRowFromJID(b.currentClient(), sender)
 	if !ok {
 		return
 	}

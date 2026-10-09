@@ -17,7 +17,7 @@ type chatPresenceSender func(context.Context, types.JID, types.ChatPresence, typ
 
 // handleReact serves POST /api/react.
 func (b *Bridge) handleReact() http.HandlerFunc {
-	client := b.Client
+	client := b.currentClient()
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ReactRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Recipient == "" || req.MessageID == "" || req.Emoji == nil {
@@ -68,7 +68,7 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 
 // handleTyping serves POST /api/typing.
 func (b *Bridge) handleTyping() http.HandlerFunc {
-	client := b.Client
+	client := b.currentClient()
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse the request body
 		var req struct {

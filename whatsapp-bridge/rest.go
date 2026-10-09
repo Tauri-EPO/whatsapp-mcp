@@ -62,7 +62,7 @@ type ReactRequest struct {
 // media_path.go.
 func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	allowedMediaRoots := b.MediaRoots
-	client, messageStore := b.Client, b.Store
+	client, messageStore := b.currentClient(), b.Store
 	allowedHosts, hostWarning := buildHostAllowList(port, b.RESTBind, b.RESTAllowedHosts)
 	if hostWarning != "" {
 		b.Log.Warnf("%s", hostWarning)
@@ -84,28 +84,11 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// asks the phone to push history and writes the rows into messages.db.
 	registerHistoryEndpoint(mux, mutate, client, func() bool { return b.Connected() }, messageStore, b.Policy)
 
-	// Health check endpoint
-	// Liveness: the process serves requests. Always 200 once the listener is up,
-	// with the connection state in the body — so a container awaiting its QR
-	// scan is "healthy" (alive) rather than "unhealthy" (broken). Readiness
-	// (/api/ready) is what to poll before sending.
-	mux.HandleFunc("/api/health", auth(requireMethod(http.MethodGet, b.handleHealth())))
+	b.registerStatusEndpoints(mux, auth)
 
 	// Own identity (see me.go). Authenticated and separate from /api/health:
 	// the owner's number is personal data, health bodies end up in logs.
 	mux.HandleFunc("/api/me", auth(requireMethod(http.MethodGet, handleMe(clientIdentity(client)))))
-
-	// Build identity; unauthenticated on purpose (see version.go).
-	mux.HandleFunc("/api/version", handleVersion(buildInfo().withFTS(messageStore != nil && messageStore.fts)))
-	if b.MetricsEnabled {
-		// Prometheus text; unauthenticated like /api/version (counts only, see metrics.go).
-		mux.HandleFunc("/metrics", requireMethod(http.MethodGet, b.handleMetrics()))
-	}
-
-	// Readiness: 200 only while paired AND connected. whatsmeow reports
-	// IsConnected() as soon as the websocket is up, which includes the QR
-	// pairing phase, so "connected" alone is not "usable".
-	mux.HandleFunc("/api/ready", auth(requireMethod(http.MethodGet, b.handleReady())))
 
 	// Group participants (see group_members.go). Needs a live connection.
 	mux.HandleFunc("/api/group/members", auth(handleGroupMembers(
@@ -197,11 +180,24 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	return mux
 }
 
+// Status handlers read runtime state without retaining one SDK client. Keep
+// their method/auth rules shared with the normal mux and independent of a slow
+// SDK request that holds the handoff gate. Liveness stays 200 while unpaired;
+// readiness still requires both pairing and an active connection.
+func (b *Bridge) registerStatusEndpoints(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc) {
+	mux.HandleFunc("/api/health", auth(requireMethod(http.MethodGet, b.handleHealth())))
+	mux.HandleFunc("/api/ready", auth(requireMethod(http.MethodGet, b.handleReady())))
+	mux.HandleFunc("/api/version", handleVersion(buildInfo().withFTS(b.Store != nil && b.Store.fts)))
+	if b.MetricsEnabled {
+		mux.HandleFunc("/metrics", requireMethod(http.MethodGet, b.handleMetrics()))
+	}
+}
+
 // healthStatus is the body of /api/health and /api/ready.
 func (b *Bridge) healthStatus() map[string]interface{} {
-	client, startedAt, stats := b.Client, b.startedAt, b.storeStats
+	startedAt, stats := b.startedAt, b.storeStats
 	connected := b.Connected()
-	paired := client != nil && client.Store != nil && client.Store.ID != nil
+	paired := b.isPaired()
 	status := "ok"
 	switch {
 	case !paired:
@@ -232,6 +228,9 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 	if pairingState != "" {
 		body["pairing_state"], body["status"] = pairingState, pairingState
 	}
+	if b.operatorPairing != nil {
+		body["operator_pairing_state"] = b.operatorPairing.snapshot().State
+	}
 	if stats != nil {
 		storeBytes, mediaBytes, mediaFiles := stats.snapshot(time.Now())
 		body["store_bytes"] = storeBytes
@@ -249,7 +248,7 @@ func writeJSON(w http.ResponseWriter, code int, body interface{}) {
 
 func (b *Bridge) startRESTServer(port int, token string) error {
 
-	handler := b.newRESTMux(port, token)
+	handler := b.runtimeRESTHandler(port, token)
 
 	// Loopback by default so the bridge is not reachable from the LAN;
 	// WHATSAPP_BRIDGE_BIND widens that on purpose (rest_bind.go).

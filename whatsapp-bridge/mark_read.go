@@ -64,7 +64,7 @@ const markReadMaxMessages = 2000
 // replace after startup.
 func (b *Bridge) handleMarkRead() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		client := b.Client
+		client := b.currentClient()
 		markReadHandler(markReadDeps{
 			store:     b.Store,
 			policy:    b.Policy,

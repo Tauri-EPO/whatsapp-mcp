@@ -52,7 +52,7 @@ func (m *metricsRegistry) recordRequest(status int) {
 func (b *Bridge) renderMetrics() string {
 	m := b.metrics
 	connected := b.Connected()
-	paired := b.Client != nil && b.Client.Store != nil && b.Client.Store.ID != nil
+	paired := b.isPaired()
 	storeBytes, mediaBytes, mediaFiles := int64(0), int64(0), 0
 	if b.storeStats != nil {
 		storeBytes, mediaBytes, mediaFiles = b.storeStats.snapshot(time.Now())

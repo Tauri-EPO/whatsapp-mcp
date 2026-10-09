@@ -11,9 +11,18 @@ from pathlib import Path
 
 import pytest
 
+from mcp_config import resolve_host
+
 
 @pytest.mark.parametrize("backend_alive", [False, True])
-def test_image_healthcheck_uses_loopback_even_with_environment_proxy(backend_alive):
+@pytest.mark.parametrize("bind_host", ["0.0.0.0", "127.0.0.2", "", " 127.0.0.1 ", "::", " ::1 "])
+def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_alive, bind_host):
+    normalized = resolve_host(bind_host)
+    address = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(normalized, normalized)
+
+    class BackendServer(ThreadingHTTPServer):
+        address_family = socket.AF_INET6 if ":" in address else socket.AF_INET
+
     proxy_calls = []
 
     def receiver(calls, status):
@@ -30,9 +39,9 @@ def test_image_healthcheck_uses_loopback_even_with_environment_proxy(backend_ali
 
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), receiver(proxy_calls, 418))
     backend_calls = []
-    backend = ThreadingHTTPServer(("127.0.0.1", 0), receiver(backend_calls, 405)) if backend_alive else None
-    dead_socket = socket.socket()
-    dead_socket.bind(("127.0.0.1", 0))  # Occupy the port without a listening backend.
+    backend = BackendServer((address, 0), receiver(backend_calls, 405)) if backend_alive else None
+    dead_socket = socket.socket(BackendServer.address_family)
+    dead_socket.bind((address, 0))  # Occupy the port without a listening backend.
     port = backend.server_port if backend else dead_socket.getsockname()[1]
     servers = [proxy] + ([backend] if backend else [])
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
@@ -46,11 +55,11 @@ def test_image_healthcheck_uses_loopback_even_with_environment_proxy(backend_ali
     )
     command = json.loads(probe)
     command[0] = sys.executable
-    env = dict(os.environ, WHATSAPP_MCP_PORT=str(port), NO_PROXY="", no_proxy="")
+    env = dict(os.environ, WHATSAPP_MCP_HOST=bind_host, WHATSAPP_MCP_PORT=str(port), NO_PROXY="", no_proxy="")
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env[name] = f"http://127.0.0.1:{proxy.server_port}"
     try:
-        result = subprocess.run(command, env=env, capture_output=True, timeout=10)
+        result = subprocess.run(command, cwd=dockerfile.parent, env=env, capture_output=True, timeout=10)
         assert (result.returncode == 0) is backend_alive
         assert not proxy_calls, "image healthcheck reached the environment proxy"
         assert backend_calls == (["/mcp"] if backend_alive else [])
