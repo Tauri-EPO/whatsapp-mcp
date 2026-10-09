@@ -50,9 +50,9 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
-| `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge |
-| `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge |
-| `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge |
+| `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
+| `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |
+| `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the list JID or `*@broadcast`. |
 | `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
@@ -87,7 +87,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB)                   | Maximum raw file size for `POST /upload`, enforced while streaming; independent of the JSON-RPC body limit. Positive integer up to 268435456 (256 MiB shared budget); uploads expire in one hour |
 | `WHATSAPP_MCP_TOKEN`   | bridge token on non-loopback binds, none on loopback | Static bearer token required on every `http`/`sse` request (`Authorization: Bearer …`, min 16 chars). Unset on a non-loopback bind → the bridge token is reused; `off` disables auth explicitly |
 | `WHATSAPP_PUBLIC_URL`  | *(unset)*                                | URL clients use to reach this server (`https://host.tailnet.ts.net/mcp`, or a bare `host` / `host:port`). Makes `bridge_status` report the expiry of that endpoint's TLS certificate. See [Watching the published certificate](#watching-the-published-certificate) |
-| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and bridge, including every group participant and the source chat of message webhooks |
+| `WHATSAPP_ALLOWED_CHATS` | *(unset = all chats)*                  | Comma-separated allow-list of chats the MCP may read or act on (JIDs, bare phone numbers, `*@g.us` / `*@s.whatsapp.net` wildcards). Enforced by the MCP server and bridge, including every participant of group add/promote and the source chat of message webhooks. Remove/demote only requires the group |
 | `WHATSAPP_READ_ONLY`   | *(unset = everything enabled)*           | Read-and-draft deployment: the MCP server hides every mutating tool from `tools/list` and refuses it if called anyway; the bridge answers `403` on the matching `/api/*` endpoints. See [Read-only mode](#read-only-mode-recommended-for-a-personal-assistant) |
 | `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
 | `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
@@ -276,13 +276,15 @@ WHATSAPP_ALLOWED_CHATS=5511999999999,120363000000000001@g.us,*@g.us
 - Contact search (`search_contacts`) is not filtered: it reads the address
   book, not conversations.
 
-Group participant changes (`add`, `remove`, `promote`, `demote`) require both
-the group and every participant to be allowed. A participant may match a known
-local phone/LID twin or the other Brazilian mobile ninth-digit spelling;
-landlines do not gain an alias. One outside participant refuses the whole batch
+Group participant changes always require the group to be allowed. Adding or
+promoting also requires every participant to be allowed. A participant may
+match a known local phone/LID twin or the other Brazilian mobile ninth-digit
+spelling; landlines do not gain an alias. One outside participant refuses the whole add/promote batch
 before any WhatsApp mutation, and the MCP tool returns `denied` before calling
 the bridge. This path uses local identities, without introducing a registered
-number lookup; send/forward retain the two checks described above.
+number lookup; send/forward retain the two checks described above. Removing or
+demoting reduces access, so an outside or unmapped LID-only member can be removed
+or demoted from an allowed group without allowing their direct chat.
 
 Unset keeps today's behaviour (everything allowed).
 
@@ -812,6 +814,9 @@ Known local phone/LID twins and Brazilian mobile ninth-digit spellings match
 the same identity. A denied event produces no POST; archive storage and ordinary
 background media caching keep their existing rules. `FORWARD_SELF`, status,
 broadcast and channel opt-ins below must also pass within this boundary.
+Status, channel and broadcast-list feeds require their own chat JID on the
+allow-list, rather than the posting contact's number. Allowing `status@broadcast`
+(or `*@broadcast`) enables every contact's status posts when status forwarding is on.
 Without an allow-list, webhook delivery keeps its existing behavior.
 
 Direct user chats (`@s.whatsapp.net` or `@lid`) and groups (`@g.us`) are
@@ -842,14 +847,18 @@ than the payload limit, or a download that failed).
 every contact's status posts, not a conversation, so by default none of it
 reaches the webhook: no text, no image, no reaction. The posts are still stored
 and readable with `list_messages(chat_jid="status@broadcast")`. Set
-`WEBHOOK_FORWARD_STATUS=true` for a receiver that wants the feed; a status
+`WEBHOOK_FORWARD_STATUS=true` for a receiver that wants the feed. With
+`WHATSAPP_ALLOWED_CHATS` set, also list `status@broadcast` (or `*@broadcast`):
+this authorizes every contact's status posts, not only listed contacts. A status
 image then carries its bytes only if `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true`
 has the bridge cache status media as well.
 
 Channel posts (`@newsletter`) and broadcast-list messages (`@broadcast`, except
 `status@broadcast`) are also stored but withheld from the webhook by default.
 Set `WEBHOOK_FORWARD_CHANNELS=true` or `WEBHOOK_FORWARD_BROADCASTS=true` to include
-the corresponding feed. These switches cover text, images and reactions and
+the corresponding feed. With `WHATSAPP_ALLOWED_CHATS` set, also list the channel
+or broadcast-list JID, or `*@newsletter` / `*@broadcast` for the whole namespace.
+These switches cover text, images and reactions and
 are independent of `WEBHOOK_FORWARD_STATUS`; `WEBHOOK_ENABLED=false` and
 `FORWARD_SELF=false` still take precedence. Media caching follows its existing
 settings; these switches change delivery to the webhook, not archive storage.

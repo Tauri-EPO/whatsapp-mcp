@@ -1650,9 +1650,10 @@ def manage_group_participants(chat_jid: str, action: str, participants: list[str
     """Add, remove, promote or demote members of a WhatsApp group you administer.
 
     Outbound and irreversible for "remove"; the account must be a group admin.
-    WHATSAPP_ALLOWED_CHATS must authorize the group and every participant for
-    all four actions (known phone/LID twins and Brazilian mobile spellings).
-    One outside participant refuses the whole batch before any change.
+    WHATSAPP_ALLOWED_CHATS must authorize the group; add/promote also requires
+    every participant (known phone/LID twins and Brazilian mobile spellings).
+    One outside participant refuses the whole add/promote batch before any
+    change. Remove/demote can reduce access for outside or LID-only members.
 
     Args:
         chat_jid: The group JID ("120363000000000001@g.us")

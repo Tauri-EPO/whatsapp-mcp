@@ -105,6 +105,8 @@ class ChatPolicy:
             return
         target = normalize_recipient(raw).strip()
         validate_chat_target(target)
+        if "@" not in target and not (target.isascii() and target.isdigit()):
+            raise ToolError("invalid_argument", "participant must be a phone number or user JID")
         if any(c in target.split("@", 1)[0] for c in ":."):
             raise ToolError("invalid_argument", "participant must not have a device suffix")
         jid = normalize_chat_entry(target)

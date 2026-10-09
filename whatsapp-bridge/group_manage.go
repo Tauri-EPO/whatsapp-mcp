@@ -173,6 +173,9 @@ func parseParticipants(raw []string, policies ...chatPolicy) ([]types.JID, error
 		}
 		normalized, err := normalizePhoneRecipient(item)
 		if err != nil {
+			if len(policies) == 0 || !policies[0].restricted {
+				return nil, errors.New("invalid participant " + item + " (use a phone number or a user JID)")
+			}
 			return nil, err
 		}
 		jid, err := normalizedUserJID(normalized)
@@ -211,13 +214,15 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 			writeGroupError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// Validate the entire batch before the single WhatsApp mutation. All
-		// four actions share this boundary; group permission alone never
-		// grants permission to act on an outside participant.
-		for _, participant := range participants {
-			if !policy.allowsIdentity(r.Context(), participant, ops.twin) {
-				writeGroupError(w, http.StatusForbidden, "participant "+participant.String()+" is not in "+chatPolicyEnv)
-				return
+		// Adding/promoting expands access: authorize the whole batch first.
+		// Removing/demoting reduces access and must work for outside or
+		// unmapped LID members without granting their direct chats access.
+		if action == whatsmeow.ParticipantChangeAdd || action == whatsmeow.ParticipantChangePromote {
+			for _, participant := range participants {
+				if !policy.allowsIdentity(r.Context(), participant, ops.twin) {
+					writeGroupError(w, http.StatusForbidden, "participant "+participant.String()+" is not in "+chatPolicyEnv)
+					return
+				}
 			}
 		}
 		result, err := ops.updateParticipants(r.Context(), jid, participants, action)

@@ -128,6 +128,20 @@ func (p chatPolicy) allowsIdentity(ctx context.Context, jid types.JID, twin lidF
 			if alt := brMobileAlternate(j.User); alt != "" {
 				queue = append(queue, types.NewJID(alt, j.Server))
 			}
+			// PN -> LID selects one row even when several LIDs map to the
+			// phone. Reverse-check exact allowed LIDs so SDK cache selection
+			// cannot hide another known identity (MCP checks every map row).
+			if twin != nil {
+				for entry := range p.exact {
+					allowed, err := canonicalChatJID(entry, false)
+					if err != nil || allowed.Server != types.HiddenUserServer {
+						continue
+					}
+					if pn, err := twin(ctx, allowed); err == nil && pn.ToNonAD() == j {
+						return true
+					}
+				}
+			}
 		}
 		if twin != nil {
 			if alt, err := twin(ctx, j); err == nil && !alt.IsEmpty() {

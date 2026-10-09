@@ -6816,7 +6816,8 @@ def manage_group_participants(group_jid: str, action: str, participants: list[st
     cleaned = [str(p).strip() for p in (participants or []) if str(p).strip()]
     if not cleaned:
         raise ToolError("invalid_argument", "participants must list at least one phone number or JID")
-    if CHAT_POLICY.restricted:
+    # Access reductions must remain possible without allowing a member's DM.
+    if CHAT_POLICY.restricted and action in ("add", "promote"):
         for participant in cleaned:
             CHAT_POLICY.require_participant(participant, _participant_twins(participant))
     return _bridge_json(

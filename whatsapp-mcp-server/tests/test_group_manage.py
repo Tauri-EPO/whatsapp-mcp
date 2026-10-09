@@ -45,9 +45,14 @@ async def test_participant_boundary_through_sdk_and_http(monkeypatch, group_http
                 "participants": [pn, "5511888888888"],
             },
         )
-        assert denied.is_error
-        assert json.loads(denied.content[0].text)["error"]["code"] == "denied"
-        assert observed == []
+        if action in ("add", "promote"):
+            assert denied.is_error
+            assert json.loads(denied.content[0].text)["error"]["code"] == "denied"
+            assert observed == []
+        else:
+            assert not denied.is_error
+            assert len(observed) == 1
+            observed.clear()
         allowed = await client.call_tool(
             "manage_group_participants",
             {
@@ -59,6 +64,43 @@ async def test_participant_boundary_through_sdk_and_http(monkeypatch, group_http
         assert not allowed.is_error
     assert len(observed) == 1
     assert observed[0][1]["participants"] == ["+55 (11) 99999-9999", "551199999999", lid]
+
+
+@pytest.mark.parametrize("action", ["remove", "demote"])
+async def test_access_reduction_with_unmapped_lid_through_sdk_and_http(monkeypatch, group_http_bridge, action):
+    reply, observed = group_http_bridge
+    reply.update(status=200, payload={"success": True})
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([GROUP]))
+    monkeypatch.setattr(
+        whatsapp, "_participant_twins", lambda _: pytest.fail("access reduction requested identity map")
+    )
+    lid = "100000000000007@lid"
+    async with group_sdk_client() as client:
+        result = await client.call_tool(
+            "manage_group_participants", {"chat_jid": GROUP, "action": action, "participants": [lid]}
+        )
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
+        denied = await client.call_tool(
+            "manage_group_participants", {"chat_jid": GROUP, "action": action, "participants": [lid]}
+        )
+    assert not result.is_error
+    assert denied.is_error
+    assert json.loads(denied.content[0].text)["error"]["code"] == "denied"
+    assert len(observed) == 1
+    assert observed[0][1] == {"group_jid": GROUP, "action": action, "participants": [lid]}
+
+
+@pytest.mark.parametrize("action", ["add", "promote"])
+async def test_non_numeric_bare_participant_refused_before_http(monkeypatch, group_http_bridge, action):
+    _, observed = group_http_bridge
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([GROUP, "*@s.whatsapp.net"]))
+    async with group_sdk_client() as client:
+        result = await client.call_tool(
+            "manage_group_participants", {"chat_jid": GROUP, "action": action, "participants": ["Alice"]}
+        )
+    assert result.is_error
+    assert json.loads(result.content[0].text)["error"]["code"] == "invalid_argument"
+    assert observed == []
 
 
 class Resp:

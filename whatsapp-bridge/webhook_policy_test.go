@@ -95,6 +95,35 @@ func TestWebhookChatBoundary(t *testing.T) {
 	}
 }
 
+func TestWebhookMultipleKnownLIDs(t *testing.T) {
+	client, pn, allowed := multipleLIDPolicyClient(t)
+	selected, _ := lookupAltJID(context.Background(), client, pn)
+	for _, chat := range []types.JID{pn, types.NewJID("551199999999", types.DefaultUserServer), selected} {
+		t.Run(chat.String(), func(t *testing.T) {
+			srv, payloads := captureWebhook(t)
+			t.Setenv("WEBHOOK_URL", srv.URL)
+			b := testBridge(t, client, newTestMessageStore(t), installRecordingLogger(t))
+			b.Policy = parseChatPolicy(allowed.String())
+			b.handleMessage(buildTextMessage(chat, chat, types.EmptyJID, types.EmptyJID, false, "allowed identity"))
+			select {
+			case payload := <-payloads:
+				if payload.Content != "allowed identity" {
+					t.Fatalf("payload changed: %+v", payload)
+				}
+			default:
+				t.Fatal("known non-selected LID withheld its webhook")
+			}
+			b.Policy = parseChatPolicy("5511888888888")
+			b.handleMessage(buildTextMessage(chat, chat, types.EmptyJID, types.EmptyJID, false, "outside identity"))
+			select {
+			case <-payloads:
+				t.Fatal("outside identity sent a POST")
+			default:
+			}
+		})
+	}
+}
+
 func TestWebhookAllowListAndFeedGates(t *testing.T) {
 	for _, chat := range []types.JID{phonePN, types.StatusBroadcastJID, types.NewJID("example", types.NewsletterServer), types.NewJID("example", types.BroadcastServer)} {
 		for _, entry := range []string{chat.String(), mgGroup} {
