@@ -9,6 +9,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp_types import ContentBlock
 
 from errors import ToolError, tool_errors
+from export import export_dir
 from export import export_messages as export_messages_to_disk
 from http_auth import (
     BearerTokenMiddleware,
@@ -25,7 +26,7 @@ from http_upload import UploadApp
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
-from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY
+from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY, notes_db_path
 from media_notes import annotate_media as notes_annotate_media
 from media_notes import clear_media_refusal as notes_clear_media_refusal
 from media_notes import get_media_notes as notes_get_media_notes
@@ -35,6 +36,7 @@ from media_read import cached_only_path as media_cached_only_path
 from media_read import content_tool
 from media_read import read_media as media_read_bytes
 from media_resource import MediaResourceServer, attach_resource_links
+from media_upload import upload_dir
 from notes import annotate as notes_annotate
 from notes import attach_notes
 from notes import compact as notes_compact
@@ -42,6 +44,7 @@ from notes import get_notes as notes_get_notes
 from notes import search_notes as notes_search_notes
 from observability import JSON_FORMAT_ENV, METRICS_TOKEN_ENV, MetricsMiddleware, log_formatter, metrics_enabled
 from parent_watchdog import install_stdio_parent_watchdog
+from private_files import tighten_existing_artifacts
 from tool_policy import (
     apply_tool_policy,
     load_tool_policy,
@@ -1947,7 +1950,9 @@ def send_file(
                       accepted). Requires `filename`; excludes `media_path`.
         filename: Name the recipient sees, with the extension that decides how
                   WhatsApp presents it (report.pdf, photo.jpg, clip.mp4). Only
-                  with `media_base64`; directories in it are dropped.
+                  with `media_base64`; directories/invisible controls are removed,
+                  reserved device names get a safe prefix. Receipts/previews use
+                  the sanitized name, retaining its extension within 200 UTF-8 bytes.
         upload_id: HTTP upload ID, exclusive with both other sources. Removed
                    after a successful send; failures/dry_run preserve it until expiry. Refused on stdio.
                    Do not pass filename: its name was fixed at upload.
@@ -2611,7 +2616,8 @@ def read_media(
         A list of content blocks: the file (or its text, or its pages), then the JSON
         metadata block, which carries `pages_total` and `truncated` with as_text (plus
         `pages_failed` for PDF pages whose text could not be extracted; read those
-        with as_images), and those plus `first_page`, `pages_rendered`, `image_bytes`
+        with as_images, and `pages_missing` for unresolved page-tree references),
+        and those plus `first_page`, `pages_rendered`, `image_bytes`
         and (for a page the renderer could not draw) `pages_failed` with as_images.
     """
     return media_read_bytes(
@@ -2789,6 +2795,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=(os.getenv("WHATSAPP_MCP_LOG_LEVEL") or "INFO").upper(), handlers=[_handler], force=True)
     logging.getLogger("whatsapp_mcp").info("whatsapp-mcp-server %s", MCP_VERSION)
     CHAT_POLICY.warn_invalid_entries()
+    tighten_existing_artifacts(notes_db_path(), os.path.realpath(export_dir()), upload_dir())
 
     # Operation-level access control (WHATSAPP_READ_ONLY, WHATSAPP_ALLOW_TOOLS,
     # WHATSAPP_DENY_TOOLS; tool_policy.py). Blocked tools are unregistered here,

@@ -14,6 +14,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 import media_upload
 from errors import ToolError
+from private_files import private_open
 from tool_policy import active_policy
 
 SWEEP_INTERVAL_S = 60
@@ -88,7 +89,7 @@ class UploadApp:
             with media_upload.receiving_upload(self.limit) as upload:
                 size = 0
                 digest = hashlib.sha256()
-                with open(upload.pending, "xb", buffering=0) as handle:
+                with private_open(upload.pending, "xb", buffering=0) as handle:
                     async for chunk in request.stream():
                         size += len(chunk)
                         if size > self.limit:

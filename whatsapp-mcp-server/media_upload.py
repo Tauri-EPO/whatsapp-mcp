@@ -32,6 +32,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from errors import ToolError
+from private_files import private_makedirs, private_open, tighten
+from untrusted import sanitize_name
 
 # Above this the tool refuses the payload before decoding it. On the http
 # transport WHATSAPP_MCP_MAX_BODY_BYTES (4 MiB by default) cuts in first, at
@@ -174,10 +176,12 @@ def receiving_upload(limit: int = MAX_INLINE_BYTES):
 
 def create_upload() -> str:
     root = checked_upload_root()
-    os.makedirs(root, exist_ok=True)
+    private_makedirs(root)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     folder = os.path.join(root, f"{stamp}-{secrets.token_hex(16)}")
-    os.mkdir(folder)
+    os.mkdir(folder, mode=0o700)
+    if os.name == "posix":
+        tighten(folder, 0o700, "upload directory")
     return folder
 
 
@@ -261,17 +265,62 @@ _UNSAFE = re.compile(r'[\x00-\x1f\x7f-\x9f/\\:*?"<>|]+')
 _DATA_URL = re.compile(r"^data:[^,]*;base64,", re.IGNORECASE)
 
 
-def media_root() -> str:
-    """The first WHATSAPP_MEDIA_ROOTS entry, or the bridge's default outbox."""
+def configured_media_root() -> str:
+    """The agreed path spelling, which may differ across filesystem namespaces."""
     raw = (os.getenv("WHATSAPP_MEDIA_ROOTS") or "").strip()
     first = ""
     if raw:
         first = next((entry.strip() for entry in raw.split(os.pathsep) if entry.strip()), "")
-    return os.path.realpath(os.path.expanduser(first or DEFAULT_MEDIA_ROOT))
+    return os.path.abspath(os.path.expanduser(first or DEFAULT_MEDIA_ROOT))
+
+
+def media_root() -> str:
+    """The physical first media root, used for local IO and confinement."""
+    return os.path.realpath(configured_media_root())
 
 
 def upload_dir() -> str:
     return os.path.join(media_root(), UPLOADS_SUBDIR)
+
+
+def bridge_media_path(path: str, *, preview: bool = False) -> str:
+    """Translate owned uploads only; preserve other caller-supplied paths.
+
+    Local IO always uses the physical root. The bridge sees the agreed
+    configured spelling, and links underneath .uploads are refused.
+    """
+    configured = configured_media_root()
+    physical = media_root()
+    uploads = os.path.join(physical, UPLOADS_SUBDIR)
+    absolute = os.path.abspath(path)
+    relative = None
+    for root in (uploads, os.path.join(configured, UPLOADS_SUBDIR)):
+        try:
+            if os.path.normcase(os.path.commonpath([absolute, root])) == os.path.normcase(root):
+                relative = os.path.relpath(absolute, root)
+                break
+        except ValueError:
+            continue  # Different Windows drives: this is the caller's path.
+    if relative is None:
+        return path
+    checked_upload_root()
+    local = os.path.join(uploads, relative)
+    if not unlinked_path(local):
+        raise ToolError("denied", "Uploads must not contain symlinks")
+    parts = Path(relative).parts
+    owned = (len(parts) == 2 and owned_entry(Path(parts[0]))) or (
+        len(parts) == 1 and bool(CONVERTED_FILE.fullmatch(parts[0]))
+    )
+    if preview and len(parts) == 2 and parts[0] == "<upload>":
+        owned = True
+    if not owned:
+        return path
+    translated = os.path.join(configured, UPLOADS_SUBDIR, relative)
+    if os.path.normcase(os.path.realpath(configured)) != os.path.normcase(physical) or (
+        os.path.normcase(os.path.realpath(translated)) != os.path.normcase(os.path.abspath(local))
+    ):
+        raise ToolError("denied", "The configured outbox no longer resolves to the same upload")
+    return translated
 
 
 def safe_filename(name: str, default: str) -> str:
@@ -281,10 +330,14 @@ def safe_filename(name: str, default: str) -> str:
     ``_``, leading/trailing dots and spaces go, and the result is capped at
     200 UTF-8 bytes with the extension kept. ``default`` when nothing is left.
     """
-    base = os.path.basename((name or "").replace("\\", "/").strip())
+    cleaned = sanitize_name(name or "", max_chars=max(1, len(name or ""))).replace("\u2028", "").replace("\u2029", "")
+    base = os.path.basename(cleaned.replace("\\", "/").strip())
     base = _UNSAFE.sub("_", base).strip(" .")
     if not base:
         return default
+    device = base.split(".", 1)[0].rstrip(" .").upper()
+    if device in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(r"(?:COM|LPT)[0-9¹²³]", device):
+        base = "_" + base
     if len(base.encode("utf-8")) > 200:
         stem, ext = os.path.splitext(base)
         ext = ext.encode("utf-8")[:16].decode("utf-8", errors="ignore")
@@ -329,7 +382,7 @@ def write_inline(data: bytes, filename: str) -> str:
     lands through a ``.pending`` rename, so the bridge never reads a half write."""
     with receiving_upload(limit=len(data)) as upload:
         path = os.path.join(upload.folder, filename)
-        with open(upload.pending, "xb", buffering=0) as handle:
+        with private_open(upload.pending, "xb", buffering=0) as handle:
             upload.write(handle, data)
         upload.finish(filename)
     return path

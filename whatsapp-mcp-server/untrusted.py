@@ -209,13 +209,13 @@ def _clean(value: str, *, kept: frozenset[str], max_chars: int) -> str:
     return value
 
 
-def sanitize_name(value: str) -> str:
+def sanitize_name(value: str, *, max_chars: int = NAME_MAX_CHARS) -> str:
     """Strip the invisible characters from one short label and cap its length.
 
     Independent of :data:`WRAP_ENV`: labels are never delimited and are always
     cleaned.
     """
-    return _clean(value, kept=KEPT_FORMAT_CHARS, max_chars=NAME_MAX_CHARS)
+    return _clean(value, kept=KEPT_FORMAT_CHARS, max_chars=max_chars)
 
 
 def sanitize_prose(value: str) -> str:

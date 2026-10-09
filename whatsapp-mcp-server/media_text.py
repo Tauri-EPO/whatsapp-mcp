@@ -82,6 +82,7 @@ class Extracted:
     # PDF pages whose text could not be extracted: {"page": 2, "error": "LimitReachedError"}.
     # The error class only, never the message: a parser message can quote the file.
     unreadable: list[dict[str, object]] = field(default_factory=list)
+    pages_missing: int = 0
 
 
 def page_limit(max_pages: int | None) -> int:
@@ -157,25 +158,61 @@ def _collect(sections: Iterator[str], produced: int, wanted: int) -> Extracted:
     return out
 
 
+def _missing_pdf_kids(reader) -> int:
+    """Count unresolved Kids references, ignoring unreliable /Count values."""
+    root = getattr(reader, "root_object", {})
+    pending = [root.get("/Pages")] if root.get("/Pages") is not None else []
+    seen: set[int] = set()
+    missing = 0
+    while pending:
+        reference = pending.pop()
+        try:
+            if reference is None:
+                missing += 1
+                continue
+            node = reference.get_object() if hasattr(reference, "get_object") else reference
+            if not isinstance(node, dict) or id(node) in seen:
+                missing += 1
+                continue
+            seen.add(id(node))
+            if "/Kids" in node:
+                kids = node["/Kids"]
+                pending.extend(kids)
+            elif node.get("/Type") != "/Page":
+                missing += 1
+        except MemoryError:
+            raise
+        except Exception:  # noqa: BLE001 - malformed references are document loss
+            missing += 1
+    return missing
+
+
 def _pdf(path: str, wanted: int) -> Extracted:
     from pypdf import PdfReader
 
     try:
         reader = PdfReader(path)
+        missing = _missing_pdf_kids(reader)
         pages = reader.pages
         total = len(pages)
+        if missing and not total:
+            raise ToolError(
+                "invalid_argument",
+                "this PDF has no readable pages in its damaged page tree; "
+                "try read_media(as_images=true) or ask for a repaired original",
+            )
+    except ToolError:
+        raise
     except Exception as exc:  # noqa: BLE001 - a malformed file is bad input, not a server fault
         # pypdf raises PyPdfError subclasses for a broken file, but also
         # KeyError/ValueError from deep inside the parser on a truncated one.
         # The class only, like the per-page failures below: a parser message can
         # quote the file, and the file is whatever a stranger sent.
         raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}") from exc
-    # No failure budget on purpose (issue #533): the attempts are bounded by
-    # max_pages (500 at most) and the 64 MiB the file may weigh, and stopping
-    # after N failures would make pages_failed and pages_total mean "not
-    # attempted" as well as "unreadable". The cost of a failing page against a
-    # healthy one was not measured; revisit with a number if a hostile file turns
-    # out slower to fail than to read.
+    # pypdf silently drops unresolved Kids. Report that loss separately from
+    # readable pages; /Count is advisory and can lie even in a readable PDF.
+    # Attempts remain bounded by max_pages (500) and 64 MiB; inspect every
+    # attempted page so minority failures retain precise page numbers.
     # Page by page: one page pypdf refuses (a font with an oversized /Widths, a
     # stream that trips its recovery limit) must not cost the pages around it.
     texts: list[tuple[int, str]] = []
@@ -187,14 +224,20 @@ def _pdf(path: str, wanted: int) -> Extracted:
             raise  # a server fault, not a page the parser refuses: do not go on to the next one
         except Exception as exc:  # noqa: BLE001 - same as above, per page
             unreadable.append({"page": index + 1, "error": type(exc).__name__})
-    if unreadable and not texts:
+    if len(unreadable) > min(total, wanted) / 2:
         raise ToolError(
             "invalid_argument",
             f"this PDF could not be read as text: {_unreadable_sentence(unreadable)}",
         )
     out = _collect((f"--- page {index + 1} of {total} ---\n{text}\n" for index, text in texts if text), total, wanted)
     out.unreadable = unreadable
+    out.pages_missing = missing
     notes = []
+    if missing:
+        notes.append(
+            f"{missing} page-tree reference(s) could not be resolved; pages_missing={missing}. "
+            "Ask for a repaired original to recover the missing pages."
+        )
     if not out.sections:
         # Empty because there is nothing to read, or empty because the pages we
         # were allowed to read happen to be the image-only ones: telling a

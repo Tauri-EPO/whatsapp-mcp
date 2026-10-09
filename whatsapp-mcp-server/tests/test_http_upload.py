@@ -556,7 +556,7 @@ def test_storage_failure_uses_error_envelope_and_cleans_partial(monkeypatch):
 def test_control_characters_removed_from_decoded_name():
     with client() as c:
         receipt = c.post("/upload", content=b"abc", headers={**HEADERS, "X-Filename": "fake%C2%80.pdf"}).json()
-        assert receipt["filename"] == "fake_.pdf"
+        assert receipt["filename"] == "fake.pdf"
 
 
 @pytest.mark.parametrize("name", ["..", "%20", "reports/"])

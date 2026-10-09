@@ -35,7 +35,6 @@ map learned the pair is still found afterwards. A message target is
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -46,6 +45,7 @@ import whatsapp
 from chat_policy import normalize_chat_entry
 from errors import ToolError
 from media_notes import MAX_SEARCH_LIMIT, MAX_VALUE_BYTES, normalize_key, normalize_sha256
+from private_files import notes_connection
 from whatsapp import CHAT_POLICY
 
 TARGET_TYPES = ("chat", "contact", "message", "media")
@@ -91,10 +91,9 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     transaction or two sessions hand out the same number.
     """
     path = media_notes.notes_db_path()
-    if not create and not os.path.exists(path):
+    conn = notes_connection(path, create=create, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S, autocommit=True)
+    if conn is None:
         return None
-    conn = sqlite3.connect(path, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
     # Both tables: a media write goes through this connection too, and notes.db
     # may not exist yet when the first note an agent writes is about a file.
     conn.executescript(media_notes.SCHEMA)

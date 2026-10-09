@@ -102,6 +102,7 @@ py-modules = [
     "observability",
     "parent_watchdog",
     "phone",
+    "private_files",
     "strict_args",
     "tool_policy",
     "transcribe",

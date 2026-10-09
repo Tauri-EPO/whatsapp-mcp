@@ -1300,10 +1300,13 @@ Send a media file (image, video, document).
 - `media_path`: Absolute path to the file on the server, inside its outbox
 - `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` / `upload_id` is required
 - `upload_id`: Opaque ID returned by `POST /upload` on the HTTP/SSE server; avoids putting file bytes in the tool call. Unavailable on stdio
-- `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories in it are dropped
+- `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories and invisible controls are removed using the name sanitizer's glyph rules. Windows device basenames receive a safe prefix; the extension survives the 200-byte UTF-8 limit. Upload receipts and dry runs return the sanitized name
 - `caption` (optional): Caption for the media
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
 
+For owned uploads and conversions, the bridge receives the first root's configured
+spelling; local reads, leases and cleanup use its resolved location. Both
+processes must agree on that configured spelling even when their mount paths differ.
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
 additional absolute directories. `media_base64` is for an agent that runs on
@@ -1720,9 +1723,11 @@ from the file; past 20 pages it says how many more — and says those pages can 
 read with
 [`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures)
 (`first_page=<the first failing page>` is spelled out). `pages_total` still
-counts every page. `pages_failed` is absent when every page extracted. When *every* page that
-was attempted fails the call is one `invalid_argument` error that names
-`as_images=true` instead.
+counts the readable page tree. `pages_failed` is absent when every page extracted.
+Unresolved page-tree references add `pages_missing` and a note naming the loss;
+a PDF with no resolved pages returns `invalid_argument`. Incorrect `/Count`
+values alone do not reject readable pages. When most attempted pages fail text
+extraction, the call returns `invalid_argument` naming `as_images=true` instead.
 
 **There is no OCR.** A scanned PDF has no text layer, and the answer says so in
 as many words instead of coming back empty — and names
