@@ -1,6 +1,7 @@
 """Real audio, provider HTTP, SQLite, worker/tool consumers and UTC quota proof."""
 
 import concurrent.futures
+import hashlib
 import http.client
 import io
 import json
@@ -840,6 +841,43 @@ def test_unauthenticated_http_tool_calls_never_record_activity(paired_dbs, monke
             )
             assert response.status_code == 200 and not response.json()["result"]["isError"]
             assert operator_admin._last_call is None
+
+
+def test_runtime_only_auth_records_activity_and_clear_restores_anonymous_denial(runtime_archive, monkeypatch):
+    monkeypatch.setattr(operator_admin, "_last_call", None)
+    server = StrictArgumentServer("runtime-activity")
+
+    @server.tool()
+    def echo() -> dict:
+        return {"ok": True}
+
+    app = main.build_http_app(server, "streamable-http", None, host="0.0.0.0", json_response=True, stateless_http=True)
+    token = "fake-runtime-mcp-0123456789"
+    state = json.dumps(
+        {
+            "current": hashlib.sha256(token.encode()).hexdigest(),
+            "previous": "",
+            "previous_valid_until": "2026-10-09T00:00:00Z",
+        }
+    )
+    with runtime_archive.messages() as conn:
+        conn.execute("INSERT INTO runtime_settings VALUES ('auth.mcp_token',?, '2026-10-09T00:00:00Z', 1)", (state,))
+    with TestClient(app) as client:
+        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {}}}
+        headers = {"Accept": "application/json, text/event-stream"}
+        for auth in (None, "Bearer fake-unverified-0123456789"):
+            response = client.post("/mcp", headers={**headers, **({"Authorization": auth} if auth else {})}, json=call)
+            assert response.status_code == 401 and operator_admin._last_call is None
+        response = client.post("/mcp", headers={**headers, "Authorization": "Bearer " + token}, json=call)
+        assert response.status_code == 200 and not response.json()["result"]["isError"]
+        assert operator_admin._last_call is not None
+        with runtime_archive.messages() as conn:
+            conn.execute("UPDATE runtime_settings SET value='null',version=2 WHERE key='auth.mcp_token'")
+        monkeypatch.setattr(operator_admin, "_last_call", None)
+        assert (
+            client.post("/mcp", headers={**headers, "Authorization": "Bearer " + token}, json=call).status_code == 200
+        )
+        assert operator_admin._last_call is None
 
 
 def test_go_operator_to_python_admin_actual_processes(paired_dbs):

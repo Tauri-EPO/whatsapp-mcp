@@ -2884,7 +2884,7 @@ def build_http_app(
     else:
         app = server.streamable_http_app(**app_kwargs)
     sdk_app = app
-    if token or verifier:
+    if verifier:
         from operator_admin import AuthenticatedCalls
 
         app = AuthenticatedCalls(app)
