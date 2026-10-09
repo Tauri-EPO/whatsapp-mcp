@@ -15,16 +15,18 @@ const operatorLogoutSchema = `CREATE TABLE IF NOT EXISTS operator_state (
 )`
 
 func (b *Bridge) restoreOperatorIdle() error {
-	var idle bool
-	if err := b.Store.db.QueryRow("SELECT EXISTS(SELECT 1 FROM operator_state WHERE id=1 AND logged_out=1)").Scan(&idle); err != nil {
+	var idle, wiped bool
+	if err := b.Store.db.QueryRow("SELECT COALESCE((SELECT logged_out FROM operator_state WHERE id=1),0), COALESCE((SELECT local_session_wiped FROM operator_state WHERE id=1),0)").Scan(&idle, &wiped); err != nil {
 		return err
 	}
 	if idle {
 		b.operatorLogout.Store(true)
-		b.operatorSessionWiped.Store(!b.isPaired())
+		b.operatorSessionWiped.Store(wiped && !b.isPaired())
 		b.pairingState = "logged_out_by_operator" // Before any consumers start.
 		if b.operatorPairing != nil {
 			b.operatorPairing.state.State = "logged_out_by_operator"
+		} else {
+			b.Log.Warnf("State logged_out_by_operator: re-enable WHATSAPP_OPERATOR_BIND and POST /operator/v1/pairing/restart to leave idle")
 		}
 	}
 	return nil
@@ -49,14 +51,18 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer p.action.Unlock()
+	// Leave time for the terminal webhook and response within the listener's
+	// 15-second write timeout, while ignoring cancellation by the caller.
+	actionCtx, finish := context.WithTimeout(context.WithoutCancel(r.Context()), 12*time.Second)
+	defer finish()
 	if (p.b.operatorLogout.Load() && p.b.operatorSessionWiped.Load()) || (!p.b.operatorLogout.Load() && !p.paired()) {
 		writeErrorCode(w, 409, "not_paired", "No linked device to unlink")
 		return
 	}
 	// Park dial paths before the SDK disconnects. Persist before wiping:
 	// a crash cannot accidentally start a new QR flow.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	_, err := p.b.Store.db.ExecContext(ctx, "INSERT INTO operator_state(id,logged_out) VALUES (1,1) ON CONFLICT(id) DO UPDATE SET logged_out=1")
+	ctx, cancel := context.WithTimeout(actionCtx, time.Second)
+	_, err := p.b.Store.db.ExecContext(ctx, "INSERT INTO operator_state(id,logged_out,local_session_wiped) VALUES (1,1,0) ON CONFLICT(id) DO UPDATE SET logged_out=1,local_session_wiped=0")
 	cancel()
 	if err != nil {
 		writeErrorCode(w, 503, "state_persistence_failed", "Operator idle state could not be saved")
@@ -80,7 +86,17 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	p.b.connectionMu.Unlock()
 	// Drain accepted REST/event consumers before the SDK mutates Device.ID and
 	// its stores. Retired events return before taking this gate.
-	p.b.clientGate.Lock()
+	drainTimeout := p.b.logoutDrainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = time.Second
+	}
+	ctx, cancel = context.WithTimeout(actionCtx, drainTimeout)
+	locked := p.b.drainOperatorClients(ctx)
+	cancel()
+	if !locked {
+		writeErrorCode(w, 503, "client_busy", "Client operations are still running; retry operator logout")
+		return
+	}
 	// A callback admitted before retirement may have finished by clearing the
 	// connection state. Reassert idle after draining it, before deleting keys.
 	p.mu.Lock()
@@ -90,7 +106,7 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	p.b.pairingState = "logged_out_by_operator"
 	p.b.connectionChangedLocked()
 	p.b.connectionMu.Unlock()
-	ctx, cancel = context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	ctx, cancel = context.WithTimeout(actionCtx, 5*time.Second)
 	logoutErr := p.b.performLogout(ctx)
 	// The pinned SDK unlinks remotely before Delete; this error identifies
 	// successful unlink followed by a local failure that our wipe can retry.
@@ -98,8 +114,11 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	p.client.Disconnect()
 	// A server refusal or caller cancellation must never skip local destruction.
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel = context.WithTimeout(actionCtx, 5*time.Second)
 	err = p.b.wipeOperatorSession(ctx)
+	if err == nil {
+		_, err = p.b.Store.db.ExecContext(ctx, "UPDATE operator_state SET local_session_wiped=1 WHERE id=1")
+	}
 	cancel()
 	if err == nil {
 		p.b.operatorSessionWiped.Store(true)
@@ -112,7 +131,10 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.After == "exit" {
-		if _, err := p.b.Store.db.Exec("DELETE FROM operator_state WHERE id=1"); err != nil {
+		ctx, cancel = context.WithTimeout(actionCtx, time.Second)
+		_, err := p.b.Store.db.ExecContext(ctx, "DELETE FROM operator_state WHERE id=1")
+		cancel()
+		if err != nil {
 			p.b.Log.Warnf("Operator logout exit retains durable idle state")
 		}
 	}
@@ -139,6 +161,23 @@ func (b *Bridge) performLogout(ctx context.Context) error {
 	return b.currentClient().Logout(ctx)
 }
 
+// A queued RWMutex writer would block new readers indefinitely. TryLock keeps
+// the operator request bounded while existing admitted requests drain.
+func (b *Bridge) drainOperatorClients(ctx context.Context) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if b.clientGate.TryLock() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
 func (b *Bridge) wipeOperatorSession(ctx context.Context) error {
 	if b.wipeSession != nil {
 		return b.wipeSession(ctx)
@@ -147,8 +186,26 @@ func (b *Bridge) wipeOperatorSession(ctx context.Context) error {
 	if client == nil || client.Store == nil {
 		return errors.New("session unavailable")
 	}
-	if client.Store.ID == nil {
-		return nil
-	} // Logout already deleted this device.
-	return client.Store.Delete(ctx)
+	if b.sessionDB == nil {
+		return errors.New("session database unavailable")
+	}
+	// Every session connection has secure_delete=ON from its DSN, including
+	// Logout's own Delete. Remove historical free pages and truncate the WAL
+	// after VACUUM, which itself writes a new WAL in WAL mode.
+	if client.Store.ID != nil {
+		if err := client.Store.Delete(ctx); err != nil {
+			return err
+		}
+	}
+	if _, err := b.sessionDB.ExecContext(ctx, "VACUUM"); err != nil {
+		return err
+	}
+	var busy, pages, checkpointed int
+	if err := b.sessionDB.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &pages, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return errors.New("session checkpoint busy")
+	}
+	return nil
 }

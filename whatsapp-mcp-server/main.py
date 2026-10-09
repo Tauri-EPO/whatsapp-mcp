@@ -2864,11 +2864,11 @@ if __name__ == "__main__":
         # Read here only to reject a value we cannot parse before serving; the
         # tools themselves consult the environment per call (untrusted.py).
         _wrap_untrusted = parse_wrap_env(os.getenv(WRAP_ENV))
+        import runtime_settings
+
+        runtime_settings.capture_environment()
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    import runtime_settings
-
-    runtime_settings.capture_environment()
     install_runtime_tool_policy(mcp, _tool_policy)
     _removed_tools = sorted(name for name in registered_tool_names(mcp) if not _tool_policy.allows(name))
     logging.getLogger("whatsapp_mcp").info("%s", _tool_policy.summary(_removed_tools))

@@ -25,6 +25,7 @@ type runtimeSetting struct {
 type runtimeSettingsSnapshot struct {
 	Version  int64                     `json:"version"`
 	Settings map[string]runtimeSetting `json:"settings"`
+	policy   toolPolicy
 }
 type settingDefinition struct {
 	key, env     string
@@ -100,8 +101,9 @@ type settingsReader interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[string]runtimeSetting) (runtimeSettingsSnapshot, error) {
+func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[string]runtimeSetting, warn func(string, int64)) (runtimeSettingsSnapshot, error) {
 	out := runtimeSettingsSnapshot{Settings: map[string]runtimeSetting{}}
+	closedAllow := false
 	for key, value := range defaults {
 		out.Settings[key] = value
 	}
@@ -125,17 +127,111 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 		if !known || raw == "null" {
 			continue
 		}
-		value, err := def.parse(json.RawMessage(raw))
+		var value any
+		var err error
+		if key == "tools.allow" || key == "tools.deny" {
+			var names []string
+			err = json.Unmarshal([]byte(raw), &names)
+			if err == nil && names == nil {
+				err = errors.New("expected tool array")
+			}
+			valid := map[string]bool{}
+			known := knownTools()
+			for _, name := range names {
+				if name == "" || name != strings.TrimSpace(name) || strings.Contains(name, ",") {
+					err = errors.New("invalid tool array")
+				} else if !known[name] {
+					warn(key, version)
+				} else {
+					valid[name] = true
+				}
+			}
+			value = sortedNames(valid)
+			if key == "tools.allow" && len(names) > 0 && len(valid) == 0 {
+				closedAllow = true
+			}
+		} else {
+			value, err = def.parse(json.RawMessage(raw))
+		}
 		if err != nil {
-			return out, fmt.Errorf("invalid saved setting %s", key)
+			warn(key, version)
+			if key == "tools.allow" {
+				closedAllow = len(defaults[key].Value.([]string)) == 0
+			}
+			continue // Recover at env/default; PATCH null can always clear the row.
 		}
 		out.Settings[key] = runtimeSetting{Value: value, Source: "runtime"}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	applyRuntimeToolFloor(&out, defaults, closedAllow)
+	return out, nil
+}
+
+// Deployment policy is the permanent ceiling of runtime capability. Empty
+// runtime lists can remove their own restriction, never the deployment floor.
+func applyRuntimeToolFloor(out *runtimeSettingsSnapshot, defaults map[string]runtimeSetting, closedAllow bool) {
+	allowSetting, denySetting := out.Settings["tools.allow"], out.Settings["tools.deny"]
+	allow := parseToolList(strings.Join(allowSetting.Value.([]string), ","))
+	envAllow := parseToolList(strings.Join(defaults["tools.allow"].Value.([]string), ","))
+	if len(envAllow) > 0 {
+		if len(allow) == 0 && !closedAllow {
+			allow = envAllow
+		} else {
+			for name := range allow {
+				if !envAllow[name] {
+					delete(allow, name)
+				}
+			}
+			closedAllow = len(allow) == 0
+		}
+	}
+	deny := parseToolList(strings.Join(denySetting.Value.([]string), ","))
+	labels := map[string]string{}
+	for name := range deny {
+		labels[name] = denyToolsEnv + " (deploy) lists it"
+		if denySetting.Source == "runtime" {
+			labels[name] = "runtime tools.deny lists it"
+		}
+	}
+	for _, name := range defaults["tools.deny"].Value.([]string) {
+		deny[name] = true
+		labels[name] = denyToolsEnv + " (deploy) lists it"
+	}
+	if closedAllow && len(allow) == 0 {
+		for name := range knownTools() {
+			deny[name] = true
+			if labels[name] == "" {
+				labels[name] = "runtime tools.allow has no readable tools inside the deploy floor"
+			}
+		}
+		denySetting.Source = "runtime"
+	}
+	allowSetting.Value, denySetting.Value = sortedNames(allow), sortedNames(deny)
+	out.Settings["tools.allow"], out.Settings["tools.deny"] = allowSetting, denySetting
+	label := allowToolsEnv + " (deploy)"
+	if allowSetting.Source == "runtime" {
+		label = "runtime tools.allow within " + allowToolsEnv + " (deploy)"
+	}
+	out.policy = toolPolicy{allow: allow, deny: deny, allowLabel: label, denyLabels: labels}
+}
+
+func (b *Bridge) warnSavedSetting(key string, version int64) {
+	b.settingsWarnMu.Lock()
+	defer b.settingsWarnMu.Unlock()
+	if b.settingsWarned == nil {
+		b.settingsWarned = map[string]int64{}
+	}
+	if b.settingsWarned[key] == version {
+		return
+	}
+	b.settingsWarned[key] = version
+	b.Log.Warnf("Saved runtime setting key=%s version=%d is incompatible; applying safe deploy fallback", key, version)
 }
 
 func (b *Bridge) settingsSnapshot(ctx context.Context) (runtimeSettingsSnapshot, error) {
-	return readRuntimeSettings(ctx, b.Store.db, b.RuntimeDefaults)
+	return readRuntimeSettings(ctx, b.Store.db, b.RuntimeDefaults, b.warnSavedSetting)
 }
 
 func (b *Bridge) handleRuntimeSettings(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +292,7 @@ func (b *Bridge) patchRuntimeSettings(ctx context.Context, values map[string]jso
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	before, err := readRuntimeSettings(ctx, tx, b.RuntimeDefaults)
+	before, err := readRuntimeSettings(ctx, tx, b.RuntimeDefaults, b.warnSavedSetting)
 	if err != nil {
 		return err
 	}
@@ -227,18 +323,15 @@ func (b *Bridge) runtimeToolGuard(h http.HandlerFunc) http.HandlerFunc {
 		return b.Tools.guard(h)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		if b.operatorLogout.Load() {
+			writeErrorCode(w, 503, "operator_idle", "Device is parked by operator logout")
+			return
+		}
 		snapshot, err := b.settingsSnapshot(r.Context())
 		if err != nil {
 			writeErrorCode(w, 503, "settings_unavailable", "Runtime policy unavailable")
 			return
 		}
-		allow := snapshot.Settings["tools.allow"].Value.([]string)
-		deny := snapshot.Settings["tools.deny"].Value.([]string)
-		policy, err := newToolPolicy(strings.Join(allow, ","), strings.Join(deny, ","))
-		if err != nil {
-			writeError(w, 503, "Runtime policy unavailable")
-			return
-		}
-		policy.guard(h)(w, r)
+		snapshot.policy.guard(h)(w, r)
 	}
 }

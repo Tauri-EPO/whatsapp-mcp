@@ -78,11 +78,14 @@ type Bridge struct {
 	Tools                 toolPolicy
 	RuntimeDefaults       map[string]runtimeSetting
 	settingsMu            sync.Mutex
+	settingsWarnMu        sync.Mutex
+	settingsWarned        map[string]int64
 	operatorLogout        atomic.Bool
 	operatorSessionWiped  atomic.Bool
 	operatorRetiredClient atomic.Pointer[whatsmeow.Client]
 	logoutClient          func(context.Context) error
 	wipeSession           func(context.Context) error
+	logoutDrainTimeout    time.Duration // Zero selects the production one-second bound.
 	// PollVoteDecrypt decodes PollUpdateMessage payloads; nil = votes are skipped.
 	PollVoteDecrypt pollVoteDecrypter
 	// DownloadMedia fetches media for a stored message (defaults to downloadMedia).

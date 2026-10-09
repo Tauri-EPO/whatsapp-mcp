@@ -136,6 +136,14 @@ func (b *Bridge) queueAutoDownload(messageID, chatJID, mediaType string) {
 // runAutoDownload is the work a pool worker does: cache one inbound file,
 // bounded by autoDownloadTimeout so a stalled CDN cannot hold a worker.
 func (b *Bridge) runAutoDownload(ctx context.Context, job mediaJob) {
+	if b.operatorLogout.Load() {
+		return
+	}
+	b.clientGate.RLock()
+	defer b.clientGate.RUnlock()
+	if b.operatorLogout.Load() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(ctx, autoDownloadTimeout)
 	defer cancel()
 	success, _, _, path, err := b.DownloadMedia(withMediaLimit(ctx, b.MediaMaxBytes), job.messageID, job.chatJID)

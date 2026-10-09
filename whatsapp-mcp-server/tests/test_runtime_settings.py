@@ -34,6 +34,7 @@ def runtime_archive(paired_dbs, monkeypatch):
         conn.executescript(schema)
         conn.execute("PRAGMA journal_mode=WAL")
     monkeypatch.setattr(runtime_settings, "_startup_env", None)
+    monkeypatch.setattr(runtime_settings, "_warned", {})
     yield paired_dbs
     tool_policy.set_active_policy(None)
     main.mcp.runtime_tool_policy = False
@@ -201,9 +202,7 @@ def test_runtime_policy_failure_between_selection_and_transcription_writes_no_fa
 
     def select_then_break(*args, **kwargs):
         selection = real_select(*args, **kwargs)
-        with runtime_archive.messages() as conn:
-            conn.execute("UPDATE runtime_settings SET value='invalid-json'")
-            conn.execute("INSERT OR IGNORE INTO runtime_settings VALUES ('tools.deny','invalid-json','2026-10-09',1)")
+        monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(runtime_archive.messages_db) + ".missing")
         return selection
 
     monkeypatch.setattr(transcribe_worker, "find_pending", select_then_break)
@@ -216,10 +215,82 @@ def test_runtime_policy_failure_between_selection_and_transcription_writes_no_fa
     assert backend.runs == []
 
 
+@pytest.mark.asyncio
+async def test_deploy_tool_floor_survives_runtime_empty_and_allow(runtime_archive, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_DENY_TOOLS", "delete_message")
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy(deny=frozenset({"delete_message"})))
+    for changes in [{"tools.deny": []}, {"tools.allow": ["delete_message"], "tools.deny": []}]:
+        patch(runtime_archive, changes)
+        snapshot = runtime_settings.snapshot()
+        assert "delete_message" in snapshot["settings"]["tools.deny"]["value"]
+        assert not tool_policy.active_policy().allows("delete_message")
+        assert "WHATSAPP_DENY_TOOLS (deploy)" in tool_policy.active_policy().denial_message("delete_message")
+        assert "delete_message" not in {tool.name for tool in await main.mcp.list_tools()}
+        result = await main.mcp.call_tool("delete_message", {})
+        assert result.is_error and "denied" in result.content[0].text
+    monkeypatch.setenv("WHATSAPP_ALLOW_TOOLS", "list_messages")
+    patch(runtime_archive, {"tools.allow": ["send_message"], "tools.deny": []})
+    assert not tool_policy.active_policy().allows("send_message")
+    assert not tool_policy.active_policy().allows("list_messages")
+    patch(runtime_archive, {"tools.allow": None})
+    assert tool_policy.active_policy().allows("list_messages")
+
+
+@pytest.mark.parametrize("key", ["tools.allow", "tools.deny", "transcription.ingest_chats"])
+def test_corrupt_saved_key_warns_once_and_null_recovers(runtime_archive, caplog, key):
+    with runtime_archive.messages() as conn:
+        conn.execute("INSERT INTO runtime_settings VALUES (?,?,'2026-10-09',1)", (key, "invalid-json"))
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy())
+    assert runtime_settings.snapshot()["settings"][key]["source"] == "default" or key == "tools.deny"
+    runtime_settings.snapshot()
+    warnings = [record.message for record in caplog.records if "Saved runtime setting" in record.message]
+    assert len(warnings) == 1 and key in warnings[0] and "invalid-json" not in warnings[0]
+    if key == "tools.allow":
+        assert not tool_policy.active_policy().allows("list_messages")
+        assert not tool_policy.active_policy().allows("send_message")
+    patch(runtime_archive, {key: None})
+    assert runtime_settings.snapshot()["version"] == 2
+    assert tool_policy.active_policy().allows("list_messages")
+
+
+def test_unknown_saved_tools_are_dropped_and_bad_allow_keeps_explicit_floor(runtime_archive, monkeypatch, caplog):
+    monkeypatch.setenv("WHATSAPP_ALLOW_TOOLS", "list_messages")
+    monkeypatch.setenv("WHATSAPP_DENY_TOOLS", "delete_message")
+    patch(
+        runtime_archive,
+        {"tools.deny": ["future_tool", "delete_message"], "tools.allow": ["future_tool", "list_messages"]},
+    )
+    snapshot = runtime_settings.snapshot()
+    assert snapshot["settings"]["tools.allow"]["value"] == ["list_messages"]
+    assert snapshot["settings"]["tools.deny"]["value"] == ["delete_message"]
+    assert len([r for r in caplog.records if "Saved runtime setting" in r.message]) == 2
+    with runtime_archive.messages() as conn:
+        conn.execute("UPDATE runtime_settings SET value='invalid-json',version=2 WHERE key='tools.allow'")
+    tool_policy.install_runtime_tool_policy(
+        main.mcp, tool_policy.ToolPolicy(allow=frozenset({"list_messages"}), deny=frozenset({"delete_message"}))
+    )
+    assert tool_policy.active_policy().allows("list_messages")
+    assert not tool_policy.active_policy().allows("send_message")
+    assert not tool_policy.active_policy().allows("delete_message")
+
+
+def test_bad_ingest_scope_startup_has_one_line_refusal(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "main.py"],
+        env={**os.environ, "TRANSCRIBE_ON_INGEST_CHATS": "invalid", "WHATSAPP_DB_PATH": str(tmp_path / "missing.db")},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert "TRANSCRIBE_ON_INGEST_CHATS: expected all or direct" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_operator_logout_script_sends_idle_to_private_http_only():
     bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("needs bash")
+    if bash is None or shutil.which("curl") is None:
+        pytest.skip("needs bash and curl")
     received = []
 
     class Handler(BaseHTTPRequestHandler):

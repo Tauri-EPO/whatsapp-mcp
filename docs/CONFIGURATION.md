@@ -611,6 +611,12 @@ MCP process opens it read-only. `notes.db` remains MCP-owned.
 | 2 | `env` | Startup environment, restored by PATCH null |
 | 3 | `default` | Built-in value when neither override nor env is set |
 
+Deploy-time tool lists remain a capability floor: effective deny is the union
+of `WHATSAPP_DENY_TOOLS` and runtime `tools.deny`. Effective allow is narrowed
+by the deploy allow-list when one is set; runtime cannot reopen a deploy-denied
+or read-only tool. GET returns these effective lists; `runtime` identifies an
+applied override even when the deploy floor removes some of its entries.
+
 GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
 "source": "default" }, ... } }`. PATCH accepts a flat JSON object:
 
@@ -619,7 +625,7 @@ GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
 ```
 
 The current keys are `tools.allow`, `tools.deny` (arrays of registered tool
-names; an empty array means no restriction from that list), and
+names; an empty array removes only the runtime restriction), and
 `transcription.ingest_chats` (`all` or `direct`). Tool-list validation reuses
 the environment parsers. Unknown keys, bad types or invalid values return 400
 and write nothing, including in a multi-key PATCH. `{"tools.allow":null}`
@@ -627,6 +633,13 @@ clears that override. Null tombstones preserve the monotonically increasing
 version even when the final override is cleared; each atomic PATCH advances
 the version once. INFO audits include key and source transition, never values.
 Bridge `/metrics` exposes `whatsapp_runtime_settings_version`.
+
+After a rollback, unknown saved tool names are dropped with one WARN naming
+the key, without printing its value. An invalid saved value falls back to
+env/default and can always be cleared by PATCH null. An unreadable
+`tools.allow` fails closed: only the deploy allow-list can remain enabled;
+without an explicit deploy allow-list every tool is denied until repaired.
+An unavailable database still fails closed in both processes.
 
 Both lists apply together at the next MCP `tools/list`/tool call and bridge
 request, without restarting either process. The worker uses the next cycle;

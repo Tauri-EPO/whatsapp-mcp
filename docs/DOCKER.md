@@ -277,16 +277,26 @@ client may also send that JSON directly with the operator bearer token.
 supervisor to restart into pairing. `idle` leaves it serving health/operator
 routes with `logged_out_by_operator`, no QR or automatic pairing; this state
 survives a process restart and is cleared only by `POST pairing/restart`.
+If the operator listener is disabled, startup logs one WARN naming this idle
+state: re-enable `WHATSAPP_OPERATOR_BIND` and POST
+`/operator/v1/pairing/restart` to resume pairing. Restart is refused while
+local cleanup is incomplete; retry logout before restarting pairing.
 The operator token works under `WHATSAPP_READ_ONLY`; data-plane tokens do not.
 Unpaired devices return 409 without contacting WhatsApp.
 
-Response: `{"server_unlinked":true,"local_session_wiped":true}`. Unlink is
+Response: `{"server_unlinked":true,"local_session_wiped":true}`. Existing
+client requests have one second to drain; otherwise logout returns 503
+`client_busy`, stays parked and may be retried. Unlink is
 bounded to five seconds, followed by an independent five-second local wipe,
 even if the server is offline or the caller disconnects. A server failure
-reports `server_unlinked:false`; retry removal on the phone when needed.
+does not cancel local cleanup; the action has a twelve-second overall cleanup
+deadline, leaving time for its terminal webhook and response.
+A server failure reports `server_unlinked:false`; retry removal on the phone when needed.
 A local wipe failure returns 500 with `local_session_wiped:false` and keeps
 the instance parked: resolve that failure before removing storage. A
 successful wipe emits connection `logged_out` with `reason:"operator"`.
+Session deletion uses SQLite secure deletion, compacts the database and
+truncates its WAL, removing old key bytes from both current database files.
 
 After a successful local wipe, stop the stack and remove its instance volume
 (or let your stack manager remove it). Existing backups still contain old

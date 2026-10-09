@@ -52,7 +52,7 @@ import functools
 import os
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from errors import ToolError
@@ -105,6 +105,8 @@ class ToolPolicy:
     read_only: bool = False
     allow: frozenset[str] = frozenset()
     deny: frozenset[str] = frozenset()
+    allow_source: str = field(default=ALLOW_TOOLS_ENV, compare=False)
+    deny_sources: Mapping[str, str] = field(default_factory=dict, compare=False)
 
     def allows(self, name: str) -> bool:
         if name in self.deny:
@@ -119,9 +121,11 @@ class ToolPolicy:
 
     def denial_message(self, name: str) -> str:
         if name in self.deny:
+            if name in self.deny_sources:
+                return f"{name} is disabled: {self.deny_sources[name]} denies it"
             return f"{name} is disabled: it is listed in {DENY_TOOLS_ENV}"
         if self.allow and name not in self.allow:
-            return f"{name} is disabled: {ALLOW_TOOLS_ENV} is set and does not list it"
+            return f"{name} is disabled: {self.allow_source} is set and does not list it"
         return (
             f"{name} is disabled: {READ_ONLY_ENV} is set, so this server may read WhatsApp "
             f"but not act on it. Report the draft to the user and let them send it."
@@ -194,11 +198,14 @@ def active_policy() -> ToolPolicy:
         import runtime_settings
 
         try:
-            settings = runtime_settings.snapshot(require_store=True)["settings"]
+            snapshot = runtime_settings.snapshot(require_store=True)
+            settings = snapshot["settings"]
             policy = ToolPolicy(
                 read_only=_active.read_only,
                 allow=frozenset(settings["tools.allow"]["value"]),
                 deny=frozenset(settings["tools.deny"]["value"]),
+                allow_source=snapshot["allow_source"],
+                deny_sources=snapshot["deny_origins"],
             )
             policy.validate(_runtime_known)
             return policy

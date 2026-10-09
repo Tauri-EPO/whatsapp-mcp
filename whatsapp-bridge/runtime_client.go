@@ -99,8 +99,8 @@ func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, re
 
 func (b *Bridge) bindRuntimeClient() {
 	b.Connect = func() error {
-		b.clientGate.RLock()
-		defer b.clientGate.RUnlock()
+		// reconnectLoop owns clientGate for the whole reconnect operation.
+		// RWMutex read locks cannot nest when an exclusive writer is queued.
 		if b.operatorLogout.Load() {
 			return errors.New("device logged out by operator")
 		}

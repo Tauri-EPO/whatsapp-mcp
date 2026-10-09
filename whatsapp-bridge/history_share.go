@@ -111,6 +111,16 @@ func (b *Bridge) queueHistoryShare(bundle *waE2E.MessageHistoryBundle, chat stri
 }
 
 func (b *Bridge) runHistoryShare(ctx context.Context, job historyShareJob) {
+	if b.operatorLogout.Load() {
+		b.Log.Warnf("Shared history import failed: device parked by operator")
+		return
+	}
+	b.clientGate.RLock()
+	defer b.clientGate.RUnlock()
+	if b.operatorLogout.Load() {
+		b.Log.Warnf("Shared history import failed: device parked by operator")
+		return
+	}
 	data, err := b.decodeHistoryShare(ctx, job.bundle, historyShareCompressedLimit, historyShareInflatedLimit)
 	if err != nil {
 		// SDK errors can contain CDN paths; neither errors nor payloads are logged.

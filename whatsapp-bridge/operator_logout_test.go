@@ -2,8 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"go.mau.fi/whatsmeow"
@@ -243,11 +243,12 @@ func TestOperatorLogoutExitIdleAndServerFailure(t *testing.T) {
 
 func TestOperatorLogoutOfflineWipesRealSessionAndIdleSurvivesRestart(t *testing.T) {
 	b := newSettingsBridge(t)
-	db, err := sql.Open("sqlite", sqliteURI(whatsmeowDBPath(), messagesWriterOptions))
+	db, err := openSessionDB()
 	if err != nil {
 		t.Fatal(err)
 	}
 	boundPool(db, messagesPoolConns)
+	b.sessionDB = db
 	container := sqlstore.NewWithDB(db, "sqlite", testLogger())
 	defer func() { _ = container.Close() }()
 	if err := container.Upgrade(context.Background()); err != nil {
@@ -259,6 +260,26 @@ func TestOperatorLogoutOfflineWipesRealSessionAndIdleSurvivesRestart(t *testing.
 	device.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{1}, AccountSignature: make([]byte, 64), AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
 	if err := device.Save(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	keys := [][]byte{append([]byte(nil), device.NoiseKey.Priv[:]...), append([]byte(nil), device.IdentityKey.Priv[:]...)}
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.Save(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var before []byte
+	for _, path := range []string{whatsmeowDBPath(), whatsmeowDBPath() + "-wal"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before = append(before, data...)
+	}
+	for _, key := range keys {
+		if !bytes.Contains(before, key) {
+			t.Fatal("fixture did not write private key bytes to SQLite")
+		}
 	}
 	client := newRuntimeClient(device, testLogger())
 	b.Client = client
@@ -272,6 +293,17 @@ func TestOperatorLogoutOfflineWipesRealSessionAndIdleSurvivesRestart(t *testing.
 	devices, err := container.GetAllDevices(context.Background())
 	if err != nil || len(devices) != 0 || device.ID != nil {
 		t.Fatal("real SDK session survived wipe")
+	}
+	for _, path := range []string{whatsmeowDBPath(), whatsmeowDBPath() + "-wal"} {
+		data, err := os.ReadFile(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		for _, key := range keys {
+			if bytes.Contains(data, key) {
+				t.Fatal("private key bytes survived offline local cleanup")
+			}
+		}
 	}
 	fresh := testBridge(t, newTestClient(&mockLIDStore{}), b.Store, testLogger())
 	fake := newFakeOperatorClient()
@@ -335,6 +367,11 @@ func TestOperatorLogoutLocalFailureAndCanceledCaller(t *testing.T) {
 		p.logout(w, httptest.NewRequest("POST", "/operator/v1/logout", strings.NewReader(`{}`)).WithContext(ctx))
 		want := 200
 		if failWipe {
+			restart := httptest.NewRecorder()
+			p.restart(restart, httptest.NewRequest("POST", "/operator/v1/pairing/restart", nil))
+			if restart.Code != 409 || !strings.Contains(restart.Body.String(), "local_session_not_wiped") {
+				t.Fatal("restart admitted before local wipe succeeded")
+			}
 			want = 500
 		}
 		if w.Code != want || wipes != 1 || (failWipe && !strings.Contains(w.Body.String(), `"local_session_wiped":false`)) {
@@ -441,7 +478,9 @@ func TestOperatorLogoutDrainsRealRESTIdentityAndRetiredCallbacks(t *testing.T) {
 
 func TestOperatorIdleWithoutListenerStillBlocksDial(t *testing.T) {
 	b := newSettingsBridge(t)
-	if _, err := b.Store.db.Exec("INSERT INTO operator_state VALUES (1,1)"); err != nil {
+	audit := &recordingLogger{}
+	b.Log = audit
+	if _, err := b.Store.db.Exec("INSERT INTO operator_state(id,logged_out) VALUES (1,1)"); err != nil {
 		t.Fatal(err)
 	}
 	if b.operatorPairing != nil {
@@ -457,6 +496,9 @@ func TestOperatorIdleWithoutListenerStillBlocksDial(t *testing.T) {
 	}
 	if !b.operatorLogout.Load() || b.pairingState != "logged_out_by_operator" {
 		t.Fatal("idle state lost without listener")
+	}
+	if strings.Count(audit.String(), "[WARN]") != 1 || !strings.Contains(audit.String(), "WHATSAPP_OPERATOR_BIND") || !strings.Contains(audit.String(), "/operator/v1/pairing/restart") {
+		t.Fatal("disabled listener did not log the idle recovery instruction once")
 	}
 }
 

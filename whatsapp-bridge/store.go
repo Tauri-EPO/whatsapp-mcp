@@ -286,6 +286,11 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}); err != nil {
 		return fmt.Errorf("operator logout schema: %w", err)
 	}
+	if _, err := applyNamedMigration(db, "operator_logout_cleanup_v2", func(tx *sql.Tx) error {
+		return ensureColumn(tx, "operator_state", "local_session_wiped", "INTEGER NOT NULL DEFAULT 0")
+	}); err != nil {
+		return fmt.Errorf("operator cleanup schema: %w", err)
+	}
 	// Run data rewrites after their tables and columns exist. Each owns an
 	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {

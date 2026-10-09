@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 INGEST_CHATS_ENV = "TRANSCRIBE_ON_INGEST_CHATS"
 _startup_env: Mapping[str, str] | None = None
+_warned: dict[str, int] = {}
+_warn_lock = threading.Lock()
+
+
+def _warn(key: str, version: int) -> None:
+    with _warn_lock:
+        if _warned.get(key) == version:
+            return
+        _warned[key] = version
+    logging.getLogger("whatsapp_mcp").warning(
+        "Saved runtime setting key=%s version=%s is incompatible; applying safe deploy fallback", key, version
+    )
 
 
 def parse_ingest_chats(raw: str | None) -> str:
@@ -79,12 +93,14 @@ def snapshot(env: Mapping[str, str] | None = None, *, require_store: bool = Fals
         value = definition.parse_env(raw) if present else definition.default
         settings[key] = {"value": value, "source": "env" if present else "default"}
     version = 0
+    defaults = {key: dict(setting) for key, setting in settings.items()}
+    closed_allow = False
     if not require_store and not os.path.exists(whatsapp.MESSAGES_DB_PATH):
-        return {"version": version, "settings": settings}
+        return _apply_floor(settings, defaults, version, closed_allow)
     conn = whatsapp._connect_messages_db()
     try:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_settings' AND type='table'").fetchone():
-            return {"version": version, "settings": settings}
+            return _apply_floor(settings, defaults, version, closed_allow)
         rows = conn.execute("SELECT key,value,version FROM runtime_settings").fetchall()
     finally:
         conn.close()
@@ -92,12 +108,63 @@ def snapshot(env: Mapping[str, str] | None = None, *, require_store: bool = Fals
         version = max(version, int(row_version))
         if key not in DEFINITIONS:
             continue
-        value = json.loads(raw)
-        if value is None:
+        try:
+            value = json.loads(raw)
+            if value is None:
+                continue
+            value = DEFINITIONS[key].parse_value(value)
+            if key in {"tools.allow", "tools.deny"}:
+                known = _known_tools()
+                filtered = sorted(set(value) & known)
+                if set(value) - known:
+                    _warn(key, row_version)
+                if key == "tools.allow" and value and not filtered:
+                    closed_allow = True
+                value = filtered
+        except (ValueError, TypeError):
+            _warn(key, row_version)
+            if key == "tools.allow":
+                closed_allow = not defaults[key]["value"]
             continue
-        value = DEFINITIONS[key].parse_value(value)
         settings[key] = {"value": value, "source": "runtime"}
-    return {"version": version, "settings": settings}
+    return _apply_floor(settings, defaults, version, closed_allow)
+
+
+def _known_tools() -> set[str]:
+    import main
+    from tool_policy import registered_tool_names
+
+    return set(registered_tool_names(main.mcp))
+
+
+def _apply_floor(settings, defaults, version, closed_allow):
+    allow = set(settings["tools.allow"]["value"])
+    env_allow = set(defaults["tools.allow"]["value"])
+    if env_allow:
+        if not allow and not closed_allow:
+            allow = env_allow
+        else:
+            allow &= env_allow
+            closed_allow = not allow
+    deny = set(settings["tools.deny"]["value"])
+    deny_source = (
+        "runtime tools.deny" if settings["tools.deny"]["source"] == "runtime" else "WHATSAPP_DENY_TOOLS (deploy)"
+    )
+    origins = {name: deny_source for name in deny}
+    for name in defaults["tools.deny"]["value"]:
+        deny.add(name)
+        origins[name] = "WHATSAPP_DENY_TOOLS (deploy)"
+    if closed_allow and not allow:
+        for name in _known_tools():
+            deny.add(name)
+            origins.setdefault(name, "runtime tools.allow has no readable tools inside the deploy floor")
+        settings["tools.deny"]["source"] = "runtime"
+    settings["tools.allow"]["value"] = sorted(allow)
+    settings["tools.deny"]["value"] = sorted(deny)
+    allow_source = "WHATSAPP_ALLOW_TOOLS (deploy)"
+    if settings["tools.allow"]["source"] == "runtime":
+        allow_source = "runtime tools.allow within WHATSAPP_ALLOW_TOOLS (deploy)"
+    return {"version": version, "settings": settings, "deny_origins": origins, "allow_source": allow_source}
 
 
 def ingest_setting() -> dict[str, Any]:

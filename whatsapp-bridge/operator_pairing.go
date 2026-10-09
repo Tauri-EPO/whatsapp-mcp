@@ -447,6 +447,10 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	defer p.action.Unlock()
+	if p.b.operatorLogout.Load() && !p.b.operatorSessionWiped.Load() {
+		writeErrorCode(w, 409, "local_session_not_wiped", "Local session not wiped; retry operator logout")
+		return
+	}
 	if p.paired() {
 		writeErrorCode(w, 409, "already_paired", "Unlink on the phone before starting another pairing")
 		return
