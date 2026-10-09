@@ -8,11 +8,91 @@ import (
 	"math"
 	"os"
 	"path"
+	"path/filepath"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 )
 
 var errAutoMediaLimit = errors.New("automatic media exceeds WHATSAPP_MEDIA_MAX_BYTES")
+
+// Cache the actual uploaded bytes while they are still owned by the sender.
+// An archive cache failure cannot undo a successful remote send.
+func (b *Bridge) cacheOutboundMedia(ctx context.Context, sent sentMessage, media outboundMedia, data []byte) {
+	if !b.MediaAutoDownload {
+		return
+	}
+	if chatJID, err := types.ParseJID(sent.ChatJID); err == nil && b.skipsStatusMedia(chatJID) {
+		return
+	}
+	if b.MediaMaxBytes != 0 && uint64(len(data)) > b.MediaMaxBytes {
+		b.recordAutoSizeSkip(sent.ID, sent.ChatJID)
+		return
+	}
+	chat := chatMediaRel(sent.ChatJID)
+	filename := mediaFileName(media.mediaType, sent.Timestamp, sent.ID, media.filename)
+	absolute, err := filepath.Abs(storePath(chat, filename))
+	if err != nil {
+		b.Log.Warnf("Sent media cache failed for message %s in %s: %v", sent.ID, sent.ChatJID, err)
+		return
+	}
+	// The caller waits only within the send request's deadline; the transfer
+	// and its owned byte slice continue under the bridge lifecycle context.
+	// All filesystem work runs there too, including a slow directory creation.
+	write := func() (written int64, cacheErr error) {
+		defer func() {
+			if cacheErr != nil {
+				b.Log.Warnf("Sent media cache failed for message %s in %s: %v", sent.ID, sent.ChatJID, cacheErr)
+			}
+		}()
+		if err := checkMediaPathComponents(chat, filename); err != nil {
+			return 0, err
+		}
+		root := b.StoreRoot
+		if root == nil {
+			return 0, errors.New("store directory unavailable")
+		}
+		if err := root.MkdirAll(chat, storeDirMode); err != nil {
+			return 0, err
+		}
+		if _, err := requireChatMediaDir(root, chat); err != nil {
+			return 0, err
+		}
+		rel := path.Join(chat, filename)
+		cached, err := findCachedMedia(root, chat, []string{filename})
+		if err != nil {
+			return 0, err
+		}
+		if cached != nil {
+			defer cached.Close()
+			return cached.info.Size(), nil
+		}
+		return writeMediaFile(root, rel, func(f *os.File) error {
+			if err := b.ctx.Err(); err != nil {
+				return err
+			}
+			_, err := f.Write(data)
+			return err
+		})
+	}
+	// A separate transfer job retains these bytes if a download already owns
+	// the destination. Its failure releases that writer before our fallback;
+	// the request can leave while the job and any file transfer keep running.
+	_, _ = b.mediaTransfers.do(ctx, "sent-cache:"+absolute, func() (int64, error) {
+		for {
+			attempted := false
+			written, err := b.mediaTransfers.do(b.ctx, absolute, func() (int64, error) {
+				attempted = true
+				return write()
+			})
+			if err == nil || b.ctx.Err() != nil || attempted {
+				return written, err
+			}
+			// Only a failed joined download gets another local-cache attempt.
+			// Our own write errors already logged once and must not loop.
+		}
+	})
+}
 
 func (b *Bridge) recordAutoSizeSkip(messageID, chatJID string) {
 	b.metrics.mediaAutoSizeSkips.Add(1)

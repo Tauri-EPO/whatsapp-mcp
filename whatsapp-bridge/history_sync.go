@@ -27,8 +27,11 @@ func (b *Bridge) handleHistorySyncWithShares(historySync *events.HistorySync, do
 }
 
 func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, historySync *events.HistorySync, downloadShares, preserveExisting bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	stopping := func() bool {
-		return (preserveExisting && ctx.Err() != nil) || b.historyStopping()
+		return b.historyStopping() || ctx.Err() != nil
 	}
 	retry := b.retryBusy
 	if preserveExisting {
@@ -75,14 +78,12 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 	if downloadShares {
 		defer b.queueHistoryShares(historySync.Data)
 	}
-	writeBatch := messageStore.Batch
-	if preserveExisting {
-		writeBatch = func(write func(*messageBatch) error) error { return messageStore.BatchContext(ctx, write) }
-	}
+	writeBatch := func(write func(*messageBatch) error) error { return messageStore.BatchContext(ctx, write) }
 	if b.historyBatchWriter != nil {
 		writeBatch = b.historyBatchWriter
 	}
 	syncedCount := 0
+	var voteJobs []historyVoteJob
 	for _, conversation := range historySync.Data.Conversations {
 		if stopping() {
 			return
@@ -104,16 +105,15 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 		// Resolve LID-based chats to phone-based JIDs.
 		// History sync doesn't carry SenderAlt, so rely on the
 		// LID store mapping populated during live message handling.
-		resolved := resolveLIDChat(client, jid, types.EmptyJID, types.EmptyJID, false)
+		resolved := resolveLIDChatContext(ctx, client, jid, types.EmptyJID, types.EmptyJID, false)
+		if stopping() {
+			return
+		}
 		chatJID := resolved.String()
 
 		// Get appropriate chat name by passing the history sync conversation directly
 		// History sync never fetches group metadata (see chat_names.go).
-		nameContext := context.Background()
-		if preserveExisting {
-			nameContext = ctx
-		}
-		name := getChatNameContext(nameContext, client, messageStore, resolved, chatJID, conversation, "", false, logger)
+		name := getChatNameContext(ctx, client, messageStore, resolved, chatJID, conversation, "", false, logger)
 
 		// Process messages
 		messages := conversation.Messages
@@ -167,6 +167,14 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// The synchronous callback captures the current chunk; keep extraction
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
+			type preparedSender struct {
+				jid    types.JID
+				stored string
+				wire   string
+				own    bool
+				err    error
+			}
+			prepared := make(map[*waHistorySync.HistorySyncMsg]preparedSender)
 			storedInBatch := 0
 			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
@@ -190,6 +198,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					// unwrap, text, media, poll. Works on a local view; the
 					// whatsmeow payload is not mutated.
 					ex := extractMessage(msg.Message.Message, timestamp, histMsgID)
+					if ex.edit != nil {
+						continue // edits run after original rows, including older chunks
+					}
 					content, mediaType, filename := ex.content, ex.mediaType, ex.filename
 
 					// Log the message content for debugging
@@ -210,12 +221,17 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						}
 					}
 
-					resolvedSender, isFromMe := b.historySender(msg.Message, jid, preserveExisting)
+					ready := prepared[msg]
+					if ready.err != nil {
+						return ready.err // SDK failure was captured before the writer began
+					}
+					resolvedSender, isFromMe := ready.jid, ready.own
 					sender := resolvedSender.User
 					// The row records which namespace that user part belongs
 					// to, so a LID the store cannot map is not read back as a
 					// phone number (#375).
-					storedSenderJID := storedSender(resolvedSender)
+					storedSenderJID := ready.stored
+					ex.retryChat, ex.retrySender = jid.String(), ready.wire
 
 					// Store message
 					msgID := ""
@@ -230,10 +246,6 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					}
 					msgTimestamp := time.Unix(int64(ts), 0) //nolint:gosec // WhatsApp seconds-since-epoch fit int64
 					if !preserveExisting && ex.location != nil && ex.location.Live {
-						storedSenderJID, err = b.liveLocationSender(ctx, batch.tx, msgID, chatJID, storedSenderJID, isFromMe)
-						if err != nil {
-							return err
-						}
 						if ex.location.update() {
 							key := locationSampleKey{id: msgID, sender: storedSenderJID, fromMe: isFromMe}
 							if first, found := locationInitial[key]; found {
@@ -285,8 +297,20 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			}
 			storedInChat := 0
 			processed := len(messages)
-			commitChunk := func() error {
+			commitChunk := func(reprepare bool) error {
+				attempt := 0
 				return retry(func() error {
+					if reprepare || attempt > 0 {
+						// Re-read only failed preparations, outside the write transaction.
+						for _, row := range chunk {
+							ready := prepared[row]
+							if ready.err != nil {
+								ready.stored, ready.err = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, storedSender(ready.jid), ready.own)
+								prepared[row] = ready
+							}
+						}
+					}
+					attempt++
 					storedInBatch = 0
 					chunkPeerRows = make(map[string]struct{})
 					return writeBatch(storeChunk)
@@ -304,7 +328,39 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					return
 				}
 				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
-				batchErr := commitChunk()
+				prepared = make(map[*waHistorySync.HistorySyncMsg]preparedSender)
+				// Resolve session-store identities and location aliases before Begin.
+				// Writers use prepared identities; only failed reads refresh before a retry.
+				for _, row := range chunk {
+					if row == nil || row.Message == nil {
+						continue
+					}
+					sender, own := b.historySenderContext(ctx, row.Message, jid, preserveExisting)
+					// Let the pinned SDK select wire authorship (original self
+					// author, own LID, participant precedence). Omit the payload
+					// from this local metadata view so UnwrapRaw cannot mutate it.
+					wireSender := ""
+					if client != nil {
+						metadata := &waWeb.WebMessageInfo{
+							Key:                             row.Message.Key,
+							Participant:                     row.Message.Participant,
+							OriginalSelfAuthorUserJIDString: row.Message.OriginalSelfAuthorUserJIDString,
+						}
+						if event, parseErr := client.ParseWebMessage(jid, metadata); parseErr == nil {
+							wireSender = event.Info.Sender.ToNonAD().String()
+						}
+					}
+					stored := storedSender(sender)
+					var preparationErr error
+					if ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID()); !preserveExisting && ex.location != nil && ex.location.Live {
+						stored, preparationErr = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, stored, own)
+					}
+					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, own: own, err: preparationErr}
+				}
+				if stopping() {
+					return
+				}
+				batchErr := commitChunk(false)
 				if batchErr == nil {
 					countCommitted()
 					continue
@@ -325,7 +381,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						return
 					}
 					chunk = []*waHistorySync.HistorySyncMsg{msg}
-					rowErr := commitChunk()
+					rowErr := commitChunk(true)
 					if rowErr == nil {
 						countCommitted()
 						continue
@@ -342,6 +398,36 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				}
 			}
 			logger.Infof("History sync: %s stored %d of %d messages", chatJID, storedInChat, len(messages))
+			if !preserveExisting {
+				for _, row := range messages[:processed] {
+					if row == nil || row.Message == nil {
+						continue
+					}
+					ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID())
+					if ex.edit == nil {
+						continue
+					}
+					if stopping() {
+						return
+					}
+					sender, own := b.historySenderContext(ctx, row.Message, jid, false)
+					if stopping() {
+						return
+					}
+					b.storeLive("history message edit", ex.edit.GetKey().GetID(), chatJID, func() error {
+						// Re-read a contended alias on each bounded retry, before the
+						// archive UPDATE starts its implicit writer transaction.
+						editSender, lookupErr := b.liveLocationSender(ctx, messageStore.db, ex.edit.GetKey().GetID(), chatJID, storedSender(sender), own)
+						if lookupErr != nil {
+							return lookupErr
+						}
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+						return messageStore.ApplyMessageEdit(chatJID, editSender, own, ex.edit, time.Unix(int64(row.Message.GetMessageTimestamp()), 0)) //nolint:gosec // WhatsApp epoch seconds
+					})
+				}
+			}
 			for _, msg := range messages[:processed] {
 				// A peer knows a group's poll secret and cannot authenticate another
 				// voter's identity. Only the account's own phone history imports votes.
@@ -350,15 +436,14 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				}
 			}
 			if len(pendingVotes) > 0 {
-				b.historyVotes.Add(1)
-				go func(chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo) {
-					defer b.historyVotes.Done()
-					b.storeHistoryPollVotes(chat, chatJID, votes, nil, historyVoteMarkers{name: name, read: markRead})
-				}(resolved, chatJID, pendingVotes)
+				voteJobs = append(voteJobs, historyVoteJob{client: client, chat: resolved, chatJID: chatJID, votes: pendingVotes, markers: historyVoteMarkers{name: name, read: markRead}})
 			}
 		}
 	}
 
+	// Ordinary rows from every conversation precede this payload's vote rows.
+	// Return to the SDK before retrying secrets that a later notification carries.
+	b.queueHistoryPollVotes(voteJobs)
 	b.Log.Infof("History sync complete. Stored %d messages.", syncedCount)
 }
 
@@ -394,6 +479,10 @@ func (b *Bridge) historyStopping() bool {
 // Peer attribution was resolved by the context-bound adapter; the account's
 // own phone keeps its canonical participant / own-account / LID precedence.
 func (b *Bridge) historySender(info *waWeb.WebMessageInfo, chat types.JID, peer bool) (types.JID, bool) {
+	return b.historySenderContext(b.ctx, info, chat, peer)
+}
+
+func (b *Bridge) historySenderContext(ctx context.Context, info *waWeb.WebMessageInfo, chat types.JID, peer bool) (types.JID, bool) {
 	if info.Key == nil {
 		return chat, false
 	}
@@ -427,5 +516,5 @@ func (b *Bridge) historySender(info *waWeb.WebMessageInfo, chat types.JID, peer 
 	if own {
 		alt = account
 	}
-	return resolveUserJID(client, raw, alt), own
+	return resolveUserJIDContext(ctx, client, raw, alt), own
 }

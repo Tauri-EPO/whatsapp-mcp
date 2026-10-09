@@ -397,6 +397,7 @@ func (b *Bridge) sendBackend() sendFunc {
 
 func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersistence, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	network := messageSendNetwork{connected: b.Connected, upload: b.uploadMedia, send: b.sendMessage}
+	network.cache = b.cacheOutboundMedia
 	if network.upload == nil {
 		network.upload = b.currentClient().Upload
 	}
@@ -415,6 +416,7 @@ type messageSendNetwork struct {
 	connected func() bool
 	upload    func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	send      func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error)
+	cache     func(context.Context, sentMessage, outboundMedia, []byte)
 }
 
 func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, persist outboundPersistence, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string, network messageSendNetwork) (bool, string, sentMessage) {
@@ -469,11 +471,12 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// What the upload returned, kept for the stored row: nothing else ever
 	// carries the key of a file this bridge sent (issue #449).
 	var upload whatsmeow.UploadResponse
+	var mediaData []byte
 
 	// Check if we have media to send
 	if mediaPath != "" {
 		// Read media file
-		mediaData, err := os.ReadFile(mediaPath) //nolint:gosec // mediaPath was canonicalised and confined to WHATSAPP_MEDIA_ROOTS by validateMediaPath
+		mediaData, err = os.ReadFile(mediaPath) //nolint:gosec // mediaPath was canonicalised and confined to WHATSAPP_MEDIA_ROOTS by validateMediaPath
 		if err != nil {
 			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
 		}
@@ -527,6 +530,16 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		media := outboundMediaColumns(mediaPath, upload)
+		// The SDK can change both the destination and our PN/LID identity.
+		// Its successful response is the wire provenance, before normalization.
+		retryChat, retrySender := resp.Chat, resp.Sender
+		if retryChat.IsEmpty() {
+			retryChat = recipientJID
+		}
+		if retrySender.IsEmpty() {
+			retrySender = *client.Store.ID
+		}
+		media.retryChat, media.retrySender = retryChat.ToNonAD().String(), retrySender.ToNonAD().String()
 		if mediaPath != "" {
 			media.mediaType, _ = mediaPartOf(msg)
 			media.presentation = mediaPresentationOf(msg)
@@ -535,6 +548,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 			}
 		}
 		sent.ChatJID, err = persist(storageJID, sent, message, media, quotedMsgID)
+		if mediaPath != "" && network.cache != nil {
+			network.cache(ctx, sent, media, mediaData)
+		}
 	}
 
 	return true, outboundSendStatus(recipient, err), sent
@@ -591,6 +607,7 @@ type outboundMedia struct {
 	mediaKey, fileSHA256, fileEncSHA256 []byte
 	fileLength                          uint64
 	presentation                        *mediaPresentation
+	retryChat, retrySender              string
 }
 
 // outboundMediaColumns maps an upload to the columns of its row. whatsmeow
@@ -644,7 +661,7 @@ func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID,
 			FileEncSHA256:   m.fileEncSHA256,
 			FileLength:      m.fileLength,
 			QuotedMessageID: quotedMsgID,
-			Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation},
+			Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
 		},
 	)
 }

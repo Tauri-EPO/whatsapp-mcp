@@ -289,6 +289,9 @@ func mediaRetryMessageInfo(messageID, chatJID, sender string, isFromMe bool) (*t
 	} else {
 		senderJID = chat
 	}
+	if chat.Server == types.GroupServer && senderJID.Server != types.DefaultUserServer && senderJID.Server != types.HiddenUserServer {
+		return nil, errors.New("group media retry requires an attributed sender JID")
+	}
 	return &types.MessageInfo{
 		MessageSource: types.MessageSource{
 			Chat:     chat,
@@ -303,6 +306,9 @@ func mediaRetryMessageInfo(messageID, chatJID, sender string, isFromMe bool) (*t
 // mediaRetryDirectPath decodes the phone's answer and returns the fresh direct
 // path, or an error describing why the media can't be recovered.
 func mediaRetryDirectPath(evt *events.MediaRetry, mediaKey []byte) (string, error) {
+	// An error node has no authenticated ciphertext. In particular the SDK's
+	// ErrMediaNotAvailableOnPhone may describe a mismatched legacy receipt;
+	// keep it retryable. Only the decrypted NOT_FOUND above proves absence.
 	notif, err := whatsmeow.DecryptMediaRetryNotification(evt, mediaKey)
 	if err != nil {
 		return "", err
@@ -333,15 +339,7 @@ func storeRefreshedMedia(messageStore *MessageStore, messageID, chatJID string, 
 // success the new URL is persisted so the next download skips the retry.
 // relPath is the destination relative to root, the store root.
 func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader, root *os.Root, relPath string) (int64, error) {
-	var sender string
-	var isFromMe bool
-	if err := messageStore.db.QueryRow(
-		"SELECT sender, is_from_me FROM messages WHERE id = ? AND chat_jid = ?",
-		messageID, chatJID,
-	).Scan(&sender, &isFromMe); err != nil {
-		return 0, fmt.Errorf("look up message for media retry: %w", err)
-	}
-	info, err := mediaRetryMessageInfo(messageID, chatJID, sender, isFromMe)
+	info, err := messageStore.mediaRetryInfo(ctx, messageID, chatJID)
 	if err != nil {
 		return 0, err
 	}
@@ -379,4 +377,33 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
+}
+
+// The pinned SDK puts Chat in rmr.jid and Sender in rmr.participant for
+// groups. New rows retain the delivery identities; legacy rows can only use
+// their archived chat and their recorded sender namespace, without guessing
+// a phone namespace for LID digits.
+func (store *MessageStore) mediaRetryInfo(ctx context.Context, id, chat string) (*types.MessageInfo, error) {
+	var sender, server, wireChat, wireSender string
+	var own bool
+	err := store.db.QueryRowContext(ctx, `SELECT sender, COALESCE(sender_server,''), is_from_me,
+		COALESCE(media_retry_chat,''), COALESCE(media_retry_sender,'') FROM messages WHERE id=? AND chat_jid=?`, id, chat).
+		Scan(&sender, &server, &own, &wireChat, &wireSender)
+	if err != nil {
+		return nil, fmt.Errorf("look up message for media retry: %w", err)
+	}
+	if wireChat != "" {
+		chat = wireChat
+	}
+	if wireSender == "" && server == "" {
+		if parsed, parseErr := types.ParseJID(chat); parseErr == nil && parsed.Server == types.GroupServer {
+			return nil, errors.New("group media retry requires a recorded sender namespace or delivery JID")
+		}
+	}
+	if wireSender != "" {
+		sender = wireSender
+	} else if server != "" {
+		sender = types.NewJID(sender, server).String()
+	}
+	return mediaRetryMessageInfo(id, chat, sender, own)
 }

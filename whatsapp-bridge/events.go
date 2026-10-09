@@ -133,6 +133,12 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// copy of the event with the envelope removed so every extractor below
 	// sees the real message and other handlers keep the original untouched.
 	original := msg.Message
+	// ParseWebMessage unwraps an edit into its new text and target ID. Its
+	// RawMessage retains the protocol key/timestamp needed for ordered updates.
+	// A direct or ephemeral protocol edit may have IsEdit=false in the SDK.
+	if msg.RawMessage != nil && extractMessage(msg.RawMessage, msg.Info.Timestamp, msg.Info.ID).edit != nil {
+		original = msg.RawMessage
+	}
 	if inner, wrapped := unwrapViewOnce(msg.Message); wrapped {
 		unwrapped := *msg
 		unwrapped.Message = inner
@@ -275,6 +281,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// timestamp must be the retry-corrected one stored below: downloadMedia
 	// rebuilds the on-disk filename from the stored row.
 	ex := extractMessage(original, msgTimestamp, msg.Info.ID)
+	ex.retryChat, ex.retrySender = msg.Info.Chat.String(), msg.Info.Sender.ToNonAD().String()
 	// whatsmeow unwraps live envelopes before dispatch and keeps this flag.
 	if msg.IsViewOnce && !ex.viewOnce {
 		ex.viewOnce = true
@@ -301,11 +308,15 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// A busy database is tried again a bounded number of times; a write that is
 	// given up is one ERROR naming the message (ID and chat only, never the
 	// content) and a count on /metrics (store_failures.go).
-	stored := storeRow("message", func() error {
+	writeMessage := func() error {
 		locationSender := storedSenderJID
-		if ex.location != nil && ex.location.Live {
+		if ex.edit != nil || ex.location != nil && ex.location.Live {
 			var err error
-			locationSender, err = b.liveLocationSender(b.ctx, messageStore.db, msg.Info.ID, chatJID, storedSenderJID, msg.Info.IsFromMe)
+			targetID := msg.Info.ID
+			if ex.edit != nil {
+				targetID = ex.edit.GetKey().GetID()
+			}
+			locationSender, err = b.liveLocationSender(b.ctx, messageStore.db, targetID, chatJID, storedSenderJID, msg.Info.IsFromMe)
 			if err != nil {
 				return err
 			}
@@ -315,10 +326,18 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, locationSender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
 			return err
 		})
-	})
+	}
+	var stored bool
+	if ex.edit != nil {
+		// An edit updates an existing target; it must not create an empty chat
+		// when that target was never archived.
+		stored = b.storeLive("message edit", msg.Info.ID, chatJID, writeMessage)
+	} else {
+		stored = storeRow("message", writeMessage)
+	}
 	// If the live-location ownership check cannot commit, withhold effects too:
 	// an unverified known key must not escape as an unstored webhook message.
-	if rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
+	if ex.edit != nil || rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
 		return
 	}
 	if stored {
@@ -348,7 +367,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// "failed to find message" (issue #454). The webhook below still goes out,
 	// or the text would be lost downstream too, and says "stored": false so the
 	// receiver does not look the message up (issue #518).
-	downloadable := stored && mediaComplete(ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc)
+	downloadable := stored && mediaComplete(chatJID, ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc)
 
 	// Is this file written to the store as it arrives? One answer for both ways
 	// of doing it below: WHATSAPP_MEDIA_AUTODOWNLOAD off means no file until

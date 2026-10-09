@@ -221,7 +221,7 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	// is a later history sync storing the same message with its media info; the
 	// caller clears its note to ask again then, exactly as it does for a phone
 	// that restored a backup.
-	if !mediaComplete(url, storedDirectPath.String, mediaKey, fileSHA256, fileEncSHA256) {
+	if !mediaComplete(chatJID, url, storedDirectPath.String, mediaKey, fileSHA256, fileEncSHA256) {
 		return false, "", "", "", permanentMediaError("incomplete media information for download")
 	}
 
@@ -264,6 +264,11 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		FileSHA256:    fileSHA256,
 		FileEncSHA256: fileEncSHA256,
 		MediaType:     waMediaType,
+	}
+	// SQLite can return an empty BLOB as a non-nil slice. whatsmeow selects
+	// plaintext newsletter downloads by nil key AND nil encrypted hash.
+	if len(mediaKey) == 0 && len(fileEncSHA256) == 0 {
+		downloader.MediaKey, downloader.FileEncSHA256 = nil, nil
 	}
 
 	// Stream straight to a temp file next to the target (whatsmeow decrypts
@@ -310,6 +315,12 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 				b.metrics.mediaDownloadFails.Add(1)
 				return 0, &cdnRefusedError{status: status, age: age}
 			default:
+				if len(downloader.MediaKey) == 0 {
+					// Newsletter files have no E2EE media key for a retry receipt.
+					// A CDN refusal alone does not prove they are permanently gone.
+					b.metrics.mediaDownloadFails.Add(1)
+					return 0, err
+				}
 				// Old enough for the link to have expired (old history, a file
 				// that sat unread), or a link stamped as expired: ask the
 				// sender's phone to re-upload and download from the fresh
@@ -349,12 +360,15 @@ func (b *Bridge) transferMedia(ctx context.Context, msg whatsmeow.DownloadableMe
 }
 
 // mediaComplete reports whether a message carries what a download needs:
-// somewhere to ask (its direct path, or a url to cut one out of), the media key
-// and the two hashes. Not the length: an empty file is a file, and its length
+// somewhere to ask, the plaintext hash, and both encryption fields. Only a
+// newsletter may omit both encryption fields: a DM/group replay that omits
+// them must not erase an archived encrypted snapshot. Not the length: an empty file is a file, and its length
 // is 0 (issue #474). The download gate and the automatic download on arrival
 // both decide on this, so they cannot disagree about a row.
-func mediaComplete(url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte) bool {
-	return (url != "" || directPath != "") && len(mediaKey) > 0 && len(fileSHA256) > 0 && len(fileEncSHA256) > 0
+func mediaComplete(chatJID, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte) bool {
+	return (url != "" || directPath != "") && len(fileSHA256) > 0 &&
+		((len(mediaKey) > 0 && len(fileEncSHA256) > 0) ||
+			(strings.HasSuffix(chatJID, "@newsletter") && len(mediaKey) == 0 && len(fileEncSHA256) == 0))
 }
 
 // retryMedia asks the sender's phone to re-upload the file and downloads it

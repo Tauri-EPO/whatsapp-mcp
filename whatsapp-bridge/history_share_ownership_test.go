@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -98,7 +99,10 @@ func TestHistoryShareOwnershipRelativeToReceiver(t *testing.T) {
 					}
 				}
 				calls := 0
-				edit := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) error { calls++; return nil }, chatPolicy{}, b.storeLive)
+				edit := handleEditMessage(ms, func(context.Context, types.JID, types.MessageID, string) (int64, error) {
+					calls++
+					return time.Now().UnixMilli(), nil
+				}, chatPolicy{}, b.storeLive)
 				rec := httptest.NewRecorder()
 				edit(rec, httptest.NewRequest(http.MethodPost, "/api/edit", strings.NewReader(`{"chat_jid":"120363000000000001@g.us","message_id":"H0","text":"Edited"}`)))
 				wantStatus, wantCalls := http.StatusForbidden, 0

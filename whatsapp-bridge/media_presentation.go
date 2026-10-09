@@ -27,9 +27,10 @@ type mediaPresentation struct {
 
 // messageMediaOptions keeps presentation and direct path in the same upsert.
 type messageMediaOptions struct {
-	directPath   string
-	presentation *mediaPresentation
-	location     *messageLocation
+	directPath             string
+	presentation           *mediaPresentation
+	location               *messageLocation
+	retryChat, retrySender string
 }
 
 func mediaPresentationOf(msg *waE2E.Message) *mediaPresentation {

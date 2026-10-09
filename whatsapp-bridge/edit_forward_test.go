@@ -91,9 +91,9 @@ func TestEditOwnMessageUpdatesLocalContent(t *testing.T) {
 		id   string
 		text string
 	}
-	h := handleEditMessage(ms, func(_ context.Context, chat types.JID, id types.MessageID, text string) error {
+	h := handleEditMessage(ms, func(_ context.Context, chat types.JID, id types.MessageID, text string) (int64, error) {
 		got.chat, got.id, got.text = chat, id, text
-		return nil
+		return time.Now().UnixMilli(), nil
 	}, chatPolicy{}, storeWriteOwner(t, ms))
 	code, resp := efPost(t, h, `{"chat_jid":"`+efChat+`","message_id":"MINE","text":" typo here "}`)
 	if code != http.StatusOK || !resp.Success || resp.MessageID != "MINE" {
@@ -112,7 +112,10 @@ func TestEditOwnMessageUpdatesLocalContent(t *testing.T) {
 func TestEditRefusals(t *testing.T) {
 	ms := seedEditStore(t)
 	calls := 0
-	h := handleEditMessage(ms, func(_ context.Context, _ types.JID, _ types.MessageID, _ string) error { calls++; return nil }, chatPolicy{}, storeWriteOwner(t, ms))
+	h := handleEditMessage(ms, func(_ context.Context, _ types.JID, _ types.MessageID, _ string) (int64, error) {
+		calls++
+		return time.Now().UnixMilli(), nil
+	}, chatPolicy{}, storeWriteOwner(t, ms))
 	cases := map[string]int{
 		`{"chat_jid":"` + efChat + `","message_id":"THEIRS","text":"x"}`: http.StatusForbidden,
 		`{"chat_jid":"` + efChat + `","message_id":"NOPE","text":"x"}`:   http.StatusNotFound,
@@ -128,7 +131,9 @@ func TestEditRefusals(t *testing.T) {
 		t.Fatal("no edit must be sent for refused requests")
 	}
 	// bridge failure
-	h = handleEditMessage(ms, func(_ context.Context, _ types.JID, _ types.MessageID, _ string) error { return errors.New("offline") }, chatPolicy{}, storeWriteOwner(t, ms))
+	h = handleEditMessage(ms, func(_ context.Context, _ types.JID, _ types.MessageID, _ string) (int64, error) {
+		return 0, errors.New("offline")
+	}, chatPolicy{}, storeWriteOwner(t, ms))
 	if code, resp := efPost(t, h, `{"chat_jid":"`+efChat+`","message_id":"MINE","text":"x"}`); code != http.StatusBadGateway || !strings.Contains(resp.Message, "offline") {
 		t.Fatalf("%d %+v", code, resp)
 	}

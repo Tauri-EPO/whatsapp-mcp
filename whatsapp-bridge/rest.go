@@ -121,12 +121,19 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 
 	// Edit an own message / forward a message (edit_forward.go).
 	mux.HandleFunc("/api/edit", mutate(handleEditMessage(messageStore,
-		func(ctx context.Context, chat types.JID, id types.MessageID, text string) error {
+		func(ctx context.Context, chat types.JID, id types.MessageID, text string) (int64, error) {
 			if !b.Connected() {
-				return errors.New("WhatsApp client is not connected")
+				return 0, errors.New("WhatsApp client is not connected")
 			}
-			_, err := client.SendMessage(ctx, chat, client.BuildEdit(chat, id, &waE2E.Message{Conversation: proto.String(text)}))
-			return err
+			message := client.BuildEdit(chat, id, &waE2E.Message{Conversation: proto.String(text)})
+			stamp := message.GetEditedMessage().GetMessage().GetProtocolMessage().GetTimestampMS()
+			var err error
+			if b.sendMessage != nil {
+				_, err = b.sendMessage(ctx, chat, message)
+			} else {
+				_, err = client.SendMessage(ctx, chat, message)
+			}
+			return stamp, err
 		},
 		b.Policy,
 		b.storeLive,

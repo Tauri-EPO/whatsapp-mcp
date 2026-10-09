@@ -137,7 +137,7 @@ message contains both forms; text-only headers do not invent a media row.
 
 ### Replayed media rows
 
-Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, key and both hashes) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later.
+Live messages, history batches and outbound sends share one message upsert. A replay without complete media credentials keeps the stored URL, direct path, key, hashes and length together; it can populate a row that has no media fields yet. A complete snapshot (URL or direct path, plaintext hash, and both encryption fields) replaces the bundle atomically, including clearing an old direct path for a URL-only snapshot. It also enriches a plain placeholder when the media arrives later. Only newsletter rows may omit both encryption fields and use the pinned SDK's plaintext hash verification; a key without an encrypted hash, or an encrypted hash without a key, remains incomplete. A DM/group replay missing both fields preserves its archived encrypted snapshot and cached filename.
 
 An incomplete replay keeps the existing media category, filename and timestamp once the row has credentials, so an already cached file remains reachable. A row with no credentials accepts its first partial snapshot with its category, filename and timestamp together; later partial copies cannot mix their fields with it. An incomplete copy with no caption keeps a stored media caption and its searchable content. A complete copy may replace that caption with an empty one.
 
@@ -223,6 +223,84 @@ outbound `/api/send` rows retain their actual wire presentation too. The JSON
 column itself is not exposed by MCP readers or webhooks.
 
 ## SQLite contention and persistence retries
+
+Incoming `MESSAGE_EDIT` envelopes update only the original row in the delivery
+chat, matching its sender namespace (including a verified LID alias) and account
+ownership. Text and mention metadata update together; FTS triggers update the
+searchable text in the same write. The integer `message_edit_timestamp`
+retains the latest protocol millisecond timestamp: older edits and original-row
+replays cannot restore stale content. A missing target is a no-op; live edit delivery
+envelopes create no message or chat row or conversation activity. Phone history applies
+edits after its original rows, including targets in later chunks. Replacement
+payloads use the shared envelope extractor, preserving wrapped captions and
+mentions. SDK-parsed live edits also recover direct/ephemeral protocols from
+`RawMessage`, even when the SDK leaves `IsEdit` false. History edit-author alias reads share the bounded busy-retry budget
+with the UPDATE, while staying outside the archive writer. Peer-shared
+history cannot edit existing rows. The outbound endpoint keeps its ownership
+checks and WhatsApp edit protocol. It persists the protocol's timestamp rather
+than the acknowledgement clock, and a delayed acknowledgement cannot overwrite
+a newer phone edit. The archive retains the latest
+text, without a separate original-text version history. An edit in an earlier
+history payload or before a delayed/retried live original is still dropped;
+that original may subsequently retain stale text. Bounded pending edits with
+expiry are tracked in issue #666 rather than stored by this implementation.
+
+History sender/LID reads and live-location alias preparation run before the
+archive writer transaction, using the bridge cancellation context. Preparation
+errors stay attached to their source row: BUSY retries re-read failed aliases
+before Begin, and other failures use the normal per-row salvage without losing
+healthy neighbours or later chunks. Transactions perform archive SQL only.
+For one history payload, ordinary rows from all
+conversations precede its vote rows. Initial vote attempts run in conversation
+and input order on one FIFO chain outside the SDK callback, allowing later
+notifications to load missing secrets. Missing-secret votes share one retry
+budget per payload, with one ordered pass after each delay. These waits release
+the initial-attempt FIFO, so a later payload's ready votes can proceed; retry
+passes from different payloads and live writes may interleave. Decryption and
+cancellable retry waits hold no archive writer. Shutdown seals the FIFO and
+drains both initial attempts and pending retry passes. In-flight ordering state
+prevents an old retry from replacing a later observed history/live tally at an
+equal timestamp. An older decoded vote still gets its own archive row; strictly
+newer vote timestamps retain priority. Ordering entries are released when their
+jobs finish, retire or are cancelled, without a persistent pending-vote store.
+Queued votes retain their delivery runtime and skip persistence after a client
+handoff, matching the rejection of a retired client's late SDK events. Only the
+short archive-write phase takes the client handoff gate; decryption does not.
+Replays preserve the existing vote timestamp/tally rules.
+
+Media rows retain `media_retry_chat` and `media_retry_sender` from delivery,
+before chat/sender normalization. History uses the pinned SDK's sender
+precedence, including `OriginalSelfAuthorUserJIDString`, through a payload-free
+metadata view prepared before Begin; it does not mutate the received protobuf.
+Outbound media uses the successful SDK
+`SendResponse.Chat` and `SendResponse.Sender`, including SDK destination upgrades
+and the account's PN/LID sending identity; empty fields alone use the requested
+chat or paired phone fallback. Device components are removed. The pinned SDK places that chat in the retry
+receipt's `rmr.jid` and a group sender in `rmr.participant`. Unattributed group
+history leaves the wire sender unset so a later delivery can supply its author.
+Group retries require an attributed delivery sender or a recorded user
+namespace; an unknown fallback cannot be guessed into a phone participant.
+Legacy rows use the
+stored chat and `sender_server`; their original delivery chat cannot be recovered
+reliably. An unencrypted phone error node remains retryable, because it carries
+no authenticated result; a decrypted `NOT_FOUND` remains `media_unavailable`.
+
+After a successful media send, the bridge caches the actual
+uploaded bytes under `mediaFileName` in the archived chat. It uses `os.Root`, the
+shared transfer owner and `.part` plus rename, so `findCachedMedia` and
+`download_media` find the copy after a temporary upload file is removed.
+`WHATSAPP_MEDIA_AUTODOWNLOAD=false` disables this copy; status sends additionally
+require `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true`. `WHATSAPP_MEDIA_MAX_BYTES`
+checks the actual plaintext size, with equality accepted and zero unlimited.
+Path/symlink refusal or a failed cache write logs WARN and preserves send success.
+The send's wait for this cache respects its request deadline; the transfer and
+its owned bytes continue under the bridge lifecycle context.
+If a concurrent download fails, the retained upload bytes get a local cache
+attempt after that download releases the destination; our own write failures
+log once and stop without repeating the remote send.
+An archive-write failure does not discard the uploaded bytes; a later replay
+can restore the row and discover its cached file.
+Retention and purge handle this copy through the ordinary cache rules.
 
 Live chat/message inserts, decoded poll-message rows, history chat metadata and
 outbound chat/message persistence share the Bridge's bounded SQLite BUSY/LOCKED

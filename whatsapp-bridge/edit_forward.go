@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -46,12 +47,41 @@ type editForwardResponse struct {
 }
 
 // editFunc sends the edit; production wraps client.BuildEdit + SendMessage.
-type editFunc func(ctx context.Context, chat types.JID, id types.MessageID, text string) error
+type editFunc func(ctx context.Context, chat types.JID, id types.MessageID, text string) (int64, error)
 
 // UpdateMessageContent rewrites the stored text after an edit.
-func (store *MessageStore) UpdateMessageContent(messageID, chatJID, content string) error {
-	_, err := store.db.Exec(`UPDATE messages SET content = ? WHERE id = ? AND chat_jid = ?`, content, messageID, chatJID)
+func (store *MessageStore) UpdateMessageContent(messageID, chatJID, content string, timestampMS int64) error {
+	_, err := store.db.Exec(`UPDATE messages SET content = ?, mentions = '', message_edit_timestamp = ?
+		WHERE id = ? AND chat_jid = ? AND message_edit_timestamp < ? AND deleted_at IS NULL`, content, timestampMS, messageID, chatJID, timestampMS)
 	return err
+}
+
+// Incoming edits are local archive effects only. The sender and ownership must
+// match the archived target; the outer delivery chat is authoritative, never
+// the untrusted RemoteJID in the protocol key. Replays cannot restore old text.
+func applyMessageEditWith(ex sqlExecer, chat, sender string, fromMe bool, edit *waE2E.ProtocolMessage, fallback time.Time) error {
+	if edit.GetKey().GetID() == "" || edit.GetEditedMessage() == nil {
+		return nil
+	}
+	stamp := edit.GetTimestampMS()
+	if stamp <= 0 {
+		stamp = fallback.UnixMilli()
+	}
+	user, server := splitSenderJID(sender)
+	replacement := extractMessage(edit.GetEditedMessage(), fallback, edit.GetKey().GetID())
+	_, err := ex.Exec(`UPDATE messages SET content = ?, mentions = ?, message_edit_timestamp = ?
+		WHERE id = ? AND chat_jid = ? AND sender = ? AND sender_server IS ?
+		AND is_from_me = ? AND message_edit_timestamp < ? AND deleted_at IS NULL`,
+		replacement.content, mentionsColumn(replacement.mentions), stamp, edit.GetKey().GetID(), chat, user, server, fromMe, stamp)
+	return err
+}
+
+func (store *MessageStore) ApplyMessageEdit(chat, sender string, fromMe bool, edit *waE2E.ProtocolMessage, fallback time.Time) error {
+	return applyMessageEditWith(store.db, chat, sender, fromMe, edit, fallback)
+}
+
+func (b *messageBatch) ApplyMessageEdit(chat, sender string, fromMe bool, edit *waE2E.ProtocolMessage, fallback time.Time) error {
+	return b.write(func() error { return applyMessageEditWith(b.tx, chat, sender, fromMe, edit, fallback) })
 }
 
 func writeEditForward(w http.ResponseWriter, status int, resp editForwardResponse) {
@@ -106,11 +136,12 @@ func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, st
 			writeEditForward(w, http.StatusForbidden, editForwardResponse{Message: "Only messages sent by this account can be edited"})
 			return
 		}
-		if err := edit(r.Context(), chat, id, text); err != nil {
+		editTimestamp, err := edit(r.Context(), chat, id, text)
+		if err != nil {
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Edit failed: " + err.Error()})
 			return
 		}
-		if !storeWrite("edited message", id, chat.String(), func() error { return store.UpdateMessageContent(id, chat.String(), text) }) {
+		if !storeWrite("edited message", id, chat.String(), func() error { return store.UpdateMessageContent(id, chat.String(), text, editTimestamp) }) {
 			writeEditForward(w, http.StatusOK, editForwardResponse{Success: true, Message: "Message edited (archive update failed; the remote edit already succeeded, do not repeat it)", MessageID: id, ChatJID: chat.String()})
 			return
 		}
