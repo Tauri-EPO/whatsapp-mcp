@@ -1,0 +1,31 @@
+# Opt-in shared reverse proxy. Requires Docker Compose >= 2.24.0 (!reset).
+# Create the external network first; choose a different alias per project.
+# docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+services:
+  bridge:
+    ports: !reset []
+    environment:
+      WHATSAPP_BRIDGE_BIND: "127.0.0.1"
+    networks:
+      default: {}
+      proxy:
+        aliases:
+          - ${WHATSAPP_PROXY_ALIAS:?set a unique proxy alias per instance}
+    volumes:
+      - ${WHATSAPP_OUTBOX:-whatsapp-outbox}:/app/outbox
+
+  # Shares bridge's namespace: only 8000 is reachable from the proxy network.
+  # Disable unauthenticated counts on every joined network by default.
+  mcp:
+    environment:
+      WHATSAPP_MCP_METRICS: "false"
+    volumes:
+      - ${WHATSAPP_OUTBOX:-whatsapp-outbox}:/app/outbox
+
+networks:
+  proxy:
+    external: true
+    name: ${WHATSAPP_PROXY_NETWORK:-proxy}
+
+volumes:
+  whatsapp-outbox:
