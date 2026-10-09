@@ -433,6 +433,8 @@ def _http_parts(source: str, work_dir: str, deadline: float) -> list[Path]:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=min(ffmpeg_timeout_s(), _remaining(deadline)),
         )
         match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", duration.stderr)

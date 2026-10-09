@@ -354,6 +354,16 @@ def test_non_audio_never_uploaded_even_with_audio_extension(provider, tmp_path):
     assert provider["calls"] == []
 
 
+def test_unicode_audio_upload_with_non_utf8_default_encoding(provider, tmp_path, monkeypatch):
+    # Reproduce the Windows ANSI default on every platform; ffmpeg emits UTF-8.
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    source = tmp_path / "fake-\u0101.wav"
+    _audio(source)
+    assert transcribe_file(str(source))["text"] == "part 1"
+    assert len(provider["calls"]) == 1
+    assert provider["calls"][0]["fields"]["file"].startswith(b"OggS")
+
+
 def test_whole_file_budget_includes_conversion_and_all_parts(provider, tmp_path):
     source = tmp_path / "long.wav"
     _audio(source, seconds=810)
