@@ -34,6 +34,12 @@ metrics, not a durable event queue; polling remains available.
 
 ## Environment variables
 
+The compose-only `WHATSAPP_PROXY_NETWORK` (default `proxy`) and required,
+per-instance `WHATSAPP_PROXY_ALIAS` select the external network in the opt-in
+`docker-compose.proxy.yml`. `WHATSAPP_OUTBOX` empty uses its project-scoped named
+outbox volume; a nonempty path retains a bind mount. See
+[Behind a shared reverse proxy](DOCKER.md#behind-a-shared-reverse-proxy).
+
 Copy `.env.example` to `.env` and configure as needed. The bridge validates startup values before opening the store, creating its outbox or binding a listener. If any are invalid, one diagnostic names every bad variable and the process exits with status 1; startup I/O failures also exit non-zero after cleanup.
 
 | Variable               | Default                                  | Description                                  |

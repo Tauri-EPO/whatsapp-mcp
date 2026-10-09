@@ -158,6 +158,10 @@ jobs:
       - name: Compose down
         if: always()
         run: docker compose down -v --remove-orphans || true
+      - name: Shared proxy overrides (two unpaired projects)
+        env:
+          WHATSAPP_IMAGE_TAG: ci
+        run: bash scripts/smoke-proxy.sh
 
   bridge-arm64:
     name: Bridge arm64 (QEMU)

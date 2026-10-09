@@ -309,8 +309,10 @@ does not isolate the agent plane. MCP port 8000 remains bound to `0.0.0.0`,
 reachable on every joined network and authenticated with the MCP bearer token.
 The override disables MCP `/metrics` to avoid exposing unauthenticated counts.
 Re-enable metrics only with a separate `WHATSAPP_MCP_METRICS_TOKEN` in a custom
-override. The MCP host-port publication stays unchanged; a split namespace and
-proxy-only agent listener remain separate work in #634.
+override. The MCP host-port publication stays unchanged unless combined with
+the [shared proxy override](#behind-a-shared-reverse-proxy). MCP still shares
+the bridge namespace with both overrides; separating the agent plane requires
+a different topology.
 
 Every member of a **shared** operator network can reach every operator listener
 on that network; separate tokens authenticate each instance. A per-instance
@@ -939,6 +941,10 @@ docker logs "$(docker ps --filter label=com.docker.compose.project=whatsapp-mcp 
 
 ## Several instances on one host
 
+For several accounts behind one containerized reverse proxy, use the
+[proxy override](#behind-a-shared-reverse-proxy) below: distinct project names
+and aliases replace the host-port allocation described here.
+
 Two WhatsApp accounts on one box are two compose projects of this repo, one
 checkout (or one manager stack) each. Nothing in the code knows about the other
 one: a bridge holds one session and one `messages.db`, an MCP server reads one
@@ -995,6 +1001,119 @@ where every item of this checklist comes from.
   `instance_lock.go`). One MCP server for two accounts: it reads one
   `messages.db` and calls one bridge, so an agent that needs both accounts gets
   two MCP endpoints in its client configuration, one per stack.
+
+## Behind a shared reverse proxy
+
+Use **Docker Compose 2.24.0 or newer** (`docker compose version`, including v5).
+This opt-in file uses [`ports: !reset []`](https://docs.docker.com/reference/compose-file/merge/#reset-value)
+to remove the base file's MCP host-port mapping. The base `docker-compose.yml`
+and its defaults are unchanged.
+
+```bash
+docker network create proxy
+# Per instance in .env (or the stack manager's Environment):
+# COMPOSE_PROJECT_NAME=wa-sales
+# WHATSAPP_PROXY_NETWORK=proxy
+# WHATSAPP_PROXY_ALIAS=whatsapp-sales
+# WHATSAPP_OUTBOX=                 # empty selects the named outbox
+# WHATSAPP_MCP_TOKEN=<a distinct random token for this account>
+# WHATSAPP_MCP_ALLOWED_HOSTS=example.ts.net
+# WHATSAPP_PUBLIC_URL=https://example.ts.net/mcp
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+```
+
+Attach the reverse proxy container to `proxy`. It forwards to
+`http://whatsapp-sales:8000/mcp`; a second project (`wa-support`) uses
+`WHATSAPP_PROXY_ALIAS=whatsapp-support` and its own token, store and named outbox.
+Neither project needs `WHATSAPP_MCP_PORT` or `WHATSAPP_MCP_BIND`. `docker compose
+ps` shows no published host port. The bridge keeps its default project network
+for whisper, and REST 8080 stays on namespace loopback. There are no proxy labels
+in the override: configure routing on your proxy.
+
+The project-scoped `whatsapp-outbox` volume is initialized from the image's
+uid-1000 `/app/outbox` directory and mounted at the same path in both services.
+Fresh instances can write uploads and read outbound files without a host
+`chown`. Leave `WHATSAPP_OUTBOX` empty (the example env's `./outbox` selects a
+bind mount). A nonempty path still opts into a bind mount and its host ownership
+requirements; existing bind-mount files are not migrated automatically.
+
+For Caddy on the proxy network, host routing preserves the public Host and
+streams the MCP response:
+
+```caddyfile
+example.ts.net {
+    reverse_proxy /mcp* whatsapp-sales:8000 {
+        flush_interval -1
+    }
+}
+```
+
+For Traefik, put the equivalent routing in its **file provider**, with TLS
+certificates configured on Traefik:
+
+```yaml
+http:
+  routers:
+    whatsapp-sales:
+      rule: "Host(`example.ts.net`) && PathPrefix(`/mcp`)"
+      entryPoints: [websecure]
+      service: whatsapp-sales
+      tls: {}
+  services:
+    whatsapp-sales:
+      loadBalancer:
+        servers:
+          - url: http://whatsapp-sales:8000
+```
+
+Use the same host/path in the client URL and `WHATSAPP_PUBLIC_URL`. A proxy
+that strips an instance prefix must forward the resulting `/mcp` path; include
+the public hostname in `WHATSAPP_MCP_ALLOWED_HOSTS` and preserve Host. HTTP
+`/upload` needs a separate explicit route if clients use raw-body uploads.
+
+Both opt-in files can be used together (either override order):
+
+```bash
+docker network create operator-private
+# Also set WHATSAPP_OPERATOR_NETWORK=operator-private,
+# WHATSAPP_OPERATOR_ALIAS=whatsapp-operator-sales and a distinct operator token.
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml \
+  -f docker-compose.operator.yml up -d
+```
+
+The operator listener binds only to its operator-network address (8090 by
+default, or `WHATSAPP_OPERATOR_PORT`), so proxy peers cannot connect to it.
+**MCP 8000 remains reachable on every joined network**, including the operator
+and default networks; its bearer token authenticates the account. These files
+do not separate the MCP namespace from the operator plane.
+
+Security checklist:
+
+- Choose a unique proxy alias and a different MCP token for every project;
+  network peers can reach every alias's MCP listener.
+- Set `WHATSAPP_MCP_ALLOWED_HOSTS` to the public hostname and
+  `WHATSAPP_PUBLIC_URL` to the full public MCP URL. Terminate TLS at the proxy
+  and forward Authorization without logging it.
+- Keep REST 8080 on loopback and the operator on its private interface. Never
+  route `/api` or `/operator`, and attach only trusted peers to either network.
+- MCP `/metrics` defaults off in both overrides. To enable it, add a custom
+  override with `WHATSAPP_MCP_METRICS=true` and a separate
+  `WHATSAPP_MCP_METRICS_TOKEN`; merely omitting a proxy route does not protect
+  metrics from network peers.
+- If enabling rate limits, set `WHATSAPP_MCP_TRUSTED_PROXIES` to the proxy's
+  narrow address/CIDR so client-address forwarding is accepted only from it.
+- In Komodo/Portainer, select both compose files and keep per-project settings
+  in the manager's Environment. Deploying a recreated checkout uses the named
+  outbox without host ownership changes. Run `scripts/smoke.sh --project
+  wa-sales --url https://example.ts.net` against the published proxy endpoint.
+
+`WHATSAPP_IMAGE_TAG=ci bash scripts/smoke-proxy.sh` runs the disposable CI proof
+with already-built images: two projects, no host ports, token-authenticated
+initialize from a proxy-network peer, explicit connection refusals on 8080,
+8090 and 8091, named-outbox uid-1000 write/read and REST send dry-run. It repeats
+with both overrides, verifies the private operator listener is alive, and
+removes only its own volumes and networks. It never pairs or sends WhatsApp
+messages. Actual recipient delivery remains a paired-phone check.
 
 ## Backup and restore
 
