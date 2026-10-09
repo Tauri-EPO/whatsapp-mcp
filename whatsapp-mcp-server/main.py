@@ -23,7 +23,13 @@ from http_auth import (
     resolve_trusted_proxies,
     resolve_upload_max_bytes,
 )
-from http_oauth import OAuthMiddleware, OAuthSDKScopeMiddleware, OAuthTokenVerifier, load_oauth_config
+from http_oauth import (
+    OAuthMiddleware,
+    OAuthSDKAvailabilityMiddleware,
+    OAuthSDKScopeMiddleware,
+    OAuthTokenVerifier,
+    load_oauth_config,
+)
 from http_upload import UploadApp
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
@@ -2853,6 +2859,9 @@ def build_http_app(
         # SDK AuthenticationMiddleware -> AuthContextMiddleware -> scope guard
         # -> transport. Check scopes from its principal, including resources.
         sdk_app.user_middleware.append(Middleware(OAuthSDKScopeMiddleware, reject=oauth_middleware._error))
+        # Catch native verification failures inside Starlette's error layer,
+        # before it turns an authorization-service outage into a plain 500.
+        sdk_app.user_middleware.insert(0, Middleware(OAuthSDKAvailabilityMiddleware, reject=oauth_middleware._error))
         app = oauth_middleware
     elif token:
         app = BearerTokenMiddleware(app, token)

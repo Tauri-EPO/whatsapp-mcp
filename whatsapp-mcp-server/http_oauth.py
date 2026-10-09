@@ -427,6 +427,30 @@ def required_tool_scope(config: OAuthConfig, name: str) -> str:
     return config.send_scope if name in mutating_tools() else config.read_scope
 
 
+class OAuthSDKAvailabilityMiddleware:
+    """Turn SDK authentication outages into the resource-server 503 envelope."""
+
+    def __init__(self, app: ASGIApp, reject: Callable[[Send, int, list[str] | None], Awaitable[None]]) -> None:
+        self.app = app
+        self.reject = reject
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        response_started = False
+
+        async def tracked_send(message: Any) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracked_send)
+        except AuthorizationUnavailableError:
+            if scope.get("type") != "http" or response_started:
+                raise
+            await self.reject(send, 503, None)
+
+
 class OAuthSDKScopeMiddleware:
     """Check operation scopes after the SDK authenticates the current token."""
 
