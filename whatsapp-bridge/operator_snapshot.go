@@ -149,7 +149,8 @@ var errSnapshotRetention = errors.New("snapshot retained; retention cleanup fail
 type snapshotOptions struct {
 	keep      int
 	freeBytes func(*os.File) (uint64, error)
-	prune     func(*os.Root, *os.File, string, int) error
+	prune     func(context.Context, *os.Root, *os.File, string, int) error
+	copy      func(context.Context, io.Writer, io.Reader) (int64, error)
 }
 
 func snapshotRequiredBytes(source *os.Root, session bool) (uint64, error) {
@@ -192,7 +193,7 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 		return nil, err
 	}
 	defer func() { _ = root.Close(); _ = dir.Close() }()
-	opt := snapshotOptions{keep: 7, freeBytes: snapshotFreeBytes, prune: pruneSnapshotSets}
+	opt := snapshotOptions{keep: 7, freeBytes: snapshotFreeBytes, prune: pruneSnapshotSets, copy: copyArchiveContext}
 	if len(options) > 0 {
 		if options[0].keep > 0 {
 			opt.keep = options[0].keep
@@ -202,6 +203,9 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 		}
 		if options[0].prune != nil {
 			opt.prune = options[0].prune
+		}
+		if options[0].copy != nil {
+			opt.copy = options[0].copy
 		}
 	}
 	required, err := snapshotRequiredBytes(source, session)
@@ -230,6 +234,9 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 		}
 	}()
 	for _, name := range []string{"messages.db", "notes.db", "whatsapp.db"} {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if name == "whatsapp.db" && !session {
 			continue
 		}
@@ -270,7 +277,10 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 			return nil, errors.New("snapshot file must enforce 0600")
 		}
 		hash := sha256.New()
-		_, copyErr := io.Copy(hash, file)
+		_, copyErr := opt.copy(ctx, hash, file)
+		if copyErr == nil {
+			copyErr = ctx.Err()
+		}
 		if copyErr == nil {
 			copyErr = file.Sync()
 		}
@@ -285,6 +295,9 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 	}
 	// Publish only after every database has a flushed, verified .partial file.
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := root.Rename(file.Name+".partial", file.Name); err != nil {
 			return nil, err
 		}
@@ -293,8 +306,11 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 			return nil, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	published = true
-	if err := opt.prune(root, dir, prefix, opt.keep); err != nil {
+	if err := opt.prune(ctx, root, dir, prefix, opt.keep); err != nil {
 		return files, errors.Join(errSnapshotRetention, err)
 	}
 	return files, nil
@@ -321,13 +337,19 @@ func snapshotSetPrefix(name string) string {
 	return prefix
 }
 
-func pruneSnapshotSets(root *os.Root, dir *os.File, current string, keep int) error {
+func pruneSnapshotSets(ctx context.Context, root *os.Root, dir *os.File, current string, keep int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return err
 	}
 	sets := map[string]time.Time{}
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		prefix := snapshotSetPrefix(entry.Name())
 		if prefix == "" || prefix == current || !entry.Type().IsRegular() {
 			continue
@@ -352,6 +374,9 @@ func pruneSnapshotSets(root *os.Root, dir *os.File, current string, keep int) er
 	})
 	for _, prefix := range prefixes[min(keep-1, len(prefixes)):] {
 		for _, name := range []string{"messages.db", "notes.db", "whatsapp.db"} {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			info, err := root.Lstat(prefix + name)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -367,7 +392,25 @@ func pruneSnapshotSets(root *os.Root, dir *os.File, current string, keep int) er
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return syncSnapshotDirectory(dir)
+}
+
+type archiveContextReader struct {
+	ctx context.Context
+	in  io.Reader
+}
+
+func (r archiveContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.in.Read(p)
+}
+func copyArchiveContext(ctx context.Context, out io.Writer, in io.Reader) (int64, error) {
+	return io.CopyBuffer(out, archiveContextReader{ctx, in}, make([]byte, 32<<10))
 }
 
 func removeSessionSnapshots(directory string) (int, error) {
@@ -461,13 +504,13 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 			defer release()
 		}
 		files, err := snapshotStores(ctx, b.StoreRoot, b.SnapshotDir, session, snapshotOptions{keep: b.Archive.Keep, freeBytes: b.snapshotSpace, prune: b.snapshotPrune})
-		if err != nil && !errors.Is(err, errSnapshotRetention) {
+		if err != nil && (!errors.Is(err, errSnapshotRetention) || ctx.Err() != nil) {
 			b.Log.Warnf("Operator snapshot failed")
 			if errors.Is(err, errSnapshotSpace) {
 				writeError(w, 507, "Snapshot refused: insufficient free space for databases, WAL and safety margin")
 				return
 			}
-			writeError(w, 500, "Snapshot failed; no complete snapshot was retained")
+			writeError(w, 500, "Snapshot failed; incomplete files were removed")
 			return
 		}
 		result := map[string]any{"files": files}
@@ -506,7 +549,7 @@ func snapshotCLI(args []string, out io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 	files, err := snapshotStores(ctx, source, *directory, *session, snapshotOptions{keep: cfg.Keep})
-	if err != nil && !errors.Is(err, errSnapshotRetention) {
+	if err != nil && (!errors.Is(err, errSnapshotRetention) || ctx.Err() != nil) {
 		_, _ = fmt.Fprintln(os.Stderr, "Snapshot failed")
 		return 1
 	}

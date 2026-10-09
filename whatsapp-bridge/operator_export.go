@@ -207,7 +207,7 @@ func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.
 				if err != nil || !os.SameFile(found.info, info) {
 					return 0, errors.New("cached media changed while opening")
 				}
-				_, err = io.Copy(out, f)
+				_, err = copyArchiveContext(ctx, out, f)
 				return 1, err
 			}})
 			found.Close()

@@ -219,8 +219,8 @@ func TestRetentionFailurePreservesNewCompletedSnapshot(t *testing.T) {
 	if _, err := snapshotStores(t.Context(), b.StoreRoot, b.SnapshotDir, false); err != nil {
 		t.Fatal(err)
 	}
-	files, err := snapshotStores(t.Context(), b.StoreRoot, b.SnapshotDir, false, snapshotOptions{keep: 1, prune: func(root *os.Root, dir *os.File, current string, keep int) error {
-		if err := pruneSnapshotSets(root, dir, current, keep); err != nil {
+	files, err := snapshotStores(t.Context(), b.StoreRoot, b.SnapshotDir, false, snapshotOptions{keep: 1, prune: func(ctx context.Context, root *os.Root, dir *os.File, current string, keep int) error {
+		if err := pruneSnapshotSets(ctx, root, dir, current, keep); err != nil {
 			return err
 		}
 		return errors.New("injected directory sync failure after real pruning")
@@ -235,7 +235,9 @@ func TestRetentionFailurePreservesNewCompletedSnapshot(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatal("retention warning lost snapshot result")
 	}
-	b.snapshotPrune = func(*os.Root, *os.File, string, int) error { return errors.New("injected retention fault") }
+	b.snapshotPrune = func(context.Context, *os.Root, *os.File, string, int) error {
+		return errors.New("injected retention fault")
+	}
 	response := archiveRequest(t, server, "POST", "/operator/v1/snapshot")
 	var result struct {
 		Files   []snapshotFile
@@ -294,5 +296,48 @@ func TestSnapshotCLIJSONStdout(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Operator snapshot CLI:") {
 		t.Fatal("CLI audit missing from stderr")
+	}
+}
+
+func TestSnapshotCancellationAfterVacuumCannotPublishOrPrune(t *testing.T) {
+	b, _ := archiveFixture(t, false)
+	prior, err := snapshotStores(t.Context(), b.StoreRoot, b.SnapshotDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_, err = snapshotStores(ctx, b.StoreRoot, b.SnapshotDir, false, snapshotOptions{keep: 1, copy: func(_ context.Context, out io.Writer, in io.Reader) (int64, error) {
+		n, err := io.Copy(out, in)
+		cancel()
+		return n, err
+	}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("snapshot ignored cancellation after VACUUM: err=%v", err)
+	}
+	entries, err := os.ReadDir(b.SnapshotDir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != prior[0].Name {
+		t.Fatal("cancelled snapshot published files or pruned previous backup")
+	}
+}
+
+type cancelArchiveWriter struct {
+	out    io.Writer
+	cancel context.CancelFunc
+}
+
+func (w cancelArchiveWriter) Write(p []byte) (int, error) {
+	n, err := w.out.Write(p)
+	w.cancel()
+	return n, err
+}
+
+func TestArchiveCopyCancellationStopsAtNextBoundedRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out bytes.Buffer
+	n, err := copyArchiveContext(ctx, cancelArchiveWriter{&out, cancel}, strings.NewReader(strings.Repeat("x", 128<<10)))
+	if !errors.Is(err, context.Canceled) || n != 32<<10 || out.Len() != 32<<10 {
+		t.Fatalf("copy exceeded cancellation boundary: n=%d len=%d err=%v", n, out.Len(), err)
 	}
 }
