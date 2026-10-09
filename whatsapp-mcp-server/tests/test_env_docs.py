@@ -42,6 +42,8 @@ def code_variables() -> set[str]:
         r'os\.environ\[\s*"([A-Z0-9_]+)"',
         r'^[A-Z_]*ENV(?:_[A-Z]+)?\s*=\s*"([A-Z0-9_]+)"',  # JSON_FORMAT_ENV = "..."
         r'get\(\s*"(WHISPER_[A-Z0-9_]+)"',  # transcribe.load_config
+        r'(?:env\.get|get)\(\s*"(WHATSAPP_[A-Z0-9_]+)"',  # OAuth/provider configuration readers
+        r'_secret\(env,\s*"(WHATSAPP_[A-Z0-9_]+)"',
         r'install_stdio_parent_watchdog\(\s*"([A-Z0-9_]+)"',
     ]
     for py in (ROOT / "whatsapp-mcp-server").glob("*.py"):

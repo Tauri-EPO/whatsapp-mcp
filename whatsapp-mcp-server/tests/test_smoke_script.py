@@ -88,6 +88,7 @@ case "$cmd" in
       WHATSAPP_MCP_METRICS)       value="${FAKE_ENV_MCP_METRICS:-}" ;;
       WHATSAPP_MCP_METRICS_TOKEN) value="${FAKE_ENV_MCP_METRICS_TOKEN:-}" ;;
       WHISPER_URL)                value="${FAKE_ENV_WHISPER_URL:-}" ;;
+      WHATSAPP_TRANSCRIPTION_PROVIDER) value="${FAKE_ENV_TRANSCRIPTION_PROVIDER:-}" ;;
       WHATSAPP_OPERATOR_BIND)     value="${FAKE_OPERATOR_BIND:-}" ;;
       *) value="" ;;
     esac
@@ -575,3 +576,23 @@ def test_unpaired_smoke_reports_only_operator_state(stack: Stack, operator_state
     assert "FAKE-QR-CREDENTIAL" not in result.stdout + result.stderr
     assert "FAKE-CODE-CREDENTIAL" not in result.stdout + result.stderr
     assert "fake-operator-token" not in result.stdout + result.stderr
+
+
+def test_http_provider_probe_is_authenticated_and_sends_no_audio(stack: Stack) -> None:
+    result = _with_whisper_url(
+        stack, "http://unused-whisper:8178/inference", FAKE_ENV_TRANSCRIPTION_PROVIDER="openai_compatible"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HTTP transcription provider" in result.stdout
+    assert "authenticated HEAD; no audio sent" in result.stdout
+    calls = stack.docker_calls()
+    assert "probe_http_provider" in calls and 'os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY")' in calls
+    assert "unused-whisper:8178" not in calls
+
+
+def test_http_provider_unavailable_fails_smoke(stack: Stack) -> None:
+    result = _with_whisper_url(
+        stack, "", FAKE_ENV_TRANSCRIPTION_PROVIDER="openai_compatible", FAKE_WHISPER_REACHABLE="no"
+    )
+    assert result.returncode == 1
+    assert "HTTP transcription provider does not answer" in result.stdout

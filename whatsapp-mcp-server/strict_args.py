@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import Any
 
 from jsonschema.validators import validator_for
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError as SDKToolError
 from mcp.server.mcpserver.exceptions import UnexpectedToolError
@@ -30,7 +31,7 @@ from referencing.exceptions import Unresolvable
 
 from errors import ERROR_CODES, ToolError, error, structured_errors, tool_error_result
 from observability import mcp_metrics_owned, metrics
-from tool_policy import active_policy
+from tool_policy import active_policy, oauth_allows_tool
 
 logger = logging.getLogger("whatsapp_mcp")
 
@@ -89,9 +90,9 @@ class StrictArgumentServer(MCPServer[Any]):
 
     async def list_tools(self):
         tools = await super().list_tools()
-        if self.runtime_tool_policy:
+        if self.runtime_tool_policy or get_access_token() is not None:
             policy = active_policy()
-            tools = [tool for tool in tools if policy.allows(tool.name)]
+            tools = [tool for tool in tools if policy.allows(tool.name) and oauth_allows_tool(tool.name)]
         return tools
 
     def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
@@ -141,6 +142,8 @@ class StrictArgumentServer(MCPServer[Any]):
                     return tool_error_result(ToolError("denied", policy.denial_message(name)).to_dict())
             except ToolError as exc:
                 return tool_error_result(exc.to_dict())
+        if not oauth_allows_tool(name):
+            return tool_error_result(error("denied", f"{name} requires an OAuth scope this token does not have"))
         declared = declared_arguments(tool)
         unknown = sorted(set(arguments) - declared)
         if unknown:

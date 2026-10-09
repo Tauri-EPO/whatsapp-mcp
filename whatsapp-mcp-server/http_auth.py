@@ -238,6 +238,8 @@ def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
     Invalid chains fail closed to the peer. Never accept a client's leftmost
     claim across an untrusted hop, or forwarding from an untrusted socket.
     """
+    if scope.get("oauth_subject"):
+        return "oauth:" + scope["oauth_subject"]
     client = scope.get("client")
     peer = client[0] if client else "unknown"
     try:
@@ -316,6 +318,21 @@ class RateLimitMiddleware:
                 for k in stale:
                     self._buckets.pop(k, None)
         return allowed
+
+    def wait_time(self, key: str) -> float:
+        """Inspect a bucket without charging a successfully authenticated subject."""
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (self.capacity, now))
+            tokens = min(self.capacity, tokens + (now - last) * self.refill_per_second)
+            return max(0.0, (1.0 - tokens) / self.refill_per_second)
+
+    def refund(self, key: str) -> None:
+        """Release the verification reservation after successful authentication."""
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (self.capacity, now))
+            self._buckets[key] = (min(self.capacity, tokens + (now - last) * self.refill_per_second + 1), now)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":

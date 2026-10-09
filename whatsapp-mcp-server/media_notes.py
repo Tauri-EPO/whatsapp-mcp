@@ -533,9 +533,14 @@ def store_transcript(sha256: str, result: dict[str, Any]) -> None:
     the cache the same way. Raises ToolError when the hash is not visible.
     """
     annotate_media(sha256, TRANSCRIPT_KEY, result["text"])
-    for key, value in ((TRANSCRIPT_LANG_KEY, result.get("language")), (TRANSCRIPT_BACKEND_KEY, result.get("backend"))):
+    for key, value in (
+        (TRANSCRIPT_LANG_KEY, result.get("language")),
+        (TRANSCRIPT_BACKEND_KEY, result.get("backend")),
+    ):
         if value:
             annotate_media(sha256, key, str(value))
+    for key, value in (("transcript_provider", result.get("provider")), ("transcript_model", result.get("model"))):
+        annotate_media(sha256, key, str(value) if value else "")
     # An empty value deletes. A file that transcribes now is no longer failing,
     # and its bytes were clearly reachable, so a recorded miss is stale too:
     # another copy of the same audio was here all along (issue #378).

@@ -1444,27 +1444,34 @@ although this caller never uploaded a file.
 
 ### `transcribe_audio`
 
-Transcribe a voice note (or any audio file) to text with local
-[whisper.cpp](https://github.com/ggml-org/whisper.cpp). Nothing leaves the
-machine; there is no cloud fallback.
+Transcribe a voice note (or any audio file) with whisper.cpp by default, or
+with the opt-in `openai_compatible` HTTP provider. A remote HTTP provider
+receives the audio as a third-party processor; no automatic fallback occurs.
+See [HTTP provider](DOCKER.md#http-provider) for configuration.
 
 **Parameters:**
 
 - `message_id` + `chat_jid`: the audio message (downloaded via the bridge first, or read
   from the store when `download_media` is disabled — see
   [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny)), **or**
-- `file_path`: absolute path of an audio file already on disk
+- `file_path`: absolute audio path inside the store or `WHATSAPP_MEDIA_ROOTS`;
+  symlinks are resolved and paths outside those roots are denied for both providers
 - `language` (optional): ISO-639-1 code, default `WHISPER_LANGUAGE` (`pt`); `auto` to detect
 - `force` (optional, default `false`): transcribe again and replace a stored transcript
 
-Requires a whisper backend, configured with either `WHISPER_URL` (a running
+Requires a configured HTTP provider, or a whisper backend configured with either `WHISPER_URL` (a running
 whisper.cpp `whisper-server` you run yourself, see
 [Voice-note transcription](DOCKER.md#voice-note-transcription)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
 `whisper-cli` binary and a `ggml-*.bin` model). Whether this deployment has one
 is reported by [`bridge_status`](#bridge_status) under `whisper`: check it before
 walking a folder of voice notes, because without a backend every call here fails
-identically. Audio is normalised to 16 kHz WAV with ffmpeg before
-transcription. Returns `text`, `language`, `backend`,
+identically. Whisper audio is normalised to 16 kHz WAV with ffmpeg. The HTTP
+provider uses `WHATSAPP_TRANSCRIPTION_LANGUAGE` (default auto) and uploads only
+transcoded, metadata-free mono Opus/OGG in ordered ten-minute parts, each capped
+at 25 MB. Invalid non-audio files fail before upload; original bytes are never
+sent. Sources are capped at 256 MiB and 24 hours. For HTTP, `WHISPER_TIMEOUT_S`
+bounds the whole file including probing, conversion and all parts, rather than
+restarting per part. Returns `text`, `language`, `backend`,
 `file_path`, `sha256`, `cached` (the answer came from the cache) and `stored`
 (this run wrote the transcript).
 
@@ -1475,7 +1482,8 @@ against the file's sha256 under three keys:
 |---|---|
 | `transcript` | the text whisper produced |
 | `transcript_lang` | the language it reports (or the one you asked for) |
-| `transcript_backend` | `server` or `cli` |
+| `transcript_backend` | `server`, `cli` or `openai_compatible` |
+| `transcript_provider` / `transcript_model` | HTTP provider and model ID |
 
 Asking again for the same voice note returns the stored text with
 `cached: true`, **without downloading the file or running whisper**; `force=true`

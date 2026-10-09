@@ -7,6 +7,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp_types import ContentBlock
+from starlette.middleware import Middleware
 
 from errors import ToolError, tool_errors
 from export import export_dir
@@ -21,6 +22,13 @@ from http_auth import (
     resolve_rate_limit,
     resolve_trusted_proxies,
     resolve_upload_max_bytes,
+)
+from http_oauth import (
+    OAuthMiddleware,
+    OAuthSDKAvailabilityMiddleware,
+    OAuthSDKScopeMiddleware,
+    OAuthTokenVerifier,
+    load_oauth_config,
 )
 from http_upload import UploadApp
 from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
@@ -52,7 +60,7 @@ from tool_policy import (
     offers_download,
     registered_tool_names,
 )
-from transcribe import TranscriptionError, transcribe_file
+from transcribe import TranscriptionError, confine_audio_path, transcribe_file
 from transcribe import load_config as load_whisper_config
 from transcribe_worker import install_ingest_worker
 from triage import mark_handled as triage_mark_handled
@@ -2737,14 +2745,18 @@ def transcribe_audio(
     language: str = "",
     force: bool = False,
 ) -> dict[str, Any]:
-    """Transcribe a WhatsApp voice note (or any audio file) to text with local whisper.cpp.
+    """Transcribe a WhatsApp voice note (or any audio file) to text with local whisper.cpp (default) or the configured HTTP provider.
 
     Pass either message_id + chat_jid (the audio is downloaded via the bridge first;
     where download_media is disabled only a voice note already in the store can be
     transcribed, anything else fails with `denied`) or an absolute file_path that is
-    already on disk. Requires a whisper backend
-    configured through WHISPER_URL (whisper.cpp server) or WHISPER_BIN + WHISPER_MODEL;
-    nothing is sent to a cloud API. **bridge_status().whisper says whether this
+    already on disk inside the store or WHATSAPP_MEDIA_ROOTS (symlinks resolved).
+    Configure WHISPER_URL or WHISPER_BIN + WHISPER_MODEL for
+    whisper.cpp, or opt in with WHATSAPP_TRANSCRIPTION_PROVIDER=openai_compatible
+    and WHATSAPP_TRANSCRIPTION_URL/MODEL. A remote HTTP provider receives only
+    reencoded, metadata-free Opus audio under one whole-file WHISPER_TIMEOUT_S budget
+    as a third-party processor; redirects and automatic fallbacks are disabled.
+    **bridge_status().whisper says whether this
     deployment has one**: when it reports configured=false (or reachable=false) every
     call here fails, so check once instead of failing per file.
 
@@ -2758,9 +2770,9 @@ def transcribe_audio(
     Args:
         chat_jid: JID of the chat containing the message
         message_id: ID of the audio/voice message to transcribe
-        file_path: Alternative to message_id/chat_jid: path of an audio file on disk.
+        file_path: Alternative to message_id/chat_jid: audio inside the store or media roots.
                    A file transcribed this way has no message row, so it is not cached.
-        language: ISO-639-1 language code (default WHISPER_LANGUAGE, "pt"); "auto" to detect
+        language: ISO-639-1 code; default WHISPER_LANGUAGE (pt) or WHATSAPP_TRANSCRIPTION_LANGUAGE (auto)
         force: Re-run whisper even when a transcript is stored, and replace it
 
     Returns:
@@ -2769,6 +2781,8 @@ def transcribe_audio(
         summarising, add your own annotate_media(sha256, "summary", ...) on top.
     """
     sha256: str | None = None
+    if file_path:
+        file_path = confine_audio_path(file_path)
     if message_id and chat_jid:
         stored_notes = _stored_transcript_notes(chat_jid, message_id)
         sha256 = stored_notes["sha256"]
@@ -2823,14 +2837,35 @@ def build_http_app(
     security = app_kwargs["transport_security"] = app_kwargs.get("transport_security") or build_transport_security(
         app_kwargs.get("host", "127.0.0.1"), None
     )
+    oauth = load_oauth_config()
+    verifier = OAuthTokenVerifier(oauth, token) if oauth else None
+    if oauth and verifier:
+        server.settings.auth = oauth.auth_settings()
+        server._token_verifier = verifier
     if transport == "sse":
         app = server.sse_app(**app_kwargs)
     else:
         app = server.streamable_http_app(**app_kwargs)
+    sdk_app = app
     app = UploadApp(app, security, upload_max_bytes)
-    if token:
+    if verifier:
+        oauth_middleware = OAuthMiddleware(
+            app,
+            verifier,
+            rate_limit_per_minute,
+            app_kwargs.get("max_request_body_size", 4 * 1024 * 1024),
+            trusted_proxies,
+        )
+        # SDK AuthenticationMiddleware -> AuthContextMiddleware -> scope guard
+        # -> transport. Check scopes from its principal, including resources.
+        sdk_app.user_middleware.append(Middleware(OAuthSDKScopeMiddleware, reject=oauth_middleware._error))
+        # Catch native verification failures inside Starlette's error layer,
+        # before it turns an authorization-service outage into a plain 500.
+        sdk_app.user_middleware.insert(0, Middleware(OAuthSDKAvailabilityMiddleware, reject=oauth_middleware._error))
+        app = oauth_middleware
+    elif token:
         app = BearerTokenMiddleware(app, token)
-    if rate_limit_per_minute > 0:
+    if rate_limit_per_minute > 0 and not verifier:
         app = RateLimitMiddleware(app, rate_limit_per_minute, trusted_proxies=trusted_proxies)
     app = ForwardedSchemeMiddleware(app, trusted_proxies)
     if metrics_enabled(os.getenv("WHATSAPP_MCP_METRICS")):
@@ -2909,7 +2944,12 @@ if __name__ == "__main__":
         # Explicit WHATSAPP_MCP_TOKEN wins; a non-loopback bind without one reuses
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
-        rate_limit = resolve_rate_limit(os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None)
+        oauth_config = load_oauth_config()
+        if oauth_config:
+            OAuthTokenVerifier.validate_static_token(token)
+        rate_limit = resolve_rate_limit(
+            os.getenv("WHATSAPP_MCP_RATE_LIMIT"), token is not None or oauth_config is not None
+        )
         trusted_proxies = resolve_trusted_proxies(os.getenv("WHATSAPP_MCP_TRUSTED_PROXIES"))
         upload_max_bytes = resolve_upload_max_bytes(os.getenv("WHATSAPP_MCP_UPLOAD_MAX_BYTES"))
         app_kwargs: dict[str, Any] = {
@@ -2931,7 +2971,7 @@ if __name__ == "__main__":
                 "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
                 file=sys.stderr,
             )
-        if token is None and token_source == "none":
+        if token is None and token_source == "none" and oauth_config is None:
             print(
                 "WARNING: no WHATSAPP_MCP_TOKEN set and no bridge token found; anyone who can reach "
                 "this port can read and send WhatsApp messages. Set a token or keep the listener "
@@ -2943,6 +2983,8 @@ if __name__ == "__main__":
 
     # stdout is reserved for the protocol on stdio; log startup to stderr.
     auth_state = f"bearer token required, from {token_source}" if token else f"no auth ({token_source})"
+    if oauth_config:
+        auth_state = "OAuth resource server" + (f"; static bearer from {token_source}" if token else "")
     limit_state = f"{rate_limit} req/min per client" if rate_limit else "no rate limit"
     print(
         f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state}; {limit_state})",

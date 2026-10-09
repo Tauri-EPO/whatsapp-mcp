@@ -52,8 +52,10 @@ import functools
 import os
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
+
+from mcp.server.auth.middleware.auth_context import get_access_token
 
 from errors import ToolError
 
@@ -194,6 +196,7 @@ def active_policy() -> ToolPolicy:
             _active = load_tool_policy()
         except ValueError:
             _active = ToolPolicy(read_only=True)
+    policy = _active
     if _runtime:
         import runtime_settings
 
@@ -208,10 +211,14 @@ def active_policy() -> ToolPolicy:
                 deny_sources=snapshot["deny_origins"],
             )
             policy.validate(_runtime_known)
-            return policy
         except (OSError, ValueError, sqlite3.Error):
             raise ToolError("denied", "Runtime tool policy unavailable") from None
-    return _active
+    access = get_access_token()
+    if access and access.claims and not access.claims.get("static"):
+        read, send = access.claims.get("read_scope"), access.claims.get("send_scope")
+        if read and send:
+            policy = replace(policy, read_only=policy.read_only or send not in access.scopes)
+    return policy
 
 
 def install_runtime_tool_policy(server: Any, policy: ToolPolicy) -> None:
@@ -226,6 +233,14 @@ def install_runtime_tool_policy(server: Any, policy: ToolPolicy) -> None:
 
 def runtime_policy_enabled() -> bool:
     return _runtime
+
+
+def oauth_allows_tool(name: str) -> bool:
+    access = get_access_token()
+    if not access or not access.claims or access.claims.get("static"):
+        return True
+    required = access.claims.get("send_scope" if name in _MUTATING else "read_scope")
+    return required is None or required in access.scopes
 
 
 def offers_download() -> bool:

@@ -132,6 +132,10 @@ MEDIA_UNAVAILABLE_CODE = "media_unavailable"
 # cleared once per process at startup and those files queue up again. Matched
 # case-insensitively against the stored value, which is "<type>: <message>".
 OUTAGE_NOTE_MARKERS = (
+    "http transcription backend request failed",
+    "http transcription backend returned http",
+    "http transcription backend response exceeds limits",
+    "http transcription requires",
     "whisper server request failed",  # refused, reset, timed out, DNS
     "invalidurl",  # a WHISPER_URL httpx would not build, which escaped the old catch
     "whisper server returned http 5",  # 5xx: loading its model, or fallen over
@@ -800,17 +804,19 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         )
         if not runtime_policy_enabled():
             config = replace(config, fetch=False)
-    if load_config(env).backend is None:
+    backend_config = load_config(env)
+    if backend_config.backend is None:
         logger.warning(
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV
         )
         return None
     clear_outage_failures()
     logger.info(
-        "%s=1: transcribing up to %d inbound voice notes every %.0fs (whisper on this machine)%s",
+        "%s=1: transcribing up to %d inbound voice notes every %.0fs (%s)%s",
         ENABLED_ENV,
         config.batch,
         config.interval_s,
+        "configured HTTP provider" if backend_config.provider == "openai_compatible" else "whisper on this machine",
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
     )
     return start_worker(config)

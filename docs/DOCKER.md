@@ -366,6 +366,83 @@ An unsafe upload tree is skipped at startup, while upload operations still refus
 A chat directory replaced by a symlink is not written to: see
 [the store root](./ARCHITECTURE.md#the-store-root).
 
+## OAuth HTTP clients
+
+The MCP listener can validate tokens from an external OIDC/OAuth 2.1 provider.
+It is a resource server: the provider owns login, consent, PKCE, registration,
+refresh tokens and revocation. Static bearer clients keep working alongside it;
+stdio is unaffected. With no issuer configured, HTTP behavior stays unchanged.
+
+A generic provider deployment might use this configuration (all hosts below
+are examples):
+
+```dotenv
+WHATSAPP_PUBLIC_URL=https://example.ts.net/mcp
+WHATSAPP_MCP_ALLOWED_HOSTS=example.ts.net
+WHATSAPP_MCP_OAUTH_ISSUER=https://identity.example.com/tenant/example
+WHATSAPP_MCP_OAUTH_AUDIENCE=https://example.ts.net/mcp
+WHATSAPP_MCP_OAUTH_SCOPES=whatsapp.connect
+WHATSAPP_MCP_OAUTH_READ_SCOPE=whatsapp.read
+WHATSAPP_MCP_OAUTH_SEND_SCOPE=whatsapp.send
+WHATSAPP_MCP_OAUTH_SUBJECTS=example-user
+```
+
+Configure the external provider's resource/audience as exactly
+`https://example.ts.net/mcp`, expose its RFC 8414 or OIDC metadata and JWKS,
+and register a public client with PKCE S256 and that client's callback URL.
+Grant `whatsapp.connect whatsapp.read` for read access and additionally
+`whatsapp.send` for mutating tools. Set the issued token's `sub` to the allowed
+subject, or leave the subject allow-list empty when every provider user is
+intended to have access. Reverse-proxy TLS terminates in front of the listener;
+OAuth configuration requires HTTPS except for loopback development.
+
+A client receives HTTP 401 with a `resource_metadata` challenge, fetches
+`/.well-known/oauth-protected-resource/mcp` (the root well-known URL returns
+the same document), discovers the issuer and completes authorization with that
+provider. JWTs require RS256 or ES256, a trusted `kid`, signature, exact issuer,
+audience, nonempty subject, expiry, not-before when present and base scopes.
+Clock claims have 60 seconds of skew leeway. A configured static bearer with
+exactly two dots is refused at startup in OAuth mode; use an opaque static secret.
+Discovery/JWKS fetches have an eight-second total budget, a 256 KiB response
+ceiling, no redirects or ambient credentials, and a five-minute key cache.
+Authorization and transcription JSON requests use `Accept-Encoding: identity`;
+compressed responses are refused before decoding to prevent expansion beyond
+their size budgets. Configure provider proxies to honor identity encoding.
+An unknown `kid` can refresh keys at most once per five-second cooldown window.
+Set `WHATSAPP_MCP_OAUTH_JWKS_URL` to override discovery when necessary.
+
+For opaque tokens and prompt revocation, use RFC 7662 introspection instead:
+
+```dotenv
+WHATSAPP_MCP_OAUTH_INTROSPECTION_URL=https://identity.example.com/tenant/example/introspect
+WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID=example-resource-server
+WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET_FILE=/run/secrets/oauth-introspection
+```
+
+Mount that owner-only regular UTF-8 secret file into the MCP container; compose
+passes the path but does not mount an operator's file automatically. The client
+ID also accepts `_FILE`. Set a value or its file, never both; do not combine
+introspection with an explicit JWKS URL. Requests use Basic auth. Only valid
+`active=true` responses with the resource audience are cached, keyed by a token
+hash, for at most 60 seconds (and at most 1024 entries). Cache hits never wait
+behind other tokens; same-token fetches share one flight, with at most four
+remote introspections in flight and HTTP 503 when that bound is reached.
+When present, introspection `token_type` must be `access_token` (case-insensitive).
+Revocation becomes
+visible within that window. An unreachable or invalid authorization service
+fails closed with HTTP 503. Claims, raw access tokens and secrets are not logged
+or forwarded to the bridge; downstream bridge authentication remains separate.
+
+Insufficient per-tool scope returns HTTP 403 with `insufficient_scope`, all
+required scopes and the metadata URL so the client can request a stronger
+token. `tools/list` shows only tools permitted by the current token.
+`WHATSAPP_READ_ONLY`, allow-lists and deny-lists still remove capabilities,
+including for the static bearer. OAuth rate limits use subject identity instead
+of the socket IP, so refreshes keep the same budget and distinct subjects have
+separate budgets. Invalid credentials consume a separate peer budget; once
+that budget is exhausted, remote verification is refused before contacting
+the provider. Successful cached credentials retain their subject budget.
+
 ## Tailscale
 
 The intended deployment is a machine on your tailnet. Publish the MCP port over
@@ -432,6 +509,39 @@ Two backends:
   (`<project>_default`).
 - `WHISPER_BIN` + `WHISPER_MODEL`: a `whisper-cli` binary and a ggml model on
   the machine the MCP server runs on (the stdio setup; the image ships neither).
+
+### HTTP provider
+
+Set `WHATSAPP_TRANSCRIPTION_PROVIDER=openai_compatible` to use an explicit
+speech-to-text endpoint instead of whisper.cpp. These variable names match
+upstream VGP #247:
+
+```dotenv
+WHATSAPP_TRANSCRIPTION_PROVIDER=openai_compatible
+WHATSAPP_TRANSCRIPTION_URL=https://speech.example.com/v1/audio/transcriptions
+WHATSAPP_TRANSCRIPTION_MODEL=example-speech-model
+WHATSAPP_TRANSCRIPTION_LANGUAGE=auto
+WHATSAPP_TRANSCRIPTION_API_KEY=
+WHISPER_TIMEOUT_S=300
+```
+
+Supply the API key in the deployment environment. A remote endpoint receives
+the audio as a third-party processor; this provider stays off until selected.
+The tool and `TRANSCRIBE_ON_INGEST` share the provider and cache provider/model
+in `notes.db`. There is no fallback, redirect, environment proxy or netrc auth.
+Only transcoded, metadata-free mono Opus/OGG audio is uploaded, never original
+file bytes. All inputs are converted and split into ordered ten-minute parts,
+each capped at 25 MB; sources are capped at 256 MiB and 24 hours. Non-audio
+inputs fail before any upload. Explicit `file_path` values must resolve inside
+the store or `WHATSAPP_MEDIA_ROOTS`, for both providers; escaping symlinks are denied.
+`WHISPER_TIMEOUT_S` is one whole-file HTTP budget (default 300 seconds), covering
+the probe, conversion and all uploads. The split also has a duration-scaled
+limit of `max(FFMPEG_TIMEOUT_S, 10 + duration_seconds / 10)`, capped by that
+remaining whole-file budget. The packaged ffmpeg supplies the duration probe.
+`scripts/smoke.sh` sends only an authenticated HEAD probe, without audio; its
+two-second total deadline also covers response headers arriving slowly.
+401/403, 408, 429, 5xx and transport failures are backend outages and leave no
+`transcript_error`; a 400 file rejection parks that file for review.
 
 Without either, `transcribe_audio` returns a clear "no whisper backend
 configured" error and everything else works. `bridge_status().whisper.reachable`
