@@ -315,7 +315,11 @@ class OAuthTokenVerifier(TokenVerifier):
         sub, aud, exp, nbf, iat = (claims.get(k) for k in ("sub", "aud", "exp", "nbf", "iat"))
         now = time.time()
         token_type = claims.get("token_type")
-        if token_type is not None and (not isinstance(token_type, str) or token_type.lower() != "access_token"):
+        # RFC 7662 token_type names the authorization scheme (usually Bearer).
+        # Retain access_token compatibility, but never accept refresh tokens.
+        if token_type is not None and (
+            not isinstance(token_type, str) or token_type.lower() not in {"bearer", "access_token"}
+        ):
             return None
         if not isinstance(sub, str) or not sub or len(sub) > 1024:
             return None

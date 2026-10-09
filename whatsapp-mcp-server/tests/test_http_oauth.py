@@ -679,7 +679,19 @@ def test_clock_skew_on_native_sdk_path(monkeypatch, issuer, claim, offset, expec
 
 
 @pytest.mark.parametrize(
-    "kind,expected", [(None, 200), ("access_token", 200), ("ACCESS_TOKEN", 200), ("refresh_token", 401), (7, 401)]
+    "kind,expected",
+    [
+        (None, 200),
+        ("Bearer", 200),
+        ("bearer", 200),
+        ("BEARER", 200),
+        ("access_token", 200),
+        ("ACCESS_TOKEN", 200),
+        ("refresh_token", 401),
+        ("REFRESH_TOKEN", 401),
+        ("unknown", 401),
+        (7, 401),
+    ],
 )
 def test_introspection_only_access_token_type(monkeypatch, issuer, kind, expected):
     configure(
