@@ -53,6 +53,7 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 	defer b.clientGate.Unlock()
 	client.EnableAutoReconnect = false
 	client.DisableLoginAutoReconnect = true
+	client.EmitAppStateEventsOnFullSync = true
 	if client.Log == nil {
 		client.Log = b.Log
 	}

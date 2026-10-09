@@ -285,7 +285,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	}
 	b.LabelResyncTimeout = actionDeadline
 	b.LabelResync = func(ctx context.Context) error {
-		return client.FetchAppState(ctx, appstate.WAPatchRegular, true, false)
+		return b.currentClient().FetchAppState(ctx, appstate.WAPatchRegular, true, false)
 	}
 	b.Policy.warnInvalidEntries(logger)
 	b.ctx, b.cancel = context.WithCancel(context.Background())

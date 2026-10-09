@@ -229,7 +229,7 @@ func handleLabelChat(deps labelDeps) http.HandlerFunc {
 // Connected only schedules this work. Once and the wait group belong to this
 // Bridge, and Shutdown seals Once before cancelling and waiting for it.
 func (b *Bridge) startLabelSync() {
-	if b.LabelResync == nil || b.Client == nil || b.Client.Store == nil || b.Client.Store.ID == nil || !b.Connected() {
+	if b.LabelResync == nil || !b.isPaired() || !b.Connected() {
 		return
 	}
 	b.labelSyncOnce.Do(func() {
@@ -249,7 +249,7 @@ func (b *Bridge) startLabelSync() {
 				if err := b.Store.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM labels LIMIT 1)").Scan(&populated); err != nil {
 					return err
 				}
-				if populated || !b.Connected() || ctx.Err() != nil {
+				if populated || !b.isPaired() || !b.Connected() || ctx.Err() != nil {
 					return nil
 				}
 				b.Log.Infof("Empty label cache: requesting one regular app-state snapshot")

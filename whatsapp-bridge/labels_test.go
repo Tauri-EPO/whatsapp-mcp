@@ -13,6 +13,7 @@ import (
 
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -20,6 +21,87 @@ import (
 
 func labelEvent(id, name string, ts time.Time, deleted bool) *events.LabelEdit {
 	return &events.LabelEdit{LabelID: id, Timestamp: ts, Action: &waSyncAction.LabelEditAction{Name: proto.String(name), Color: proto.Int32(3), Deleted: proto.Bool(deleted)}}
+}
+
+type labelSnapshotStore struct {
+	store.AppStateStore
+	calls atomic.Int32
+	err   error
+}
+
+func (s *labelSnapshotStore) DeleteAppStateVersion(_ context.Context, name string) error {
+	if name != string(appstate.WAPatchRegular) {
+		return errors.New("unexpected label collection")
+	}
+	s.calls.Add(1)
+	return s.err // Stop the real SDK fetch before any network request.
+}
+
+func TestLabelRuntimeHandoffWiring(t *testing.T) {
+	first, second := newTestClient(nil), newTestClient(nil)
+	old, active := &labelSnapshotStore{err: errors.New("retired label store")}, &labelSnapshotStore{err: errors.New("active label store")}
+	first.Store.AppState, second.Store.AppState = old, active
+	b := newBridge(first, newTestMessageStore(t), testLogger(), "", nil, bridgeSwitches{})
+	defer b.Shutdown(time.Second)
+	b.installClient(second, true, make(chan bool, 1))
+	if !second.EmitAppStateEventsOnFullSync {
+		t.Error("replacement SDK client suppresses full-sync label events")
+	}
+	if err := b.LabelResync(context.Background()); !errors.Is(err, active.err) || old.calls.Load() != 0 || active.calls.Load() != 1 {
+		t.Fatal("resync retained retired SDK client", err, old.calls.Load(), active.calls.Load())
+	}
+}
+
+func TestLabelSyncUsesRuntimePairing(t *testing.T) {
+	for _, paired := range []bool{true, false} {
+		t.Run(map[bool]string{true: "paired replacement", false: "unpaired replacement"}[paired], func(t *testing.T) {
+			first, second := newTestClient(nil), newTestClient(nil)
+			if paired {
+				first.Store.ID = nil // Initial client was never paired.
+			} else {
+				id := types.NewJID("5511999999999", types.DefaultUserServer)
+				first.Store.ID = &id // Retired client had been paired.
+			}
+			b := testBridge(t, first, newTestMessageStore(t), testLogger())
+			b.Connected = func() bool { return true }
+			b.installClient(second, paired, make(chan bool, 1))
+			called := make(chan struct{})
+			b.LabelResync = func(context.Context) error { close(called); return nil }
+			b.startLabelSync()
+			if paired {
+				select {
+				case <-called:
+				case <-time.After(time.Second):
+					t.Error("paired replacement did not schedule label sync")
+				}
+			} else {
+				untouched := false
+				b.labelSyncOnce.Do(func() { untouched = true })
+				if !untouched {
+					t.Error("unpaired replacement consumed label sync attempt")
+				}
+			}
+			b.Shutdown(time.Second)
+		})
+	}
+}
+
+func TestLabelSyncRechecksRuntimePairingAfterWaiting(t *testing.T) {
+	first := newTestClientWithSelf(nil, types.NewJID("5511999999999", types.DefaultUserServer))
+	b := testBridge(t, first, newTestMessageStore(t), testLogger())
+	b.Connected = func() bool { return true }
+	b.installClient(first, true, make(chan bool, 1))
+	var calls atomic.Int32
+	b.LabelResync = func(context.Context) error { calls.Add(1); return nil }
+	b.appStateGate <- struct{}{}
+	b.startLabelSync()
+	b.installClient(newTestClient(nil), false, make(chan bool, 1))
+	<-b.appStateGate
+	b.labelSyncWait.Wait()
+	b.Shutdown(time.Second)
+	if calls.Load() != 0 {
+		t.Fatal("queued resync ran after runtime became unpaired")
+	}
 }
 
 func TestLabelListMetadataPersists(t *testing.T) {
