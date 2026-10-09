@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -164,7 +167,9 @@ func TestOperatorLogoutCancelsExportAndWipesRealSession(t *testing.T) {
 	key := append([]byte(nil), device.NoiseKey.Priv[:]...)
 	b.Client = newRuntimeClient(device, testLogger())
 	// The offline test never contacts WhatsApp; local destruction is the real path.
-	b.logoutClient = func(context.Context) error { return nil }
+	b.logoutClient = func(context.Context) error { return errors.New("offline unlink") }
+	b.SnapshotDir = t.TempDir()
+	b.Archive.Session = true
 	b.operatorPairing = newOperatorPairing(b.ctx, b, b.Client, nil, b.isPaired, b.Connected, io.Discard, make(chan bool, 1))
 	if _, err := b.Store.db.Exec("INSERT INTO chats(jid,name) VALUES('111@s.whatsapp.net','Alice')"); err != nil {
 		t.Fatal(err)
@@ -183,6 +188,27 @@ func TestOperatorLogoutCancelsExportAndWipesRealSession(t *testing.T) {
 	}
 	server := httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, b.operatorRoutes(), b.Log))
 	defer server.Close()
+	sessionSnapshot := archiveRequest(t, server, "POST", "/operator/v1/snapshot?session=true")
+	var backup struct{ Files []snapshotFile }
+	if err := json.NewDecoder(sessionSnapshot.Body).Decode(&backup); err != nil {
+		t.Fatal(err)
+	}
+	_ = sessionSnapshot.Body.Close()
+	if sessionSnapshot.StatusCode != 200 || len(backup.Files) != 2 {
+		t.Fatal("session snapshot failed before logout")
+	}
+	for _, file := range backup.Files {
+		if !strings.HasSuffix(file.Name, "-whatsapp.db") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(b.SnapshotDir, file.Name))
+		if err != nil || !bytes.Contains(raw, key) {
+			t.Fatal("session snapshot did not contain test credential")
+		}
+		if err := os.WriteFile(filepath.Join(b.SnapshotDir, file.Name+".partial"), raw, 0o600); err != nil { //nolint:gosec // Generated snapshot name in the test's private directory.
+			t.Fatal(err)
+		}
+	}
 	export := archiveRequest(t, server, "GET", "/operator/v1/export")
 	defer func() { _ = export.Body.Close() }()
 	if _, err := io.ReadFull(export.Body, make([]byte, 1)); err != nil {
@@ -208,6 +234,13 @@ func TestOperatorLogoutCancelsExportAndWipesRealSession(t *testing.T) {
 	if err != nil || response.StatusCode != 200 || !strings.Contains(string(result), `"local_session_wiped":true`) {
 		t.Fatalf("logout blocked by export: status=%d body=%s err=%v", response.StatusCode, result, err)
 	}
+	if !strings.Contains(string(result), `"server_unlinked":false`) || !strings.Contains(string(result), `"session_snapshots_removed":2`) {
+		t.Fatal("offline logout did not report both snapshot deletions")
+	}
+	entries, err := os.ReadDir(b.SnapshotDir)
+	if err != nil || len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), "-messages.db") {
+		t.Fatal("logout retained session snapshot or deleted data snapshot")
+	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("logout waited for the stalled export client")
 	}
@@ -229,6 +262,7 @@ func TestOperatorLogoutCancelsExportAndWipesRealSession(t *testing.T) {
 		t.Fatal("logout kept export admission occupied")
 	}
 	b.SnapshotDir = t.TempDir()
+	b.Archive.Session = true
 	snapshot := archiveRequest(t, server, "POST", "/operator/v1/snapshot?session=true")
 	_ = snapshot.Body.Close()
 	if snapshot.StatusCode != 503 {

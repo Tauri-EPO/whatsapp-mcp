@@ -121,12 +121,17 @@ func (p *historyProgress) snapshot() historyStatus {
 	}
 	return s
 }
-func (p *historyProgress) update(progress uint32, conversations int, messages int64) {
+func (p *historyProgress) update(kind waHistorySync.HistorySync_HistorySyncType, progress uint32, conversations int, messages int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.status.State, p.status.Progress = "syncing", min(progress, 100)
-	if progress >= 100 {
-		p.status.State = "complete"
+	switch kind {
+	case waHistorySync.HistorySync_INITIAL_BOOTSTRAP, waHistorySync.HistorySync_RECENT, waHistorySync.HistorySync_FULL:
+		if p.status.State != "complete" {
+			p.status.State, p.status.Progress = "syncing", max(p.status.Progress, min(progress, 100))
+			if progress >= 100 {
+				p.status.State = "complete"
+			}
+		}
 	}
 	p.status.Conversations += int64(conversations)
 	p.status.Messages += messages

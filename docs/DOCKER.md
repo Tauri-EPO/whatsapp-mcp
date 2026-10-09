@@ -207,11 +207,13 @@ Export streams an uncompressed ZIP64 directly into the response, with no
 server-side staging. It contains `chats.json`, `contacts.json`,
 `messages.jsonl`, `notes.jsonl` (versioned notes), `media_notes.jsonl`,
 `transcriptions.jsonl` and `manifest.json` (version, UTC creation time, per-file
-row/file counts, sizes and SHA256). Contacts are selected explicitly from the
+row/file counts, sizes, SHA256 and `media_skipped` (malformed media rows skipped). Contacts are selected explicitly from the
 session store's contact table; session/device keys, database files, media keys,
 CDN URLs and tokens are excluded. Missing lazy `notes.db` produces empty note
 files. Add `?media=true` for referenced cached media; default is false and each
-exported message has a `media_ref` when its file is included.
+exported message has a `media_ref` when its file is included. A malformed ID,
+chat or timestamp leaves that reference null and increments `media_skipped`;
+a missing cache file leaves it null without being classified as malformed.
 
 The export holds one read transaction per store while live writes continue;
 stores are independently consistent, not one cross-process transaction.
@@ -219,8 +221,14 @@ To keep memory flat even with many media files, it replays the pinned rows and
 reads media three times for hashes and the ZIP central directory. This trades
 I/O for bounded memory; cache changes or client cancellation abort the archive.
 A long read transaction can retain WAL growth until the download completes.
+The read-only notes handle never changes database rows or schema, but SQLite
+can create/update `-wal`/`-shm` coordination sidecars (0600, same uid). Large
+queries may spill temporary SQLite files outside the ZIP; no ZIP is staged.
+The three passes cost approximately three reads of the selected media bytes
+and three scans of exported rows; allow enough disk I/O and WAL space.
 Only one export runs at a time (429 for a second); requests are capped at
-30 minutes. Operator logout cancels and joins exports and session snapshots
+`WHATSAPP_OPERATOR_EXPORT_TIMEOUT_MIN` minutes (default 30, allowed 1-1440);
+the same deadline applies to snapshots and the CLI. Operator logout cancels and joins exports and session snapshots
 before destroying session keys; a stalled download is aborted. While parked
 after logout, exports still include messages/notes but have no contacts, and
 session snapshots return 503 until pairing restarts. Audit logs contain counts,
@@ -231,20 +239,36 @@ private backup volume **only on bridge**, outside `/app/store` and
 `/app/outbox`, using a local compose override. The directory is 0700 and files
 are 0600 on a filesystem that enforces Unix modes; world-writable directories
 and symlink components are refused. Windows requires equivalent private ACLs.
-The Linux image pins the output directory during SQLite writes.
+Startup also refuses a snapshot directory inside the store, default outbox
+or any configured media root. The Linux image pins the output directory
+during SQLite writes. Each file is written as `.partial`, flushed, renamed
+to its final name and followed by a directory flush; interrupted files must
+never be restored. The newest `WHATSAPP_SNAPSHOT_KEEP` sets (default 7) are
+retained, with older sets removed only after success. Before writing, the
+snapshot filesystem must have twice the selected database plus WAL bytes,
+plus 16 MiB free for work space and growth; otherwise HTTP returns 507. This
+is a preflight estimate, not a reservation against concurrent disk users.
 `POST /operator/v1/snapshot` accepts an empty body, returning generated names,
 sizes and SHA256s. `VACUUM INTO` reads committed WAL data and writes independent,
 consistent `messages.db` and optional `notes.db` copies without disconnecting
-the client. Only `?session=true` adds `whatsapp.db`; that copy is a credential
+the client. `?session=true` adds `whatsapp.db` only with the separate
+`WHATSAPP_SNAPSHOT_SESSION=true` opt-in (default false returns 403 naming
+the variable). That copy is a credential
 which can restore the account without re-pairing. Protect and encrypt it with
 the same care as the active session. Media files and tokens are not included.
 Concurrent snapshots get 429. No request parameter selects an output path.
+Operator logout removes generated session snapshots and `.partial` session
+copies in `WHATSAPP_SNAPSHOT_DIR`, even if remote unlink fails, and reports
+`session_snapshots_removed`. Data snapshots remain. This cannot erase copies
+exported to another directory or off-box; remove those separately. A failed
+removal leaves the instance parked and returns `local_session_wiped:false`.
 
 The equivalent host/cron command is:
 
 ```bash
 WHATSAPP_STORE_DIR=/private/store whatsapp-bridge snapshot --out /private/backups
-# Add --session only when an account/session backup is intended.
+# Add --session only when an account/session backup is intended (independent
+# of the HTTP opt-in). Successful stdout is one JSON result; logs use stderr.
 ```
 
 To restore, stop **both** bridge and MCP, verify each file's returned SHA256,
@@ -347,7 +371,12 @@ local cleanup is incomplete; retry logout before restarting pairing.
 The operator token works under `WHATSAPP_READ_ONLY`; data-plane tokens do not.
 Unpaired devices return 409 without contacting WhatsApp.
 
-Response: `{"server_unlinked":true,"local_session_wiped":true}`. Existing
+Response includes `server_unlinked`, `local_session_wiped` and
+`session_snapshots_removed`. Logout removes generated credential-bearing
+`*-whatsapp.db` snapshots and their `.partial` siblings from
+`WHATSAPP_SNAPSHOT_DIR`, including when remote unlink fails. Remove any
+off-box or differently configured session backup separately before removing
+an instance; data snapshots are retained. Existing
 client requests have one second to drain; otherwise logout returns 503
 `client_busy`, stays parked and may be retried. Unlink is
 bounded to five seconds, followed by an independent five-second local wipe,

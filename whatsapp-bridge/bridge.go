@@ -58,6 +58,8 @@ type Bridge struct {
 	HistoryLimits              historyLimits
 	historyProgress            historyProgress
 	SnapshotDir                string
+	Archive                    archiveConfig
+	snapshotSpace              func(*os.File) (uint64, error)
 	exportBusy                 atomic.Bool
 	snapshotBusy               atomic.Bool
 	archiveSessionMu           sync.Mutex

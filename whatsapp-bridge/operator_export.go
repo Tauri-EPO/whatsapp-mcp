@@ -114,8 +114,13 @@ func exportTableExists(ctx context.Context, tx *sql.Tx, name string) bool {
 	return tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?", name).Scan(&count) == nil && count == 1
 }
 
-func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.Tx, media bool) archiveWalk {
+type exportCounts struct{ skippedMedia int64 }
+
+func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.Tx, media bool, counts ...*exportCounts) archiveWalk {
 	return func(emit func(archiveEntry) error) error {
+		if len(counts) > 0 {
+			counts[0].skippedMedia = 0
+		}
 		for _, file := range []struct {
 			name, query, table string
 			tx                 *sql.Tx
@@ -144,10 +149,16 @@ func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.
 					if media {
 						found, err := b.exportMedia(row)
 						if err != nil {
+							if errors.Is(err, errMediaPath) {
+								if len(counts) > 0 {
+									counts[0].skippedMedia++
+								}
+								return nil
+							}
 							return err
 						}
 						if found != nil {
-							row["media_ref"] = "media/" + path.Join(row["chat"].(string), found.name)
+							row["media_ref"] = "media/" + path.Join(chatMediaRel(row["chat"].(string)), found.name)
 							found.Close()
 						}
 					}
@@ -169,18 +180,21 @@ func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			var id, chat, kind, timestamp, filename string
+			var id, chat, kind, timestamp, filename any
 			if err := rows.Scan(&id, &chat, &kind, &timestamp, &filename); err != nil {
 				return err
 			}
 			found, err := b.exportMedia(map[string]any{"id": id, "chat": chat, "media_type": kind, "timestamp": timestamp, "filename": filename})
 			if err != nil {
+				if errors.Is(err, errMediaPath) {
+					continue
+				}
 				return err
 			}
 			if found == nil {
 				continue
 			}
-			err = emit(archiveEntry{"media/" + path.Join(chat, found.name), func(out io.Writer) (int64, error) {
+			err = emit(archiveEntry{"media/" + path.Join(chatMediaRel(chat.(string)), found.name), func(out io.Writer) (int64, error) {
 				if ctx.Err() != nil {
 					return 0, ctx.Err()
 				}
@@ -212,15 +226,21 @@ func (b *Bridge) exportMedia(row map[string]any) (*cachedMedia, error) {
 	default:
 		return nil, nil
 	}
-	timestamp, err := parseDBTime(row["timestamp"].(string))
+	stamp, stampOK := row["timestamp"].(string)
+	chat, chatOK := row["chat"].(string)
+	id, idOK := row["id"].(string)
+	if !stampOK || !chatOK || !idOK {
+		return nil, errMediaPath
+	}
+	timestamp, err := parseDBTime(stamp)
 	if err != nil {
-		return nil, err
+		return nil, errMediaPath
 	}
 	filename, _ := row["filename"].(string)
-	return findCachedMedia(b.StoreRoot, row["chat"].(string), mediaFileNames(kind, timestamp, row["id"].(string), filename))
+	return findCachedMedia(b.StoreRoot, chatMediaRel(chat), mediaFileNames(kind, timestamp, id, filename))
 }
 
-func exportManifest(created time.Time) func(io.Writer, archiveWalk) (int64, error) {
+func exportManifest(created time.Time, counts ...*exportCounts) func(io.Writer, archiveWalk) (int64, error) {
 	return func(out io.Writer, walk archiveWalk) (int64, error) {
 		prefix, err := json.Marshal(map[string]any{"version": buildInfo().Version, "created_at": created.UTC().Format(time.RFC3339)})
 		if err != nil {
@@ -246,7 +266,11 @@ func exportManifest(created time.Time) func(io.Writer, archiveWalk) (int64, erro
 		if err != nil {
 			return count, err
 		}
-		_, err = io.WriteString(out, "]}\n")
+		var skipped int64
+		if len(counts) > 0 {
+			skipped = counts[0].skippedMedia
+		}
+		_, err = fmt.Fprintf(out, "],\"media_skipped\":%d}\n", skipped)
 		return count, err
 	}
 }
@@ -264,7 +288,7 @@ func (b *Bridge) handleExport() http.HandlerFunc {
 		}
 		defer b.exportBusy.Store(false)
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(r.Context(), b.archiveTimeout())
 		defer cancel()
 		messages, err := openExportStore(ctx, b.StoreRoot, "messages.db", false)
 		if err != nil {
@@ -289,7 +313,7 @@ func (b *Bridge) handleExport() http.HandlerFunc {
 		}
 		defer contacts.close()
 		// Override the pairing listener's short write deadline for large streams.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(b.archiveTimeout())); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			writeError(w, 500, "Export deadline unavailable")
 			return
 		}
@@ -299,7 +323,8 @@ func (b *Bridge) handleExport() http.HandlerFunc {
 		defer stop()
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", `attachment; filename="whatsapp-export.zip"`)
-		count, err := streamArchive(w, b.exportWalk(ctx, messages.tx, notes.tx, contacts.tx, media), exportManifest(start))
+		counts := &exportCounts{}
+		count, err := streamArchive(w, b.exportWalk(ctx, messages.tx, notes.tx, contacts.tx, media, counts), exportManifest(start, counts))
 		if err != nil {
 			b.Log.Warnf("Operator export failed after streaming began")
 			panic(http.ErrAbortHandler)

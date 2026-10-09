@@ -68,7 +68,12 @@ func main() {
 func runCLI() int {
 	privateProcessUmask()
 	if len(os.Args) > 1 && os.Args[1] == "snapshot" {
-		_, _, _ = initLogging()
+		level := resolveLogLevel(os.Getenv(logLevelEnv))
+		if jsonLogsEnabled(os.Getenv(logFormatEnv)) {
+			bridgeLog = newJSONLogger("Bridge", level, os.Stderr)
+		} else {
+			bridgeLog = newTextWriter("Bridge", level, os.Stderr, false)
+		}
 		return snapshotCLI(os.Args[2:], os.Stdout)
 	}
 	flag.Parse()
@@ -263,6 +268,7 @@ func runBridge(cfg bridgeConfig) int {
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
 	bridge.sessionDB = sessionDB
 	bridge.HistoryLimits, bridge.SnapshotDir = cfg.History, cfg.SnapshotDir
+	bridge.Archive = cfg.Archive
 	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	reconnectChan := make(chan bool, 1)

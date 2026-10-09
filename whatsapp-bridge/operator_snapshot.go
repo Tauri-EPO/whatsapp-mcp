@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -142,12 +143,70 @@ func privateSnapshotDir(directory string) (*os.Root, *os.File, error) {
 	return root, f, nil
 }
 
-func snapshotStores(ctx context.Context, source *os.Root, directory string, session bool) (files []snapshotFile, err error) {
+var errSnapshotSpace = errors.New("insufficient snapshot filesystem space")
+
+type snapshotOptions struct {
+	keep      int
+	freeBytes func(*os.File) (uint64, error)
+}
+
+func snapshotRequiredBytes(source *os.Root, session bool) (uint64, error) {
+	var size uint64
+	for _, name := range []string{"messages.db", "notes.db", "whatsapp.db"} {
+		if name == "whatsapp.db" && !session {
+			continue
+		}
+		for _, suffix := range []string{"", "-wal"} {
+			info, err := source.Lstat(name + suffix)
+			if errors.Is(err, os.ErrNotExist) && (name == "notes.db" || suffix != "") {
+				continue
+			}
+			if err != nil {
+				return 0, err
+			}
+			if !info.Mode().IsRegular() || info.Size() < 0 {
+				return 0, errors.New("invalid snapshot database file")
+			}
+			if uint64(info.Size()) > (^uint64(0)-size)/2 { //nolint:gosec // Negative sizes rejected above.
+				return 0, errSnapshotSpace
+			}
+			size += uint64(info.Size()) //nolint:gosec // Negative sizes rejected above.
+		}
+	}
+	// VACUUM needs a compact output and SQLite work space. Reserve twice the
+	// source DB+WAL size, with a further fixed 16 MiB for growth and metadata.
+	if size > (^uint64(0)-(16<<20))/2 {
+		return 0, errSnapshotSpace
+	}
+	return 2*size + (16 << 20), nil
+}
+
+func snapshotStores(ctx context.Context, source *os.Root, directory string, session bool, options ...snapshotOptions) (files []snapshotFile, err error) {
 	root, dir, err := privateSnapshotDir(directory)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = root.Close(); _ = dir.Close() }()
+	opt := snapshotOptions{keep: 7, freeBytes: snapshotFreeBytes}
+	if len(options) > 0 {
+		if options[0].keep > 0 {
+			opt.keep = options[0].keep
+		}
+		if options[0].freeBytes != nil {
+			opt.freeBytes = options[0].freeBytes
+		}
+	}
+	required, err := snapshotRequiredBytes(source, session)
+	if err != nil {
+		return nil, err
+	}
+	available, err := opt.freeBytes(dir)
+	if err != nil {
+		return nil, err
+	}
+	if available < required {
+		return nil, errSnapshotSpace
+	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
@@ -173,17 +232,18 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 			continue
 		}
 		fileName := prefix + name
-		file, createErr := root.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		partial := fileName + ".partial"
+		file, createErr := root.OpenFile(partial, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if createErr != nil {
 			_ = db.Close()
 			return nil, createErr
 		}
-		created = append(created, fileName)
+		created = append(created, partial)
 		// On the shipped Linux image, SQLite resolves the target through the
 		// pinned directory FD even if its pathname is concurrently replaced.
-		target := filepath.Join(root.Name(), fileName)
+		target := filepath.Join(root.Name(), partial)
 		if runtime.GOOS == "linux" {
-			target = fmt.Sprintf("/proc/self/fd/%d/%s", dir.Fd(), fileName)
+			target = fmt.Sprintf("/proc/self/fd/%d/%s", dir.Fd(), partial)
 		}
 		_, vacuumErr := db.ExecContext(ctx, "VACUUM INTO ?", target)
 		_ = db.Close()
@@ -202,13 +262,137 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 		}
 		hash := sha256.New()
 		_, copyErr := io.Copy(hash, file)
-		_ = file.Close()
+		if copyErr == nil {
+			copyErr = file.Sync()
+		}
+		closeErr := file.Close()
+		if copyErr == nil {
+			copyErr = closeErr
+		}
 		if copyErr != nil {
 			return nil, copyErr
 		}
 		files = append(files, snapshotFile{Name: fileName, Size: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil))})
 	}
+	// Publish only after every database has a flushed, verified .partial file.
+	for _, file := range files {
+		if err := root.Rename(file.Name+".partial", file.Name); err != nil {
+			return nil, err
+		}
+		created = append(created, file.Name)
+		if err := syncSnapshotDirectory(dir); err != nil {
+			return nil, err
+		}
+	}
+	if err := pruneSnapshotSets(root, dir, prefix, opt.keep); err != nil {
+		return nil, err
+	}
 	return files, nil
+}
+
+func snapshotSetPrefix(name string) string {
+	const prefixLength = len("snapshot-20060102T150405Z-") + 32 + 1
+	if len(name) <= prefixLength || !strings.HasPrefix(name, "snapshot-") {
+		return ""
+	}
+	prefix, suffix := name[:prefixLength], name[prefixLength:]
+	if suffix != "messages.db" && suffix != "notes.db" && suffix != "whatsapp.db" {
+		return ""
+	}
+	if prefix[25] != '-' || prefix[len(prefix)-1] != '-' {
+		return ""
+	}
+	if _, err := time.Parse("20060102T150405Z", prefix[9:25]); err != nil {
+		return ""
+	}
+	if nonce, err := hex.DecodeString(prefix[26 : len(prefix)-1]); err != nil || len(nonce) != 16 {
+		return ""
+	}
+	return prefix
+}
+
+func pruneSnapshotSets(root *os.Root, dir *os.File, current string, keep int) error {
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	sets := map[string]time.Time{}
+	for _, entry := range entries {
+		prefix := snapshotSetPrefix(entry.Name())
+		if prefix == "" || prefix == current || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if old, ok := sets[prefix]; !ok || info.ModTime().After(old) {
+			sets[prefix] = info.ModTime()
+		}
+	}
+	prefixes := make([]string, 0, len(sets))
+	for prefix := range sets {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Slice(prefixes, func(i, j int) bool {
+		if sets[prefixes[i]].Equal(sets[prefixes[j]]) {
+			return prefixes[i] > prefixes[j]
+		}
+		return sets[prefixes[i]].After(sets[prefixes[j]])
+	})
+	for _, prefix := range prefixes[min(keep-1, len(prefixes)):] {
+		for _, name := range []string{"messages.db", "notes.db", "whatsapp.db"} {
+			info, err := root.Lstat(prefix + name)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if err := root.Remove(prefix + name); err != nil {
+				return err
+			}
+		}
+	}
+	return syncSnapshotDirectory(dir)
+}
+
+func removeSessionSnapshots(directory string) (int, error) {
+	if directory == "" {
+		return 0, nil
+	}
+	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	root, dir, err := privateSnapshotDir(directory)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = root.Close(); _ = dir.Close() }()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		// Include leftovers from an interrupted snapshot: they can contain keys.
+		base := strings.TrimSuffix(name, ".partial")
+		if snapshotSetPrefix(base) == "" || !strings.HasSuffix(base, "-whatsapp.db") {
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			return removed, errors.New("session snapshot is not a regular file")
+		}
+		if err := root.Remove(name); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, syncSnapshotDirectory(dir)
 }
 
 func operatorBoolQuery(r *http.Request, key string) (bool, error) {
@@ -242,17 +426,21 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 			writeError(w, 503, "WHATSAPP_SNAPSHOT_DIR is not configured")
 			return
 		}
+		if session && !b.Archive.Session {
+			writeError(w, 403, "Session snapshots require WHATSAPP_SNAPSHOT_SESSION=true")
+			return
+		}
 		if !b.snapshotBusy.CompareAndSwap(false, true) {
 			writeError(w, 429, "A snapshot is already running")
 			return
 		}
 		defer b.snapshotBusy.Store(false)
 		start := time.Now()
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(b.archiveTimeout())); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			writeError(w, 500, "Snapshot deadline unavailable")
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+		ctx, cancel := context.WithTimeout(r.Context(), b.archiveTimeout())
 		defer cancel()
 		if session {
 			release, admitted := b.beginArchiveSessionRead(cancel)
@@ -262,9 +450,13 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 			}
 			defer release()
 		}
-		files, err := snapshotStores(ctx, b.StoreRoot, b.SnapshotDir, session)
+		files, err := snapshotStores(ctx, b.StoreRoot, b.SnapshotDir, session, snapshotOptions{keep: b.Archive.Keep, freeBytes: b.snapshotSpace})
 		if err != nil {
 			b.Log.Warnf("Operator snapshot failed")
+			if errors.Is(err, errSnapshotSpace) {
+				writeError(w, 507, "Snapshot refused: insufficient free space for databases, WAL and safety margin")
+				return
+			}
 			writeError(w, 500, "Snapshot failed; no complete snapshot was retained")
 			return
 		}
@@ -275,7 +467,7 @@ func (b *Bridge) handleSnapshot() http.HandlerFunc {
 
 func snapshotCLI(args []string, out io.Writer) int {
 	flags := flag.NewFlagSet("snapshot", flag.ContinueOnError)
-	flags.SetOutput(out)
+	flags.SetOutput(os.Stderr)
 	directory := flags.String("out", "", "Private snapshot directory")
 	session := flags.Bool("session", false, "Include the credential-bearing session store")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || strings.TrimSpace(*directory) == "" {
@@ -283,15 +475,24 @@ func snapshotCLI(args []string, out io.Writer) int {
 	}
 	source, err := openStoreRoot()
 	if err != nil {
-		_, _ = fmt.Fprintln(out, "Snapshot source unavailable")
+		_, _ = fmt.Fprintln(os.Stderr, "Snapshot source unavailable")
 		return 1
 	}
 	defer func() { _ = source.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-	files, err := snapshotStores(ctx, source, *directory, *session)
+	cfg, err := parseArchiveConfig(os.Getenv)
 	if err != nil {
-		_, _ = fmt.Fprintln(out, "Snapshot failed")
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := validateSnapshotLocation(*directory, storeDir(), os.Getenv("WHATSAPP_MEDIA_ROOTS")); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+	files, err := snapshotStores(ctx, source, *directory, *session, snapshotOptions{keep: cfg.Keep})
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "Snapshot failed")
 		return 1
 	}
 	returnCode := 0

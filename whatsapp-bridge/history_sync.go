@@ -31,7 +31,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 		return
 	}
 	if !preserveExisting {
-		b.historyProgress.update(historySync.Data.GetProgress(), len(historySync.Data.Conversations), 0)
+		b.historyProgress.update(historySync.Data.GetSyncType(), historySync.Data.GetProgress(), len(historySync.Data.Conversations), 0)
 	}
 	historySync = &events.HistorySync{Data: b.boundedHistory(historySync.Data, time.Now())}
 	if ctx == nil {
@@ -341,7 +341,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))
 				if !preserveExisting {
-					b.historyProgress.update(historySync.Data.GetProgress(), 0, int64(storedInBatch))
+					b.historyProgress.update(historySync.Data.GetSyncType(), historySync.Data.GetProgress(), 0, int64(storedInBatch))
 				}
 
 			}
