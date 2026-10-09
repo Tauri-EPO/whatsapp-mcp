@@ -615,5 +615,5 @@ func (p *operatorPairing) passkeyConfirm(w http.ResponseWriter, r *http.Request)
 }
 
 func (p *operatorPairing) routes() operatorRoutes {
-	return operatorRoutes{health: p.b.handleHealth(), ready: p.b.handleReady(), pairing: func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, p.snapshot()) }, code: p.code, restart: p.restart, passkeyResponse: p.passkeyResponse, passkeyConfirm: p.passkeyConfirm, settings: p.b.handleRuntimeSettings, logout: p.logout}
+	return operatorRoutes{health: p.b.handleHealth(), ready: p.b.handleReady(), pairing: func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, p.snapshot()) }, code: p.code, restart: p.restart, passkeyResponse: p.passkeyResponse, passkeyConfirm: p.passkeyConfirm, settings: p.b.handleRuntimeSettings, logout: p.logout, sendUsage: p.b.handleSendUsage, mcpToken: p.b.handleMCPToken}
 }

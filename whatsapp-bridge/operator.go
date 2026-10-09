@@ -19,6 +19,7 @@ type operatorRoutes struct {
 	health, ready, pairing                         http.HandlerFunc
 	code, restart, passkeyResponse, passkeyConfirm http.HandlerFunc
 	settings, logout                               http.HandlerFunc
+	sendUsage, mcpToken                            http.HandlerFunc
 }
 
 type operatorBucket struct {
@@ -131,9 +132,10 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		{"pairing/code", "POST", routes.code}, {"pairing/restart", "POST", routes.restart},
 		{"pairing/passkey/response", "POST", routes.passkeyResponse}, {"pairing/passkey/confirm", "POST", routes.passkeyConfirm},
 		{"settings", "", routes.settings}, {"logout", "POST", routes.logout},
+		{"send/usage", "GET", routes.sendUsage}, {"mcp-token", "", routes.mcpToken},
 	} {
 		path := "/operator/v1/" + route.name
-		if route.method == http.MethodPost || route.name == "settings" {
+		if route.method == http.MethodPost || route.name == "settings" || route.name == "mcp-token" {
 			mutations[path] = true
 		}
 		handler := route.handler
@@ -174,7 +176,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
+		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
 			audited := false
 			audit := func() {
 				if audited {

@@ -17,6 +17,7 @@ from tests.test_send_inline import DummyResponse
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+@pytest.mark.usefixtures("auth_runtime_store")
 def test_inline_and_http_uploads_continue_when_directory_chmod_is_unsupported(tmp_path, monkeypatch, caplog):
     outbox = tmp_path / "outbox"
     root = outbox / ".uploads"

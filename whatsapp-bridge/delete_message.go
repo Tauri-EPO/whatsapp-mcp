@@ -61,7 +61,7 @@ func writeDeleteResponse(w http.ResponseWriter, status int, resp DeleteMessageRe
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicy, storeWrite storeWriteFunc) http.HandlerFunc {
+func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicy, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -106,6 +106,9 @@ func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPoli
 		}
 		if !*isFromMe {
 			writeDeleteResponse(w, http.StatusForbidden, DeleteMessageResponse{Message: "Only messages sent by this account can be deleted for everyone", ForEveryone: true})
+			return
+		}
+		if len(guards) > 0 && !guards[0](w, r, chat.String()) {
 			return
 		}
 		if err := revoke(r.Context(), chat, req.MessageID); err != nil {

@@ -22,6 +22,7 @@ from http_upload import UploadApp
 from mcp_config import build_transport_security
 
 TOKEN = "fake-upload-token-0123456789"
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "X-Filename": "report.pdf"}
 ALICE = "12025551234@s.whatsapp.net"
 

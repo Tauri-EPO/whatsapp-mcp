@@ -161,7 +161,7 @@ func (b *Bridge) renderMetrics() string {
 	for _, l := range out {
 		result += l + "\n"
 	}
-	return result
+	return result + b.sendMetrics()
 }
 
 func (b *Bridge) handleMetrics() http.HandlerFunc {

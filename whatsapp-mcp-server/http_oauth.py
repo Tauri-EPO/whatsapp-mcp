@@ -32,13 +32,15 @@ from starlette.routing import Route, Router
 
 from http_auth import (
     ASGIApp,
+    AuthStateUnavailableError,
     RateLimitMiddleware,
     Receive,
     Scope,
     Send,
     _bearer_from_headers,
+    authentication_unavailable_response,
     client_key,
-    token_matches,
+    verify_static_token,
 )
 
 MAX_JSON_BYTES = 256 * 1024
@@ -199,7 +201,7 @@ class OAuthTokenVerifier(TokenVerifier):
 
     def accepts_static(self, token: str) -> bool:
         """Single hook for later runtime rotation; never classify a JWT as static."""
-        return token.count(".") != 2 and self.static_token is not None and token_matches(token, self.static_token)
+        return token.count(".") != 2 and verify_static_token(token, self.static_token)
 
     async def _fetch(self, url: str, data: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -377,7 +379,15 @@ class OAuthTokenVerifier(TokenVerifier):
     async def verify_token(self, token: str, before_fetch: Callable[[], None] | None = None) -> AccessToken | None:
         if len(token.encode()) > MAX_TOKEN_BYTES:
             return None
-        if self.accepts_static(token):
+        if token.count(".") != 2 and before_fetch:
+            before_fetch()  # Static registry reads are verification I/O too.
+        static_unavailable = None
+        try:
+            is_static = token.count(".") != 2 and await asyncio.to_thread(self.accepts_static, token)
+        except AuthStateUnavailableError as exc:
+            static_unavailable = exc
+            is_static = False
+        if is_static:
             return AccessToken(
                 token=token,
                 client_id="static",
@@ -388,7 +398,12 @@ class OAuthTokenVerifier(TokenVerifier):
             )
         if self.config.introspection_url:
             payload = await self._inspect(token, before_fetch)
-            return self._access(token, payload) if payload.get("active") is True else None
+            access = self._access(token, payload) if payload.get("active") is True else None
+            if access is None and static_unavailable is not None:
+                raise static_unavailable
+            return access
+        if static_unavailable is not None:
+            raise static_unavailable
         try:
             header = jwt.get_unverified_header(token)
             alg = header.get("alg")
@@ -445,6 +460,10 @@ class OAuthSDKAvailabilityMiddleware:
 
         try:
             await self.app(scope, receive, tracked_send)
+        except AuthStateUnavailableError as exc:
+            if scope.get("type") != "http" or response_started:
+                raise
+            await authentication_unavailable_response(send, str(exc))
         except AuthorizationUnavailableError:
             if scope.get("type") != "http" or response_started:
                 raise
@@ -566,6 +585,10 @@ class OAuthMiddleware:
             access = (
                 await self.verifier.verify_token(presented, lambda: self._guard_fetch(scope)) if presented else None
             )
+        except AuthStateUnavailableError as exc:
+            if not await self._limited(scope, send, peer=True):
+                await authentication_unavailable_response(send, str(exc))
+            return
         except VerificationRateLimitError as exc:
             await self._rate_error(send, exc.wait)
             return

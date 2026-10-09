@@ -118,7 +118,7 @@ async def test_deep_json_backend_response_has_classified_error(endpoint, tmp_pat
             await transcribe._transcribe_http_request(source, config, "auto")
 
 
-def test_oauth_deep_json_preflight_keeps_sdk_parse_error(monkeypatch, issuer):
+def test_oauth_deep_json_preflight_keeps_sdk_parse_error(monkeypatch, issuer, auth_runtime_store):
     configure(monkeypatch, issuer)
     body = b'{"jsonrpc":"2.0","id":2,"method":"ping","params":{"nested":' + b"[" * 10000 + b"0" + b"]" * 10000 + b"}}"
     application, calls = app()

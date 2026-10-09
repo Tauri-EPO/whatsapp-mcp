@@ -5,6 +5,8 @@ Success returns the payload the tool documents. Failure returns::
     {"error": {"code": "<code>", "message": "<human readable>"}}
 
 codes: ``not_found`` (the chat/message/contact does not exist in the archive),
+``rate_limited`` (send budget exhausted; stop and report instead of retrying,
+with ``retry_after_s`` and the limit name),
 ``denied`` (WHATSAPP_ALLOWED_CHATS blocks the target), ``bridge_unavailable``
 (the bridge REST API could not be reached or answered 5xx),
 ``media_unavailable`` (the bytes are not cached here and nothing can fetch them:
@@ -36,6 +38,7 @@ from mcp_types import CallToolResult, TextContent
 MEDIA_REFUSED_CODE = "media_refused"
 
 ERROR_CODES = (
+    "rate_limited",
     "not_found",
     "denied",
     "bridge_unavailable",

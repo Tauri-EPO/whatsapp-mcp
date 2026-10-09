@@ -25,6 +25,7 @@ import (
 
 // groupOps is the slice of the whatsmeow client the handlers need.
 type groupOps struct {
+	allowSend          func(http.ResponseWriter, *http.Request, ...string) bool
 	twin               lidForPNFunc
 	updateParticipants func(ctx context.Context, jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
 	setName            func(ctx context.Context, jid types.JID, name string) error
@@ -223,6 +224,15 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 					writeGroupError(w, http.StatusForbidden, "participant "+participant.String()+" is not in "+chatPolicyEnv)
 					return
 				}
+			}
+		}
+		if action == whatsmeow.ParticipantChangeAdd && ops.allowSend != nil {
+			targets := make([]string, 0, len(participants))
+			for _, participant := range participants {
+				targets = append(targets, participant.String())
+			}
+			if !ops.allowSend(w, r, targets...) {
+				return
 			}
 		}
 		result, err := ops.updateParticipants(r.Context(), jid, participants, action)

@@ -106,6 +106,7 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			content TEXT,
 			timestamp TIMESTAMP,
 			is_from_me BOOLEAN,
+            read_receipt_sent INTEGER NOT NULL DEFAULT 0,
 			media_type TEXT,
 			filename TEXT,
 			url TEXT,
@@ -155,6 +156,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 		t.Fatalf("failed to create poll tables: %v", err)
 	}
 	if _, err := db.Exec(runtimeSettingsSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(sendLimitsSchema); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(operatorLogoutSchema); err != nil {

@@ -29,6 +29,8 @@ from tests.test_runtime_settings import runtime_archive as runtime_archive
 from tests.test_transcribe_http import provider as provider
 from tool_policy import ToolPolicy, mutating_tool, set_active_policy
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 STATIC = "fake-static-token-0123456789abcdef"
 AUDIENCE = "https://example.ts.net/mcp"
 HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}

@@ -5,6 +5,8 @@ from starlette.testclient import TestClient
 
 from http_auth import RateLimitMiddleware, client_key, resolve_trusted_proxies
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 
 async def _ok_app(scope, receive, send):
     if scope["type"] == "lifespan":
