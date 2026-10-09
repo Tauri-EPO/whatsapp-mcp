@@ -33,7 +33,7 @@ func TestReconnectQueuedWriterAndConcurrentLogoutComplete(t *testing.T) {
 		t.Fatal("reconnect did not acquire its outer read lock")
 	}
 	writerDone := make(chan struct{})
-	go func() { b.clientGate.Lock(); b.clientGate.Unlock(); close(writerDone) }()
+	go func() { b.clientGate.Lock(); b.clientGate.Unlock(); close(writerDone) }() //nolint:staticcheck // deliberately queue an empty exclusive acquisition behind the admitted reader.
 	deadline := time.Now().Add(time.Second)
 	for b.clientGate.TryRLock() {
 		b.clientGate.RUnlock()
@@ -145,7 +145,7 @@ func TestDetachedDownloadDoesNotWaitBehindQueuedClientWriter(t *testing.T) {
 	seedMediaRowIn(t, b.Store, mediaTestChat, "QUEUED")
 	b.clientGate.RLock()
 	done := make(chan struct{})
-	go func() { b.clientGate.Lock(); b.clientGate.Unlock(); close(done) }()
+	go func() { b.clientGate.Lock(); b.clientGate.Unlock(); close(done) }() //nolint:staticcheck // deliberately queue an empty exclusive acquisition to test detached reader admission.
 	deadline := time.Now().Add(time.Second)
 	for b.clientGate.TryRLock() {
 		b.clientGate.RUnlock()

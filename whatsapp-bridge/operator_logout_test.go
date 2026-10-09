@@ -270,7 +270,7 @@ func TestOperatorLogoutOfflineWipesRealSessionAndIdleSurvivesRestart(t *testing.
 	}
 	var before []byte
 	for _, path := range []string{whatsmeowDBPath(), whatsmeowDBPath() + "-wal"} {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // paths are the generated session fixture database and WAL under t.TempDir().
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +295,7 @@ func TestOperatorLogoutOfflineWipesRealSessionAndIdleSurvivesRestart(t *testing.
 		t.Fatal("real SDK session survived wipe")
 	}
 	for _, path := range []string{whatsmeowDBPath(), whatsmeowDBPath() + "-wal"} {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // paths are the generated session fixture database and WAL under t.TempDir().
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
