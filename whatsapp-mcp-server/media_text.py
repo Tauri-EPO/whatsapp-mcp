@@ -82,6 +82,7 @@ class Extracted:
     # PDF pages whose text could not be extracted: {"page": 2, "error": "LimitReachedError"}.
     # The error class only, never the message: a parser message can quote the file.
     unreadable: list[dict[str, object]] = field(default_factory=list)
+    pages_missing: int = 0
 
 
 def page_limit(max_pages: int | None) -> int:
@@ -157,22 +158,48 @@ def _collect(sections: Iterator[str], produced: int, wanted: int) -> Extracted:
     return out
 
 
+def _missing_pdf_kids(reader) -> int:
+    """Count unresolved Kids references, ignoring unreliable /Count values."""
+    root = getattr(reader, "root_object", {})
+    pending = [root.get("/Pages")] if root.get("/Pages") is not None else []
+    seen: set[int] = set()
+    missing = 0
+    while pending:
+        reference = pending.pop()
+        try:
+            if reference is None:
+                missing += 1
+                continue
+            node = reference.get_object() if hasattr(reference, "get_object") else reference
+            if not isinstance(node, dict) or id(node) in seen:
+                missing += 1
+                continue
+            seen.add(id(node))
+            if "/Kids" in node:
+                kids = node["/Kids"]
+                pending.extend(kids)
+            elif node.get("/Type") != "/Page":
+                missing += 1
+        except MemoryError:
+            raise
+        except Exception:  # noqa: BLE001 - malformed references are document loss
+            missing += 1
+    return missing
+
+
 def _pdf(path: str, wanted: int) -> Extracted:
     from pypdf import PdfReader
 
     try:
         reader = PdfReader(path)
+        missing = _missing_pdf_kids(reader)
         pages = reader.pages
         total = len(pages)
-        root = getattr(reader, "root_object", {})
-        page_tree = root.get("/Pages", {})
-        if hasattr(page_tree, "get_object"):
-            page_tree = page_tree.get_object()
-        declared = page_tree.get("/Count", total)
-        if isinstance(declared, int) and declared > max(total * 2, 1):
+        if missing and not total:
             raise ToolError(
                 "invalid_argument",
-                "this PDF has a damaged page tree; try read_media(as_images=true) or ask for a repaired original",
+                "this PDF has no readable pages in its damaged page tree; "
+                "try read_media(as_images=true) or ask for a repaired original",
             )
     except ToolError:
         raise
@@ -182,9 +209,8 @@ def _pdf(path: str, wanted: int) -> Extracted:
         # The class only, like the per-page failures below: a parser message can
         # quote the file, and the file is whatever a stranger sent.
         raise ToolError("invalid_argument", f"this PDF could not be read: {type(exc).__name__}") from exc
-    # A real 500-page missing-Kids fixture took 0.55 s versus 0.25 s healthy
-    # (#555). pypdf silently discarded 499 missing pages, so reject a severe
-    # declared/flattened count mismatch above rather than report one-page success.
+    # pypdf silently drops unresolved Kids. Report that loss separately from
+    # readable pages; /Count is advisory and can lie even in a readable PDF.
     # Attempts remain bounded by max_pages (500) and 64 MiB; inspect every
     # attempted page so minority failures retain precise page numbers.
     # Page by page: one page pypdf refuses (a font with an oversized /Widths, a
@@ -205,7 +231,13 @@ def _pdf(path: str, wanted: int) -> Extracted:
         )
     out = _collect((f"--- page {index + 1} of {total} ---\n{text}\n" for index, text in texts if text), total, wanted)
     out.unreadable = unreadable
+    out.pages_missing = missing
     notes = []
+    if missing:
+        notes.append(
+            f"{missing} page-tree reference(s) could not be resolved; pages_missing={missing}. "
+            "Ask for a repaired original to recover the missing pages."
+        )
     if not out.sections:
         # Empty because there is nothing to read, or empty because the pages we
         # were allowed to read happen to be the image-only ones: telling a

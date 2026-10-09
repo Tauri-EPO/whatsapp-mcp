@@ -1655,9 +1655,11 @@ from the file; past 20 pages it says how many more — and says those pages can 
 read with
 [`as_images=true`](#as_images-a-scanned-pdf-rendered-as-pictures)
 (`first_page=<the first failing page>` is spelled out). `pages_total` still
-counts every page. `pages_failed` is absent when every page extracted. When *every* page that
-was attempted fails the call is one `invalid_argument` error that names
-`as_images=true` instead.
+counts the readable page tree. `pages_failed` is absent when every page extracted.
+Unresolved page-tree references add `pages_missing` and a note naming the loss;
+a PDF with no resolved pages returns `invalid_argument`. Incorrect `/Count`
+values alone do not reject readable pages. When most attempted pages fail text
+extraction, the call returns `invalid_argument` naming `as_images=true` instead.
 
 **There is no OCR.** A scanned PDF has no text layer, and the answer says so in
 as many words instead of coming back empty — and names

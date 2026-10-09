@@ -552,6 +552,8 @@ def _extracted_blocks(path: str, mime: str, max_pages: int) -> tuple[list[Conten
         # document.
         blocks.append(TextContent(type="text", text=result.note))
     extra: dict[str, Any] = {"pages_total": result.units_total, "truncated": result.truncated}
+    if result.pages_missing:
+        extra["pages_missing"] = result.pages_missing
     if result.unreadable:
         # Only when something failed, so a healthy document's metadata is unchanged.
         # Same name and shape as the pages as_images could not draw; the error

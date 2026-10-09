@@ -1,9 +1,11 @@
 """Actual MCP-owned files, HTTP uploads, payload namespaces and parser results."""
 
 import base64
+import errno
 import json
 import logging
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -37,6 +39,11 @@ from tests.test_send_inline import DummyResponse
         ("CO\u200bN.txt", "_CON.txt"),
         ("CON.tar.gz", "_CON.tar.gz"),
         ("COM1.ogg", "_COM1.ogg"),
+        ("com0.ogg", "_com0.ogg"),
+        ("LpT0.pdf", "_LpT0.pdf"),
+        ("conin$.txt", "_conin$.txt"),
+        ("ConOut$.tar.gz", "_ConOut$.tar.gz"),
+        ("report\u2028part\u2029.pdf", "reportpart.pdf"),
         ("lpt³.pdf", "_lpt³.pdf"),
         ("NUL .txt", "_NUL .txt"),
         ("COM10.ogg", "COM10.ogg"),
@@ -140,8 +147,9 @@ def test_startup_tightens_existing_owned_files_once_and_skips_links(tmp_path, ca
     roots = [tmp_path / "exports", tmp_path / ".uploads"]
     for index, root in enumerate(roots):
         root.mkdir(mode=0o755)
-        child = root / ("nested" if index == 0 else "20261008T100000Z-" + "a" * 32)
-        child.mkdir(mode=0o755)
+        child = root if index == 0 else root / ("20261008T100000Z-" + "a" * 32)
+        if child != root:
+            child.mkdir(mode=0o755)
         (child / ("messages-all-20261008T100000Z.ndjson" if index == 0 else "bytes")).write_bytes(b"private")
         (root / "link").symlink_to(outside, target_is_directory=True)
         (root / "linked-file").symlink_to(external)
@@ -149,7 +157,7 @@ def test_startup_tightens_existing_owned_files_once_and_skips_links(tmp_path, ca
         for _ in range(2):
             private_files.tighten_existing_artifacts(str(database), *(str(root) for root in roots))
     assert len(caplog.records) == 1
-    assert "5 files, 3 directories" in caplog.records[0].message
+    assert "5 files, 2 directories" in caplog.records[0].message
     assert [mode(str(database) + suffix) for suffix in ("", "-wal", "-shm")] == [0o600] * 3
     assert mode(external) == mode(bridge) == 0o644 and mode(outside) == 0o755
     missing = tmp_path / "absent" / "notes.db"
@@ -309,7 +317,7 @@ def test_real_startup_tightens_existing_artifacts_before_stdio_serves(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert mode(database) == mode(archived) == 0o600
-    assert mode(exports) == mode(uploads) == 0o700
+    assert mode(exports) == 0o755 and mode(uploads) == 0o700
     assert mode(store) == 0o755 and mode(bridge_db) == 0o644
     assert result.stderr.count("Tightened MCP-owned permissions:") == 1
     assert result.stdout == ""
@@ -371,16 +379,19 @@ def test_configured_symlink_spelling_for_inline_preview_http_id_and_audio(tmp_pa
         media_upload.bridge_media_path(str(configured / ".uploads" / "linked" / "escape.pdf"))
 
 
-def damaged_pdf():
-    # Rewrite the page tree before reconstructing xref, retaining one valid Kid.
-    raw = make_pdf([f"Synthetic page {i}" for i in range(500)])
+def damaged_pdf(count=500, missing=499, declared=None, indirect=False):
+    # Rewrite the page tree before reconstructing xref, preserving readable Kids.
+    raw = make_pdf([f"Synthetic page {i}" for i in range(count)])
     objects = raw.split(b"endobj\n")[:-1]
     bodies = [part.split(b" obj\n", 1)[1] for part in objects]
-    bodies[1] = (
-        b"<< /Type /Pages /Count 500 /Kids [4 0 R "
-        + b" ".join(f"{10000 + i} 0 R".encode() for i in range(499))
-        + b"] >>\n"
-    )
+    declared = count if declared is None else declared
+    count_value = f"{declared}"
+    if indirect:
+        count_value = f"{len(bodies) + 1} 0 R"
+        bodies.append(f"{declared}\n".encode())
+    kids = [f"{4 + 2 * i} 0 R" for i in range(count - missing)]
+    kids.extend(f"{10000 + i} 0 R" for i in range(missing))
+    bodies[1] = f"<< /Type /Pages /Count {count_value} /Kids [{' '.join(kids)}] >>\n".encode()
     result = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(bodies, 1):
@@ -406,10 +417,11 @@ def test_actual_media_read_healthy_500_pages_and_damaged_tree(paired_dbs, monkey
         healthy_s = time.perf_counter() - start
         assert json.loads(blocks[-1].text)["pages_total"] == 500
         start = time.perf_counter()
-        with pytest.raises(ToolError, match="damaged page tree.*as_images") as failure:
-            media_read.read_media(ALICE, "DAMAGED500", as_text=True, max_pages=500)
+        damaged = media_read.read_media(ALICE, "DAMAGED500", as_text=True, max_pages=500)
         damaged_s = time.perf_counter() - start
-    assert failure.value.code == "invalid_argument"
+    assert json.loads(damaged[-1].text)["pages_missing"] == 499
+    assert json.loads(damaged[-1].text)["pages_total"] == 1
+    assert any("499 page-tree reference(s)" in block.text for block in damaged)
     print(f"actual read_media 500 pages: healthy={healthy_s:.6f}s damaged={damaged_s:.6f}s")
 
 
@@ -433,3 +445,212 @@ def test_majority_extraction_failures_refused_without_losing_minority_details(tm
     with pytest.raises(ToolError, match="as_images") as failure:
         media_text._pdf(str(tmp_path / "synthetic.pdf"), 500)
     assert failure.value.code == "invalid_argument"
+
+
+@pytest.mark.parametrize("indirect", [False, True])
+def test_wrong_pdf_count_keeps_all_healthy_pages(tmp_path, indirect):
+    path = tmp_path / "wrong-count.pdf"
+    path.write_bytes(damaged_pdf(count=10, missing=0, declared=30, indirect=indirect))
+    result = media_text.extract(str(path), media_text.PDF_MIME)
+    assert result.units_total == 10 and len(result.sections) == 10
+    assert result.pages_missing == 0 and result.note is None
+
+
+@pytest.mark.parametrize("indirect", [False, True])
+def test_actual_media_read_names_missing_pdf_kids(paired_dbs, monkeypatch, indirect):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", chat_policy.load_chat_policy({}))
+    with paired_dbs.messages() as conn:
+        _insert(conn, "MISSINGKIDS", "missing.pdf")
+    _cache("document_20260904_100000_MISSINGKIDS.pdf", damaged_pdf(count=10, missing=4, indirect=indirect))
+    blocks = media_read.read_media(ALICE, "MISSINGKIDS", as_text=True)
+    metadata = json.loads(blocks[-1].text)
+    assert metadata["pages_total"] == 6 and metadata["pages_missing"] == 4
+    assert any("4 page-tree reference(s)" in block.text for block in blocks)
+    assert sum("--- page " in block.text for block in blocks) == 6
+
+
+def test_all_pdf_kids_missing_is_invalid_input(tmp_path):
+    path = tmp_path / "all-missing.pdf"
+    path.write_bytes(damaged_pdf(count=10, missing=10))
+    with pytest.raises(ToolError, match="no readable pages") as failure:
+        media_text.extract(str(path), media_text.PDF_MIME)
+    assert failure.value.code == "invalid_argument"
+
+
+@POSIX
+def test_existing_export_root_and_nested_directories_keep_modes(tmp_path, monkeypatch):
+    root = tmp_path / "exports"
+    nested = root / "unrelated" / "deep"
+    nested.mkdir(parents=True)
+    for folder in (root, nested.parent, nested):
+        os.chmod(folder, 0o755)
+    archive = root / "messages-all-20261008T100000Z.ndjson"
+    archive.write_text("synthetic")
+    os.chmod(archive, 0o644)
+    deep_archive = nested / archive.name
+    deep_archive.write_text("not registered")
+    os.chmod(deep_archive, 0o644)
+    custom = nested / "registered.ndjson"
+    custom.write_text("synthetic")
+    private_files.record_export(str(root), str(custom))
+    os.chmod(custom, 0o644)
+    # Even a scan of the unrelated subtree is a regression.
+    monkeypatch.setattr(os, "walk", lambda *_args, **_kwargs: pytest.fail("recursive export traversal"))
+    private_files.tighten_existing_artifacts(str(tmp_path / "absent"), str(root), str(tmp_path / "absent2"))
+    assert mode(archive) == mode(custom) == 0o600
+    assert mode(deep_archive) == 0o644
+    assert [mode(folder) for folder in (root, nested.parent, nested)] == [0o755] * 3
+
+
+@POSIX
+def test_export_continues_when_fchmod_is_unsupported(store, tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("WHATSAPP_EXPORT_DIR", str(tmp_path / "exports"))
+    private_files._warn_permissions.cache_clear()
+
+    def refused(*_args):
+        raise PermissionError(errno.EPERM, "synthetic private path")
+
+    monkeypatch.setattr(os, "fchmod", refused)
+    with caplog.at_level(logging.WARNING, logger="whatsapp_mcp"):
+        result = export.export_messages(out_path="archive.ndjson")
+        again = export.export_messages(out_path="second.ndjson")
+    assert len(Path(result["path"]).read_text().splitlines()) == result["count"] == 5
+    assert again["count"] == 5
+    assert len([row for row in caplog.records if "artifact permissions" in row.message]) == 1
+    assert all(
+        "synthetic private path" not in row.message and str(tmp_path) not in row.message for row in caplog.records
+    )
+
+
+@POSIX
+def test_old_notes_database_is_tightened_before_open_and_first_query(tmp_path, monkeypatch):
+    database = tmp_path / "notes.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE legacy (value TEXT)")
+        conn.execute("INSERT INTO legacy VALUES ('synthetic')")
+    os.chmod(database, 0o644)
+    original_fchmod = os.fchmod
+    original_connect = sqlite3.connect
+    observed = []
+
+    def check_fd(fd, permissions):
+        observed.append("before fchmod")
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        original_fchmod(fd, permissions)
+
+    def check_connect(*args, **kwargs):
+        observed.append("before connect")
+        assert mode(database) == 0o600
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(os, "fchmod", check_fd)
+    monkeypatch.setattr(sqlite3, "connect", check_connect)
+    conn = private_files.notes_connection(str(database), create=False, timeout=1)
+    try:
+        assert conn.execute("SELECT value FROM legacy").fetchone() == ("synthetic",)
+    finally:
+        conn.close()
+    assert observed == ["before fchmod", "before connect"]
+
+
+@POSIX
+@pytest.mark.parametrize("connector", [notes._connect, media_notes._connect])
+def test_notes_queries_continue_when_permission_adjustments_fail(tmp_path, monkeypatch, caplog, connector):
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "messages.db"))
+    database = tmp_path / "notes.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE legacy (value TEXT)")
+        conn.execute("INSERT INTO legacy VALUES ('synthetic')")
+    os.chmod(database, 0o644)
+    private_files._warn_permissions.cache_clear()
+
+    def refused(*_args, **_kwargs):
+        raise PermissionError(errno.EPERM, "synthetic private path")
+
+    monkeypatch.setattr(os, "chmod", refused)
+    monkeypatch.setattr(os, "fchmod", refused)
+    with caplog.at_level(logging.WARNING, logger="whatsapp_mcp"):
+        conn = connector(create=True)
+        try:
+            assert conn.execute("SELECT value FROM legacy").fetchone() == ("synthetic",)
+        finally:
+            conn.close()
+    assert len(caplog.records) == 1 and "notes database" in caplog.records[0].message
+    assert str(tmp_path) not in caplog.records[0].message
+
+
+@POSIX
+@pytest.mark.parametrize(
+    "failure",
+    ["notes", "archive", "uploads", "manifest_read", "manifest_utf8", "readonly", "unsupported"],
+)
+def test_real_startup_survives_permission_and_manifest_failures(tmp_path, failure):
+    store = tmp_path / "store"
+    store.mkdir()
+    database = store / "notes.db"
+    database.write_bytes(b"synthetic")
+    exports = store / "exports"
+    exports.mkdir()
+    archive = exports / "messages-all-20261008T100000Z.ndjson"
+    archive.write_text("synthetic")
+    uploads = tmp_path / "outbox" / ".uploads"
+    uploads.mkdir(parents=True)
+    manifest = exports / private_files.EXPORT_MANIFEST
+    manifest.write_bytes(b"\xff" if failure == "manifest_utf8" else b'"custom.ndjson"\n')
+    for path in (database, archive):
+        os.chmod(path, 0o644)
+    os.chmod(uploads, 0o755)
+    os.chmod(manifest, 0o600)
+    target = {"notes": database, "archive": archive, "uploads": uploads}.get(failure, database)
+    # Fault injection occurs in the real stdio entrypoint process. Files and
+    # startup are real; only the unavailable filesystem operation is replaced.
+    runner = """
+import builtins, errno, os, runpy, sys
+failure, target, manifest, entrypoint = sys.argv[1:]
+chmod, opened = os.chmod, builtins.open
+def denied_chmod(path, *args, **kwargs):
+    if os.fspath(path) == target:
+        code = {'readonly': errno.EROFS, 'unsupported': errno.ENOTSUP}.get(failure, errno.EPERM)
+        raise OSError(code, 'synthetic private path')
+    return chmod(path, *args, **kwargs)
+def denied_open(path, *args, **kwargs):
+    if os.fspath(path) == manifest:
+        raise PermissionError(errno.EACCES, 'synthetic private path')
+    return opened(path, *args, **kwargs)
+if failure not in ('manifest_read', 'manifest_utf8'):
+    os.chmod = denied_chmod
+if failure == 'manifest_read':
+    builtins.open = denied_open
+runpy.run_path(entrypoint, run_name='__main__')
+"""
+    env = {
+        **os.environ,
+        "WHATSAPP_DB_PATH": str(store / "messages.db"),
+        "WHATSMEOW_DB_PATH": str(store / "whatsapp.db"),
+        "WHATSAPP_EXPORT_DIR": str(exports),
+        "WHATSAPP_MEDIA_ROOTS": str(uploads.parent),
+        "WHATSAPP_MCP_TRANSPORT": "stdio",
+        "WHATSAPP_PARENT_WATCHDOG_S": "0",
+        "TRANSCRIBE_ON_INGEST": "0",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            runner,
+            failure,
+            str(target),
+            str(manifest),
+            str(Path(media_upload.__file__).with_name("main.py")),
+        ],
+        input="",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "" and "Traceback" not in result.stderr
+    warnings = [line for line in result.stderr.splitlines() if "WARNING" in line]
+    assert len(warnings) == 1, result.stderr
+    assert str(tmp_path) not in warnings[0] and "synthetic private path" not in warnings[0]

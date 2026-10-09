@@ -173,7 +173,11 @@ read uploaded bytes; the bridge never opens `notes.db`.
 Migration recognizes generated `messages-...-<timestamp>.ndjson` archives and
 custom paths recorded in `.mcp-export-artifacts`. Older custom archives with no
 ownership record retain their modes; tighten those explicitly if needed.
-Shared export directories keep their modes when they contain unrelated entries.
+Existing export directories always keep their modes. Migration scans generated
+archives directly under the export root and custom paths recorded in the manifest,
+without walking the rest of the tree. If the filesystem refuses permission changes
+or the manifest cannot be read, the server logs a warning without private paths and
+continues; files may retain their previous modes.
 An unsafe upload tree is skipped at startup, while upload operations still refuse it.
 
 A chat directory replaced by a symlink is not written to: see

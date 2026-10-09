@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import stat
+from functools import lru_cache
 from pathlib import Path
 
 _EXPORT_NAME = re.compile(r"messages-[\w-]+-[0-9]{8}T[0-9]{6}Z\.ndjson(?:\.part)?\Z")
@@ -16,13 +17,19 @@ _CONVERTED_FILE = re.compile(r"tmp[^/\\]+\.ogg\Z")
 EXPORT_MANIFEST = ".mcp-export-artifacts"
 
 
+@lru_cache(maxsize=32)
+def _warn_permissions(artifact: str) -> None:
+    """Report degraded permissions once per artifact class, without private paths."""
+    logging.getLogger("whatsapp_mcp").warning("Could not restrict MCP-owned %s permissions; continuing", artifact)
+
+
 def record_export(root: str, path: str) -> None:
     """Remember custom export names without claiming ownership of a shared root."""
     relative = os.path.relpath(path, root)
     # One append write per record, safe for concurrent exporters. The names are
     # JSON encoded because out_path can contain newline characters.
     try:
-        fd = _open_fd(os.path.join(root, EXPORT_MANIFEST), os.O_CREAT | os.O_WRONLY | os.O_APPEND)
+        fd = _open_fd(os.path.join(root, EXPORT_MANIFEST), os.O_CREAT | os.O_WRONLY | os.O_APPEND, "export manifest")
         try:
             os.write(fd, (json.dumps(relative) + "\n").encode())
         finally:
@@ -46,29 +53,32 @@ def private_makedirs(path: str) -> None:
         try:
             folder.mkdir(mode=0o700)
             if os.name == "posix":
-                os.chmod(folder, 0o700)
+                tighten(folder, 0o700, "artifact directory")
         except FileExistsError:
             if not folder.is_dir():
                 raise
 
 
-def tighten(path: str | Path, mode: int) -> bool:
+def tighten(path: str | Path, mode: int, artifact: str = "artifact") -> bool:
     """Tighten a real file/directory, never a symlink, on POSIX."""
     if os.name != "posix":
         return False
     try:
         info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            return False
+        if stat.S_IMODE(info.st_mode) == mode:
+            return False
+        os.chmod(path, mode, follow_symlinks=False)
     except FileNotFoundError:
         return False
-    if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+    except OSError:
+        _warn_permissions(artifact)
         return False
-    if stat.S_IMODE(info.st_mode) == mode:
-        return False
-    os.chmod(path, mode, follow_symlinks=False)
     return True
 
 
-def _open_fd(path: str, flags: int) -> int:
+def _open_fd(path: str, flags: int, artifact: str = "artifact") -> int:
     if os.path.islink(path):
         raise OSError("An MCP-owned file must not be a symlink")
     fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -76,7 +86,10 @@ def _open_fd(path: str, flags: int) -> int:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("An MCP-owned file must be regular")
         if os.name == "posix":
-            os.fchmod(fd, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                _warn_permissions(artifact)
         return fd
     except BaseException:
         os.close(fd)
@@ -103,8 +116,8 @@ def notes_connection(path: str, *, create: bool, timeout: float, autocommit: boo
     for suffix in ("", "-wal", "-shm"):
         if os.path.islink(path + suffix):
             raise OSError("An MCP-owned notes file must not be a symlink")
-        tighten(path + suffix, 0o600)
-    os.close(_open_fd(path, os.O_CREAT | os.O_RDWR))
+        tighten(path + suffix, 0o600, "notes database")
+    os.close(_open_fd(path, os.O_CREAT | os.O_RDWR, "notes database"))
     conn = (
         sqlite3.connect(path, timeout=timeout, isolation_level=None)
         if autocommit
@@ -113,7 +126,7 @@ def notes_connection(path: str, *, create: bool, timeout: float, autocommit: boo
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         for suffix in ("", "-wal", "-shm"):
-            tighten(path + suffix, 0o600)
+            tighten(path + suffix, 0o600, "notes database")
         return conn
     except BaseException:
         conn.close()
@@ -122,61 +135,55 @@ def notes_connection(path: str, *, create: bool, timeout: float, autocommit: boo
 
 def tighten_existing_artifacts(notes_path: str, export_root: str, upload_root: str) -> None:
     """Tighten existing MCP-owned artifacts once at startup, with one summary."""
-    files = sum(tighten(notes_path + suffix, 0o600) for suffix in ("", "-wal", "-shm"))
+    files = sum(tighten(notes_path + suffix, 0o600, "notes database") for suffix in ("", "-wal", "-shm"))
     directories = 0
     known: set[str] = set()
     manifest = os.path.join(export_root, EXPORT_MANIFEST)
     if not os.path.islink(manifest) and os.path.isfile(manifest):
-        with open(manifest, encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    relative = json.loads(line)
-                    if not isinstance(relative, str):
+        try:
+            with open(manifest, encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        relative = json.loads(line)
+                        if not isinstance(relative, str):
+                            continue
+                        candidate = os.path.abspath(os.path.join(export_root, relative))
+                        if (
+                            os.path.commonpath([export_root, candidate]) == export_root
+                            and os.path.realpath(candidate) == candidate
+                        ):
+                            known.update((candidate, candidate + ".part"))
+                    except (ValueError, OSError):
                         continue
-                    candidate = os.path.abspath(os.path.join(export_root, relative))
-                    if (
-                        os.path.commonpath([export_root, candidate]) == export_root
-                        and os.path.realpath(candidate) == candidate
-                    ):
-                        known.update((candidate, candidate + ".part"))
-                except (ValueError, OSError):
-                    continue
+        except (OSError, UnicodeDecodeError):
+            _warn_permissions("export manifest")
     if os.path.isdir(export_root) and not os.path.islink(export_root):
-        owned_directories: set[str] = set()
-        for folder, subdirs, filenames in os.walk(export_root, topdown=False, followlinks=False):
-            owned = [
-                name
-                for name in filenames
-                if not os.path.islink(os.path.join(folder, name))
-                and (
-                    _EXPORT_NAME.fullmatch(name)
-                    or os.path.join(folder, name) in known
-                    or os.path.join(folder, name) == manifest
-                )
-            ]
-            files += sum(tighten(os.path.join(folder, name), 0o600) for name in owned)
-            # Shared directories retain their modes: tightening an ancestor
-            # would remove access to unrelated files even when their modes stay.
-            if (
-                (owned or subdirs)
-                and len(owned) == len(filenames)
-                and all(os.path.join(folder, name) in owned_directories for name in subdirs)
-            ):
-                directories += tighten(folder, 0o700)
-                owned_directories.add(folder)
+        # Default archives are written directly under the root. Custom nested
+        # paths come from the manifest; never crawl unrelated subdirectories.
+        known.add(manifest)
+        try:
+            known.update(str(entry) for entry in Path(export_root).iterdir() if _EXPORT_NAME.fullmatch(entry.name))
+        except OSError:
+            _warn_permissions("export directory")
+        files += sum(tighten(path, 0o600, "export artifact") for path in known if not os.path.isdir(path))
     # An unsafe uploads root cannot block unrelated read tools at startup.
     if os.path.realpath(upload_root) == os.path.abspath(upload_root) and os.path.isdir(upload_root):
-        directories += tighten(upload_root, 0o700)
-        for entry in Path(upload_root).iterdir():
+        directories += tighten(upload_root, 0o700, "upload directory")
+        try:
+            entries = list(Path(upload_root).iterdir())
+        except OSError:
+            _warn_permissions("upload directory")
+            entries = []
+        for entry in entries:
             if entry.is_symlink():
                 continue
             if entry.is_dir() and _UPLOAD_FOLDER.fullmatch(entry.name):
                 for folder, subdirs, filenames in os.walk(entry, followlinks=False):
                     subdirs[:] = [name for name in subdirs if not os.path.islink(os.path.join(folder, name))]
-                    directories += tighten(folder, 0o700)
-                    files += sum(tighten(os.path.join(folder, name), 0o600) for name in filenames)
+                    directories += tighten(folder, 0o700, "upload directory")
+                    files += sum(tighten(os.path.join(folder, name), 0o600, "upload artifact") for name in filenames)
             elif entry.is_file() and _CONVERTED_FILE.fullmatch(entry.name):
-                files += tighten(entry, 0o600)
+                files += tighten(entry, 0o600, "upload artifact")
     if files or directories:
         logging.getLogger("whatsapp_mcp").info(
             "Tightened MCP-owned permissions: %d files, %d directories", files, directories

@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from errors import ToolError
-from private_files import private_makedirs, private_open
+from private_files import private_makedirs, private_open, tighten
 from untrusted import sanitize_name
 
 # Above this the tool refuses the payload before decoding it. On the http
@@ -181,7 +181,7 @@ def create_upload() -> str:
     folder = os.path.join(root, f"{stamp}-{secrets.token_hex(16)}")
     os.mkdir(folder, mode=0o700)
     if os.name == "posix":
-        os.chmod(folder, 0o700)
+        tighten(folder, 0o700, "upload directory")
     return folder
 
 
@@ -330,13 +330,13 @@ def safe_filename(name: str, default: str) -> str:
     ``_``, leading/trailing dots and spaces go, and the result is capped at
     200 UTF-8 bytes with the extension kept. ``default`` when nothing is left.
     """
-    cleaned = sanitize_name(name or "", max_chars=max(1, len(name or "")))
+    cleaned = sanitize_name(name or "", max_chars=max(1, len(name or ""))).replace("\u2028", "").replace("\u2029", "")
     base = os.path.basename(cleaned.replace("\\", "/").strip())
     base = _UNSAFE.sub("_", base).strip(" .")
     if not base:
         return default
     device = base.split(".", 1)[0].rstrip(" .").upper()
-    if device in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"(?:COM|LPT)[1-9¹²³]", device):
+    if device in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(r"(?:COM|LPT)[0-9¹²³]", device):
         base = "_" + base
     if len(base.encode("utf-8")) > 200:
         stem, ext = os.path.splitext(base)
