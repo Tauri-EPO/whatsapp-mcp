@@ -39,6 +39,12 @@ jobs:
         run: |
           cd whatsapp-mcp-server
           uv run pyright
+      - name: Install audio test tooling
+        # Exercise the provider's real oversized-audio chunking and existing
+        # audio integration tests rather than depending on the runner image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
       - name: Run tests
         run: |
           cd whatsapp-mcp-server
