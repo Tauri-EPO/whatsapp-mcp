@@ -128,9 +128,13 @@ func (o *originalTimestamps) take(id string) (time.Time, bool) {
 }
 
 func (b *Bridge) handleMessage(msg *events.Message) {
-	if b.ctx != nil && b.ctx.Err() != nil {
-		return
+	lookupCtx := b.ctx
+	if lookupCtx == nil {
+		lookupCtx = context.Background()
 	}
+	// The SDK may acknowledge a delivered message during shutdown. Preserve
+	// its final archive write; only SDK reads and retry waits are cancellable.
+	writeCtx := context.WithoutCancel(lookupCtx)
 	client, messageStore, logger := b.currentClient(), b.Store, b.Log
 	// View-once envelopes hide the real media one level down. Work on a local
 	// copy of the event with the envelope removed so every extractor below
@@ -319,16 +323,22 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			if ex.edit != nil {
 				targetID = ex.edit.GetKey().GetID()
 			}
-			locationSender, err = b.liveLocationSender(b.ctx, messageStore.db, targetID, chatJID, storedSenderJID, msg.Info.IsFromMe)
+			locationSender, err = b.liveLocationSender(lookupCtx, messageStore.db, targetID, chatJID, storedSenderJID, msg.Info.IsFromMe)
 			if err != nil {
-				return err
+				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				locationSender = storedSenderJID
 			}
 		}
 		if ex.edit == nil {
 			var err error
-			ex.editAuthorAlias, ex.editChatAlias, err = b.pendingEditAlias(b.ctx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
+			ex.editAuthorAlias, ex.editChatAlias, err = b.pendingEditAlias(lookupCtx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
 			if err != nil {
-				return err
+				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				ex.editAuthorAlias, ex.editChatAlias = "", ""
 			}
 			// A delivery's verified phone alternative may be available before
 			// the SDK map catches up. Retain its original LID author for matching.
@@ -340,7 +350,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				ex.editChatAlias = msg.Info.Chat.ToNonAD().String()
 			}
 		}
-		return messageStore.BatchContext(b.ctx, func(batch *messageBatch) error {
+		return messageStore.BatchContext(writeCtx, func(batch *messageBatch) error {
 			var err error
 			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, locationSender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
 			return err

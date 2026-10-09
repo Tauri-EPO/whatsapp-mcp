@@ -227,12 +227,16 @@ column itself is not exposed by MCP readers or webhooks.
 Incoming `MESSAGE_EDIT` envelopes update only the original row in the delivery
 chat, matching its sender namespace (including a verified LID alias) and account
 ownership. Text and mention metadata update together; FTS triggers update the
-searchable text in the same write. The integer `message_edit_timestamp`
+searchable text in the same write. Hosted business sender forms use the same
+canonical phone/LID namespace classification as archived message rows. The integer
+`message_edit_timestamp`
 retains the latest protocol millisecond timestamp: older edits and original-row
 replays cannot restore stale content. A missing target retains a bounded pending
-edit; delivery envelopes create no message, chat, FTS row or conversation activity.
-Edit-only phone-history payloads also create no orphan chat, while preserving
-authoritative disappearing-message settings for existing conversations. Phone history applies
+edit; live delivery envelopes create no message, chat, FTS row or conversation activity.
+An edit-only phone-history conversation retains the phone's authoritative name
+and disappearing-message settings, creating its chat metadata when needed so
+later sends respect that timer. It creates no original message or FTS row.
+Phone history applies
 edits after its original rows, including targets in later chunks. Replacement
 payloads use the shared envelope extractor, preserving wrapped captions and
 mentions. SDK-parsed live edits also recover direct/ephemeral protocols from
@@ -258,11 +262,17 @@ independent of the protocol timestamp). Newer versions and replays do not renew
 that deadline. Expired entries are removed at startup and on the next edit or
 original write, and never apply to a later original. After expiry, a new delivery
 can begin a new retention period. The table retains at most 1,024 pending edits
-globally and 128 per chat, evicting the oldest arrivals first; each pending
+globally, 128 per chat and 32 per typed sender in each chat. Sender caps apply
+before chat/global oldest-arrival eviction, preventing one member's burst of
+unknown-target edits from consuming a chat's entire budget; each pending
 payload, including its identifiers, text and mentions, is limited to 64 KiB.
 These are internal bounds, with no new environment variable. Targets outside
 the TTL or caps retain their original text. Pending SQL uses the existing bounded
 BUSY retry owner and cancellation context; no SDK read occurs inside its writer.
+Live message persistence keeps its final write during shutdown using a context
+without cancellation, while retry waits and SDK lookups remain cancellable.
+A cancelled live alias lookup or a failed author mapping falls back to storing
+the original without an unverified alias, instead of losing a delivered message.
 
 History sender/LID reads and live-location alias preparation run before the
 archive writer transaction, using the bridge cancellation context. Preparation

@@ -138,27 +138,10 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// state may advance the marker, after accepted rows are written.
 			markRead := !preserveExisting && conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
-			needsChat := preserveExisting
-			hasEdits := false
-			for _, row := range messages {
-				if row == nil || row.Message == nil {
-					continue
-				}
-				ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID())
-				if ex.edit == nil {
-					needsChat = true
-					break
-				}
-				hasEdits = true
-			}
-			needsChat = needsChat || !hasEdits
+			// A phone-history conversation is authoritative chat metadata even
+			// when it contains only edits. Retain its name and disappearing timer;
+			// live orphan edits still cannot materialize a chat.
 			if err := retry(func() error {
-				if !needsChat {
-					// Persist authoritative names only for existing chats;
-					// an orphan edit alone must not create a conversation.
-					_, err := messageStore.db.ExecContext(ctx, "UPDATE chats SET name=? WHERE jid=? AND ?<>''", name, chatJID, name)
-					return err
-				}
 				if preserveExisting {
 					return storeChatWith(contextExecer{db: messageStore.db, ctx: ctx}, chatJID, name, time.Time{})
 				}
@@ -171,13 +154,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				continue
 			}
 			if !preserveExisting {
-				var settingsErr error
-				if needsChat {
-					settingsErr = messageStore.UpdateChatEphemeralSettings(chatJID, conversation.GetEphemeralExpiration(), conversation.GetEphemeralSettingTimestamp())
-				} else {
-					settingsErr = messageStore.updateExistingChatEphemeralSettings(ctx, chatJID, conversation.GetEphemeralExpiration(), conversation.GetEphemeralSettingTimestamp())
-				}
-				if err := settingsErr; err != nil {
+				if err := messageStore.UpdateChatEphemeralSettings(chatJID, conversation.GetEphemeralExpiration(), conversation.GetEphemeralSettingTimestamp()); err != nil {
 					logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 				}
 			}

@@ -851,17 +851,6 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 	return err
 }
 
-// Edit-only history carries authoritative metadata for existing conversations,
-// but must not materialize a chat solely to retain an orphan edit.
-func (store *MessageStore) updateExistingChatEphemeralSettings(ctx context.Context, jid string, expiration uint32, settingTimestamp int64) error {
-	if settingTimestamp == 0 {
-		return nil
-	}
-	_, err := store.db.ExecContext(ctx, `UPDATE chats SET ephemeral_expiration=?,ephemeral_setting_timestamp=?
-		WHERE jid=? AND ephemeral_setting_timestamp<=?`, expiration, settingTimestamp, jid, settingTimestamp)
-	return err
-}
-
 // MarkChatRead records that we read the chat up to readAt. The marker merges
 // monotonically — out-of-order receipts and history-sync backfill can never
 // move it backwards and un-read a chat. Like UpdateChatEphemeralSettings it

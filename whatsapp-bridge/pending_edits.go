@@ -15,6 +15,7 @@ const (
 	pendingEditTTL       = 24 * time.Hour
 	pendingEditGlobalCap = 1024
 	pendingEditChatCap   = 128
+	pendingEditSenderCap = 32
 	pendingEditMaxBytes  = 64 << 10
 )
 
@@ -44,6 +45,23 @@ func prunePendingEdits(ex sqlExecer, now time.Time) error {
 	return err
 }
 
+// Match the namespace stored on messages, including hosted business senders.
+// The SDK's alternate-JID lookup also requires these canonical PN/LID servers.
+func pendingEditUserJID(sender string) (types.JID, bool) {
+	jid, err := types.ParseJID(sender)
+	if err != nil || jid.User == "" {
+		return types.EmptyJID, false
+	}
+	_, server := splitSenderJID(storedSender(jid))
+	namespace, ok := server.(string)
+	if !ok {
+		return types.EmptyJID, false
+	}
+	jid = jid.ToNonAD()
+	jid.Server = namespace
+	return jid, true
+}
+
 func applyOrDeferMessageEdit(ex locationWriter, chat, sender string, own bool, edit *waE2E.ProtocolMessage, fallback, now time.Time) error {
 	if chat == "" || edit.GetKey().GetID() == "" || edit.GetEditedMessage() == nil {
 		return nil
@@ -58,8 +76,8 @@ func applyOrDeferMessageEdit(ex locationWriter, chat, sender string, own bool, e
 	if exists {
 		return applyMessageEditWith(ex, chat, sender, own, edit, fallback)
 	}
-	jid, err := types.ParseJID(sender)
-	if err != nil || jid.User == "" || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
+	jid, ok := pendingEditUserJID(sender)
+	if !ok {
 		return nil // an unattributed/group author cannot authorize a later edit
 	}
 	stamp := edit.GetTimestampMS()
@@ -74,7 +92,7 @@ func applyOrDeferMessageEdit(ex locationWriter, chat, sender string, own bool, e
 	if len(chat)+len(sender)+len(edit.GetKey().GetID())+len(replacement.content)+len(mentions) > pendingEditMaxBytes {
 		return nil // bounded pending payloads; never truncate an eventual edit
 	}
-	_, err = ex.Exec(`INSERT INTO pending_edits
+	_, err := ex.Exec(`INSERT INTO pending_edits
 		(chat_jid,target_id,sender,sender_server,is_from_me,edit_timestamp,content,mentions,arrived_ms,expires_ms)
 		VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_jid,target_id,sender,sender_server,is_from_me)
 		DO UPDATE SET edit_timestamp=excluded.edit_timestamp,content=excluded.content,mentions=excluded.mentions
@@ -88,6 +106,14 @@ func applyOrDeferMessageEdit(ex locationWriter, chat, sender string, own bool, e
 }
 
 func capPendingEdits(ex sqlExecer, chat string) error {
+	// Reduce one member's burst before chat/global eviction can reach edits
+	// belonging to other authors. Author identity includes its namespace.
+	if _, err := ex.Exec(`DELETE FROM pending_edits WHERE rowid IN (
+		SELECT rowid FROM (SELECT rowid,ROW_NUMBER() OVER (
+		PARTITION BY sender,sender_server,is_from_me ORDER BY arrived_ms DESC,rowid DESC) AS position
+		FROM pending_edits WHERE chat_jid=?) WHERE position>?)`, chat, pendingEditSenderCap); err != nil {
+		return err
+	}
 	if _, err := ex.Exec(`DELETE FROM pending_edits WHERE rowid IN (
 		SELECT rowid FROM pending_edits WHERE chat_jid=? ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, chat, pendingEditChatCap); err != nil {
 		return err
@@ -100,8 +126,8 @@ func capPendingEdits(ex sqlExecer, chat string) error {
 // Resolve only a verified alternative author, before acquiring the archive writer.
 // No cursor or SDK read survives into consumption's transaction.
 func (b *Bridge) pendingEditAlias(ctx context.Context, id, chat, sender string, own bool) (string, string, error) {
-	author, err := types.ParseJID(sender)
-	if err != nil || author.User == "" || (author.Server != types.DefaultUserServer && author.Server != types.HiddenUserServer) {
+	author, ok := pendingEditUserJID(sender)
+	if !ok {
 		return "", "", nil
 	}
 	opposite := types.HiddenUserServer
@@ -158,6 +184,9 @@ func (b *Bridge) pendingEditAlias(ctx context.Context, id, chat, sender string, 
 				return chatAlias, chatAlias, nil
 			}
 			alias, err := b.pendingEditAlt(ctx, sender)
+			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				return "", chatAlias, nil // unverified author cannot block the original
+			}
 			if sender == chat && chatAlias == "" {
 				chatAlias = alias
 			}
@@ -168,8 +197,8 @@ func (b *Bridge) pendingEditAlias(ctx context.Context, id, chat, sender string, 
 }
 
 func (b *Bridge) pendingEditAlt(ctx context.Context, sender string) (string, error) {
-	jid, err := types.ParseJID(sender)
-	if err != nil || jid.User == "" || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
+	jid, ok := pendingEditUserJID(sender)
+	if !ok {
 		return "", nil
 	}
 	alt, err := lookupAltJID(ctx, b.currentClient(), jid.ToNonAD())
@@ -179,9 +208,10 @@ func (b *Bridge) pendingEditAlt(ctx context.Context, sender string) (string, err
 	if err != nil {
 		return "", err
 	}
-	if alt.User != "" && ((jid.Server == types.DefaultUserServer && alt.Server == types.HiddenUserServer) ||
-		(jid.Server == types.HiddenUserServer && alt.Server == types.DefaultUserServer)) {
-		return alt.ToNonAD().String(), nil
+	normalizedAlt, valid := pendingEditUserJID(alt.String())
+	if valid && ((jid.Server == types.DefaultUserServer && normalizedAlt.Server == types.HiddenUserServer) ||
+		(jid.Server == types.HiddenUserServer && normalizedAlt.Server == types.DefaultUserServer)) {
+		return normalizedAlt.String(), nil
 	}
 	return "", nil
 }

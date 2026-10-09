@@ -109,7 +109,7 @@ func TestPendingEditHistoryAcrossPayloadsAndReplay(t *testing.T) {
 	if err := ms.db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&chats); err != nil {
 		t.Fatal(err)
 	}
-	if pendingCount(t, ms) != 1 || chats != 0 {
+	if pendingCount(t, ms) != 1 || chats != 1 {
 		t.Fatalf("pending=%d chats=%d", pendingCount(t, ms), chats)
 	}
 	original := largeHistoryFixture(1)
@@ -203,13 +203,14 @@ func TestPendingEditCapsAndReplayDoesNotExtendTTL(t *testing.T) {
 	firstExpiry := now.Add(pendingEditTTL).UnixMilli()
 	ms.editNow = func() time.Time { return now }
 	stamp := time.Unix(1772359200, 0)
+	senders := []string{phonePN.String(), selfPhone.String(), "12025550100@s.whatsapp.net", "12025550101@s.whatsapp.net", "15551234567@s.whatsapp.net"}
 	if err := ms.Batch(func(batch *messageBatch) error {
 		chats := []string{phonePN.String(), "120363000000000001@g.us", "120363000000000002@g.us",
 			"120363000000000003@g.us", "120363000000000004@g.us", "120363000000000009@g.us", "1@g.us", "3@g.us", "123@g.us"}
 		for index := range pendingEditGlobalCap + 1 {
 			chat := chats[index/pendingEditChatCap]
 			edit := incomingEdit(fmt.Sprintf("CAP-%d", index), "capword", stamp.UnixMilli()).EditedMessage.Message.ProtocolMessage
-			if err := batch.ApplyMessageEdit(chat, phonePN.String(), false, edit, stamp); err != nil {
+			if err := batch.ApplyMessageEdit(chat, senders[index%len(senders)], false, edit, stamp); err != nil {
 				return err
 			}
 		}
@@ -229,7 +230,7 @@ func TestPendingEditCapsAndReplayDoesNotExtendTTL(t *testing.T) {
 	}
 	for index := range pendingEditChatCap + 1 {
 		edit := incomingEdit(fmt.Sprintf("CHAT-%d", index), "capword", stamp.UnixMilli()).EditedMessage.Message.ProtocolMessage
-		if err := ms.ApplyMessageEdit(phonePN.String(), phonePN.String(), false, edit, stamp); err != nil {
+		if err := ms.ApplyMessageEdit(phonePN.String(), senders[index%len(senders)], false, edit, stamp); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -242,7 +243,7 @@ func TestPendingEditCapsAndReplayDoesNotExtendTTL(t *testing.T) {
 	}
 	now = now.Add(pendingEditTTL - time.Minute)
 	replay := incomingEdit(fmt.Sprintf("CHAT-%d", pendingEditChatCap), "newerword", stamp.Add(time.Minute).UnixMilli()).EditedMessage.Message.ProtocolMessage
-	if err := ms.ApplyMessageEdit(phonePN.String(), phonePN.String(), false, replay, stamp); err != nil {
+	if err := ms.ApplyMessageEdit(phonePN.String(), senders[pendingEditChatCap%len(senders)], false, replay, stamp); err != nil {
 		t.Fatal(err)
 	}
 	var retainedExpiry int64
@@ -253,7 +254,7 @@ func TestPendingEditCapsAndReplayDoesNotExtendTTL(t *testing.T) {
 		t.Fatalf("newer version refreshed TTL: got %d want %d", retainedExpiry, firstExpiry)
 	}
 	now = now.Add(time.Minute)
-	if err := ms.ApplyMessageEdit(phonePN.String(), phonePN.String(), false, replay, stamp); err != nil {
+	if err := ms.ApplyMessageEdit(phonePN.String(), senders[pendingEditChatCap%len(senders)], false, replay, stamp); err != nil {
 		t.Fatal(err)
 	}
 	if pendingCount(t, ms) != 1 {
@@ -261,7 +262,7 @@ func TestPendingEditCapsAndReplayDoesNotExtendTTL(t *testing.T) {
 	}
 }
 
-func TestPendingEditConsumptionRollsBackAndShutdownKeepsPending(t *testing.T) {
+func TestPendingEditConsumptionRollsBackAndShutdownArchivesLive(t *testing.T) {
 	ms, _ := lockedProductionStore(t)
 	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
 	stamp := time.Unix(1772359200, 0)
@@ -295,9 +296,10 @@ func TestPendingEditConsumptionRollsBackAndShutdownKeepsPending(t *testing.T) {
 	event := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "oldword")
 	event.Info.ID = original.ID
 	b.handleEvent(event, nil)
-	if pendingCount(t, ms) != 1 {
-		t.Fatal("shutdown consumed edit")
+	if pendingCount(t, ms) != 0 {
+		t.Fatal("shutdown failed to consume a matching edit with the live original")
 	}
+	assertPendingArchive(t, ms, original.ID, phonePN.String(), "atomiceditword", "", stamp.Add(time.Minute).UnixMilli())
 	if err := ms.StoreMessage(original); err != nil {
 		t.Fatal(err)
 	}
@@ -594,19 +596,16 @@ func TestPendingEditOnlyHistoryPreservesOtherConversationMetadata(t *testing.T) 
 			if err := ms.db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&chats); err != nil {
 				t.Fatal(err)
 			}
-			if onlyEdits {
-				if chats != 0 || pendingCount(t, ms) != 1 {
-					t.Fatalf("edit-only chats=%d pending=%d", chats, pendingCount(t, ms))
-				}
-			} else {
-				var name string
-				var expiry int
-				if err := ms.db.QueryRow("SELECT name,ephemeral_expiration FROM chats").Scan(&name, &expiry); err != nil {
-					t.Fatal(err)
-				}
-				if chats != 1 || name != "Alice" || expiry != 86400 {
-					t.Fatalf("metadata chats=%d name=%s expiry=%d", chats, name, expiry)
-				}
+			if onlyEdits && pendingCount(t, ms) != 1 {
+				t.Fatal("edit-only history lost pending replacement")
+			}
+			var name string
+			var expiry int
+			if err := ms.db.QueryRow("SELECT name,ephemeral_expiration FROM chats").Scan(&name, &expiry); err != nil {
+				t.Fatal(err)
+			}
+			if chats != 1 || name != "Alice" || expiry != 86400 {
+				t.Fatalf("metadata chats=%d name=%s expiry=%d", chats, name, expiry)
 			}
 		})
 	}
@@ -842,5 +841,272 @@ func TestPendingEditOnlyHistoryRefreshesExistingChatName(t *testing.T) {
 	}
 	if name != "Alice" || pendingCount(t, ms) != 1 {
 		t.Fatalf("name=%q pending=%d", name, pendingCount(t, ms))
+	}
+}
+
+func TestPendingEditLiveShutdownStillArchivesOriginal(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	for _, pendingAlias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pending-alias=%v", pendingAlias), func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+			chat := types.NewJID("120363000000000001", types.GroupServer)
+			stamp := time.Unix(1772359200, 0)
+			if pendingAlias {
+				edit := incomingEdit("SHUTDOWN-ORIGINAL", "aliaseditword", stamp.Add(time.Minute).UnixMilli()).EditedMessage.Message.ProtocolMessage
+				if err := ms.ApplyMessageEdit(chat.String(), phoneLID.String(), false, edit, stamp); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b.cancel()
+			original := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "originalword")
+			original.Info.ID, original.Info.Timestamp = "SHUTDOWN-ORIGINAL", stamp
+			b.handleEvent(original, nil)
+			assertPendingArchive(t, ms, original.Info.ID, chat.String(), "originalword", "", 0)
+			var rows int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 1 || b.metrics.storeFailures.Load() != 0 {
+				t.Fatalf("rows=%d failures=%d", rows, b.metrics.storeFailures.Load())
+			}
+		})
+	}
+}
+
+func TestPendingEditOtherMemberBrokenSessionStillArchivesOriginal(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	for _, mode := range []string{"live", "history"} {
+		t.Run(mode, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			session, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "session.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			boundPool(session, sessionPoolConns)
+			t.Cleanup(func() { _ = session.Close() })
+			container := sqlstore.NewWithDB(session, "sqlite", testLogger())
+			b := testBridge(t, newTestClient(container.LIDMap), ms, testLogger())
+			chat := types.NewJID("120363000000000001", types.GroupServer)
+			stamp := time.Unix(1772359200, 0)
+			edit := incomingEdit("MEMBER-COLLISION", "othermemberword", stamp.Add(time.Minute).UnixMilli()).EditedMessage.Message.ProtocolMessage
+			if err := ms.ApplyMessageEdit(chat.String(), phoneLID.String(), false, edit, stamp); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "live" {
+				original := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "originalword")
+				original.Info.ID, original.Info.Timestamp = "MEMBER-COLLISION", stamp
+				b.handleEvent(original, nil)
+			} else {
+				fixture := largeHistoryFixture(1)
+				conversation := fixture.Data.Conversations[0]
+				conversation.ID = proto.String(chat.String())
+				row := conversation.Messages[0].Message
+				row.Key.ID, row.Participant = proto.String("MEMBER-COLLISION"), proto.String(phonePN.String())
+				row.Message = &waE2E.Message{Conversation: proto.String("originalword")}
+				b.handleHistorySync(fixture)
+			}
+			assertPendingArchive(t, ms, "MEMBER-COLLISION", chat.String(), "originalword", "", 0)
+			if b.metrics.storeFailures.Load() != 0 {
+				t.Fatalf("failures=%d", b.metrics.storeFailures.Load())
+			}
+		})
+	}
+}
+
+func TestPendingEditUnknownHistoryKeepsRecipientVisibleTimer(t *testing.T) {
+	ms, _ := lockedProductionStore(t)
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	b.Connected = func() bool { return true }
+	b.Send = b.sendBackend()
+	chat := "120363000000000001@g.us"
+	fixture := largeHistoryFixture(1)
+	conversation := fixture.Data.Conversations[0]
+	conversation.ID, conversation.Name = proto.String(chat), proto.String("Alice")
+	conversation.Messages[0].Message.Participant = proto.String(phonePN.String())
+	conversation.Messages[0].Message.Message = incomingEdit("ABSENT", "pendingword", 1772359260000)
+	conversation.EphemeralExpiration, conversation.EphemeralSettingTimestamp = proto.Uint32(86400), proto.Int64(1772359200)
+	b.handleHistorySync(fixture)
+	var observed uint32
+	calls := 0
+	b.sendMessage = func(_ context.Context, _ types.JID, message *waE2E.Message) (whatsmeow.SendResponse, error) {
+		calls++
+		observed = message.GetExtendedTextMessage().GetContextInfo().GetExpiration()
+		return whatsmeow.SendResponse{ID: "HISTORY-TIMER-SEND", Timestamp: time.Unix(1772359200, 0)}, nil
+	}
+	body, err := json.Marshal(SendMessageRequest{Recipient: chat, Message: "outboundsendword"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	b.newRESTMux(8080, sendRecipientToken).ServeHTTP(response, seamRequest(http.MethodPost, "/api/send", string(body), sendRecipientToken))
+	if response.Code != http.StatusOK || calls != 1 || observed != 86400 {
+		t.Fatalf("HTTP=%d calls=%d wire expiration=%d", response.Code, calls, observed)
+	}
+	var name string
+	if err := ms.db.QueryRow("SELECT name FROM chats WHERE jid=?", chat).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Alice" {
+		t.Fatalf("name=%q", name)
+	}
+}
+
+func TestPendingEditSenderFloodPreservesOtherMembersAndChats(t *testing.T) {
+	ms, _ := lockedProductionStore(t)
+	stamp := time.Unix(1772359200, 0)
+	chats := []string{"120363000000000001@g.us", "120363000000000002@g.us", "120363000000000003@g.us", "120363000000000004@g.us", "120363000000000009@g.us", "1@g.us", "3@g.us", "123@g.us"}
+	if err := ms.Batch(func(batch *messageBatch) error {
+		for _, chat := range []string{phonePN.String(), chats[0]} {
+			edit := incomingEdit("LEGITIMATE", "legitimateword", stamp.Add(time.Minute).UnixMilli()).EditedMessage.Message.ProtocolMessage
+			if err := batch.ApplyMessageEdit(chat, selfPhone.String(), false, edit, stamp); err != nil {
+				return err
+			}
+		}
+		for _, chat := range chats {
+			for index := range 128 {
+				edit := incomingEdit(fmt.Sprintf("FLOOD-%d", index), "floodword", stamp.UnixMilli()).EditedMessage.Message.ProtocolMessage
+				if err := batch.ApplyMessageEdit(chat, phonePN.String(), false, edit, stamp); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var legitimate, maximum int
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM pending_edits WHERE target_id='LEGITIMATE'").Scan(&legitimate); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT MAX(n) FROM (SELECT COUNT(*) n FROM pending_edits GROUP BY chat_jid,sender,sender_server,is_from_me)").Scan(&maximum); err != nil {
+		t.Fatal(err)
+	}
+	if legitimate != 2 || maximum > 32 {
+		t.Fatalf("legitimate=%d maximum sender pending=%d", legitimate, maximum)
+	}
+	for _, chat := range []string{phonePN.String(), chats[0]} {
+		if err := ms.EnsureChat(chat, "Alice"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ms.StoreMessage(storedMessage{ID: "LEGITIMATE", ChatJID: chat, Sender: selfPhone.String(), Content: "originalword", Timestamp: stamp}); err != nil {
+			t.Fatal(err)
+		}
+		assertPendingArchive(t, ms, "LEGITIMATE", chat, "legitimateword", "", stamp.Add(time.Minute).UnixMilli())
+	}
+}
+
+func TestPendingEditLiveAliasCancellationStillArchivesOriginal(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	ms, _ := lockedProductionStore(t)
+	session, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundPool(session, sessionPoolConns)
+	t.Cleanup(func() { _ = session.Close() })
+	if _, err := session.Exec("CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY,pn TEXT); INSERT INTO whatsmeow_lid_map VALUES (?,?)", phoneLID.User, phonePN.User); err != nil {
+		t.Fatal(err)
+	}
+	container := sqlstore.NewWithDB(session, "sqlite", testLogger())
+	b := testBridge(t, newTestClient(container.LIDMap), ms, testLogger())
+	chat := types.NewJID("120363000000000001", types.GroupServer)
+	stamp := time.Unix(1772359200, 0)
+	edit := incomingEdit("LIVE-ALIAS-CANCEL", "aliaseditword", stamp.Add(time.Minute).UnixMilli()).EditedMessage.Message.ProtocolMessage
+	if err := ms.ApplyMessageEdit(chat.String(), phoneLID.String(), false, edit, stamp); err != nil {
+		t.Fatal(err)
+	}
+	for range sessionPoolConns {
+		conn, err := session.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	original := buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "originalword")
+	original.Info.ID, original.Info.Timestamp = "LIVE-ALIAS-CANCEL", stamp
+	done := make(chan struct{})
+	go func() { defer close(done); b.handleEvent(original, nil) }()
+	deadline := time.After(2 * time.Second)
+	for session.Stats().WaitCount == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("live alias lookup never reached occupied session pool")
+		default:
+			runtime.Gosched()
+		}
+	}
+	b.cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled live lookup did not finish persistence")
+	}
+	assertPendingArchive(t, ms, original.Info.ID, chat.String(), "originalword", "", 0)
+	if b.metrics.storeFailures.Load() != 0 {
+		t.Fatalf("failures=%d", b.metrics.storeFailures.Load())
+	}
+}
+
+func TestPendingEditHostedSenderNamespaces(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	for _, path := range []string{"live", "history"} {
+		for _, lid := range []bool{false, true} {
+			for _, mode := range []string{"same", "verified-alias", "wrong-namespace"} {
+				t.Run(fmt.Sprintf("%s/lid=%v/%s", path, lid, mode), func(t *testing.T) {
+					ms, _ := lockedProductionStore(t)
+					mapping := &mockLIDStore{}
+					b := testBridge(t, newTestClient(mapping), ms, testLogger())
+					chat := types.NewJID("120363000000000001", types.GroupServer)
+					author := types.NewJID(phonePN.User, types.HostedServer)
+					other := types.NewJID(phoneLID.User, types.HostedLIDServer)
+					if lid {
+						author, other = other, author
+					}
+					stamp := time.Unix(1772359200, 0)
+					deliver := func(sender types.JID, message *waE2E.Message) {
+						if path == "live" {
+							event := buildTextMessage(chat, sender, types.EmptyJID, types.EmptyJID, false, "")
+							event.Info.ID, event.Info.Timestamp, event.Message = "HOSTED-TARGET", stamp, message
+							b.handleEvent(event, nil)
+						} else {
+							fixture := largeHistoryFixture(1)
+							conversation := fixture.Data.Conversations[0]
+							conversation.ID = proto.String(chat.String())
+							row := conversation.Messages[0].Message
+							row.Key.ID, row.Participant, row.Message = proto.String("HOSTED-TARGET"), proto.String(sender.String()), message
+							b.handleHistorySync(fixture)
+						}
+					}
+					deliver(author, pendingEditMessage("HOSTED-TARGET", "hostededitword", stamp.Add(time.Minute), true))
+					if pendingCount(t, ms) != 1 {
+						t.Fatalf("hosted edit pending=%d", pendingCount(t, ms))
+					}
+					var server string
+					if err := ms.db.QueryRow("SELECT sender_server FROM pending_edits").Scan(&server); err != nil {
+						t.Fatal(err)
+					}
+					_, expectedServer := splitSenderJID(author.String())
+					if server != expectedServer {
+						t.Fatalf("server=%q want=%v", server, expectedServer)
+					}
+					originalAuthor := author
+					switch mode {
+					case "verified-alias":
+						mapping.lidByPN = map[types.JID]types.JID{phonePN: phoneLID}
+						mapping.pnByLID = map[types.JID]types.JID{phoneLID: phonePN}
+						originalAuthor = other
+					case "wrong-namespace":
+						originalAuthor = types.NewJID(author.User, other.Server)
+					}
+					deliver(originalAuthor, &waE2E.Message{Conversation: proto.String("originalword")})
+					text, mentions, editStamp := "hostededitword", selfPhone.User, stamp.Add(time.Minute).UnixMilli()
+					if mode == "wrong-namespace" {
+						text, mentions, editStamp = "originalword", "", 0
+					}
+					assertPendingArchive(t, ms, "HOSTED-TARGET", chat.String(), text, mentions, editStamp)
+				})
+			}
+		}
 	}
 }
