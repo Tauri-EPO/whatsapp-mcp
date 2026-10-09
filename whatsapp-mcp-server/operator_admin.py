@@ -38,7 +38,7 @@ class AuthenticatedCalls:
 
 
 def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
-    if not mcp_token or len(bridge_token) < 16 or hmac.compare_digest(bridge_token, mcp_token):
+    if not mcp_token or len(bridge_token) < 16 or hmac.compare_digest(bridge_token.encode(), mcp_token.encode()):
         raise ValueError("MCP admin requires a bridge token distinct from the MCP bearer; configure WHATSAPP_MCP_TOKEN")
 
     class Handler(BaseHTTPRequestHandler):
@@ -56,7 +56,7 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
             if (
                 not ipaddress.ip_address(self.client_address[0]).is_loopback
                 or len(auth) != 1
-                or not hmac.compare_digest(auth[0], f"Bearer {bridge_token}")
+                or not hmac.compare_digest(auth[0].encode(), f"Bearer {bridge_token}".encode())
             ):
                 self.reply(401, {"error": "unauthorized"})
             elif headers.get_all("Host", []) != [host] or headers.get_all("Origin", []) not in ([], [f"http://{host}"]):

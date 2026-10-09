@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import queue
 import re
@@ -89,6 +90,12 @@ def limits(deadline=None):
     settings = snapshot(timeout_s=_budget(deadline))["settings"]
     minutes = settings["transcription.monthly_max_minutes"]["value"]
     return (None if minutes is None else minutes * 60), settings["transcription.cap_scope"]["value"]
+
+
+def _exceeds_quota(seconds: float, cap: float) -> bool:
+    # One nanosecond absorbs floating-point addition noise, far below one
+    # decoded 16-kHz sample; it cannot admit another audio sample over the cap.
+    return seconds > cap and not math.isclose(seconds, cap, rel_tol=0, abs_tol=1e-9)
 
 
 def _used(conn, month, scope):
@@ -201,7 +208,7 @@ def _pause(value):
 
 def ingest_quota_exhausted(required_seconds: float = 0):
     remaining = current_usage()["remaining_seconds"]
-    if remaining is not None and (remaining <= 0 or remaining < required_seconds):
+    if remaining is not None and (remaining <= 0 or _exceeds_quota(required_seconds, remaining)):
         _pause(True)
         return True
     return False
@@ -285,7 +292,11 @@ def admission(seconds: float, provider: str, model: str, source: str, *, deadlin
         conn.execute(f"PRAGMA busy_timeout={max(1, int(_budget(deadline) * 1000))}")
         with conn:
             conn.execute("BEGIN IMMEDIATE")
-            if cap is not None and (scope == "all" or source == "ingest") and _used(conn, month, scope) + seconds > cap:
+            if (
+                cap is not None
+                and (scope == "all" or source == "ingest")
+                and _exceeds_quota(_used(conn, month, scope) + seconds, cap)
+            ):
                 if source == "ingest":
                     _pause(True)
                 raise QuotaExceededError(seconds)

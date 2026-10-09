@@ -54,14 +54,14 @@ def occupied_admin_port():
         yield
 
 
-@pytest.mark.parametrize("occupied", [False, True])
-def test_actual_http_startup_without_admin_keeps_mcp_serving_and_warns(tmp_path, occupied):
+@pytest.mark.parametrize("occupied,mcp_token", [(False, None), (True, MCP_TOKEN), (True, "fake-mcp-ä0123456789abcdef")])
+def test_actual_http_startup_without_admin_keeps_mcp_serving_and_warns(tmp_path, occupied, mcp_token):
     with socket.socket() as free:
         free.bind(("127.0.0.1", 0))
         port = free.getsockname()[1]
     env = startup_env(tmp_path, WHATSAPP_MCP_PORT=str(port))
     if occupied:
-        env["WHATSAPP_MCP_TOKEN"] = MCP_TOKEN
+        env["WHATSAPP_MCP_TOKEN"] = mcp_token
     from contextlib import nullcontext
 
     with occupied_admin_port() if occupied else nullcontext():
@@ -76,7 +76,7 @@ def test_actual_http_startup_without_admin_keeps_mcp_serving_and_warns(tmp_path,
                         f"http://127.0.0.1:{port}/mcp",
                         data=json.dumps(INITIALIZE).encode(),
                         headers={
-                            "Authorization": "Bearer " + (MCP_TOKEN if occupied else BRIDGE_TOKEN),
+                            "Authorization": "Bearer " + (mcp_token if occupied else BRIDGE_TOKEN),
                             "Content-Type": "application/json",
                             "Accept": "application/json, text/event-stream",
                         },

@@ -42,6 +42,56 @@ provider = provider_fixture
 
 
 @pytest.mark.parametrize("provider_name", ["whisper_cpp", "openai_compatible"])
+@pytest.mark.parametrize("source_kind", ["tool", "ingest"])
+def test_exact_decimal_quota_fits_real_decoded_files(
+    provider, runtime_archive, monkeypatch, tmp_path, provider_name, source_kind
+):
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", provider_name)
+    if provider_name == "whisper_cpp":
+        monkeypatch.setenv("WHISPER_URL", provider["url"])
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 0.08, "transcription.cap_scope": "all"})
+    source = tmp_path / "exact.wav"
+    _audio(source, 1.6)
+    for _ in range(3):
+        assert not usage.ingest_quota_exhausted(1.6)
+        assert transcribe.transcribe_file(str(source), source=source_kind)["duration_s"] == 1.6
+    assert len(provider["calls"]) == 3
+    assert usage.current_usage()["seconds"] == pytest.approx(4.8)
+    assert usage.current_usage()["remaining_seconds"] == 0
+    assert usage.ingest_quota_exhausted(1.6)
+    _audio(source, 1 / 16000)
+    with pytest.raises(ToolError, match="quota"):
+        transcribe.transcribe_file(str(source), source=source_kind)
+    assert len(provider["calls"]) == 3
+
+
+def test_admin_non_ascii_tokens_and_headers_never_crash(paired_dbs, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_OPERATOR_BIND", "operator.example")
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "fake-bridge-0123456789abcdef")
+    monkeypatch.setenv("WHATSAPP_MCP_TOKEN", "fake-mcp-ä0123456789abcdef")
+    start = operator_admin.start_admin
+    monkeypatch.setattr(operator_admin, "start_admin", lambda bridge, mcp: start(bridge, mcp, port=0))
+    admin = operator_admin.install_admin("http", 8000)
+    assert admin is not None
+    try:
+        for token, expected in [("fake-mcp-ä0123456789abcdef", 401), ("fake-bridge-0123456789abcdef", 200)]:
+            client = http.client.HTTPConnection("127.0.0.1", admin.server_port, timeout=2)
+            try:
+                client.request("GET", "/admin/v1/health", headers={"Authorization": "Bearer " + token})
+                response = client.getresponse()
+                assert response.status == expected
+                response.read()
+            finally:
+                client.close()
+    finally:
+        admin.shutdown()
+        admin.server_close()
+    with pytest.raises(ValueError, match="distinct"):
+        start("fake-same-ä0123456789abcdef", "fake-same-ä0123456789abcdef", port=0)
+
+
+@pytest.mark.parametrize("provider_name", ["whisper_cpp", "openai_compatible"])
 def test_real_tool_worker_duration_notes_metrics_and_restart(
     provider, paired_dbs, monkeypatch, tmp_path, provider_name
 ):
