@@ -2795,3 +2795,5 @@ group participant additions). A `rate_limited` tool error includes
 of repeatedly retrying. `bridge_status.send_usage` reports UTC daily counts and
 effective limits. Oversized batches return `limit_exceeds_batch` with no retry
 delay; split the batch. See [send budgets](CONFIGURATION.md#outbound-send-budgets-and-mcp-token-rotation).
+
+Transcription results include `duration_s`, `provider` and `model`; successful uncached runs are metered in notes.db. Cache hits return stored metadata; legacy transcripts have null duration_s when no duration was recorded. A monthly cap with scope `all` returns `transcription_quota_exceeded` before provider upload when the file does not fit. `bridge_status.transcription_usage` reports UTC monthly usage and remaining quota.

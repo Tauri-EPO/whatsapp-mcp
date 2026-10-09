@@ -74,6 +74,8 @@ def test_tools_report_not_found_and_denied(monkeypatch):
 def test_codes_are_documented():
     assert set(ERROR_CODES) == {
         "rate_limited",
+
+        "transcription_quota_exceeded",
         "not_found",
         "denied",
         "bridge_unavailable",

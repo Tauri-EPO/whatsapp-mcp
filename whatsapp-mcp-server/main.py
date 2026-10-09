@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import signal
 import sys
@@ -2815,6 +2816,12 @@ def transcribe_audio(
         sha256 = stored_notes["sha256"]
         cached_text = stored_notes["notes"].get(TRANSCRIPT_KEY)
         if cached_text and not force and not file_path:
+            try:
+                duration = float(stored_notes["notes"].get("duration_s", ""))
+                if not math.isfinite(duration) or duration < 0:
+                    duration = None
+            except (ValueError, TypeError):
+                duration = None
             return {
                 "success": True,
                 "cached": True,
@@ -2824,6 +2831,9 @@ def transcribe_audio(
                 "text": cached_text,
                 "language": stored_notes["notes"].get(TRANSCRIPT_LANG_KEY),
                 "backend": stored_notes["notes"].get(TRANSCRIPT_BACKEND_KEY),
+                "duration_s": duration,
+                "provider": stored_notes["notes"].get("transcript_provider"),
+                "model": stored_notes["notes"].get("transcript_model"),
             }
     if not file_path:
         if not message_id or not chat_jid:
@@ -2874,6 +2884,10 @@ def build_http_app(
     else:
         app = server.streamable_http_app(**app_kwargs)
     sdk_app = app
+    if token or verifier:
+        from operator_admin import AuthenticatedCalls
+
+        app = AuthenticatedCalls(app)
     app = UploadApp(app, security, upload_max_bytes)
     if verifier:
         oauth_middleware = OAuthMiddleware(
@@ -2928,6 +2942,9 @@ if __name__ == "__main__":
         import runtime_settings
 
         runtime_settings.capture_environment()
+        from operator_admin import install_admin
+
+        install_admin()
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     install_runtime_tool_policy(mcp, _tool_policy)

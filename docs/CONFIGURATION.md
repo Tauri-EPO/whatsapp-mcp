@@ -129,6 +129,8 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)*                       | Alternative to `WHISPER_URL`: local `whisper-cli` binary and `ggml-*.bin` model path |
 | `WHISPER_LANGUAGE`     | `pt`                                     | Default transcription language (`auto` to detect) |
 | `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
+| `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
+| `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe inbound voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` or `direct` (phone/LID one-to-one chats only). Set for both processes. Worker and `coverage().audio` share this scope; explicit group `transcribe_audio` remains available. Runtime key `transcription.ingest_chats` overrides it. |
@@ -1228,3 +1230,42 @@ Neither route is an MCP tool or a bridge data-plane endpoint. Both require the
 operator token and the operator Host/Origin checks. When running the two processes
 outside Compose, pass the same `WHATSAPP_MCP_TOKEN` and `WHATSAPP_MCP_HOST` to the
 bridge so the initial previous hash reflects the MCP deployment policy.
+
+
+
+### Transcription accounting and runtime ceilings
+
+`GET /operator/v1/transcription/usage` requires the operator token and returns
+`month` (UTC `YYYY-MM`), `seconds`, `requests`, `by_source` (tool/ingest),
+`cap_scope`, `cap_seconds` and `remaining_seconds` (null without a cap).
+`bridge_status` includes the same snapshot as `transcription_usage`, with current-month `minutes` as well.
+`/metrics` exposes durable transcription seconds by provider/source, requests
+by provider/outcome, and remaining quota seconds (+Inf without a cap).
+No usage endpoint is served on the MCP HTTP transport and no new MCP tool is added.
+
+The bridge authenticates the operator and forwards a bounded GET to the MCP
+admin listener at `127.0.0.1:8091`, using the **bridge token**. The operator
+secret stays bridge-only. Admin accepts only usage and activity GETs; it is off
+unless `WHATSAPP_OPERATOR_BIND` is set, is never published, and rejects the MCP
+bearer. With the operator enabled, configure `WHATSAPP_MCP_TOKEN` distinct from
+the bridge token (the normal shared-token HTTP fallback is refused).
+
+`PATCH /operator/v1/settings` accepts `transcription.monthly_max_minutes` (number
+0..525600) and `transcription.cap_scope` (`ingest` or `all`). Null clears an
+override. Settings stay in bridge-owned `messages.db`; MCP reads them before each
+file. Effective minutes are the minimum of runtime and deploy limits (an empty
+deploy limit permits a runtime limit); deploy scope `all` always wins. GET reports
+the source of the effective value. Runtime cap raises work only up to the deploy
+ceiling, and neither a raise nor a clear discards usage.
+
+A file that does not fit is left pending without a failure note. Ingest pauses
+and resumes once each in the logs, retrying next cycle after a UTC month rollover
+or a permitted cap raise. Explicit calls subject to the cap return
+`transcription_quota_exceeded`; cached transcripts cost no additional usage.
+`ingest` counts only ingest seconds against the cap; `all` counts both sources.
+Duration comes from the decoded PCM sample count (including all chained Ogg streams), using the packaged ffmpeg without retaining decoded files. Successful whole-file calls count duration and one request, including forced
+retranscriptions; failures record an error outcome and release their reservation.
+Atomic SQLite reservations bound concurrent tool/worker admission. Reservations
+left by a crashed process remain conservatively charged for that UTC month;
+they cannot cause a restart to reopen an uncertain quota. Transcript notes also
+store `duration_s`, `transcript_model` and `transcript_provider`.

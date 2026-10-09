@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 )
 
 const ingestChatsEnv = "TRANSCRIBE_ON_INGEST_CHATS"
+const transcriptionCapEnv = "TRANSCRIBE_MONTHLY_MAX_MINUTES"
+const transcriptionScopeEnv = "TRANSCRIBE_CAP_SCOPE"
 const runtimeSettingsSchema = `CREATE TABLE IF NOT EXISTS runtime_settings (
 	key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP NOT NULL,
 	version INTEGER NOT NULL CHECK(version > 0)
@@ -49,6 +52,19 @@ func parseIngestChats(raw string) (string, error) {
 // Add a definition here when a consumer introduces another runtime knob.
 // Security boundaries (read-only and chat allow-list) remain deploy-time only.
 func settingDefinitions() []settingDefinition {
+	capValue := func(raw json.RawMessage) (any, error) {
+		var value float64
+		if len(raw) == 0 || raw[0] == '"' || string(raw) == "null" || json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 525600 {
+			return nil, errors.New("expected minutes in 0..525600")
+		}
+		return value, nil
+	}
+	scope := func(value string) (any, error) {
+		if value != "ingest" && value != "all" {
+			return nil, errors.New("expected ingest or all")
+		}
+		return value, nil
+	}
 	tools := func(raw json.RawMessage) (any, error) {
 		var names []string
 		if json.Unmarshal(raw, &names) != nil || names == nil {
@@ -73,6 +89,21 @@ func settingDefinitions() []settingDefinition {
 		sendSetting("send.rate_per_day", sendRateDayEnv),
 		sendSetting("send.new_chats_per_day", sendNewChatsEnv),
 		sendSetting("send.min_interval_ms", sendIntervalEnv),
+
+		{"transcription.monthly_max_minutes", transcriptionCapEnv, nil, capValue, func(raw string) (any, error) {
+			value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+			if err != nil {
+				return nil, errors.New("expected non-negative minutes")
+			}
+			return capValue(json.RawMessage(strconv.FormatFloat(value, 'f', -1, 64)))
+		}},
+		{"transcription.cap_scope", transcriptionScopeEnv, "ingest", func(raw json.RawMessage) (any, error) {
+			var value string
+			if json.Unmarshal(raw, &value) != nil {
+				return nil, errors.New("expected ingest or all")
+			}
+			return scope(value)
+		}, func(raw string) (any, error) { return scope(strings.TrimSpace(raw)) }},
 		{"tools.allow", allowToolsEnv, []string{}, tools, toolEnv},
 		{"tools.deny", denyToolsEnv, []string{}, tools, toolEnv},
 		{"transcription.ingest_chats", ingestChatsEnv, "all", func(raw json.RawMessage) (any, error) {
@@ -189,6 +220,17 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 	}
 	applyRuntimeToolFloor(&out, defaults, closedAllow)
 	applyRuntimeSendCeiling(&out, defaults)
+
+	capKey, scopeKey := "transcription.monthly_max_minutes", "transcription.cap_scope"
+	if ceiling, ok := defaults[capKey].Value.(float64); ok {
+		value, valid := out.Settings[capKey].Value.(float64)
+		if !valid || value > ceiling {
+			out.Settings[capKey] = defaults[capKey]
+		}
+	}
+	if defaults[scopeKey].Value == "all" {
+		out.Settings[scopeKey] = defaults[scopeKey]
+	}
 	return out, nil
 }
 

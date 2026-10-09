@@ -102,6 +102,9 @@ class StrictArgumentServer(MCPServer[Any]):
         self, name: str, arguments: dict[str, Any], context: Context[Any, Any] | None = None
     ) -> CallToolResult | InputRequiredResult:
         started = time.monotonic()
+        from operator_admin import record_call
+
+        record_call()
         tool = self._tool_manager.get_tool(name)
         result: CallToolResult | InputRequiredResult | None = None
         token = mcp_metrics_owned.set(True)

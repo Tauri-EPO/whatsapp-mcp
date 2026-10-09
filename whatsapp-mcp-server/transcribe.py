@@ -13,11 +13,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 import time
+import wave
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -261,6 +261,8 @@ def convert_to_wav16k(input_file: str, output_file: str) -> str:
         "error",
         "-i",
         input_file,
+        "-map",
+        "0:a:0",
         "-vn",
         "-ac",
         "1",
@@ -412,7 +414,7 @@ def _remaining(deadline: float) -> float:
     return seconds
 
 
-def _http_parts(source: str, work_dir: str, deadline: float) -> list[Path]:
+def _http_parts(source: str, work_dir: str, deadline: float) -> tuple[list[Path], float]:
     path = Path(source)
     size = path.stat().st_size
     if size > MAX_HTTP_AUDIO_BYTES:
@@ -428,22 +430,9 @@ def _http_parts(source: str, work_dir: str, deadline: float) -> list[Path]:
             "-i",
             source,
         ]
-        duration = subprocess.run(
-            ["ffmpeg", "-nostdin", "-hide_banner", *input_args],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=min(ffmpeg_timeout_s(), _remaining(deadline)),
-        )
-        match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", duration.stderr)
-        if not match or "Audio:" not in duration.stderr:
-            raise TranscriptionError("HTTP transcription input is not supported audio")
-        hours, minutes, fraction = (float(v) for v in match.groups())
-        seconds = hours * 3600 + minutes * 60 + fraction
-        if not 0 < seconds <= MAX_HTTP_AUDIO_SECONDS:
-            raise TranscriptionError("HTTP transcription audio duration must be at most 24 hours")
+        from transcription_usage import audio_duration
+
+        seconds = audio_duration(source, deadline)
         # 32 kbit/s mono, ten-minute parts: far below 25 MB, in chronological order.
         subprocess.run(
             [
@@ -464,6 +453,8 @@ def _http_parts(source: str, work_dir: str, deadline: float) -> list[Path]:
                 "1",
                 "-ar",
                 "16000",
+                "-af",
+                "asetpts=N/SR/TB",
                 "-c:a",
                 "libopus",
                 "-b:a",
@@ -492,7 +483,7 @@ def _http_parts(source: str, work_dir: str, deadline: float) -> list[Path]:
     parts = sorted(Path(work_dir).glob("part-*.ogg"))
     if not parts or len(parts) > 145 or any(p.stat().st_size > HTTP_UPLOAD_LIMIT for p in parts):
         raise TranscriptionError("HTTP transcription chunk exceeds upload limits")
-    return parts
+    return parts, seconds
 
 
 def _transcribe_http(source: Path, config: WhisperConfig, language: str) -> str:
@@ -552,7 +543,31 @@ async def _transcribe_http_request(source: Path, config: WhisperConfig, language
     return text.strip()
 
 
-def transcribe_file(audio_path: str, language: str | None = None, config: WhisperConfig | None = None) -> dict:
+def transcribe_file(
+    audio_path: str, language: str | None = None, config: WhisperConfig | None = None, *, source: str = "tool"
+) -> dict:
+    from transcription_usage import admission
+
+    config = config or load_config()
+    if config.backend is None:
+        raise BackendUnavailableError(describe_setup_help())
+    if config.provider == "openai_compatible":
+        return _transcribe_file(audio_path, language, config, source=source)
+    model = os.path.basename(config.model or "") or "unknown"
+    with tempfile.TemporaryDirectory(prefix="wa-meter-transcribe-") as tmp:
+        prepared = convert_to_wav16k(audio_path, os.path.join(tmp, "audio.wav"))
+        with wave.open(prepared, "rb") as audio:
+            duration = audio.getnframes() / audio.getframerate()
+        with admission(duration, config.provider, model, source):
+            result = _transcribe_wav(prepared, config, (language or "").strip() or config.language)
+            if not isinstance(result.get("text"), str) or not result["text"].strip():
+                raise TranscriptionError("Whisper backend returned no non-empty transcript")
+    return {**result, "duration_s": duration, "provider": config.provider, "model": model}
+
+
+def _transcribe_file(
+    audio_path: str, language: str | None = None, config: WhisperConfig | None = None, *, source: str = "tool"
+) -> dict:
     """Transcribe an audio file with the configured whisper backend.
 
     Returns ``{"text", "language", "backend"}``. Raises TranscriptionError when the
@@ -568,17 +583,31 @@ def transcribe_file(audio_path: str, language: str | None = None, config: Whispe
     if backend == "openai_compatible":
         deadline = time.monotonic() + config.timeout_s
         with tempfile.TemporaryDirectory(prefix="wa-http-transcribe-") as tmp:
-            parts = _http_parts(audio_path, tmp, deadline)
-            text = " ".join(
-                _transcribe_http(part, replace(config, timeout_s=_remaining(deadline)), lang) for part in parts
-            )
-        return {"text": text, "language": lang, "backend": backend, "provider": config.provider, "model": config.model}
+            parts, duration = _http_parts(audio_path, tmp, deadline)
+            from transcription_usage import admission
+
+            with admission(duration, config.provider, config.model or "", source, deadline=deadline):
+                text = " ".join(
+                    _transcribe_http(part, replace(config, timeout_s=_remaining(deadline)), lang) for part in parts
+                )
+        return {
+            "text": text,
+            "language": lang,
+            "backend": backend,
+            "provider": config.provider,
+            "model": config.model,
+            "duration_s": duration,
+        }
 
     with tempfile.TemporaryDirectory(prefix="wa-whisper-") as tmp:
         wav_path = convert_to_wav16k(audio_path, os.path.join(tmp, "audio.wav"))
-        if backend == "server":
-            text = _transcribe_via_server(wav_path, config, lang)
-        else:
-            text = _transcribe_via_cli(wav_path, config, lang)
+        return _transcribe_wav(wav_path, config, lang)
 
-    return {"text": text, "language": lang, "backend": backend}
+
+def _transcribe_wav(wav_path: str, config: WhisperConfig, lang: str) -> dict:
+    if config.backend == "server":
+        text = _transcribe_via_server(wav_path, config, lang)
+    else:
+        text = _transcribe_via_cli(wav_path, config, lang)
+
+    return {"text": text, "language": lang, "backend": config.backend}

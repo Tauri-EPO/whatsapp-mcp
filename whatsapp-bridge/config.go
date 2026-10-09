@@ -98,6 +98,9 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	if cfg.Operator.Bind != "" && cfg.Operator.Port == cfg.Port {
 		collect(errors.New("WHATSAPP_OPERATOR_PORT must differ from WHATSAPP_BRIDGE_PORT"))
 	}
+	if cfg.Operator.Bind != "" && (cfg.Port == 8091 || cfg.Operator.Port == 8091) {
+		collect(errors.New("Bridge and operator ports must differ from the loopback MCP admin port 8091"))
+	}
 	cfg.PairingStdout, err = parseBoolEnv(pairingStdoutEnv, getenv(pairingStdoutEnv), cfg.Operator.Bind == "")
 	collect(err)
 	cfg.RuntimeDefaults, err = runtimeDefaults(getenv)

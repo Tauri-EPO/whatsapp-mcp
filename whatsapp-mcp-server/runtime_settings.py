@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from collections.abc import Callable, Mapping
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 INGEST_CHATS_ENV = "TRANSCRIBE_ON_INGEST_CHATS"
+CAP_ENV = "TRANSCRIBE_MONTHLY_MAX_MINUTES"
+CAP_SCOPE_ENV = "TRANSCRIBE_CAP_SCOPE"
 _startup_env: Mapping[str, str] | None = None
 _warned: dict[str, int] = {}
 _warn_lock = threading.Lock()
@@ -53,6 +56,38 @@ def _ingest_value(value: Any) -> str:
     return parse_ingest_chats(value)
 
 
+def parse_cap(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{CAP_ENV}: expected finite non-negative minutes")
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= 525600:
+        raise ValueError(f"{CAP_ENV}: expected minutes in 0..525600")
+    return number
+
+
+def _cap_value(value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError("expected non-negative minutes")
+    parsed = parse_cap(value)
+    assert parsed is not None
+    return parsed
+
+
+def parse_cap_scope(raw: str | None) -> str:
+    value = (raw or "").strip() or "ingest"
+    if value not in {"ingest", "all"}:
+        raise ValueError(f"{CAP_SCOPE_ENV}: expected ingest or all")
+    return value
+
+
+def _scope_value(value: Any) -> str:
+    if not isinstance(value, str) or value not in {"ingest", "all"}:
+        raise ValueError("expected ingest or all")
+    return value
+
+
 @dataclass(frozen=True)
 class SettingDefinition:
     env: str
@@ -66,6 +101,8 @@ DEFINITIONS = {
     "tools.allow": SettingDefinition("WHATSAPP_ALLOW_TOOLS", [], _tool_env, _tool_value),
     "tools.deny": SettingDefinition("WHATSAPP_DENY_TOOLS", [], _tool_env, _tool_value),
     "transcription.ingest_chats": SettingDefinition(INGEST_CHATS_ENV, "all", parse_ingest_chats, _ingest_value),
+    "transcription.monthly_max_minutes": SettingDefinition(CAP_ENV, None, parse_cap, _cap_value),
+    "transcription.cap_scope": SettingDefinition(CAP_SCOPE_ENV, "ingest", parse_cap_scope, _scope_value),
 }
 
 
@@ -76,7 +113,9 @@ def capture_environment() -> None:
         definition.parse_env(_startup_env.get(definition.env))
 
 
-def snapshot(env: Mapping[str, str] | None = None, *, require_store: bool = False) -> dict[str, Any]:
+def snapshot(
+    env: Mapping[str, str] | None = None, *, require_store: bool = False, timeout_s: float | None = None
+) -> dict[str, Any]:
     """One SQLite snapshot per observation: both tool lists change together.
 
     Null rows are tombstones, preserving max(version) after the last clear.
@@ -99,6 +138,8 @@ def snapshot(env: Mapping[str, str] | None = None, *, require_store: bool = Fals
         return _apply_floor(settings, defaults, version, closed_allow)
     conn = whatsapp._connect_messages_db()
     try:
+        if timeout_s is not None:
+            conn.execute(f"PRAGMA busy_timeout={max(1, int(timeout_s * 1000))}")
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_settings' AND type='table'").fetchone():
             return _apply_floor(settings, defaults, version, closed_allow)
         rows = conn.execute("SELECT key,value,version FROM runtime_settings").fetchall()
@@ -138,6 +179,13 @@ def _known_tools() -> set[str]:
 
 
 def _apply_floor(settings, defaults, version, closed_allow):
+    cap_key, scope_key = "transcription.monthly_max_minutes", "transcription.cap_scope"
+    ceiling = defaults[cap_key]["value"]
+    cap = settings[cap_key]["value"]
+    if ceiling is not None and (cap is None or cap > ceiling):
+        settings[cap_key] = dict(defaults[cap_key])
+    if defaults[scope_key]["value"] == "all":
+        settings[scope_key] = dict(defaults[scope_key])
     allow = set(settings["tools.allow"]["value"])
     env_allow = set(defaults["tools.allow"]["value"])
     if env_allow:

@@ -7,6 +7,8 @@ Success returns the payload the tool documents. Failure returns::
 codes: ``not_found`` (the chat/message/contact does not exist in the archive),
 ``rate_limited`` (send budget exhausted; stop and report instead of retrying,
 with ``retry_after_s`` and the limit name),
+
+``transcription_quota_exceeded`` (the audio does not fit the capped monthly quota),
 ``denied`` (WHATSAPP_ALLOWED_CHATS blocks the target), ``bridge_unavailable``
 (the bridge REST API could not be reached or answered 5xx),
 ``media_unavailable`` (the bytes are not cached here and nothing can fetch them:
@@ -39,6 +41,8 @@ MEDIA_REFUSED_CODE = "media_refused"
 
 ERROR_CODES = (
     "rate_limited",
+
+    "transcription_quota_exceeded",
     "not_found",
     "denied",
     "bridge_unavailable",

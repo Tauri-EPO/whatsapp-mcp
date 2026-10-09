@@ -15,6 +15,7 @@ import bisect
 import hmac
 import json
 import logging
+import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict
@@ -160,7 +161,13 @@ class Metrics:
                     for k, n in sorted(self.http_requests.items())
                 ],
             ]
-        return "\n".join(lines) + "\n"
+        from transcription_usage import metrics_text
+
+        try:
+            transcription = metrics_text()
+        except (OSError, sqlite3.Error, ValueError):
+            transcription = "# TYPE whatsapp_mcp_transcription_usage_available gauge\nwhatsapp_mcp_transcription_usage_available 0\n"
+        return "\n".join(lines) + "\n" + transcription
 
 
 metrics = Metrics()

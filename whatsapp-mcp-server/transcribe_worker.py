@@ -588,7 +588,7 @@ def _log_fetch_problem(quiet: bool, message: str) -> None:
 
 
 def _default_transcribe(path: str) -> dict[str, Any]:
-    return transcribe_file(path, config=load_config())
+    return transcribe_file(path, config=load_config(), source="ingest")
 
 
 def _record_failure(sha256: str, reason: str) -> None:
@@ -668,6 +668,14 @@ def run_once(
             if not text:
                 raise TranscriptionError("whisper returned no text")
             store_transcript(candidate.sha256, {**result, "text": text})
+        except ToolError as exc:
+            if exc.code == "transcription_quota_exceeded":
+                return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+            logger.warning("transcribe_on_ingest: accounting unavailable; round paused")
+            return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+        except sqlite3.Error:
+            logger.warning("transcribe_on_ingest: accounting or cache unavailable; round paused")
+            return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         except BackendUnavailableError as exc:
             # Not this file's failure, so no note. One request the server choked
             # on must not stop the batch, and a server that is down must not be

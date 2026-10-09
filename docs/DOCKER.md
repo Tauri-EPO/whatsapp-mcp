@@ -1254,3 +1254,17 @@ docker run -d --name mcp --network container:bridge -v whatsapp-store:/app/store
 
 The MCP image defaults to the HTTP transport bound to `0.0.0.0:8000` **inside
 the container**; publish that port thoughtfully.
+
+
+### MCP-owned operator reads
+
+When `WHATSAPP_OPERATOR_BIND` is enabled, the MCP service starts its admin
+listener on **127.0.0.1:8091** inside the shared bridge network namespace.
+Do not publish this port or proxy it. Only the bridge calls it with its bridge
+token; the operator token and token file are never passed to MCP. Configure a
+separate `WHATSAPP_MCP_TOKEN` when enabling operator reads so the MCP bearer cannot
+be used on admin. Operator clients continue to use a single bridge URL/token for
+`GET /operator/v1/transcription/usage` and health (`last_mcp_call_at`, null until
+an authenticated MCP tool call, or while MCP is unavailable). Runtime settings
+remain bridge-owned; UTC monthly metering is MCP-owned in `notes.db` and is
+included in the existing store backup. See CONFIGURATION.md for caps and scopes.
