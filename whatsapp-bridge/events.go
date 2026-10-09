@@ -307,7 +307,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// A busy database is tried again a bounded number of times; a write that is
 	// given up is one ERROR naming the message (ID and chat only, never the
 	// content) and a count on /metrics (store_failures.go).
-	stored := storeRow("message", func() error {
+	writeMessage := func() error {
 		locationSender := storedSenderJID
 		if ex.edit != nil || ex.location != nil && ex.location.Live {
 			var err error
@@ -325,10 +325,18 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, locationSender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
 			return err
 		})
-	})
+	}
+	var stored bool
+	if ex.edit != nil {
+		// An edit updates an existing target; it must not create an empty chat
+		// when that target was never archived.
+		stored = b.storeLive("message edit", msg.Info.ID, chatJID, writeMessage)
+	} else {
+		stored = storeRow("message", writeMessage)
+	}
 	// If the live-location ownership check cannot commit, withhold effects too:
 	// an unverified known key must not escape as an unstored webhook message.
-	if rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
+	if ex.edit != nil || rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
 		return
 	}
 	if stored {

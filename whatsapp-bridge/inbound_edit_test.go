@@ -239,6 +239,28 @@ func TestInboundEditLiveAndHistoryTargetFTSAndReplay(t *testing.T) {
 	}
 }
 
+func TestInboundEditMissingTargetDoesNotCreateChat(t *testing.T) {
+	ms, _ := lockedProductionStore(t)
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	event := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "")
+	event.Info.ID = "ORPHAN-EDIT"
+	event.Message = incomingEdit("MISSING", "unarchivedword", 1772359300000)
+	b.handleEvent(event, nil)
+	var messages, chats, indexed int
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&chats); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts").Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 || chats != 0 || indexed != 0 || b.metrics.storeFailures.Load() != 0 {
+		t.Fatalf("orphan edit left messages=%d chats=%d FTS=%d failures=%d", messages, chats, indexed, b.metrics.storeFailures.Load())
+	}
+}
+
 func TestHistoryEditsWaitForOriginalInLaterChunk(t *testing.T) {
 	ms, _ := lockedProductionStore(t)
 	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())

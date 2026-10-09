@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -155,6 +156,79 @@ func TestHistoryConversationVoteOrderingAndReplay(t *testing.T) {
 			if indexed != 4 || b.metrics.storeFailures.Load() != 0 {
 				t.Fatalf("FTS=%d failures=%d", indexed, b.metrics.storeFailures.Load())
 			}
+		}
+	}
+}
+
+func TestHistoryMissingVoteSecretsSharePayloadRetryBudget(t *testing.T) {
+	ms, _ := lockedProductionStore(t)
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+	b.HistoryVoteRetryDelays = []time.Duration{time.Second, time.Second}
+	chats := []types.JID{phonePN, selfPhone, phoneLID, selfLID}
+	var mu sync.Mutex
+	calls := map[string]int{}
+	firstPass, ready := make(chan struct{}), make(chan struct{})
+	b.PollVoteDecrypt = func(_ context.Context, evt *events.Message) ([][]byte, error) {
+		if evt.Info.ID == "READY" {
+			close(ready)
+			return [][]byte{hashOf("Sushi")}, nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		calls[evt.Info.Chat.String()]++
+		if calls[evt.Info.Chat.String()] == 1 && len(calls) == len(chats) {
+			close(firstPass)
+		}
+		if calls[evt.Info.Chat.String()] > 1 && len(calls) != len(chats) {
+			t.Errorf("retry started before all initial votes: calls=%v", calls)
+		}
+		return nil, whatsmeow.ErrOriginalMessageSecretNotFound
+	}
+	stamp := time.Unix(1772359200, 0)
+	fixture := historySyncWithPoll(chats[0], stamp)
+	for _, chat := range chats[1:] {
+		fixture.Data.Conversations = append(fixture.Data.Conversations, historySyncWithPoll(chat, stamp).Data.Conversations...)
+	}
+	started := time.Now()
+	b.handleHistorySync(fixture)
+	select {
+	case <-firstPass:
+	case <-time.After(10 * time.Second):
+		t.Fatal("initial vote pass never completed")
+	}
+	later := historySyncWithPoll(phonePN, stamp.Add(time.Hour))
+	later.Data.Conversations[0].Messages[0].Message.Key.ID = proto.String("READY")
+	// The poll already exists; this payload carries only the later vote.
+	later.Data.Conversations[0].Messages = later.Data.Conversations[0].Messages[:1]
+	b.handleHistorySync(later)
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Error("later ready vote waited behind missing-secret retry sleeps")
+	}
+	b.historyVotes.Wait()
+	elapsed := time.Since(started)
+	// One two-second budget has a generous scheduling/SQLite allowance;
+	// the old four independent budgets require at least eight seconds.
+	if elapsed >= 6*time.Second {
+		t.Errorf("four conversations multiplied the two-second retry budget: %s", elapsed)
+	}
+	t.Logf("four missing-secret conversations plus a later ready vote: %s", elapsed)
+	for _, chat := range chats {
+		result, err := ms.PollResults("HPOLL1", chat.String())
+		wantMissing, wantReady := 1, 0
+		if chat == phonePN {
+			wantMissing, wantReady = 0, 1
+		}
+		if err != nil || result.UndecodableVotes != wantMissing || result.TotalVoters != wantReady {
+			t.Fatalf("chat=%s tally=%+v err=%v", chat, result, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, chat := range chats {
+		if calls[chat.String()] != 3 {
+			t.Errorf("chat=%s attempts=%d, want initial plus two retry passes", chat, calls[chat.String()])
 		}
 	}
 }

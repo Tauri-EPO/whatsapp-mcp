@@ -22,7 +22,7 @@ import (
 )
 
 func TestOutboundMediaRESTSendCacheDownloadPolicyAndFailures(t *testing.T) {
-	for _, mode := range []string{"cached", "disabled", "at-cap", "over-cap", "write-failure", "symlink", "bad-id"} {
+	for _, mode := range []string{"cached", "disabled", "at-cap", "over-cap", "write-failure", "symlink", "bad-id", "status-off", "status-on"} {
 		t.Run(mode, func(t *testing.T) {
 			ms, _ := lockedProductionStore(t)
 			rec := installRecordingLogger(t)
@@ -30,7 +30,11 @@ func TestOutboundMediaRESTSendCacheDownloadPolicyAndFailures(t *testing.T) {
 			b.Connected = func() bool { return true }
 			b.Send = b.sendBackend()
 			b.MediaAutoDownload = mode != "disabled"
-			const chat = "120363000000000001@g.us"
+			chat := "120363000000000001@g.us"
+			if strings.HasPrefix(mode, "status-") {
+				chat = types.StatusBroadcastJID.String()
+				b.MediaAutoDownloadStatus = mode == "status-on"
+			}
 			stamp := time.Unix(1772359200, 0)
 			data := []byte("synthetic outbound PDF bytes")
 			file := filepath.Join(t.TempDir(), "sample.pdf")
@@ -96,7 +100,7 @@ func TestOutboundMediaRESTSendCacheDownloadPolicyAndFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			cached, lookupErr := findCachedMedia(b.StoreRoot, chat, []string{name})
-			shouldCache := mode == "cached" || mode == "at-cap"
+			shouldCache := mode == "cached" || mode == "at-cap" || mode == "status-on"
 			if shouldCache {
 				if lookupErr != nil || cached == nil {
 					t.Fatalf("sent bytes not cached: %v", lookupErr)

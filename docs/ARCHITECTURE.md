@@ -230,23 +230,28 @@ ownership. Text and mention metadata update together; FTS triggers update the
 searchable text in the same write. The integer `message_edit_timestamp`
 retains the latest protocol millisecond timestamp: older edits and original-row
 replays cannot restore stale content. A missing target is a no-op; edit delivery
-envelopes create no message row or conversation activity. Phone history applies
+envelopes create no message or chat row or conversation activity. Phone history applies
 edits after its original rows, including targets in later chunks. Peer-shared
 history cannot edit existing rows. The outbound endpoint keeps its ownership
 checks and WhatsApp edit protocol. It persists the protocol's timestamp rather
 than the acknowledgement clock, and a delayed acknowledgement cannot overwrite
 a newer phone edit. The archive retains the latest
-text, without a separate original-text version history.
+text, without a separate original-text version history. An edit in an earlier
+history payload or before a delayed/retried live original is still dropped;
+that original may subsequently retain stale text. Bounded pending edits with
+expiry are tracked in issue #666 rather than stored by this implementation.
 
 History sender/LID reads and live-location alias preparation run before the
 archive writer transaction, using the bridge cancellation context. Transactions
 perform archive SQL only. For one history payload, ordinary rows from all
-conversations precede its vote rows; vote batches then run in conversation and
-input order on one FIFO chain. The SDK callback returns before that decoding,
-allowing later notifications to load missing secrets. Ordinary rows in a later
-payload, like live messages, may arrive while an older vote waits for its key;
-vote batches themselves stay ordered across payloads. Decryption and cancellable
-retry waits hold no archive writer. Shutdown seals and drains the vote chain.
+conversations precede its vote rows. Initial vote attempts run in conversation
+and input order on one FIFO chain outside the SDK callback, allowing later
+notifications to load missing secrets. Missing-secret votes share one retry
+budget per payload, with one ordered pass after each delay. These waits release
+the initial-attempt FIFO, so a later payload's ready votes can proceed; retry
+passes from different payloads and live writes may interleave. Decryption and
+cancellable retry waits hold no archive writer. Shutdown seals the FIFO and
+drains both initial attempts and pending retry passes.
 Queued votes retain their delivery runtime and skip persistence after a client
 handoff, matching the rejection of a retired client's late SDK events. Only the
 short archive-write phase takes the client handoff gate; decryption does not.
@@ -265,7 +270,8 @@ After a successful media send, the bridge caches the actual
 uploaded bytes under `mediaFileName` in the archived chat. It uses `os.Root`, the
 shared transfer owner and `.part` plus rename, so `findCachedMedia` and
 `download_media` find the copy after a temporary upload file is removed.
-`WHATSAPP_MEDIA_AUTODOWNLOAD=false` disables this copy; `WHATSAPP_MEDIA_MAX_BYTES`
+`WHATSAPP_MEDIA_AUTODOWNLOAD=false` disables this copy; status sends additionally
+require `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS=true`. `WHATSAPP_MEDIA_MAX_BYTES`
 checks the actual plaintext size, with equality accepted and zero unlimited.
 Path/symlink refusal or a failed cache write logs WARN and preserves send success.
 The send's wait for this cache respects its request deadline; the transfer and

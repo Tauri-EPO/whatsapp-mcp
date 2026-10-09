@@ -287,9 +287,9 @@ type historyVoteJob struct {
 	markers historyVoteMarkers
 }
 
-// Submit after all ordinary rows in a payload. One FIFO chain preserves vote
-// order across conversations and payloads without pinning the SDK callback,
-// which must download later notifications before their secrets can appear.
+// Initial attempts follow payload/conversation order outside the SDK callback.
+// Missing secrets share one retry budget per payload; releasing the FIFO before
+// those waits lets later ready votes proceed while their secrets arrive.
 func (b *Bridge) queueHistoryPollVotes(jobs []historyVoteJob) {
 	if len(jobs) == 0 {
 		return
@@ -305,21 +305,56 @@ func (b *Bridge) queueHistoryPollVotes(jobs []historyVoteJob) {
 	b.historyVoteMu.Unlock()
 	go func() {
 		defer b.historyVotes.Done()
-		defer close(done)
-		if previous != nil {
-			select {
-			case <-previous:
-			case <-b.ctx.Done():
+		pending := b.initialHistoryVotePass(previous, done, jobs)
+		for attempt, delay := range b.HistoryVoteRetryDelays {
+			if len(pending) == 0 || !b.sleep(delay) {
 				return
 			}
-		}
-		for _, job := range jobs {
-			if b.ctx.Err() != nil {
-				return
-			}
-			b.storeHistoryPollVotesForClient(job.client, job.chat, job.chatJID, job.votes, nil, job.markers)
+			pending = b.storeHistoryVotePass(pending, attempt+1 < len(b.HistoryVoteRetryDelays))
 		}
 	}()
+}
+
+type historyVoteWork struct {
+	client  *whatsmeow.Client
+	event   *events.Message
+	chatJID string
+	sender  types.JID
+	markers historyVoteMarkers
+}
+
+func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- struct{}, jobs []historyVoteJob) []historyVoteWork {
+	defer close(done)
+	if previous != nil {
+		select {
+		case <-previous:
+		case <-b.ctx.Done():
+			return nil
+		}
+	}
+	var pending []historyVoteWork
+	for _, job := range jobs {
+		if job.client == nil || b.currentClient() != job.client {
+			continue
+		}
+		for _, web := range job.votes {
+			if b.ctx.Err() != nil {
+				return nil
+			}
+			if b.currentClient() != job.client {
+				break
+			}
+			evt, err := job.client.ParseWebMessage(job.chat, web)
+			if err != nil {
+				b.Log.Warnf("Could not parse history poll vote %s: %v", web.GetKey().GetID(), err)
+				continue
+			}
+			sender := resolveUserJIDContext(b.ctx, job.client, evt.Info.Sender, types.EmptyJID)
+			work := historyVoteWork{client: job.client, event: evt, chatJID: job.chatJID, sender: sender, markers: job.markers}
+			pending = append(pending, b.storeHistoryVotePass([]historyVoteWork{work}, len(b.HistoryVoteRetryDelays) > 0)...)
+		}
+	}
+	return pending
 }
 
 func (store *MessageStore) storePollVoteMessageResult(id, chatJID, sender, content string, ts time.Time, fromMe bool, pollID string, logger waLog.Logger, markers ...historyVoteMarkers) (consumed bool, err error) {
@@ -350,72 +385,50 @@ func defaultHistoryVoteRetryDelays() []time.Duration {
 	return []time.Duration{2 * time.Second, 10 * time.Second}
 }
 
-// A queued vote belongs to the client that delivered its payload. A handoff
-// retires it like a late SDK event; decryption never holds the handoff gate.
-func (b *Bridge) storeHistoryPollVotesForClient(client *whatsmeow.Client, chat types.JID, chatJID string, votes []*waWeb.WebMessageInfo, done chan<- struct{}, markers ...historyVoteMarkers) {
-	defer func() {
-		if done != nil {
-			close(done)
+// A pass never sleeps. Missing secrets retain their original order for the
+// next shared pass; ready votes persist immediately. A handoff retires queued
+// work like a late SDK event; decryption never holds the handoff gate.
+func (b *Bridge) storeHistoryVotePass(work []historyVoteWork, retryMissing bool) []historyVoteWork {
+	var pending []historyVoteWork
+	for _, vote := range work {
+		client, evt, chatJID := vote.client, vote.event, vote.chatJID
+		if b.ctx.Err() != nil {
+			return nil
 		}
-	}()
-	if client == nil {
-		return
-	}
-	for _, web := range votes {
-		if b.ctx.Err() != nil || b.currentClient() != client {
-			return
-		}
-		evt, err := client.ParseWebMessage(chat, web)
-		if err != nil {
-			b.Log.Warnf("Could not parse history poll vote %s: %v", web.GetKey().GetID(), err)
+		if b.currentClient() != client {
 			continue
 		}
-		resolvedSender := resolveUserJIDContext(b.ctx, client, evt.Info.Sender, types.EmptyJID)
+		pollID, names, derr := decodePollVote(b.ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
 		if b.ctx.Err() != nil {
-			return
+			return nil
 		}
-		sender := resolvedSender.User
-		for attempt := 0; ; attempt++ {
-			pollID, names, derr := decodePollVote(b.ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
-			if b.ctx.Err() != nil || b.currentClient() != client {
-				return
-			}
-			if pollID == "" {
-				break
-			}
+		if b.currentClient() != client || pollID == "" {
+			continue
+		}
+		if retryMissing && errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) {
+			pending = append(pending, vote)
+			continue
+		}
+		b.writeHistoryVoteForClient(client, func() {
 			if derr == nil {
 				// Decryption finished outside any archive write transaction.
-				if !b.writeHistoryVoteForClient(client, func() {
-					b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
-						return b.Store.StorePollVote(pollID, chatJID, sender, names, evt.Info.Timestamp)
-					})
-					b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
-						_, err := b.Store.storePollVoteMessageResult(evt.Info.ID, chatJID, storedSender(resolvedSender),
-							pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log, markers...)
-						return err
-					})
-				}) {
-					return
-				}
-				break
-			}
-			if errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) && attempt < len(b.HistoryVoteRetryDelays) {
-				if !b.sleep(b.HistoryVoteRetryDelays[attempt]) {
-					return
-				}
-				continue
-			}
-			if !b.writeHistoryVoteForClient(client, func() {
+				b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+					return b.Store.StorePollVote(pollID, chatJID, vote.sender.User, names, evt.Info.Timestamp)
+				})
+				b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
+					_, err := b.Store.storePollVoteMessageResult(evt.Info.ID, chatJID, storedSender(vote.sender),
+						pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log, vote.markers)
+					return err
+				})
+			} else {
 				b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)
 				b.storeLive("undecodable history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
-					return b.Store.StoreUndecodablePollVote(pollID, chatJID, sender, evt.Info.Timestamp)
+					return b.Store.StoreUndecodablePollVote(pollID, chatJID, vote.sender.User, evt.Info.Timestamp)
 				})
-			}) {
-				return
 			}
-			break
-		}
+		})
 	}
+	return pending
 }
 
 func (b *Bridge) writeHistoryVoteForClient(client *whatsmeow.Client, write func()) bool {

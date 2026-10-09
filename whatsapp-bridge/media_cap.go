@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 )
 
 var errAutoMediaLimit = errors.New("automatic media exceeds WHATSAPP_MEDIA_MAX_BYTES")
@@ -19,6 +20,9 @@ var errAutoMediaLimit = errors.New("automatic media exceeds WHATSAPP_MEDIA_MAX_B
 // An archive cache failure cannot undo a successful remote send.
 func (b *Bridge) cacheOutboundMedia(ctx context.Context, sent sentMessage, media outboundMedia, data []byte) {
 	if !b.MediaAutoDownload {
+		return
+	}
+	if chatJID, err := types.ParseJID(sent.ChatJID); err == nil && b.skipsStatusMedia(chatJID) {
 		return
 	}
 	if b.MediaMaxBytes != 0 && uint64(len(data)) > b.MediaMaxBytes {
