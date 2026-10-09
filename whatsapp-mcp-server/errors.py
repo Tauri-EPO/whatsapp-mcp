@@ -41,7 +41,6 @@ MEDIA_REFUSED_CODE = "media_refused"
 
 ERROR_CODES = (
     "rate_limited",
-
     "transcription_quota_exceeded",
     "not_found",
     "denied",

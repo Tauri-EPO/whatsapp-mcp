@@ -21,7 +21,7 @@ type operatorRoutes struct {
 	settings, logout                               http.HandlerFunc
 	sendUsage, mcpToken                            http.HandlerFunc
 
-	transcriptionUsage                             http.HandlerFunc
+	transcriptionUsage http.HandlerFunc
 }
 
 type operatorBucket struct {

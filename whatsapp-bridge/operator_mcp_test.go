@@ -238,3 +238,32 @@ func TestTranscriptionCapEnvironmentDecimalForms(t *testing.T) {
 		}
 	}
 }
+
+func TestCompleteRuntimeRegistryAtomicPatchAndRestart(t *testing.T) {
+	b := newSettingsBridge(t)
+	server := settingsServer(t, b)
+	patch := `{"send.rate_per_minute":2,"send.rate_per_day":10,"send.new_chats_per_day":3,"send.min_interval_ms":100,"transcription.monthly_max_minutes":1,"transcription.cap_scope":"all","transcription.ingest_chats":"direct","tools.allow":["list_messages"],"tools.deny":["send_message"]}`
+	status, state := settingsRequest(t, server, "PATCH", patch)
+	if status != 200 || state.Version != 1 || len(state.Settings) != 9 {
+		t.Fatalf("complete registry: status=%d state=%+v", status, state)
+	}
+	for key, setting := range state.Settings {
+		if setting.Source != "runtime" {
+			t.Fatalf("key=%s source=%s", key, setting.Source)
+		}
+	}
+	if status, _ := settingsRequest(t, server, "PATCH", `{"send.rate_per_day":1,"transcription.cap_scope":"bad"}`); status != 400 {
+		t.Fatal("mixed invalid patch accepted")
+	}
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	fresh := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
+	fresh.RuntimeDefaults = b.RuntimeDefaults
+	restored, err := fresh.settingsSnapshot(context.Background())
+	if err != nil || restored.Version != 1 || restored.Settings["send.rate_per_day"].Value != int64(10) || restored.Settings["transcription.cap_scope"].Value != "all" {
+		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
+}

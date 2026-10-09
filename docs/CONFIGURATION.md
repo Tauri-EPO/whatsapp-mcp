@@ -658,9 +658,16 @@ GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
 {"tools.allow":["list_messages","transcribe_audio"],"tools.deny":[],"transcription.ingest_chats":"direct"}
 ```
 
-The current keys are `tools.allow`, `tools.deny` (arrays of registered tool
-names; an empty array removes only the runtime restriction), and
-`transcription.ingest_chats` (`all` or `direct`). Tool-list validation reuses
+The nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
+names; an empty array removes only the runtime restriction),
+`transcription.ingest_chats` (`all` or `direct`),
+`transcription.monthly_max_minutes` (0..525600), `transcription.cap_scope`
+(`ingest` or `all`), and `send.rate_per_minute`, `send.rate_per_day`,
+`send.new_chats_per_day`, `send.min_interval_ms` (integers 0..2147483647).
+Send rates and transcription caps can only lower deploy-time ceilings;
+the send interval can only increase its deploy-time floor. See the send-budget
+and transcription-accounting sections below for consumers and cap scope.
+Tool-list validation reuses
 the environment parsers. Unknown keys, bad types or invalid values return 400
 and write nothing, including in a multi-key PATCH. `{"tools.allow":null}`
 clears that override. Null tombstones preserve the monotonically increasing

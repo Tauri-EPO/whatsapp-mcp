@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -23,6 +24,13 @@ INITIALIZE = {
 
 
 def startup_env(tmp_path, **settings):
+    # The real bridge creates this registry before the MCP container starts.
+    # Token rotation intentionally refuses a missing archive on protected HTTP.
+    with sqlite3.connect(tmp_path / "messages.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_settings "
+            "(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT, version INTEGER)"
+        )
     env = {
         key: value for key, value in os.environ.items() if not key.startswith(("WHATSAPP_", "TRANSCRIBE_", "WHISPER_"))
     }
