@@ -263,6 +263,17 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
+	if _, err := applyNamedMigration(db, "labels_schema_v1", func(tx *sql.Tx) error {
+		_, err := tx.Exec(labelsSchema)
+		return err
+	}); err != nil {
+		return fmt.Errorf("failed to ensure label tables: %w", err)
+	}
+	if _, err := applyNamedMigration(db, "labels_metadata_v2", func(tx *sql.Tx) error {
+		return ensureLabelMetadata(tx)
+	}); err != nil {
+		return fmt.Errorf("failed to ensure label metadata: %w", err)
+	}
 	// Run data rewrites after their tables and columns exist. Each owns an
 	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {
@@ -277,7 +288,12 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	return nil
 }
 
-func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
+type schemaWriter interface {
+	sqlExecer
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func ensureColumn(db schemaWriter, tableName, columnName, columnSpec string) error {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
 		return err
@@ -1043,18 +1059,11 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 // which is what every bridge write path passes, so the row records which
 // namespace the sender lives in — or the bare user part, which leaves
 // messages.sender_server unset (splitSenderJID, sender_namespace.go).
-func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, options ...messageMediaOptions) error {
-	// Only store if there's actual content or media
-	if content == "" && mediaType == "" {
+func (store *MessageStore) StoreMessage(message storedMessage) error {
+	if message.Content == "" && message.MediaType == "" {
 		return nil
 	}
-
-	// Single-row path; history sync uses Batch (store_batch.go) for the same
-	// statement inside one transaction.
-	_, err := store.db.Exec(insertMessageSQL, messageArgs(id, chatJID, sender, content, timestamp, isFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
+	_, err := store.db.Exec(insertMessageSQL, messageArgs(message)...)
 	return err
 }
 
@@ -1217,10 +1226,12 @@ func setTargetMessageIDWith(ex sqlExecer, id, chatJID, target string) error {
 }
 
 // Store additional media info in the database
-func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+func (store *MessageStore) StoreMediaInfo(id, chatJID string, refreshed *MediaDownloader) error {
+	url, mediaKey := refreshed.URL, refreshed.MediaKey
+	fileSHA256, fileEncSHA256, fileLength := refreshed.FileSHA256, refreshed.FileEncSHA256, refreshed.FileLength
 	_, err := store.db.Exec(
-		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END, media_presentation = CASE WHEN file_sha256 = ? THEN media_presentation END WHERE id = ? AND chat_jid = ?",
-		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, fileSHA256, id, chatJID,
+		"UPDATE messages SET url = ?, direct_path = NULLIF(?, ''), media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END, media_presentation = CASE WHEN file_sha256 = ? THEN media_presentation END WHERE id = ? AND chat_jid = ?",
+		url, refreshed.DirectPath, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, fileSHA256, id, chatJID,
 	)
 	return err
 }

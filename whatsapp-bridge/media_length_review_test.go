@@ -98,7 +98,14 @@ func TestNewNonMediaLengthIsNull(t *testing.T) {
 		ms := newTestMessageStore(t)
 		seedLegacyRow(t, ms.db, "INSERT INTO chats(jid,name) VALUES (?, 'Alice')", mediaTestChat)
 		replayWriter(t, ms, batch, func(w messageWriter) error {
-			return w.StoreMessage("TEXT1", mediaTestChat, "x", "text", time.Now(), false, "", "", "", nil, nil, nil, uint64(0), "")
+			return w.StoreMessage(storedMessage{
+				ID:         "TEXT1",
+				ChatJID:    mediaTestChat,
+				Sender:     "x",
+				Content:    "text",
+				Timestamp:  time.Now(),
+				FileLength: uint64(0),
+			})
 		})
 		var length sql.NullInt64
 		if err := ms.db.QueryRow("SELECT file_length FROM messages WHERE id='TEXT1'").Scan(&length); err != nil || length.Valid {

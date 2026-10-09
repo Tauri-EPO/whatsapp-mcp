@@ -158,7 +158,13 @@ func TestPeerLocationAttributionUsesOnlyJobDeadline(t *testing.T) {
 	if err := ms.StoreChat(chat, "group", stamp); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("H0", chat, phonePN.String(), "Original", stamp, false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:        "H0",
+		ChatJID:   chat,
+		Sender:    phonePN.String(),
+		Content:   "Original",
+		Timestamp: stamp,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	before := shareArchiveSnapshot(t, ms, "H0", chat)

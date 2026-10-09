@@ -104,7 +104,15 @@ func TestArchiveMissingLIDTwinUsesOnlyStoredChat(t *testing.T) {
 		id, chat string
 		when     time.Time
 	}{{"LID-SOURCE", registeredLID.String(), ts}, {"LATER-PHONE", efChat, ts.Add(time.Hour)}} {
-		if err := b.Store.StoreMessage(row.id, row.chat, efChat, "hello", row.when, true, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		if err := b.Store.StoreMessage(storedMessage{
+			ID:         row.id,
+			ChatJID:    row.chat,
+			Sender:     efChat,
+			Content:    "hello",
+			Timestamp:  row.when,
+			IsFromMe:   true,
+			FileLength: 0,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

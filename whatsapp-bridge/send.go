@@ -637,8 +637,23 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 // store persists the outbound row with these media columns.
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
 	return messageStore.StoreMessage(
-		id, chatJID, senderJID, content, timestamp, true,
-		m.mediaType, m.filename, m.url, m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, quotedMsgID, messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
+		storedMessage{
+			ID:              id,
+			ChatJID:         chatJID,
+			Sender:          senderJID,
+			Content:         content,
+			Timestamp:       timestamp,
+			IsFromMe:        true,
+			MediaType:       m.mediaType,
+			Filename:        m.filename,
+			URL:             m.url,
+			MediaKey:        m.mediaKey,
+			FileSHA256:      m.fileSHA256,
+			FileEncSHA256:   m.fileEncSHA256,
+			FileLength:      m.fileLength,
+			QuotedMessageID: quotedMsgID,
+			Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
+		},
 	)
 }
 

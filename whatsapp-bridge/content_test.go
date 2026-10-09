@@ -140,7 +140,7 @@ func TestExtractMediaInfo_AllKinds(t *testing.T) {
 }
 
 func TestExtractVCardPhones_And_FormatContactContent(t *testing.T) {
-	vcard := "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ana\r\nTEL;type=CELL;waid=5511999999999:+55 11 99999-9999\r\nTEL;type=HOME:+55 11 3333-3333\r\nEND:VCARD"
+	vcard := "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Eve\r\nTEL;type=CELL;waid=5511999999999:+55 11 99999-9999\r\nTEL;type=HOME:+55 11 3333-3333\r\nEND:VCARD"
 	phones := extractVCardPhones(vcard)
 	if len(phones) != 2 || phones[0] != "+55 11 99999-9999" || phones[1] != "+55 11 3333-3333" {
 		t.Errorf("phones = %v", phones)
@@ -148,8 +148,8 @@ func TestExtractVCardPhones_And_FormatContactContent(t *testing.T) {
 	if got := extractVCardPhones("no phones here"); len(got) != 0 {
 		t.Errorf("no TEL lines: %v", got)
 	}
-	content := formatContactContent("Ana", vcard)
-	if !strings.Contains(content, "Ana") || !strings.Contains(content, "+55 11 99999-9999") {
+	content := formatContactContent("Eve", vcard)
+	if !strings.Contains(content, "Eve") || !strings.Contains(content, "+55 11 99999-9999") {
 		t.Errorf("contact content = %q", content)
 	}
 	if got := formatContactContent("", ""); got != "" {

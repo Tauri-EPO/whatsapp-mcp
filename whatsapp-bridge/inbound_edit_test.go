@@ -34,7 +34,7 @@ func TestOutboundEditWireTimestampAndNewerPhoneEditOrdering(t *testing.T) {
 			if err := ms.StoreChat(phonePN.String(), "Alice", time.Now()); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.StoreMessage("OWN-EDIT", phonePN.String(), selfPhone.String(), "originalword", time.Now(), true, "", "", "", nil, nil, nil, nil, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{ID: "OWN-EDIT", ChatJID: phonePN.String(), Sender: selfPhone.String(), Content: "originalword", Timestamp: time.Now(), IsFromMe: true, MediaType: "", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: nil, QuotedMessageID: ""}); err != nil {
 				t.Fatal(err)
 			}
 			wireStamp := int64(100)
@@ -96,7 +96,7 @@ func TestInboundEditSDKParsedEventAndVerifiedLIDAuthor(t *testing.T) {
 			if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.StoreMessage("TARGET", phonePN.String(), author, "originalword", stamp, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: phonePN.String(), Sender: author, Content: "originalword", Timestamp: stamp, IsFromMe: false, MediaType: "", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 				t.Fatal(err)
 			}
 			edit := incomingEdit("TARGET", "parsededitword", stamp.Add(time.Minute).UnixMilli())
@@ -190,7 +190,7 @@ func TestInboundEditLiveAndHistoryTargetFTSAndReplay(t *testing.T) {
 				if err := ms.StoreChat(chat.String(), "Alice", stamp); err != nil {
 					t.Fatal(err)
 				}
-				if err := ms.StoreMessage("TARGET", chat.String(), phonePN.String(), "originalword", stamp, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: chat.String(), Sender: phonePN.String(), Content: "originalword", Timestamp: stamp, IsFromMe: false, MediaType: "", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -298,7 +298,7 @@ func TestInboundEditBusyReleaseAndExhaustion(t *testing.T) {
 				if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
 					t.Fatal(err)
 				}
-				if err := ms.StoreMessage("TARGET", phonePN.String(), phonePN.String(), "oldword", stamp, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: phonePN.String(), Sender: phonePN.String(), Content: "oldword", Timestamp: stamp, IsFromMe: false, MediaType: "", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 					t.Fatal(err)
 				}
 				unlock := lock()

@@ -128,7 +128,16 @@ func TestPointerReplaysKeepTheirUpdateSemantics(t *testing.T) {
 				}
 				write := func(content string) {
 					replayWriter(t, ms, batch, func(w messageWriter) error {
-						return w.StoreMessage("POINTER1", mediaTestChat, "x", content, ts, false, kind, "TARGET1", "", nil, nil, nil, 0, "")
+						return w.StoreMessage(storedMessage{
+							ID:         "POINTER1",
+							ChatJID:    mediaTestChat,
+							Sender:     "x",
+							Content:    content,
+							Timestamp:  ts,
+							MediaType:  kind,
+							Filename:   "TARGET1",
+							FileLength: 0,
+						})
 					})
 				}
 				write("initial")

@@ -105,7 +105,7 @@ func TestUnencryptedExceptionPreservesEncryptedReplayAndRejectsOtherChats(t *tes
 			key, sha, enc := []byte("key"), []byte("hash"), []byte("encrypted hash")
 			store := func(id, caption string, key, enc []byte, ts time.Time) {
 				t.Helper()
-				if err := ms.StoreMessage(id, chat, phonePN.String(), caption, ts, false, "image", "", "https://example.invalid/media", key, sha, enc, uint64(3), "", messageMediaOptions{directPath: "/fake-media"}); err != nil {
+				if err := ms.StoreMessage(storedMessage{ID: id, ChatJID: chat, Sender: phonePN.String(), Content: caption, Timestamp: ts, IsFromMe: false, MediaType: "image", Filename: "", URL: "https://example.invalid/media", MediaKey: key, FileSHA256: sha, FileEncSHA256: enc, FileLength: uint64(3), QuotedMessageID: "", Media: messageMediaOptions{directPath: "/fake-media"}}); err != nil {
 					t.Fatal(err)
 				}
 			}

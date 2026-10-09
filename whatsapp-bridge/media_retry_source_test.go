@@ -45,7 +45,7 @@ func TestMediaRetryRetainsDeliveryJIDsLiveHistoryAndLegacy(t *testing.T) {
 				if err := ms.StoreChat(archiveChat.String(), "Alice", time.Now()); err != nil {
 					t.Fatal(err)
 				}
-				if err := ms.StoreMessage("WIRE-SOURCE", archiveChat.String(), phoneLID.String(), "", time.Now(), false, "image", "", "", []byte("k"), []byte("s"), []byte("e"), 0, ""); err != nil {
+				if err := ms.StoreMessage(storedMessage{ID: "WIRE-SOURCE", ChatJID: archiveChat.String(), Sender: phoneLID.String(), Content: "", Timestamp: time.Now(), IsFromMe: false, MediaType: "image", Filename: "", URL: "", MediaKey: []byte("k"), FileSHA256: []byte("s"), FileEncSHA256: []byte("e"), FileLength: 0, QuotedMessageID: ""}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -55,7 +55,7 @@ func TestMediaRetryRetainsDeliveryJIDsLiveHistoryAndLegacy(t *testing.T) {
 			}
 			// A sparse replay using the normalized identity must retain the
 			// wire source, rather than replacing it with archive addressing.
-			if err := ms.StoreMessage("WIRE-SOURCE", archiveChat.String(), phonePN.String(), "caption", time.Now(), false, "image", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{ID: "WIRE-SOURCE", ChatJID: archiveChat.String(), Sender: phonePN.String(), Content: "caption", Timestamp: time.Now(), IsFromMe: false, MediaType: "image", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 				t.Fatal(err)
 			}
 			info, err = ms.mediaRetryInfo(context.Background(), "WIRE-SOURCE", archiveChat.String())

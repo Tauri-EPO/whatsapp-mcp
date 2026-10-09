@@ -26,7 +26,19 @@ func seedCompletenessRow(t *testing.T, ms *MessageStore, id, url, directPath str
 	if err := ms.StoreChat(mediaTestChat, "", ts); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage(id, mediaTestChat, "5511999999999@s.whatsapp.net", "", ts, false, "document", "empty.txt", url, key, sha, enc, length, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:            id,
+		ChatJID:       mediaTestChat,
+		Sender:        "5511999999999@s.whatsapp.net",
+		Timestamp:     ts,
+		MediaType:     "document",
+		Filename:      "empty.txt",
+		URL:           url,
+		MediaKey:      key,
+		FileSHA256:    sha,
+		FileEncSHA256: enc,
+		FileLength:    length,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ms.SetDirectPath(id, mediaTestChat, directPath); err != nil {

@@ -49,7 +49,19 @@ func TestForwardSniffsCachedMediaAndKeepsCachePaths(t *testing.T) {
 			if err := ms.StoreChat(efChat, "Alice", ts); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.StoreMessage("MIME1", efChat, "x", "caption", ts, false, tc.category, "", fixtureMediaURL, []byte("key"), []byte("sha"), []byte("enc"), uint64(len(tc.data)), ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{
+				ID:            "MIME1",
+				ChatJID:       efChat,
+				Sender:        "x",
+				Content:       "caption",
+				Timestamp:     ts,
+				MediaType:     tc.category,
+				URL:           fixtureMediaURL,
+				MediaKey:      []byte("key"),
+				FileSHA256:    []byte("sha"),
+				FileEncSHA256: []byte("enc"),
+				FileLength:    uint64(len(tc.data)),
+			}); err != nil {
 				t.Fatal(err)
 			}
 			dir := chatMediaDir(efChat)

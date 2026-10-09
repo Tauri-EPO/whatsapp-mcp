@@ -326,11 +326,8 @@ func mediaRetryDirectPath(evt *events.MediaRetry, mediaKey []byte) (string, erro
 // download skips the retry: the url form of the fresh path, and the path
 // itself in place of the message's own one, which has just expired.
 func storeRefreshedMedia(messageStore *MessageStore, messageID, chatJID string, refreshed *MediaDownloader) {
-	if err := messageStore.StoreMediaInfo(messageID, chatJID, refreshed.URL, refreshed.MediaKey, refreshed.FileSHA256, refreshed.FileEncSHA256, refreshed.FileLength); err != nil {
-		bridgeLog.Warnf("Media retry succeeded but failed to persist refreshed URL for %s: %v", messageID, err)
-	}
-	if err := messageStore.SetDirectPath(messageID, chatJID, refreshed.DirectPath); err != nil {
-		bridgeLog.Warnf("Media retry succeeded but failed to persist the fresh direct path for %s: %v", messageID, err)
+	if err := messageStore.StoreMediaInfo(messageID, chatJID, refreshed); err != nil {
+		bridgeLog.Warnf("Media retry succeeded but failed to persist refreshed media for %s: %v", messageID, err)
 	}
 }
 

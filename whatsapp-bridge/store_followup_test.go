@@ -195,10 +195,10 @@ func TestLiveAuxiliaryFailureRollsBackMessageAndIndex(t *testing.T) {
 				b.storeRetryWait = func(time.Duration) bool { t.Error("constraint errors must not retry"); return true }
 				evt := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "private words")
 				evt.Info.ID = "AUX1"
-				table, event := "messages", "UPDATE OF mentions"
+				table, event, condition := "messages", "INSERT", ""
 				switch kind {
 				case "mentions":
-					event = "UPDATE OF mentions"
+					condition = " WHEN new.mentions IS NOT NULL"
 					evt.Message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("private words"), ContextInfo: &waE2E.ContextInfo{MentionedJID: []string{phonePN.String()}}}}
 				case "poll":
 					table, event = "polls", "INSERT"
@@ -207,7 +207,7 @@ func TestLiveAuxiliaryFailureRollsBackMessageAndIndex(t *testing.T) {
 					event = "UPDATE OF view_once"
 					evt.Message = viewOnceImage("private words")
 				}
-				if _, err := ms.db.Exec(fmt.Sprintf("CREATE TRIGGER reject_aux BEFORE %s ON %s BEGIN SELECT RAISE(%s,'metadata rejected');END", event, table, failure)); err != nil {
+				if _, err := ms.db.Exec(fmt.Sprintf("CREATE TRIGGER reject_aux BEFORE %s ON %s%s BEGIN SELECT RAISE(%s,'metadata rejected');END", event, table, condition, failure)); err != nil {
 					t.Fatal(err)
 				}
 				b.handleMessage(evt)

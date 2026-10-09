@@ -81,11 +81,15 @@ func messagesFTSExists(db *sql.DB) (bool, error) {
 // rebuilt from existing rows so history imported before this version is
 // searchable too; on a large store that is a one-off cost of a few seconds.
 func ensureMessagesFTS(db *sql.DB) (bool, error) {
+	return ensureMessagesFTSCapability(db, sqliteHasFTS5(db))
+}
+
+func ensureMessagesFTSCapability(db *sql.DB, available bool) (bool, error) {
 	existed, err := messagesFTSExists(db)
 	if err != nil {
 		return false, fmt.Errorf("inspect fts schema: %w", err)
 	}
-	if !sqliteHasFTS5(db) {
+	if !available {
 		if existed {
 			if _, err := db.Exec(ftsTeardown); err != nil {
 				return false, fmt.Errorf("remove fts index from a build without FTS5: %w", err)

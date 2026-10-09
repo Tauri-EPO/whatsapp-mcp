@@ -127,7 +127,13 @@ func TestPhoneHistoryReverseLocationCollision(t *testing.T) {
 					if err := ms.MarkChatRead(chat, stamp); err != nil {
 						t.Fatal(err)
 					}
-					if err := ms.StoreMessage("UNREAD", chat, phonePN.String(), "still unread", stamp.Add(30*time.Second), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+					if err := ms.StoreMessage(storedMessage{
+						ID:        "UNREAD",
+						ChatJID:   chat,
+						Sender:    phonePN.String(),
+						Content:   "still unread",
+						Timestamp: stamp.Add(30 * time.Second),
+					}); err != nil {
 						t.Fatal(err)
 					}
 					seed := func() {

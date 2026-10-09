@@ -557,6 +557,10 @@ const (
 // connection loss so reconnectLoop can dial again.
 func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 	switch v := evt.(type) {
+	case *events.LabelEdit:
+		b.recordLabel(v)
+	case *events.LabelAssociationChat:
+		b.recordChatLabel(v)
 	case *events.Message:
 		// Process regular messages
 		b.handleMessage(v)
@@ -667,6 +671,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.Connected:
+		b.startLabelSync()
 		b.clearConnectionProblem()
 		b.recipientNumbers.clear()
 		b.Log.Infof("✓ Successfully connected to WhatsApp servers")

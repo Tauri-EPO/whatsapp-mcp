@@ -27,6 +27,7 @@ from tool_policy import (
 # The contract this feature promises. Kept spelled out so a tool that quietly
 # loses its @mutating_tool decorator fails here instead of in production.
 EXPECTED_MUTATING = {
+    "label_chat",
     "archive_chat",
     "send_message",
     "send_file",
@@ -47,6 +48,7 @@ EXPECTED_MUTATING = {
 
 # Reads (and local-only writes) that must survive read-only mode.
 EXPECTED_READABLE = {
+    "list_labels",
     "list_messages",
     "list_chats",
     "search_contacts",

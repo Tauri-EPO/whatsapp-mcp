@@ -122,7 +122,14 @@ func TestBridgeWritesCanonicalTimestamps(t *testing.T) {
 	if err := ms.MarkChatRead(chat, base.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("M1", chat, "5511999999999", "hi", base, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "M1",
+		ChatJID:    chat,
+		Sender:     "5511999999999",
+		Content:    "hi",
+		Timestamp:  base,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ms.MarkMessageDeleted("M1", chat, base.Add(2*time.Minute)); err != nil {

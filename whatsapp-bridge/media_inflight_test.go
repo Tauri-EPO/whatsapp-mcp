@@ -32,7 +32,19 @@ func seedMediaRowIn(t *testing.T, ms *MessageStore, chat, id string) string {
 	if err := ms.StoreChat(chat, "Test", ts); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage(id, chat, "5511999999999", "caption", ts, false, "image", "", url, key, sha, enc, length, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:            id,
+		ChatJID:       chat,
+		Sender:        "5511999999999",
+		Content:       "caption",
+		Timestamp:     ts,
+		MediaType:     "image",
+		URL:           url,
+		MediaKey:      key,
+		FileSHA256:    sha,
+		FileEncSHA256: enc,
+		FileLength:    length,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	dest, err := filepath.Abs(filepath.Join(chatMediaDir(chat), mediaFileName("image", ts, id, "")))

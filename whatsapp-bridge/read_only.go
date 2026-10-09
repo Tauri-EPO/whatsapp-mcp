@@ -5,7 +5,7 @@ package main
 // WHATSAPP_ALLOWED_CHATS (chat_policy.go) restricts *which chats* the REST API
 // may act on; WHATSAPP_READ_ONLY restricts *what it may do*. When set, every
 // endpoint with an external side effect answers 403 with the shared JSON error
-// shape: send, react, typing, chat/archive, mark-read, delete, edit, forward, the four group
+// shape: send, react, typing, chat/archive, chat/label, mark-read, delete, edit, forward, the four group
 // endpoints, media purge and the on-demand history request.
 //
 // The MCP server enforces the same variable on its tools (tool_policy.py) and
@@ -41,7 +41,7 @@ func (p readOnlyPolicy) Summary() string {
 		return readOnlyEnv + " unset: outbound endpoints enabled"
 	}
 	return readOnlyEnv + "=1: read-only, every mutating endpoint answers 403 " +
-		"(send, react, typing, chat/archive, mark-read, delete, edit, forward, group/*, media/purge, history)"
+		"(send, react, typing, chat/archive, chat/label, mark-read, delete, edit, forward, group/*, media/purge, history)"
 }
 
 // guard wraps a handler with a side effect: 403 while read-only, pass-through

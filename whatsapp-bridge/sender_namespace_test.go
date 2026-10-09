@@ -80,16 +80,34 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	chat := "status@broadcast"
 	ts := time.Now()
 
-	if err := ms.StoreMessage("LID", chat, "100000000000002@lid", "status", ts, false,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "LID",
+		ChatJID:    chat,
+		Sender:     "100000000000002@lid",
+		Content:    "status",
+		Timestamp:  ts,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatalf("store lid message: %v", err)
 	}
-	if err := ms.StoreMessage("PN", chat, "11234567890@s.whatsapp.net", "hi", ts, false,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "PN",
+		ChatJID:    chat,
+		Sender:     "11234567890@s.whatsapp.net",
+		Content:    "hi",
+		Timestamp:  ts,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatalf("store phone message: %v", err)
 	}
-	if err := ms.StoreMessage("BARE", chat, "11234567890", "legacy caller", ts, false,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "BARE",
+		ChatJID:    chat,
+		Sender:     "11234567890",
+		Content:    "legacy caller",
+		Timestamp:  ts,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatalf("store bare message: %v", err)
 	}
 
@@ -105,8 +123,14 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 
 	// An edit/replay that only knows the bare user part must not downgrade a
 	// row that already carries its namespace.
-	if err := ms.StoreMessage("LID", chat, "100000000000002", "status edited", ts, false,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "LID",
+		ChatJID:    chat,
+		Sender:     "100000000000002",
+		Content:    "status edited",
+		Timestamp:  ts,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatalf("re-store lid message: %v", err)
 	}
 	if _, server := querySenderServer(t, ms, "LID", chat); server != "lid" {
@@ -115,8 +139,14 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 
 	// ... but a bare upsert that also changes the user part must not leave the
 	// old namespace describing the new number.
-	if err := ms.StoreMessage("LID", chat, "5511999999999", "different sender", ts, false,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "LID",
+		ChatJID:    chat,
+		Sender:     "5511999999999",
+		Content:    "different sender",
+		Timestamp:  ts,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatalf("re-store with another sender: %v", err)
 	}
 	if sender, server := querySenderServer(t, ms, "LID", chat); sender != "5511999999999" || server != "" {
@@ -131,8 +161,14 @@ func TestBatchStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	chat := "5511999990004-1400000000@g.us"
 
 	if err := ms.Batch(func(b *messageBatch) error {
-		return b.StoreMessage("H1", chat, "100000000000002@lid", "history", time.Now(), false,
-			"", "", "", nil, nil, nil, 0, "")
+		return b.StoreMessage(storedMessage{
+			ID:         "H1",
+			ChatJID:    chat,
+			Sender:     "100000000000002@lid",
+			Content:    "history",
+			Timestamp:  time.Now(),
+			FileLength: 0,
+		})
 	}); err != nil {
 		t.Fatalf("batch store: %v", err)
 	}

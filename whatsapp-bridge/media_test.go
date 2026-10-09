@@ -28,7 +28,19 @@ func seedMediaRow(t *testing.T, ms *MessageStore, id, mediaType, url string, key
 	if err := ms.StoreChat(mediaTestChat, "Test", ts); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage(id, mediaTestChat, "5511999999999", "caption", ts, false, mediaType, "", url, key, sha, encSHA, length, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:            id,
+		ChatJID:       mediaTestChat,
+		Sender:        "5511999999999",
+		Content:       "caption",
+		Timestamp:     ts,
+		MediaType:     mediaType,
+		URL:           url,
+		MediaKey:      key,
+		FileSHA256:    sha,
+		FileEncSHA256: encSHA,
+		FileLength:    length,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return ts
@@ -133,7 +145,14 @@ func TestDownloadMedia_ChatDirSanitisesColons(t *testing.T) {
 	if err := ms.StoreChat(chat, "", ts); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("m", chat, "x", "", ts, false, "image", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "m",
+		ChatJID:    chat,
+		Sender:     "x",
+		Timestamp:  ts,
+		MediaType:  "image",
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, _, _ = b.downloadMedia(context.Background(), "m", chat)
@@ -312,7 +331,15 @@ func TestDownloadMedia_DocumentsUseAndFallBackOnLegacyName(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := func(id string) {
-		if err := ms.StoreMessage(id, mediaTestChat, "x", "", ts, false, "document", "Report Q3.pdf", "", nil, nil, nil, 0, ""); err != nil {
+		if err := ms.StoreMessage(storedMessage{
+			ID:         id,
+			ChatJID:    mediaTestChat,
+			Sender:     "x",
+			Timestamp:  ts,
+			MediaType:  "document",
+			Filename:   "Report Q3.pdf",
+			FileLength: 0,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

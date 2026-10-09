@@ -34,14 +34,32 @@ func purgeFixture(t *testing.T) (*Bridge, map[string]string) {
 		}
 	}
 	seed := func(id, chat, mediaType string, ts time.Time, length uint64) {
-		if err := ms.StoreMessage(id, chat, "x", "", ts, false, mediaType, "", "u", []byte("k"), []byte("s"), []byte("e"), length, ""); err != nil {
+		if err := ms.StoreMessage(storedMessage{
+			ID:            id,
+			ChatJID:       chat,
+			Sender:        "x",
+			Timestamp:     ts,
+			MediaType:     mediaType,
+			URL:           "u",
+			MediaKey:      []byte("k"),
+			FileSHA256:    []byte("s"),
+			FileEncSHA256: []byte("e"),
+			FileLength:    length,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	seed("OLDVID", purgeChat, "video", old, 5_000_000)
 	seed("NEWIMG", purgeChat, "image", recent, 200_000)
 	seed("GRPDOC", purgeGroup, "document", old, 50_000)
-	if err := ms.StoreMessage("TXT", purgeChat, "x", "hello", recent, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "TXT",
+		ChatJID:    purgeChat,
+		Sender:     "x",
+		Content:    "hello",
+		Timestamp:  recent,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	files := map[string]string{}
@@ -293,7 +311,18 @@ func seedPurgeRows(t *testing.T, b *Bridge, chat, prefix string, n int, base tim
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("%s%04d", prefix, i)
 		ts := base.Add(time.Duration(i) * time.Second)
-		if err := b.Store.StoreMessage(id, chat, "x", "", ts, false, "image", "", "u", []byte("k"), []byte("s"), []byte("e"), 1024, ""); err != nil {
+		if err := b.Store.StoreMessage(storedMessage{
+			ID:            id,
+			ChatJID:       chat,
+			Sender:        "x",
+			Timestamp:     ts,
+			MediaType:     "image",
+			URL:           "u",
+			MediaKey:      []byte("k"),
+			FileSHA256:    []byte("s"),
+			FileEncSHA256: []byte("e"),
+			FileLength:    1024,
+		}); err != nil {
 			t.Fatal(err)
 		}
 		if cached {

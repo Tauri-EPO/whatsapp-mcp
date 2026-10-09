@@ -43,7 +43,18 @@ func TestMediaFileName_AgreesWithArrivalNameAcrossTimezones(t *testing.T) {
 			id := zone + "-" + string(rune('A'+i))
 			arrival := time.Unix(sec, 0) // what whatsmeow hands to handleMessage: a Local time
 			_, arrivalName, _, _, _, _, _ := extractMediaInfo(msg, arrival, id)
-			if err := ms.StoreMessage(id, chat, "x", "", arrival, false, "image", "", url, []byte("k"), []byte("s"), []byte("e"), length, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{
+				ID:            id,
+				ChatJID:       chat,
+				Sender:        "x",
+				Timestamp:     arrival,
+				MediaType:     "image",
+				URL:           url,
+				MediaKey:      []byte("k"),
+				FileSHA256:    []byte("s"),
+				FileEncSHA256: []byte("e"),
+				FileLength:    length,
+			}); err != nil {
 				t.Fatal(err)
 			}
 			row, err := ms.MediaRow(id, chat)

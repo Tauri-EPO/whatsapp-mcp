@@ -24,7 +24,13 @@ func TestHistoryShareRejectsForeignConversationBeforeAnyImport(t *testing.T) {
 				if err := ms.StoreChat(foreign, "Original", timestamp); err != nil {
 					t.Fatal(err)
 				}
-				if err := ms.StoreMessage("H0", foreign, phonePN.String(), "Original untouched", timestamp, false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+				if err := ms.StoreMessage(storedMessage{
+					ID:        "H0",
+					ChatJID:   foreign,
+					Sender:    phonePN.String(),
+					Content:   "Original untouched",
+					Timestamp: timestamp,
+				}); err != nil {
 					t.Fatal(err)
 				}
 				fixture := shareHistoryFixture(1)

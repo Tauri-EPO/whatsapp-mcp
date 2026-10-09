@@ -29,8 +29,8 @@ def test_search_contacts_by_jid_digits_excludes_groups(paired_dbs):
 
 def test_search_contacts_is_case_and_unicode_aware(paired_dbs):
     with paired_dbs.messages() as c:
-        c.execute("INSERT INTO chats (jid, name) VALUES ('5511666666666@s.whatsapp.net', 'José Ção')")
-    assert _jids(whatsapp.search_contacts("josé")) == ["5511666666666@s.whatsapp.net"]
+        c.execute("INSERT INTO chats (jid, name) VALUES ('5511666666666@s.whatsapp.net', 'Dave Ção')")
+    assert _jids(whatsapp.search_contacts("dave")) == ["5511666666666@s.whatsapp.net"]
     assert _jids(whatsapp.search_contacts("Ção")) == ["5511666666666@s.whatsapp.net"]
     assert set(_jids(whatsapp.search_contacts("ALICE"))) == {ALICE, DECOY}  # "Not Alice" matches too
 
@@ -50,15 +50,15 @@ def test_search_contacts_keeps_lids_out_of_phone_number(paired_dbs):
 
 
 def test_search_contacts_finds_the_name_a_contact_gave_themselves(paired_dbs):
-    """A contact saved as "Z Dave" is still found by "Carol" (#280)."""
+    """A contact saved as "Z Dave" is still found by "Eve" (#280)."""
     with paired_dbs.whatsmeow() as c:
         c.execute(
-            "UPDATE whatsmeow_contacts SET full_name = 'Z Dave', push_name = 'Carol Lima' WHERE their_jid = ?", (BOB,)
+            "UPDATE whatsmeow_contacts SET full_name = 'Z Dave', push_name = 'Eve Lima' WHERE their_jid = ?", (BOB,)
         )
-    (row,) = whatsapp.search_contacts("carol")
+    (row,) = whatsapp.search_contacts("eve")
     assert row["jid"] == BOB
     assert row["name"] == "Z Dave"  # what this account saved them as, unchanged
-    assert row["push_name"] == "Carol Lima"
+    assert row["push_name"] == "Eve Lima"
     assert row["matched"] == "push_name"
 
 
@@ -75,7 +75,7 @@ def test_search_contacts_reports_which_field_matched(paired_dbs):
 def test_search_contacts_whatsmeow_only_contact_uses_name_fallback_chain(paired_dbs):
     rows = whatsapp.search_contacts("consultoria")
     assert _jids(rows) == [CARLA]
-    assert rows[0]["name"] == "Carla Consultoria"  # business_name when the others are NULL
+    assert rows[0]["name"] == "Carol Consultoria"  # business_name when the others are NULL
 
 
 def test_search_contacts_without_whatsmeow_db(paired_dbs, monkeypatch):
@@ -240,7 +240,7 @@ def test_contact_names_handle_every_jid_form(paired_dbs, monkeypatch):
         BOB: "Bob Silva",
         f"{BOB_LID}@lid": "Bob Silva",  # via the LID map
         BOB_LID: "Bob Silva",  # bare LID
-        CARLA: "Carla Consultoria",
+        CARLA: "Carol Consultoria",
         # "999@lid" is a LID that is not in the map, FAMILY is a group: neither
         # has a phone-book entry, and both are reported as simply absent.
     }
@@ -268,7 +268,7 @@ def test_contact_names_prefer_full_then_push_then_first(paired_dbs):
 def test_contact_profiles_keep_the_push_name_beside_the_name(paired_dbs):
     """Same `name` as before, plus the fact it used to hide (#280)."""
     assert whatsapp.contact_profile(BOB) == ("Bob Silva", "bobby", "contacts")
-    assert whatsapp.contact_profile(CARLA) == ("Carla Consultoria", None, "contacts")
+    assert whatsapp.contact_profile(CARLA) == ("Carol Consultoria", None, "contacts")
     assert whatsapp.contact_profile("999@lid") == (None, None, "")  # nobody
     with paired_dbs.whatsmeow() as c:
         c.execute("UPDATE whatsmeow_contacts SET full_name = NULL WHERE their_jid = ?", (BOB,))
@@ -317,7 +317,7 @@ def test_get_sender_name_fallback_chain(paired_dbs):
     assert (
         whatsapp.get_sender_name(f"{BOB_LID}@lid") == "Bob Silva"
     )  # not in chats under that spelling: whatsmeow via LID
-    assert whatsapp.get_sender_name("5521777777777") == "Carla Consultoria"  # bare number + @s.whatsapp.net retry
+    assert whatsapp.get_sender_name("5521777777777") == "Carol Consultoria"  # bare number + @s.whatsapp.net retry
     assert whatsapp.get_sender_name("5500000000000@s.whatsapp.net") == "5500000000000@s.whatsapp.net"
 
 

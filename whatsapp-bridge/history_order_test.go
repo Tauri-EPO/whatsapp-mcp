@@ -154,7 +154,7 @@ func TestHistoryIdentityPreparationFailureAffectsOnlyItsRow(t *testing.T) {
 			if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.StoreMessage("H2", phonePN.String(), phoneLID.String(), "initialsample", stamp, false, "location", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{ID: "H2", ChatJID: phonePN.String(), Sender: phoneLID.String(), Content: "initialsample", Timestamp: stamp, IsFromMe: false, MediaType: "location", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 				t.Fatal(err)
 			}
 			waits := 0
@@ -164,7 +164,7 @@ func TestHistoryIdentityPreparationFailureAffectsOnlyItsRow(t *testing.T) {
 				if err := ms.StoreChat(selfPhone.String(), "Bob", stamp); err != nil {
 					t.Fatal(err)
 				}
-				if err := ms.StoreMessage("LIVE-PREP", selfPhone.String(), selfPhone.String(), "prepwriterword", stamp, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+				if err := ms.StoreMessage(storedMessage{ID: "LIVE-PREP", ChatJID: selfPhone.String(), Sender: selfPhone.String(), Content: "prepwriterword", Timestamp: stamp, IsFromMe: false, MediaType: "", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 					t.Fatal(err)
 				}
 				if held == nil {

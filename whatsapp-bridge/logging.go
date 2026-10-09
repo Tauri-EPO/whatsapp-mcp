@@ -15,9 +15,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -42,57 +45,128 @@ func resolveLogLevel(value string) string {
 	}
 }
 
-// oneLineLogger keeps every message a text logger prints on one line.
-//
-// A message ID, a push name, a group subject are whatever the other side put
-// in the stanza, and the bridge and whatsmeow print them with %s. In the text
-// format a line break inside one of them started a second line that reads like
-// a log entry of its own (issue #492). The JSON format never had the problem:
-// its message is one JSON string. Wrapping the logger, instead of quoting at
-// each call site, covers the lines nobody thought of and the ones whatsmeow
-// writes.
-//
-// min is the level below which nothing is printed, so a DEBUG line is not
-// formatted just to be dropped by the logger underneath.
-type oneLineLogger struct {
-	inner waLog.Logger
-	min   int
+// textLogger formats each payload once and writes complete marked lines atomically.
+type textLogger struct {
+	module string
+	min    int
+	out    io.Writer
+	mu     *sync.Mutex
+	now    func() time.Time
+	color  bool
 }
 
-func (l oneLineLogger) emit(level string, write func(string, ...any), msg string, args []any) {
+const textLogMaxLine = 8 * 1024
+const textLogTruncated = " [truncated]"
+const textLogContinuation = "[continued] "
+
+func newTextWriter(module, level string, out io.Writer, color bool) *textLogger {
+	return &textLogger{module: module, min: levelRank[resolveLogLevel(level)], out: out, mu: &sync.Mutex{}, now: time.Now, color: color}
+}
+
+func newTextLogger(module, level string, color bool) waLog.Logger {
+	return newTextWriter(module, level, os.Stdout, color)
+}
+
+func textModuleBound(module string) string {
+	if len(module) <= 480 {
+		return module
+	}
+	end := escapedTextBoundary(module, 480)
+	return module[:end] + textLogTruncated
+}
+
+// escapedTextBoundary walks the encoding emitted by oneLine: whole UTF-8 runes
+// and whole Go escape sequences. Cutting an encoded backslash or control in
+// half would make the remaining payload ambiguous.
+func escapedTextBoundary(text string, budget int) int {
+	end := 0
+	for end < len(text) {
+		_, size := utf8.DecodeRuneInString(text[end:])
+		if text[end] == '\\' && end+1 < len(text) {
+			size = 2
+			switch text[end+1] {
+			case 'x':
+				size = 4
+			case 'u':
+				size = 6
+			case 'U':
+				size = 10
+			}
+		}
+		if end+size > budget || end+size > len(text) {
+			break
+		}
+		end += size
+	}
+	return end
+}
+
+// The cap includes prefix, marker and newline, and preserves encoding boundaries.
+func capTextLine(line string) string {
+	if len(line)+1 <= textLogMaxLine {
+		return line + "\n"
+	}
+	end := escapedTextBoundary(line, textLogMaxLine-1-len(textLogTruncated))
+	return line[:end] + textLogTruncated + "\n"
+}
+
+func (l *textLogger) log(level, msg string, args ...any) {
 	if levelRank[level] < l.min {
 		return
 	}
-	write("%s", oneLine(fmt.Sprintf(msg, args...)))
+	message := fmt.Sprintf(msg, args...)
+	prefix := l.now().Format("15:04:05.000") + " [" + textModuleBound(oneLine(l.module)) + " " + level + "] "
+	if l.color {
+		color := "\x1b[32m"
+		if level == "WARN" {
+			color = "\x1b[33m"
+		}
+		if level == "ERROR" {
+			color = "\x1b[31m"
+		}
+		prefix = color + prefix + "\x1b[0m"
+	}
+	var rendered strings.Builder
+	parts := strings.Split(message, "\n")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1] // A final newline terminates the last record.
+	}
+	for index, part := range parts {
+		marker := ""
+		if index > 0 {
+			marker = textLogContinuation
+		}
+		rendered.WriteString(capTextLine(prefix + marker + oneLine(part)))
+	}
+	l.mu.Lock()
+	_, _ = io.WriteString(l.out, rendered.String())
+	l.mu.Unlock()
 }
 
-func (l oneLineLogger) Warnf(msg string, args ...any)  { l.emit("WARN", l.inner.Warnf, msg, args) }
-func (l oneLineLogger) Errorf(msg string, args ...any) { l.emit("ERROR", l.inner.Errorf, msg, args) }
-func (l oneLineLogger) Infof(msg string, args ...any)  { l.emit("INFO", l.inner.Infof, msg, args) }
-func (l oneLineLogger) Debugf(msg string, args ...any) { l.emit("DEBUG", l.inner.Debugf, msg, args) }
-func (l oneLineLogger) Sub(module string) waLog.Logger {
-	return oneLineLogger{inner: l.inner.Sub(module), min: l.min}
-}
-
-// newTextLogger is whatsmeow's stdout logger behind oneLineLogger.
-func newTextLogger(module, level string, color bool) waLog.Logger {
-	return oneLineLogger{inner: waLog.Stdout(module, level, color), min: levelRank[level]}
+func (l *textLogger) Warnf(msg string, args ...any)  { l.log("WARN", msg, args...) }
+func (l *textLogger) Errorf(msg string, args ...any) { l.log("ERROR", msg, args...) }
+func (l *textLogger) Infof(msg string, args ...any)  { l.log("INFO", msg, args...) }
+func (l *textLogger) Debugf(msg string, args ...any) { l.log("DEBUG", msg, args...) }
+func (l *textLogger) Sub(module string) waLog.Logger {
+	return &textLogger{module: l.module + "/" + module, min: l.min, out: l.out, mu: l.mu, now: l.now, color: l.color}
 }
 
 // oneLine returns s with every character that could end the line, drive the
 // terminal or reorder the text replaced by its Go escape (\n, \x1b, \u202e),
 // and every byte that is not UTF-8 by \xNN. Ordinary text, accents, emoji and
 // right-to-left scripts with their directional marks included, comes back
-// unchanged; so does a tab. A backslash is not doubled, so the output is for
-// reading, not for decoding: it cannot be turned back into the original bytes.
+// unchanged; so does a tab. Literal backslashes are doubled so escapes can be
+// distinguished from the original text.
 func oneLine(s string) string {
-	if utf8.ValidString(s) && strings.IndexFunc(s, unsafeInLogLine) < 0 {
+	if utf8.ValidString(s) && strings.IndexFunc(s, unsafeInLogLine) < 0 && !strings.ContainsRune(s, '\\') {
 		return s
 	}
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
 		case r == utf8.RuneError && size == 1:
 			fmt.Fprintf(&b, `\x%02x`, s[i])
 		case unsafeInLogLine(r):

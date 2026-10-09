@@ -62,11 +62,17 @@ func webhookStartupMessage(switches bridgeSwitches) string {
 const shutdownTimeout = 10 * time.Second
 
 func main() {
+	os.Exit(runCLI())
+}
+
+// runCLI is the actual startup sequence, including process-wide creation policy.
+func runCLI() int {
+	privateProcessUmask()
 	flag.Parse()
 	if *operatorStatusFlag {
-		os.Exit(operatorStatusProbe(os.Getenv, os.Stdout))
+		return operatorStatusProbe(os.Getenv, os.Stdout)
 	}
-	os.Exit(run())
+	return run()
 }
 
 // run validates startup before any filesystem or network effect. Logging is
@@ -261,6 +267,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	bridge.sessionDB = sessionDB
 	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	reconnectChan := make(chan bool, 1)

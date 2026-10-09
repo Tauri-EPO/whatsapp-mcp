@@ -112,7 +112,7 @@ jobs:
       - name: Smoke test images
         run: |
           # Bridge: the binary starts, prints its banner and creates the store (no pairing needed for this).
-          docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
+          docker run --rm --entrypoint sh whatsapp-mcp-bridge:ci -c 'cd /tmp && mkdir -p store && (timeout 15 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 || true); grep -E "Full-text search index [(]FTS5[)] active for messages.content" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
           # MCP: every module imports inside the image (catches a missing COPY like the transcribe.py incident).
           # The names come from py-modules in the mounted pyproject.toml (the list a wheel
           # would ship), so a new module is covered without editing this workflow.
@@ -158,8 +158,8 @@ jobs:
     # carries architecture-specific generated libc code that nothing else here
     # runs on arm64 (issue #470). This job builds the image, starts it under
     # QEMU like the amd64 smoke, and runs the whole Go test suite as an arm64
-    # binary in that image. About ten minutes on a cold cache (the image build
-    # compiles under emulation), in parallel with the other jobs.
+    # binary in that image. The image cross-compiles on the native builder;
+    # the runtime smoke and full test binary still execute under QEMU.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -199,12 +199,12 @@ jobs:
             timeout 120 /usr/local/bin/whatsapp-bridge >/tmp/out 2>&1 &
             pid=$!
             for i in $(seq 120); do
-              grep -qE "Full-text search index|SQLite built without FTS5" /tmp/out && break
+              grep -qE "Full-text search index [(]FTS5[)] active for messages.content" /tmp/out && break
               sleep 1
             done
             kill $pid 2>/dev/null; wait $pid 2>/dev/null
             cat /tmp/out
-            grep -E "Full-text search index|SQLite built without FTS5" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
+            grep -E "Full-text search index [(]FTS5[)] active for messages.content" /tmp/out && grep -F "commit ${{ github.sha }}" /tmp/out'
       - name: Go tests as an arm64 binary
         run: |
           # Compiled natively (CGO_ENABLED=0 cross-compiles), executed under QEMU in

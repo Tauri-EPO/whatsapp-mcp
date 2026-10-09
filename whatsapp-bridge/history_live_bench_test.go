@@ -57,7 +57,14 @@ func BenchmarkHistoryLiveWriteFile(b *testing.B) {
 					first = false
 					// One marker holds the SQLite writer before the concurrent live event
 					// starts. All 5,000 history rows then use the real handler callback.
-					if err := batch.StoreMessage(fmt.Sprintf("MARKER%d", iteration), phonePN.String(), phonePN.User, "marker searchable", time.Unix(1772359200, 0), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+					if err := batch.StoreMessage(storedMessage{
+						ID:         fmt.Sprintf("MARKER%d", iteration),
+						ChatJID:    phonePN.String(),
+						Sender:     phonePN.User,
+						Content:    "marker searchable",
+						Timestamp:  time.Unix(1772359200, 0),
+						FileLength: 0,
+					}); err != nil {
 						return err
 					}
 					close(firstWritten)

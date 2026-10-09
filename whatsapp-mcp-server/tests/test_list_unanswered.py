@@ -33,7 +33,7 @@ def db(tmp_path, monkeypatch):
         # jid, name, last_message_time, last_read_time
         (WAITING, "Alice", _stamp(days=2), _stamp(days=2)),  # marker past it: "read"
         (ANSWERED, "Bob", _stamp(days=3), None),
-        (REACTED, "Carla", _stamp(days=4), _stamp(days=4)),
+        (REACTED, "Carol", _stamp(days=4), _stamp(days=4)),
         (GROUP, "Neighbourhood", _stamp(days=5), None),
         (FRESH, "Dan", _stamp(minutes=30), None),
     ]

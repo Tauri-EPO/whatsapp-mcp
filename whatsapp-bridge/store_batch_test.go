@@ -15,8 +15,14 @@ func TestBatchStoresRowsAndCommits(t *testing.T) {
 	}
 	err := ms.Batch(func(b *messageBatch) error {
 		for i := 0; i < 50; i++ {
-			if err := b.StoreMessage(fmt.Sprintf("B%d", i), chat, "5511999999999", fmt.Sprintf("hello %d", i),
-				time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := b.StoreMessage(storedMessage{
+				ID:         fmt.Sprintf("B%d", i),
+				ChatJID:    chat,
+				Sender:     "5511999999999",
+				Content:    fmt.Sprintf("hello %d", i),
+				Timestamp:  time.Now(),
+				FileLength: 0,
+			}); err != nil {
 				return err
 			}
 		}
@@ -43,7 +49,14 @@ func TestBatchStoresRowsAndCommits(t *testing.T) {
 		t.Fatalf("rows=%d viewOnce=%v polls=%d", n, viewOnce, polls)
 	}
 	// Same row again through the single-row path: upsert, not duplicate.
-	if err := ms.StoreMessage("B0", chat, "5511999999999", "edited", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:         "B0",
+		ChatJID:    chat,
+		Sender:     "5511999999999",
+		Content:    "edited",
+		Timestamp:  time.Now(),
+		FileLength: 0,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var content string
@@ -59,7 +72,14 @@ func TestBatchRollsBackOnError(t *testing.T) {
 	_ = ms.StoreChat(chat, "Alice", time.Now())
 	boom := errors.New("boom")
 	err := ms.Batch(func(b *messageBatch) error {
-		if err := b.StoreMessage("R1", chat, "x", "one", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		if err := b.StoreMessage(storedMessage{
+			ID:         "R1",
+			ChatJID:    chat,
+			Sender:     "x",
+			Content:    "one",
+			Timestamp:  time.Now(),
+			FileLength: 0,
+		}); err != nil {
 			return err
 		}
 		return boom
@@ -80,7 +100,14 @@ func BenchmarkStoreMessagesOneByOne(b *testing.B) {
 	_ = ms.StoreChat(chat, "Alice", time.Now())
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = ms.StoreMessage(fmt.Sprintf("S%d", i), chat, "x", "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, "")
+		_ = ms.StoreMessage(storedMessage{
+			ID:         fmt.Sprintf("S%d", i),
+			ChatJID:    chat,
+			Sender:     "x",
+			Content:    "hello",
+			Timestamp:  time.Now(),
+			FileLength: 0,
+		})
 	}
 }
 
@@ -91,7 +118,14 @@ func BenchmarkStoreMessagesBatch(b *testing.B) {
 	b.ResetTimer()
 	_ = ms.Batch(func(batch *messageBatch) error {
 		for i := 0; i < b.N; i++ {
-			_ = batch.StoreMessage(fmt.Sprintf("T%d", i), chat, "x", "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, "")
+			_ = batch.StoreMessage(storedMessage{
+				ID:         fmt.Sprintf("T%d", i),
+				ChatJID:    chat,
+				Sender:     "x",
+				Content:    "hello",
+				Timestamp:  time.Now(),
+				FileLength: 0,
+			})
 		}
 		return nil
 	})

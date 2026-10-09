@@ -501,7 +501,7 @@ func writeMediaFile(root *os.Root, relPath string, fill func(*os.File) error) (i
 	if err := root.Remove(tmpPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return 0, fmt.Errorf("create media file: %w", err)
 	}
-	f, err := root.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := root.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, storeFileMode)
 	if err != nil {
 		return 0, fmt.Errorf("create media file: %w", err)
 	}

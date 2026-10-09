@@ -50,17 +50,6 @@ func mentionsColumn(jids []string) string {
 	return strings.Join(users, ",")
 }
 
-// SetMentions records the mentioned users of a stored message. Called only
-// when there is something to store, so it never clears a previous value.
-func (store *MessageStore) SetMentions(messageID, chatJID, mentions string) error {
-	return setMentionsWith(store.db, messageID, chatJID, mentions)
-}
-
-func setMentionsWith(ex sqlExecer, messageID, chatJID, mentions string) error {
-	_, err := ex.Exec(`UPDATE messages SET mentions = ? WHERE id = ? AND chat_jid = ? AND message_edit_timestamp = 0`, mentions, messageID, chatJID)
-	return err
-}
-
 // mentionTextPattern matches a mention as WhatsApp renders it in the text: an
 // "@" followed by the mentioned user's digits. Five digits is the shortest
 // national number in use; the bound keeps "@1" style handles out.

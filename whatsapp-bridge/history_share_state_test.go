@@ -26,7 +26,13 @@ func TestHistorySharePreservesOwnReadAndEphemeralState(t *testing.T) {
 			if err := ms.UpdateChatEphemeralSettings(chat, 86400, 1700000000); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.StoreMessage("UNREAD", chat, phonePN.String(), "Still unread", unreadAt, false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+			if err := ms.StoreMessage(storedMessage{
+				ID:        "UNREAD",
+				ChatJID:   chat,
+				Sender:    phonePN.String(),
+				Content:   "Still unread",
+				Timestamp: unreadAt,
+			}); err != nil {
 				t.Fatal(err)
 			}
 			fixture := shareHistoryFixture(1)
