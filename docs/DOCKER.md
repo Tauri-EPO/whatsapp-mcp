@@ -345,10 +345,12 @@ this override. SDK DEBUG is suppressed while the operator is enabled; bridge
 and database DEBUG remain available. Explicit stdout opt-in is for trusted
 console operators only.
 
-Operator `GET/PATCH /operator/v1/settings` changes `tools.allow`, `tools.deny`
-and `transcription.ingest_chats` without a restart. See the precedence and
+Operator `GET/PATCH /operator/v1/settings` changes `tools.allow`, `tools.deny`,
+the three `transcription.*` keys and the four `send.*` limits without a restart.
+Deploy-time limits remain floors or ceilings the runtime can only tighten.
+See the precedence and
 atomic PATCH contract in [Runtime overrides](CONFIGURATION.md#runtime-overrides).
-Transcription caps and send limits remain tracked in #637/#635. A private authenticated pairing
+A private authenticated pairing
 response reports a bounded `failure_reason` after a passkey failure; health,
 metrics and INFO never expose that text. Real passkey eligibility and a native
 WhatsApp authenticator still need the live verification tracked in #487/#647.
