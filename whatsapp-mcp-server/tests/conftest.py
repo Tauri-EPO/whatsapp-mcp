@@ -77,6 +77,19 @@ def _no_cached_owner():
     whatsapp._reset_owner_cache()
 
 
+@pytest.fixture
+def auth_runtime_store(tmp_path, monkeypatch):
+    """HTTP authentication requires the bridge's durable runtime registry."""
+    path = tmp_path / "auth-runtime.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE runtime_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT,version INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+
+
 @dataclass
 class PairedStore:
     messages_db: Path

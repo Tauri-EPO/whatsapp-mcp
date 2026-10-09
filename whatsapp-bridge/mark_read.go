@@ -34,6 +34,7 @@ type markReadFunc func(ctx context.Context, ids []types.MessageID, readAt time.T
 // PN -> LID rewrite applied to the JIDs a receipt is addressed with
 // (resolveRecipientJID in production).
 type markReadDeps struct {
+	allowSend  func(http.ResponseWriter, *http.Request, string) bool
 	store      *MessageStore
 	policy     chatPolicy
 	connected  func() bool
@@ -66,6 +67,7 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		client := b.currentClient()
 		markReadHandler(markReadDeps{
+			allowSend: b.allowSendAction,
 			store:     b.Store,
 			policy:    b.Policy,
 			connected: b.Connected,
@@ -176,6 +178,9 @@ func markListedRead(w http.ResponseWriter, r *http.Request, deps markReadDeps, r
 
 	ctx, cancel := requestContext(r, actionDeadline)
 	defer cancel()
+	if deps.allowSend != nil && !deps.allowSend(w, r, receiptChat.String()) {
+		return
+	}
 	if err := deps.markRead(ctx, messageIDs, readAt, receiptChat, receiptSender); err != nil {
 		writeMarkRead(w, http.StatusInternalServerError, MarkReadResponse{Message: err.Error()})
 		return
@@ -280,6 +285,14 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 		for start := 0; start < len(group.ids); start += markReadBatch {
 			end := min(start+markReadBatch, len(group.ids))
 			chunk := group.ids[start:end]
+			if deps.allowSend != nil && !deps.allowSend(w, r, receiptChat.String()) {
+				// A refusal can follow completed batches. Preserve their safe
+				// prefix so the next call cannot spend its budget resending them.
+				if covered := coveredPrefix(pending, acked, overflow); covered > 0 {
+					_ = persistReadMarker(deps, req.ChatJID, pending[covered-1].Timestamp)
+				}
+				return
+			}
 			if err := deps.markRead(ctx, chunk, readAt, receiptChat, receiptSender); err != nil {
 				failure, fatal = err, true
 				break

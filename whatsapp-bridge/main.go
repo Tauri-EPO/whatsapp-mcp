@@ -285,6 +285,10 @@ func runBridge(cfg bridgeConfig) int {
 	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
 	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools
 	bridge.RuntimeDefaults = cfg.RuntimeDefaults
+	bridge.SendIncludeActions, bridge.MCPEnvHash = cfg.SendIncludeActions, cfg.MCPEnvHash
+	if cfg.MCPFallbackBridge {
+		bridge.MCPEnvHash = tokenHash(bridgeToken)
+	}
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)
 	// Install exit before exposing operator mutations on a paired device.

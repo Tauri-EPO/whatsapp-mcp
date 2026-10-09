@@ -12,11 +12,15 @@ This mirrors what the Go bridge does for its own REST API (see auth.go).
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import json
 import secrets
+import sqlite3
 import threading
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +111,44 @@ def token_matches(presented: str | None, expected: str) -> bool:
     return secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
+def verify_static_token(presented: str | None, expected: str | None, *, allow_anonymous: bool = False) -> bool:
+    """Read operator rotation on each HTTP request, including OAuth's static path.
+
+    Python only reads messages.db. Incompatible or unreadable saved auth fails
+    closed; the operator DELETE is the recovery path. Never log bearer/hash data.
+    """
+    from datetime import datetime
+
+    import whatsapp
+
+    try:
+        if not Path(whatsapp.MESSAGES_DB_PATH).exists():
+            return False
+        conn = whatsapp._connect_messages_db()
+        try:
+            row = conn.execute("SELECT value FROM runtime_settings WHERE key='auth.mcp_token'").fetchone()
+        finally:
+            conn.close()
+        if not row or row[0] == "null":
+            return allow_anonymous if expected is None else token_matches(presented, expected)
+        state = json.loads(row[0])
+        current, previous = state["current"], state["previous"]
+        for value in (current, previous):
+            if not isinstance(value, str) or (value and (len(value) != 64 or len(bytes.fromhex(value)) != 32)):
+                return False
+        if not current:
+            return False
+        until = datetime.fromisoformat(state["previous_valid_until"].replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            return False
+        digest = hashlib.sha256((presented or "").encode("utf-8")).hexdigest()
+        current_match = secrets.compare_digest(digest, current)
+        previous_match = secrets.compare_digest(digest, previous)
+        return bool(presented) and (current_match or (previous_match and datetime.now(UTC) < until))
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 class BearerTokenMiddleware:
     """Pure-ASGI middleware: 401 unless the request carries the expected bearer token.
 
@@ -116,8 +158,8 @@ class BearerTokenMiddleware:
     error instead of an HTML page.
     """
 
-    def __init__(self, app: ASGIApp, token: str):
-        if not token:
+    def __init__(self, app: ASGIApp, token: str | None, *, runtime_rotation: bool = False):
+        if not token and not runtime_rotation:
             raise ValueError("BearerTokenMiddleware requires a non-empty token")
         self.app = app
         self._token = token
@@ -126,7 +168,9 @@ class BearerTokenMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        if token_matches(_bearer_from_headers(scope.get("headers", [])), self._token):
+        if verify_static_token(
+            _bearer_from_headers(scope.get("headers", [])), self._token, allow_anonymous=self._token is None
+        ):
             await self.app(scope, receive, send)
             return
         body = b'{"error":"unauthorized","message":"Missing or invalid bearer token"}'

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -68,6 +69,10 @@ func settingDefinitions() []settingDefinition {
 		return sortedNames(parseToolList(raw)), nil // Config validates names once, last.
 	}
 	return []settingDefinition{
+		sendSetting("send.rate_per_minute", sendRateMinuteEnv),
+		sendSetting("send.rate_per_day", sendRateDayEnv),
+		sendSetting("send.new_chats_per_day", sendNewChatsEnv),
+		sendSetting("send.min_interval_ms", sendIntervalEnv),
 		{"tools.allow", allowToolsEnv, []string{}, tools, toolEnv},
 		{"tools.deny", denyToolsEnv, []string{}, tools, toolEnv},
 		{"transcription.ingest_chats", ingestChatsEnv, "all", func(raw json.RawMessage) (any, error) {
@@ -78,6 +83,23 @@ func settingDefinitions() []settingDefinition {
 			return parseIngestChats(value)
 		}, func(raw string) (any, error) { return parseIngestChats(raw) }},
 	}
+}
+
+func sendSetting(key, env string) settingDefinition {
+	parse := func(raw json.RawMessage) (any, error) {
+		var value int64
+		if json.Unmarshal(raw, &value) != nil || value < 0 || value > 2147483647 {
+			return nil, errors.New("expected an integer from 0 to 2147483647; 0 disables")
+		}
+		return value, nil
+	}
+	return settingDefinition{key, env, int64(0), parse, func(raw string) (any, error) {
+		value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 32)
+		if err != nil || value < 0 {
+			return nil, errors.New("expected a nonnegative 32-bit integer")
+		}
+		return value, nil
+	}}
 }
 
 func runtimeDefaults(getenv func(string) string) (map[string]runtimeSetting, error) {

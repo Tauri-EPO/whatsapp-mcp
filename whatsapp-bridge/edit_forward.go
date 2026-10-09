@@ -110,7 +110,7 @@ func parseChatAndMessage(w http.ResponseWriter, policy chatPolicy, rawChat, rawI
 	return chat, rawID, true
 }
 
-func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, storeWrite storeWriteFunc) http.HandlerFunc {
+func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeEditForward(w, http.StatusMethodNotAllowed, editForwardResponse{Message: "method not allowed"})
@@ -143,6 +143,9 @@ func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, st
 			writeEditForward(w, http.StatusForbidden, editForwardResponse{Message: "Only messages sent by this account can be edited"})
 			return
 		}
+		if len(guards) > 0 && !guards[0](w, r, chat.String()) {
+			return
+		}
 		editTimestamp, err := edit(r.Context(), chat, id, text)
 		if err != nil {
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Edit failed: " + err.Error()})
@@ -162,6 +165,7 @@ type forwardDeps struct {
 	resolveRecipient func(context.Context, http.ResponseWriter, string) (string, bool)
 	download         mediaDownloader
 	send             sendFunc
+	allowSend        func(http.ResponseWriter, *http.Request, ...string) bool
 }
 
 func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc {
@@ -259,6 +263,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			// Update before the sender reads it; keep the exact registration
 			// context and its budget, without creating another deadline.
 			source = current
+		}
+		if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(sendCtx), to) {
+			return
 		}
 		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {

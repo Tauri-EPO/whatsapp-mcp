@@ -2863,8 +2863,8 @@ def build_http_app(
         # before it turns an authorization-service outage into a plain 500.
         sdk_app.user_middleware.insert(0, Middleware(OAuthSDKAvailabilityMiddleware, reject=oauth_middleware._error))
         app = oauth_middleware
-    elif token:
-        app = BearerTokenMiddleware(app, token)
+    else:
+        app = BearerTokenMiddleware(app, token, runtime_rotation=True)
     if rate_limit_per_minute > 0 and not verifier:
         app = RateLimitMiddleware(app, rate_limit_per_minute, trusted_proxies=trusted_proxies)
     app = ForwardedSchemeMiddleware(app, trusted_proxies)

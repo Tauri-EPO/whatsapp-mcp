@@ -287,6 +287,12 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}); err != nil {
 		return fmt.Errorf("runtime settings schema: %w", err)
 	}
+	if _, err := applyNamedMigration(db, "send_limits_v1", func(tx *sql.Tx) error {
+		_, err := tx.Exec(sendLimitsSchema)
+		return err
+	}); err != nil {
+		return fmt.Errorf("send limits schema: %w", err)
+	}
 	if _, err := applyNamedMigration(db, "operator_logout_v1", func(tx *sql.Tx) error {
 		_, err := tx.Exec(operatorLogoutSchema)
 		return err

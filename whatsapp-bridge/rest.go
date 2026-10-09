@@ -137,18 +137,22 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		},
 		b.Policy,
 		b.storeLive,
+		b.allowSendAction,
 	)))
 	mux.HandleFunc("/api/forward", mutate(handleForwardMessage(forwardDeps{
 		lookup: messageStore.messageContentLookup,
 		resolveRecipient: func(ctx context.Context, w http.ResponseWriter, to string) (string, bool) {
 			return b.registeredRecipient(ctx, w, to, nil)
 		},
-		download: b.DownloadMedia,
-		send:     b.Send,
+		download:  b.DownloadMedia,
+		send:      b.Send,
+		allowSend: b.allowSend,
 	}, b.Policy)))
 
 	// Group management: participants, subject/description, invite link, leave (group_manage.go).
-	registerGroupManagement(mux, mutate, liveGroupOps(client, func() bool { return b.Connected() }), b.Policy, b.recordGroupRoster)
+	group := liveGroupOps(client, func() bool { return b.Connected() })
+	group.allowSend = b.allowParticipantAdds
+	registerGroupManagement(mux, mutate, group, b.Policy, b.recordGroupRoster)
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.
@@ -163,6 +167,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		},
 		b.Policy,
 		b.storeLive,
+		b.allowSendAction,
 	)))
 
 	// Poll results (see polls.go).
@@ -262,6 +267,13 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["store_warning"] = warning
 	}
 	body["history_sync"] = b.historyProgress.snapshot()
+	if b.Store != nil {
+		ctx, cancel := context.WithTimeout(b.ctx, 100*time.Millisecond)
+		defer cancel()
+		if usage, err := b.sendUsageSnapshot(ctx); err == nil {
+			body["send_usage"] = usage
+		}
+	}
 	return body
 }
 

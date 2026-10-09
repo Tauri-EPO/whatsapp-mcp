@@ -87,6 +87,10 @@ type Bridge struct {
 	// unrestricted; main() parses it and refuses to start on an unknown name.
 	Tools                 toolPolicy
 	RuntimeDefaults       map[string]runtimeSetting
+	sendMu                sync.Mutex
+	sendNow               func() time.Time
+	SendIncludeActions    bool
+	MCPEnvHash            string
 	settingsMu            sync.Mutex
 	settingsWarnMu        sync.Mutex
 	settingsWarned        map[string]int64

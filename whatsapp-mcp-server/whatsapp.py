@@ -4344,6 +4344,8 @@ def _bridge_error_code(status: int) -> str:
         return "invalid_argument"
     if status == 403:
         return "denied"
+    if status == 429:
+        return "rate_limited"
     if status == 404:
         return "not_found"
     if status == 401:
@@ -4381,6 +4383,18 @@ def _bridge_json(response) -> dict[str, Any]:
         or (getattr(response, "text", "") or "").strip()[:300]
     )
     if response.status_code != 200:
+        if response.status_code == 429:
+            retry = payload.get("retry_after_s") or getattr(response, "headers", {}).get("Retry-After", 1)
+            try:
+                retry = max(1, int(retry))
+            except (TypeError, ValueError):
+                retry = 1
+            raise ToolError(
+                "rate_limited",
+                f"Send limit reached; stop and report to the operator instead of retrying (retry after {retry}s)",
+                retry_after_s=retry,
+                limit=payload.get("limit"),
+            )
         named = error_body.get("code")
         code = named if named in _BRIDGE_NAMED_CODES else _bridge_error_code(response.status_code)
         raise ToolError(code, message or f"bridge answered HTTP {response.status_code}")
@@ -5876,6 +5890,7 @@ def bridge_status() -> dict[str, Any]:
             "store_bytes": body.get("store_bytes"),
             "media_bytes": body.get("media_bytes"),
             "media_files": body.get("media_files"),
+            "send_usage": body.get("send_usage"),
         }
     )
     status["ok"] = status["connected"] and status["paired"]

@@ -1142,3 +1142,62 @@ Caveats:
   as the anchor. Chats with no local messages return `404`; send or receive one
   message first.
 - Messages the phone has deleted are not recoverable, as above.
+# Outbound send budgets and MCP token rotation
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WHATSAPP_SEND_RATE_PER_MINUTE` | `0` (off) | Token bucket for outbound sends, burst equal to rate |
+| `WHATSAPP_SEND_RATE_PER_DAY` | `0` (off) | Persistent daily send ceiling, resetting at midnight UTC |
+| `WHATSAPP_SEND_NEW_CHATS_PER_DAY` | `0` (off) | First-contact ceiling; contacting many strangers increases account-restriction risk |
+| `WHATSAPP_SEND_MIN_INTERVAL_MS` | `0` (off) | Minimum spacing between send reservations |
+| `WHATSAPP_SEND_INCLUDE_ACTIONS` | `false` | Include reactions, edits, revokes and read-receipt batches in the same budget |
+
+All numeric limits accept integers 0–2147483647, with empty/0 disabling the limit.
+The operator `PATCH /operator/v1/settings` accepts `send.rate_per_minute`,
+`send.rate_per_day`, `send.new_chats_per_day`, `send.min_interval_ms`.
+Precedence is runtime > env > default; `null` restores the env/default value.
+These limits cover `/api/send` (text/file/audio), `/api/forward` and group
+participant additions (one reservation per added participant). `/api/poll` is a
+read-only results endpoint; there is currently no outbound poll-creation route.
+`dry_run:true` on `/api/send` validates the target and path without sending or
+consuming budget. Denied requests consume no budget. Typing, history sync,
+archive/labels and other group management stay outside the budget.
+
+Reservations and first-contact identities persist in bridge-owned `messages.db`.
+They are committed before network effects; failed or uncertain deliveries also
+consume budget, avoiding duplicate sends after an archive failure or crash.
+First contact means no message in either direction for the canonical chat or its
+PN/LID twin, and no prior send reservation. It counts once, even if several sends
+follow or the archive could not be written. Daily counts reset at midnight UTC,
+independent of `TZ`; the minute bucket and minimum interval survive restart too.
+Concurrent requests share one atomic reservation. A group batch larger than a
+configured minute burst must be split by the operator.
+
+Refusals return 429 with `Retry-After` and `send_rate_limited`, `limit`,
+`retry_after_s`. MCP returns `rate_limited` and tells the agent to stop and report
+instead of retrying. `bridge_status.send_usage` and private
+`GET /operator/v1/send/usage` expose the same effective limits and UTC counters:
+`day`, `today`, `day_limit`, `minute_limit`, `new_chats_today`, `new_chats_limit`,
+`refusals_today`, `min_interval_ms`, `resets_at`.
+Metrics include `whatsapp_bridge_send_today`, `whatsapp_bridge_send_new_chats_today`,
+`whatsapp_bridge_send_rate_limited_total{limit}` and
+`whatsapp_bridge_send_refusals_total{reason}`.
+
+Rotate only on the private operator listener:
+`POST /operator/v1/mcp-token` with `{"sha256":"<64 hex characters>",
+"previous_valid_until":"2026-10-10T00:00:00Z"}`. An optional `token` must match
+the hash and have at least 16 characters; it is discarded. Prefer sending only
+the hash. Grace is capped at 24 hours; absent/past expiry means no grace.
+The previous token is the current runtime token (or the deploy token on first
+rotation); a second rotation drops the oldest. The current/previous hashes and
+expiry persist in a private runtime row and override the deploy token immediately
+on new HTTP requests, surviving restart. `DELETE /operator/v1/mcp-token` restores
+the deploy token/auth mode. Existing requests are allowed to finish.
+An unavailable authentication database or registry refuses all requests; it
+never implicitly restores the deployment token or anonymous access.
+`GET /operator/v1/settings` never includes hashes, and PATCH cannot change the
+private auth key. INFO audits show only eight-character hash prefixes and expiry.
+Neither route is an MCP tool or a bridge data-plane endpoint. Both require the
+operator token and the operator Host/Origin checks. When running the two processes
+outside Compose, pass the same `WHATSAPP_MCP_TOKEN` and `WHATSAPP_MCP_HOST` to the
+bridge so the initial previous hash reflects the MCP deployment policy.

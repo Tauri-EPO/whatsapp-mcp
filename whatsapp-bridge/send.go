@@ -62,6 +62,7 @@ type sentMessage struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
+	DryRun          bool   `json:"dry_run,omitempty"`
 	Recipient       string `json:"recipient"`
 	Message         string `json:"message"`
 	MediaPath       string `json:"media_path,omitempty"`
@@ -1110,6 +1111,13 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 
 		// Send the message
+		if req.DryRun {
+			writeJSON(w, 200, map[string]any{"success": true, "dry_run": true, "chat_jid": recipient})
+			return
+		}
+		if !b.allowSend(w, r.WithContext(ctx), recipient) {
+			return
+		}
 		success, message, sent := b.Send(ctx, recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
 		b.Log.Debugf("← /api/send success=%v status=%q id=%q", success, message, sent.ID)
 		if success {

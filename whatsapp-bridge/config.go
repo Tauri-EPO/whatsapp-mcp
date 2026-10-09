@@ -34,6 +34,9 @@ type bridgeConfig struct {
 	History                      historyLimits
 	SnapshotDir                  string
 	Archive                      archiveConfig
+	SendIncludeActions           bool
+	MCPEnvHash                   string
+	MCPFallbackBridge            bool
 }
 
 func loadBridgeConfig() (bridgeConfig, error) { return parseBridgeConfig(os.Getenv) }
@@ -99,6 +102,21 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	collect(err)
 	cfg.RuntimeDefaults, err = runtimeDefaults(getenv)
 	collect(err)
+	cfg.SendIncludeActions, err = parseBoolEnv("WHATSAPP_SEND_INCLUDE_ACTIONS", getenv("WHATSAPP_SEND_INCLUDE_ACTIONS"), false)
+	collect(err)
+	mcpToken := strings.TrimSpace(getenv("WHATSAPP_MCP_TOKEN"))
+	switch strings.ToLower(mcpToken) {
+	case "off", "none", "disabled":
+	case "":
+		host := strings.TrimSpace(getenv("WHATSAPP_MCP_HOST"))
+		cfg.MCPFallbackBridge = host != "" && host != "localhost" && host != "127.0.0.1" && host != "::1"
+	default:
+		if len(mcpToken) < 16 {
+			collect(errors.New("WHATSAPP_MCP_TOKEN must have at least 16 characters"))
+		} else {
+			cfg.MCPEnvHash = tokenHash(mcpToken)
+		}
+	}
 	// The valid-name appendix is long; put it after every other variable.
 	cfg.Tools, err = newToolPolicy(getenv(allowToolsEnv), getenv(denyToolsEnv))
 	collect(err)

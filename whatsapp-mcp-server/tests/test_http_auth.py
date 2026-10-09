@@ -6,6 +6,7 @@ from starlette.testclient import TestClient
 from http_auth import MIN_TOKEN_LENGTH, BearerTokenMiddleware, resolve_mcp_token, token_matches
 
 TOKEN = "s3cret-token-0123456789abcdef"
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
 
 
 class TestResolveMcpToken:
