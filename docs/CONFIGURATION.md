@@ -1265,6 +1265,8 @@ ceiling, and neither a raise nor a clear discards usage.
 A file that does not fit is left pending without a failure note. Ingest remembers
 one blocked file's measured duration and checks its identity and available quota
 before preparing it again; a fully exhausted quota stops fetching and conversion.
+HTTP metering and encoding share a private input snapshot, bounded to 256 MiB
+and the existing whole-file deadline; the copy is removed with the job's temporary files.
 Ingest pauses
 and resumes once each in the logs, retrying next cycle after a UTC month rollover
 or a permitted cap raise. Explicit calls subject to the cap return

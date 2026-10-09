@@ -58,13 +58,13 @@ def _ingest_value(value: Any) -> str:
 
 
 def parse_cap(value: Any) -> float | None:
+    if isinstance(value, str):
+        value = value.strip()
     if value is None or value == "":
         return None
     if isinstance(value, bool):
         raise ValueError(f"{CAP_ENV}: expected finite non-negative minutes")
-    if isinstance(value, str) and not re.fullmatch(
-        r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value.strip()
-    ):
+    if isinstance(value, str) and not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
         raise ValueError(f"{CAP_ENV}: expected decimal minutes")
     number = float(value)
     if not math.isfinite(number) or not 0 <= number <= 525600:

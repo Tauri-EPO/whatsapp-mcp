@@ -1,8 +1,10 @@
 """Real audio, provider HTTP, SQLite, worker/tool consumers and UTC quota proof."""
 
 import concurrent.futures
+import http.client
 import io
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -232,6 +234,104 @@ def test_transcription_metrics_have_help_for_every_family(paired_dbs):
         assert f"# HELP whatsapp_mcp_transcription_{name} " in text
 
 
+def test_initialized_usage_metrics_and_admin_read_during_real_writer_transaction(paired_dbs):
+    with usage.admission(2, "whisper_cpp", "", "tool"):
+        pass
+    writer = usage._connection()
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("UPDATE transcription_usage SET seconds=99")
+    token = "fake-bridge-0123456789abcdef"
+    admin = operator_admin.start_admin(token, "fake-mcp-0123456789abcdef", port=0)
+    try:
+        assert usage.current_usage()["seconds"] == 2  # Committed WAL snapshot, never the writer's pending value.
+        assert 'source="tool"} 2' in usage.metrics_text()
+        client = http.client.HTTPConnection("127.0.0.1", admin.server_port, timeout=2)
+        try:
+            client.request("GET", "/admin/v1/transcription/usage", headers={"Authorization": "Bearer " + token})
+            response = client.getresponse()
+            assert response.status == 200 and json.loads(response.read())["seconds"] == 2
+        finally:
+            client.close()
+    finally:
+        writer.rollback()
+        writer.close()
+        admin.shutdown()
+        admin.server_close()
+
+
+def test_http_meter_and_upload_share_snapshot_when_original_is_replaced(
+    provider, runtime_archive, monkeypatch, tmp_path
+):
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 0.05, "transcription.cap_scope": "all"})
+    source = tmp_path / "mutable.wav"
+    _audio(source, 1)
+    duration = usage.audio_duration
+
+    def replace_after_probe(path, deadline=None):
+        measured = duration(path, deadline)
+        _audio(source, 10)
+        return measured
+
+    monkeypatch.setattr(usage, "audio_duration", replace_after_probe)
+    result = transcribe.transcribe_file(str(source))
+    uploaded = tmp_path / "uploaded.ogg"
+    uploaded.write_bytes(provider["calls"][0]["fields"]["file"])
+    assert duration(str(source)) == 10
+    # Opus can pad its last frame; the ten-second replacement is never encoded.
+    assert duration(str(uploaded)) == pytest.approx(1, abs=0.02)
+    assert result["duration_s"] == 1
+    assert usage.current_usage()["seconds"] == 1
+    assert usage.current_usage()["remaining_seconds"] == 2
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="POSIX no-follow descriptor contract")
+def test_http_snapshot_refuses_final_symlink(tmp_path):
+    target, source, work = tmp_path / "private.wav", tmp_path / "input.wav", tmp_path / "work"
+    _audio(target)
+    source.symlink_to(target)
+    work.mkdir()
+    with pytest.raises(transcribe.TranscriptionError, match="snapshot"):
+        transcribe._freeze_http_audio(str(source), str(work), time.monotonic() + 5)
+    assert list((work / "original").iterdir()) == []
+
+
+def test_http_snapshot_bounds_bytes_when_input_grows_after_initial_stat(tmp_path, monkeypatch):
+    source, work = tmp_path / "growing.wav", tmp_path / "work"
+    _audio(source, 0.01)
+    work.mkdir()
+    monkeypatch.setattr(transcribe, "MAX_HTTP_AUDIO_BYTES", 1024)
+    fdopen = os.fdopen
+
+    class GrowingInput:
+        def __init__(self, original):
+            self.original = original
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.original.close()
+
+        def fileno(self):
+            return self.original.fileno()
+
+        def read(self, size):
+            with source.open("ab") as file:
+                file.write(b"\0" * 2048)
+            return self.original.read(size)
+
+    monkeypatch.setattr(
+        os,
+        "fdopen",
+        lambda fd, mode, **kwargs: (
+            GrowingInput(fdopen(fd, mode, **kwargs)) if mode == "rb" else fdopen(fd, mode, **kwargs)
+        ),
+    )
+    with pytest.raises(transcribe.TranscriptionError, match="256 MiB"):
+        transcribe._freeze_http_audio(str(source), str(work), time.monotonic() + 5)
+    assert (work / "original" / source.name).stat().st_size == 0
+
+
 @pytest.mark.parametrize("provider_name", ["whisper_cpp", "openai_compatible"])
 @pytest.mark.parametrize("resume", ["raise", "month", "replace"])
 def test_positive_insufficient_quota_reuses_measured_duration_and_rechecks_file_identity(
@@ -289,7 +389,20 @@ def test_cap_environment_refuses_non_decimal_forms(value):
         runtime_settings.parse_cap(value)
 
 
-@pytest.mark.parametrize("value,expected", [(" 1.5 ", 1.5), ("+1", 1), (".5", 0.5), ("1.", 1), ("1e2", 100), ("01", 1)])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, None),
+        ("", None),
+        (" \t", None),
+        (" 1.5 ", 1.5),
+        ("+1", 1),
+        (".5", 0.5),
+        ("1.", 1),
+        ("1e2", 100),
+        ("01", 1),
+    ],
+)
 def test_cap_environment_decimal_forms(value, expected):
     assert runtime_settings.parse_cap(value) == expected
 

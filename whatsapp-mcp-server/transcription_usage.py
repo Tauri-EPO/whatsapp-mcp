@@ -61,9 +61,16 @@ def _connection(create=True, timeout: float = 5):
     if conn is not None:
         try:
             conn.execute(f"PRAGMA busy_timeout={max(1, int(max(0, expires - time.monotonic()) * 1000))}")
-            # Serialize first-use DDL as well as admission. Deferred CREATEs
-            # can race while upgrading a read transaction to a writer.
-            conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
+            initialized = (
+                conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
+                    "('transcription_usage','transcription_reservations','transcription_outcomes')"
+                ).fetchone()[0]
+                == 3
+            )
+            if not initialized:
+                # Serialize first-use DDL; initialized observations only read.
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
         except BaseException:
             conn.close()
             raise

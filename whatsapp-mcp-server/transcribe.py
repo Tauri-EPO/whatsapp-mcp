@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -414,11 +415,47 @@ def _remaining(deadline: float) -> float:
     return seconds
 
 
+def _freeze_http_audio(source: str, work_dir: str, deadline: float) -> str:
+    from private_files import private_makedirs, private_open
+
+    directory = Path(work_dir) / "original"
+    private_makedirs(str(directory))
+    frozen = directory / Path(source).name
+    _remaining(deadline)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        with os.fdopen(os.open(source, flags), "rb") as original, private_open(str(frozen), "xb") as target:
+            info = os.fstat(original.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise TranscriptionError("HTTP transcription input must be a regular file")
+            if info.st_size > MAX_HTTP_AUDIO_BYTES:
+                raise TranscriptionError("HTTP transcription input exceeds 256 MiB")
+            copied = 0
+            while True:
+                _remaining(deadline)
+                block = original.read(1024 * 1024)
+                if not block:
+                    break
+                copied += len(block)
+                if copied > MAX_HTTP_AUDIO_BYTES:
+                    raise TranscriptionError("HTTP transcription input exceeds 256 MiB")
+                target.write(block)
+        _remaining(deadline)
+        return str(frozen)
+    except FileNotFoundError:
+        raise  # A purge is not a backend outage or a permanent transcription refusal.
+    except OSError:
+        raise TranscriptionError("HTTP transcription could not snapshot this audio") from None
+
+
 def _http_parts(source: str, work_dir: str, deadline: float) -> tuple[list[Path], float]:
     path = Path(source)
     size = path.stat().st_size
     if size > MAX_HTTP_AUDIO_BYTES:
         raise TranscriptionError("HTTP transcription input exceeds 256 MiB")
+    # Probe and encode the exact same private, bounded bytes even if the
+    # caller replaces/appends to its file while this request is running.
+    source = _freeze_http_audio(source, work_dir, deadline)
     try:
         # Restrict demuxers/protocols: playlists cannot fetch other local files
         # or remote URLs. Probe with the already packaged ffmpeg, no ffprobe.
