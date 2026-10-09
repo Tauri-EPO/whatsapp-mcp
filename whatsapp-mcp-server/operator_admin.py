@@ -40,6 +40,13 @@ class AuthenticatedCalls:
 def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
     if not mcp_token or len(bridge_token) < 16 or hmac.compare_digest(bridge_token.encode(), mcp_token.encode()):
         raise ValueError("MCP admin requires a bridge token distinct from the MCP bearer; configure WHATSAPP_MCP_TOKEN")
+    from http_auth import AuthStateUnavailableError, verify_static_token
+
+    try:
+        if verify_static_token(bridge_token, mcp_token):
+            raise ValueError("MCP admin requires a bridge token distinct from every effective MCP bearer")
+    except AuthStateUnavailableError:
+        raise ValueError("MCP admin cannot establish effective credential separation") from None
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -61,6 +68,8 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
                 self.reply(401, {"error": "unauthorized"})
             elif headers.get_all("Host", []) != [host] or headers.get_all("Origin", []) not in ([], [f"http://{host}"]):
                 self.reply(403, {"error": "host_origin_refused"})
+            elif not self.separated():
+                return  # A later runtime rotation can revoke admin immediately.
             elif headers.get("Content-Length", "0") != "0" or headers.get("Transfer-Encoding"):
                 self.reply(400, {"error": "body_refused"})
             elif self.path == "/admin/v1/transcription/usage":
@@ -75,6 +84,16 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
                     self.reply(200, {"last_mcp_call_at": _last_call})
             else:
                 self.reply(404, {"error": "not_found"})
+
+        def separated(self):
+            try:
+                if verify_static_token(bridge_token, mcp_token):
+                    self.reply(401, {"error": "unauthorized"})
+                    return False
+            except AuthStateUnavailableError:
+                self.reply(503, {"error": "authentication_state_unavailable"})
+                return False
+            return True
 
         def reply(self, status, payload):
             body = json.dumps(payload).encode()
@@ -108,7 +127,8 @@ def install_admin(transport: str, port: int):
         return start_admin(bridge_token, token)
     except ValueError:
         logging.getLogger("whatsapp_mcp").warning(
-            "MCP admin disabled: set WHATSAPP_MCP_TOKEN distinct from the bridge token; data plane remains available"
+            "MCP admin disabled: set WHATSAPP_MCP_TOKEN distinct from the bridge token and clear or expire "
+            "any saved bridge-token MCP bearer; data plane remains available"
         )
     except OSError:
         logging.getLogger("whatsapp_mcp").warning(

@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.request
 import wave
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -878,6 +878,58 @@ def test_runtime_only_auth_records_activity_and_clear_restores_anonymous_denial(
             client.post("/mcp", headers={**headers, "Authorization": "Bearer " + token}, json=call).status_code == 200
         )
         assert operator_admin._last_call is None
+
+
+def test_admin_refuses_current_and_grace_mcp_bridge_tokens_on_start_and_later_rotation(runtime_archive):
+    bridge, mcp_token = "fake-bridge-0123456789abcdef", "fake-mcp-0123456789abcdef"
+
+    def rotate(current, previous="", future=True):
+        until = datetime.now(UTC) + timedelta(hours=1 if future else -1)
+        state = json.dumps(
+            {
+                "current": hashlib.sha256(current.encode()).hexdigest(),
+                "previous": hashlib.sha256(previous.encode()).hexdigest() if previous else "",
+                "previous_valid_until": until.isoformat(),
+            }
+        )
+        with runtime_archive.messages() as conn:
+            conn.execute(
+                "INSERT INTO runtime_settings VALUES ('auth.mcp_token',?, '2026-10-09T00:00:00Z', 1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (state,),
+            )
+
+    for current, previous in [(bridge, ""), (mcp_token, bridge)]:
+        rotate(current, previous)
+        with pytest.raises(ValueError, match="distinct"):
+            operator_admin.start_admin(bridge, mcp_token, port=0)
+    rotate(mcp_token, bridge, future=False)
+    admin = operator_admin.start_admin(bridge, mcp_token, port=0)
+    try:
+
+        def read():
+            client = http.client.HTTPConnection("127.0.0.1", admin.server_port, timeout=2)
+            try:
+                client.request("GET", "/admin/v1/health", headers={"Authorization": "Bearer " + bridge})
+                response = client.getresponse()
+                response.read()
+                return response.status
+            finally:
+                client.close()
+
+        from http_auth import verify_static_token
+
+        assert read() == 200 and not verify_static_token(bridge, mcp_token)
+        for current, previous in [(bridge, ""), (mcp_token, bridge)]:
+            rotate(current, previous)
+            assert verify_static_token(bridge, mcp_token) and read() == 401
+        rotate(mcp_token, bridge, future=False)
+        assert read() == 200 and not verify_static_token(bridge, mcp_token)
+        with runtime_archive.messages() as conn:
+            conn.execute("UPDATE runtime_settings SET value='invalid' WHERE key='auth.mcp_token'")
+        assert read() == 503
+    finally:
+        admin.shutdown()
+        admin.server_close()
 
 
 def test_go_operator_to_python_admin_actual_processes(paired_dbs):

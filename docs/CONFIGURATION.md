@@ -1260,6 +1260,11 @@ skipped with one warning and the MCP data plane stays available. An occupied
 admin port also disables admin with a warning; operator usage returns 503 and
 activity stays null. HTTP/SSE cannot use `WHATSAPP_MCP_PORT=8091` while the
 operator is enabled. Stdio never opens admin.
+Admin also rejects a bridge token accepted by the current runtime MCP token or
+its unexpired grace token. Clear or expire that saved bearer before enabling
+admin; each GET rechecks separation after later rotations. Unavailable saved
+auth state fails closed with 503. Only authenticated calls update activity,
+including credentials installed after an anonymous startup.
 
 `PATCH /operator/v1/settings` accepts `transcription.monthly_max_minutes` (number
 0..525600) and `transcription.cap_scope` (`ingest` or `all`). Null clears an

@@ -1,5 +1,6 @@
 """Actual MCP startup preserves the data plane when optional admin is unavailable."""
 
+import hashlib
 import json
 import os
 import socket
@@ -10,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -54,14 +56,34 @@ def occupied_admin_port():
         yield
 
 
-@pytest.mark.parametrize("occupied,mcp_token", [(False, None), (True, MCP_TOKEN), (True, "fake-mcp-ä0123456789abcdef")])
-def test_actual_http_startup_without_admin_keeps_mcp_serving_and_warns(tmp_path, occupied, mcp_token):
+@pytest.mark.parametrize(
+    "occupied,mcp_token,bridge_grace",
+    [
+        (False, None, False),
+        (True, MCP_TOKEN, False),
+        (True, "fake-mcp-ä0123456789abcdef", False),
+        (False, MCP_TOKEN, True),
+    ],
+)
+def test_actual_http_startup_without_admin_keeps_mcp_serving_and_warns(tmp_path, occupied, mcp_token, bridge_grace):
     with socket.socket() as free:
         free.bind(("127.0.0.1", 0))
         port = free.getsockname()[1]
     env = startup_env(tmp_path, WHATSAPP_MCP_PORT=str(port))
-    if occupied:
+    if mcp_token:
         env["WHATSAPP_MCP_TOKEN"] = mcp_token
+    if bridge_grace:
+        state = json.dumps(
+            {
+                "current": hashlib.sha256(MCP_TOKEN.encode()).hexdigest(),
+                "previous": hashlib.sha256(BRIDGE_TOKEN.encode()).hexdigest(),
+                "previous_valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            }
+        )
+        with sqlite3.connect(tmp_path / "messages.db") as conn:
+            conn.execute(
+                "INSERT INTO runtime_settings VALUES ('auth.mcp_token',?, '2026-10-09T00:00:00Z', 1)", (state,)
+            )
     from contextlib import nullcontext
 
     with occupied_admin_port() if occupied else nullcontext():
@@ -76,7 +98,7 @@ def test_actual_http_startup_without_admin_keeps_mcp_serving_and_warns(tmp_path,
                         f"http://127.0.0.1:{port}/mcp",
                         data=json.dumps(INITIALIZE).encode(),
                         headers={
-                            "Authorization": "Bearer " + (mcp_token if occupied else BRIDGE_TOKEN),
+                            "Authorization": "Bearer " + (mcp_token or BRIDGE_TOKEN),
                             "Content-Type": "application/json",
                             "Accept": "application/json, text/event-stream",
                         },
