@@ -50,7 +50,7 @@ func TestPrivateProcessUmaskIncludesSQLiteSidecars(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, name := range []string{"directory", "loose-file", "unprotected.db", "unprotected.db-wal", "unprotected.db-shm", "journal.db", "journal.db-journal"} {
-			info, err := os.Stat(filepath.Join(root, name))
+			info, err := os.Stat(filepath.Join(root, name)) //nolint:gosec // Child receives this test's generated t.TempDir and fixed object names only.
 			if err != nil || info.Mode().Perm()&0o077 != 0 {
 				t.Fatalf("creation mask did not protect %s", name)
 			}
