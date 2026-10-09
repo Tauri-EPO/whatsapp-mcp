@@ -166,12 +166,15 @@ func storeUsage(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles int) {
 // storeStats caches storeUsage so /api/health stays cheap under Docker's
 // periodic health checks.
 type storeStats struct {
-	mu         sync.Mutex
-	root       *os.Root
-	measuredAt time.Time
-	store      int64
-	media      int64
-	files      int
+	mu                                sync.Mutex
+	root                              *os.Root
+	measuredAt                        time.Time
+	store                             int64
+	media                             int64
+	files                             int
+	dbMeasuredAt                      time.Time
+	messagesBytes, sessionBytes, rows int64
+	warning                           bool
 }
 
 func newStoreStats(root *os.Root) *storeStats { return &storeStats{root: root} }
@@ -191,6 +194,7 @@ func (s *storeStats) snapshot(now time.Time) (storeBytes, mediaBytes int64, medi
 func (s *storeStats) invalidate() {
 	s.mu.Lock()
 	s.measuredAt = time.Time{}
+	s.dbMeasuredAt = time.Time{}
 	s.mu.Unlock()
 }
 

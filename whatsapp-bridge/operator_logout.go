@@ -73,6 +73,13 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	p.b.operatorLogout.Store(true)
 	p.b.operatorRetiredClient.Store(p.b.currentClient())
+	ctx, cancel = context.WithTimeout(actionCtx, time.Second)
+	archivesDrained := p.b.cancelArchiveSessionReads(ctx)
+	cancel()
+	if !archivesDrained {
+		writeErrorCode(w, 503, "archive_busy", "Session archive readers are still closing; retry operator logout")
+		return
+	}
 	p.mu.Lock()
 	p.state.Generation++
 	p.invalidateLocked("logged_out_by_operator")

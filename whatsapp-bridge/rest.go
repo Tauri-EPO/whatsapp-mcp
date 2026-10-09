@@ -258,7 +258,10 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["store_bytes"] = storeBytes
 		body["media_bytes"] = mediaBytes
 		body["media_files"] = mediaFiles
+		_, _, _, warning := b.archiveStats(time.Now())
+		body["store_warning"] = warning
 	}
+	body["history_sync"] = b.historyProgress.snapshot()
 	return body
 }
 

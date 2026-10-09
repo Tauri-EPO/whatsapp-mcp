@@ -20,6 +20,7 @@ type metricsRegistry struct {
 	messagesStored     atomic.Int64
 	sessionKeepalives  atomic.Int64
 	historyMessages    atomic.Int64
+	historyDropped     atomic.Int64
 	groupHistoryShares atomic.Int64
 	storeFailures      atomic.Int64
 	messagesSent       atomic.Int64
@@ -112,6 +113,13 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_messages_stored_total", "Inbound/outbound messages written from live events.", "counter", fmt.Sprint(m.messagesStored.Load()))
 	add("whatsapp_bridge_session_keepalives_total", "Times the device was marked available and unavailable again so WhatsApp counts it as in use.", "counter", fmt.Sprint(m.sessionKeepalives.Load()))
 	add("whatsapp_bridge_history_messages_total", "Messages written from history sync.", "counter", fmt.Sprint(m.historyMessages.Load()))
+	add("whatsapp_bridge_history_sync_progress", "Latest phone history sync progress (0-100).", "gauge", fmt.Sprint(b.historyProgress.snapshot().Progress))
+	out = append(out, "# HELP whatsapp_bridge_history_dropped_total History messages refused before ingest.", "# TYPE whatsapp_bridge_history_dropped_total counter", fmt.Sprintf("whatsapp_bridge_history_dropped_total{reason=\"age\"} %d", m.historyDropped.Load()))
+	if b.storeStats != nil {
+		messages, session, rows, _ := b.archiveStats(time.Now())
+		out = append(out, "# HELP whatsapp_bridge_db_bytes Database main file plus WAL bytes.", "# TYPE whatsapp_bridge_db_bytes gauge", fmt.Sprintf("whatsapp_bridge_db_bytes{db=\"messages\"} %d", messages), fmt.Sprintf("whatsapp_bridge_db_bytes{db=\"whatsapp\"} %d", session))
+		add("whatsapp_bridge_messages_rows", "Message row count refreshed with store usage.", "gauge", fmt.Sprint(rows))
+	}
 	add("whatsapp_bridge_message_store_failures_total", "Message, history, chat, call and label rows or archive updates that could not be written.", "counter", fmt.Sprint(m.storeFailures.Load()))
 	add("whatsapp_bridge_group_history_shares_total", "Group history bundle and notice messages seen (a member was added with history sharing); logged, not decoded.", "counter", fmt.Sprint(m.groupHistoryShares.Load()))
 	add("whatsapp_bridge_messages_sent_total", "Successful /api/send calls.", "counter", fmt.Sprint(m.messagesSent.Load()))

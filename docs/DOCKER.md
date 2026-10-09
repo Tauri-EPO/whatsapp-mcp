@@ -195,6 +195,69 @@ Neither phone-number linking nor these endpoints promise avoidance of a
 passkey challenge. `scripts/smoke.sh` keeps exit 2 while unpaired and, when the
 operator listener is enabled, prints only its pairing state, never credentials.
 
+
+### Operator export and online snapshots
+
+The private operator listener also serves `GET /operator/v1/export` and
+`POST /operator/v1/snapshot`. Both require the separate operator bearer token
+and the same Host, Origin and rate rules as pairing; neither is an MCP tool.
+Keep downloads and backups private: they contain message and contact data.
+
+Export streams an uncompressed ZIP64 directly into the response, with no
+server-side staging. It contains `chats.json`, `contacts.json`,
+`messages.jsonl`, `notes.jsonl` (versioned notes), `media_notes.jsonl`,
+`transcriptions.jsonl` and `manifest.json` (version, UTC creation time, per-file
+row/file counts, sizes and SHA256). Contacts are selected explicitly from the
+session store's contact table; session/device keys, database files, media keys,
+CDN URLs and tokens are excluded. Missing lazy `notes.db` produces empty note
+files. Add `?media=true` for referenced cached media; default is false and each
+exported message has a `media_ref` when its file is included.
+
+The export holds one read transaction per store while live writes continue;
+stores are independently consistent, not one cross-process transaction.
+To keep memory flat even with many media files, it replays the pinned rows and
+reads media three times for hashes and the ZIP central directory. This trades
+I/O for bounded memory; cache changes or client cancellation abort the archive.
+A long read transaction can retain WAL growth until the download completes.
+Only one export runs at a time (429 for a second); requests are capped at
+30 minutes. Operator logout cancels and joins exports and session snapshots
+before destroying session keys; a stalled download is aborted. While parked
+after logout, exports still include messages/notes but have no contacts, and
+session snapshots return 503 until pairing restarts. Audit logs contain counts,
+timing and fixed routes, never content.
+
+For snapshots, configure `WHATSAPP_SNAPSHOT_DIR=/app/snapshots` and mount a
+private backup volume **only on bridge**, outside `/app/store` and
+`/app/outbox`, using a local compose override. The directory is 0700 and files
+are 0600 on a filesystem that enforces Unix modes; world-writable directories
+and symlink components are refused. Windows requires equivalent private ACLs.
+The Linux image pins the output directory during SQLite writes.
+`POST /operator/v1/snapshot` accepts an empty body, returning generated names,
+sizes and SHA256s. `VACUUM INTO` reads committed WAL data and writes independent,
+consistent `messages.db` and optional `notes.db` copies without disconnecting
+the client. Only `?session=true` adds `whatsapp.db`; that copy is a credential
+which can restore the account without re-pairing. Protect and encrypt it with
+the same care as the active session. Media files and tokens are not included.
+Concurrent snapshots get 429. No request parameter selects an output path.
+
+The equivalent host/cron command is:
+
+```bash
+WHATSAPP_STORE_DIR=/private/store whatsapp-bridge snapshot --out /private/backups
+# Add --session only when an account/session backup is intended.
+```
+
+To restore, stop **both** bridge and MCP, verify each file's returned SHA256,
+copy the chosen generated copies into the store as `messages.db` and
+`notes.db` (and `whatsapp.db` only when explicitly backed up), preserving
+owner-only modes and the container uid. Remove the old matching `-wal`,
+`-shm` and `-journal` siblings while the processes are stopped; never combine
+a snapshot with a WAL from another database. Keep the original store backup
+until verification finishes. Restore cached media separately, then start both
+processes and run the normal smoke check. A data-only snapshot retains the
+current live session if left in place; a clean store without a session needs
+pairing. A missing notes copy is expected for an account without agent notes.
+
 ### Private operator network
 
 For an operator in a container, create one private external Docker network

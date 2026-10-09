@@ -55,6 +55,13 @@ type Bridge struct {
 	operatorServer             *http.Server
 	sessionDB                  *sql.DB // Startup-owned session pool, observed without acquiring a connection.
 	Store                      *MessageStore
+	HistoryLimits              historyLimits
+	historyProgress            historyProgress
+	SnapshotDir                string
+	exportBusy                 atomic.Bool
+	snapshotBusy               atomic.Bool
+	archiveSessionMu           sync.Mutex
+	archiveSessionReaders      [2]*archiveSessionRead
 	Log                        waLog.Logger
 
 	// StoreRoot is the store directory opened as an os.Root (store_dir.go).

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal"
-	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"google.golang.org/protobuf/proto"
@@ -68,6 +67,10 @@ func main() {
 // runCLI is the actual startup sequence, including process-wide creation policy.
 func runCLI() int {
 	privateProcessUmask()
+	if len(os.Args) > 1 && os.Args[1] == "snapshot" {
+		_, _, _ = initLogging()
+		return snapshotCLI(os.Args[2:], os.Stdout)
+	}
 	flag.Parse()
 	if *operatorStatusFlag {
 		return operatorStatusProbe(os.Getenv, os.Stdout)
@@ -84,10 +87,23 @@ func run() int {
 		bridgeLog.Errorf("Refusing to start: %s", err)
 		return 1
 	}
+	if err := cfg.History.validateFlag(*fullHistoryPairFlag); err != nil {
+		bridgeLog.Errorf("Refusing to start: %s", err)
+		return 1
+	}
 	return runBridge(cfg)
 }
 
 func runBridge(cfg bridgeConfig) int {
+	if cfg.SnapshotDir != "" {
+		root, dir, err := privateSnapshotDir(cfg.SnapshotDir)
+		if err != nil {
+			bridgeLog.Errorf("Refusing unsafe WHATSAPP_SNAPSHOT_DIR")
+			return 1
+		}
+		_ = root.Close()
+		_ = dir.Close()
+	}
 
 	// One level for the bridge and the whatsmeow client (WHATSAPP_LOG_LEVEL, default INFO).
 	logger, clientLog, dbLog := newLoggerSet(cfg.LogLevel, cfg.JSONLogs)
@@ -180,29 +196,7 @@ func runBridge(cfg bridgeConfig) int {
 		}
 	}
 
-	// Optionally request a full history sync at pair time.
-	//
-	// whatsmeow's default DeviceProps has RequireFullSync=false, which asks the
-	// primary device for "recent" history only (typically ~3 months, decided by
-	// the phone). Setting RequireFullSync=true with a large FullSyncDaysLimit
-	// flips the handshake to request full-history mode. The phone still decides
-	// the actual cap — iPad companion is documented at ~1 year max
-	// (https://wabetainfo.com/...). Only meaningful at pair time: for an
-	// already-paired session (whatsapp.db present), this is a no-op because no
-	// new pair handshake fires.
-	//
-	// Enable by passing --full-history-pair on the command line BEFORE deleting
-	// whatsapp.db and re-scanning the QR code. The flag defaults to false so
-	// normal launchd-managed restarts don't accidentally trigger a huge sync.
-	if *fullHistoryPairFlag {
-		store.DeviceProps.RequireFullSync = proto.Bool(true)
-		store.DeviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{
-			FullSyncDaysLimit:   proto.Uint32(3650),
-			FullSyncSizeMbLimit: proto.Uint32(102400),
-			StorageQuotaMb:      proto.Uint32(102400),
-		}
-		logger.Infof("--full-history-pair enabled: requesting full history (days=3650, sizeMb=102400)")
-	}
+	cfg.History.apply(store.DeviceProps, deviceStore.ID != nil, *fullHistoryPairFlag)
 
 	// Set the linked-device label shown in WhatsApp's "Linked Devices" list.
 	// whatsmeow's built-in default is the literal string "whatsmeow", which is
@@ -268,6 +262,7 @@ func runBridge(cfg bridgeConfig) int {
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
 	bridge.sessionDB = sessionDB
+	bridge.HistoryLimits, bridge.SnapshotDir = cfg.History, cfg.SnapshotDir
 	exitCtx, stopSignals := signal.NotifyContext(bridge.ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	reconnectChan := make(chan bool, 1)
@@ -302,6 +297,7 @@ func runBridge(cfg bridgeConfig) int {
 			// Only an explicitly unpaired restart reaches this factory. Deleted
 			// SDK clients cannot be reused, and old QR contexts cannot disconnect
 			// this new client's socket.
+			cfg.History.apply(store.DeviceProps, false, *fullHistoryPairFlag)
 			freshClient := newRuntimeClient(container.NewDevice(), clientLog)
 			bridge.installClient(freshClient, false, reconnectChan)
 			return freshClient, nil
@@ -312,7 +308,7 @@ func runBridge(cfg bridgeConfig) int {
 		return 1
 	}
 	if bridge.operatorPairing != nil {
-		bridge.operatorServer, err = startOperatorServer(cfg.Operator, bridge.operatorPairing.routes(), logger)
+		bridge.operatorServer, err = startOperatorServer(cfg.Operator, bridge.operatorRoutes(), logger)
 		if err != nil {
 			logger.Errorf("Failed to start operator listener: %v", err)
 			return 1
