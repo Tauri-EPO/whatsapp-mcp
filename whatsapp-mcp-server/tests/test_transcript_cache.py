@@ -68,7 +68,7 @@ def test_transcript_is_stored_then_served_from_the_cache(audio_store, monkeypatc
 
 def test_transcript_of_a_bare_file_path_is_not_cached(audio_store, monkeypatch):
     _fake_whisper(monkeypatch)
-    out = main.transcribe_audio(file_path="/tmp/voice.ogg")
+    out = main.transcribe_audio(file_path=str(audio_store.messages_db.parent / "voice.ogg"))
     assert out["sha256"] is None and out["stored"] is False and out["cached"] is False
     assert media_notes.fetch_notes([SHA_AUDIO]) == {}
 
