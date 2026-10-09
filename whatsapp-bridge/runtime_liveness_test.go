@@ -33,7 +33,7 @@ func TestRuntimeStatusHTTPRemainsResponsiveDuringDownloadAndPendingHandoff(t *te
 			return false, "", "", "", ctx.Err()
 		}
 	}
-	const token = "fake-data-plane-token-0123456789abcdef"
+	const token = "fake-data-plane-token-0123456789abcdef" //nolint:gosec // Public fake HTTP credential for the authenticated deny-path fixture.
 	server := httptest.NewServer(b.runtimeRESTHandler(8080, token))
 	t.Cleanup(server.Close)
 	request := func(client *http.Client, method, path, bearer, host, body string) (int, error) {
