@@ -184,7 +184,7 @@ func TestMediaRetryUnknownLengthDoesNotBorrowFromDifferentPlaintext(t *testing.T
 	}
 	check := func(hash []byte, reported uint64, want sql.NullInt64) {
 		t.Helper()
-		if err := ms.StoreMediaInfo("RETRYLENGTH1", mediaTestChat, "https://example.invalid/refreshed", doc.GetMediaKey(), hash, doc.GetFileEncSHA256(), reported); err != nil {
+		if err := ms.StoreMediaInfo("RETRYLENGTH1", mediaTestChat, &MediaDownloader{URL: "https://example.invalid/refreshed", MediaKey: doc.GetMediaKey(), FileSHA256: hash, FileEncSHA256: doc.GetFileEncSHA256(), FileLength: reported}); err != nil {
 			t.Fatal(err)
 		}
 		var got sql.NullInt64

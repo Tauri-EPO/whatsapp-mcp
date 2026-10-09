@@ -144,7 +144,7 @@ func TestHistoryRetriesBusyWholeChunk(t *testing.T) {
 	}
 }
 
-func TestBatchRejectsIgnoredSideWriteErrors(t *testing.T) {
+func TestBatchRejectsIgnoredInsertErrors(t *testing.T) {
 	for _, action := range []string{"ABORT", "ROLLBACK"} {
 		t.Run(action, func(t *testing.T) {
 			t.Setenv(storeDirEnv, t.TempDir())
@@ -156,12 +156,12 @@ func TestBatchRejectsIgnoredSideWriteErrors(t *testing.T) {
 			if err := ms.StoreChat(phonePN.String(), "Alice", time.Now()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ms.db.Exec(fmt.Sprintf("CREATE TRIGGER fail_side BEFORE UPDATE OF mentions ON messages WHEN new.id='FAIL' BEGIN SELECT RAISE(%s,'simulated side failure');END", action)); err != nil {
+			if _, err := ms.db.Exec(fmt.Sprintf("CREATE TRIGGER fail_insert BEFORE INSERT ON messages WHEN new.id='FAIL' AND new.mentions IS NOT NULL BEGIN SELECT RAISE(%s,'simulated insert failure');END", action)); err != nil {
 				t.Fatal(err)
 			}
 			err = ms.Batch(func(batch *messageBatch) error {
 				if err := batch.StoreMessage(storedMessage{
-					ID:         "FAIL",
+					ID:         "HEAD",
 					ChatJID:    phonePN.String(),
 					Sender:     phonePN.User,
 					Content:    "history searchable",
@@ -170,9 +170,9 @@ func TestBatchRejectsIgnoredSideWriteErrors(t *testing.T) {
 				}); err != nil {
 					return err
 				}
-				// A caller that ignores an auxiliary write error must still get
-				// a failed transaction, with no tail autocommitted after rollback.
-				_ = batch.SetMentions("FAIL", phonePN.String(), phonePN.String())
+				// An ignored atomic insert error must fail the whole transaction,
+				// with neither HEAD nor an autocommitted TAIL after rollback.
+				_ = batch.StoreMessage(storedMessage{ID: "FAIL", ChatJID: phonePN.String(), Sender: phonePN.User, Content: "history searchable", Timestamp: time.Now(), Mentions: phonePN.User})
 				_ = batch.StoreMessage(storedMessage{
 					ID:         "TAIL",
 					ChatJID:    phonePN.String(),
@@ -184,7 +184,7 @@ func TestBatchRejectsIgnoredSideWriteErrors(t *testing.T) {
 				return nil
 			})
 			if err == nil {
-				t.Fatal("ignored side failure committed a batch")
+				t.Fatal("ignored insert failure committed a batch")
 			}
 			var rows, indexed int
 			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil {

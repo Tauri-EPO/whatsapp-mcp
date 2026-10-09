@@ -13,8 +13,11 @@ import (
 
 func TestPrivateProcessUmaskIncludesSQLiteSidecars(t *testing.T) {
 	if os.Getenv("WAMCP_UMASK_FIXTURE") == "1" {
-		syscall.Umask(0o022) // Establish a permissive inherited mask in this isolated child.
-		privateProcessUmask()
+		syscall.Umask(0o022)                  // Establish a permissive inherited mask in this isolated child.
+		t.Setenv(bridgePortEnv, "not-a-port") // Return before listeners or filesystem effects.
+		if code := runCLI(); code != 1 {
+			t.Fatalf("actual startup did not refuse invalid port: %d", code)
+		}
 		root := os.Getenv("WAMCP_UMASK_DIRECTORY")
 		if err := os.Mkdir(filepath.Join(root, "directory"), 0o777); err != nil { //nolint:gosec // Deliberately permissive request: process umask must restrict it.
 			t.Fatal(err)

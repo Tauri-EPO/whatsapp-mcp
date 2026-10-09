@@ -71,22 +71,42 @@ func textModuleBound(module string) string {
 	if len(module) <= 480 {
 		return module
 	}
-	end := 480
-	for end > 0 && !utf8.RuneStart(module[end]) {
-		end--
-	}
+	end := escapedTextBoundary(module, 480)
 	return module[:end] + textLogTruncated
 }
 
-// The cap includes prefix, marker and newline, and never splits a UTF-8 rune.
+// escapedTextBoundary walks the encoding emitted by oneLine: whole UTF-8 runes
+// and whole Go escape sequences. Cutting an encoded backslash or control in
+// half would make the remaining payload ambiguous.
+func escapedTextBoundary(text string, budget int) int {
+	end := 0
+	for end < len(text) {
+		_, size := utf8.DecodeRuneInString(text[end:])
+		if text[end] == '\\' && end+1 < len(text) {
+			size = 2
+			switch text[end+1] {
+			case 'x':
+				size = 4
+			case 'u':
+				size = 6
+			case 'U':
+				size = 10
+			}
+		}
+		if end+size > budget || end+size > len(text) {
+			break
+		}
+		end += size
+	}
+	return end
+}
+
+// The cap includes prefix, marker and newline, and preserves encoding boundaries.
 func capTextLine(line string) string {
 	if len(line)+1 <= textLogMaxLine {
 		return line + "\n"
 	}
-	end := textLogMaxLine - 1 - len(textLogTruncated)
-	for end > 0 && !utf8.RuneStart(line[end]) {
-		end--
-	}
+	end := escapedTextBoundary(line, textLogMaxLine-1-len(textLogTruncated))
 	return line[:end] + textLogTruncated + "\n"
 }
 
@@ -107,7 +127,11 @@ func (l *textLogger) log(level, msg string, args ...any) {
 		prefix = color + prefix + "\x1b[0m"
 	}
 	var rendered strings.Builder
-	for index, part := range strings.Split(message, "\n") {
+	parts := strings.Split(message, "\n")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1] // A final newline terminates the last record.
+	}
+	for index, part := range parts {
 		marker := ""
 		if index > 0 {
 			marker = textLogContinuation

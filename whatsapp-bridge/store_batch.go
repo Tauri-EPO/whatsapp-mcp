@@ -218,11 +218,6 @@ func (b *messageBatch) MarkViewOnce(messageID, chatJID string) error {
 	return b.write(func() error { return markViewOnceWith(b.tx, messageID, chatJID) })
 }
 
-// SetMentions is MessageStore.SetMentions inside the batch.
-func (b *messageBatch) SetMentions(messageID, chatJID, mentions string) error {
-	return b.write(func() error { return setMentionsWith(b.tx, messageID, chatJID, mentions) })
-}
-
 // StorePoll is MessageStore.StorePoll inside the batch.
 func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, createdAt time.Time) error {
 	return b.write(func() error { return storePollWith(b.tx, messageID, chatJID, p, createdAt) })

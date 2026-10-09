@@ -1198,10 +1198,12 @@ func setTargetMessageIDWith(ex sqlExecer, id, chatJID, target string) error {
 }
 
 // Store additional media info in the database
-func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+func (store *MessageStore) StoreMediaInfo(id, chatJID string, refreshed *MediaDownloader) error {
+	url, mediaKey := refreshed.URL, refreshed.MediaKey
+	fileSHA256, fileEncSHA256, fileLength := refreshed.FileSHA256, refreshed.FileEncSHA256, refreshed.FileLength
 	_, err := store.db.Exec(
-		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END, media_presentation = CASE WHEN file_sha256 = ? THEN media_presentation END WHERE id = ? AND chat_jid = ?",
-		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, fileSHA256, id, chatJID,
+		"UPDATE messages SET url = ?, direct_path = NULLIF(?, ''), media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = CASE WHEN ? = 0 AND file_sha256 = ? THEN file_length ELSE NULLIF(?, 0) END, media_presentation = CASE WHEN file_sha256 = ? THEN media_presentation END WHERE id = ? AND chat_jid = ?",
+		url, refreshed.DirectPath, mediaKey, fileSHA256, fileEncSHA256, fileLength, fileSHA256, fileLength, fileSHA256, id, chatJID,
 	)
 	return err
 }
