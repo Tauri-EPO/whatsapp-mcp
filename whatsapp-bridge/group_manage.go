@@ -17,6 +17,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -26,14 +27,37 @@ import (
 type groupOps struct {
 	updateParticipants func(ctx context.Context, jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
 	setName            func(ctx context.Context, jid types.JID, name string) error
-	setDescription     func(ctx context.Context, jid types.JID, description string) error
+	getInfo            groupInfoFetcher
+	setTopic           func(ctx context.Context, jid types.JID, topic groupTopicUpdate) error
 	inviteLink         func(ctx context.Context, jid types.JID, reset bool) (string, error)
 	leave              func(ctx context.Context, jid types.JID) error
 }
 
+// groupTopicUpdate names the adjacent SDK strings so the description cannot
+// silently become the previous ID (which would clear the description).
+type groupTopicUpdate struct {
+	PreviousID  string
+	Description string
+}
+
+// groupManagementClient keeps the live adapter testable at the SDK boundary.
+// *whatsmeow.Client implements it; tests observe the actual argument placement.
+type groupManagementClient interface {
+	UpdateGroupParticipants(context.Context, types.JID, []types.JID, whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
+	SetGroupName(context.Context, types.JID, string) error
+	GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error)
+	SetGroupTopic(context.Context, types.JID, string, string, string) error
+	GetGroupInviteLink(context.Context, types.JID, bool) (string, error)
+	LeaveGroup(context.Context, types.JID) error
+}
+
 // liveGroupOps binds groupOps to a whatsmeow client, refusing when offline
 // (connected is Bridge.Connected, so tests can flip it).
-func liveGroupOps(client *whatsmeow.Client, connected func() bool) groupOps {
+func liveGroupOps(client groupManagementClient, connected func() bool) groupOps {
+	// Preserve the nil-client guard when a typed SDK pointer enters the interface.
+	if sdk, ok := client.(*whatsmeow.Client); ok && sdk == nil {
+		client = nil
+	}
 	online := func() error {
 		if client == nil || !connected() {
 			return errors.New("WhatsApp client is not connected")
@@ -53,14 +77,20 @@ func liveGroupOps(client *whatsmeow.Client, connected func() bool) groupOps {
 			}
 			return client.SetGroupName(ctx, jid, name)
 		},
-		setDescription: func(ctx context.Context, jid types.JID, description string) error {
+		getInfo: func(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
+			if err := online(); err != nil {
+				return nil, err
+			}
+			return client.GetGroupInfo(ctx, jid)
+		},
+		setTopic: func(ctx context.Context, jid types.JID, topic groupTopicUpdate) error {
 			if err := online(); err != nil {
 				return err
 			}
-			// whatsmeow deprecated SetGroupDescription as a duplicate of this
-			// call. Empty IDs: it reads the current topic ID from the group
-			// info and generates the new one.
-			return client.SetGroupTopic(ctx, jid, "", "", description)
+			// Empty new ID asks the SDK to generate one. When PreviousID is
+			// empty (no existing topic), the pinned SDK still refetches group
+			// info; pass the real ID rather than inventing a protocol sentinel.
+			return client.SetGroupTopic(ctx, jid, topic.PreviousID, "", topic.Description)
 		},
 		inviteLink: func(ctx context.Context, jid types.JID, reset bool) (string, error) {
 			if err := online(); err != nil {
@@ -92,6 +122,7 @@ type groupResponse struct {
 	GroupJID     string        `json:"group_jid,omitempty"`
 	Link         string        `json:"link,omitempty"`
 	Participants []GroupMember `json:"participants,omitempty"`
+	Changed      []string      `json:"changed,omitempty"`
 }
 
 func writeGroupError(w http.ResponseWriter, code int, msg string) {
@@ -186,7 +217,7 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 	}
 }
 
-func handleGroupSubject(ops groupOps, policy chatPolicy) http.HandlerFunc {
+func handleGroupSubject(ops groupOps, policy chatPolicy, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, jid, ok := parseGroupRequest(w, r, policy)
 		if !ok {
@@ -197,6 +228,13 @@ func handleGroupSubject(ops groupOps, policy chatPolicy) http.HandlerFunc {
 			return
 		}
 		var changed []string
+		failDescription := func(msg string) {
+			if len(changed) > 0 {
+				// _bridge_json preserves this message in the MCP error envelope.
+				msg = "group was renamed; " + msg + "; retry only description"
+			}
+			writeJSON(w, http.StatusBadGateway, groupResponse{Success: false, Message: msg, Changed: changed})
+		}
 		if req.Name != nil {
 			name := strings.TrimSpace(*req.Name)
 			if name == "" {
@@ -210,13 +248,29 @@ func handleGroupSubject(ops groupOps, policy chatPolicy) http.HandlerFunc {
 			changed = append(changed, "name")
 		}
 		if req.Description != nil {
-			if err := ops.setDescription(r.Context(), jid, strings.TrimSpace(*req.Description)); err != nil {
-				writeGroupError(w, http.StatusBadGateway, "set description failed: "+err.Error())
+			// The sweep stamp must predate the fetch, preserving joins that
+			// arrive while the roster snapshot is in flight.
+			at := time.Now()
+			info, err := ops.getInfo(r.Context(), jid)
+			if err != nil || info == nil {
+				msg := "could not read group info"
+				if err != nil {
+					msg += ": " + err.Error()
+				}
+				failDescription(msg)
+				return
+			}
+			if record != nil {
+				record(jid.String(), buildGroupMembers(info, nil, nil).Members, at)
+			}
+			topic := groupTopicUpdate{PreviousID: info.TopicID, Description: strings.TrimSpace(*req.Description)}
+			if err := ops.setTopic(r.Context(), jid, topic); err != nil {
+				failDescription("set description failed: " + err.Error())
 				return
 			}
 			changed = append(changed, "description")
 		}
-		_ = json.NewEncoder(w).Encode(groupResponse{Success: true, GroupJID: jid.String(), Message: "updated " + strings.Join(changed, " and ")})
+		_ = json.NewEncoder(w).Encode(groupResponse{Success: true, GroupJID: jid.String(), Message: "updated " + strings.Join(changed, " and "), Changed: changed})
 	}
 }
 
@@ -254,9 +308,9 @@ func handleGroupLeave(ops groupOps, policy chatPolicy) http.HandlerFunc {
 }
 
 // registerGroupManagement wires the four endpoints.
-func registerGroupManagement(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, ops groupOps, policy chatPolicy) {
+func registerGroupManagement(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, ops groupOps, policy chatPolicy, record rosterRecorder) {
 	mux.HandleFunc("/api/group/participants", auth(handleGroupParticipants(ops, policy)))
-	mux.HandleFunc("/api/group/subject", auth(handleGroupSubject(ops, policy)))
+	mux.HandleFunc("/api/group/subject", auth(handleGroupSubject(ops, policy, record)))
 	mux.HandleFunc("/api/group/invite", auth(handleGroupInvite(ops, policy)))
 	mux.HandleFunc("/api/group/leave", auth(handleGroupLeave(ops, policy)))
 }

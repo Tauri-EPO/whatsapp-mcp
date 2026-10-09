@@ -106,6 +106,7 @@ FAKE_NUMBERS = {
     "100000000000006",
     "100000000000007",
     "100000000000008",
+    "100000000000009",  # unmapped LID in the peer job-deadline regression
     "10000000000005",
     "1000000000000030",
     "123456789012345",
@@ -118,6 +119,7 @@ FAKE_NUMBERS = {
 # The user part of `@g.us` JIDs, new-style (`1203630…`) or phone-timestamp.
 FAKE_GROUPS = {
     "1",
+    "3",  # suffix of the deliberately malformed device-suffixed group fixture
     "123",
     "222",
     "404",

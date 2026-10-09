@@ -183,6 +183,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// second attempt; the time moves only once the row is in, so a message that
 	// is dropped below, or that fails to store, is not activity (issues #519,
 	// #531).
+	rowConsumed := false
 	storeRow := func(kind string, write func() error) bool {
 		if !b.storeLive(kind, msg.Info.ID, chatJID, func() error {
 			if err := messageStore.EnsureChat(chatJID, name); err != nil {
@@ -191,6 +192,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			return write()
 		}) {
 			return false
+		}
+		if rowConsumed {
+			return true
 		}
 		if err := b.retryBusy(func() error { return messageStore.StoreChat(chatJID, "", msgTimestamp) }); err != nil {
 			logger.Warnf("Failed to update the last message time of %s: %v", chatJID, err)
@@ -222,7 +226,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	if handled, pollID, voteContent := b.handlePollVote(context.Background(), msg, chatJID, sender, msgTimestamp); handled {
 		if voteContent != "" {
 			storeRow("poll vote", func() error {
-				return messageStore.storePollVoteMessage(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+				var err error
+				rowConsumed, err = messageStore.storePollVoteMessageResult(msg.Info.ID, chatJID, storedSenderJID, voteContent, msgTimestamp, msg.Info.IsFromMe, pollID, logger)
+				return err
 			})
 		}
 		return
@@ -242,16 +248,18 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		if reactedToID != "" {
 			emoji := reaction.GetText()
 			stored := storeRow("reaction", func() error {
-				return messageStore.StoreMessage(
-					msg.Info.ID, chatJID, storedSenderJID, emoji,
-					msgTimestamp, msg.Info.IsFromMe,
-					"reaction", reactedToID, "", nil, nil, nil, 0, "",
-				)
+				return messageStore.Batch(func(batch *messageBatch) error {
+					ex := extractedMessage{content: emoji, mediaType: "reaction", filename: reactedToID, hasLength: true}
+					var err error
+					rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, false, logger)
+					if err != nil || rowConsumed {
+						return err
+					}
+					return batch.write(func() error { return setTargetMessageIDWith(batch.tx, msg.Info.ID, chatJID, reactedToID) })
+				})
 			})
-			if stored {
-				if err := messageStore.SetTargetMessageID(msg.Info.ID, chatJID, reactedToID); err != nil {
-					logger.Warnf("Failed to set reaction target: %v", err)
-				}
+			if rowConsumed {
+				return
 			}
 			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe) {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
@@ -277,33 +285,42 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	mentionedJIDs := ex.mentions
 
 	// Group history shared when a member is added has neither text nor media,
-	// so the gate below drops it. Say that it was seen and count it first: the
-	// blob is not downloaded or decoded yet, and without this line nothing
-	// tells whether the share ever reached this device (issue #468). Every
+	// so recognise it before the gate and import bundles through history sync.
+	// Every
 	// device of the group may see the message, the one that did the add
 	// included, hence from_me. Counts and timestamps only: never the
 	// receivers, the path or the keys.
-	if kind, meta := sharedGroupHistory(ex.inner); kind != "" {
-		b.metrics.groupHistoryShares.Add(1)
-		logger.Infof("Group history %s seen in %s (message %s, from_me=%t): %s; the shared messages are not downloaded or stored",
-			kind, chatJID, msg.Info.ID, msg.Info.IsFromMe, describeSharedGroupHistory(meta))
-	}
+	b.handleHistoryShare(ex.inner, chatJID, msg.Info.ID, msg.Info.IsFromMe)
 
 	// Skip if there's no content and no media
 	if ex.empty() {
 		return
 	}
-
 	// Store message in database first so that downloadMedia (which queries the DB
 	// by message ID) can find the row when we call it synchronously below.
 	// A busy database is tried again a bounded number of times; a write that is
 	// given up is one ERROR naming the message (ID and chat only, never the
 	// content) and a count on /metrics (store_failures.go).
 	stored := storeRow("message", func() error {
+		locationSender := storedSenderJID
+		if ex.location != nil && ex.location.Live {
+			var err error
+			locationSender, err = b.liveLocationSender(b.ctx, messageStore.db, msg.Info.ID, chatJID, storedSenderJID, msg.Info.IsFromMe)
+			if err != nil {
+				return err
+			}
+		}
 		return messageStore.Batch(func(batch *messageBatch) error {
-			return persistMessage(batch, msg.Info.ID, chatJID, storedSenderJID, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+			var err error
+			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, locationSender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
+			return err
 		})
 	})
+	// If the live-location ownership check cannot commit, withhold effects too:
+	// an unverified known key must not escape as an unstored webhook message.
+	if rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
+		return
+	}
 	if stored {
 		b.metrics.messagesStored.Add(1)
 	}

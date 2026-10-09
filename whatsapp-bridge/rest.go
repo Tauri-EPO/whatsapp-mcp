@@ -143,7 +143,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	}, b.Policy)))
 
 	// Group management: participants, subject/description, invite link, leave (group_manage.go).
-	registerGroupManagement(mux, mutate, liveGroupOps(client, func() bool { return b.Connected() }), b.Policy)
+	registerGroupManagement(mux, mutate, liveGroupOps(client, func() bool { return b.Connected() }), b.Policy, b.recordGroupRoster)
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.

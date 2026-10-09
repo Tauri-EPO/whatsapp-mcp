@@ -34,8 +34,14 @@ func fakeGroupOps(calls *groupCalls, fail error) groupOps {
 			}
 			return out, nil
 		},
-		setName:        func(_ context.Context, _ types.JID, n string) error { calls.name = n; return fail },
-		setDescription: func(_ context.Context, _ types.JID, d string) error { calls.desc = d; return fail },
+		setName: func(_ context.Context, _ types.JID, n string) error { calls.name = n; return fail },
+		getInfo: func(_ context.Context, jid types.JID) (*types.GroupInfo, error) {
+			return &types.GroupInfo{JID: jid}, fail
+		},
+		setTopic: func(_ context.Context, _ types.JID, topic groupTopicUpdate) error {
+			calls.desc = topic.Description
+			return fail
+		},
 		inviteLink: func(_ context.Context, _ types.JID, reset bool) (string, error) {
 			calls.reset = &reset
 			if fail != nil {
@@ -111,11 +117,11 @@ func TestGroupEndpointsRespectPolicyAndBridgeErrors(t *testing.T) {
 func TestGroupSubjectInviteLeave(t *testing.T) {
 	calls := &groupCalls{}
 	ops := fakeGroupOps(calls, nil)
-	code, resp := groupPost(t, handleGroupSubject(ops, chatPolicy{}), `{"group_jid":"`+mgGroup+`","name":" Família ","description":"regras"}`)
+	code, resp := groupPost(t, handleGroupSubject(ops, chatPolicy{}, nil), `{"group_jid":"`+mgGroup+`","name":" Família ","description":"regras"}`)
 	if code != http.StatusOK || calls.name != "Família" || calls.desc != "regras" || !strings.Contains(resp.Message, "name and description") {
 		t.Fatalf("subject: %d %+v calls=%+v", code, resp, calls)
 	}
-	if code, _ := groupPost(t, handleGroupSubject(ops, chatPolicy{}), `{"group_jid":"`+mgGroup+`"}`); code != http.StatusBadRequest {
+	if code, _ := groupPost(t, handleGroupSubject(ops, chatPolicy{}, nil), `{"group_jid":"`+mgGroup+`"}`); code != http.StatusBadRequest {
 		t.Fatalf("subject without fields → %d", code)
 	}
 	code, resp = groupPost(t, handleGroupInvite(ops, chatPolicy{}), `{"group_jid":"`+mgGroup+`","reset":true}`)

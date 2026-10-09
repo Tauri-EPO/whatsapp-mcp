@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -205,6 +206,13 @@ type Bridge struct {
 	historyVotes sync.WaitGroup
 	// historyBatchWriter replaces the transaction runner in controlled tests.
 	historyBatchWriter func(func(*messageBatch) error) error
+	// Peer history has a separate one-worker, one-waiting-job budget.
+	historyShareMu         sync.Mutex
+	historyShares          *historyShareQueue
+	historyShareStopped    bool
+	historyShareJobTimeout time.Duration
+	// nil uses the SDK; tests bypass paired media-connection discovery only.
+	historyShareDownload func(context.Context, *waE2E.HistorySyncNotification, whatsmeow.File) error
 	// httpServer is the REST listener, kept so Shutdown can drain it (rest.go).
 	httpServer *http.Server
 	// ctx is cancelled by Shutdown; long-lived goroutines (reconnect loop, retention
@@ -311,8 +319,19 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.cancel()
 	b.stopConnectionEvents()
+	// Seal submission before the bounded drain joins cancelled peer imports.
+	b.historyShareMu.Lock()
+	b.historyShareStopped = true
+	shares := b.historyShares
+	b.historyShareMu.Unlock()
+	if shares != nil {
+		shares.seal()
+	}
 	done := make(chan struct{})
 	go func() {
+		if shares != nil {
+			shares.stop()
+		}
 		b.historyVotes.Wait()
 		// Media transfers outlive the request that started them, so they are
 		// waited on here too: the lifecycle context above already aborted them
@@ -330,6 +349,6 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		b.Log.Warnf("Timed out waiting for history poll votes, media transfers and the session keepalive; exiting anyway")
+		b.Log.Warnf("Timed out waiting for shared history, history poll votes, media transfers and the session keepalive; exiting anyway")
 	}
 }

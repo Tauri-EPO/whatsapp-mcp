@@ -186,7 +186,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	// Create client instance
-	client := whatsmeow.NewClient(deviceStore, clientLog)
+	client := whatsmeow.NewClient(deviceStore, sdkSafeLogger{clientLog})
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return 1

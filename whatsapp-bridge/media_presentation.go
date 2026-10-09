@@ -29,6 +29,7 @@ type mediaPresentation struct {
 type messageMediaOptions struct {
 	directPath   string
 	presentation *mediaPresentation
+	location     *messageLocation
 }
 
 func mediaPresentationOf(msg *waE2E.Message) *mediaPresentation {

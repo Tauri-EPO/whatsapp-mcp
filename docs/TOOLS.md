@@ -37,7 +37,7 @@ Rules worth knowing:
 
 - **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them. The single-row tools `get_chat` and `get_message_context` have no `count_only` — there is nothing to count — and passing it is refused as an [unknown argument](#unknown-arguments).
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
 - **The long text `max_content_chars` cuts is the row's own.** `content` on message rows, `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
 
 ## Unknown arguments
@@ -550,6 +550,26 @@ Errors: `not_found` when the chat has no stored message to anchor on (send or
 receive one there first), `bridge_unavailable` when the bridge is not connected
 to WhatsApp. Respects `WHATSAPP_ALLOWED_CHATS`.
 
+Group messages shared when a member is added use a separate encrypted bundle.
+The bridge imports a received bundle automatically through history sync, on
+live delivery or history replay; `request_history` asks the account's own phone
+for older messages and cannot request that bundle by name. A share notice alone
+does not contain the messages. Imports are restricted to the originating group;
+a bundle containing another conversation is refused in full before any rows
+are written. Only group identity and messages are imported; the sender's read
+state, disappearing-message settings and other conversation metadata are not
+applied to this account. Rows attributed to this account's phone number or LID
+are skipped: a peer cannot establish that this account sent a message. All
+imported rows are inbound; missing/invalid participants have unknown attribution.
+Poll updates from peers are ignored because they cannot authenticate a voter.
+Existing archive rows are preserved, including positions and duplicate keys
+within one bundle. Chat activity follows
+committed rows, never an overlapping peer copy. Compare the oldest stored
+message to confirm import; the share counter only confirms recognition. See
+[missing group history](TROUBLESHOOTING.md#the-number-was-added-to-a-group-and-the-earlier-messages-are-missing)
+for download limits and failure diagnostics. Delivery to a paired phone has not
+been verified by the synthetic encrypted HTTP tests.
+
 ## Contact Operations
 
 ### `search_contacts`
@@ -710,8 +730,8 @@ Get messages with filters, date ranges, and sorting.
 - `include_deleted` (optional, default `true`): keep messages that were "deleted for everyone". They are returned with their original text/media and a `deleted_at` timestamp; `false` hides them
 - `unread_only` (optional, default `false`): only inbound messages newer than their chat's read marker (`last_read_time`, as read on any linked device). `unread_only=true, sort_by="oldest", include_context=false` lists what still needs attention, oldest first
 - `from_me` (optional, default unset): `true` for messages you sent, `false` for inbound only, unset for both. `unread_only` already implies inbound, so `unread_only=true, from_me=true` is refused with `invalid_argument` instead of returning an empty page
-- `has_media` (optional, default unset): `true` for messages carrying a file, `false` for text-only. Reactions and poll votes are pointer rows and never count as media
-- `media_type` (optional): one of `image`, `video`, `audio`, `document`, `sticker`. Implies `has_media=true`; combining it with `has_media=false` is refused
+- `has_media` (optional, default unset): `true` for messages carrying a file, `false` for messages without a file. Locations, reactions and poll votes never count as downloadable media
+- `media_type` (optional): `image`, `video`, `audio`, `document`, `sticker` (implies `has_media=true`), or `location` (no file, compatible with `has_media=false`). Conflicting combinations are refused
 - `exclude_groups` (optional, default `false`): `true` keeps [direct conversations](#direct-conversations) only — `@s.whatsapp.net` and `@lid` — dropping `@g.us` groups, `@broadcast` lists, `@newsletter` channels and `@bot` chats
 - `mentions_me` (optional, default `false`): `true` keeps only the messages that **mentioned you** — see [Mentions of you](#mentions-of-you)
 - `include_transcripts` (optional, default `false`): `true` copies the stored transcript of each voice note onto its row as `transcript`. It comes from the same batched `notes.db` lookup the rows already do, costs no extra query and **never** transcribes: audio never passed to `transcribe_audio` simply has none. `media_type="audio", include_transcripts=true` reads a conversation held by voice
@@ -720,6 +740,36 @@ Get messages with filters, date ranges, and sorting.
 The four filters above are plain WHERE predicates, so they combine with each other and with
 every filter above: `from_me=false, media_type="document", exclude_groups=true`
 is "documents people sent me in a direct chat".
+
+**Locations.** New native static and live locations carry `media_type="location"`
+and a `location` object with the supplied latitude/longitude, name, address, URL,
+comment and position metadata. Coordinates use degrees; accuracy is in meters,
+speed in meters per second, bearing in degrees, and time offset in seconds.
+Missing or invalid numeric values are omitted. The searchable `content` keeps
+the original readable description; structured fields retain separators inside names.
+`list_messages(media_type="location")` selects them. They have no cached file,
+hash, media notes or byte size and are absent from `list_media` and media stats;
+`download_media` and `forward_message` refuse them. Locations remain conversational
+messages for `list_unanswered`, even if a comment is a closing word. Old rows
+remain text with no structured fields; ambiguous text is never parsed for a backfill.
+
+For live shares, sequence zero or unset is the initial sample. A later positive
+sequence updates position fields only when it has the exact same message ID and
+chat key as an archived live location, with the same sender, sender namespace
+and ownership flag. A verified LID-to-phone alias may identify the same author;
+the archived author and namespace are retained. The first description, timestamp,
+quote and mentions remain; stale positions do not replace newer ones. Such live
+updates emit no new webhook. A distinct key is archived as its own row, including
+a later sample received without the original: no guessed relationship drops data.
+Messages of any kind cannot replace another author's archived location. Rejected
+collisions do not advance its conversation activity or read markers. An initial
+sample supplies an earlier timestamp only for the same resolved author and
+ownership flag, including a verified PN/LID alias.
+
+History from the account's own phone uses the same key policy and retains newer
+positions when the initial sample arrives afterwards. Peer history bundles never
+update an existing position. Phone behaviour is unverified; these shapes are proven
+with synthetic live events and history payloads, not a paired phone.
 
 <a id="mentions-of-you"></a>**Mentions of you.** WhatsApp records an @-mention as
 the mentioned account's identity, not as text, and it renders it in the message
@@ -752,7 +802,13 @@ Two caveats worth knowing:
   [`list_unanswered(include_group_mentions=True)`](#list_unanswered), which only
   keeps mentions newer than your own last word in the chat.
 
-**Shared locations read as text.** A location has no file, so it is stored as a message whose `content` is the place and `media_type` is empty: `📍 Padaria Estrela — Rua das Flores, 10 (-23.550520, -46.633308)`, followed by ` — <url>` and ` — <comment>` when the sender attached them. With no name or address the coordinates stand alone (`📍 (48.858400, 2.294500)`). A live location reads `📍 Live location (-22.906800, -43.172900) — <caption>` and records where the share *started*; later position updates are not tracked. Coordinates always carry six decimals and a `.` separator, whatever the machine's locale; a pair with a missing, non-numeric or out-of-range half is left out and the label alone is kept. `query` finds the place name, address or caption like any other text. Only the text is kept: the map thumbnail is not stored, so `has_media` and `media_type` do not see a location.
+**Location text.** New locations retain a searchable place description alongside
+their typed `location` fields described above. Coordinates in `content` use six
+decimals and a `.` separator; an invalid or incomplete coordinate pair is omitted.
+`query` finds names, addresses and captions. The original description remains
+when a live share's position changes. Rows archived before typed locations retain
+only their original text and empty media type; no ambiguous text is parsed for a
+backfill. Neither version has a downloadable map thumbnail or other media file.
 
 **Other message kinds.** The bridge stores these in `content`, so text searches
 find their labels and the fields the sender supplied; a sparse envelope still
@@ -889,7 +945,7 @@ and flat memory.
 - `chat_jid` / `exclude_chat_jid` (optional): one conversation or a list of them — see [Chat filters](#chat-filters)
 - `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`, or `messages-all-<timestamp>.ndjson` for anything but a single chat. An existing file is overwritten
 - `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
-- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
+- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
 
 **Returns:**
@@ -937,8 +993,8 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `chat_jid` (required): Phone number with country code ([supported formatting](#phone-numbers) accepted), direct-chat JID or group JID
 - `message` (required): Text content to send
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
-- `quoted_sender_jid` (optional): Phone number or full JID of the author of the quoted message. [Supported phone formatting](#phone-numbers) is normalized; malformed provided identities are omitted with a warning. Required for group replies so WhatsApp renders the correct attribution header.
-- `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
+- `quoted_sender_jid` (optional): Phone number or full JID of the quoted author. [Supported phone formatting](#phone-numbers) is normalized; malformed provided identities are omitted with a warning. When omitted, the author comes from the stored row in the requested chat: sender plus its namespace, or this account's own JID for an own message. Both explicit and derived authors use a known LID mapping for wire addressing; stored LIDs retain their namespace. If the archive has no known author, the participant field is omitted.
+- `quoted_content` (optional): Fallback text preview when the quoted message is absent from the local chat archive. A stored message in the same chat supplies its own text or typed media preview, including caption and retained document, voice-note or sticker presentation. Thumbnail bytes are not retained, and rendering of these previews on a phone has not been verified.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. [Supported phone formatting](#phone-numbers) is normalized before resolving a LID twin. Empty entries, multiple `@` parts and missing users/servers are omitted with a warning. Mentions do not address another conversation and are not checked against the conversation allow-list. For each entry the message text must contain a matching `@<number>` token after normalization (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs).
 
@@ -980,6 +1036,18 @@ Add, remove, promote or demote members of a group you administer. Outbound; `rem
 ### `update_group`
 
 Rename a group and/or set its description (admin only). **Parameters:** `chat_jid`, `name` (optional), `description` (optional; empty string clears).
+
+The name is applied first. If the group-info read or description update then
+fails, the bridge keeps HTTP 502 with `changed: ["name"]`; the MCP error says
+the group was renamed and to retry only `description`. The successful result
+also lists `changed` fields. These updates are sequential; a description
+failure does not roll back a successful rename.
+
+Before setting or clearing a description, the bridge reads the current topic
+ID and caches the fetched participants using the roster cache's existing rules.
+With a nonempty topic ID this avoids the SDK's extra group-info read. When the
+group has no topic ID, the pinned SDK still reads group info again; the bridge
+passes the real empty ID and does not bypass that SDK behavior.
 
 ### `get_group_invite_link`
 

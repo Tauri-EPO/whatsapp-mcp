@@ -167,3 +167,102 @@ func TestHandleHistorySync_VoteWithoutSecretIsUndecodable(t *testing.T) {
 		t.Fatal("undecodable history vote must not produce a message row")
 	}
 }
+
+func TestHistoryPollVoteMarkersFollowCommittedRows(t *testing.T) {
+	for _, policy := range []string{"read", "unread", "sparse", "undecodable", "collision"} {
+		t.Run(policy, func(t *testing.T) {
+			ms := newTestMessageStore(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+			b.HistoryVoteRetryDelays = nil
+			b.PollVoteDecrypt = func(context.Context, *events.Message) ([][]byte, error) {
+				if policy == "undecodable" {
+					return nil, whatsmeow.ErrOriginalMessageSecretNotFound
+				}
+				return [][]byte{hashOf("Sushi")}, nil
+			}
+			stamp := time.Unix(1700000100, 0)
+			fixture := historySyncWithPoll(phonePN, stamp)
+			conv := fixture.Data.Conversations[0]
+			if policy != "sparse" {
+				conv.UnreadCount = proto.Uint32(0)
+			}
+			if policy == "unread" {
+				conv.MarkedAsUnread = proto.Bool(true)
+			}
+			if err := ms.StoreChat(phonePN.String(), "Contact", stamp.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.MarkChatRead(phonePN.String(), stamp.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if policy == "collision" {
+				if err := persistMessage(ms, "HVOTE1", phonePN.String(), selfPhone.String(), stamp.Add(-time.Minute), true, extractMessage(livePosition(0, 0.1), stamp, "HVOTE1"), false, b.Log); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b.handleHistorySync(fixture)
+			b.historyVotes.Wait()
+			var activity, read string
+			if err := ms.db.QueryRow("SELECT CAST(last_message_time AS TEXT), CAST(last_read_time AS TEXT) FROM chats WHERE jid=?", phonePN.String()).Scan(&activity, &read); err != nil {
+				t.Fatal(err)
+			}
+			wantActivity, wantRead := stamp, stamp.Add(-time.Minute)
+			if policy == "undecodable" || policy == "collision" {
+				wantActivity = wantRead
+			}
+			if policy == "read" {
+				wantRead = stamp
+			}
+			var unread int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages m JOIN chats c ON m.chat_jid=c.jid WHERE m.id='HVOTE1' AND m.is_from_me=0 AND m.timestamp>c.last_read_time").Scan(&unread); err != nil {
+				t.Fatal(err)
+			}
+			wantUnread := 0
+			if policy == "unread" || policy == "sparse" {
+				wantUnread = 1
+			}
+			if activity != dbTime(wantActivity) || read != dbTime(wantRead) || unread != wantUnread {
+				t.Fatalf("activity=%s read=%s unread=%d; want %s %s %d", activity, read, unread, dbTime(wantActivity), dbTime(wantRead), wantUnread)
+			}
+		})
+	}
+}
+
+func TestHistoryPollVoteMarkerFailureRollsBackMessage(t *testing.T) {
+	ms := newTestMessageStore(t)
+	stamp := time.Unix(1700000100, 0)
+	chat := phonePN.String()
+	if err := ms.StoreChat(chat, "Contact", stamp.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.MarkChatRead(chat, stamp.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.db.Exec("CREATE TRIGGER reject_vote_marker BEFORE UPDATE OF last_read_time ON chats BEGIN SELECT RAISE(ABORT, 'marker refused'); END"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ms.storePollVoteMessageResult("HVOTE1", chat, phonePN.String(), "vote", stamp, false, "HPOLL1", testLogger(), historyVoteMarkers{name: "Contact", read: true})
+	if err == nil {
+		t.Fatal("marker failure was ignored")
+	}
+	var rows int
+	var activity, read string
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages WHERE id='HVOTE1'").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT CAST(last_message_time AS TEXT), CAST(last_read_time AS TEXT) FROM chats WHERE jid=?", chat).Scan(&activity, &read); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 || activity != dbTime(stamp.Add(-time.Minute)) || read != activity {
+		t.Fatalf("failed marker left partial writes: rows=%d activity=%s read=%s", rows, activity, read)
+	}
+	if _, err := ms.db.Exec("DROP TRIGGER reject_vote_marker"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.storePollVoteMessageResult("HVOTE1", chat, phonePN.String(), "vote", stamp, false, "HPOLL1", testLogger(), historyVoteMarkers{name: "Contact", read: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.db.QueryRow("SELECT CAST(last_message_time AS TEXT), CAST(last_read_time AS TEXT) FROM chats WHERE jid=?", chat).Scan(&activity, &read); err != nil || activity != dbTime(stamp) || read != activity {
+		t.Fatalf("replay failed: activity=%s read=%s err=%v", activity, read, err)
+	}
+}

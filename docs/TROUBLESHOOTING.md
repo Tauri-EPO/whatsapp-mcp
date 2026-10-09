@@ -137,18 +137,16 @@ a full backfill instead, re-pair once with `--full-history-pair`.
 ## "The number was added to a group and the earlier messages are missing"
 
 When someone adds a number to a group, WhatsApp can offer to share the group's
-recent messages with the new member. The archive of a bridge linked to that
-number still starts at the moment it joined: the shared messages are **not**
-stored today.
+recent messages with the new member. When the encrypted share bundle reaches
+the bridge, it downloads and decrypts it with whatsmeow, inflates its zlib
+payload, and imports the messages through the regular history-sync writer.
 
-That share does not travel as a history sync (the companion sync at pair time,
-or the on-demand request `request_history` makes). The adder's client uploads
+The adder's client uploads
 the messages as one encrypted bundle and sends a message that only points at
-it. The bridge recognises that message and says so, but it does not download or
-decode the bundle yet (issue #468):
+it. Both live delivery and a share replayed inside history sync are recognised:
 
 ```text
-Group history bundle seen in <group>@g.us (message <id>, from_me=false): 42 messages, oldest in window 1700000000, oldest in bundle 1700003600, 1 history receivers, 3 other receivers; the shared messages are not downloaded or stored
+Group history bundle seen in <group>@g.us (message <id>, from_me=false): 42 messages, oldest in window 1700000000, oldest in bundle 1700003600, 1 history receivers, 3 other receivers; shared history recognised
 ```
 
 How to read it:
@@ -163,8 +161,8 @@ How to read it:
   or a redelivery), and the counter starts again at `0` when the bridge
   restarts.
 - **No line is weaker evidence than a line.** It needs `WHATSAPP_LOG_LEVEL` at
-  `INFO` or lower, the share has to arrive on the live connection while the
-  bridge is running (a share replayed inside a history sync is not reported),
+  `INFO` or lower, the share has to arrive live or inside history sync while the
+  bridge is running,
   and a message this device could not decrypt never gets that far.
 
 `request_history` does not fetch the bundle: it asks the account's **own
@@ -173,9 +171,38 @@ bundle. Whether that phone, once it has processed the share itself, returns the
 shared messages on such a request (or at a re-pair with `--full-history-pair`)
 has not been observed; do not count on it.
 
-Until the bundle is decoded, the copy that is known to exist is the archive of
-an account that was already in the group: export it there with
-`export_messages`.
+Recognition alone does not prove import: a notice has no downloadable bundle.
+Check the subsequent history-sync summary and the oldest stored message with
+`list_messages(chat_jid=…, sort_by="oldest", limit=1)`. A failed download,
+integrity check or decode produces a generic warning; paths, keys and receiver
+lists stay out of the bridge's share diagnostic. Imports run in the background,
+one at a time with at most one waiting job, and are cancelled during shutdown.
+Each job has a two-minute budget, a 16 MiB compressed limit, a 4 MiB inflated
+limit and a 5,000-message limit checked before allocating the decoded protobuf.
+Oversized bundles and jobs refused by the queue produce a warning and no rows.
+Own-phone history rows are written before their share bundles are queued.
+Nested share messages are counted
+and logged but their bundles are not followed. Regular history chunk retries
+and store-failure accounting still apply after decoding. Only a group origin is
+accepted; every conversation and any explicit message chat key must match that
+group. A bundle containing another chat is refused in full before import, even
+when its encryption and hashes are valid. The bundle imports group identity and
+messages only; its sender's read state, disappearing-message settings and other
+conversation metadata do not override this account's state. Ordinary history
+sync from the account's own phone still updates those fields. A shared row's
+`FromMe` flag belongs to the exporting participant and is never trusted. Rows
+attributed to the receiving account's phone number or LID are skipped and counted
+in the import summary; genuine own messages arrive through live delivery or the
+account's own phone history. Missing/invalid participants remain inbound with
+unknown attribution. Peer poll updates are ignored. Shared copies never overwrite
+any existing row, including a position or a duplicate key in the same bundle.
+Chat activity uses newly committed stored timestamps, not an overlapping copy's
+timestamp.
+
+WhatsApp controls whether a share reaches this linked device; this path has
+synthetic encrypted HTTP test coverage, not a paired-phone guarantee. If the
+bundle is unavailable, an account already in the group can export its archive
+with `export_messages`.
 
 ## "Messages are out of order after an image rollback"
 
