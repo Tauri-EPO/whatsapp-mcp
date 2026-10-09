@@ -19,7 +19,8 @@ export WHATSAPP_MCP_OAUTH_ISSUER="" WHATSAPP_SNAPSHOT_DIR=""
 run="wamcp-proxy-${$}"
 export WHATSAPP_PROXY_NETWORK="$run-proxy"
 export WHATSAPP_OPERATOR_NETWORK="$run-operator"
-export WHATSAPP_OPERATOR_PORT=8091
+# 8091 is reserved for the loopback MCP admin listener.
+export WHATSAPP_OPERATOR_PORT=8090
 WHATSAPP_OPERATOR_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 export WHATSAPP_OPERATOR_TOKEN
 export PROBE_ALIAS_A="$run-a" PROBE_ALIAS_B="$run-b"
@@ -99,7 +100,7 @@ print("REST /api/send named outbox dry_run -> 200 (no WhatsApp send)")
 PY
     if [ "$mode" = combined ]; then
       state=$(docker exec "$bridge" whatsapp-bridge --operator-status)
-      echo "$WHATSAPP_OPERATOR_ALIAS:8091 private operator -> $state"
+      echo "$WHATSAPP_OPERATOR_ALIAS:8090 private operator -> $state"
       case "$state" in starting|awaiting_qr|expired) ;; *) exit 1 ;; esac
     fi
   done
