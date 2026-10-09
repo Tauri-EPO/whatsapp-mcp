@@ -24,6 +24,8 @@ import tool_policy
 from http_oauth import load_oauth_config
 from main import build_http_app
 from strict_args import StrictArgumentServer
+from tests.test_runtime_settings import patch as write_runtime_settings
+from tests.test_runtime_settings import runtime_archive as runtime_archive
 from tests.test_transcribe_http import provider as provider
 from tool_policy import ToolPolicy, mutating_tool, set_active_policy
 
@@ -898,3 +900,44 @@ def test_read_only_oauth_cannot_upload_store_secret(monkeypatch, issuer, provide
     assert response.status_code == 200 and response.json()["result"]["isError"]
     assert "not supported audio" in response.text
     assert provider["calls"] == []
+
+
+@pytest.mark.parametrize("deploy_denied", [False, True])
+def test_oauth_intersects_live_runtime_policy_and_deploy_floor(monkeypatch, issuer, runtime_archive, deploy_denied):
+    configure(monkeypatch, issuer)
+    if deploy_denied:
+        monkeypatch.setenv("WHATSAPP_DENY_TOOLS", "send_message")
+    server = StrictArgumentServer("fake")
+    calls = []
+
+    @server.tool()
+    def list_messages() -> str:
+        return "read"
+
+    @server.tool()
+    def send_message() -> str:
+        calls.append("send")
+        return "sent"
+
+    policy = ToolPolicy(deny=frozenset({"send_message"}) if deploy_denied else frozenset())
+    tool_policy.install_runtime_tool_policy(server, policy)
+    application = build_http_app(
+        server, "streamable-http", STATIC, host="0.0.0.0", json_response=True, stateless_http=True
+    )
+    listing = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    sending = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "send_message", "arguments": {}}}
+    with TestClient(application) as client:
+        read_token, full_token = signed(issuer, scope="base whatsapp:read"), signed(issuer)
+        assert request(client, full_token).status_code == 200
+        assert [t["name"] for t in request(client, read_token, listing).json()["result"]["tools"]] == ["list_messages"]
+        assert request(client, read_token, sending).status_code == 403
+        initial = request(client, full_token, sending).json()["result"]
+        assert bool(initial.get("isError")) == deploy_denied
+        write_runtime_settings(runtime_archive, {"tools.deny": ["send_message"]})
+        for token in (full_token, STATIC):
+            assert [t["name"] for t in request(client, token, listing).json()["result"]["tools"]] == ["list_messages"]
+            assert request(client, token, sending).json()["result"]["isError"]
+        write_runtime_settings(runtime_archive, {"tools.deny": None})
+        restored = request(client, full_token, sending).json()["result"]
+        assert bool(restored.get("isError")) == deploy_denied
+    assert calls == ([] if deploy_denied else ["send", "send"])
