@@ -1092,14 +1092,18 @@ range key matching, including group participant spelling, remain unverified.
 Read the locally cached WhatsApp Business label catalog, even when the bridge is
 disconnected. **Parameters:** `chat_jid` (optional full JID; only labels currently
 associated with that chat), `include_deleted` (optional, default `false`). Returns
-`{"labels": [{"id": "1", "name": "Alice", "color": 3, "deleted": false}]}`.
+`{"labels": [{"id": "1", "name": "Alice", "color": 3, "deleted": false, "type": 19, "immutable": false, "predefined_id": null}]}`.
 A global catalog exposes label definitions, not which chats use them. A chat
 filter observes the chat allow-list and merges only verified permitted PN/LID twins.
 Across those twins, the newest association wins; equal-time twins prefer removal.
 Names are sanitized as untrusted text; use the stable ID when acting on a label.
 
-Labels belong to WhatsApp Business accounts. An ordinary account normally has an
-empty catalog (`{"labels": []}`); labeling with an unknown ID returns `not_found`.
+Business labels and any other list entries delivered as `label_edit` are cached.
+`type` preserves the protocol's numeric list type (for example, 3 for favorites,
+5 for custom lists and 19 for Business); `immutable` and the optional
+`predefined_id` preserve their metadata. Which types non-Business accounts receive
+is unverified. An older bridge that has not created the tables returns an empty
+catalog (`{"labels": []}`); labeling with an unknown ID returns `not_found`.
 The cache receives label-edit and chat-association app-state events. On a connected
 paired bridge with an empty catalog, one bounded asynchronous full sync of the
 regular collection is attempted per process, so reads may initially be empty.
@@ -1112,8 +1116,10 @@ association JIDs retain their original namespace. Message labels are not include
 Request applying or removing an existing Business label on a direct chat or group.
 **Parameters:** `chat_jid`, `label` (ID or exact name), `labeled` (optional, default
 `true`; use `false` to remove). The ID takes precedence over a matching name.
-An ambiguous name returns `invalid_argument`; unknown/deleted labels return
-`not_found`. Labels cannot be created, renamed or deleted by this tool.
+Names match the raw stored form or its sanitized display form; ambiguity across
+either form returns `invalid_argument`. Immutable entries also return
+`invalid_argument`; unknown/deleted labels return `not_found`. Labels cannot be
+created, renamed or deleted by this tool.
 
 Requires a connected bridge. Returns `success`, `label_id`, the requested
 `labeled` state, `sent=true` and `confirmed=false`: this does not confirm the

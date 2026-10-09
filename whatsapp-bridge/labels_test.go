@@ -22,6 +22,101 @@ func labelEvent(id, name string, ts time.Time, deleted bool) *events.LabelEdit {
 	return &events.LabelEdit{LabelID: id, Timestamp: ts, Action: &waSyncAction.LabelEditAction{Name: proto.String(name), Color: proto.Int32(3), Deleted: proto.Bool(deleted)}}
 }
 
+func TestLabelListMetadataPersists(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := testBridge(t, newTestClient(nil), store, testLogger())
+	e := labelEvent("1", "Alice", time.Now(), false)
+	e.FromFullSync = true
+	e.Action.Type = waSyncAction.LabelEditAction_FAVORITES.Enum()
+	e.Action.IsImmutable = proto.Bool(true)
+	e.Action.PredefinedID = proto.Int32(7)
+	b.handleEvent(e, nil)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rec := httptest.NewRecorder()
+	handleLabels(store, parseChatPolicy(""), nil)(rec, httptest.NewRequest(http.MethodGet, "/api/labels", nil))
+	var result struct {
+		Labels []map[string]any `json:"labels"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || len(result.Labels) != 1 || result.Labels[0]["type"] != float64(3) || result.Labels[0]["immutable"] != true || result.Labels[0]["predefined_id"] != float64(7) {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestImmutableLabelRefusedThroughMux(t *testing.T) {
+	b := testBridge(t, newTestClient(nil), newTestMessageStore(t), testLogger())
+	b.Connected = func() bool { return true }
+	e := labelEvent("1", "Alice", time.Now(), false)
+	e.Action.IsImmutable = proto.Bool(true)
+	b.handleEvent(e, nil)
+	b.SendAppState = func(context.Context, appstate.PatchInfo) error { t.Fatal("immutable label sent"); return nil }
+	for _, flag := range []string{"true", "false"} {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/chat/label", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","label_id":"1","labeled":`+flag+`}`))
+		req.Header.Set("Authorization", "Bearer "+readOnlyTestToken)
+		rec := httptest.NewRecorder()
+		b.newRESTMux(8080, readOnlyTestToken).ServeHTTP(rec, req)
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"code":"invalid_argument"`) || !strings.Contains(rec.Body.String(), "immutable") {
+			t.Fatal(rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestLabelsMetadataMigrationFromV1(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.storeLabel(labelEvent("1", "Alice", time.Now(), false)); err != nil {
+		t.Fatal(err)
+	}
+	// A cache created by the first draft keeps its data and gains metadata.
+	if _, err := store.db.Exec(`ALTER TABLE labels DROP COLUMN type;
+	 ALTER TABLE labels DROP COLUMN immutable; ALTER TABLE labels DROP COLUMN predefined_id;
+	 DELETE FROM schema_migrations WHERE name='labels_metadata_v2'`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := ensureMessageStoreSchema(store.db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var name string
+	var kind int32
+	var immutable bool
+	var predefined any
+	if err := store.db.QueryRow("SELECT name, type, immutable, predefined_id FROM labels WHERE id='1'").Scan(&name, &kind, &immutable, &predefined); err != nil || name != "Alice" || kind != 0 || immutable || predefined != nil {
+		t.Fatal(name, kind, immutable, predefined, err)
+	}
+	if applied, err := migrationApplied(store.db, "labels_metadata_v2"); err != nil || !applied {
+		t.Fatal(applied, err)
+	}
+	if _, err := store.db.Exec(`UPDATE labels SET type=3, immutable=1, predefined_id=7 WHERE id='1';
+	 DELETE FROM schema_migrations WHERE name='labels_metadata_v2'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMessageStoreSchema(store.db); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow("SELECT type, immutable, predefined_id FROM labels WHERE id='1'").Scan(&kind, &immutable, &predefined); err != nil || kind != 3 || !immutable || predefined != int64(7) {
+		t.Fatal(kind, immutable, predefined, err)
+	}
+}
+
 func TestLabelsEventReplayAndPersistence(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	store, err := NewMessageStore()
@@ -91,7 +186,7 @@ func TestLabelsEventReplayAndPersistence(t *testing.T) {
 	if err := reopened.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 1 {
 		t.Fatal(version, err)
 	}
-	for _, marker := range []string{"labels_schema_v1", canonicalTimestampsMigration} {
+	for _, marker := range []string{"labels_schema_v1", "labels_metadata_v2", canonicalTimestampsMigration} {
 		if applied, err := migrationApplied(reopened.db, marker); err != nil || !applied {
 			t.Fatal(marker, applied, err)
 		}

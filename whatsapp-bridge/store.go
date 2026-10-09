@@ -260,6 +260,11 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}); err != nil {
 		return fmt.Errorf("failed to ensure label tables: %w", err)
 	}
+	if _, err := applyNamedMigration(db, "labels_metadata_v2", func(tx *sql.Tx) error {
+		return ensureLabelMetadata(tx)
+	}); err != nil {
+		return fmt.Errorf("failed to ensure label metadata: %w", err)
+	}
 	// Run data rewrites after their tables and columns exist. Each owns an
 	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {
@@ -274,7 +279,12 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	return nil
 }
 
-func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
+type schemaWriter interface {
+	sqlExecer
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func ensureColumn(db schemaWriter, tableName, columnName, columnSpec string) error {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
 		return err

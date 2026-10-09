@@ -27,12 +27,14 @@ def labels_db(tmp_path, monkeypatch):
     with sqlite3.connect(path) as db:
         db.executescript("""
         CREATE TABLE labels(id TEXT PRIMARY KEY, name TEXT, color INTEGER, deleted BOOLEAN,
-                            updated_at TIMESTAMP, action_ms INTEGER);
+                            updated_at TIMESTAMP, action_ms INTEGER,
+                            type INTEGER NOT NULL DEFAULT 0, immutable BOOLEAN NOT NULL DEFAULT 0,
+                            predefined_id INTEGER);
         CREATE TABLE chat_labels(chat_jid TEXT, label_id TEXT, labeled BOOLEAN,
                                  updated_at TIMESTAMP, action_ms INTEGER, PRIMARY KEY(chat_jid,label_id));
-        INSERT INTO labels VALUES('1','Alice',3,0,'2026-01-01 12:00:00+00:00',1);
-        INSERT INTO labels VALUES('2','Bob',4,1,'2026-01-01 12:00:00+00:00',2);
-        INSERT INTO labels VALUES('3','Alice',5,0,'2026-01-01 12:00:00+00:00',3);
+        INSERT INTO labels(id,name,color,deleted,updated_at,action_ms) VALUES('1','Alice',3,0,'2026-01-01 12:00:00+00:00',1);
+        INSERT INTO labels(id,name,color,deleted,updated_at,action_ms) VALUES('2','Bob',4,1,'2026-01-01 12:00:00+00:00',2);
+        INSERT INTO labels(id,name,color,deleted,updated_at,action_ms) VALUES('3','Alice',5,0,'2026-01-01 12:00:00+00:00',3);
         """)
         db.executemany(
             "INSERT INTO chat_labels VALUES(?,?,?,'2026-01-01 12:00:00+00:00',1)",
@@ -49,14 +51,26 @@ def test_list_labels_offline_and_deleted(labels_db):
     assert [row["id"] for row in main.list_labels()["labels"]] == ["1", "3"]
     assert [row["id"] for row in main.list_labels(include_deleted=True)["labels"]] == ["1", "2", "3"]
     result = main.list_labels(CHAT)
-    assert result == {"labels": [{"id": "1", "name": "Alice", "color": 3, "deleted": False}]}
+    assert result == {
+        "labels": [
+            {
+                "id": "1",
+                "name": "Alice",
+                "color": 3,
+                "deleted": False,
+                "type": 0,
+                "immutable": False,
+                "predefined_id": None,
+            }
+        ]
+    }
     assert len(main.list_labels(CHAT, True)["labels"]) == 2
     with sqlite3.connect(labels_db) as db:
         db.execute("UPDATE chat_labels SET labeled=0 WHERE chat_jid=?", (CHAT,))
     assert main.list_labels(CHAT) == {"labels": []}
 
 
-def test_ordinary_account_empty_catalog(labels_db):
+def test_empty_catalog(labels_db):
     with sqlite3.connect(labels_db) as db:
         db.execute("DELETE FROM labels")
     assert main.list_labels() == {"labels": []}
@@ -190,6 +204,68 @@ def test_missing_cache_does_not_create_tables(tmp_path, monkeypatch):
     with pytest.raises(ToolError):
         whatsapp.list_labels()
     assert not path.exists()
+
+
+def test_pre_labels_bridge_cache(labels_db, monkeypatch, caplog):
+    with sqlite3.connect(labels_db) as db:
+        db.execute("DROP TABLE chat_labels")
+        db.execute("DROP TABLE labels")
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **kw: pytest.fail("unknown label sent"))
+    assert main.list_labels() == {"labels": []}
+    assert main.list_labels(CHAT) == {"labels": []}
+    result = main.label_chat(CHAT, "1")
+    assert result["error"] == {"code": "not_found", "message": "Unknown label; use list_labels"}
+    assert not caplog.records
+    with sqlite3.connect(labels_db) as db:
+        assert not db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('labels', 'chat_labels')").fetchall()
+
+
+def test_labels_probe_sees_upgrade_in_wal(labels_db):
+    with sqlite3.connect(labels_db) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("DROP TABLE labels")
+        writer.commit()
+        assert main.list_labels() == {"labels": []}
+        writer.execute(
+            "CREATE TABLE labels(id TEXT, name TEXT, color INTEGER, deleted BOOLEAN, "
+            "type INTEGER, immutable BOOLEAN, predefined_id INTEGER)"
+        )
+        writer.execute("INSERT INTO labels VALUES('1','Alice',3,0,19,0,NULL)")
+        writer.commit()
+        assert main.list_labels()["labels"][0]["id"] == "1"
+
+
+@pytest.mark.parametrize("label", ["1", "Alice"])
+@pytest.mark.parametrize("labeled", [True, False])
+def test_immutable_label_refused(labels_db, monkeypatch, label, labeled):
+    with sqlite3.connect(labels_db) as db:
+        db.execute("DELETE FROM labels WHERE id='3'")
+        db.execute("UPDATE labels SET type=3, immutable=1, predefined_id=7 WHERE id='1'")
+    entry = main.list_labels(CHAT)["labels"][0]
+    assert (entry["type"], entry["immutable"], entry["predefined_id"]) == (3, True, 7)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **kw: pytest.fail("immutable label sent"))
+    assert main.label_chat(CHAT, label, labeled)["error"]["code"] == "invalid_argument"
+
+
+@pytest.mark.parametrize("needle", ["Follow up", "Follow\u200b up\u200f", "Follow\u200e up"])
+def test_label_matches_displayed_name(labels_db, monkeypatch, needle):
+    with sqlite3.connect(labels_db) as db:
+        db.execute("UPDATE labels SET name=? WHERE id='1'", ("Follow\u200b up\u200f",))
+    displayed = main.list_labels(CHAT)["labels"][0]["name"]
+    assert displayed == "Follow up"
+    seen = []
+    monkeypatch.setattr(whatsapp, "_bridge_request", lambda *a, **kw: seen.append(kw["json"]) or object())
+    monkeypatch.setattr(whatsapp, "_bridge_json", lambda response: {"success": True})
+    assert main.label_chat(CHAT, needle)["success"]
+    assert seen == [{"chat_jid": CHAT, "label_id": "1", "labeled": True}]
+
+
+@pytest.mark.parametrize("needle", ["Alice", "Alice\u200b"])
+def test_label_sanitized_collision_refused(labels_db, monkeypatch, needle):
+    with sqlite3.connect(labels_db) as db:
+        db.execute("UPDATE labels SET name=? WHERE id='1'", ("Alice\u200b",))
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **kw: pytest.fail("ambiguous label sent"))
+    assert main.label_chat(CHAT, needle)["error"]["code"] == "invalid_argument"
 
 
 def test_exact_name_preserves_whitespace(labels_db, monkeypatch):

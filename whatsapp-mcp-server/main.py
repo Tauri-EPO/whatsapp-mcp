@@ -1724,8 +1724,10 @@ def list_labels(chat_jid: str | None = None, include_deleted: bool = False) -> d
     chat, merging verified permitted phone/LID twins. Without it, return label
     definitions without exposing which chats use them. Deleted labels are hidden
     unless include_deleted=True. Names are untrusted; prefer the stable id when
-    calling label_chat. Ordinary accounts normally have an empty catalog.
-    Startup sync may not have filled the cache yet. Message labels are excluded.
+    calling label_chat. Entries include the protocol type, immutable flag and
+    optional predefined_id; immutable entries cannot be applied or removed.
+    An older bridge or pending startup sync may leave the cache empty. Which
+    list types non-Business accounts receive is unverified. Message labels are excluded.
 
     Args:
         chat_jid: Optional full direct-chat or group JID
@@ -1741,9 +1743,10 @@ def label_chat(chat_jid: str, label: str, labeled: bool = True) -> dict[str, Any
     """Apply an existing WhatsApp Business label to a chat, or remove it with labeled=False.
 
     label accepts a stable id or an exact name from list_labels; id takes
-    precedence. Duplicate names return invalid_argument: use the id. Unknown or
+    precedence. Names match their raw or sanitized display form; collisions
+    across either form return invalid_argument: use the id. Unknown or
     deleted labels return not_found. This cannot create, rename or delete labels.
-    Requires a connected bridge; ordinary accounts normally have no labels.
+    Immutable entries return invalid_argument. Requires a connected bridge.
     Returns the requested state with sent=True, confirmed=False, not phone
     confirmation. The read cache changes only when app-state events arrive.
     HTTP 408 means nothing sent and safe to retry. Definite bridge rejections say

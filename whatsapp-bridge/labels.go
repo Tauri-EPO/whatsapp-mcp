@@ -28,21 +28,39 @@ CREATE TABLE IF NOT EXISTS chat_labels (
 CREATE INDEX IF NOT EXISTS idx_chat_labels_label ON chat_labels(label_id);
 `
 
+func ensureLabelMetadata(db schemaWriter) error {
+	for _, col := range []struct{ name, spec string }{
+		{"type", "INTEGER NOT NULL DEFAULT 0"},
+		{"immutable", "BOOLEAN NOT NULL DEFAULT 0"},
+		{"predefined_id", "INTEGER"},
+	} {
+		if err := ensureColumn(db, "labels", col.name, col.spec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type labelRecord struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Color   int32  `json:"color"`
-	Deleted bool   `json:"deleted"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Color        int32  `json:"color"`
+	Deleted      bool   `json:"deleted"`
+	Type         int32  `json:"type"`
+	Immutable    bool   `json:"immutable"`
+	PredefinedID *int32 `json:"predefined_id"`
 }
 
 func (s *MessageStore) storeLabel(e *events.LabelEdit) error {
-	_, err := s.db.Exec(`INSERT INTO labels(id, name, color, deleted, updated_at, action_ms)
-	 VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+	_, err := s.db.Exec(`INSERT INTO labels(id, name, color, deleted, updated_at, action_ms, type, immutable, predefined_id)
+	 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
 	 name = CASE WHEN excluded.deleted AND excluded.name = '' THEN labels.name ELSE excluded.name END,
-	 color = excluded.color, deleted = excluded.deleted, updated_at = excluded.updated_at, action_ms = excluded.action_ms
+	 color = excluded.color, deleted = excluded.deleted, updated_at = excluded.updated_at, action_ms = excluded.action_ms,
+	 type = excluded.type, immutable = excluded.immutable, predefined_id = excluded.predefined_id
 	 WHERE excluded.action_ms > labels.action_ms OR
 	 (excluded.action_ms = labels.action_ms AND (excluded.deleted OR NOT labels.deleted))`,
-		e.LabelID, e.Action.GetName(), e.Action.GetColor(), e.Action.GetDeleted(), dbTime(e.Timestamp), e.Timestamp.UnixMilli())
+		e.LabelID, e.Action.GetName(), e.Action.GetColor(), e.Action.GetDeleted(), dbTime(e.Timestamp), e.Timestamp.UnixMilli(),
+		int32(e.Action.GetType()), e.Action.GetIsImmutable(), e.Action.PredefinedID)
 	return err
 }
 
@@ -84,7 +102,7 @@ func (s *MessageStore) listLabels(chats []string, includeDeleted bool) ([]labelR
 	if len(chats) > 1 {
 		second = chats[1]
 	}
-	rows, err := s.db.Query(`SELECT id, name, color, deleted FROM labels l
+	rows, err := s.db.Query(`SELECT id, name, color, deleted, type, immutable, predefined_id FROM labels l
 	 WHERE (NOT deleted OR ?) AND (? OR
 	 (SELECT c.labeled FROM chat_labels c WHERE c.label_id=l.id AND c.chat_jid IN (?, ?)
 	 ORDER BY c.action_ms DESC, c.labeled ASC LIMIT 1)=1) ORDER BY id`, includeDeleted, len(chats) == 0, first, second)
@@ -95,8 +113,12 @@ func (s *MessageStore) listLabels(chats []string, includeDeleted bool) ([]labelR
 	labels := []labelRecord{}
 	for rows.Next() {
 		var label labelRecord
-		if err := rows.Scan(&label.ID, &label.Name, &label.Color, &label.Deleted); err != nil {
+		var predefined sql.NullInt32
+		if err := rows.Scan(&label.ID, &label.Name, &label.Color, &label.Deleted, &label.Type, &label.Immutable, &predefined); err != nil {
 			return nil, err
+		}
+		if predefined.Valid {
+			label.PredefinedID = &predefined.Int32
 		}
 		labels = append(labels, label)
 	}
@@ -172,8 +194,8 @@ func handleLabelChat(deps labelDeps) http.HandlerFunc {
 			writeError(w, 503, "WhatsApp client is not connected. Please wait for reconnection.")
 			return
 		}
-		var deleted bool
-		err := deps.store.db.QueryRowContext(ctx, "SELECT deleted FROM labels WHERE id=?", req.LabelID).Scan(&deleted)
+		var deleted, immutable bool
+		err := deps.store.db.QueryRowContext(ctx, "SELECT deleted, immutable FROM labels WHERE id=?", req.LabelID).Scan(&deleted, &immutable)
 		if ctx.Err() != nil {
 			writeErrorCode(w, 408, "bridge_unavailable", "Label request expired before send; nothing sent; safe to retry")
 			return
@@ -184,6 +206,10 @@ func handleLabelChat(deps labelDeps) http.HandlerFunc {
 		}
 		if err != nil {
 			writeError(w, 500, "Cannot read label cache: "+err.Error())
+			return
+		}
+		if immutable {
+			writeError(w, 400, "Label is immutable and cannot be applied or removed")
 			return
 		}
 		target, err := deps.resolve(ctx, req.ChatJID)
