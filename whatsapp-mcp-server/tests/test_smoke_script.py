@@ -595,4 +595,4 @@ def test_http_provider_unavailable_fails_smoke(stack: Stack) -> None:
         stack, "", FAKE_ENV_TRANSCRIPTION_PROVIDER="openai_compatible", FAKE_WHISPER_REACHABLE="no"
     )
     assert result.returncode == 1
-    assert "HTTP transcription provider does not answer" in result.stderr
+    assert "HTTP transcription provider does not answer" in result.stdout

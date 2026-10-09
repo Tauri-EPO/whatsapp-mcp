@@ -429,7 +429,9 @@ token. `tools/list` shows only tools permitted by the current token.
 `WHATSAPP_READ_ONLY`, allow-lists and deny-lists still remove capabilities,
 including for the static bearer. OAuth rate limits use subject identity instead
 of the socket IP, so refreshes keep the same budget and distinct subjects have
-separate budgets.
+separate budgets. Invalid credentials consume a separate peer budget; once
+that budget is exhausted, remote verification is refused before contacting
+the provider. Successful cached credentials retain their subject budget.
 
 ## Tailscale
 

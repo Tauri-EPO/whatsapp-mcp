@@ -7,7 +7,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import jwt
 import pytest
@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from starlette.testclient import TestClient
 
 import http_oauth
+import tool_policy
 from http_oauth import load_oauth_config
 from main import build_http_app
 from strict_args import StrictArgumentServer
@@ -29,6 +30,12 @@ INIT = {
     "method": "initialize",
     "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "fake", "version": "1"}},
 }
+
+
+@pytest.fixture(autouse=True)
+def isolated_tool_registry(monkeypatch):
+    monkeypatch.setattr(tool_policy, "_MUTATING", set(tool_policy._MUTATING))
+    monkeypatch.setattr(tool_policy, "_active", tool_policy._active)
 
 
 @pytest.fixture
@@ -66,8 +73,26 @@ def issuer():
 
         def do_GET(self):
             state["calls"].append(self.path)
-            if "well-known" in self.path:
-                self.reply({"issuer": state["url"], "jwks_uri": state["url"] + "/jwks"}, state["status"])
+            if self.path.startswith("/authorize?"):
+                query = parse_qs(urlsplit(self.path).query)
+                assert query["code_challenge_method"] == ["S256"]
+                assert query["response_type"] == ["code"]
+                assert query["resource"] == [AUDIENCE]
+                state["codes"]["code-1"] = query["code_challenge"][0]
+                self.send_response(302)
+                self.send_header("Location", "http://localhost/callback?code=code-1")
+                self.end_headers()
+            elif "well-known" in self.path:
+                self.reply(
+                    {
+                        "issuer": state["url"],
+                        "jwks_uri": state["url"] + "/jwks",
+                        "authorization_endpoint": state["url"] + "/authorize",
+                        "token_endpoint": state["url"] + "/token",
+                        "code_challenge_methods_supported": ["S256"],
+                    },
+                    state["status"],
+                )
             else:
                 self.reply({"keys": [state["public"]]}, 302 if state["redirect"] else state["status"])
 
@@ -273,6 +298,11 @@ def test_metadata_discovery_jwks_cache_and_static(monkeypatch, issuer):
         assert docs[0]["resource"] == AUDIENCE
         assert docs[0]["authorization_servers"] == [issuer["url"]]
         assert "whatsapp:send" in docs[0]["scopes_supported"]
+        path = "/.well-known/oauth-protected-resource/mcp"
+        cors = client.get(path, headers={"Origin": "https://client.example.com"})
+        assert cors.headers["access-control-allow-origin"] == "*"
+        assert client.head(path).content == b""
+        assert client.post(path).status_code == 405
         assert request(client, STATIC).status_code == 200
         for _ in range(3):
             assert request(client, signed(issuer)).status_code == 200
@@ -390,17 +420,31 @@ def test_local_as_pkce_refresh_reuse_revocation(monkeypatch, issuer):
         WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
     )
     verifier = "fake-pkce-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
-    issuer["codes"]["code-1"] = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    )
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     application, calls = app()
     original = http_oauth.time.monotonic
     with TestClient(application) as client, httpx.Client(trust_env=False) as as_client:
         metadata = client.get("/.well-known/oauth-protected-resource/mcp").json()
         assert metadata["authorization_servers"] == [config.issuer]
+        discovery = as_client.get(
+            metadata["authorization_servers"][0] + "/.well-known/oauth-authorization-server"
+        ).json()
+        authorization = as_client.get(
+            discovery["authorization_endpoint"],
+            params={
+                "response_type": "code",
+                "client_id": "fake-client",
+                "resource": AUDIENCE,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "redirect_uri": "http://localhost/callback",
+            },
+        )
+        assert authorization.status_code == 302
+        code = parse_qs(urlsplit(authorization.headers["Location"]).query)["code"][0]
         pair = as_client.post(
-            issuer["url"] + "/token",
-            data={"grant_type": "authorization_code", "code": "code-1", "code_verifier": verifier},
+            discovery["token_endpoint"],
+            data={"grant_type": "authorization_code", "code": code, "code_verifier": verifier},
         ).json()
         call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "read_fake", "arguments": {}}}
         assert request(client, pair["access_token"], call).status_code == 200
@@ -505,3 +549,77 @@ async def test_jwks_expiry_key_confusion_and_proxy_isolation(monkeypatch, issuer
     with pytest.raises(http_oauth.AuthorizationUnavailableError):
         await verifier.verify_token(signed(issuer))
     assert issuer["calls"] == ["/jwks", "/jwks"]
+
+
+def test_introspection_invalid_guesses_stop_before_remote_fetch(monkeypatch, issuer):
+    configure(
+        monkeypatch,
+        issuer,
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_URL=issuer["url"] + "/introspect",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID="fake-client",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
+    )
+    issuer["active"] = False
+    application, _ = app(rate=1)
+    with TestClient(application) as client:
+        assert [request(client, "invalid-" + str(i)).status_code for i in range(4)] == [401, 429, 429, 429]
+    assert issuer["calls"] == ["/introspect"]
+
+
+def test_introspection_distinct_subjects_keep_independent_limits(monkeypatch, issuer):
+    configure(
+        monkeypatch,
+        issuer,
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_URL=issuer["url"] + "/introspect",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID="fake-client",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
+    )
+    application, _ = app(rate=1)
+    with TestClient(application) as client:
+        assert request(client, "opaque-alice").status_code == 200
+        assert request(client, "opaque-alice").status_code == 429
+        issuer["extra"] = {"sub": "Bob"}
+        assert request(client, "opaque-bob").status_code == 200
+    assert issuer["calls"] == ["/introspect", "/introspect"]
+
+
+def test_concurrent_invalid_tokens_cannot_queue_introspection_calls(monkeypatch, issuer):
+    from concurrent.futures import ThreadPoolExecutor
+
+    configure(
+        monkeypatch,
+        issuer,
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_URL=issuer["url"] + "/introspect",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID="fake-client",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
+    )
+    issuer["active"] = False
+    application, _ = app(rate=1)
+    with TestClient(application) as client, ThreadPoolExecutor(max_workers=4) as pool:
+        statuses = list(pool.map(lambda i: request(client, "invalid-" + str(i)).status_code, range(4)))
+    assert sorted(statuses) == [401, 429, 429, 429]
+    assert issuer["calls"] == ["/introspect"]
+
+
+def test_private_secret_file_deny_paths(tmp_path):
+    import os
+
+    from http_oauth import SECRET_FILE_ENV, _secret
+
+    path = tmp_path / "secret"
+    path.write_bytes(b"x" * 4097)
+    path.chmod(0o600)
+    with pytest.raises(ValueError, match="private regular"):
+        _secret({SECRET_FILE_ENV: str(path)}, "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET", SECRET_FILE_ENV)
+    with pytest.raises(ValueError, match="private regular"):
+        _secret({SECRET_FILE_ENV: str(tmp_path)}, "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET", SECRET_FILE_ENV)
+    if os.name != "nt":
+        path.write_text("fake-secret")
+        path.chmod(0o644)
+        with pytest.raises(ValueError, match="private regular"):
+            _secret({SECRET_FILE_ENV: str(path)}, "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET", SECRET_FILE_ENV)
+        path.chmod(0o600)
+        link = tmp_path / "symlink-secret"
+        link.symlink_to(path)
+        with pytest.raises(ValueError, match="private regular"):
+            _secret({SECRET_FILE_ENV: str(link)}, "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET", SECRET_FILE_ENV)

@@ -232,3 +232,17 @@ def test_explicit_configuration_no_fallback():
                 "WHATSAPP_TRANSCRIPTION_MODEL": "fake-model",
             }
         )
+
+
+def test_local_replacement_clears_http_provenance(provider, paired_dbs):
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    assert transcribe_worker.run_once(1).transcribed == 1
+    before = media_notes.fetch_notes([SHA["AUD1"]])[SHA["AUD1"]]
+    assert before["transcript_provider"] == "openai_compatible"
+    media_notes.store_transcript(
+        SHA["AUD1"], {"text": "replacement local transcript", "backend": "cli", "language": "en"}
+    )
+    after = media_notes.fetch_notes([SHA["AUD1"]])[SHA["AUD1"]]
+    assert after["transcript"] == "replacement local transcript"
+    assert after["transcript_backend"] == "cli"
+    assert "transcript_provider" not in after and "transcript_model" not in after

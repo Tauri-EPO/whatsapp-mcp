@@ -15,16 +15,19 @@ import math
 import os
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import jwt
 from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import AuthSettings
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, TypeAdapter, UrlConstraints
+from starlette.routing import Route, Router
 
 from http_auth import (
     ASGIApp,
@@ -45,10 +48,17 @@ MAX_CACHE_ENTRIES = 1024
 ALGORITHMS = ("RS256", "ES256")
 CLIENT_ID_FILE_ENV = "WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID_FILE"
 SECRET_FILE_ENV = "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET_FILE"
+URL_ADAPTER = TypeAdapter(Annotated[AnyHttpUrl, UrlConstraints(preserve_empty_path=True)])
 
 
 class AuthorizationUnavailableError(RuntimeError):
     """The authorization service cannot supply a bounded, valid response."""
+
+
+class VerificationRateLimitError(RuntimeError):
+    def __init__(self, wait: float):
+        self.wait = wait
+        super().__init__("Credential verification is rate limited")
 
 
 def _url(value: str, name: str) -> str:
@@ -83,7 +93,11 @@ def _secret(env: Any, name: str, file_name: str) -> str:
                 raise ValueError()
             if os.name != "nt" and path.stat().st_mode & 0o077:
                 raise ValueError()
-            value = path.read_text(encoding="utf-8").strip()
+            with path.open("rb") as source:
+                raw = source.read(4097)
+            if len(raw) > 4096:
+                raise ValueError()
+            value = raw.decode("utf-8").strip()
         except (OSError, UnicodeError, ValueError):
             raise ValueError(f"{name}_FILE must be a private regular UTF-8 file of at most 4096 bytes") from None
     return value
@@ -113,8 +127,8 @@ class OAuthConfig:
 
     def auth_settings(self) -> AuthSettings:
         return AuthSettings(
-            issuer_url=AnyHttpUrl(self.issuer),
-            resource_server_url=AnyHttpUrl(self.audience),
+            issuer_url=URL_ADAPTER.validate_python(self.issuer),
+            resource_server_url=URL_ADAPTER.validate_python(self.audience),
             required_scopes=list(self.scopes),
             validate_token_resource=True,
         )
@@ -205,13 +219,15 @@ class OAuthTokenVerifier(TokenVerifier):
         except (httpx.HTTPError, httpx.InvalidURL, ValueError):
             raise AuthorizationUnavailableError("Authorization service unavailable") from None
 
-    async def _jwks(self) -> list[dict[str, Any]]:
+    async def _jwks(self, before_fetch: Callable[[], None] | None = None) -> list[dict[str, Any]]:
         async with self._lock:
             now = time.monotonic()
             if now < self._keys_until:
                 return self._keys
             if now < self._retry_after:
                 raise AuthorizationUnavailableError("Authorization service unavailable")
+            if before_fetch:
+                before_fetch()
             try:
                 url = self.config.jwks_url
                 if not url:
@@ -250,7 +266,7 @@ class OAuthTokenVerifier(TokenVerifier):
                 self._retry_after = now + 5
                 raise AuthorizationUnavailableError("Authorization service unavailable") from None
 
-    async def _inspect(self, token: str) -> dict[str, Any]:
+    async def _inspect(self, token: str, before_fetch: Callable[[], None] | None = None) -> dict[str, Any]:
         key = hashlib.sha256(token.encode()).hexdigest()
         async with self._lock:
             now = time.monotonic()
@@ -258,6 +274,8 @@ class OAuthTokenVerifier(TokenVerifier):
             if cached and cached[0] > now:
                 return cached[1]
             self._introspection.pop(key, None)
+            if before_fetch:
+                before_fetch()  # inside the lock: queued guesses cannot bypass it
             payload = await self._fetch(self.config.introspection_url or "", {"token": token})
             # Validate before caching: only successful authorization is remembered.
             if payload.get("active") is True and self._access(token, payload) is not None:
@@ -308,7 +326,7 @@ class OAuthTokenVerifier(TokenVerifier):
             },
         )
 
-    async def verify_token(self, token: str) -> AccessToken | None:
+    async def verify_token(self, token: str, before_fetch: Callable[[], None] | None = None) -> AccessToken | None:
         if len(token.encode()) > MAX_TOKEN_BYTES:
             return None
         if self.accepts_static(token):
@@ -321,14 +339,14 @@ class OAuthTokenVerifier(TokenVerifier):
                 claims={"iss": "urn:whatsapp-mcp:static", "static": True},
             )
         if self.config.introspection_url:
-            payload = await self._inspect(token)
+            payload = await self._inspect(token, before_fetch)
             return self._access(token, payload) if payload.get("active") is True else None
         try:
             header = jwt.get_unverified_header(token)
             alg = header.get("alg")
             if alg not in ALGORITHMS or not isinstance(header.get("kid"), str) or header.get("crit"):
                 return None
-            keys = await self._jwks()
+            keys = await self._jwks(before_fetch)
             candidates = [
                 k
                 for k in keys
@@ -371,13 +389,38 @@ class OAuthMiddleware:
     ):
         self.app, self.verifier, self.max_body = app, verifier, max_body
         self.limiter = RateLimitMiddleware(app, per_minute, trusted_proxies=trusted_proxies) if per_minute else None
+        self.peer_limiter = (
+            RateLimitMiddleware(app, per_minute, trusted_proxies=trusted_proxies) if per_minute else None
+        )
+        routes = create_protected_resource_routes(
+            URL_ADAPTER.validate_python(verifier.config.audience),
+            [URL_ADAPTER.validate_python(verifier.config.issuer)],
+            verifier.config.supported_scopes,
+        )
+        self.metadata_app = Router(
+            routes=[
+                *routes,
+                Route("/.well-known/oauth-protected-resource", endpoint=routes[0].endpoint, methods=["GET", "OPTIONS"]),
+            ]
+        )
 
-    async def _limited(self, scope: Scope, send: Send) -> bool:
-        if not self.limiter:
+    def _guard_fetch(self, scope: Scope) -> None:
+        if self.peer_limiter:
+            wait = self.peer_limiter.wait_time(client_key(scope, self.peer_limiter._trusted_proxies))
+            if wait > 0:
+                raise VerificationRateLimitError(wait)
+
+    async def _limited(self, scope: Scope, send: Send, peer: bool = False) -> bool:
+        limiter = self.peer_limiter if peer else self.limiter
+        if not limiter:
             return False
-        wait = self.limiter._take(client_key(scope, self.limiter._trusted_proxies))
+        wait = limiter._take(client_key(scope, limiter._trusted_proxies))
         if wait <= 0:
             return False
+        await self._rate_error(send, wait)
+        return True
+
+    async def _rate_error(self, send: Send, wait: float) -> None:
         await send(
             {
                 "type": "http.response.start",
@@ -390,7 +433,6 @@ class OAuthMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": b'{"error":"rate_limited"}'})
-        return True
 
     async def _error(self, send: Send, status: int, required: list[str] | None = None) -> None:
         challenge = f'Bearer resource_metadata="{self.verifier.config.metadata_url}"'
@@ -424,28 +466,22 @@ class OAuthMiddleware:
             return
         config = self.verifier.config
         if scope.get("path") in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
-            body = json.dumps(
-                {
-                    "resource": config.audience,
-                    "authorization_servers": [config.issuer],
-                    "scopes_supported": config.supported_scopes,
-                    "bearer_methods_supported": ["header"],
-                }
-            ).encode()
-            await send(
-                {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]}
-            )
-            await send({"type": "http.response.body", "body": body if scope.get("method") != "HEAD" else b""})
+            await self.metadata_app(scope, receive, send)
             return
         presented = _bearer_from_headers(scope.get("headers", []))
         try:
-            access = await self.verifier.verify_token(presented) if presented else None
+            access = (
+                await self.verifier.verify_token(presented, lambda: self._guard_fetch(scope)) if presented else None
+            )
+        except VerificationRateLimitError as exc:
+            await self._rate_error(send, exc.wait)
+            return
         except AuthorizationUnavailableError:
-            if not await self._limited(scope, send):
+            if not await self._limited(scope, send, peer=True):
                 await self._error(send, 503)
             return
         if access is None:
-            if not await self._limited(scope, send):
+            if not await self._limited(scope, send, peer=True):
                 await self._error(send, 401)
             return
         if not (access.claims or {}).get("static"):

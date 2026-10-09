@@ -319,6 +319,14 @@ class RateLimitMiddleware:
                     self._buckets.pop(k, None)
         return allowed
 
+    def wait_time(self, key: str) -> float:
+        """Inspect a bucket without charging a successfully authenticated subject."""
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (self.capacity, now))
+            tokens = min(self.capacity, tokens + (now - last) * self.refill_per_second)
+            return max(0.0, (1.0 - tokens) / self.refill_per_second)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
