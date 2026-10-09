@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-const fakeOperatorToken = "5bb46abd5967c7ca28b4df05606834ebe5f01266e25c595c73d8295a7e985569"
+const fakeOperatorToken = "5bb46abd5967c7ca28b4df05606834ebe5f01266e25c595c73d8295a7e985569" //nolint:gosec // Public fake credential, used only by operator tests.
 
 func operatorTestValues(overrides map[string]string) func(string) string {
 	values := map[string]string{operatorBindEnv: "127.0.0.1", operatorTokenEnv: fakeOperatorToken, "WHATSAPP_BRIDGE_TOKEN": "fake-data-plane-token-0123456789abcdef"} //nolint:gosec // Deliberately fake credentials for separate-token refusal tests.
