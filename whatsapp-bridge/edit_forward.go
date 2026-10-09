@@ -68,10 +68,11 @@ func applyMessageEditWith(ex sqlExecer, chat, sender string, fromMe bool, edit *
 		stamp = fallback.UnixMilli()
 	}
 	user, server := splitSenderJID(sender)
+	replacement := extractMessage(edit.GetEditedMessage(), fallback, edit.GetKey().GetID())
 	_, err := ex.Exec(`UPDATE messages SET content = ?, mentions = ?, message_edit_timestamp = ?
 		WHERE id = ? AND chat_jid = ? AND sender = ? AND sender_server IS ?
 		AND is_from_me = ? AND message_edit_timestamp < ? AND deleted_at IS NULL`,
-		extractTextContent(edit.GetEditedMessage()), mentionsColumn(extractMentionedJIDs(edit.GetEditedMessage())), stamp, edit.GetKey().GetID(), chat, user, server, fromMe, stamp)
+		replacement.content, mentionsColumn(replacement.mentions), stamp, edit.GetKey().GetID(), chat, user, server, fromMe, stamp)
 	return err
 }
 

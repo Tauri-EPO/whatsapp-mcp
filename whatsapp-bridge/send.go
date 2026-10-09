@@ -530,7 +530,16 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		media := outboundMediaColumns(mediaPath, upload)
-		media.retryChat, media.retrySender = recipientJID.String(), client.Store.ID.ToNonAD().String()
+		// The SDK can change both the destination and our PN/LID identity.
+		// Its successful response is the wire provenance, before normalization.
+		retryChat, retrySender := resp.Chat, resp.Sender
+		if retryChat.IsEmpty() {
+			retryChat = recipientJID
+		}
+		if retrySender.IsEmpty() {
+			retrySender = *client.Store.ID
+		}
+		media.retryChat, media.retrySender = retryChat.ToNonAD().String(), retrySender.ToNonAD().String()
 		if mediaPath != "" {
 			media.mediaType, _ = mediaPartOf(msg)
 			media.presentation = mediaPresentationOf(msg)

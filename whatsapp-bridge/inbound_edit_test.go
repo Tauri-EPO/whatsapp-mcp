@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
@@ -23,6 +26,131 @@ func incomingEdit(id, text string, stamp int64) *waE2E.Message {
 			Key:           &waCommon.MessageKey{ID: proto.String(id), RemoteJID: proto.String(selfPhone.String())},
 			EditedMessage: &waE2E.Message{Conversation: proto.String(text)}, TimestampMS: proto.Int64(stamp)},
 	}}}
+}
+
+func TestInboundEditWrappedReplacementKeepsCaptionAndMentions(t *testing.T) {
+	for _, path := range []string{"live", "history"} {
+		for _, wrapper := range []string{"document-caption", "ephemeral", "nested"} {
+			t.Run(path+"/"+wrapper, func(t *testing.T) {
+				ms, _ := lockedProductionStore(t)
+				b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+				stamp := time.Unix(1772359200, 0)
+				original := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "oldword")
+				original.Info.ID, original.Info.Timestamp = "WRAPPED-TARGET", stamp
+				b.handleEvent(original, nil)
+				inner := &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String("wrappededitword"), ContextInfo: &waE2E.ContextInfo{MentionedJID: []string{selfPhone.String()}}}}
+				replacement := &waE2E.Message{DocumentWithCaptionMessage: &waE2E.FutureProofMessage{Message: inner}}
+				switch wrapper {
+				case "ephemeral":
+					replacement = &waE2E.Message{EphemeralMessage: &waE2E.FutureProofMessage{Message: inner}}
+				case "nested":
+					replacement = &waE2E.Message{EphemeralMessage: &waE2E.FutureProofMessage{Message: replacement}}
+				}
+				edit := incomingEdit(original.Info.ID, "", stamp.Add(time.Minute).UnixMilli())
+				edit.EditedMessage.Message.ProtocolMessage.EditedMessage = replacement
+				if path == "live" {
+					event := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "")
+					event.Info.ID, event.Message = "WRAPPED-EDIT", edit
+					b.handleEvent(event, nil)
+				} else {
+					fixture := largeHistoryFixture(1)
+					fixture.Data.Conversations[0].Messages[0].Message.Message = edit
+					b.handleHistorySync(fixture)
+				}
+				b.handleEvent(original, nil)
+				var content, mentions string
+				var edited int64
+				if err := ms.db.QueryRow("SELECT content,mentions,message_edit_timestamp FROM messages WHERE id=?", original.Info.ID).Scan(&content, &mentions, &edited); err != nil {
+					t.Fatal(err)
+				}
+				var oldFTS, newFTS int
+				if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'oldword'").Scan(&oldFTS); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'wrappededitword'").Scan(&newFTS); err != nil {
+					t.Fatal(err)
+				}
+				if content != "wrappededitword" || mentions != selfPhone.User || edited != stamp.Add(time.Minute).UnixMilli() || oldFTS != 0 || newFTS != 1 {
+					t.Fatalf("wrapped edit content=%q mentions=%q edited=%d oldFTS=%d newFTS=%d", content, mentions, edited, oldFTS, newFTS)
+				}
+			})
+		}
+	}
+}
+
+func TestHistoryEditSessionBusyRetryOutsideArchiveWriter(t *testing.T) {
+	for _, release := range []bool{true, false} {
+		t.Run(map[bool]string{true: "release", false: "exhaust"}[release], func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			session, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "session.db"))+"?_pragma=busy_timeout(1)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			session.SetMaxOpenConns(2)
+			if _, err := session.Exec("CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY,pn TEXT); INSERT INTO whatsmeow_lid_map VALUES (?,?)", phoneLID.User, phonePN.User); err != nil {
+				t.Fatal(err)
+			}
+			held, err := session.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _, _ = held.ExecContext(context.Background(), "ROLLBACK"); _ = held.Close() })
+			container := sqlstore.NewWithDB(session, "sqlite", testLogger())
+			rec := installRecordingLogger(t)
+			b := testBridge(t, newTestClient(container.LIDMap), ms, rec)
+			stamp := time.Unix(1772359200, 0)
+			if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.StoreMessage(storedMessage{ID: "SESSION-EDIT", ChatJID: phonePN.String(), Sender: phoneLID.String(), Content: "oldword", Timestamp: stamp}); err != nil {
+				t.Fatal(err)
+			}
+			b.historyBatchWriter = func(write func(*messageBatch) error) error {
+				err := ms.Batch(write)
+				if _, lockErr := held.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); lockErr != nil {
+					t.Fatal(lockErr)
+				}
+				return err
+			}
+			waits := 0
+			b.storeRetryWait = func(time.Duration) bool {
+				waits++
+				// A session writer is held; the archive writer must still be free.
+				if err := ms.StoreMessage(storedMessage{ID: "EDIT-PROBE", ChatJID: phonePN.String(), Sender: phonePN.String(), Content: "writerprobeword", Timestamp: stamp}); err != nil {
+					t.Fatal(err)
+				}
+				if release {
+					if _, err := held.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return true
+			}
+			fixture := largeHistoryFixture(1)
+			fixture.Data.Conversations[0].Messages[0].Message.Message = incomingEdit("SESSION-EDIT", "neweditword", stamp.Add(time.Minute).UnixMilli())
+			b.handleHistorySync(fixture)
+			_, _ = held.ExecContext(context.Background(), "ROLLBACK")
+			var content string
+			if err := ms.db.QueryRow("SELECT content FROM messages WHERE id='SESSION-EDIT'").Scan(&content); err != nil {
+				t.Fatal(err)
+			}
+			var probes int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'writerprobeword'").Scan(&probes); err != nil {
+				t.Fatal(err)
+			}
+			want, wantWaits, wantFailures := "oldword", 2, int64(1)
+			if release {
+				want, wantWaits, wantFailures = "neweditword", 1, 0
+			}
+			if content != want || waits != wantWaits || probes != 1 || b.metrics.storeFailures.Load() != wantFailures || len(errorLines(rec.String())) != int(wantFailures) {
+				t.Fatalf("content=%q waits=%d probes=%d failures=%d log=%s", content, waits, probes, b.metrics.storeFailures.Load(), rec.String())
+			}
+			if strings.Contains(rec.String(), "neweditword") {
+				t.Fatal("edit content leaked in diagnostics")
+			}
+		})
+	}
 }
 
 func TestOutboundEditWireTimestampAndNewerPhoneEditOrdering(t *testing.T) {
@@ -84,13 +212,13 @@ func TestOutboundEditWireTimestampAndNewerPhoneEditOrdering(t *testing.T) {
 
 func TestInboundEditSDKParsedEventAndVerifiedLIDAuthor(t *testing.T) {
 	t.Setenv("WEBHOOK_ENABLED", "false")
-	for _, mode := range []string{"SDK", "LID-live", "LID-history"} {
+	for _, mode := range []string{"SDK", "SDK-direct", "SDK-ephemeral", "LID-live", "LID-history"} {
 		t.Run(mode, func(t *testing.T) {
 			ms, _ := lockedProductionStore(t)
 			b := testBridge(t, newTestClient(&mockLIDStore{pnByLID: map[types.JID]types.JID{phoneLID: phonePN}}), ms, testLogger())
 			stamp := time.Unix(1772359200, 0)
 			author := phoneLID.String()
-			if mode == "SDK" {
+			if strings.HasPrefix(mode, "SDK") {
 				author = phonePN.String()
 			}
 			if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
@@ -99,11 +227,22 @@ func TestInboundEditSDKParsedEventAndVerifiedLIDAuthor(t *testing.T) {
 			if err := ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: phonePN.String(), Sender: author, Content: "originalword", Timestamp: stamp, IsFromMe: false, MediaType: "", Filename: "", URL: "", MediaKey: nil, FileSHA256: nil, FileEncSHA256: nil, FileLength: 0, QuotedMessageID: ""}); err != nil {
 				t.Fatal(err)
 			}
+			previous := incomingEdit("TARGET", "previouseditword", stamp.Add(30*time.Second).UnixMilli()).EditedMessage.Message.ProtocolMessage
+			if err := ms.ApplyMessageEdit(phonePN.String(), author, false, previous, stamp); err != nil {
+				t.Fatal(err)
+			}
 			edit := incomingEdit("TARGET", "parsededitword", stamp.Add(time.Minute).UnixMilli())
 			switch mode {
-			case "SDK":
-				event, err := b.Client.ParseWebMessage(phonePN, &waWeb.WebMessageInfo{Key: &waCommon.MessageKey{ID: proto.String("DELIVERY")}, Message: edit, MessageTimestamp: proto.Uint64(1772359260)})
-				if err != nil || !event.IsEdit || event.Info.ID != "TARGET" || event.Message.GetConversation() != "parsededitword" {
+			case "SDK", "SDK-direct", "SDK-ephemeral":
+				payload := edit
+				if mode != "SDK" {
+					payload = edit.EditedMessage.Message
+				}
+				if mode == "SDK-ephemeral" {
+					payload = &waE2E.Message{EphemeralMessage: &waE2E.FutureProofMessage{Message: payload}}
+				}
+				event, err := b.Client.ParseWebMessage(phonePN, &waWeb.WebMessageInfo{Key: &waCommon.MessageKey{ID: proto.String("DELIVERY")}, Message: payload, MessageTimestamp: proto.Uint64(1772359260)})
+				if err != nil || event.IsEdit != (mode == "SDK") || event.Info.ID != "TARGET" || event.Message.GetConversation() != "parsededitword" {
 					t.Fatalf("unexpected pinned SDK edit shape: %+v %v", event, err)
 				}
 				b.handleEvent(event, nil)

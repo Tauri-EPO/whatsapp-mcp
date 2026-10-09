@@ -336,13 +336,26 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						continue
 					}
 					sender, own := b.historySenderContext(ctx, row.Message, jid, preserveExisting)
-					rawSender, _ := b.historySenderContext(ctx, row.Message, jid, true)
+					// Let the pinned SDK select wire authorship (original self
+					// author, own LID, participant precedence). Omit the payload
+					// from this local metadata view so UnwrapRaw cannot mutate it.
+					wireSender := ""
+					if client != nil {
+						metadata := &waWeb.WebMessageInfo{
+							Key:                             row.Message.Key,
+							Participant:                     row.Message.Participant,
+							OriginalSelfAuthorUserJIDString: row.Message.OriginalSelfAuthorUserJIDString,
+						}
+						if event, parseErr := client.ParseWebMessage(jid, metadata); parseErr == nil {
+							wireSender = event.Info.Sender.ToNonAD().String()
+						}
+					}
 					stored := storedSender(sender)
 					var preparationErr error
 					if ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID()); !preserveExisting && ex.location != nil && ex.location.Live {
 						stored, preparationErr = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, stored, own)
 					}
-					prepared[row] = preparedSender{jid: sender, stored: stored, wire: rawSender.ToNonAD().String(), own: own, err: preparationErr}
+					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, own: own, err: preparationErr}
 				}
 				if stopping() {
 					return
@@ -401,15 +414,16 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					if stopping() {
 						return
 					}
-					editSender, lookupErr := b.liveLocationSender(ctx, messageStore.db, ex.edit.GetKey().GetID(), chatJID, storedSender(sender), own)
-					if stopping() {
-						return
-					}
-					if lookupErr != nil {
-						b.noteStoreFailure("history message edit", ex.edit.GetKey().GetID(), chatJID, lookupErr)
-						continue
-					}
 					b.storeLive("history message edit", ex.edit.GetKey().GetID(), chatJID, func() error {
+						// Re-read a contended alias on each bounded retry, before the
+						// archive UPDATE starts its implicit writer transaction.
+						editSender, lookupErr := b.liveLocationSender(ctx, messageStore.db, ex.edit.GetKey().GetID(), chatJID, storedSender(sender), own)
+						if lookupErr != nil {
+							return lookupErr
+						}
+						if err := ctx.Err(); err != nil {
+							return err
+						}
 						return messageStore.ApplyMessageEdit(chatJID, editSender, own, ex.edit, time.Unix(int64(row.Message.GetMessageTimestamp()), 0)) //nolint:gosec // WhatsApp epoch seconds
 					})
 				}

@@ -289,6 +289,9 @@ func mediaRetryMessageInfo(messageID, chatJID, sender string, isFromMe bool) (*t
 	} else {
 		senderJID = chat
 	}
+	if chat.Server == types.GroupServer && senderJID.Server != types.DefaultUserServer && senderJID.Server != types.HiddenUserServer {
+		return nil, errors.New("group media retry requires an attributed sender JID")
+	}
 	return &types.MessageInfo{
 		MessageSource: types.MessageSource{
 			Chat:     chat,
@@ -391,6 +394,11 @@ func (store *MessageStore) mediaRetryInfo(ctx context.Context, id, chat string) 
 	}
 	if wireChat != "" {
 		chat = wireChat
+	}
+	if wireSender == "" && server == "" {
+		if parsed, parseErr := types.ParseJID(chat); parseErr == nil && parsed.Server == types.GroupServer {
+			return nil, errors.New("group media retry requires a recorded sender namespace or delivery JID")
+		}
 	}
 	if wireSender != "" {
 		sender = wireSender

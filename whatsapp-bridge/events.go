@@ -135,7 +135,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	original := msg.Message
 	// ParseWebMessage unwraps an edit into its new text and target ID. Its
 	// RawMessage retains the protocol key/timestamp needed for ordered updates.
-	if msg.IsEdit && msg.RawMessage != nil {
+	// A direct or ephemeral protocol edit may have IsEdit=false in the SDK.
+	if msg.RawMessage != nil && extractMessage(msg.RawMessage, msg.Info.Timestamp, msg.Info.ID).edit != nil {
 		original = msg.RawMessage
 	}
 	if inner, wrapped := unwrapViewOnce(msg.Message); wrapped {

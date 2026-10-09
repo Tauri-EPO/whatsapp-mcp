@@ -229,9 +229,13 @@ chat, matching its sender namespace (including a verified LID alias) and account
 ownership. Text and mention metadata update together; FTS triggers update the
 searchable text in the same write. The integer `message_edit_timestamp`
 retains the latest protocol millisecond timestamp: older edits and original-row
-replays cannot restore stale content. A missing target is a no-op; edit delivery
+replays cannot restore stale content. A missing target is a no-op; live edit delivery
 envelopes create no message or chat row or conversation activity. Phone history applies
-edits after its original rows, including targets in later chunks. Peer-shared
+edits after its original rows, including targets in later chunks. Replacement
+payloads use the shared envelope extractor, preserving wrapped captions and
+mentions. SDK-parsed live edits also recover direct/ephemeral protocols from
+`RawMessage`, even when the SDK leaves `IsEdit` false. History edit-author alias reads share the bounded busy-retry budget
+with the UPDATE, while staying outside the archive writer. Peer-shared
 history cannot edit existing rows. The outbound endpoint keeps its ownership
 checks and WhatsApp edit protocol. It persists the protocol's timestamp rather
 than the acknowledgement clock, and a delayed acknowledgement cannot overwrite
@@ -265,9 +269,17 @@ short archive-write phase takes the client handoff gate; decryption does not.
 Replays preserve the existing vote timestamp/tally rules.
 
 Media rows retain `media_retry_chat` and `media_retry_sender` from delivery,
-before chat/sender normalization. The pinned SDK places that chat in the retry
+before chat/sender normalization. History uses the pinned SDK's sender
+precedence, including `OriginalSelfAuthorUserJIDString`, through a payload-free
+metadata view prepared before Begin; it does not mutate the received protobuf.
+Outbound media uses the successful SDK
+`SendResponse.Chat` and `SendResponse.Sender`, including SDK destination upgrades
+and the account's PN/LID sending identity; empty fields alone use the requested
+chat or paired phone fallback. Device components are removed. The pinned SDK places that chat in the retry
 receipt's `rmr.jid` and a group sender in `rmr.participant`. Unattributed group
 history leaves the wire sender unset so a later delivery can supply its author.
+Group retries require an attributed delivery sender or a recorded user
+namespace; an unknown fallback cannot be guessed into a phone participant.
 Legacy rows use the
 stored chat and `sender_server`; their original delivery chat cannot be recovered
 reliably. An unencrypted phone error node remains retryable, because it carries
