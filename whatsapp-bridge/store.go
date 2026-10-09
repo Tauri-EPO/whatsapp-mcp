@@ -34,9 +34,10 @@ type MessageStore struct {
 	db   *sql.DB
 	waDB *sql.DB // whatsmeow's DB for contact name resolution fallback
 
-	names     *chatNameCache  // resolved chat names + failed group lookups (chat_names.go)
-	groupInfo groupInfoLookup // live group metadata fetch; nil = no network
-	fts       bool            // messages_fts active (fts.go)
+	names     *chatNameCache   // resolved chat names + failed group lookups (chat_names.go)
+	groupInfo groupInfoLookup  // live group metadata fetch; nil = no network
+	fts       bool             // messages_fts active (fts.go)
+	editNow   func() time.Time // per-store arrival clock for pending edit expiry
 }
 
 type ChatEphemeralSettings struct {
@@ -177,6 +178,12 @@ func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
 }
 
 func ensureMessageStoreSchema(db *sql.DB) error {
+	if _, err := db.Exec(pendingEditsSchema); err != nil {
+		return fmt.Errorf("failed to ensure pending edits: %w", err)
+	}
+	if err := prunePendingEdits(db, time.Now()); err != nil {
+		return err
+	}
 	if err := ensureColumn(db, "chats", "ephemeral_expiration", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("failed to ensure chats.ephemeral_expiration column: %w", err)
 	}
@@ -388,6 +395,9 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to stat WhatsApp DB %s: %w", whatsappDBPath, err)
 	}
 
+	if err := store.migratePendingEditChats(context.Background(), whatsappDBPath); err != nil {
+		return fmt.Errorf("migrate pending edit chats: %w", err)
+	}
 	alias := fmt.Sprintf("wa_mig_%d", time.Now().UnixNano())
 	tx, finish, err := store.beginMessageMigration(alias)
 	if err != nil {
@@ -1077,11 +1087,7 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 // namespace the sender lives in — or the bare user part, which leaves
 // messages.sender_server unset (splitSenderJID, sender_namespace.go).
 func (store *MessageStore) StoreMessage(message storedMessage) error {
-	if message.Content == "" && message.MediaType == "" {
-		return nil
-	}
-	_, err := store.db.Exec(insertMessageSQL, messageArgs(message)...)
-	return err
+	return store.Batch(func(batch *messageBatch) error { return batch.StoreMessage(message) })
 }
 
 // MarkMessageDeleted records a "delete for everyone" event by stamping

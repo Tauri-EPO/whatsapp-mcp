@@ -148,6 +148,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 		t.Fatalf("failed to create tables: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(pendingEditsSchema); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(pollsSchema); err != nil {
 		t.Fatalf("failed to create poll tables: %v", err)
 	}
