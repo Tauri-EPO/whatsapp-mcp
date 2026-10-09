@@ -44,7 +44,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 
 | Variable               | Default                                  | Description                                  |
 | ---------------------- | ---------------------------------------- | -------------------------------------------- |
-| `WHATSAPP_BRIDGE_BIND`  | `127.0.0.1`                              | Address the bridge REST API listens on. `0.0.0.0` / `::` to expose it to other containers or hosts (pair with `WHATSAPP_BRIDGE_ALLOWED_HOSTS`) |
+| `WHATSAPP_BRIDGE_BIND`  | `127.0.0.1`                              | Address the bridge REST API listens on. `0.0.0.0` / `::` to expose it to other containers or hosts (pair with `WHATSAPP_BRIDGE_ALLOWED_HOSTS`). With operator enabled, only loopback or the split topology's `bridge-agent` alias is allowed: one local address, distinct from operator, with exact `bridge-agent:<REST port>` Host policy. See [Docker namespace separation](DOCKER.md#separate-mcp-network-namespace) |
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)*                 | Comma-separated `Host` values accepted besides loopback (`host` = any port, `host:port` exact, `*` any). Off-loopback binds refuse non-loopback Hosts until this names them |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
 | `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback. |

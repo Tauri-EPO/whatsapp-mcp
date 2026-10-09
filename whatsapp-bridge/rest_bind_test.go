@@ -1,11 +1,76 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestSplitBridgeBindPinsOnlyDistinctLocalAddress(t *testing.T) {
+	_, local, err := net.ParseCIDR("192.0.2.10/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.IP = net.ParseIP("192.0.2.10")
+	for _, tc := range []struct {
+		name, bind, hosts, operator string
+		ips                         []string
+		lookupErr, localErr         bool
+		want                        string
+	}{
+		{"split", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10"}, false, false, "192.0.2.10"},
+		{"split without operator", "bridge-agent", "bridge-agent:8080", "", []string{"192.0.2.10"}, false, false, "192.0.2.10"},
+		{"duplicate DNS", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10", "192.0.2.10"}, false, false, "192.0.2.10"},
+		{"loopback", "127.0.0.1", "", "192.0.2.20", nil, false, false, "127.0.0.1"},
+		{"legacy off operator", "0.0.0.0", "", "", nil, false, false, "0.0.0.0"},
+		{"wildcard v4", "0.0.0.0", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"wildcard v6", "::", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"arbitrary hostname", "bridge", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"explicit IP", "192.0.2.10", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"missing alias", "bridge-agent", "bridge-agent:8080", "192.0.2.20", nil, true, false, ""},
+		{"empty DNS", "bridge-agent", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"multiple IPs", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10", "192.0.2.20"}, false, false, ""},
+		{"operator IP", "bridge-agent", "bridge-agent:8080", "192.0.2.10", []string{"192.0.2.10"}, false, false, ""},
+		{"nonlocal IP", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.30"}, false, false, ""},
+		{"DNS wildcard", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"0.0.0.0"}, false, false, ""},
+		{"DNS loopback", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"127.0.0.1"}, false, false, ""},
+		{"DNS multicast", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"224.0.0.1"}, false, false, ""},
+		{"interface error", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10"}, false, true, ""},
+		{"host wildcard", "bridge-agent", "*", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
+		{"host missing port", "bridge-agent", "bridge-agent", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
+		{"host extras", "bridge-agent", "bridge-agent:8080,example.test", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lookup := func(_ context.Context, name string) ([]net.IPAddr, error) {
+				if name != splitBridgeAlias {
+					t.Fatalf("unexpected lookup %s", name)
+				}
+				if tc.lookupErr {
+					return nil, errors.New("DNS unavailable")
+				}
+				var addresses []net.IPAddr
+				for _, ip := range tc.ips {
+					addresses = append(addresses, net.IPAddr{IP: net.ParseIP(ip)})
+				}
+				return addresses, nil
+			}
+			interfaces := func() ([]net.Addr, error) {
+				if tc.localErr {
+					return nil, errors.New("interfaces unavailable")
+				}
+				return []net.Addr{local}, nil
+			}
+			got, err := resolveSplitBridgeBind(tc.bind, tc.hosts, 8080, tc.operator, lookup, interfaces)
+			if got != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("got %q err=%v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestResolveBridgeBind(t *testing.T) {
 	cases := []struct {

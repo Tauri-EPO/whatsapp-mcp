@@ -14,7 +14,8 @@ The `mcp` container joins the bridge's network namespace
 on a laptop: bound to `127.0.0.1`, loopback-only `Host` allow-list, token file
 on disk. The MCP server reaches it at `http://127.0.0.1:8080` and reads
 `messages.db` from the shared `whatsapp-store` volume. Because the two share a
-namespace, the MCP port is **published on the `bridge` service**.
+namespace, the MCP port is **published on the `bridge` service**. The opt-in
+[split topology](#separate-mcp-network-namespace) gives MCP its own namespace.
 
 ## Quick start
 
@@ -303,7 +304,8 @@ docker compose -f docker-compose.yml -f docker-compose.operator.yml up -d
 `docker-compose.operator.yml` binds the operator listener to the single IP
 resolved for that alias **on the operator network** and includes the alias in
 its Host allow-list. It publishes no operator host port. Port 8080 stays on
-loopback; enabling the operator refuses a widened `WHATSAPP_BRIDGE_BIND`.
+loopback; enabling the operator refuses a widened `WHATSAPP_BRIDGE_BIND`, except
+the restricted `bridge-agent` alias in the split topology below.
 The MCP container shares the bridge namespace, so joining a private network
 does not isolate the agent plane. MCP port 8000 remains bound to `0.0.0.0`,
 reachable on every joined network and authenticated with the MCP bearer token.
@@ -352,6 +354,83 @@ Transcription caps and send limits remain tracked in #637/#635. A private authen
 response reports a bounded `failure_reason` after a passkey failure; health,
 metrics and INFO never expose that text. Real passkey eligibility and a native
 WhatsApp authenticator still need the live verification tracked in #487/#647.
+
+### Separate MCP network namespace
+
+`docker-compose.split.yml` separates the agent and operator listeners at the
+network namespace boundary. Apply it **last**, with Docker Compose 2.24.4 or
+newer. It works with neither, either, or both of the proxy/operator overrides:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml \
+  -f docker-compose.operator.yml -f docker-compose.split.yml up -d
+# Without a proxy or operator, omit the corresponding -f argument.
+```
+
+Set the proxy/operator network names, unique aliases and separate tokens as
+documented above. Configure the proxy's upstream as `http://whatsapp-sales:8000`
+and preserve the public Host (`example.ts.net`) and Authorization header.
+The proxy alias now belongs to **mcp**, and bridge has no proxy interface.
+The operator alias still belongs only to bridge; MCP has no operator interface.
+Operator-only peers cannot connect to MCP 8000. Proxy-only peers reach MCP
+8000, but cannot connect to bridge REST or operator 8090 (or a custom port).
+The split override disables MCP's unauthenticated metrics by default.
+
+Both services join a project-scoped **internal** `agent` network. REST binds
+only the single local IP resolved for `bridge-agent`; the MCP uses
+`WHATSAPP_API_URL=http://bridge-agent:8080/api` and the exact non-loopback
+Host allow-list is `bridge-agent:8080`. The bridge bearer token is unchanged,
+including automatic `.bridge-token` resolution. The bridge still accepts its
+built-in loopback Host spellings. The special bind refuses missing/ambiguous
+DNS, nonlocal/wildcard addresses, and the operator listener's IP. Ordinary
+non-loopback binds remain refused when the operator is enabled. Health probes
+use the selected bind instead of assuming REST is on loopback.
+
+The project default network remains on both services for WhatsApp, MCP OAuth
+discovery/JWKS, transcription providers and whisper egress. A whisper container
+already attached to that network remains reachable by the same `WHISPER_URL`;
+MCP loopback now means MCP itself, so replace URLs that relied on bridge's
+loopback with a service hostname. Default-network peers can reach MCP, while
+agent-network peers can reach REST. REST requires its Host policy and bearer,
+and MCP its configured authentication.
+Only attach trusted services to the default/agent networks. `internal: true`
+does not isolate bridge from MCP or from other deliberately joined agent peers.
+Without the proxy override, `proxy` is another project-scoped network on MCP;
+with it, MCP joins the existing external proxy network.
+
+The split override publishes **no host ports**, including without a proxy.
+Use a proxy on its network, or append your own local override publishing
+`mcp.ports: ["127.0.0.1:8000:8000"]` for Tailscale Serve or host-local access.
+Choose distinct host ports when publishing multiple projects. Never publish
+REST or operator ports. Each project keeps separate named stores and outboxes;
+leave `WHATSAPP_OUTBOX` empty to select the named outbox.
+
+MCP still mounts `whatsapp-store` at `/app/store` and reads `messages.db` and
+`whatsapp.db` directly using SQLite `mode=ro`, **never** `immutable`. This is
+read-only at the database-handle level: **the store mount is writable**.
+The MCP container can write its filesystem; bridge database protection relies
+on ownership conventions and read-only handles, not mount enforcement. The
+write access is required for `notes.db` and SQLite WAL/SHM coordination sidecars.
+Both containers keep uid 1000. MCP exports default to `/app/outbox/exports`
+in this override only (`WHATSAPP_EXPORT_DIR` can retain an existing destination),
+and uploads/conversions use `/app/outbox/.uploads`, shared with bridge.
+
+To migrate, back up the store and outbox, keep the same Compose project name,
+tokens and operator alias, and append the split file to the existing command.
+The store is reused and pairing is retained. If using a bind outbox, keep its
+`WHATSAPP_OUTBOX` value and uid-1000 ownership; clearing it creates a named
+outbox and does not copy the old files. Existing exports stay at their old
+location; set `WHATSAPP_EXPORT_DIR=/app/store/exports` to continue writing there,
+or copy archives to the new outbox destination yourself. Reconfigure any
+container routing pinned to the old bridge container or namespace. Roll back
+by removing the split file and recreating the same project; default compose
+and the two existing overrides are unchanged. Do not use `down -v` to migrate.
+
+`scripts/smoke-split.sh` runs all four combinations with two unpaired instances,
+real peer connections, separate stores/tokens/outboxes and a disposable HTTP
+whisper reachability fixture. It calls MCP initialize only, never tools.
+CI also retains the default and shared-namespace proxy smoke runs. These checks
+prove reachability and authentication, not paired-phone delivery or inference.
 
 ## Removing an instance
 

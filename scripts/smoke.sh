@@ -132,8 +132,13 @@ bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
   # function in a subshell and lose the status.
   # busybox wget: exit 0 with the body on a 2xx; on other statuses it prints
   # "server returned error: HTTP/1.1 503 Service Unavailable" and exits 1.
-  local out rc
-  out=$(bridge_exec wget -Y off -qO- --header "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:8080$1" 2>&1 </dev/null)
+  local out rc bind port
+  bind=$(bridge_exec printenv WHATSAPP_BRIDGE_BIND 2>/dev/null </dev/null) || true
+  port=$(bridge_exec printenv WHATSAPP_BRIDGE_PORT 2>/dev/null </dev/null) || true
+  bind=$(printf '%s' "$bind" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^\[//;s/\]$//')
+  bind=${bind:-127.0.0.1}
+  case "$bind" in 0.0.0.0) bind=127.0.0.1 ;; ::) bind='[::1]' ;; *:*) bind="[$bind]" ;; esac
+  out=$(bridge_exec wget -Y off -qO- --header "Authorization: Bearer ${TOKEN}" "http://$bind:${port:-8080}$1" 2>&1 </dev/null)
   rc=$?
   BRIDGE_BODY=""
   if [ "$rc" -eq 0 ]; then

@@ -1,0 +1,39 @@
+# Opt-in separate MCP namespace. Apply LAST after proxy/operator overrides.
+# Requires Docker Compose >= 2.24.4 (!override). No host ports are published.
+services:
+  bridge:
+    ports: !reset []
+    environment:
+      WHATSAPP_BRIDGE_BIND: bridge-agent
+      WHATSAPP_BRIDGE_ALLOWED_HOSTS: bridge-agent:8080
+    networks:
+      default: {}
+      agent:
+        aliases: [bridge-agent]
+      proxy: !reset null
+    volumes:
+      - ${WHATSAPP_OUTBOX:-whatsapp-outbox}:/app/outbox
+
+  mcp:
+    network_mode: !reset null
+    environment:
+      WHATSAPP_API_URL: http://bridge-agent:8080/api
+      WHATSAPP_EXPORT_DIR: ${WHATSAPP_EXPORT_DIR:-/app/outbox/exports}
+      WHATSAPP_MCP_METRICS: "false"
+    networks: !override
+      default: {}
+      agent: {}
+      proxy:
+        aliases: ["${WHATSAPP_PROXY_ALIAS:-mcp-agent}"]
+    volumes:
+      - ${WHATSAPP_OUTBOX:-whatsapp-outbox}:/app/outbox
+
+networks:
+  agent:
+    internal: true
+  # Without the proxy override this is an unused project-scoped network.
+  # With it, the external network definition is inherited unchanged.
+  proxy: {}
+
+volumes:
+  whatsapp-outbox:

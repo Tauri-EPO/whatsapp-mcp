@@ -21,9 +21,12 @@ package main
 // guards the API, but DNS-rebinding protection stays on by default.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 const (
@@ -31,7 +34,58 @@ const (
 	bridgeAllowedHostsEnv = "WHATSAPP_BRIDGE_ALLOWED_HOSTS"
 	defaultBridgeBind     = "127.0.0.1"
 	allowAnyHost          = "*"
+	splitBridgeAlias      = "bridge-agent"
 )
+
+// Only the split topology may move REST off loopback alongside an operator.
+// Pin its one local address before startup; never bind a wildcard or re-resolve
+// the alias when listening. Host policy and the existing bearer remain required.
+func resolveSplitBridgeBind(bind, hosts string, port int, operatorBind string,
+	lookup func(context.Context, string) ([]net.IPAddr, error), localAddrs func() ([]net.Addr, error),
+) (string, error) {
+	if bind != splitBridgeAlias {
+		if operatorBind != "" && !isLoopbackBind(bind) {
+			return "", errors.New("WHATSAPP_BRIDGE_BIND must remain loopback or use bridge-agent when WHATSAPP_OPERATOR_BIND is enabled")
+		}
+		return bind, nil
+	}
+	if hosts != fmt.Sprintf("%s:%d", splitBridgeAlias, port) {
+		return "", errors.New("WHATSAPP_BRIDGE_ALLOWED_HOSTS must name exactly bridge-agent and the REST port for split topology")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addresses, err := lookup(ctx, splitBridgeAlias)
+	if err != nil || len(addresses) == 0 {
+		return "", errors.New("WHATSAPP_BRIDGE_BIND bridge-agent could not be resolved")
+	}
+	unique := map[string]net.IP{}
+	for _, address := range addresses {
+		ip := address.IP
+		if ip == nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() || address.Zone != "" {
+			return "", errors.New("WHATSAPP_BRIDGE_BIND bridge-agent resolved to an unsafe address")
+		}
+		unique[ip.String()] = ip
+	}
+	if len(unique) != 1 {
+		return "", errors.New("WHATSAPP_BRIDGE_BIND bridge-agent must resolve to exactly one local address")
+	}
+	interfaces, err := localAddrs()
+	if err != nil {
+		return "", errors.New("WHATSAPP_BRIDGE_BIND local interfaces could not be checked")
+	}
+	for address, ip := range unique {
+		if operatorIP := net.ParseIP(operatorBind); operatorIP != nil && ip.Equal(operatorIP) {
+			return "", errors.New("WHATSAPP_BRIDGE_BIND must differ from the operator address")
+		}
+		for _, local := range interfaces {
+			localIP, _, parseErr := net.ParseCIDR(local.String())
+			if parseErr == nil && ip.Equal(localIP) {
+				return address, nil
+			}
+		}
+	}
+	return "", errors.New("WHATSAPP_BRIDGE_BIND bridge-agent must resolve to a local interface")
+}
 
 // hostAllowList is the compiled form of WHATSAPP_BRIDGE_ALLOWED_HOSTS.
 type hostAllowList struct {

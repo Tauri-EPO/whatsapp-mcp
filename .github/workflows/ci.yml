@@ -162,6 +162,10 @@ jobs:
         env:
           WHATSAPP_IMAGE_TAG: ci
         run: bash scripts/smoke-proxy.sh
+      - name: Separate MCP namespace (two unpaired projects)
+        env:
+          WHATSAPP_IMAGE_TAG: ci
+        run: bash scripts/smoke-split.sh
 
   bridge-arm64:
     name: Bridge arm64 (QEMU)

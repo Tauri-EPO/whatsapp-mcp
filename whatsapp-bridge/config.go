@@ -92,9 +92,8 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
 	cfg.Operator, err = parseOperatorConfig(getenv, net.DefaultResolver.LookupIPAddr)
 	collect(err)
-	if cfg.Operator.Bind != "" && !isLoopbackBind(cfg.Bind) {
-		collect(errors.New("WHATSAPP_BRIDGE_BIND must remain loopback when WHATSAPP_OPERATOR_BIND is enabled"))
-	}
+	cfg.Bind, err = resolveSplitBridgeBind(cfg.Bind, cfg.AllowedHosts, cfg.Port, cfg.Operator.Bind, net.DefaultResolver.LookupIPAddr, net.InterfaceAddrs)
+	collect(err)
 	if cfg.Operator.Bind != "" && cfg.Operator.Port == cfg.Port {
 		collect(errors.New("WHATSAPP_OPERATOR_PORT must differ from WHATSAPP_BRIDGE_PORT"))
 	}

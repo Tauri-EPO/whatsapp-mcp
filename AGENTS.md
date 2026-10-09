@@ -186,6 +186,7 @@ whatsapp-mcp/
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp — docs/DOCKER.md (no whisper: WHISPER_URL points at a server you run)
 ├── docker-compose.operator.yml # optional private operator network; no operator host port
+├── docker-compose.split.yml    # optional MCP namespace separation; apply last after other overrides
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), operator-logout.sh (private unlink/cleanup), upstream-harvest.sh, merge-when-green.sh (update / wait for CI / squash-merge a PR)
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
@@ -438,6 +439,8 @@ Runtime overrides are the exception to startup-only configuration: `tools.allow`
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 
 Compose-only proxy knobs: `WHATSAPP_PROXY_NETWORK` (default `proxy`) names an existing external network and `WHATSAPP_PROXY_ALIAS` is required and unique per instance in `docker-compose.proxy.yml`. This override removes host ports and defaults the outbox to a project-scoped named volume; `WHATSAPP_OUTBOX` can still select a bind mount. The base compose topology is unchanged. See `docs/DOCKER.md`.
+
+`docker-compose.split.yml` is applied last: MCP owns its namespace and proxy alias, joins the internal project agent network and default egress network, and never joins operator. Bridge REST uses the pinned single local `bridge-agent` address and exact `bridge-agent:8080` Host entry; with an operator this is the only non-loopback bind exception and must differ from its address. Default topology and existing overrides remain unchanged. No host ports are published. Store remains mounted writable for MCP-owned notes and SQLite WAL/SHM; bridge databases use `mode=ro` handles, never `immutable`, not physical mount enforcement. Only this override defaults exports to `/app/outbox/exports`; uid 1000 and token resolution remain unchanged. See `docs/DOCKER.md` for migration and network boundaries.
 
 ## 8. Gotchas (read before editing)
 
