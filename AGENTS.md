@@ -252,7 +252,7 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/p
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
-  -w /src golangci/golangci-lint:v2.13.2 golangci-lint run
+  -w /src golangci/golangci-lint:v2.14.0 golangci-lint run
 ```
 
 **gofmt on Windows.** `golangci-lint run` fails on a file `gofmt` would rewrite (the `gofmt` formatter in `.golangci.yml`), and `gofmt` also rewrites line endings — so running it on this CRLF working copy reports every file and would commit whole-file churn. Check it on an LF copy of the tree instead, and apply what it reports with an editor, not with `gofmt -w` on the working copy. The copy goes to a directory named after the worktree and is rebuilt from scratch on every run, so two worktrees side by side never share it and a file deleted or renamed in the branch cannot be linted from an earlier run:
@@ -284,7 +284,7 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 ./...'
 # golangci-lint runs on the LF copy built above (not on the CRLF tree), same cache volumes:
 docker run --rm -v "$(cd "$LF" && pwd -W)/whatsapp-bridge:/src" $V -w /src \
-  golangci/golangci-lint:v2.13.2 golangci-lint run
+  golangci/golangci-lint:v2.14.0 golangci-lint run
 ```
 
 The price is a cold module download the first time a session uses its volumes; remove them when the session ends (`docker volume rm "wamcp-gomod-$S" "wamcp-gobuild-$S"`).
@@ -302,7 +302,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Job | What |
 |---|---|
 | Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pyright` (basic mode, `tests/` excluded: they use duck-typed fakes), `pytest` (one job, one toolchain setup) |
-| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.13.2 with `whatsapp-bridge/.golangci.yml`: linters `errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`, `nolintlint` and the `gofmt` formatter (an unformatted file fails the job — see §5 for checking it from a CRLF checkout). Suppress a finding only with `//nolint:<linter> // <why>` on the line; `nolintlint` rejects a bare `//nolint`, a directive without a reason, and one that no longer silences anything, so delete a suppression once its finding is gone |
+| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.14.0 with `whatsapp-bridge/.golangci.yml`: linters `errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`, `nolintlint` and the `gofmt` formatter (an unformatted file fails the job — see §5 for checking it from a CRLF checkout). Suppress a finding only with `//nolint:<linter> // <why>` on the line; `nolintlint` rejects a bare `//nolint`, a directive without a reason, and one that no longer silences anything, so delete a suppression once its finding is gone |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit, pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every module in `py-modules` imports inside the image (the arm64 bridge has the next row) |
