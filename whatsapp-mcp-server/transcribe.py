@@ -10,13 +10,13 @@ the audio; original Opus/OGG is used when it fits, otherwise mono Opus chunks.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import os
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -449,40 +449,50 @@ def _http_parts(source: str, work_dir: str) -> list[Path]:
 
 
 def _transcribe_http(source: Path, config: WhisperConfig, language: str) -> str:
+    # Both callers are synchronous (the MCP SDK runs sync tools in a worker).
+    # Cancellation closes the socket even while headers/upload are trickling.
+    async def bounded() -> str:
+        try:
+            return await asyncio.wait_for(_transcribe_http_request(source, config, language), config.timeout_s)
+        except TimeoutError:
+            raise BackendUnavailableError("HTTP transcription backend exceeded request deadline") from None
+
+    return asyncio.run(bounded())
+
+
+async def _transcribe_http_request(source: Path, config: WhisperConfig, language: str) -> str:
     data = {"model": config.model or "", "response_format": "json"}
     if language and language != "auto":
         data["language"] = language
     key = os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY", "").strip()
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
-        with (
-            httpx.Client(
-                trust_env=False,
-                follow_redirects=False,
-                timeout=httpx.Timeout(config.timeout_s, connect=min(10, config.timeout_s)),
-            ) as client,
-            source.open("rb") as audio,
-        ):
-            with client.stream(
-                "POST",
-                config.url or "",
-                headers=headers,
-                files={
-                    "file": (source.name, audio, mimetypes.guess_type(source.name)[0] or "application/octet-stream")
-                },
-                data=data,
-            ) as response:
-                status = response.status_code
-                if status in (401, 403, 404, 405, 408, 429) or status >= 500 or 300 <= status < 400:
-                    raise BackendUnavailableError(f"HTTP transcription backend returned HTTP {status}")
-                if not 200 <= status < 300:
-                    raise TranscriptionError(f"HTTP transcription backend rejected this file (HTTP {status})")
-                body, started = bytearray(), time.monotonic()
-                for chunk in response.iter_bytes():
-                    body.extend(chunk)
-                    if len(body) > HTTP_RESPONSE_LIMIT or time.monotonic() - started > config.timeout_s:
-                        raise BackendUnavailableError("HTTP transcription backend response exceeds limits")
-                payload = json.loads(body)
+        async with httpx.AsyncClient(
+            trust_env=False,
+            follow_redirects=False,
+            timeout=httpx.Timeout(config.timeout_s, connect=min(10, config.timeout_s)),
+        ) as client:
+            with source.open("rb") as audio:
+                async with client.stream(
+                    "POST",
+                    config.url or "",
+                    headers=headers,
+                    files={
+                        "file": (source.name, audio, mimetypes.guess_type(source.name)[0] or "application/octet-stream")
+                    },
+                    data=data,
+                ) as response:
+                    status = response.status_code
+                    if status in (401, 403, 404, 405, 408, 429) or status >= 500 or 300 <= status < 400:
+                        raise BackendUnavailableError(f"HTTP transcription backend returned HTTP {status}")
+                    if not 200 <= status < 300:
+                        raise TranscriptionError(f"HTTP transcription backend rejected this file (HTTP {status})")
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > HTTP_RESPONSE_LIMIT:
+                            raise BackendUnavailableError("HTTP transcription backend response exceeds limits")
+                    payload = json.loads(body)
     except (httpx.HTTPError, httpx.InvalidURL):
         raise BackendUnavailableError("HTTP transcription backend request failed") from None
     except ValueError:

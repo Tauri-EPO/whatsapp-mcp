@@ -525,12 +525,12 @@ def test_invalid_and_scope_denied_requests_are_rate_limited(monkeypatch, issuer)
     configure(monkeypatch, issuer)
     application, _ = app(rate=1)
     with TestClient(application) as client:
-        assert request(client).status_code == 401
-        assert request(client).status_code == 429
         token = signed(issuer, scope="base")
         call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "read_fake", "arguments": {}}}
         assert request(client, token, call).status_code == 403
         assert request(client, token, call).status_code == 429
+        assert request(client).status_code == 401
+        assert request(client).status_code == 429
 
 
 @pytest.mark.asyncio
@@ -623,3 +623,28 @@ def test_private_secret_file_deny_paths(tmp_path):
         link.symlink_to(path)
         with pytest.raises(ValueError, match="private regular"):
             _secret({SECRET_FILE_ENV: str(link)}, "WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET", SECRET_FILE_ENV)
+
+
+def test_introspection_session_is_bound_to_client_and_subject(monkeypatch, issuer):
+    configure(
+        monkeypatch,
+        issuer,
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_URL=issuer["url"] + "/introspect",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID="fake-resource",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
+    )
+    issuer["extra"] = {"client_id": "client-a"}
+    application, calls = app(stateless=False)
+    with TestClient(application) as client:
+        initialized = request(client, "opaque-client-a")
+        assert initialized.status_code == 200
+        session = initialized.headers["mcp-session-id"]
+        issuer["extra"] = {"client_id": "client-b"}
+        headers = {**HEADERS, "mcp-session-id": session, "Authorization": "Bearer opaque-client-b"}
+        foreign = client.post(
+            "/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "read_fake", "arguments": {}}},
+        )
+        assert foreign.status_code == 404
+        assert calls == []

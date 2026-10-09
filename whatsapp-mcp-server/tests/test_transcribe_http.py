@@ -3,6 +3,8 @@
 import json
 import subprocess
 import threading
+import time
+from dataclasses import replace
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +22,45 @@ from tool_policy import ToolPolicy
 from transcribe import BackendUnavailableError, TranscriptionError, load_config, transcribe_file
 
 KEY = "fake-provider-key-0123456789abcdef"
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_path, phase):
+    class SlowHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            pieces = (
+                [b"HTTP/1.1 200 OK\r\n", b"Content-Type: application/json\r\n", b"\r\n", b'{"text":"done"}']
+                if phase == "headers"
+                else [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n", b'{"text":', b'"done"', b"}"]
+            )
+            try:
+                for piece in pieces:
+                    self.wfile.write(piece)
+                    self.wfile.flush()
+                    time.sleep(0.6)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    source = tmp_path / "note.ogg"
+    source.write_bytes(b"OggS")
+    config = replace(load_config(), url=f"http://127.0.0.1:{server.server_port}/transcribe", timeout_s=1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(BackendUnavailableError, match="deadline"):
+            transcribe_file(str(source), config=config)
+        assert time.monotonic() - started < 1.6
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.fixture

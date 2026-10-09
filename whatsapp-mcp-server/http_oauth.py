@@ -291,6 +291,9 @@ class OAuthTokenVerifier(TokenVerifier):
             return None
         if self.config.subjects and sub not in self.config.subjects:
             return None
+        client_id = claims.get("client_id", claims.get("azp", sub))
+        if not isinstance(client_id, str) or not client_id or len(client_id) > 1024:
+            return None
         # RFC 7662 permits absent exp/iss; JWT verification requires both.
         if "iss" in claims and claims["iss"] != self.config.issuer:
             return None
@@ -314,7 +317,7 @@ class OAuthTokenVerifier(TokenVerifier):
             return None
         return AccessToken(
             token=token,
-            client_id=sub,
+            client_id=client_id,
             subject=sub,
             scopes=scopes,
             expires_at=int(exp) if exp is not None else None,
