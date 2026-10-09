@@ -167,7 +167,10 @@ class Metrics:
         try:
             transcription = metrics_text()
         except (OSError, sqlite3.Error, ValueError):
-            transcription = "# TYPE whatsapp_mcp_transcription_usage_available gauge\nwhatsapp_mcp_transcription_usage_available 0\n"
+            transcription = (
+                "# HELP whatsapp_mcp_transcription_usage_available Whether durable transcription accounting is readable.\n"
+                "# TYPE whatsapp_mcp_transcription_usage_available gauge\nwhatsapp_mcp_transcription_usage_available 0\n"
+            )
         return "\n".join(lines) + "\n" + transcription
 
 

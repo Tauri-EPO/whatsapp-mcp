@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -61,6 +62,10 @@ def parse_cap(value: Any) -> float | None:
         return None
     if isinstance(value, bool):
         raise ValueError(f"{CAP_ENV}: expected finite non-negative minutes")
+    if isinstance(value, str) and not re.fullmatch(
+        r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value.strip()
+    ):
+        raise ValueError(f"{CAP_ENV}: expected decimal minutes")
     number = float(value)
     if not math.isfinite(number) or not 0 <= number <= 525600:
         raise ValueError(f"{CAP_ENV}: expected minutes in 0..525600")

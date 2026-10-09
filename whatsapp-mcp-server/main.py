@@ -2942,9 +2942,6 @@ if __name__ == "__main__":
         import runtime_settings
 
         runtime_settings.capture_environment()
-        from operator_admin import install_admin
-
-        install_admin()
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     install_runtime_tool_policy(mcp, _tool_policy)
@@ -3021,6 +3018,9 @@ if __name__ == "__main__":
                 "tailnet/loopback-only.",
                 file=sys.stderr,
             )
+        from operator_admin import install_admin
+
+        install_admin(transport, port)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,9 @@ import (
 const ingestChatsEnv = "TRANSCRIBE_ON_INGEST_CHATS"
 const transcriptionCapEnv = "TRANSCRIBE_MONTHLY_MAX_MINUTES"
 const transcriptionScopeEnv = "TRANSCRIBE_CAP_SCOPE"
+
+var transcriptionDecimal = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
+
 const runtimeSettingsSchema = `CREATE TABLE IF NOT EXISTS runtime_settings (
 	key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP NOT NULL,
 	version INTEGER NOT NULL CHECK(version > 0)
@@ -91,6 +95,9 @@ func settingDefinitions() []settingDefinition {
 		sendSetting("send.min_interval_ms", sendIntervalEnv),
 
 		{"transcription.monthly_max_minutes", transcriptionCapEnv, nil, capValue, func(raw string) (any, error) {
+			if !transcriptionDecimal.MatchString(strings.TrimSpace(raw)) {
+				return nil, errors.New("expected decimal minutes")
+			}
 			value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 			if err != nil {
 				return nil, errors.New("expected non-negative minutes")

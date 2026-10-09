@@ -1263,7 +1263,12 @@ listener on **127.0.0.1:8091** inside the shared bridge network namespace.
 Do not publish this port or proxy it. Only the bridge calls it with its bridge
 token; the operator token and token file are never passed to MCP. Configure a
 separate `WHATSAPP_MCP_TOKEN` when enabling operator reads so the MCP bearer cannot
-be used on admin. Operator clients continue to use a single bridge URL/token for
+be used on admin. If that token is absent/shared, or port 8091 is occupied, MCP
+logs one warning and keeps serving its data plane without admin: operator usage
+returns 503 and health activity is null. Free the port or set a distinct MCP
+token to enable admin after a restart. Port 8091 is reserved when the operator
+is enabled; choosing it for `WHATSAPP_MCP_PORT` fails with a configuration error.
+The stdio transport never starts an admin listener. Operator clients continue to use a single bridge URL/token for
 `GET /operator/v1/transcription/usage` and health (`last_mcp_call_at`, null until
 an authenticated MCP tool call, or while MCP is unavailable). Runtime settings
 remain bridge-owned; UTC monthly metering is MCP-owned in `notes.db` and is

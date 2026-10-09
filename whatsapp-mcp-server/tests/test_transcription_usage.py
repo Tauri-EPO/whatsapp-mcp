@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import wave
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import main
+import media_inventory
 import media_notes
 import observability
 import operator_admin
@@ -31,7 +33,7 @@ from tests.test_runtime_settings import patch
 from tests.test_runtime_settings import runtime_archive as archive_fixture
 from tests.test_transcribe_http import _add_audio, _audio
 from tests.test_transcribe_http import provider as provider_fixture
-from tests.test_transcribe_ingest import SHA
+from tests.test_transcribe_ingest import SHA, _media_filename
 
 runtime_archive = archive_fixture
 provider = provider_fixture
@@ -144,6 +146,152 @@ def test_concurrent_reservations_no_overshoot_release_failure_and_crash_is_conse
         conn.execute("INSERT INTO transcription_reservations VALUES ('crashed',?,'tool',1)", (usage.month_now(),))
     assert usage.current_usage()["remaining_seconds"] == 0
     assert 'outcome="error"} 1' in usage.metrics_text()
+
+
+def test_barrier_concurrent_admissions_never_exceed_cap(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 4 / 60, "transcription.cap_scope": "all"})
+    # First use creates its schema; the next test isolates concurrent DDL.
+    conn = usage._connection()
+    conn.close()
+    barrier = threading.Barrier(8)
+    used = usage._used
+
+    def widen_read_write_race(conn, month, scope):
+        result = used(conn, month, scope)
+        time.sleep(0.1)  # A real writer must retain the admission lock during this gap.
+        return result
+
+    monkeypatch.setattr(usage, "_used", widen_read_write_race)
+
+    def attempt():
+        barrier.wait(timeout=10)
+        try:
+            with usage.admission(2, "whisper_cpp", "", "ingest"):
+                time.sleep(0.05)
+            return True
+        except ToolError as exc:
+            assert exc.code == "transcription_quota_exceeded"
+            return False
+
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        assert sum(pool.map(lambda _: attempt(), range(8))) == 2
+    assert usage.current_usage()["seconds"] == 4
+    assert usage.current_usage()["remaining_seconds"] == 0
+
+
+def test_concurrent_first_use_creates_schema_without_preexisting_tables(paired_dbs):
+    assert not Path(media_notes.notes_db_path()).exists()
+    barrier = threading.Barrier(8)
+
+    def first_use(_):
+        barrier.wait(timeout=10)
+        conn = usage._connection(timeout=10)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM transcription_reservations").fetchone() == (0,)
+            assert conn.execute("SELECT COUNT(*) FROM transcription_usage").fetchone() == (0,)
+            assert conn.execute("SELECT COUNT(*) FROM transcription_outcomes").fetchone() == (0,)
+        finally:
+            conn.close()
+
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        list(pool.map(first_use, range(8)))
+
+
+@pytest.mark.parametrize("provider_name", ["whisper_cpp", "openai_compatible"])
+def test_exhausted_worker_never_reconverts_head_and_resumes_after_raise(
+    provider, runtime_archive, monkeypatch, provider_name
+):
+    if provider_name == "whisper_cpp":
+        monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", provider_name)
+        monkeypatch.setenv("WHISPER_URL", provider["url"])
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    _add_audio(runtime_archive, "AUD1", ALICE)
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 0})
+    conversions = []
+    original = subprocess.run
+
+    def count_conversion(argv, *args, **kwargs):
+        if argv[0] == "ffmpeg":
+            conversions.append(argv)
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", count_conversion)
+    for _ in range(3):
+        batch = transcribe_worker.run_once(10)
+        assert batch.transcribed == batch.failed == 0 and batch.position is None
+    assert conversions == [] and provider["calls"] == []
+    assert media_notes.get_media_notes(SHA["AUD1"])["notes"] == {}
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 1})
+    assert transcribe_worker.run_once(10).transcribed == 1
+    assert conversions and len(provider["calls"]) == 1
+
+
+def test_transcription_metrics_have_help_for_every_family(paired_dbs):
+    text = usage.metrics_text()
+    for name in ("usage_available", "seconds_total", "requests_total", "quota_remaining_seconds"):
+        assert f"# HELP whatsapp_mcp_transcription_{name} " in text
+
+
+@pytest.mark.parametrize("provider_name", ["whisper_cpp", "openai_compatible"])
+@pytest.mark.parametrize("resume", ["raise", "month", "replace"])
+def test_positive_insufficient_quota_reuses_measured_duration_and_rechecks_file_identity(
+    provider, runtime_archive, monkeypatch, provider_name, resume
+):
+    if provider_name == "whisper_cpp":
+        monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", provider_name)
+        monkeypatch.setenv("WHISPER_URL", provider["url"])
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setattr(transcribe_worker, "_blocked_quota", None)
+    monkeypatch.setattr(usage, "month_now", lambda: "2026-10")
+    patch(runtime_archive, {"transcription.monthly_max_minutes": 3 / 60})
+    with usage.admission(2, provider_name, "", "ingest"):
+        pass
+    _add_audio(runtime_archive, "AUD1", ALICE)
+    path = Path(media_inventory.chat_media_dir(ALICE)) / _media_filename("AUD1")
+    _audio(path, 2)
+    conversions = []
+    original = subprocess.run
+
+    def count_conversion(argv, *args, **kwargs):
+        if argv[0] == "ffmpeg":
+            conversions.append(argv)
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", count_conversion)
+    conversion_counts = []
+    for _ in range(3):
+        batch = transcribe_worker.run_once(10)
+        assert batch.transcribed == batch.failed == 0 and batch.position is None
+        conversion_counts.append(len(conversions))
+    assert conversion_counts[0] > 0 and conversion_counts == [conversion_counts[0]] * 3
+    assert provider["calls"] == []
+    assert media_notes.get_media_notes(SHA["AUD1"])["notes"] == {}
+    if resume == "raise":
+        patch(runtime_archive, {"transcription.monthly_max_minutes": 5 / 60})
+    elif resume == "month":
+        monkeypatch.setattr(usage, "month_now", lambda: "2026-11")
+    else:
+        # Replacement bytes have a different archive hash as well as size/mtime.
+        _audio(path, 0.5)
+        with runtime_archive.messages() as conn:
+            conn.execute("UPDATE messages SET file_sha256=? WHERE id='AUD1'", (bytes.fromhex(SHA["AUD2"]),))
+    assert transcribe_worker.run_once(10).transcribed == 1
+    assert len(conversions) > conversion_counts[0]
+    assert len(provider["calls"]) == 1
+    assert media_notes.get_media_notes(SHA["AUD2"] if resume == "replace" else SHA["AUD1"])["notes"]["duration_s"][
+        "value"
+    ] == ("0.5" if resume == "replace" else "2.0")
+
+
+@pytest.mark.parametrize("value", ["0x1p4", "1_0", "0b10", "NaN", "Inf", "١"])
+def test_cap_environment_refuses_non_decimal_forms(value):
+    with pytest.raises(ValueError):
+        runtime_settings.parse_cap(value)
+
+
+@pytest.mark.parametrize("value,expected", [(" 1.5 ", 1.5), ("+1", 1), (".5", 0.5), ("1.", 1), ("1e2", 100), ("01", 1)])
+def test_cap_environment_decimal_forms(value, expected):
+    assert runtime_settings.parse_cap(value) == expected
 
 
 def test_runtime_deploy_ceiling_scope_clear_restart_and_raise(runtime_archive, monkeypatch):
@@ -510,6 +658,25 @@ def test_authenticated_mcp_tool_activity_and_operator_routes_absent(paired_dbs, 
         assert operator_admin._last_call is not None
         for path in ("/operator/v1/transcription/usage", "/admin/v1/transcription/usage", "/operator/v1/settings"):
             assert client.get(path, headers=headers).status_code == 404
+
+
+def test_unauthenticated_http_tool_calls_never_record_activity(paired_dbs, monkeypatch):
+    monkeypatch.setattr(operator_admin, "_last_call", None)
+    server = StrictArgumentServer("unauthenticated-activity")
+
+    @server.tool()
+    def echo() -> dict:
+        return {"ok": True}
+
+    app = main.build_http_app(server, "streamable-http", None, host="0.0.0.0", json_response=True, stateless_http=True)
+    with TestClient(app) as client:
+        call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {}}}
+        for headers in ({}, {"Authorization": "Bearer fake-unverified-0123456789"}):
+            response = client.post(
+                "/mcp", headers={"Accept": "application/json, text/event-stream", **headers}, json=call
+            )
+            assert response.status_code == 200 and not response.json()["result"]["isError"]
+            assert operator_admin._last_call is None
 
 
 def test_go_operator_to_python_admin_actual_processes(paired_dbs):

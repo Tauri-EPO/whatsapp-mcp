@@ -1248,7 +1248,11 @@ admin listener at `127.0.0.1:8091`, using the **bridge token**. The operator
 secret stays bridge-only. Admin accepts only usage and activity GETs; it is off
 unless `WHATSAPP_OPERATOR_BIND` is set, is never published, and rejects the MCP
 bearer. With the operator enabled, configure `WHATSAPP_MCP_TOKEN` distinct from
-the bridge token (the normal shared-token HTTP fallback is refused).
+the bridge token. If the normal shared-token HTTP fallback is in use, admin is
+skipped with one warning and the MCP data plane stays available. An occupied
+admin port also disables admin with a warning; operator usage returns 503 and
+activity stays null. HTTP/SSE cannot use `WHATSAPP_MCP_PORT=8091` while the
+operator is enabled. Stdio never opens admin.
 
 `PATCH /operator/v1/settings` accepts `transcription.monthly_max_minutes` (number
 0..525600) and `transcription.cap_scope` (`ingest` or `all`). Null clears an
@@ -1258,7 +1262,10 @@ deploy limit permits a runtime limit); deploy scope `all` always wins. GET repor
 the source of the effective value. Runtime cap raises work only up to the deploy
 ceiling, and neither a raise nor a clear discards usage.
 
-A file that does not fit is left pending without a failure note. Ingest pauses
+A file that does not fit is left pending without a failure note. Ingest remembers
+one blocked file's measured duration and checks its identity and available quota
+before preparing it again; a fully exhausted quota stops fetching and conversion.
+Ingest pauses
 and resumes once each in the logs, retrying next cycle after a UTC month rollover
 or a permitted cap raise. Explicit calls subject to the cap return
 `transcription_quota_exceeded`; cached transcripts cost no additional usage.

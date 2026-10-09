@@ -43,10 +43,27 @@ def month_now() -> str:
 
 
 def _connection(create=True, timeout: float = 5):
-    conn = notes_connection(notes_db_path(), create=create, timeout=timeout)
+    expires = time.monotonic() + timeout
+    while True:
+        try:
+            conn = notes_connection(notes_db_path(), create=create, timeout=max(0, expires - time.monotonic()))
+            break
+        except sqlite3.OperationalError as exc:
+            # Concurrent WAL initialization can return BUSY without invoking
+            # SQLite's busy handler. Retry within the caller's original budget.
+            remaining = expires - time.monotonic()
+            if (
+                getattr(exc, "sqlite_errorcode", 0) & 0xFF not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                or remaining <= 0
+            ):
+                raise
+            time.sleep(min(0.01, remaining))
     if conn is not None:
         try:
-            conn.executescript(SCHEMA)
+            conn.execute(f"PRAGMA busy_timeout={max(1, int(max(0, expires - time.monotonic()) * 1000))}")
+            # Serialize first-use DDL as well as admission. Deferred CREATEs
+            # can race while upgrading a read transaction to a writer.
+            conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
         except BaseException:
             conn.close()
             raise
@@ -175,6 +192,20 @@ def _pause(value):
             logger.info("transcribe_on_ingest: monthly quota %s", "paused" if value else "resumed")
 
 
+def ingest_quota_exhausted(required_seconds: float = 0):
+    remaining = current_usage()["remaining_seconds"]
+    if remaining is not None and (remaining <= 0 or remaining < required_seconds):
+        _pause(True)
+        return True
+    return False
+
+
+class QuotaExceededError(ToolError):
+    def __init__(self, seconds):
+        super().__init__("transcription_quota_exceeded", "Audio does not fit the remaining monthly transcription quota")
+        self.required_seconds = seconds  # Internal scheduling receipt, never serialized.
+
+
 @dataclass(frozen=True)
 class Completion:
     path: str
@@ -250,9 +281,7 @@ def admission(seconds: float, provider: str, model: str, source: str, *, deadlin
             if cap is not None and (scope == "all" or source == "ingest") and _used(conn, month, scope) + seconds > cap:
                 if source == "ingest":
                     _pause(True)
-                raise ToolError(
-                    "transcription_quota_exceeded", "Audio does not fit the remaining monthly transcription quota"
-                )
+                raise QuotaExceededError(seconds)
             conn.execute("INSERT INTO transcription_reservations VALUES (?,?,?,?)", (token, month, source, seconds))
         if source == "ingest":
             _pause(False)
@@ -299,10 +328,14 @@ def admission(seconds: float, provider: str, model: str, source: str, *, deadlin
 
 def metrics_text():
     lines = [
+        "# HELP whatsapp_mcp_transcription_usage_available Whether durable transcription accounting is readable.",
         "# TYPE whatsapp_mcp_transcription_usage_available gauge",
         "whatsapp_mcp_transcription_usage_available 1",
+        "# HELP whatsapp_mcp_transcription_seconds_total Successfully transcribed audio seconds.",
         "# TYPE whatsapp_mcp_transcription_seconds_total counter",
+        "# HELP whatsapp_mcp_transcription_requests_total Completed transcription requests by outcome.",
         "# TYPE whatsapp_mcp_transcription_requests_total counter",
+        "# HELP whatsapp_mcp_transcription_quota_remaining_seconds Remaining admitted audio seconds this UTC month.",
         "# TYPE whatsapp_mcp_transcription_quota_remaining_seconds gauge",
     ]
     conn = _connection(create=False)

@@ -214,3 +214,27 @@ func TestTranscriptionSettingsHTTPBoundsCeilingScopeAndAtomicClear(t *testing.T)
 		t.Fatal("cap clear failed")
 	}
 }
+
+func TestTranscriptionCapEnvironmentDecimalForms(t *testing.T) {
+	for _, raw := range []string{"0x1p4", "1_0", "0b10", "NaN", "Inf", "١"} {
+		if _, err := runtimeDefaults(func(key string) string {
+			if key == transcriptionCapEnv {
+				return raw
+			}
+			return ""
+		}); err == nil {
+			t.Fatalf("non-decimal form %q accepted", raw)
+		}
+	}
+	for raw, want := range map[string]float64{" 1.5 ": 1.5, "+1": 1, ".5": 0.5, "1.": 1, "1e2": 100, "01": 1} {
+		values, err := runtimeDefaults(func(key string) string {
+			if key == transcriptionCapEnv {
+				return raw
+			}
+			return ""
+		})
+		if err != nil || values["transcription.monthly_max_minutes"].Value != want {
+			t.Fatalf("decimal form %q: %v, %v", raw, values, err)
+		}
+	}
+}

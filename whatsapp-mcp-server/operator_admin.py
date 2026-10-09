@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import threading
 from contextvars import ContextVar
@@ -37,7 +38,7 @@ class AuthenticatedCalls:
 
 
 def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
-    if len(bridge_token) < 16 or (mcp_token and hmac.compare_digest(bridge_token, mcp_token)):
+    if not mcp_token or len(bridge_token) < 16 or hmac.compare_digest(bridge_token, mcp_token):
         raise ValueError("MCP admin requires a bridge token distinct from the MCP bearer; configure WHATSAPP_MCP_TOKEN")
 
     class Handler(BaseHTTPRequestHandler):
@@ -91,9 +92,11 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
     return server
 
 
-def install_admin():
-    if not os.getenv("WHATSAPP_OPERATOR_BIND", "").strip():
+def install_admin(transport: str, port: int):
+    if transport == "stdio" or not os.getenv("WHATSAPP_OPERATOR_BIND", "").strip():
         return None
+    if port == 8091:
+        raise ValueError("WHATSAPP_MCP_PORT: 8091 is reserved for the operator admin listener")
     from http_auth import resolve_http_token
     from whatsapp import _read_bridge_token
 
@@ -101,4 +104,14 @@ def install_admin():
     token, _ = resolve_http_token(
         os.getenv("WHATSAPP_MCP_TOKEN"), os.getenv("WHATSAPP_MCP_HOST", "127.0.0.1"), _read_bridge_token
     )
-    return start_admin(bridge_token, token)
+    try:
+        return start_admin(bridge_token, token)
+    except ValueError:
+        logging.getLogger("whatsapp_mcp").warning(
+            "MCP admin disabled: set WHATSAPP_MCP_TOKEN distinct from the bridge token; data plane remains available"
+        )
+    except OSError:
+        logging.getLogger("whatsapp_mcp").warning(
+            "MCP admin disabled: cannot bind 127.0.0.1:8091; free the admin port; data plane remains available"
+        )
+    return None
