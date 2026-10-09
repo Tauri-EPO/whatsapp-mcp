@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,5 +340,17 @@ func TestArchiveCopyCancellationStopsAtNextBoundedRead(t *testing.T) {
 	n, err := copyArchiveContext(ctx, cancelArchiveWriter{&out, cancel}, strings.NewReader(strings.Repeat("x", 128<<10)))
 	if !errors.Is(err, context.Canceled) || n != 32<<10 || out.Len() != 32<<10 {
 		t.Fatalf("copy exceeded cancellation boundary: n=%d len=%d err=%v", n, out.Len(), err)
+	}
+}
+
+func TestArchiveReadOnlyURIEscapesDrivePathsWithoutAuthority(t *testing.T) {
+	for _, name := range []string{"C:/private store/#archive.db", "/private store/#archive.db"} {
+		uri, err := url.Parse(archiveReadOnlyURI(name))
+		if err != nil || uri.Scheme != "file" || uri.Host != "" || uri.Fragment != "" || uri.Query().Get("mode") != "ro" || uri.Query().Has("immutable") {
+			t.Fatalf("invalid read-only URI: err=%v uri=%v", err, uri)
+		}
+		if !strings.HasSuffix(uri.Path, "/private store/#archive.db") {
+			t.Fatal("URI changed the source path")
+		}
 	}
 }

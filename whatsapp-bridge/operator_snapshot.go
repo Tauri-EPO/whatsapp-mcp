@@ -61,7 +61,7 @@ func openArchiveDB(root *os.Root, name string, optional bool) (*archiveDatabase,
 	if runtime.GOOS == "linux" {
 		abs = fmt.Sprintf("/proc/self/fd/%d/%s", directory.Fd(), name)
 	}
-	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}).String() + "?" + sqliteReadOnlyOptions
+	uri := archiveReadOnlyURI(abs)
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		_ = directory.Close()
@@ -79,6 +79,16 @@ func openArchiveDB(root *os.Root, name string, optional bool) (*archiveDatabase,
 		return nil, errors.New("archive source changed while opening")
 	}
 	return opened, nil
+}
+
+func archiveReadOnlyURI(name string) string {
+	name = filepath.ToSlash(name)
+	// A drive-letter path must be file:///C:/..., with an empty authority.
+	// Without the leading slash net/url emits file://C:/..., rejected by SQLite.
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	return (&url.URL{Scheme: "file", Path: name}).String() + "?" + sqliteReadOnlyOptions
 }
 
 func privateSnapshotDir(directory string) (*os.Root, *os.File, error) {
