@@ -106,6 +106,99 @@ func TestHistorySessionReadStallDoesNotHoldArchiveWriter(t *testing.T) {
 	}
 }
 
+func TestHistoryIdentityPreparationFailureAffectsOnlyItsRow(t *testing.T) {
+	for _, mode := range []string{"missing-session-table", "restored-session-schema", "released-session-writer"} {
+		t.Run(mode, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			session, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(t.TempDir(), "session.db"))+"?_pragma=busy_timeout(1)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			session.SetMaxOpenConns(2)
+			var held *sql.Conn
+			if mode == "released-session-writer" {
+				if _, err := session.Exec("CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT); INSERT INTO whatsmeow_lid_map VALUES (?,?)", phoneLID.User, phonePN.User); err != nil {
+					t.Fatal(err)
+				}
+				held, err = session.Conn(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					_, _ = held.ExecContext(context.Background(), "ROLLBACK")
+					_ = held.Close()
+				})
+				if _, err := held.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			container := sqlstore.NewWithDB(session, "sqlite", testLogger())
+			b := testBridge(t, newTestClientWithSelf(container.LIDMap, selfPhone), ms, testLogger())
+			if mode == "restored-session-schema" {
+				restored := false
+				b.historyBatchWriter = func(write func(*messageBatch) error) error {
+					err := ms.Batch(write)
+					if err != nil && !restored {
+						// Restore after the failed archive batch has rolled back.
+						_, schemaErr := session.Exec("CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT); INSERT INTO whatsmeow_lid_map VALUES (?,?)", phoneLID.User, phonePN.User)
+						if schemaErr != nil {
+							t.Fatal(schemaErr)
+						}
+						restored = true
+					}
+					return err
+				}
+			}
+			stamp := time.Unix(1772359200, 0)
+			if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.StoreMessage("H2", phonePN.String(), phoneLID.String(), "initialsample", stamp, false, "location", "", "", nil, nil, nil, 0, ""); err != nil {
+				t.Fatal(err)
+			}
+			waits := 0
+			b.storeRetryWait = func(time.Duration) bool {
+				waits++
+				// The SDK writer is still locked: a real archive write must be free.
+				if err := ms.StoreChat(selfPhone.String(), "Bob", stamp); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.StoreMessage("LIVE-PREP", selfPhone.String(), selfPhone.String(), "prepwriterword", stamp, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+					t.Fatal(err)
+				}
+				if held == nil {
+					t.Fatal("non-busy preparation should not wait")
+				}
+				if _, err := held.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+					t.Fatal(err)
+				}
+				return true
+			}
+			fixture := largeHistoryFixture(historyBatchMessages + 2)
+			fixture.Data.Conversations[0].Messages[2].Message.Message = livePosition(2, 0.25)
+			b.handleHistorySync(fixture)
+			var rows, indexed int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'searchable'").Scan(&indexed); err != nil {
+				t.Fatal(err)
+			}
+			wantRows, wantFailures, wantWaits := historyBatchMessages+2, int64(1), 0
+			if held != nil {
+				wantRows, wantFailures, wantWaits = wantRows+1, 0, 1
+			}
+			if mode == "restored-session-schema" {
+				wantFailures = 0
+			}
+			if rows != wantRows || indexed != historyBatchMessages+1 || b.metrics.historyMessages.Load() != int64(historyBatchMessages+1) || b.metrics.storeFailures.Load() != wantFailures || waits != wantWaits {
+				t.Fatalf("rows=%d FTS=%d committed=%d failures=%d waits=%d", rows, indexed, b.metrics.historyMessages.Load(), b.metrics.storeFailures.Load(), waits)
+			}
+		})
+	}
+}
+
 func TestHistoryConversationVoteOrderingAndReplay(t *testing.T) {
 	for iteration := range 12 {
 		ms, _ := lockedProductionStore(t)
@@ -230,6 +323,109 @@ func TestHistoryMissingVoteSecretsSharePayloadRetryBudget(t *testing.T) {
 		if calls[chat.String()] != 3 {
 			t.Errorf("chat=%s attempts=%d, want initial plus two retry passes", chat, calls[chat.String()])
 		}
+	}
+}
+
+func TestHistoryPendingVoteCannotOverwriteLaterEqualTimeVote(t *testing.T) {
+	for _, mode := range []string{"undecodable", "decoded", "older-ready", "live-ready", "live-during-initial"} {
+		t.Run(mode, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+			b.HistoryVoteRetryDelays = []time.Duration{time.Millisecond}
+			missing, ready := make(chan struct{}), make(chan struct{})
+			calls := 0
+			b.PollVoteDecrypt = func(ctx context.Context, evt *events.Message) ([][]byte, error) {
+				if evt.Info.ID == "READY" {
+					close(ready)
+					return [][]byte{hashOf("Sushi")}, nil
+				}
+				calls++
+				if calls == 1 {
+					close(missing)
+					if mode != "live-during-initial" {
+						return nil, whatsmeow.ErrOriginalMessageSecretNotFound
+					}
+				}
+				select {
+				case <-ready:
+					deadline := time.NewTimer(2 * time.Second)
+					defer deadline.Stop()
+					// Observe the actual newer archive row before releasing the old
+					// decoder; a callback notification alone is not commit proof.
+					for {
+						var committed int
+						if err := ms.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE id='READY'").Scan(&committed); err != nil {
+							return nil, err
+						}
+						if committed == 1 {
+							break
+						}
+						select {
+						case <-time.After(time.Millisecond):
+						case <-deadline.C:
+							return nil, context.DeadlineExceeded
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+					}
+					if mode == "decoded" {
+						return [][]byte{hashOf("Pizza")}, nil
+					}
+					return nil, whatsmeow.ErrOriginalMessageSecretNotFound
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			stamp := time.Unix(1772359200, 0)
+			b.handleHistorySync(historySyncWithPoll(phonePN, stamp))
+			select {
+			case <-missing:
+			case <-time.After(2 * time.Second):
+				t.Fatal("initial missing vote was never decoded")
+			}
+			readyStamp := stamp
+			if mode == "older-ready" {
+				readyStamp = stamp.Add(-time.Second)
+			}
+			later := historySyncWithPoll(phonePN, readyStamp)
+			later.Data.Conversations[0].Messages[0].Message.Key.ID = proto.String("READY")
+			later.Data.Conversations[0].Messages = later.Data.Conversations[0].Messages[:1]
+			if mode == "live-ready" || mode == "live-during-initial" {
+				event, err := b.currentClient().ParseWebMessage(phonePN, later.Data.Conversations[0].Messages[0].Message)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.handleEvent(event, nil)
+			} else {
+				b.handleHistorySync(later)
+			}
+			b.historyVotes.Wait()
+			result, err := ms.PollResults("HPOLL1", phonePN.String())
+			wantReady, wantMissing := 1, 0
+			if mode == "older-ready" {
+				wantReady, wantMissing = 0, 1
+			}
+			if err != nil || result.TotalVoters != wantReady || result.UndecodableVotes != wantMissing || result.Options[1].Count != wantReady {
+				t.Fatalf("mode=%s equal-time tally=%+v err=%v", mode, result, err)
+			}
+			var oldRows int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages WHERE id='HVOTE1' AND content LIKE '%Pizza%'").Scan(&oldRows); err != nil {
+				t.Fatal(err)
+			}
+			wantOld := 0
+			if mode == "decoded" {
+				wantOld = 1 // archive the old vote without reverting the latest tally
+			}
+			if oldRows != wantOld {
+				t.Fatalf("older decoded vote archive rows=%d", oldRows)
+			}
+			b.historyVoteOrderMu.Lock()
+			retained := len(b.historyPendingVotes)
+			b.historyVoteOrderMu.Unlock()
+			if retained != 0 {
+				t.Fatalf("finished vote jobs retained %d ordering entries", retained)
+			}
+		})
 	}
 }
 

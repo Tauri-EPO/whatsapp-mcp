@@ -214,6 +214,9 @@ type Bridge struct {
 	historyVoteMu      sync.Mutex
 	historyVoteTail    chan struct{}
 	historyVoteStopped bool
+	// In-flight history attempts/retries, one latest candidate per tally key.
+	historyVoteOrderMu  sync.Mutex
+	historyPendingVotes map[historyVoteKey]*historyVoteWork
 	// historyBatchWriter replaces the transaction runner in controlled tests.
 	historyBatchWriter func(func(*messageBatch) error) error
 	// Peer history has a separate one-worker, one-waiting-job budget.

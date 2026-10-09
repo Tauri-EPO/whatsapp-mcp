@@ -247,6 +247,11 @@ func (b *Bridge) handlePollVote(ctx context.Context, evt *events.Message, chatJI
 	if evt.Message.GetPollUpdateMessage() == nil {
 		return false, "", ""
 	}
+	live := *evt
+	live.Info.Timestamp = ts
+	b.observeHistoryVote(&historyVoteWork{event: &live, key: historyVoteKey{
+		client: b.currentClient(), chat: chatJID, poll: evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID(), voter: sender,
+	}}, false)
 	pollID, names, err := decodePollVote(ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
 	if pollID == "" {
 		return true, "", ""
@@ -306,6 +311,7 @@ func (b *Bridge) queueHistoryPollVotes(jobs []historyVoteJob) {
 	go func() {
 		defer b.historyVotes.Done()
 		pending := b.initialHistoryVotePass(previous, done, jobs)
+		defer b.releaseHistoryVotes(pending)
 		for attempt, delay := range b.HistoryVoteRetryDelays {
 			if len(pending) == 0 || !b.sleep(delay) {
 				return
@@ -316,14 +322,55 @@ func (b *Bridge) queueHistoryPollVotes(jobs []historyVoteJob) {
 }
 
 type historyVoteWork struct {
-	client  *whatsmeow.Client
-	event   *events.Message
-	chatJID string
-	sender  types.JID
-	markers historyVoteMarkers
+	client     *whatsmeow.Client
+	event      *events.Message
+	chatJID    string
+	sender     types.JID
+	markers    historyVoteMarkers
+	key        historyVoteKey
+	superseded bool // guarded by historyVoteOrderMu
 }
 
-func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- struct{}, jobs []historyVoteJob) []historyVoteWork {
+type historyVoteKey struct {
+	client            *whatsmeow.Client
+	chat, poll, voter string
+}
+
+// Initial attempts define arrival order at equal timestamps. A pending older
+// vote can still become an archive message, but cannot replace a later tally.
+func (b *Bridge) observeHistoryVote(vote *historyVoteWork, register bool) {
+	b.historyVoteOrderMu.Lock()
+	defer b.historyVoteOrderMu.Unlock()
+	if previous := b.historyPendingVotes[vote.key]; previous != nil {
+		if vote.event.Info.Timestamp.Before(previous.event.Info.Timestamp) {
+			vote.superseded = true
+		} else {
+			previous.superseded = true
+			delete(b.historyPendingVotes, vote.key)
+		}
+	}
+	if register && !vote.superseded {
+		if b.historyPendingVotes == nil {
+			b.historyPendingVotes = make(map[historyVoteKey]*historyVoteWork)
+		}
+		b.historyPendingVotes[vote.key] = vote
+	}
+}
+
+func (b *Bridge) releaseHistoryVotes(votes []*historyVoteWork) {
+	b.historyVoteOrderMu.Lock()
+	defer b.historyVoteOrderMu.Unlock()
+	for _, vote := range votes {
+		if b.historyPendingVotes[vote.key] == vote {
+			delete(b.historyPendingVotes, vote.key)
+		}
+	}
+	if len(b.historyPendingVotes) == 0 {
+		b.historyPendingVotes = nil
+	}
+}
+
+func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- struct{}, jobs []historyVoteJob) []*historyVoteWork {
 	defer close(done)
 	if previous != nil {
 		select {
@@ -332,13 +379,14 @@ func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- st
 			return nil
 		}
 	}
-	var pending []historyVoteWork
+	var pending []*historyVoteWork
 	for _, job := range jobs {
 		if job.client == nil || b.currentClient() != job.client {
 			continue
 		}
 		for _, web := range job.votes {
 			if b.ctx.Err() != nil {
+				b.releaseHistoryVotes(pending)
 				return nil
 			}
 			if b.currentClient() != job.client {
@@ -350,8 +398,10 @@ func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- st
 				continue
 			}
 			sender := resolveUserJIDContext(b.ctx, job.client, evt.Info.Sender, types.EmptyJID)
-			work := historyVoteWork{client: job.client, event: evt, chatJID: job.chatJID, sender: sender, markers: job.markers}
-			pending = append(pending, b.storeHistoryVotePass([]historyVoteWork{work}, len(b.HistoryVoteRetryDelays) > 0)...)
+			work := &historyVoteWork{client: job.client, event: evt, chatJID: job.chatJID, sender: sender, markers: job.markers,
+				key: historyVoteKey{client: job.client, chat: job.chatJID, poll: evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID(), voter: sender.User}}
+			b.observeHistoryVote(work, true)
+			pending = append(pending, b.storeHistoryVotePass([]*historyVoteWork{work}, len(b.HistoryVoteRetryDelays) > 0)...)
 		}
 	}
 	return pending
@@ -388,21 +438,25 @@ func defaultHistoryVoteRetryDelays() []time.Duration {
 // A pass never sleeps. Missing secrets retain their original order for the
 // next shared pass; ready votes persist immediately. A handoff retires queued
 // work like a late SDK event; decryption never holds the handoff gate.
-func (b *Bridge) storeHistoryVotePass(work []historyVoteWork, retryMissing bool) []historyVoteWork {
-	var pending []historyVoteWork
+func (b *Bridge) storeHistoryVotePass(work []*historyVoteWork, retryMissing bool) []*historyVoteWork {
+	var pending []*historyVoteWork
 	for _, vote := range work {
 		client, evt, chatJID := vote.client, vote.event, vote.chatJID
 		if b.ctx.Err() != nil {
+			b.releaseHistoryVotes(work)
 			return nil
 		}
 		if b.currentClient() != client {
+			b.releaseHistoryVotes([]*historyVoteWork{vote})
 			continue
 		}
 		pollID, names, derr := decodePollVote(b.ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
 		if b.ctx.Err() != nil {
+			b.releaseHistoryVotes(work)
 			return nil
 		}
 		if b.currentClient() != client || pollID == "" {
+			b.releaseHistoryVotes([]*historyVoteWork{vote})
 			continue
 		}
 		if retryMissing && errors.Is(derr, whatsmeow.ErrOriginalMessageSecretNotFound) {
@@ -410,11 +464,18 @@ func (b *Bridge) storeHistoryVotePass(work []historyVoteWork, retryMissing bool)
 			continue
 		}
 		b.writeHistoryVoteForClient(client, func() {
+			b.historyVoteOrderMu.Lock()
+			defer b.historyVoteOrderMu.Unlock()
+			if b.historyPendingVotes[vote.key] == vote {
+				delete(b.historyPendingVotes, vote.key)
+			}
 			if derr == nil {
 				// Decryption finished outside any archive write transaction.
-				b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
-					return b.Store.StorePollVote(pollID, chatJID, vote.sender.User, names, evt.Info.Timestamp)
-				})
+				if !vote.superseded {
+					b.storeLive("history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+						return b.Store.StorePollVote(pollID, chatJID, vote.sender.User, names, evt.Info.Timestamp)
+					})
+				}
 				b.storeLive("history poll vote", evt.Info.ID, chatJID, func() error {
 					_, err := b.Store.storePollVoteMessageResult(evt.Info.ID, chatJID, storedSender(vote.sender),
 						pollVoteContent(names), evt.Info.Timestamp, evt.Info.IsFromMe, pollID, b.Log, vote.markers)
@@ -422,11 +483,14 @@ func (b *Bridge) storeHistoryVotePass(work []historyVoteWork, retryMissing bool)
 				})
 			} else {
 				b.Log.Warnf("History poll vote %s for %s in %s is undecodable: %v", evt.Info.ID, pollID, chatJID, derr)
-				b.storeLive("undecodable history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
-					return b.Store.StoreUndecodablePollVote(pollID, chatJID, vote.sender.User, evt.Info.Timestamp)
-				})
+				if !vote.superseded {
+					b.storeLive("undecodable history vote on poll "+pollID+", message", evt.Info.ID, chatJID, func() error {
+						return b.Store.StoreUndecodablePollVote(pollID, chatJID, vote.sender.User, evt.Info.Timestamp)
+					})
+				}
 			}
 		})
+		b.releaseHistoryVotes([]*historyVoteWork{vote})
 	}
 	return pending
 }

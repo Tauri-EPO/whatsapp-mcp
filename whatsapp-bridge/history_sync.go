@@ -172,6 +172,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				stored string
 				wire   string
 				own    bool
+				err    error
 			}
 			prepared := make(map[*waHistorySync.HistorySyncMsg]preparedSender)
 			storedInBatch := 0
@@ -221,6 +222,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					}
 
 					ready := prepared[msg]
+					if ready.err != nil {
+						return ready.err // SDK failure was captured before the writer began
+					}
 					resolvedSender, isFromMe := ready.jid, ready.own
 					sender := resolvedSender.User
 					// The row records which namespace that user part belongs
@@ -293,8 +297,20 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			}
 			storedInChat := 0
 			processed := len(messages)
-			commitChunk := func() error {
+			commitChunk := func(reprepare bool) error {
+				attempt := 0
 				return retry(func() error {
+					if reprepare || attempt > 0 {
+						// Re-read only failed preparations, outside the write transaction.
+						for _, row := range chunk {
+							ready := prepared[row]
+							if ready.err != nil {
+								ready.stored, ready.err = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, storedSender(ready.jid), ready.own)
+								prepared[row] = ready
+							}
+						}
+					}
+					attempt++
 					storedInBatch = 0
 					chunkPeerRows = make(map[string]struct{})
 					return writeBatch(storeChunk)
@@ -313,9 +329,8 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				}
 				chunk = messages[start:min(start+historyBatchMessages, len(messages))]
 				prepared = make(map[*waHistorySync.HistorySyncMsg]preparedSender)
-				var preparationErr error
 				// Resolve session-store identities and location aliases before Begin.
-				// Retrying a write uses this immutable prepared view, with no SDK I/O.
+				// Writers use prepared identities; only failed reads refresh before a retry.
 				for _, row := range chunk {
 					if row == nil || row.Message == nil {
 						continue
@@ -323,23 +338,16 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					sender, own := b.historySenderContext(ctx, row.Message, jid, preserveExisting)
 					rawSender, _ := b.historySenderContext(ctx, row.Message, jid, true)
 					stored := storedSender(sender)
+					var preparationErr error
 					if ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID()); !preserveExisting && ex.location != nil && ex.location.Live {
 						stored, preparationErr = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, stored, own)
-						if preparationErr != nil {
-							break
-						}
 					}
-					prepared[row] = preparedSender{jid: sender, stored: stored, wire: rawSender.ToNonAD().String(), own: own}
+					prepared[row] = preparedSender{jid: sender, stored: stored, wire: rawSender.ToNonAD().String(), own: own, err: preparationErr}
 				}
 				if stopping() {
 					return
 				}
-				if preparationErr != nil {
-					processed = start
-					b.noteHistoryLoss(messages[start:], timestamp, chatJID, preparationErr)
-					break
-				}
-				batchErr := commitChunk()
+				batchErr := commitChunk(false)
 				if batchErr == nil {
 					countCommitted()
 					continue
@@ -360,7 +368,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						return
 					}
 					chunk = []*waHistorySync.HistorySyncMsg{msg}
-					rowErr := commitChunk()
+					rowErr := commitChunk(true)
 					if rowErr == nil {
 						countCommitted()
 						continue

@@ -242,8 +242,11 @@ that original may subsequently retain stale text. Bounded pending edits with
 expiry are tracked in issue #666 rather than stored by this implementation.
 
 History sender/LID reads and live-location alias preparation run before the
-archive writer transaction, using the bridge cancellation context. Transactions
-perform archive SQL only. For one history payload, ordinary rows from all
+archive writer transaction, using the bridge cancellation context. Preparation
+errors stay attached to their source row: BUSY retries re-read failed aliases
+before Begin, and other failures use the normal per-row salvage without losing
+healthy neighbours or later chunks. Transactions perform archive SQL only.
+For one history payload, ordinary rows from all
 conversations precede its vote rows. Initial vote attempts run in conversation
 and input order on one FIFO chain outside the SDK callback, allowing later
 notifications to load missing secrets. Missing-secret votes share one retry
@@ -251,7 +254,11 @@ budget per payload, with one ordered pass after each delay. These waits release
 the initial-attempt FIFO, so a later payload's ready votes can proceed; retry
 passes from different payloads and live writes may interleave. Decryption and
 cancellable retry waits hold no archive writer. Shutdown seals the FIFO and
-drains both initial attempts and pending retry passes.
+drains both initial attempts and pending retry passes. In-flight ordering state
+prevents an old retry from replacing a later observed history/live tally at an
+equal timestamp. An older decoded vote still gets its own archive row; strictly
+newer vote timestamps retain priority. Ordering entries are released when their
+jobs finish, retire or are cancelled, without a persistent pending-vote store.
 Queued votes retain their delivery runtime and skip persistence after a client
 handoff, matching the rejection of a retired client's late SDK events. Only the
 short archive-write phase takes the client handoff gate; decryption does not.
