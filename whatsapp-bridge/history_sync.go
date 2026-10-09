@@ -138,7 +138,27 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// state may advance the marker, after accepted rows are written.
 			markRead := !preserveExisting && conversation.UnreadCount != nil && conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread()
 
+			needsChat := preserveExisting
+			hasEdits := false
+			for _, row := range messages {
+				if row == nil || row.Message == nil {
+					continue
+				}
+				ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID())
+				if ex.edit == nil {
+					needsChat = true
+					break
+				}
+				hasEdits = true
+			}
+			needsChat = needsChat || !hasEdits
 			if err := retry(func() error {
+				if !needsChat {
+					// Persist authoritative names only for existing chats;
+					// an orphan edit alone must not create a conversation.
+					_, err := messageStore.db.ExecContext(ctx, "UPDATE chats SET name=? WHERE jid=? AND ?<>''", name, chatJID, name)
+					return err
+				}
 				if preserveExisting {
 					return storeChatWith(contextExecer{db: messageStore.db, ctx: ctx}, chatJID, name, time.Time{})
 				}
@@ -151,11 +171,13 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 				continue
 			}
 			if !preserveExisting {
-				if err := messageStore.UpdateChatEphemeralSettings(
-					chatJID,
-					conversation.GetEphemeralExpiration(),
-					conversation.GetEphemeralSettingTimestamp(),
-				); err != nil {
+				var settingsErr error
+				if needsChat {
+					settingsErr = messageStore.UpdateChatEphemeralSettings(chatJID, conversation.GetEphemeralExpiration(), conversation.GetEphemeralSettingTimestamp())
+				} else {
+					settingsErr = messageStore.updateExistingChatEphemeralSettings(ctx, chatJID, conversation.GetEphemeralExpiration(), conversation.GetEphemeralSettingTimestamp())
+				}
+				if err := settingsErr; err != nil {
 					logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 				}
 			}
@@ -168,11 +190,13 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			type preparedSender struct {
-				jid    types.JID
-				stored string
-				wire   string
-				own    bool
-				err    error
+				jid       types.JID
+				stored    string
+				wire      string
+				alias     string
+				chatAlias string
+				own       bool
+				err       error
 			}
 			prepared := make(map[*waHistorySync.HistorySyncMsg]preparedSender)
 			storedInBatch := 0
@@ -232,6 +256,8 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					// phone number (#375).
 					storedSenderJID := ready.stored
 					ex.retryChat, ex.retrySender = jid.String(), ready.wire
+					ex.editAuthorAlias = ready.alias
+					ex.editChatAlias = ready.chatAlias
 
 					// Store message
 					msgID := ""
@@ -306,6 +332,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 							ready := prepared[row]
 							if ready.err != nil {
 								ready.stored, ready.err = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, storedSender(ready.jid), ready.own)
+								if ready.err == nil {
+									ready.alias, ready.chatAlias, ready.err = b.pendingEditAlias(ctx, row.Message.GetKey().GetID(), chatJID, ready.stored, ready.own)
+								}
 								prepared[row] = ready
 							}
 						}
@@ -355,7 +384,12 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					if ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID()); !preserveExisting && ex.location != nil && ex.location.Live {
 						stored, preparationErr = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, stored, own)
 					}
-					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, own: own, err: preparationErr}
+					alias := ""
+					chatAlias := ""
+					if preparationErr == nil {
+						alias, chatAlias, preparationErr = b.pendingEditAlias(ctx, row.Message.GetKey().GetID(), chatJID, stored, own)
+					}
+					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, alias: alias, chatAlias: chatAlias, own: own, err: preparationErr}
 				}
 				if stopping() {
 					return
@@ -424,7 +458,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						if err := ctx.Err(); err != nil {
 							return err
 						}
-						return messageStore.ApplyMessageEdit(chatJID, editSender, own, ex.edit, time.Unix(int64(row.Message.GetMessageTimestamp()), 0)) //nolint:gosec // WhatsApp epoch seconds
+						return messageStore.ApplyMessageEditContext(ctx, chatJID, editSender, own, ex.edit, time.Unix(int64(row.Message.GetMessageTimestamp()), 0)) //nolint:gosec // WhatsApp epoch seconds
 					})
 				}
 			}

@@ -28,6 +28,8 @@ type storedMessage struct {
 	QuotedMessageID                     string
 	Media                               messageMediaOptions
 	Mentions                            string
+	EditAuthorAlias                     string // verified outside the writer, never inferred from digits
+	EditChatAlias                       string // verified alternative DM chat, prepared before the writer
 }
 
 // sqlExecer is satisfied by *sql.DB and *sql.Tx.
@@ -135,10 +137,13 @@ const insertMessageSQL = `INSERT INTO messages
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
 type messageBatch struct {
-	tx      *contextTransaction
-	ctx     context.Context
-	stmt    *sql.Stmt
-	failure error // first failed write; never issue more SQL after a possible rollback
+	store          *MessageStore
+	tx             *contextTransaction
+	ctx            context.Context
+	stmt           *sql.Stmt
+	failure        error // first failed write; never issue more SQL after a possible rollback
+	pendingChecked bool
+	pendingActive  bool
 }
 
 // Batch runs fn inside a transaction with a prepared message insert and
@@ -159,7 +164,7 @@ func (store *MessageStore) BatchContext(ctx context.Context, fn func(b *messageB
 		_ = tx.Rollback()
 		return fmt.Errorf("prepare batch insert: %w", err)
 	}
-	b := &messageBatch{tx: &contextTransaction{Tx: tx, ctx: ctx}, ctx: ctx, stmt: stmt}
+	b := &messageBatch{store: store, tx: &contextTransaction{Tx: tx, ctx: ctx}, ctx: ctx, stmt: stmt}
 	err = fn(b)
 	if err == nil {
 		err = b.failure
@@ -215,7 +220,23 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 	}
 	return b.write(func() error {
 		_, err := b.stmt.ExecContext(b.ctx, messageArgs(message)...)
-		return err
+		if err != nil {
+			return err
+		}
+		now := b.store.pendingEditNow()
+		if !b.pendingChecked {
+			if err := prunePendingEdits(b.tx, now); err != nil {
+				return err
+			}
+			if err := b.tx.QueryRow("SELECT EXISTS(SELECT 1 FROM pending_edits)").Scan(&b.pendingActive); err != nil {
+				return err
+			}
+			b.pendingChecked = true
+		}
+		if !b.pendingActive {
+			return nil // a bulk import without pending edits does no per-row edit SQL
+		}
+		return consumePendingEdits(b.tx, message, now)
 	})
 }
 

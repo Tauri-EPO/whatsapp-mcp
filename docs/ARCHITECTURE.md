@@ -229,8 +229,10 @@ chat, matching its sender namespace (including a verified LID alias) and account
 ownership. Text and mention metadata update together; FTS triggers update the
 searchable text in the same write. The integer `message_edit_timestamp`
 retains the latest protocol millisecond timestamp: older edits and original-row
-replays cannot restore stale content. A missing target is a no-op; live edit delivery
-envelopes create no message or chat row or conversation activity. Phone history applies
+replays cannot restore stale content. A missing target retains a bounded pending
+edit; delivery envelopes create no message, chat, FTS row or conversation activity.
+Edit-only phone-history payloads also create no orphan chat, while preserving
+authoritative disappearing-message settings for existing conversations. Phone history applies
 edits after its original rows, including targets in later chunks. Replacement
 payloads use the shared envelope extractor, preserving wrapped captions and
 mentions. SDK-parsed live edits also recover direct/ephemeral protocols from
@@ -240,10 +242,27 @@ history cannot edit existing rows. The outbound endpoint keeps its ownership
 checks and WhatsApp edit protocol. It persists the protocol's timestamp rather
 than the acknowledgement clock, and a delayed acknowledgement cannot overwrite
 a newer phone edit. The archive retains the latest
-text, without a separate original-text version history. An edit in an earlier
-history payload or before a delayed/retried live original is still dropped;
-that original may subsequently retain stale text. Bounded pending edits with
-expiry are tracked in issue #666 rather than stored by this implementation.
+text, without a separate original-text version history. `pending_edits` retains
+edits across phone-history payloads, delayed live originals and bridge restarts.
+When the original is archived, the newest matching edit updates text, mentions
+and FTS and is consumed in that same transaction. Matching requires the exact
+chat, author namespace and account ownership, or verified PN/LID chat/author aliases
+prepared before opening the archive writer. Mismatched pending authors for a
+known target are discarded; they cannot edit another row. Startup canonicalizes
+pending LID chat keys from the session map too, preparing those reads before its
+archive transaction, retaining the newest edit and earliest arrival/expiry when
+keys merge, and applying the same caps without creating orphan chats.
+
+Pending state expires 24 hours after its first arrival (epoch milliseconds,
+independent of the protocol timestamp). Newer versions and replays do not renew
+that deadline. Expired entries are removed at startup and on the next edit or
+original write, and never apply to a later original. After expiry, a new delivery
+can begin a new retention period. The table retains at most 1,024 pending edits
+globally and 128 per chat, evicting the oldest arrivals first; each pending
+payload, including its identifiers, text and mentions, is limited to 64 KiB.
+These are internal bounds, with no new environment variable. Targets outside
+the TTL or caps retain their original text. Pending SQL uses the existing bounded
+BUSY retry owner and cancellation context; no SDK read occurs inside its writer.
 
 History sender/LID reads and live-location alias preparation run before the
 archive writer transaction, using the bridge cancellation context. Preparation

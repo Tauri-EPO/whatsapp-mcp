@@ -128,6 +128,9 @@ func (o *originalTimestamps) take(id string) (time.Time, bool) {
 }
 
 func (b *Bridge) handleMessage(msg *events.Message) {
+	if b.ctx != nil && b.ctx.Err() != nil {
+		return
+	}
 	client, messageStore, logger := b.currentClient(), b.Store, b.Log
 	// View-once envelopes hide the real media one level down. Work on a local
 	// copy of the event with the envelope removed so every extractor below
@@ -321,7 +324,23 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 				return err
 			}
 		}
-		return messageStore.Batch(func(batch *messageBatch) error {
+		if ex.edit == nil {
+			var err error
+			ex.editAuthorAlias, ex.editChatAlias, err = b.pendingEditAlias(b.ctx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
+			if err != nil {
+				return err
+			}
+			// A delivery's verified phone alternative may be available before
+			// the SDK map catches up. Retain its original LID author for matching.
+			if ex.editAuthorAlias == "" && msg.Info.Sender.Server == types.HiddenUserServer &&
+				resolvedSender.Server == types.DefaultUserServer && locationSender == storedSender(resolvedSender) {
+				ex.editAuthorAlias = msg.Info.Sender.ToNonAD().String()
+			}
+			if ex.editChatAlias == "" && msg.Info.Chat.Server == types.HiddenUserServer && resolvedChat.Server == types.DefaultUserServer {
+				ex.editChatAlias = msg.Info.Chat.ToNonAD().String()
+			}
+		}
+		return messageStore.BatchContext(b.ctx, func(batch *messageBatch) error {
 			var err error
 			rowConsumed, err = persistMessageResult(batch, msg.Info.ID, chatJID, locationSender, msgTimestamp, msg.Info.IsFromMe, ex, true, logger)
 			return err

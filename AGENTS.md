@@ -77,6 +77,7 @@ whatsapp-mcp/
 │   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
 │   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member
 │   ├── outbound_quote.go       # same-chat typed quote previews and context-bound archive lookups
+│   ├── pending_edits.go        # bounded, expiring edits consumed atomically with delayed originals
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
 │   ├── recipient_cache.go      # bounded, expiring typed -> registered number answers, cleared on reconnect
 │   ├── send_mime.go            # sniff MIME for category-named cached images/videos
@@ -179,7 +180,7 @@ whatsapp-mcp/
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
 
-Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `calls`, `polls`, `poll_votes`, `group_members`, `labels`, `chat_labels`, `messages_fts`, `schema_migrations` (bridge-owned, one row per applied one-off migration)) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus per-message `media_refusals` (dated cache-identity refusals), `notes_meta` and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never opens it — the "never create FTS from Python" rule is about `messages.db` only.
+Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `pending_edits`, `calls`, `polls`, `poll_votes`, `group_members`, `labels`, `chat_labels`, `messages_fts`, `schema_migrations` (bridge-owned, one row per applied one-off migration)) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus per-message `media_refusals` (dated cache-identity refusals), `notes_meta` and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never opens it — the "never create FTS from Python" rule is about `messages.db` only.
 
 Compose topology: the `mcp` container joins the bridge's network namespace (`network_mode: service:bridge`), so the bridge keeps its loopback bind and loopback-only Host allow-list; the MCP port is published on the bridge service. An alternative topology is issue #58.
 
