@@ -94,7 +94,7 @@ func (b *Bridge) liveLocationSender(ctx context.Context, reader locationAuthorRe
 		return sender, nil
 	}
 	previous := types.NewJID(user, server)
-	verified, err := lookupAltJID(ctx, b.Client, previous)
+	verified, err := lookupAltJID(ctx, b.currentClient(), previous)
 	if err != nil {
 		return sender, err
 	}

@@ -164,7 +164,8 @@ func historyShareMatchesGroup(data *waHistorySync.HistorySync, chat string) bool
 // Keep an explicit allow-list so peer read markers, disappearing-message
 // settings and future conversation metadata never enter the phone importer.
 func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.HistorySync) (*waHistorySync.HistorySync, int, error) {
-	phone, lid := clientIdentity(b.Client)(ctx)
+	client := b.currentClient()
+	phone, lid := clientIdentity(client)(ctx)
 	if phone.Server == types.HostedServer {
 		phone.Server = types.DefaultUserServer
 	}
@@ -220,7 +221,7 @@ func (b *Bridge) historyShareMessages(ctx context.Context, data *waHistorySync.H
 					alt, known := alternates[candidate]
 					if !known {
 						var err error
-						alt, err = lookupAltJID(ctx, b.Client, candidate)
+						alt, err = lookupAltJID(ctx, client, candidate)
 						if err != nil {
 							return nil, skipped, err
 						}
@@ -281,7 +282,11 @@ func (b *Bridge) decodeHistoryShare(ctx context.Context, bundle *waE2E.MessageHi
 	if b.historyShareDownload != nil {
 		err = b.historyShareDownload(boundedCtx, notif, bounded)
 	} else {
-		err = b.Client.DownloadToFile(boundedCtx, notif, bounded)
+		client := b.currentClient()
+		if client == nil {
+			return nil, errors.New("shared history client unavailable")
+		}
+		err = client.DownloadToFile(boundedCtx, notif, bounded)
 	}
 	if bounded.exceeded {
 		return nil, errors.New("shared history compressed limit exceeded")

@@ -397,11 +397,16 @@ func (b *Bridge) historySender(info *waWeb.WebMessageInfo, chat types.JID, peer 
 	if info.Key == nil {
 		return chat, false
 	}
+	client := b.currentClient()
+	var account types.JID
+	if client != nil && client.Store != nil && client.Store.ID != nil {
+		account = client.Store.ID.ToNonAD()
+	}
 	own := info.Key.GetFromMe()
 	var raw types.JID
 	switch {
-	case own && b.Client.Store.ID != nil:
-		raw = b.Client.Store.ID.ToNonAD()
+	case own && !account.IsEmpty():
+		raw = account
 	case info.GetParticipant() != "" || info.Key.GetParticipant() != "":
 		participant := info.GetParticipant()
 		if participant == "" {
@@ -419,8 +424,8 @@ func (b *Bridge) historySender(info *waWeb.WebMessageInfo, chat types.JID, peer 
 		return raw, own
 	}
 	var alt types.JID
-	if own && b.Client.Store.ID != nil {
-		alt = b.Client.Store.ID.ToNonAD()
+	if own {
+		alt = account
 	}
-	return resolveUserJID(b.Client, raw, alt), own
+	return resolveUserJID(client, raw, alt), own
 }
