@@ -163,7 +163,12 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 						}
 						controlMux := mux
 						if route.field == "group_jid" && allow == "*@s.whatsapp.net" {
-							b.Policy = parseChatPolicy("*@g.us")
+							b.Policy = parseChatPolicy("*@g.us,5511999999999")
+							controlMux = b.newRESTMux(8080, sendRecipientToken)
+						}
+						if route.path == "/api/group/participants" {
+							// A permitted group alone does not permit its participants.
+							b.Policy = parseChatPolicy("*@g.us,5511999999999")
 							controlMux = b.newRESTMux(8080, sendRecipientToken)
 						}
 						controlMux.ServeHTTP(positive, seamRequest(method, controlPath, control, sendRecipientToken))

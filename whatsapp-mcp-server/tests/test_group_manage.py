@@ -1,6 +1,7 @@
 """Group management tools: payloads, validation, allow-list, bridge errors."""
 
 import json
+import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,88 @@ from errors import ToolError
 from tool_policy import ToolPolicy
 
 GROUP = "120363000000000001@g.us"
+
+
+@pytest.mark.parametrize("action", ["add", "remove", "promote", "demote"])
+@pytest.mark.parametrize("identity", ["phone", "lid", "alternate_lid"])
+async def test_participant_boundary_through_sdk_and_http(monkeypatch, group_http_bridge, tmp_path, action, identity):
+    reply, observed = group_http_bridge
+    reply.update(status=200, payload={"success": True})
+    pn, lid = "5511999999999", "100000000000007@lid"
+    alternate_lid = "100000000000008@lid"
+    db = tmp_path / "whatsapp.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE whatsmeow_lid_map (lid TEXT, pn TEXT)")
+        conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (lid.split("@")[0], pn))
+        conn.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (alternate_lid.split("@")[0], "551199999999"))
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(db))
+    entry = {"phone": pn, "lid": lid, "alternate_lid": alternate_lid}[identity]
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([GROUP, entry]))
+    async with group_sdk_client() as client:
+        denied = await client.call_tool(
+            "manage_group_participants",
+            {
+                "chat_jid": GROUP,
+                "action": action,
+                "participants": [pn, "5511888888888"],
+            },
+        )
+        if action in ("add", "promote"):
+            assert denied.is_error
+            assert json.loads(denied.content[0].text)["error"]["code"] == "denied"
+            assert observed == []
+        else:
+            assert not denied.is_error
+            assert len(observed) == 1
+            observed.clear()
+        allowed = await client.call_tool(
+            "manage_group_participants",
+            {
+                "chat_jid": GROUP,
+                "action": action,
+                "participants": ["+55 (11) 99999-9999", "551199999999", lid],
+            },
+        )
+        assert not allowed.is_error
+    assert len(observed) == 1
+    assert observed[0][1]["participants"] == ["+55 (11) 99999-9999", "551199999999", lid]
+
+
+@pytest.mark.parametrize("action", ["remove", "demote"])
+async def test_access_reduction_with_unmapped_lid_through_sdk_and_http(monkeypatch, group_http_bridge, action):
+    reply, observed = group_http_bridge
+    reply.update(status=200, payload={"success": True})
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([GROUP]))
+    monkeypatch.setattr(
+        whatsapp, "_participant_twins", lambda _: pytest.fail("access reduction requested identity map")
+    )
+    lid = "100000000000007@lid"
+    async with group_sdk_client() as client:
+        result = await client.call_tool(
+            "manage_group_participants", {"chat_jid": GROUP, "action": action, "participants": [lid]}
+        )
+        monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
+        denied = await client.call_tool(
+            "manage_group_participants", {"chat_jid": GROUP, "action": action, "participants": [lid]}
+        )
+    assert not result.is_error
+    assert denied.is_error
+    assert json.loads(denied.content[0].text)["error"]["code"] == "denied"
+    assert len(observed) == 1
+    assert observed[0][1] == {"group_jid": GROUP, "action": action, "participants": [lid]}
+
+
+@pytest.mark.parametrize("action", ["add", "promote"])
+async def test_non_numeric_bare_participant_refused_before_http(monkeypatch, group_http_bridge, action):
+    _, observed = group_http_bridge
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([GROUP, "*@s.whatsapp.net"]))
+    async with group_sdk_client() as client:
+        result = await client.call_tool(
+            "manage_group_participants", {"chat_jid": GROUP, "action": action, "participants": ["Alice"]}
+        )
+    assert result.is_error
+    assert json.loads(result.content[0].text)["error"]["code"] == "invalid_argument"
+    assert observed == []
 
 
 class Resp:
