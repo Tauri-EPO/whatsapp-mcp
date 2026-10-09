@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
@@ -77,10 +78,12 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, reconnect chan bool) {
 	// Disconnect may wait for SDK callbacks. Retired callbacks cannot wait on
 	// the exclusive logout gate held by that same Disconnect.
-	if b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
+	active := func() bool {
+		return !b.operatorLogout.Load() && b.operatorRetiredClient.Load() != client && b.currentClient() == client
+	}
+	if !b.admitClientCallback(active) {
 		return
 	}
-	b.clientGate.RLock()
 	defer b.clientGate.RUnlock()
 	if b.currentClient() != client || b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
 		return
@@ -95,6 +98,28 @@ func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, re
 	if b.operatorPairing != nil {
 		b.operatorPairing.connectionEvent(evt)
 	}
+}
+
+// SDK disconnect can wait for its callback queue while logout owns the writer
+// gate. Retry reader admission while checking retirement, never block in RLock.
+func (b *Bridge) admitClientCallback(active func() bool) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for active() {
+		if b.clientGate.TryRLock() {
+			if active() {
+				return true
+			}
+			b.clientGate.RUnlock()
+			return false
+		}
+		select {
+		case <-b.ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+	return false
 }
 
 func (b *Bridge) bindRuntimeClient() {

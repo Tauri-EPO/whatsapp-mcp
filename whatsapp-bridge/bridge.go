@@ -228,10 +228,12 @@ type Bridge struct {
 	// startedAt feeds uptime_seconds in /api/health.
 	startedAt time.Time
 	// History vote batches form one FIFO chain outside the SDK callback.
-	historyVotes       sync.WaitGroup
-	historyVoteMu      sync.Mutex
-	historyVoteTail    chan struct{}
-	historyVoteStopped bool
+	historyVotes  sync.WaitGroup
+	historyVoteMu sync.Mutex
+	// Vote decoding must drain for logout without blocking a client handoff.
+	historyVoteSessionGate sync.RWMutex
+	historyVoteTail        chan struct{}
+	historyVoteStopped     bool
 	// In-flight history attempts/retries, one latest candidate per tally key.
 	historyVoteOrderMu  sync.Mutex
 	historyPendingVotes map[historyVoteKey]*historyVoteWork

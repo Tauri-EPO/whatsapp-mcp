@@ -300,7 +300,7 @@ func (b *Bridge) queueHistoryPollVotes(jobs []historyVoteJob) {
 		return
 	}
 	b.historyVoteMu.Lock()
-	if b.historyVoteStopped || b.ctx.Err() != nil {
+	if b.historyVoteStopped || b.ctx.Err() != nil || b.operatorLogout.Load() {
 		b.historyVoteMu.Unlock()
 		return
 	}
@@ -379,6 +379,11 @@ func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- st
 			return nil
 		}
 	}
+	b.historyVoteSessionGate.RLock()
+	defer b.historyVoteSessionGate.RUnlock()
+	if b.operatorLogout.Load() {
+		return nil
+	}
 	var pending []*historyVoteWork
 	for _, job := range jobs {
 		if job.client == nil || b.currentClient() != job.client {
@@ -389,7 +394,7 @@ func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- st
 				b.releaseHistoryVotes(pending)
 				return nil
 			}
-			if b.currentClient() != job.client {
+			if b.currentClient() != job.client || b.operatorLogout.Load() {
 				break
 			}
 			evt, err := job.client.ParseWebMessage(job.chat, web)
@@ -401,7 +406,7 @@ func (b *Bridge) initialHistoryVotePass(previous <-chan struct{}, done chan<- st
 			work := &historyVoteWork{client: job.client, event: evt, chatJID: job.chatJID, sender: sender, markers: job.markers,
 				key: historyVoteKey{client: job.client, chat: job.chatJID, poll: evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID(), voter: sender.User}}
 			b.observeHistoryVote(work, true)
-			pending = append(pending, b.storeHistoryVotePass([]*historyVoteWork{work}, len(b.HistoryVoteRetryDelays) > 0)...)
+			pending = append(pending, b.storeHistoryVotePassGated([]*historyVoteWork{work}, len(b.HistoryVoteRetryDelays) > 0)...)
 		}
 	}
 	return pending
@@ -439,10 +444,16 @@ func defaultHistoryVoteRetryDelays() []time.Duration {
 // next shared pass; ready votes persist immediately. A handoff retires queued
 // work like a late SDK event; decryption never holds the handoff gate.
 func (b *Bridge) storeHistoryVotePass(work []*historyVoteWork, retryMissing bool) []*historyVoteWork {
+	b.historyVoteSessionGate.RLock()
+	defer b.historyVoteSessionGate.RUnlock()
+	return b.storeHistoryVotePassGated(work, retryMissing)
+}
+
+func (b *Bridge) storeHistoryVotePassGated(work []*historyVoteWork, retryMissing bool) []*historyVoteWork {
 	var pending []*historyVoteWork
 	for _, vote := range work {
 		client, evt, chatJID := vote.client, vote.event, vote.chatJID
-		if b.ctx.Err() != nil {
+		if b.ctx.Err() != nil || b.operatorLogout.Load() {
 			b.releaseHistoryVotes(work)
 			return nil
 		}
@@ -451,7 +462,7 @@ func (b *Bridge) storeHistoryVotePass(work []*historyVoteWork, retryMissing bool
 			continue
 		}
 		pollID, names, derr := decodePollVote(b.ctx, b.PollVoteDecrypt, b.Store, evt, chatJID, b.Log)
-		if b.ctx.Err() != nil {
+		if b.ctx.Err() != nil || b.operatorLogout.Load() {
 			b.releaseHistoryVotes(work)
 			return nil
 		}
@@ -498,7 +509,7 @@ func (b *Bridge) storeHistoryVotePass(work []*historyVoteWork, retryMissing bool
 func (b *Bridge) writeHistoryVoteForClient(client *whatsmeow.Client, write func()) bool {
 	b.clientGate.RLock()
 	defer b.clientGate.RUnlock()
-	if b.ctx.Err() != nil || b.currentClient() != client {
+	if b.ctx.Err() != nil || b.currentClient() != client || b.operatorLogout.Load() {
 		return false
 	}
 	write()

@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -168,6 +170,103 @@ func TestDetachedDownloadDoesNotWaitBehindQueuedClientWriter(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("writer did not finish")
+	}
+}
+
+func TestCallbackAdmissionRetiresWhileExclusiveGateRemainsHeld(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.clientGate.Lock()
+	defer b.clientGate.Unlock()
+	var retired atomic.Bool
+	var checks atomic.Int32
+	waiting := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() {
+		result <- b.admitClientCallback(func() bool {
+			if checks.Add(1) == 2 {
+				close(waiting)
+			}
+			return !retired.Load()
+		})
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("callback blocked inside RLock instead of checking retirement")
+	}
+	retired.Store(true)
+	select {
+	case admitted := <-result:
+		if admitted {
+			t.Fatal("retired callback admitted behind writer")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retired SDK callback remained behind logout writer")
+	}
+}
+
+func TestOperatorLogoutDrainsHistoryVotesAndRetiresTeardownFailures(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.Client = newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	b.HistoryVoteRetryDelays = []time.Duration{time.Millisecond}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var finished atomic.Bool
+	var calls atomic.Int32
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		b.historyVotes.Wait()
+	})
+	b.PollVoteDecrypt = func(context.Context, *events.Message) ([][]byte, error) {
+		calls.Add(1)
+		close(entered)
+		<-release
+		finished.Store(true)
+		return nil, errors.New("fake teardown decryption error")
+	}
+	b.handleHistorySync(historySyncWithPoll(phonePN, time.Now()))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("queued history vote did not start decrypting")
+	}
+	b.logoutDrainTimeout = 30 * time.Millisecond
+	b.logoutClient = func(context.Context) error { return nil }
+	b.wipeSession = func(context.Context) error {
+		if !finished.Load() {
+			t.Error("wipe overlapped history vote SDK stores")
+		}
+		return nil
+	}
+	p := newOperatorPairing(b.ctx, b, newFakeOperatorClient(), nil, func() bool { return true }, b.Connected, io.Discard, make(chan bool, 1))
+	w := httptest.NewRecorder()
+	p.logout(w, httptest.NewRequest("POST", "/operator/v1/logout", strings.NewReader(`{"after":"idle"}`)))
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "client_busy") {
+		t.Fatalf("vote drain=%d %s", w.Code, w.Body.String())
+	}
+	close(release)
+	b.historyVotes.Wait()
+	results, err := b.Store.PollResults("HPOLL1", phonePN.String())
+	if err != nil || results.UndecodableVotes != 0 {
+		t.Fatalf("teardown archived as failed vote: %+v %v", results, err)
+	}
+	// Both an initial job and a retry pass are retired while idle, even though
+	// the same currentClient pointer is retained until explicit restart.
+	job := historyVoteJob{client: b.currentClient(), chat: phonePN, chatJID: phonePN.String(), votes: []*waWeb.WebMessageInfo{historySyncWithPoll(phonePN, time.Now()).Data.Conversations[0].Messages[0].Message}}
+	if pending := b.initialHistoryVotePass(nil, make(chan struct{}), []historyVoteJob{job}); len(pending) != 0 {
+		t.Fatal("idle initial vote remained pending")
+	}
+	b.storeHistoryVotePass([]*historyVoteWork{{client: b.currentClient(), event: &events.Message{}}}, true)
+	if calls.Load() != 1 {
+		t.Fatal("idle history work reused deleted session")
+	}
+	w = httptest.NewRecorder()
+	p.logout(w, httptest.NewRequest("POST", "/operator/v1/logout", strings.NewReader(`{"after":"idle"}`)))
+	if w.Code != 200 {
+		t.Fatalf("vote drain retry=%d %s", w.Code, w.Body.String())
 	}
 }
 

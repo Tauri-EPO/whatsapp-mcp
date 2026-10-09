@@ -125,6 +125,7 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 		p.b.runtimePaired.Store(false)
 	}
 	p.b.clientGate.Unlock()
+	p.b.historyVoteSessionGate.Unlock()
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"server_unlinked": serverUnlinked, "local_session_wiped": false})
 		p.b.Log.Errorf("Operator logout local session wipe failed; instance remains parked")
@@ -168,7 +169,10 @@ func (b *Bridge) drainOperatorClients(ctx context.Context) bool {
 	defer ticker.Stop()
 	for {
 		if b.clientGate.TryLock() {
-			return true
+			if b.historyVoteSessionGate.TryLock() {
+				return true
+			}
+			b.clientGate.Unlock()
 		}
 		select {
 		case <-ctx.Done():
