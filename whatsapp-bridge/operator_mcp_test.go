@@ -242,9 +242,9 @@ func TestTranscriptionCapEnvironmentDecimalForms(t *testing.T) {
 func TestCompleteRuntimeRegistryAtomicPatchAndRestart(t *testing.T) {
 	b := newSettingsBridge(t)
 	server := settingsServer(t, b)
-	patch := `{"send.rate_per_minute":2,"send.rate_per_day":10,"send.new_chats_per_day":3,"send.min_interval_ms":100,"transcription.monthly_max_minutes":1,"transcription.cap_scope":"all","transcription.ingest_chats":"direct","tools.allow":["list_messages"],"tools.deny":["send_message"]}`
+	patch := `{"send.rate_per_minute":2,"send.rate_per_day":10,"send.new_chats_per_day":3,"send.min_interval_ms":100,"transcription.monthly_max_minutes":1,"transcription.cap_scope":"all","transcription.ingest_chats":"direct","tools.allow":["list_messages"],"tools.deny":["send_message"],"media.autodownload_status":true,"media.quota_bytes":1024,"media.quota_evict_types":["video"],"media.quota_evict_target_percent":80}`
 	status, state := settingsRequest(t, server, "PATCH", patch)
-	if status != 200 || state.Version != 1 || len(state.Settings) != 9 {
+	if status != 200 || state.Version != 1 || len(state.Settings) != 13 {
 		t.Fatalf("complete registry: status=%d state=%+v", status, state)
 	}
 	for key, setting := range state.Settings {
@@ -265,5 +265,18 @@ func TestCompleteRuntimeRegistryAtomicPatchAndRestart(t *testing.T) {
 	restored, err := fresh.settingsSnapshot(context.Background())
 	if err != nil || restored.Version != 1 || restored.Settings["send.rate_per_day"].Value != int64(10) || restored.Settings["transcription.cap_scope"].Value != "all" {
 		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
+	if len(restored.Settings) != len(state.Settings) {
+		t.Fatalf("registry changed across restart: before=%d after=%d", len(state.Settings), len(restored.Settings))
+	}
+	for key, setting := range state.Settings {
+		want, err := json.Marshal(setting)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := json.Marshal(restored.Settings[key])
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("setting changed across restart: key=%s got=%s want=%s err=%v", key, got, want, err)
+		}
 	}
 }
