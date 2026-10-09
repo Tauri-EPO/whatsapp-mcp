@@ -519,6 +519,18 @@ authentication on that endpoint, so keep it inside a network you trust.
         - targets: ["home-server:8080"]   # only if the bridge port is published
   ```
 
+  Bridge database pools expose `whatsapp_bridge_db_in_use` (gauge),
+  `whatsapp_bridge_db_wait_total` and `whatsapp_bridge_db_wait_seconds_total`
+  (counters), labelled only by `pool="messages"`, `"session"` or `"contacts"`.
+  A rising `rate(whatsapp_bridge_db_wait_seconds_total[5m])` shows time spent
+  waiting for a bounded pool. Collecting these statistics does not acquire a
+  database connection, so saturation remains observable. Media purge closes its
+  256-row page cursor before probing or removing files.
+
+  The bridge applies a POSIX `077` creation mask once at process startup;
+  store files share one `0600` mode and existing database permissions are still
+  tightened. Windows uses its existing ACL-based behavior.
+
   The MCP server also exposes `whatsapp_mcp_tool_duration_seconds`, a
   histogram of tool wall-clock time per tool (buckets 5 ms → 300 s, plus
   `+Inf`), so a slow tail shows up even when the average does not. The 95th

@@ -347,7 +347,14 @@ func TestLiveStoreBusyReleaseAndBoundedExhaustion(t *testing.T) {
 					if phase == "chat" {
 						return ms.StoreChat(phonePN.String(), "Alice", now)
 					}
-					return ms.StoreMessage("LIVE1", phonePN.String(), phonePN.String(), "searchable", now, false, "", "", "", nil, nil, nil, 0, "")
+					return ms.StoreMessage(storedMessage{
+						ID:         "LIVE1",
+						ChatJID:    phonePN.String(),
+						Sender:     phonePN.String(),
+						Content:    "searchable",
+						Timestamp:  now,
+						FileLength: 0,
+					})
 				})
 				release()
 				wantWaits := len(wantDelays)

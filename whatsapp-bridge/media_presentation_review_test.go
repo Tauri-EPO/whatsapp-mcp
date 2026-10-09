@@ -264,7 +264,21 @@ func TestMediaPresentationHeadMainHeadSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	newHash := bytes.Repeat([]byte{2}, 32)
-	args := messageArgs("ROLLBACKP1", mediaTestChat, "x", "new caption", ts, false, "document", "new.pdf", doc.GetURL(), doc.MediaKey, newHash, doc.FileEncSHA256, doc.GetFileLength(), "", messageMediaOptions{directPath: doc.GetDirectPath()})
+	args := messageArgs(storedMessage{
+		ID:            "ROLLBACKP1",
+		ChatJID:       mediaTestChat,
+		Sender:        "x",
+		Content:       "new caption",
+		Timestamp:     ts,
+		MediaType:     "document",
+		Filename:      "new.pdf",
+		URL:           doc.GetURL(),
+		MediaKey:      doc.MediaKey,
+		FileSHA256:    newHash,
+		FileEncSHA256: doc.FileEncSHA256,
+		FileLength:    doc.GetFileLength(),
+		Media:         messageMediaOptions{directPath: doc.GetDirectPath()},
+	})
 	args = append(args[:16:16], sql.Named("complete_media", true))
 	if _, err := ms.db.Exec(string(legacySQL), args...); err != nil {
 		t.Fatal(err)

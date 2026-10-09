@@ -38,7 +38,7 @@ CHAT = "111@s.whatsapp.net"
 ROWS = [
     ("m1", "Segue o orçamento da obra", "2024-01-01T10:00:00"),
     ("m2", "orcamento aprovado, obrigado", "2024-01-02T10:00:00"),
-    ("m3", "A Ana chega na semana que vem", "2024-01-03T10:00:00"),
+    ("m3", "A Eve chega na never que vem", "2024-01-03T10:00:00"),
     ("m4", "boleto do mês", "2024-01-04T10:00:00"),
     ("m5", "fatura da luz", "2024-01-05T10:00:00"),
     ("m6", "nota fiscal enviada", "2024-01-06T10:00:00"),
@@ -85,7 +85,7 @@ class TestFtsSearch:
         assert sorted(ids("orçamento")) == ["m1", "m2"]
 
     def test_whole_words_not_substrings(self, fts_db):
-        assert ids("ana") == ["m3"]  # not "semana"
+        assert ids("eve") == ["m3"]  # not "never"
         assert ids("obra") == ["m8", "m1"]  # newest first; not "obrigado"
 
     def test_operators(self, fts_db):
@@ -118,7 +118,7 @@ class TestSubstringFallback:
     def test_no_index_uses_substring_scan(self, plain_db):
         assert ids("orçamento") == ["m1"]  # exact bytes only
         assert ids("orcamento") == ["m2"]
-        assert ids("sem") == ["m3"]  # substring match inside "semana"
+        assert ids("nev") == ["m3"]  # substring match inside "never"
 
 
 class TestHelpers:

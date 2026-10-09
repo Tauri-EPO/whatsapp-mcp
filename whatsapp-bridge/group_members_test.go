@@ -33,7 +33,7 @@ func fakeGroup() *types.GroupInfo {
 }
 
 func TestBuildGroupMembers(t *testing.T) {
-	names := map[string]string{"5511999999999@s.whatsapp.net": "Alice", "5511888888888@s.whatsapp.net": "Ana"}
+	names := map[string]string{"5511999999999@s.whatsapp.net": "Alice", "5511888888888@s.whatsapp.net": "Eve"}
 	resp := buildGroupMembers(fakeGroup(), func(jid types.JID) string { return names[jid.String()] }, nil)
 
 	if !resp.Success || resp.Name != "Obra Rua A" || resp.Topic != "Combinados" || resp.Participant != 3 {
@@ -50,8 +50,8 @@ func TestBuildGroupMembers(t *testing.T) {
 	if owner.PhoneNumber != "5511999999999" || owner.Name != "Alice" || !owner.IsAdmin || !owner.IsSuperAdmin {
 		t.Fatalf("owner = %+v", owner)
 	}
-	if ana.JID != "777@lid" || ana.PhoneNumber != "5511888888888" || ana.LID != "777@lid" || ana.Name != "Ana" || !ana.IsAdmin || ana.IsSuperAdmin {
-		t.Fatalf("ana = %+v", ana)
+	if ana.JID != "777@lid" || ana.PhoneNumber != "5511888888888" || ana.LID != "777@lid" || ana.Name != "Eve" || !ana.IsAdmin || ana.IsSuperAdmin {
+		t.Fatalf("eve = %+v", ana)
 	}
 	if anon.PhoneNumber != "" || anon.LID != "888@lid" || anon.Name != "anon" || anon.IsAdmin {
 		t.Fatalf("anon = %+v", anon)
@@ -66,8 +66,8 @@ func TestBuildGroupOwner(t *testing.T) {
 	phone := func(user string) types.JID { return types.JID{User: user, Server: types.DefaultUserServer} }
 	names := map[string]string{
 		"5511999999999@s.whatsapp.net": "Alice",
-		"5511888888888@s.whatsapp.net": "Ana",
-		"5511777777777@s.whatsapp.net": "Bruno",
+		"5511888888888@s.whatsapp.net": "Eve",
+		"5511777777777@s.whatsapp.net": "Bob",
 	}
 	nameOf := func(jid types.JID) string { return names[jid.String()] }
 	alts := map[string]types.JID{
@@ -90,12 +90,12 @@ func TestBuildGroupOwner(t *testing.T) {
 			name: "LID of a participant resolves from the roster",
 			// Ana is in the group with both forms, so no store lookup is needed.
 			owner: lid("777"), wantJID: "5511888888888@s.whatsapp.net",
-			wantPhone: "5511888888888", wantLID: "777@lid", wantName: "Ana",
+			wantPhone: "5511888888888", wantLID: "777@lid", wantName: "Eve",
 		},
 		{
 			name:  "LID of an owner who left resolves from the map",
 			owner: lid("999"), wantJID: "5511777777777@s.whatsapp.net",
-			wantPhone: "5511777777777", wantLID: "999@lid", wantName: "Bruno", wantAltLookup: 1,
+			wantPhone: "5511777777777", wantLID: "999@lid", wantName: "Bob", wantAltLookup: 1,
 		},
 		{
 			name:  "unknown LID stays a bare LID",
@@ -152,10 +152,10 @@ func TestBuildGroupOwner(t *testing.T) {
 	info.OwnerJID = lid("998")
 	info.Participants = append(info.Participants, types.GroupParticipant{
 		JID:         phone("5511666666666"),
-		DisplayName: "Bruno B.",
+		DisplayName: "Bob B.",
 	})
 	owner := buildGroupMembers(info, nameOf, altOf).Owner
-	if owner == nil || owner.JID != "5511666666666@s.whatsapp.net" || owner.LID != "998@lid" || owner.Name != "Bruno B." {
+	if owner == nil || owner.JID != "5511666666666@s.whatsapp.net" || owner.LID != "998@lid" || owner.Name != "Bob B." {
 		t.Fatalf("owner known only to the roster = %+v", owner)
 	}
 }

@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"os"
 	"sync"
@@ -52,6 +53,7 @@ type Bridge struct {
 	runtimePaired              atomic.Bool
 	operatorPairing            *operatorPairing
 	operatorServer             *http.Server
+	sessionDB                  *sql.DB // Startup-owned session pool, observed without acquiring a connection.
 	Store                      *MessageStore
 	Log                        waLog.Logger
 

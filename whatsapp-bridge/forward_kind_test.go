@@ -122,7 +122,19 @@ func TestForwardPreservesStoredKindAndPresentation(t *testing.T) {
 					if tc.kind == "document" && ex.filename == "" {
 						ex.filename = "document_" + ts.Format("20060102_150405") + "_KIND1"
 					}
-					if err := ms.StoreMessage("KIND1", efChat, "x", "", ts, false, tc.kind, ex.filename, common.URL, common.MediaKey, common.FileSHA256, common.FileEncSHA256, common.FileLength, ""); err != nil {
+					if err := ms.StoreMessage(storedMessage{
+						ID:            "KIND1",
+						ChatJID:       efChat,
+						Sender:        "x",
+						Timestamp:     ts,
+						MediaType:     tc.kind,
+						Filename:      ex.filename,
+						URL:           common.URL,
+						MediaKey:      common.MediaKey,
+						FileSHA256:    common.FileSHA256,
+						FileEncSHA256: common.FileEncSHA256,
+						FileLength:    common.FileLength,
+					}); err != nil {
 						t.Fatal(err)
 					}
 				} else {

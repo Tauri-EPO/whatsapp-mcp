@@ -30,7 +30,15 @@ func TestPeerHistoryPreservesLocallyDeletedPollMetadata(t *testing.T) {
 					t.Fatal(err)
 				}
 				if originalRow {
-					if err := ms.StoreMessage("HPOLL1", chat, selfPhone.String(), "Original", stamp, true, "poll", "", "", nil, nil, nil, nil, ""); err != nil {
+					if err := ms.StoreMessage(storedMessage{
+						ID:        "HPOLL1",
+						ChatJID:   chat,
+						Sender:    selfPhone.String(),
+						Content:   "Original",
+						Timestamp: stamp,
+						IsFromMe:  true,
+						MediaType: "poll",
+					}); err != nil {
 						t.Fatal(err)
 					}
 					if err := ms.DeleteMessageRow("HPOLL1", chat); err != nil {

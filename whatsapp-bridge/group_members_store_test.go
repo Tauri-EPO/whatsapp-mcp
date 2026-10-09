@@ -56,7 +56,7 @@ func TestReplaceGroupRosterUpsertsAndDropsMissing(t *testing.T) {
 
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
 		{JID: "5511999999999@s.whatsapp.net", PhoneNumber: "5511999999999", Name: "Alice", IsAdmin: true, IsSuperAdmin: true},
-		{JID: "777@lid", PhoneNumber: "5511888888888", LID: "777@lid", Name: "Ana"},
+		{JID: "777@lid", PhoneNumber: "5511888888888", LID: "777@lid", Name: "Eve"},
 		{JID: "888@lid", LID: "888@lid"},
 	}), first); err != nil {
 		t.Fatalf("first roster: %v", err)
@@ -70,10 +70,10 @@ func TestReplaceGroupRosterUpsertsAndDropsMissing(t *testing.T) {
 	// same spelling messages.sender uses; a LID-only member keys on the LID.
 	ana, ok := members["5511888888888"]
 	if !ok {
-		t.Fatalf("ana keyed by phone missing: %+v", members)
+		t.Fatalf("eve keyed by phone missing: %+v", members)
 	}
-	if ana.lid != "777" || ana.phone != "5511888888888" || ana.name != "Ana" {
-		t.Fatalf("ana = %+v", ana)
+	if ana.lid != "777" || ana.phone != "5511888888888" || ana.name != "Eve" {
+		t.Fatalf("eve = %+v", ana)
 	}
 	if _, ok := members["888"]; !ok {
 		t.Fatalf("LID-only member missing: %+v", members)
@@ -97,9 +97,9 @@ func TestReplaceGroupRosterUpsertsAndDropsMissing(t *testing.T) {
 	}
 	ana = members["5511888888888"]
 	if !ana.isAdmin {
-		t.Fatalf("ana should be admin now: %+v", ana)
+		t.Fatalf("eve should be admin now: %+v", ana)
 	}
-	if ana.name != "Ana" {
+	if ana.name != "Eve" {
 		t.Fatalf("a roster without a name must not erase the stored one: %+v", ana)
 	}
 	if ana.firstSeen != dbTime(first) || ana.lastSeen != dbTime(second) {
@@ -349,7 +349,7 @@ func TestGroupMemberRowsMatchOnAnyAddressForm(t *testing.T) {
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	// The roster knew only the LID, so the row is keyed on it.
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
-		{JID: "777@lid", LID: "777@lid", Name: "Ana"},
+		{JID: "777@lid", LID: "777@lid", Name: "Eve"},
 	}), now); err != nil {
 		t.Fatalf("roster: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestNoteGroupParticipantOnlyFillsGaps(t *testing.T) {
 	// that stamp is what StaleGroupRosters measures roster freshness from.
 	rosterAt := first.Add(time.Hour)
 	if _, err := store.ReplaceGroupRoster(testGroupJID, groupMemberRows([]GroupMember{
-		{JID: "777@lid", PhoneNumber: "5511888888888", LID: "777@lid", Name: "Ana", IsAdmin: true},
+		{JID: "777@lid", PhoneNumber: "5511888888888", LID: "777@lid", Name: "Eve", IsAdmin: true},
 	}), rosterAt); err != nil {
 		t.Fatalf("roster: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestNoteGroupParticipantOnlyFillsGaps(t *testing.T) {
 		t.Fatalf("second note: %v", err)
 	}
 	after := readMembers(t, store, testGroupJID)["5511888888888"]
-	if after.source != groupMemberSourceRoster || !after.isAdmin || after.name != "Ana" {
+	if after.source != groupMemberSourceRoster || !after.isAdmin || after.name != "Eve" {
 		t.Fatalf("a message must not downgrade a roster row: %+v", after)
 	}
 	if after.lastSeen != dbTime(rosterAt) {

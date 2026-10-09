@@ -1526,10 +1526,10 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 					DegreesLatitude:  proto.Float64(-23.55052),
 					DegreesLongitude: proto.Float64(-46.633308),
 					Name:             proto.String("Praça da Sé"),
-					Address:          proto.String("Praça da Sé, São Paulo"),
+					Address:          proto.String("Praça da Sé, Example City"),
 				},
 			},
-			want: "📍 Praça da Sé — Praça da Sé, São Paulo (-23.550520, -46.633308)",
+			want: "📍 Praça da Sé — Praça da Sé, Example City (-23.550520, -46.633308)",
 		},
 		{
 			name: "LocationMessage with coordinates only",
@@ -3069,7 +3069,15 @@ func TestExtractMentionedJIDs_ExtendedText(t *testing.T) {
 func TestGetMessageIsFromMe(t *testing.T) {
 	store := newTestMessageStore(t)
 	chatJID := "15551234567@s.whatsapp.net"
-	if err := store.StoreMessage("outbound", chatJID, "15550000000", "[🤖] response", time.Now(), true, "", "", "", nil, nil, nil, 0, ""); err != nil {
+	if err := store.StoreMessage(storedMessage{
+		ID:         "outbound",
+		ChatJID:    chatJID,
+		Sender:     "15550000000",
+		Content:    "[🤖] response",
+		Timestamp:  time.Now(),
+		IsFromMe:   true,
+		FileLength: 0,
+	}); err != nil {
 		t.Fatalf("store outbound message: %v", err)
 	}
 

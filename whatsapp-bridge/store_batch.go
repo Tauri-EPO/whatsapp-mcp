@@ -14,6 +14,20 @@ import (
 	"time"
 )
 
+// storedMessage names one archive snapshot, including its two distinct hashes.
+// Empty Mentions preserves an existing value; media and location remain atomic.
+type storedMessage struct {
+	ID, ChatJID, Sender, Content        string
+	Timestamp                           time.Time
+	IsFromMe                            bool
+	MediaType, Filename, URL            string
+	MediaKey, FileSHA256, FileEncSHA256 []byte
+	FileLength                          any
+	QuotedMessageID                     string
+	Media                               messageMediaOptions
+	Mentions                            string
+}
+
 // sqlExecer is satisfied by *sql.DB and *sql.Tx.
 type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -52,8 +66,8 @@ const validPresentationSQL = `(CASE
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location, mentions)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -109,7 +123,8 @@ const insertMessageSQL = `INSERT INTO messages
 					'bearing_degrees', COALESCE(json_extract(messages.location, '$.bearing_degrees'), json_extract(excluded.location, '$.bearing_degrees')),
 					'sequence', json_extract(messages.location, '$.sequence'),
 					'time_offset_seconds', json_extract(messages.location, '$.time_offset_seconds')))
-				ELSE COALESCE(excluded.location, messages.location) END`
+				ELSE COALESCE(excluded.location, messages.location) END,
+			mentions = COALESCE(excluded.mentions, messages.mentions)`
 
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
@@ -188,15 +203,12 @@ func (b *messageBatch) write(fn func() error) error {
 }
 
 // StoreMessage is MessageStore.StoreMessage inside the batch.
-func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, options ...messageMediaOptions) error {
-	if content == "" && mediaType == "" {
+func (b *messageBatch) StoreMessage(message storedMessage) error {
+	if message.Content == "" && message.MediaType == "" {
 		return nil
 	}
 	return b.write(func() error {
-		_, err := b.stmt.ExecContext(b.ctx, messageArgs(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
-			mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageId, options...)...)
+		_, err := b.stmt.ExecContext(b.ctx, messageArgs(message)...)
 		return err
 	})
 }
@@ -204,11 +216,6 @@ func (b *messageBatch) StoreMessage(id, chatJID, sender, content string, timesta
 // MarkViewOnce is MessageStore.MarkViewOnce inside the batch.
 func (b *messageBatch) MarkViewOnce(messageID, chatJID string) error {
 	return b.write(func() error { return markViewOnceWith(b.tx, messageID, chatJID) })
-}
-
-// SetMentions is MessageStore.SetMentions inside the batch.
-func (b *messageBatch) SetMentions(messageID, chatJID, mentions string) error {
-	return b.write(func() error { return setMentionsWith(b.tx, messageID, chatJID, mentions) })
 }
 
 // StorePoll is MessageStore.StorePoll inside the batch.
@@ -227,34 +234,29 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 // becomes NULL for URL-only snapshots.
 // On a complete write, omitting the optional path therefore clears the stored
 // direct_path. Incomplete writes keep the previous snapshot, including its path.
-func messageArgs(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength any,
-	quotedMessageId string, options ...messageMediaOptions) []any {
-	switch mediaType {
+func messageArgs(m storedMessage) []any {
+	length := m.FileLength
+	switch m.MediaType {
 	case "image", "video", "audio", "document", "sticker":
-		if length, ok := fileLength.(uint64); ok {
-			fileLength = storedMediaLength(length)
+		if value, ok := length.(uint64); ok {
+			length = storedMediaLength(value)
 		}
 	default:
-		fileLength = nil
+		length = nil
 	}
-	var qmid any
-	if quotedMessageId != "" {
-		qmid = quotedMessageId
+	var quote, path, mentions any
+	if m.QuotedMessageID != "" {
+		quote = m.QuotedMessageID
 	}
-	senderUser, senderServer := splitSenderJID(sender)
-	var path any
-	var pathText string
-	var presentation *mediaPresentation
-	var location *messageLocation
-	if len(options) > 0 {
-		pathText, presentation = options[0].directPath, options[0].presentation
-		location = options[0].location
-		if pathText != "" {
-			path = pathText
-		}
+	if m.Media.directPath != "" {
+		path = m.Media.directPath
 	}
-	return []any{id, chatJID, senderUser, senderServer, content, dbTime(timestamp), isFromMe, mediaType, filename, url,
-		mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, path, presentation.forFile(mediaType, fileSHA256).column(), location.column(),
-		sql.Named("complete_media", mediaComplete(url, pathText, mediaKey, fileSHA256, fileEncSHA256))}
+	if m.Mentions != "" {
+		mentions = m.Mentions
+	}
+	sender, server := splitSenderJID(m.Sender)
+	return []any{m.ID, m.ChatJID, sender, server, m.Content, dbTime(m.Timestamp), m.IsFromMe,
+		m.MediaType, m.Filename, m.URL, m.MediaKey, m.FileSHA256, m.FileEncSHA256, length, quote,
+		path, m.Media.presentation.forFile(m.MediaType, m.FileSHA256).column(), m.Media.location.column(), mentions,
+		sql.Named("complete_media", mediaComplete(m.URL, m.Media.directPath, m.MediaKey, m.FileSHA256, m.FileEncSHA256))}
 }

@@ -111,7 +111,7 @@ def make_paired_store(tmp_path: Path) -> PairedStore:
             "INSERT INTO whatsmeow_contacts VALUES ('me', ?, ?, ?, ?, ?)",
             [
                 (BOB, "Bob", "Bob Silva", "bobby", None),
-                (CARLA, None, None, None, "Carla Consultoria"),
+                (CARLA, None, None, None, "Carol Consultoria"),
             ],
         )
     return PairedStore(mdb, wdb)

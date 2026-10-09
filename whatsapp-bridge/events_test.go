@@ -156,7 +156,14 @@ func TestHandleEvent_SelfReadReceiptMarksChatRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, ts := range map[string]time.Time{"m1": t1, "m2": t2} {
-		if err := ms.StoreMessage(id, peer.String(), peer.User, "hi "+id, ts, false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		if err := ms.StoreMessage(storedMessage{
+			ID:         id,
+			ChatJID:    peer.String(),
+			Sender:     peer.User,
+			Content:    "hi " + id,
+			Timestamp:  ts,
+			FileLength: 0,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

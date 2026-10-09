@@ -20,7 +20,13 @@ func TestImmediateStartupMigrationsLeaveNoSessionAliasInPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, row := range []struct{ id, sender string }{{"LEGACY", phoneLID.User}, {"UNCLASSIFIED", phonePN.User}} {
-		if err := ms.StoreMessage(row.id, phoneLID.String(), row.sender, "migration searchable", time.Now(), false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+		if err := ms.StoreMessage(storedMessage{
+			ID:        row.id,
+			ChatJID:   phoneLID.String(),
+			Sender:    row.sender,
+			Content:   "migration searchable",
+			Timestamp: time.Now(),
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -105,10 +111,24 @@ func TestImmediateStartupMigrationsLeaveNoSessionAliasInPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := ms.Batch(func(batch *messageBatch) error {
-		return batch.StoreMessage("LIVE", phonePN.String(), phonePN.String(), "live searchable", time.Now(), false, "", "", "", nil, nil, nil, nil, "")
+		return batch.StoreMessage(storedMessage{
+			ID:        "LIVE",
+			ChatJID:   phonePN.String(),
+			Sender:    phonePN.String(),
+			Content:   "live searchable",
+			Timestamp: time.Now(),
+		})
 	}); err != nil {
 		t.Fatalf("unrelated session writer blocked archive: %v", err)
 	}
+	if err := sessionWriter.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var busy, frames, checkpointed int
+	if err := wa.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 {
+		t.Fatalf("session WAL checkpoint blocked after migration: busy=%d frames=%d checkpointed=%d err=%v", busy, frames, checkpointed, err)
+	}
+
 	var count int
 	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'searchable'").Scan(&count); err != nil || count != 3 {
 		t.Fatalf("indexed=%d err=%v", count, err)

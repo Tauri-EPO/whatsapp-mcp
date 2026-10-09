@@ -194,7 +194,14 @@ func TestForwardAmbiguousDestinationNeverReachesSend(t *testing.T) {
 			if allow == "*@s.whatsapp.net" {
 				source, target = efChat, "120363000000000002@g.us@s.whatsapp.net"
 			}
-			if err := b.Store.StoreMessage("SOURCE1", source, "5511999999999", "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""); err != nil {
+			if err := b.Store.StoreMessage(storedMessage{
+				ID:         "SOURCE1",
+				ChatJID:    source,
+				Sender:     "5511999999999",
+				Content:    "hello",
+				Timestamp:  time.Now(),
+				FileLength: 0,
+			}); err != nil {
 				t.Fatal(err)
 			}
 			var addressed []types.JID

@@ -36,10 +36,9 @@ func countMatches(t *testing.T, db *sql.DB, match string) int {
 	return n
 }
 
-// With FTS5 compiled in (sqlite_fts5 build tag, as in the Dockerfile and CI)
-// the index is created, back-filled, kept in sync by triggers and folds
-// diacritics. Without it, ensureMessagesFTS must report false and leave the
-// schema clean. Both outcomes are asserted from the same test.
+// The linked pure-Go driver must provide FTS5. Its real index is created,
+// back-filled, kept in sync by triggers and folds diacritics. Capability-off
+// teardown is exercised separately through the explicit test seam below.
 func TestEnsureMessagesFTS(t *testing.T) {
 	db := newMessagesDB(t)
 	if _, err := db.Exec(`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
@@ -57,11 +56,7 @@ func TestEnsureMessagesFTS(t *testing.T) {
 	}
 
 	if !sqliteHasFTS5(db) {
-		if on || exists {
-			t.Fatalf("build without FTS5 must not enable the index (on=%v exists=%v)", on, exists)
-		}
-		t.Log("SQLite built without FTS5; verified the disabled path only")
-		return
+		t.Fatal("linked SQLite driver must provide FTS5")
 	}
 
 	if !on || !exists {
@@ -110,9 +105,6 @@ func TestEnsureMessagesFTS(t *testing.T) {
 // otherwise the triggers would make every INSERT into messages fail.
 func TestEnsureMessagesFTS_TeardownWithoutModule(t *testing.T) {
 	db := newMessagesDB(t)
-	if sqliteHasFTS5(db) {
-		t.Skip("needs a SQLite build without FTS5 to exercise the teardown path")
-	}
 	// Simulate leftovers with plain objects of the same names.
 	if _, err := db.Exec(`
 		CREATE TABLE messages_fts (content TEXT);
@@ -120,7 +112,7 @@ func TestEnsureMessagesFTS_TeardownWithoutModule(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	on, err := ensureMessagesFTS(db)
+	on, err := ensureMessagesFTSCapability(db, false)
 	if err != nil || on {
 		t.Fatalf("ensure without FTS5: on=%v err=%v", on, err)
 	}

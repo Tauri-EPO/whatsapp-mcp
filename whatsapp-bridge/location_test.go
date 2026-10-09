@@ -491,7 +491,13 @@ func TestLocationNewestFirstHistoryAndMigration(t *testing.T) {
 	if err := ms.db.QueryRow("SELECT content, json_extract(location,'$.latitude') FROM messages WHERE id='HISTORY'").Scan(&content, &lat); err != nil || lat != 0.8 || content != "📍 Live location (0.250000, 0.500000) — initial" {
 		t.Fatalf("newest-first replay lost metadata/position: %q %v %v", content, lat, err)
 	}
-	if err := ms.StoreMessage("OLD", phonePN.String(), phonePN.String(), "📍 Old — text", stamp, false, "", "", "", nil, nil, nil, nil, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:        "OLD",
+		ChatJID:   phonePN.String(),
+		Sender:    phonePN.String(),
+		Content:   "📍 Old — text",
+		Timestamp: stamp,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ms.db.Exec("ALTER TABLE messages DROP COLUMN location"); err != nil {
@@ -515,7 +521,14 @@ func TestForwardLocationRefusedBeforeRemoteEffects(t *testing.T) {
 	if err := ms.EnsureChat(phonePN.String(), "Alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("LOCATION", phonePN.String(), phonePN.String(), "📍 place", time.Now(), false, "location", "", "", nil, nil, nil, nil, ""); err != nil {
+	if err := ms.StoreMessage(storedMessage{
+		ID:        "LOCATION",
+		ChatJID:   phonePN.String(),
+		Sender:    phonePN.String(),
+		Content:   "📍 place",
+		Timestamp: time.Now(),
+		MediaType: "location",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	deps := forwardDeps{lookup: ms.messageContentLookup,

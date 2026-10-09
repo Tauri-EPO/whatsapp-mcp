@@ -5,6 +5,7 @@ package main
 // never message content. WHATSAPP_METRICS=false disables the route.
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"sort"
@@ -66,6 +67,35 @@ func (b *Bridge) renderMetrics() string {
 	var out []string
 	add := func(name, help, kind string, value string) {
 		out = append(out, "# HELP "+name+" "+help, "# TYPE "+name+" "+kind, name+" "+value)
+	}
+	pools := []struct {
+		name string
+		db   *sql.DB
+	}{{"session", b.sessionDB}}
+	if b.Store != nil {
+		pools = append(pools, struct {
+			name string
+			db   *sql.DB
+		}{"messages", b.Store.db}, struct {
+			name string
+			db   *sql.DB
+		}{"contacts", b.Store.waDB})
+	}
+	out = append(out,
+		"# HELP whatsapp_bridge_db_in_use Connections currently in use by a bounded database pool.",
+		"# TYPE whatsapp_bridge_db_in_use gauge",
+		"# HELP whatsapp_bridge_db_wait_total Requests that waited for a database connection.",
+		"# TYPE whatsapp_bridge_db_wait_total counter",
+		"# HELP whatsapp_bridge_db_wait_seconds_total Seconds spent waiting for database connections.",
+		"# TYPE whatsapp_bridge_db_wait_seconds_total counter")
+	for _, pool := range pools {
+		if pool.db == nil {
+			continue
+		}
+		stats := pool.db.Stats()
+		out = append(out, fmt.Sprintf("whatsapp_bridge_db_in_use{pool=%q} %d", pool.name, stats.InUse),
+			fmt.Sprintf("whatsapp_bridge_db_wait_total{pool=%q} %d", pool.name, stats.WaitCount),
+			fmt.Sprintf("whatsapp_bridge_db_wait_seconds_total{pool=%q} %.9f", pool.name, stats.WaitDuration.Seconds()))
 	}
 	add("whatsapp_bridge_up", "1 while the process serves requests.", "gauge", "1")
 	add("whatsapp_bridge_connected", "1 while connected to WhatsApp.", "gauge", fmt.Sprint(bool01(connected)))

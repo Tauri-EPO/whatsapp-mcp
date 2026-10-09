@@ -40,10 +40,47 @@ func seedEditStore(t *testing.T) *MessageStore {
 			t.Fatal(err)
 		}
 	}
-	must(ms.StoreMessage("MINE", efChat, "me", "typo hre", time.Now(), true, "", "", "", nil, nil, nil, 0, ""))
-	must(ms.StoreMessage("THEIRS", efChat, "5511999999999", "hello", time.Now(), false, "", "", "", nil, nil, nil, 0, ""))
-	must(ms.StoreMessage("PIC", efChat, "5511999999999", "look", time.Now(), false, "image", "pic.jpg", "https://x", []byte("k"), []byte("s"), []byte("e"), 10, ""))
-	must(ms.StoreMessage("VOTE", efChat, "5511999999999", "🗳️ voted", time.Now(), false, "poll_vote", "P1", "", nil, nil, nil, 0, ""))
+	must(ms.StoreMessage(storedMessage{
+		ID:         "MINE",
+		ChatJID:    efChat,
+		Sender:     "me",
+		Content:    "typo hre",
+		Timestamp:  time.Now(),
+		IsFromMe:   true,
+		FileLength: 0,
+	}))
+	must(ms.StoreMessage(storedMessage{
+		ID:         "THEIRS",
+		ChatJID:    efChat,
+		Sender:     "5511999999999",
+		Content:    "hello",
+		Timestamp:  time.Now(),
+		FileLength: 0,
+	}))
+	must(ms.StoreMessage(storedMessage{
+		ID:            "PIC",
+		ChatJID:       efChat,
+		Sender:        "5511999999999",
+		Content:       "look",
+		Timestamp:     time.Now(),
+		MediaType:     "image",
+		Filename:      "pic.jpg",
+		URL:           "https://x",
+		MediaKey:      []byte("k"),
+		FileSHA256:    []byte("s"),
+		FileEncSHA256: []byte("e"),
+		FileLength:    10,
+	}))
+	must(ms.StoreMessage(storedMessage{
+		ID:         "VOTE",
+		ChatJID:    efChat,
+		Sender:     "5511999999999",
+		Content:    "🗳️ voted",
+		Timestamp:  time.Now(),
+		MediaType:  "poll_vote",
+		Filename:   "P1",
+		FileLength: 0,
+	}))
 	return ms
 }
 

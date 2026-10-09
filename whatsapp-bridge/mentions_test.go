@@ -130,7 +130,7 @@ func TestMigrateMentionsBackfill(t *testing.T) {
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		VALUES ('OLD2', ?, 's', 'bom dia a todos', '2026-08-08 12:01:00+00:00', 0)`, chat)
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-		VALUES ('OLD3', ?, 's', 'escreve pro joao@example.com', '2026-08-08 12:02:00+00:00', 0)`, chat)
+		VALUES ('OLD3', ?, 's', 'escreve pro alice@example.com', '2026-08-08 12:02:00+00:00', 0)`, chat)
 	seedLegacyRow(t, db, `INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, mentions)
 		VALUES ('NEW1', ?, 's', '@5511888888888 obrigado', '2026-08-08 12:03:00+00:00', 0, '5511888888888')`, chat)
 
