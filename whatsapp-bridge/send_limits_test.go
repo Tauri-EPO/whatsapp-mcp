@@ -612,3 +612,54 @@ func TestReadReceiptProgressColumnUpgradesExistingArchive(t *testing.T) {
 		t.Fatalf("migration lost archive: %+v %v", pending, err)
 	}
 }
+
+func TestSendCountedInterleavedReceiptsClearLocalUnread(t *testing.T) {
+	for _, tailPending := range []bool{false, true} {
+		t.Run(fmt.Sprint(tailPending), func(t *testing.T) {
+			b := newSettingsBridge(t)
+			b.SendIncludeActions = true
+			now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+			b.sendNow = func() time.Time { return now }
+			limitPatch(t, b, `{"send.rate_per_day":1}`)
+			stamp := now.Add(-time.Hour)
+			seedMarkReadChat(t, b.Store, markReadGroup, nil)
+			seedMarkReadMessage(t, b.Store, markReadGroup, "a-first", "5511999999999", stamp, false, nil)
+			seedMarkReadMessage(t, b.Store, markReadGroup, "b-middle", "5511988887777", stamp.Add(time.Second), false, nil)
+			seedMarkReadMessage(t, b.Store, markReadGroup, "a-last", "5511999999999", stamp.Add(2*time.Second), false, nil)
+			if tailPending {
+				seedMarkReadMessage(t, b.Store, markReadGroup, "c-tail", "333", stamp.Add(3*time.Second), false, nil)
+			}
+			recorder := &markReadRecorder{}
+			deps := newMarkReadDeps(t, b.Store, recorder)
+			deps.allowSend = b.allowSendAction
+			if w := postMarkRead(t, deps, map[string]any{"chat_jid": markReadGroup}); w.Code != 429 {
+				t.Fatalf("first batch refusal: %d", w.Code)
+			}
+			now = now.Add(24 * time.Hour)
+			wantStatus, wantUnread, wantReceipts := 200, 0, 3
+			if tailPending {
+				wantStatus, wantUnread, wantReceipts = 429, 1, 4
+			}
+			if w := postMarkRead(t, deps, map[string]any{"chat_jid": markReadGroup}); w.Code != wantStatus {
+				t.Fatalf("resumed receipts: %d", w.Code)
+			}
+			if marker := chatReadMarker(t, b.Store, markReadGroup); !marker.Equal(stamp.Add(2 * time.Second)) {
+				t.Fatalf("local unread marker left acknowledged tail unread: %v", marker)
+			}
+			var unread int
+			if err := b.Store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE chat_jid=? AND is_from_me=0
+    AND timestamp > (SELECT last_read_time FROM chats WHERE jid=?)`, markReadGroup, markReadGroup).Scan(&unread); err != nil || unread != wantUnread {
+				t.Fatalf("database-backed consumers see wrong unread: %d, %v", unread, err)
+			}
+			if tailPending {
+				now = now.Add(24 * time.Hour)
+				if w := postMarkRead(t, deps, map[string]any{"chat_jid": markReadGroup}); w.Code != 200 || !chatReadMarker(t, b.Store, markReadGroup).Equal(stamp.Add(3*time.Second)) {
+					t.Fatalf("pending sender was skipped: %d", w.Code)
+				}
+			}
+			if w := postMarkRead(t, deps, map[string]any{"chat_jid": markReadGroup}); w.Code != 200 || len(recorder.allIDs()) != wantReceipts {
+				t.Fatalf("repeated request sent duplicate receipts: %d %+v", w.Code, recorder.allIDs())
+			}
+		})
+	}
+}

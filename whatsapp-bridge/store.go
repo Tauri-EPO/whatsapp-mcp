@@ -582,7 +582,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
 			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation, location,
-			quoted_message_id, mentions, deleted_at, view_once, target_message_id, message_edit_timestamp, media_retry_chat, media_retry_sender
+			quoted_message_id, mentions, deleted_at, view_once, target_message_id, message_edit_timestamp, media_retry_chat, media_retry_sender, read_receipt_sent
 		)
 		SELECT
 			msg.id,
@@ -609,7 +609,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			msg.target_message_id,
 			msg.message_edit_timestamp,
 			msg.media_retry_chat,
-			msg.media_retry_sender
+			msg.media_retry_sender,
+			msg.read_receipt_sent
 		FROM messages msg
 		JOIN tmp_lid_to_phone m ON m.lid_jid = msg.chat_jid;
 	`)
@@ -618,6 +619,20 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	}
 
 	insertedMessages, _ := insertResult.RowsAffected()
+	// A PN row wins metadata collisions, but either source's acknowledged
+	// receipt must survive so a partial refusal does not resend that receipt.
+	if _, err := tx.Exec(`
+		UPDATE messages SET read_receipt_sent = 1
+		WHERE chat_jid IN (SELECT phone_jid FROM tmp_lid_to_phone)
+		AND EXISTS (
+			SELECT 1 FROM messages source
+			JOIN tmp_lid_to_phone m ON m.lid_jid = source.chat_jid
+			WHERE m.phone_jid = messages.chat_jid AND source.id = messages.id
+			AND source.read_receipt_sent = 1
+		);
+	`); err != nil {
+		return fmt.Errorf("failed to merge migrated receipt progress: %w", err)
+	}
 
 	deleteMessagesResult, err := tx.Exec(`
 		DELETE FROM messages
@@ -1087,6 +1102,23 @@ func (store *MessageStore) UnreadInboundMessages(chatJID string, upTo time.Time,
 		})
 	}
 	return pending, rows.Err()
+}
+
+// AcknowledgedReceiptPrefix finds saved receipt progress above the current
+// marker, stopping before the first receipt still pending in this range.
+func (store *MessageStore) AcknowledgedReceiptPrefix(chatJID string, upTo time.Time) (time.Time, error) {
+	var raw any
+	err := store.db.QueryRow(`
+		WITH marker AS (SELECT COALESCE(last_read_time, '') AS at FROM chats WHERE jid=?)
+		SELECT MAX(timestamp) FROM messages
+		WHERE chat_jid=? AND is_from_me=0 AND deleted_at IS NULL AND read_receipt_sent=1
+		AND timestamp > COALESCE((SELECT at FROM marker), '') AND timestamp <= ?
+		AND timestamp < COALESCE((
+			SELECT MIN(timestamp) FROM messages
+			WHERE chat_jid=? AND is_from_me=0 AND deleted_at IS NULL AND read_receipt_sent=0
+			AND timestamp > COALESCE((SELECT at FROM marker), '') AND timestamp <= ?
+		), '9999-12-31 23:59:59+00:00')`, chatJID, chatJID, dbTime(upTo), chatJID, dbTime(upTo)).Scan(&raw)
+	return anchorTime(raw), err
 }
 
 // StoreMessage stores one message. sender may be the full resolved JID —

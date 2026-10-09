@@ -332,10 +332,10 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `WHATSAPP_SEND_RATE_PER_MINUTE` | `0` (off) | Per-instance token bucket, burst equal to rate; runtime `send.rate_per_minute` wins |
-| `WHATSAPP_SEND_RATE_PER_DAY` | `0` (off) | Persistent send reservations per UTC calendar day; runtime `send.rate_per_day` wins |
-| `WHATSAPP_SEND_NEW_CHATS_PER_DAY` | `0` (off) | Persistent first-contact ceiling per UTC day; runtime `send.new_chats_per_day` wins |
-| `WHATSAPP_SEND_MIN_INTERVAL_MS` | `0` (off) | Minimum spacing between outbound send reservations; runtime `send.min_interval_ms` wins |
+| `WHATSAPP_SEND_RATE_PER_MINUTE` | `0` (off) | Per-instance token bucket, burst equal to rate; runtime `send.rate_per_minute` may tighten the env ceiling |
+| `WHATSAPP_SEND_RATE_PER_DAY` | `0` (off) | Persistent send reservations per UTC calendar day; runtime `send.rate_per_day` may tighten the env ceiling |
+| `WHATSAPP_SEND_NEW_CHATS_PER_DAY` | `0` (off) | Persistent first-contact ceiling per UTC day; runtime `send.new_chats_per_day` may tighten the env ceiling |
+| `WHATSAPP_SEND_MIN_INTERVAL_MS` | `0` (off) | Minimum spacing between outbound send reservations; runtime `send.min_interval_ms` may increase the env delay floor |
 | `WHATSAPP_SEND_INCLUDE_ACTIONS` | `false` | Also count reactions, edits, revokes and each read-receipt batch; env-only |
 | `WHATSAPP_STORE_DIR` | `store` (bridge, relative to cwd), `../whatsapp-bridge/store` (MCP) | Directory for `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive` (`store_dir.go`: `storeDir()`, `storePath()`). Set for both processes; the compose file uses `/app/store` |
 | `WHATSAPP_DB_PATH` | `$WHATSAPP_STORE_DIR/messages.db` | SQLite path used by the MCP server (overrides the store dir). Opened read-only; a missing file is an error naming this path, never a new empty database |
@@ -433,7 +433,7 @@ Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`) are documented in `.
 
 When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
 
-Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats` and the four `send.*` limits are read from `messages.db` before each operation, with runtime > env > default precedence. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
+Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats` and the four `send.*` limits are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
 
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 

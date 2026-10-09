@@ -1208,8 +1208,12 @@ Unreadable or corrupt authentication state fails closed with HTTP 503,
 `authentication state unavailable` and one credential-free WARN per minute.
 SQLite reads run in a thread with a 100 ms busy timeout. A pre-registry store
 (no `runtime_settings` table) has no persisted rotation and uses env auth rules;
-a missing database preserves an explicitly anonymous deployment. A missing
-database on a token-protected deployment returns 503. Runtime rotation also
+a missing database preserves an initially anonymous deployment. Once the MCP
+process observes runtime rotation, losing the database returns 503 until the
+registry is restored; operator DELETE restores the deployment policy. A missing
+database on a token-protected deployment returns 503. Independently valid OAuth
+JWTs and introspected credentials remain usable during static-state outages.
+Runtime rotation also
 activates the default 120 requests/minute credential-guessing throttle when the
 deployment started anonymously; explicit `WHATSAPP_MCP_RATE_LIMIT` still wins.
 `GET /operator/v1/settings` never includes hashes, and PATCH cannot change the

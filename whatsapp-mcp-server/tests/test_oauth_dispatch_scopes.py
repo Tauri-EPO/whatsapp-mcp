@@ -81,7 +81,7 @@ def test_dispatch_uses_fresh_sdk_scopes_after_delayed_body(monkeypatch, issuer, 
 
 
 @pytest.mark.parametrize("mode", ["opaque", "jwt"])
-def test_sdk_revalidation_outage_keeps_503_metadata(monkeypatch, issuer, mode):
+def test_sdk_revalidation_outage_keeps_503_metadata(monkeypatch, issuer, mode, auth_runtime_store):
     options = (
         {
             "WHATSAPP_MCP_OAUTH_INTROSPECTION_URL": issuer["url"] + "/introspect",

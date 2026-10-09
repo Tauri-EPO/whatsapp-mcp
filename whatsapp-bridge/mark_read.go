@@ -243,7 +243,8 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 	}
 	truncated := overflow != nil
 	if len(pending) == 0 {
-		writeMarkRead(w, http.StatusOK, MarkReadResponse{Success: true, Message: "No unread inbound messages in that range"})
+		warning := persistAcknowledgedReceiptPrefix(deps, req.ChatJID, upTo)
+		writeMarkRead(w, http.StatusOK, MarkReadResponse{Success: true, Message: "No unread inbound messages in that range" + warning})
 		return
 	}
 
@@ -289,6 +290,7 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 				// A refusal can follow completed batches. Preserve their safe
 				// prefix so the next call cannot spend its budget resending them.
 				persistRefusedReceiptProgress(deps, req.ChatJID, pending, acked, overflow)
+				_ = persistAcknowledgedReceiptPrefix(deps, req.ChatJID, upTo)
 				return
 			}
 			if err := deps.markRead(ctx, chunk, readAt, receiptChat, receiptSender); err != nil {
@@ -309,6 +311,9 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 	warning := ""
 	if covered > 0 {
 		warning = persistReadMarker(deps, req.ChatJID, pending[covered-1].Timestamp)
+	}
+	if warning == "" {
+		warning = persistAcknowledgedReceiptPrefix(deps, req.ChatJID, upTo)
 	}
 
 	if failure != nil {
@@ -440,6 +445,18 @@ func persistReadMarker(deps markReadDeps, chatJID string, readAt time.Time) stri
 		return " (archive update failed; the remote read receipts already succeeded, do not repeat them)"
 	}
 	return ""
+}
+
+func persistAcknowledgedReceiptPrefix(deps markReadDeps, chatJID string, upTo time.Time) string {
+	readAt, err := deps.store.AcknowledgedReceiptPrefix(chatJID, upTo)
+	if err != nil {
+		deps.log.Warnf("Failed to read saved receipt progress: %v", err)
+		return " (archive update failed; saved receipt progress remains available for retry)"
+	}
+	if readAt.IsZero() {
+		return ""
+	}
+	return persistReadMarker(deps, chatJID, readAt)
 }
 
 func writeMarkRead(w http.ResponseWriter, status int, resp MarkReadResponse) {

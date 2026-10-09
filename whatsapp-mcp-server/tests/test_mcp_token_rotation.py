@@ -17,6 +17,8 @@ from http_auth import AuthStateUnavailableError, BearerTokenMiddleware, RuntimeR
 from tests.conftest import PairedStore
 from tests.test_http_auth import TestBuildHttpApp as BuildProbe
 from tests.test_http_auth import _ok_app
+from tests.test_http_oauth import isolated_tool_registry as isolated_tool_registry
+from tests.test_http_oauth import issuer as issuer
 
 OLD = "fake-original-mcp-token"
 NEW = "fake-next-mcp-token"
@@ -132,6 +134,21 @@ def test_missing_database_preserves_explicit_anonymous_mode(auth_store):
     assert client.get("/mcp").status_code == 200
 
 
+def test_observed_rotation_cannot_revert_to_anonymous_when_database_disappears(auth_store):
+    from tests.test_http_oauth import app, request
+
+    application, calls = app(static=None)
+    with TestClient(application) as client:
+        assert request(client).status_code == 200
+        rotate(auth_store, previous=None)
+        assert request(client, NEW).status_code == 200
+        assert request(client).status_code == 401
+        Path(whatsapp.MESSAGES_DB_PATH).unlink()
+        assert request(client).status_code == 503
+        assert request(client, NEW).status_code == 503
+        assert not calls
+
+
 def test_rotation_enforces_auth_when_initially_disabled(auth_store):
     assert not verify_static_token("arbitrary-fake-token", None)
     client = TestClient(BearerTokenMiddleware(_ok_app, None, runtime_rotation=True))
@@ -220,3 +237,152 @@ def test_auth_reader_does_not_block_event_loop(auth_store, monkeypatch):
         assert messages[0]["status"] == 200
 
     asyncio.run(probe())
+
+
+@pytest.mark.parametrize("oauth", [False, True])
+@pytest.mark.parametrize("initial", [OLD, None])
+def test_token_protected_exhausted_peer_never_reads_locked_auth_store(auth_store, monkeypatch, issuer, oauth, initial):
+    from concurrent.futures import ThreadPoolExecutor
+
+    import http_auth
+    import http_oauth
+    from tests.test_http_oauth import app, configure
+
+    reads = []
+    original = http_auth._rotation_state
+
+    def observed(*args, **kwargs):
+        reads.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(http_auth, "_rotation_state", observed)
+    if oauth:
+        configure(monkeypatch, issuer)
+    application, calls = app(rate=None, static=initial)
+    middleware = application
+    middleware_type = http_oauth.OAuthMiddleware if oauth else RuntimeRateLimitMiddleware
+    while not isinstance(middleware, middleware_type):
+        middleware = middleware.app
+    if oauth:
+        middleware.limiter._clock = lambda: 1.0
+        middleware.peer_limiter._clock = lambda: 1.0
+    else:
+        middleware.limited._clock = lambda: 1.0
+        middleware._state_clock = lambda: 1.0
+    lock = None
+    try:
+        with TestClient(application) as client:
+            if initial is None:
+                if not oauth:
+                    assert client.get("/fake-probe").status_code == 404
+                rotate(auth_store, previous=None)
+            for _ in range(120):
+                assert (
+                    client.get("/fake-probe", headers={"Authorization": "Bearer fake-invalid-token"}).status_code == 401
+                )
+            lock = auth_store.messages()
+            lock.execute("PRAGMA journal_mode=DELETE")
+            lock.execute("BEGIN EXCLUSIVE")
+            reads.clear()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = pool.map(
+                    lambda _: client.get("/fake-probe", headers={"Authorization": f"Bearer {OLD}"}), range(4)
+                )
+                assert [result.status_code for result in results] == [429] * 4
+            # A changed anonymous store gets one shared refresh, never one per
+            # refused request; a configured token/OAuth needs no store probe.
+            assert len(reads) <= (1 if initial is None and not oauth else 0)
+            reads.clear()
+            for _ in range(4):
+                assert client.get("/fake-probe").status_code == 429
+            assert not reads
+            assert not calls
+    finally:
+        if lock is not None:
+            lock.rollback()
+            lock.close()
+
+
+@pytest.mark.parametrize("initial", [OLD, None])
+def test_oauth_static_hook_rotates_with_native_sdk_and_preserves_jwt(auth_store, monkeypatch, issuer, initial):
+    from tests.test_http_oauth import app, configure, request, signed
+
+    configure(monkeypatch, issuer)
+    application, calls = app(static=initial)
+    jwt_token = signed(issuer)
+    with TestClient(application) as client:
+        if initial:
+            assert request(client, OLD).status_code == 200
+        rotate(auth_store, previous=OLD if initial else None)
+        assert request(client, NEW).status_code == 200
+        assert request(client, jwt_token).status_code == 200
+        assert not calls  # Only initialize, never dispatch any MCP tool.
+        rotate(auth_store, until=datetime.now(UTC) - timedelta(seconds=1))
+        assert request(client, OLD).status_code == 401
+        assert request(client, NEW).status_code == 200
+        rotate(auth_store, THIRD, NEW)
+        assert request(client, OLD).status_code == 401
+        assert request(client, THIRD).status_code == 200
+        rotate(auth_store, None)
+        assert request(client, NEW).status_code == 401
+        assert request(client, OLD).status_code == (200 if initial else 401)
+        assert request(client, jwt_token).status_code == 200
+
+
+@pytest.mark.parametrize("initial", [OLD, None])
+def test_oauth_static_storage_outage_is_503_and_jwt_still_valid(auth_store, monkeypatch, issuer, caplog, initial):
+    import http_auth
+    from tests.test_http_oauth import app, configure, request, signed
+
+    monkeypatch.setattr(http_auth, "_AUTH_WARN_AT", float("-inf"))
+    configure(monkeypatch, issuer)
+    rotate(auth_store, previous=OLD if initial else None)
+    application, calls = app(static=initial)
+    with TestClient(application) as client:
+        assert request(client, NEW).status_code == 200
+        Path(whatsapp.MESSAGES_DB_PATH).unlink()
+        result = request(client, NEW)
+        assert result.status_code == 503
+        assert result.json()["message"] == "authentication state unavailable"
+        assert "messages database missing" in caplog.text
+        assert NEW not in caplog.text and digest(NEW) not in caplog.text
+        assert request(client, signed(issuer)).status_code == 200
+        assert not calls
+
+
+@pytest.mark.parametrize("outage", ["missing", "locked", "corrupt"])
+@pytest.mark.parametrize("initial", [OLD, None])
+def test_independent_opaque_oauth_survives_static_storage_outage(auth_store, monkeypatch, issuer, outage, initial):
+    from tests.test_http_oauth import app, configure, request
+
+    configure(
+        monkeypatch,
+        issuer,
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_URL=issuer["url"] + "/introspect",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_CLIENT_ID="fake-client",
+        WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
+    )
+    issuer["revoked"].update((OLD, NEW))  # Static credentials are not AS-issued OAuth credentials.
+    rotate(auth_store, previous=OLD if initial else None)
+    application, calls = app(static=initial)
+    lock = None
+    try:
+        with TestClient(application) as client:
+            assert request(client, NEW).status_code == 200
+            if outage == "locked":
+                lock = auth_store.messages()
+                lock.execute("PRAGMA journal_mode=DELETE")
+                lock.execute("BEGIN EXCLUSIVE")
+            elif outage == "missing":
+                Path(whatsapp.MESSAGES_DB_PATH).unlink()
+            else:
+                Path(whatsapp.MESSAGES_DB_PATH).write_bytes(b"invalid SQLite database")
+            assert request(client, "fake-independent-oauth-token").status_code == 200
+            result = request(client, NEW)
+            assert result.status_code == 503
+            assert result.json()["message"] == "authentication state unavailable"
+            assert not calls
+    finally:
+        if lock is not None:
+            lock.rollback()
+            lock.close()
