@@ -79,8 +79,18 @@ func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 // forwardsToWebhook is shared by text, images and reactions. Status, channels
 // and broadcast lists are stored regardless, but require separate opt-ins to
 // reach a webhook intended for conversations. The global/self gates always win.
-func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool) bool {
+func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...types.JID) bool {
 	if !b.Webhook.Enabled() || (fromMe && !b.ForwardSelf) {
+		return false
+	}
+	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {
+		return lookupAltJID(ctx, b.currentClient(), j)
+	}
+	allowed := b.Policy.allowsIdentity(b.ctx, chat, lookup)
+	for _, j := range original {
+		allowed = allowed || b.Policy.allowsIdentity(b.ctx, j, lookup)
+	}
+	if !allowed {
 		return false
 	}
 	if isStatusChat(chat) {

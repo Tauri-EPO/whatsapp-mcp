@@ -6816,11 +6816,43 @@ def manage_group_participants(group_jid: str, action: str, participants: list[st
     cleaned = [str(p).strip() for p in (participants or []) if str(p).strip()]
     if not cleaned:
         raise ToolError("invalid_argument", "participants must list at least one phone number or JID")
+    # Access reductions must remain possible without allowing a member's DM.
+    if CHAT_POLICY.restricted and action in ("add", "promote"):
+        for participant in cleaned:
+            CHAT_POLICY.require_participant(participant, _participant_twins(participant))
     return _bridge_json(
         _bridge_request(
             "POST", "/group/participants", json={"group_jid": jid, "action": action, "participants": cleaned}
         )
     )
+
+
+def _participant_twins(raw: str) -> list[str]:
+    """Local identity aliases only; group updates do not resolve via WhatsApp."""
+    target = normalize_recipient(raw).strip()
+    validate_chat_target(target)
+    jid = normalize_chat_entry(target)
+    user, _, server = jid.rpartition("@")
+    if server not in (DEFAULT_USER_SERVER, "lid"):
+        return []
+    conn = None
+    try:
+        conn = _connect_whatsmeow_db()
+        if server == "lid":
+            row = conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (user,)).fetchone()
+            if not row or not row[0]:
+                return []
+            user = row[0]
+        users = [user]
+        if alternate := br_mobile_alternate(user):
+            users.append(alternate)
+        rows = conn.execute(f"SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(users)})", users)
+        return [value for lid, pn in rows for value in (f"{lid}@lid", f"{pn}@{DEFAULT_USER_SERVER}")]
+    except sqlite3.Error:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def update_group(group_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
