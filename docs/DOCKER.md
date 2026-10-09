@@ -405,6 +405,9 @@ Clock claims have 60 seconds of skew leeway. A configured static bearer with
 exactly two dots is refused at startup in OAuth mode; use an opaque static secret.
 Discovery/JWKS fetches have an eight-second total budget, a 256 KiB response
 ceiling, no redirects or ambient credentials, and a five-minute key cache.
+Authorization and transcription JSON requests use `Accept-Encoding: identity`;
+compressed responses are refused before decoding to prevent expansion beyond
+their size budgets. Configure provider proxies to honor identity encoding.
 An unknown `kid` can refresh keys at most once per five-second cooldown window.
 Set `WHATSAPP_MCP_OAUTH_JWKS_URL` to override discovery when necessary.
 
@@ -535,7 +538,8 @@ the store or `WHATSAPP_MEDIA_ROOTS`, for both providers; escaping symlinks are d
 the probe, conversion and all uploads. The split also has a duration-scaled
 limit of `max(FFMPEG_TIMEOUT_S, 10 + duration_seconds / 10)`, capped by that
 remaining whole-file budget. The packaged ffmpeg supplies the duration probe.
-`scripts/smoke.sh` sends only an authenticated HEAD probe, without audio.
+`scripts/smoke.sh` sends only an authenticated HEAD probe, without audio; its
+two-second total deadline also covers response headers arriving slowly.
 401/403, 408, 429, 5xx and transport failures are backend outages and leave no
 `transcript_error`; a 400 file rejection parks that file for review.
 

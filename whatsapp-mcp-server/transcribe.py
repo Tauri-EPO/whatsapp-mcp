@@ -366,15 +366,19 @@ def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> 
 def probe_http_provider(config: WhisperConfig, key: str | None = None) -> bool:
     """Authenticated HEAD only; no audio or ambient credentials are sent."""
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    try:
-        with httpx.Client(trust_env=False, follow_redirects=False, timeout=STATUS_PROBE_TIMEOUT_S) as client:
-            with client.stream("HEAD", config.url or "", headers=headers) as response:
+
+    async def probe() -> bool:
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=STATUS_PROBE_TIMEOUT_S) as client:
+            async with client.stream("HEAD", config.url or "", headers=headers) as response:
                 return (
                     response.status_code not in (401, 403, 408, 429)
                     and response.status_code < 500
                     and not 300 <= response.status_code < 400
                 )
-    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+
+    try:
+        return asyncio.run(asyncio.wait_for(probe(), timeout=STATUS_PROBE_TIMEOUT_S))
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, TimeoutError):
         return False
 
 
@@ -506,7 +510,9 @@ async def _transcribe_http_request(source: Path, config: WhisperConfig, language
     if language and language != "auto":
         data["language"] = language
     key = os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY", "").strip()
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    headers = {"Accept-Encoding": "identity"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     try:
         async with httpx.AsyncClient(
             trust_env=False,
@@ -526,15 +532,17 @@ async def _transcribe_http_request(source: Path, config: WhisperConfig, language
                         raise BackendUnavailableError(f"HTTP transcription backend returned HTTP {status}")
                     if not 200 <= status < 300:
                         raise TranscriptionError(f"HTTP transcription backend rejected this file (HTTP {status})")
+                    if response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+                        raise BackendUnavailableError("HTTP transcription backend encoded response refused")
                     body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > HTTP_RESPONSE_LIMIT:
+                    async for chunk in response.aiter_raw():
+                        if len(body) + len(chunk) > HTTP_RESPONSE_LIMIT:
                             raise BackendUnavailableError("HTTP transcription backend response exceeds limits")
+                        body.extend(chunk)
                     payload = json.loads(body)
     except (httpx.HTTPError, httpx.InvalidURL):
         raise BackendUnavailableError("HTTP transcription backend request failed") from None
-    except ValueError:
+    except (ValueError, RecursionError):
         raise TranscriptionError("HTTP transcription backend returned invalid JSON") from None
     text = payload.get("text") if isinstance(payload, dict) else None
     if not isinstance(text, str) or not text.strip():

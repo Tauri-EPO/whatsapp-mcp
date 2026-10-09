@@ -209,7 +209,10 @@ class OAuthTokenVerifier(TokenVerifier):
     async def _fetch_json(self, url: str, data: dict[str, str] | None = None) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(
-                trust_env=False, follow_redirects=False, timeout=httpx.Timeout(5, connect=2)
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(5, connect=2),
+                headers={"Accept-Encoding": "identity"},
             ) as client:
                 kwargs: dict[str, Any] = {}
                 if data is not None:
@@ -217,16 +220,18 @@ class OAuthTokenVerifier(TokenVerifier):
                 async with client.stream("POST" if data is not None else "GET", url, **kwargs) as response:
                     if response.status_code != 200:
                         raise AuthorizationUnavailableError("Authorization service unavailable")
+                    if response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+                        raise AuthorizationUnavailableError("Encoded authorization response refused")
                     body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > MAX_JSON_BYTES:
+                    async for chunk in response.aiter_raw():
+                        if len(body) + len(chunk) > MAX_JSON_BYTES:
                             raise AuthorizationUnavailableError("Authorization response exceeds its limit")
+                        body.extend(chunk)
                     payload = json.loads(body)
                     if not isinstance(payload, dict):
                         raise AuthorizationUnavailableError("Invalid authorization response")
                     return payload
-        except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError, RecursionError):
             raise AuthorizationUnavailableError("Authorization service unavailable") from None
 
     async def _jwks(
@@ -577,7 +582,7 @@ class OAuthMiddleware:
                                 required.add(required_tool_scope(config, name))
                         elif isinstance(method, str) and method.startswith(("resources/", "prompts/")):
                             required.add(config.read_scope)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, RecursionError):
                     pass  # SDK supplies the protocol error
                 original_receive = receive
                 pending = [{"type": "http.request", "body": bytes(body), "more_body": False}]
