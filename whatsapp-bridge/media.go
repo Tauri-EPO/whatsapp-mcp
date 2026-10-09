@@ -297,7 +297,7 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		ctx, cancel := transferContext(b.ctx, ctx)
 		defer cancel()
 		if automaticCache(ctx) {
-			bounded, release, err := b.acquireMediaQuota(ctx, length)
+			bounded, release, err := b.acquireMediaQuota(context.WithValue(ctx, quotaPathKey{}, relPath), length)
 			if err != nil {
 				return 0, err
 			}
@@ -415,6 +415,11 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 var errMediaPath = errors.New("refusing media path")
 
 func checkMediaPathComponents(chatDir, filename string) error {
+	// A sender-controlled document ID can otherwise name another transfer's
+	// temporary leaf. Temporary files are never cached media or purge targets.
+	if strings.HasSuffix(filename, ".part") {
+		return fmt.Errorf("%w: temporary media leaf", errMediaPath)
+	}
 	for _, c := range []struct{ what, name string }{{"chat JID", chatDir}, {"message ID", filename}} {
 		if c.name == "" || c.name == "." || strings.Contains(c.name, "..") || strings.ContainsAny(c.name, `/\`) || strings.ContainsFunc(c.name, unicode.IsControl) {
 			return fmt.Errorf("%w: the %s does not name a single file inside the store directory", errMediaPath, c.what)

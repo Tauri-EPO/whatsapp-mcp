@@ -177,7 +177,7 @@ func TestStatusPurgePagesOrphansPolicyCLIAndOnce(t *testing.T) {
 		t.Fatalf("%d %+v", code, preview)
 	}
 	var out bytes.Buffer
-	if exit := purgeStatusCLI([]string{"--dry-run"}, &out); exit != 0 {
+	if exit := purgeStatusCLI([]string{"--dry-run"}, &out, io.Discard); exit != 0 {
 		t.Fatalf("CLI exit %d", exit)
 	}
 	var cli operatorMediaResult
@@ -206,7 +206,7 @@ func TestStatusPurgePagesOrphansPolicyCLIAndOnce(t *testing.T) {
 	if code, _ := mediaHTTPRequest(t, server, "POST", "/api/media/purge", `{"scope":"status","dry_run":false}`, purgeToken); code != 403 || !fileExists(keep) {
 		t.Fatal("tool deny bypassed")
 	}
-	if exit := purgeStatusCLI([]string{}, io.Discard); exit != 1 {
+	if exit := purgeStatusCLI([]string{}, io.Discard, io.Discard); exit != 1 {
 		t.Fatal("CLI tool deny bypassed")
 	}
 	settingsRequest(t, operator, "PATCH", `{"tools.deny":null}`)
@@ -308,10 +308,14 @@ func TestOperatorMediaRefusesSymlinksAndCraftedRows(t *testing.T) {
 	victim := seedOperatorMedia(t, b, "SAFE", purgeChat, "image", time.Hour, 19)
 	seedOperatorMedia(t, b, "../SAFE", purgeGroup, "image", time.Hour, 5)
 	linkChat := "status@broadcast"
+	collision, err := b.Store.MediaRow("SAFE", purgeChat)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := b.Store.StoreChat(linkChat, "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Store.StoreMessage(storedMessage{ID: "SAFE", ChatJID: linkChat, Sender: purgeChat, Timestamp: time.Now().UTC(), MediaType: "image"}); err != nil {
+	if err := b.Store.StoreMessage(storedMessage{ID: "SAFE", ChatJID: linkChat, Sender: purgeChat, Timestamp: collision.Timestamp, MediaType: "image"}); err != nil {
 		t.Fatal(err)
 	}
 	symlinkOrSkip(t, chatMediaRel(purgeChat), filepath.Join(storeDir(), linkChat))
@@ -424,7 +428,7 @@ func TestLocalQuotaOldestRuntimeTypesAndPause(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
-	if fileExists(old) || fileExists(newer) || !fileExists(image) || mediaLimit(ctx) != 60 {
+	if fileExists(old) || fileExists(newer) || !fileExists(image) || mediaLimit(ctx) != 1 {
 		t.Fatal("wrong eviction set or low water")
 	}
 	settingsRequest(t, server, "PATCH", `{"media.quota_bytes":30}`)
@@ -494,7 +498,7 @@ func TestLocalQuotaLeaseWaitHonorsContext(t *testing.T) {
 	b := newSettingsBridge(t)
 	b.RuntimeDefaults = nil
 	b.MediaQuotaBytes = 100
-	_, release, err := b.acquireMediaQuota(t.Context(), 1)
+	release, err := b.lockMediaQuota(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +542,7 @@ func TestLocalQuotaExpiredAutomaticTransferReleasesClientGate(t *testing.T) {
 		networkCalls <- struct{}{}
 		return 0, errors.New("expired quota waiter must never reach the network")
 	}
-	_, release, err := b.acquireMediaQuota(t.Context(), 1)
+	release, err := b.lockMediaQuota(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +686,7 @@ func TestStatusCLIRefusesHeldLockAndDoesNotChangeRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exit := purgeStatusCLI([]string{"--dry-run"}, io.Discard)
+	exit := purgeStatusCLI([]string{"--dry-run"}, io.Discard, io.Discard)
 	lock.Release()
 	if exit != 1 || !fileExists(file) {
 		t.Fatal("held store lock ignored")
@@ -691,7 +695,7 @@ func TestStatusCLIRefusesHeldLockAndDoesNotChangeRows(t *testing.T) {
 	if err := b.Store.db.QueryRow("SELECT group_concat(name) FROM sqlite_schema ORDER BY name").Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if exit := purgeStatusCLI([]string{"--dry-run"}, io.Discard); exit != 0 {
+	if exit := purgeStatusCLI([]string{"--dry-run"}, io.Discard, io.Discard); exit != 0 {
 		t.Fatal(exit)
 	}
 	var after string
@@ -700,5 +704,387 @@ func TestStatusCLIRefusesHeldLockAndDoesNotChangeRows(t *testing.T) {
 	}
 	if before != after || !fileExists(file) {
 		t.Fatal("dry run changed store")
+	}
+}
+
+func TestLocalQuotaSlowNetworkDoesNotBlockInboundImage(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.RuntimeDefaults = nil
+	b.MediaQuotaBytes = 10
+	b.MediaAutoDownload = true
+	b.Webhook = newWebhookSender("", true)
+	b.Webhook.url = "http://127.0.0.1:1"
+	queueCtx, queueCancel := context.WithCancel(b.ctx)
+	b.autoDownloads = newMediaJobQueue(queueCtx, 1, 20, b.runAutoDownload)
+	defer func() { queueCancel(); b.autoDownloads.wait() }()
+	seedOperatorMedia(t, b, "SLOW", purgeChat, "video", time.Minute, 8)
+	row, err := b.Store.MediaRow("SLOW", purgeChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := purgeOne(b.StoreRoot, row, false); !res.Purged {
+		t.Fatal(res)
+	}
+	entered, finish := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer func() { once.Do(func() { close(finish) }); b.mediaTransfers.wait() }()
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		close(entered)
+		<-finish
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, file whatsmeow.File) error {
+			_, err := file.Write([]byte("12345678"))
+			return err
+		})
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := b.DownloadMedia(withAutomaticCache(t.Context()), "SLOW", purgeChat)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("no real transfer admission")
+	}
+	msg := buildImageMessage(phonePN, phonePN, false, "caption")
+	msg.Info.ID = "NEXT"
+	msg.Message.ImageMessage.FileLength = proto.Uint64(3)
+	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/media")
+	msg.Message.ImageMessage.MediaKey = []byte("key")
+	msg.Message.ImageMessage.FileSHA256 = []byte("sha")
+	msg.Message.ImageMessage.FileEncSHA256 = []byte("enc")
+	handled := make(chan struct{})
+	go func() { b.handleMessage(msg); close(handled) }()
+	select {
+	case <-handled:
+	case <-time.After(500 * time.Millisecond):
+		once.Do(func() { close(finish) })
+		<-handled
+		t.Fatal("unrelated transfer blocked inbound processing")
+	}
+	if b.autoDownloads.queued() != 0 {
+		t.Fatal("paused image was requeued")
+	}
+	if b.metrics.mediaQuotaRefusals.Load() != 1 {
+		t.Fatal("no pause observed")
+	}
+	once.Do(func() { close(finish) })
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_, used, files := storeUsage(b.StoreRoot)
+	if used != 8 || files != 1 {
+		t.Fatalf("reservation publication bytes=%d files=%d", used, files)
+	}
+}
+
+func TestLocalQuotaConcurrentNetworkReservations(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.RuntimeDefaults = nil
+	b.MediaQuotaBytes = 10
+	for _, id := range []string{"FIRST", "SECOND", "THIRD"} {
+		seedOperatorMedia(t, b, id, purgeChat, "video", time.Minute, 4)
+		row, err := b.Store.MediaRow(id, purgeChat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := purgeOne(b.StoreRoot, row, false); !res.Purged {
+			t.Fatal(res)
+		}
+	}
+	entered := make(chan string, 3)
+	finish := make(chan struct{})
+	var once sync.Once
+	defer func() { once.Do(func() { close(finish) }); b.mediaTransfers.wait() }()
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		entered <- rel
+		<-finish
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, file whatsmeow.File) error { _, err := file.Write([]byte("1234")); return err })
+	}
+	results := make(chan error, 2)
+	for _, id := range []string{"FIRST", "SECOND"} {
+		go func() {
+			_, _, _, _, err := b.DownloadMedia(withAutomaticCache(t.Context()), id, purgeChat)
+			results <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("network transfer retained accounting lease")
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, _, _, _, err := b.DownloadMedia(withAutomaticCache(ctx), "THIRD", purgeChat); !errors.Is(err, errMediaQuota) {
+		t.Fatal("third transfer exceeded quota", err)
+	}
+	once.Do(func() { close(finish) })
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.mediaTransfers.wait()
+	_, used, files := storeUsage(b.StoreRoot)
+	if used != 8 || files != 2 {
+		t.Fatalf("overrun %d %d", used, files)
+	}
+	_, release, err := b.acquireMediaQuota(t.Context(), 2)
+	if err != nil {
+		t.Fatal("reservation leaked", err)
+	}
+	release()
+}
+
+func TestOperatorPurgeStreamsBeyondWriteTimeout(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		t.Run(fmt.Sprint(dry), func(t *testing.T) {
+			b := newSettingsBridge(t)
+			cached := seedOperatorMedia(t, b, "STREAM", purgeChat, "image", time.Hour, 4)
+			b.Store.db.SetMaxOpenConns(1)
+			conn, err := b.Store.db.Conn(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var once sync.Once
+			defer once.Do(func() { _ = conn.Close() })
+			server := httptest.NewUnstartedServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, operatorRoutes{mediaPurge: b.handleOperatorMediaPurge}, b.Log))
+			server.Config.WriteTimeout = 15 * time.Second
+			server.Start()
+			defer server.Close()
+			go func() { time.Sleep(16 * time.Second); once.Do(func() { _ = conn.Close() }) }()
+			code, result := mediaHTTPRequest(t, server, "POST", "/operator/v1/media/purge", fmt.Sprintf(`{"type":"all","dry_run":%t}`, dry), fakeOperatorToken)
+			if code != 200 || result["files"] != float64(1) || result["freed_bytes"] != float64(4) || len(result["progress"].([]any)) < 4 || fileExists(cached) != dry {
+				t.Fatal(code, result)
+			}
+		})
+	}
+}
+
+func TestStatusCLIDiagnosticsAndAudit(t *testing.T) {
+	b := newSettingsBridge(t)
+	seedOperatorMedia(t, b, "AUDIT", "status@broadcast", "image", time.Hour, 4)
+	var out, diagnostics bytes.Buffer
+	lock, err := acquireInstanceLock(instanceLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := purgeStatusCLI(nil, &out, &diagnostics)
+	lock.Release()
+	if exit != 1 || diagnostics.Len() == 0 || out.Len() != 0 {
+		t.Fatal("silent lock refusal")
+	}
+	for _, tc := range []struct{ key, value, reason string }{{readOnlyEnv, "true", "read-only"}, {denyToolsEnv, "purge_media", "disabled"}} {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+			out.Reset()
+			diagnostics.Reset()
+			if purgeStatusCLI(nil, &out, &diagnostics) != 1 || !strings.Contains(diagnostics.String(), tc.reason) {
+				t.Fatal(diagnostics.String())
+			}
+		})
+	}
+	out.Reset()
+	diagnostics.Reset()
+	if purgeStatusCLI(nil, &out, &diagnostics) != 0 || !strings.Contains(diagnostics.String(), "INFO") || !strings.Contains(diagnostics.String(), "freed_bytes=4") {
+		t.Fatal(diagnostics.String())
+	}
+	t.Setenv(storeDirEnv, t.TempDir())
+	out.Reset()
+	diagnostics.Reset()
+	if purgeStatusCLI(nil, &out, &diagnostics) != 1 || diagnostics.Len() == 0 {
+		t.Fatal("silent missing DB")
+	}
+}
+
+func TestStatusOnlyRetentionLogUsesStatusAge(t *testing.T) {
+	b := newSettingsBridge(t)
+	cached := seedOperatorMedia(t, b, "EXPIRED", "status@broadcast", "image", 96*time.Hour, 4)
+	age := 24 * time.Hour
+	b.StatusRetention = &age
+	b.MediaRetention = 0
+	var out bytes.Buffer
+	b.Log = newTextWriter("Bridge", "INFO", &out, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b.ctx = ctx
+	b.runMediaRetention()
+	if fileExists(cached) || !strings.Contains(out.String(), "status_age=24h0m0s") {
+		t.Fatal(out.String())
+	}
+}
+
+func TestOperatorPurgeKeepsCraftedPartLeaf(t *testing.T) {
+	b := newSettingsBridge(t)
+	stamp := time.Now().UTC().Truncate(time.Second)
+	if err := b.Store.StoreChat(purgeChat, "", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Store.StoreMessage(storedMessage{ID: "FLIGHT.part", ChatJID: purgeChat, Sender: purgeChat, Timestamp: stamp, MediaType: "document"}); err != nil {
+		t.Fatal(err)
+	}
+	leaf := mediaFileName("document", stamp, "FLIGHT", "") + ".part"
+	if err := b.StoreRoot.MkdirAll(chatMediaRel(purgeChat), storeDirMode); err != nil {
+		t.Fatal(err)
+	}
+	f, err := b.StoreRoot.Create(chatMediaRel(purgeChat) + "/" + leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.Write([]byte("in flight"))
+	_ = f.Close()
+	no := false
+	result, err := b.purgeOperatorMedia(t.Context(), operatorMediaPurge{Type: "all", DryRun: &no})
+	if err != nil || result.Files != 0 {
+		t.Fatal("crafted row deleted transfer temp", result, err)
+	}
+	if _, err := b.StoreRoot.Lstat(chatMediaRel(purgeChat) + "/" + leaf); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalQuotaSynchronousAccountingContentionFallsBack(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.RuntimeDefaults = nil
+	b.MediaQuotaBytes = 10
+	b.MediaAutoDownload = true
+	webhook, _ := captureWebhook(t)
+	b.Webhook = newWebhookSender("", true)
+	b.Webhook.url = webhook.URL
+	entered := make(chan struct{}, 1)
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		entered <- struct{}{}
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, file whatsmeow.File) error { _, err := file.Write([]byte("123")); return err })
+	}
+	release, err := b.lockMediaQuota(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	defer once.Do(release)
+	msg := buildImageMessage(phonePN, phonePN, false, "caption")
+	msg.Info.ID = "CONTENDED"
+	msg.Message.ImageMessage = &waE2E.ImageMessage{Caption: proto.String("caption"), URL: proto.String("https://example.invalid/media"), FileLength: proto.Uint64(3), MediaKey: []byte("key"), FileSHA256: []byte("sha"), FileEncSHA256: []byte("enc")}
+	done := make(chan struct{})
+	go func() { b.handleMessage(msg); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		once.Do(release)
+		<-done
+		t.Fatal("synchronous image waited on accounting")
+	}
+	if b.metrics.mediaQuotaRefusals.Load() != 0 {
+		t.Fatal("contention misclassified as quota pause")
+	}
+	once.Do(release)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("background fallback not consumed")
+	}
+	b.mediaTransfers.wait()
+	_, used, files := storeUsage(b.StoreRoot)
+	if used != 3 || files != 1 {
+		t.Fatal(used, files)
+	}
+}
+
+func TestLocalQuotaPauseLogIsRateLimited(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.RuntimeDefaults = nil
+	b.MediaQuotaBytes = 1
+	seedOperatorMedia(t, b, "FULL", purgeChat, "image", time.Hour, 1)
+	var out bytes.Buffer
+	b.Log = newTextWriter("Bridge", "INFO", &out, false)
+	for range 3 {
+		_, release, err := b.acquireMediaQuota(t.Context(), 1)
+		release()
+		if !errors.Is(err, errMediaQuota) {
+			t.Fatal(err)
+		}
+	}
+	if b.metrics.mediaQuotaRefusals.Load() != 3 || strings.Count(out.String(), "Automatic media caching paused") != 1 {
+		t.Fatal(out.String())
+	}
+}
+
+func TestCachedMediaWalkCancellationStopsBetweenFiles(t *testing.T) {
+	b := newSettingsBridge(t)
+	for i := range 600 {
+		seedOperatorMedia(t, b, fmt.Sprintf("WALK%04d", i), purgeChat, "image", time.Hour, 1)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	seen := 0
+	err := eachCachedMediaContext(ctx, b.StoreRoot, func(_ string, _ *cachedMedia) { seen++; cancel() })
+	if !errors.Is(err, context.Canceled) || seen != 1 {
+		t.Fatal("walk continued after cancellation", seen, err)
+	}
+}
+
+func TestStatusRESTStreamsBeyondClientReadTimeout(t *testing.T) {
+	b := newSettingsBridge(t)
+	cached := seedOperatorMedia(t, b, "RESTSTREAM", "status@broadcast", "image", time.Hour, 4)
+	b.Store.db.SetMaxOpenConns(1)
+	conn, err := b.Store.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	defer once.Do(func() { _ = conn.Close() })
+	b.RuntimeDefaults = nil
+	b.RESTAllowedHosts = "127.0.0.1"
+	server := httptest.NewServer(b.newRESTMux(8080, purgeToken))
+	defer server.Close()
+	go func() { time.Sleep(31 * time.Second); once.Do(func() { _ = conn.Close() }) }()
+	code, result := mediaHTTPRequest(t, server, "POST", "/api/media/purge", `{"scope":"status","dry_run":false}`, purgeToken)
+	if code != 200 || result["success"] != true || result["purged_bytes"] != float64(4) || len(result["progress"].([]any)) < 7 || fileExists(cached) {
+		t.Fatal(code, result)
+	}
+}
+
+// Explicitly invoked by the durable cross-language verification script; ordinary
+// Go gates skip the helper. Its REST handler, SQLite rows and cache are real.
+func TestStatusRESTStreamingMCPHelper(t *testing.T) {
+	if os.Getenv("WAMCP_TEST_STATUS_STREAM_MCP") != "1" {
+		return
+	}
+	b := newSettingsBridge(t)
+	b.RuntimeDefaults = nil
+	b.RESTAllowedHosts = "127.0.0.1"
+	cached := seedOperatorMedia(t, b, "MCPSTREAM", "status@broadcast", "image", time.Hour, 4)
+	b.Store.db.SetMaxOpenConns(1)
+	mux := b.newRESTMux(8080, purgeToken)
+	done := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := b.Store.db.Conn(r.Context())
+		if err != nil {
+			writeError(w, 503, "Test database unavailable")
+			return
+		}
+		timer := time.AfterFunc(31*time.Second, func() { _ = conn.Close() })
+		defer timer.Stop()
+		defer func() { _ = conn.Close() }()
+		mux.ServeHTTP(w, r)
+		done <- struct{}{}
+	}))
+	defer server.Close()
+	fmt.Printf("WAMCP_STREAM_URL=%s\n", server.URL)
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(40 * time.Second):
+			t.Fatal("MCP request did not finish")
+		}
+	}
+	if fileExists(cached) {
+		t.Fatal("real MCP purge retained the file")
+	}
+	var rows int
+	if err := b.Store.db.QueryRow("SELECT COUNT(*) FROM messages WHERE id='MCPSTREAM'").Scan(&rows); err != nil || rows != 1 {
+		t.Fatal("MCP purge changed rows", rows, err)
 	}
 }

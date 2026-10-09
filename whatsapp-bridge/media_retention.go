@@ -228,6 +228,10 @@ func (s *storeStats) invalidate() {
 // b.ctx is cancelled (Shutdown). b.MediaRetention <= 0 disables it.
 func (b *Bridge) runMediaRetention() {
 	maxAge := b.MediaRetention
+	statusAge := maxAge
+	if b.StatusRetention != nil {
+		statusAge = *b.StatusRetention
+	}
 	if maxAge <= 0 && (b.StatusRetention == nil || *b.StatusRetention <= 0) {
 		return
 	}
@@ -235,9 +239,9 @@ func (b *Bridge) runMediaRetention() {
 		removed, freed, failed := sweepMediaWithStatus(b.StoreRoot, maxAge, b.StatusRetention, time.Now())
 		b.storeStats.invalidate()
 		if removed > 0 || failed > 0 {
-			b.Log.Infof("Media retention: removed %d files (%d bytes) older than %s, %d failures", removed, freed, maxAge, failed)
+			b.Log.Infof("Media retention: removed %d files (%d bytes), chat_age=%s status_age=%s, %d failures", removed, freed, maxAge, statusAge, failed)
 		} else {
-			b.Log.Debugf("Media retention: nothing older than %s", maxAge)
+			b.Log.Debugf("Media retention: nothing expired, chat_age=%s status_age=%s", maxAge, statusAge)
 		}
 	}
 	sweep()

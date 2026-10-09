@@ -679,12 +679,27 @@ chat and tool restrictions, as export/settings do. Both endpoints require the
 separate operator token and normal Host/Origin, rate-limit and audit checks;
 they are absent from bridge REST and MCP.
 
+Purge responses stream a `progress` array with five-second heartbeats followed
+by the usual final result fields in the same JSON object, so long scans survive
+the listener's 15-second write timeout. A streaming failure adds `error`; clients
+must not treat partial progress as completed deletion. Disconnects cancel the
+scan, and the operator archive timeout bounds its lifetime. The REST/MCP status
+shortcut uses the same heartbeats to keep the bridge read timeout alive.
+Startup cleanup honors termination signals and leaves its marker pending after
+a canceled or unsuccessful attempt.
+
 These endpoints measure the current local layout through the canonical safe-cache
 helpers. Usage includes generated orphan files, with status as a disjoint type
 bucket; `by_type` sums to total bytes and `by_chat` is ordered and limited (1-100).
 There is no shared-object catalog, S3 backend or dedupe saving field yet (#649).
 Local eviction is off by default; selecting types deletes their oldest cached
 files down to the low-water target before admitting an automatic cache write.
+Automatic transfers reserve their declared plaintext length under a short accounting
+lease before any network work; unknown-length transfers reserve the available
+budget. Actual plaintext is capped at the reservation, which is released after
+publication or failure. Independent transfers run concurrently within the quota.
+Synchronous webhook images try accounting without waiting and queue only on
+contention; quota refusals are not queued.
 A full quota with no eligible bytes pauses automatic caching. On-demand downloads
 continue to cache locally, so they can exceed this automatic ceiling; #649 owns
 streaming without caching, S3 and dedupe-aware purge/eviction. Eviction counters

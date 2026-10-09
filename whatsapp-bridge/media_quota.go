@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,9 +19,48 @@ const mediaEvictTypesEnv = "WHATSAPP_MEDIA_QUOTA_EVICT_TYPES"
 const mediaEvictTargetEnv = "WHATSAPP_MEDIA_QUOTA_EVICT_TARGET_PERCENT"
 
 var errMediaQuota = errors.New("automatic media cache paused at local quota")
+var errMediaQuotaBusy = errors.New("automatic cache accounting busy")
 
 type automaticCacheKey struct{}
 type quotaBudgetKey struct{}
+type quotaTryKey struct{}
+type quotaPathKey struct{}
+type mediaQuotaReservation struct {
+	path  string
+	bytes uint64
+}
+
+func (b *Bridge) lockMediaQuota(ctx context.Context) (func(), error) {
+	b.mediaQuotaMu.Lock()
+	if b.mediaQuotaLease == nil {
+		b.mediaQuotaLease = make(chan struct{}, 1)
+	}
+	lease := b.mediaQuotaLease
+	b.mediaQuotaMu.Unlock()
+	if try, _ := ctx.Value(quotaTryKey{}).(bool); try {
+		select {
+		case lease <- struct{}{}:
+		default:
+			return nil, errMediaQuotaBusy
+		}
+	} else {
+		select {
+		case lease <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return func() { <-lease }, nil
+}
+
+func (b *Bridge) recordQuotaPause() {
+	b.metrics.mediaQuotaRefusals.Add(1)
+	now := time.Now().Unix()
+	previous := b.mediaQuotaLastPause.Load()
+	if now-previous >= 60 && b.mediaQuotaLastPause.CompareAndSwap(previous, now) {
+		b.Log.Infof("Automatic media caching paused at local quota")
+	}
+}
 
 func withAutomaticCache(ctx context.Context) context.Context {
 	return context.WithValue(ctx, automaticCacheKey{}, true)
@@ -146,22 +187,17 @@ func (b *Bridge) mediaQuotaSettings(ctx context.Context) (uint64, []string, int,
 	return snapshot.Settings["media.quota_bytes"].Value.(uint64), snapshot.Settings["media.quota_evict_types"].Value.([]string), snapshot.Settings["media.quota_evict_target_percent"].Value.(int), nil
 }
 
-// Serialize automatic cache publication while a quota is active. The lease is
-// owned by the detached transfer, including retry, never by its HTTP waiter.
+// Account and evict under a short lease, then reserve bytes before any network
+// work. The detached transfer owns its reservation through retries/publication;
+// its actual plaintext cannot exceed the reservation and release reconciles it
+// with the canonical filesystem on the next admission. Active paths are excluded
+// from that walk, preventing both double counting and eviction before release.
 // On-demand downloads keep the existing local behavior pending #649 streaming.
 func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (context.Context, func(), error) {
-	b.mediaQuotaMu.Lock()
-	if b.mediaQuotaLease == nil {
-		b.mediaQuotaLease = make(chan struct{}, 1)
+	release, err := b.lockMediaQuota(ctx)
+	if err != nil {
+		return ctx, func() {}, err
 	}
-	lease := b.mediaQuotaLease
-	b.mediaQuotaMu.Unlock()
-	select {
-	case lease <- struct{}{}:
-	case <-ctx.Done():
-		return ctx, func() {}, ctx.Err()
-	}
-	release := func() { <-lease }
 	if err := ctx.Err(); err != nil {
 		release()
 		return ctx, func() {}, err
@@ -181,18 +217,26 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 		return ctx, func() {}, errors.New("invalid eviction target")
 	}
 	if incoming > quota {
-		b.metrics.mediaQuotaRefusals.Add(1)
+		b.recordQuotaPause()
 		release()
 		return ctx, func() {}, errMediaQuota
 	}
 	var used uint64
+	active := map[string]bool{}
+	for reservation := range b.mediaQuotaReservations {
+		used += reservation.bytes
+		active[reservation.path] = true
+	}
 	type candidate struct {
 		chat, name, kind string
 		bytes            uint64
 		at               time.Time
 	}
 	var candidates []candidate
-	err = eachCachedMedia(b.StoreRoot, func(chat string, file *cachedMedia) {
+	err = eachCachedMediaContext(ctx, b.StoreRoot, func(chat string, file *cachedMedia) {
+		if active[path.Join(chat, file.name)] {
+			return
+		}
 		size := file.info.Size()
 		if size < 0 {
 			return
@@ -256,11 +300,14 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 		return ctx, func() {}, ctx.Err()
 	}
 	if used >= quota || incoming > quota-used || b.mediaQuotaNeedsLowWater.Load() {
-		b.metrics.mediaQuotaRefusals.Add(1)
+		b.recordQuotaPause()
 		release()
 		return ctx, func() {}, errMediaQuota
 	}
 	limit := quota - used
+	if incoming > 0 {
+		limit = min(limit, incoming)
+	}
 	if current := mediaLimit(ctx); current > 0 {
 		if limit < current {
 			ctx = context.WithValue(ctx, quotaBudgetKey{}, true)
@@ -269,7 +316,21 @@ func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (contex
 	} else {
 		ctx = context.WithValue(ctx, quotaBudgetKey{}, true)
 	}
-	return withMediaLimit(ctx, limit), release, nil
+	name, _ := ctx.Value(quotaPathKey{}).(string)
+	reservation := &mediaQuotaReservation{path: name, bytes: limit}
+	if b.mediaQuotaReservations == nil {
+		b.mediaQuotaReservations = map[*mediaQuotaReservation]bool{}
+	}
+	b.mediaQuotaReservations[reservation] = true
+	release()
+	var once sync.Once
+	return withMediaLimit(ctx, limit), func() {
+		once.Do(func() {
+			unlock, _ := b.lockMediaQuota(context.Background())
+			delete(b.mediaQuotaReservations, reservation)
+			unlock()
+		})
+	}, nil
 }
 
 func mediaQuotaLowWater(quota uint64, target int) uint64 {

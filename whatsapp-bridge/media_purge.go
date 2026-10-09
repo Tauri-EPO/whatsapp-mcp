@@ -15,6 +15,7 @@ package main
 // a missing field reports what would be removed and removes nothing.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -165,6 +166,10 @@ func (store *MessageStore) MediaRow(messageID, chatJID string) (mediaRow, error)
 // caller, never against the sender-declared SQL length. Rows are drained in bounded pages and the cursor is closed before callbacks,
 // so disk work never holds a database connection and fn may query the database.
 func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
+	return store.EachMediaRowMatchingContext(context.Background(), chatJID, before, after, mediaType, policy, maxScan, fn)
+}
+
+func (store *MessageStore) EachMediaRowMatchingContext(ctx context.Context, chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
 	clauses := []string{"media_type IN ('image','video','audio','document','sticker')"}
 	var args []any
 	if chatJID != "" {
@@ -190,7 +195,7 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 			pageClauses = append(pageClauses, "(timestamp, id, chat_jid) > (?, ?, ?)")
 			pageArgs = append(pageArgs, after.Timestamp, after.ID, after.Chat)
 		}
-		rows, err := store.db.Query(
+		rows, err := store.db.QueryContext(ctx,
 			`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, ''), CAST(timestamp AS TEXT) FROM messages WHERE `+strings.Join(pageClauses, " AND ")+ //nolint:gosec // Literal clauses and bound values only; the limit is fixed.
 				` ORDER BY timestamp ASC, id ASC, chat_jid ASC LIMIT 256`, pageArgs...)
 		if err != nil {
@@ -331,12 +336,9 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 				writeError(w, 400, "scope=status is a standalone purge shortcut")
 				return
 			}
-			result, err := b.purgeOperatorMedia(r.Context(), operatorMediaPurge{Type: "status", Chat: "status@broadcast", DryRun: req.DryRun, IncludeOrphans: req.IncludeOrphans})
-			if err != nil {
-				writeError(w, 503, "Status purge incomplete")
-				return
-			}
-			writeJSON(w, 200, map[string]any{"success": true, "dry_run": result.DryRun, "purged_files": result.Files, "purged_bytes": result.FreedBytes, "orphan_files": result.OrphanFiles, "orphan_bytes": result.OrphanBytes, "failed": result.Failed, "matched": result.Files, "truncated": false})
+			b.streamMediaPurge(w, r, operatorMediaPurge{Type: "status", Chat: "status@broadcast", DryRun: req.DryRun, IncludeOrphans: req.IncludeOrphans}, func(result operatorMediaResult, err error) any {
+				return map[string]any{"success": err == nil, "dry_run": result.DryRun, "purged_files": result.Files, "purged_bytes": result.FreedBytes, "orphan_files": result.OrphanFiles, "orphan_bytes": result.OrphanBytes, "failed": result.Failed, "matched": result.Files, "truncated": false}
+			})
 			return
 		}
 		if len(req.Items) > purgeMaxItems {

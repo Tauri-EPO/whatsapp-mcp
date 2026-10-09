@@ -3,6 +3,7 @@ package main
 // Local operator media maintenance. S3 and shared-object accounting await #649.
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
@@ -53,7 +54,7 @@ func (b *Bridge) handleOperatorMediaUsage(w http.ResponseWriter, r *http.Request
 	byType := map[string]int64{"image": 0, "video": 0, "audio": 0, "document": 0, "sticker": 0, "status": 0}
 	byChat := map[string]int64{}
 	var total int64
-	err := eachCachedMedia(b.StoreRoot, func(chat string, file *cachedMedia) {
+	err := eachCachedMediaContext(r.Context(), b.StoreRoot, func(chat string, file *cachedMedia) {
 		if r.Context().Err() != nil {
 			return
 		}
@@ -116,17 +117,91 @@ func (b *Bridge) handleOperatorMediaPurge(w http.ResponseWriter, r *http.Request
 		}
 		req.Chat = "status@broadcast"
 	}
-	result, err := b.purgeOperatorMedia(r.Context(), req)
-	if err != nil {
-		writeError(w, 503, "Media purge incomplete")
+	if b.StoreRoot == nil {
+		writeError(w, 503, "Media store unavailable")
 		return
 	}
-	writeJSON(w, 200, result)
+	b.streamMediaPurge(w, r, req, nil)
+}
+
+func (b *Bridge) streamMediaPurge(w http.ResponseWriter, r *http.Request, req operatorMediaPurge, final func(operatorMediaResult, error) any) {
+	if b.StoreRoot == nil {
+		writeError(w, 503, "Media store unavailable")
+		return
+	}
+	// Long scans outlive the listener's 15-second WriteTimeout. Stream a single
+	// JSON object with progress and the existing final result fields, refreshing
+	// only this response's deadline at each bounded heartbeat. No background job
+	// survives its HTTP request and a disconnected client cancels the scan.
+	ctx, cancel := context.WithTimeout(r.Context(), b.archiveTimeout())
+	defer cancel()
+	type completion struct {
+		result operatorMediaResult
+		err    error
+	}
+	updates := make(chan operatorMediaResult, 1)
+	done := make(chan completion, 1)
+	go func() {
+		result, err := b.purgeOperatorMediaProgress(ctx, req, func(result operatorMediaResult) {
+			select {
+			case updates <- result:
+			default:
+			}
+		})
+		done <- completion{result, err}
+	}()
+	controller := http.NewResponseController(w)
+	stop := context.AfterFunc(ctx, func() { _ = controller.SetWriteDeadline(time.Now()) })
+	defer stop()
+	w.Header().Set("Content-Type", "application/json")
+	write := func(value []byte) bool {
+		if err := controller.SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return false
+		}
+		if _, err := w.Write(value); err != nil {
+			return false
+		}
+		return controller.Flush() == nil
+	}
+	if !write([]byte(`{"progress":[{"files":0,"freed_bytes":0}`)) {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	latest := operatorMediaResult{DryRun: req.DryRun == nil || *req.DryRun}
+	for {
+		select {
+		case latest = <-updates:
+		case <-ticker.C:
+			data, _ := json.Marshal(latest)
+			if !write(append([]byte(","), data...)) {
+				return
+			}
+		case completed := <-done:
+			var payload any = completed.result
+			if final != nil {
+				payload = final(completed.result, completed.err)
+			}
+			data, _ := json.Marshal(payload)
+			ending := append([]byte("],"), data[1:len(data)-1]...)
+			if completed.err != nil {
+				ending = append(ending, []byte(`,"ok":false,"error":"Media purge incomplete"`)...)
+			}
+			_ = write(append(ending, '}'))
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // Rows are drained in pages before callbacks. There is no 500-file or uncached
 // row-tail cap here: one operator/status action walks all matching rows.
 func (b *Bridge) purgeOperatorMedia(ctx context.Context, req operatorMediaPurge) (operatorMediaResult, error) {
+	return b.purgeOperatorMediaProgress(ctx, req, nil)
+}
+
+func (b *Bridge) purgeOperatorMediaProgress(ctx context.Context, req operatorMediaPurge, progress func(operatorMediaResult)) (operatorMediaResult, error) {
 	result := operatorMediaResult{DryRun: req.DryRun == nil || *req.DryRun}
 	if b.StoreRoot == nil {
 		return result, errors.New("store unavailable")
@@ -143,7 +218,7 @@ func (b *Bridge) purgeOperatorMedia(ctx context.Context, req operatorMediaPurge)
 	// directories and user-created names can never enter the orphan deletion.
 	orphans := map[string]bool{}
 	if req.Type == "status" {
-		if err := eachCachedMedia(b.StoreRoot, func(chat string, file *cachedMedia) {
+		if err := eachCachedMediaContext(ctx, b.StoreRoot, func(chat string, file *cachedMedia) {
 			if chat == "status@broadcast" {
 				orphans[file.name] = true
 			}
@@ -153,7 +228,12 @@ func (b *Bridge) purgeOperatorMedia(ctx context.Context, req operatorMediaPurge)
 	}
 	finder := &cachedMediaFinder{root: b.StoreRoot}
 	defer finder.Close()
-	_, err := b.Store.EachMediaRowMatching(req.Chat, time.Time{}, purgeCursor{}, kind, chatPolicy{}, math.MaxInt, func(row mediaRow) bool {
+	examined := 0
+	_, err := b.Store.EachMediaRowMatchingContext(ctx, req.Chat, time.Time{}, purgeCursor{}, kind, chatPolicy{}, math.MaxInt, func(row mediaRow) bool {
+		examined++
+		if progress != nil && examined%256 == 0 {
+			progress(result)
+		}
 		if ctx.Err() != nil {
 			return false
 		}
@@ -210,7 +290,7 @@ func (b *Bridge) purgeOperatorMedia(ctx context.Context, req operatorMediaPurge)
 		return result, ctx.Err()
 	}
 	if req.Type == "status" {
-		err = eachCachedMedia(b.StoreRoot, func(chat string, file *cachedMedia) {
+		err = eachCachedMediaContext(ctx, b.StoreRoot, func(chat string, file *cachedMedia) {
 			if ctx.Err() != nil || chat != "status@broadcast" || !orphans[file.name] || (!before.IsZero() && !file.info.ModTime().Before(before)) {
 				return
 			}

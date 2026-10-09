@@ -67,7 +67,7 @@ func (b *Bridge) cacheOutboundMedia(ctx context.Context, sent sentMessage, media
 			defer cached.Close()
 			return cached.info.Size(), nil
 		}
-		_, release, err := b.acquireMediaQuota(b.ctx, uint64(len(data)))
+		_, release, err := b.acquireMediaQuota(context.WithValue(b.ctx, quotaPathKey{}, rel), uint64(len(data)))
 		if err != nil {
 			return 0, err
 		}

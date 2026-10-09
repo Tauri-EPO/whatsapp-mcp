@@ -13,12 +13,13 @@ package main
 // directory name with a narrower condition of its own.
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
-	"strings"
 	"time"
 )
 
@@ -208,34 +209,64 @@ func cachedMediaPath(root *os.Root, chatDir, mediaType string, timestamp time.Ti
 // It never descends into nested directories or follows a link. The directory
 // handle belongs to this walk; the callback may measure or remove the file.
 func eachCachedMedia(root *os.Root, fn func(chat string, file *cachedMedia)) error {
+	return eachCachedMediaContext(context.Background(), root, fn)
+}
+
+// Read bounded pages and stop between entries; canceled maintenance must not
+// keep walking unrelated directories or retain their pinned handles.
+func eachMediaDirEntry(ctx context.Context, root *os.Root, fn func(fs.DirEntry) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if root == nil {
 		return errors.New("store directory unavailable")
 	}
-	entries, err := fs.ReadDir(root.FS(), ".")
+	directory, err := root.Open(".")
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
+	defer func() { _ = directory.Close() }()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, err := directory.ReadDir(256)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := fn(entry); err != nil {
+				return err
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func eachCachedMediaContext(ctx context.Context, root *os.Root, fn func(chat string, file *cachedMedia)) error {
+	return eachMediaDirEntry(ctx, root, func(entry fs.DirEntry) error {
 		chat := entry.Name()
 		if !isChatDir(entry) || checkMediaPathComponents(chat, "probe") != nil {
-			continue
+			return nil
 		}
 		dir, err := openChatMediaDir(root, chat)
 		if err != nil {
-			continue
+			return nil
 		}
-		names, err := fs.ReadDir(dir.FS(), ".")
-		if err == nil {
-			for _, name := range names {
-				if checkMediaPathComponents(chat, name.Name()) != nil || strings.HasSuffix(name.Name(), ".part") || !generatedMediaName(name.Name()) {
-					continue
-				}
-				if info, err := statCachedMedia(dir, name.Name()); err == nil {
-					fn(chat, &cachedMedia{dir: dir, name: name.Name(), info: info})
-				}
+		defer func() { _ = dir.Close() }()
+		return eachMediaDirEntry(ctx, dir, func(name fs.DirEntry) error {
+			if checkMediaPathComponents(chat, name.Name()) != nil || !generatedMediaName(name.Name()) {
+				return nil
 			}
-		}
-		_ = dir.Close()
-	}
-	return nil
+			if info, err := statCachedMedia(dir, name.Name()); err == nil {
+				fn(chat, &cachedMedia{dir: dir, name: name.Name(), info: info})
+			}
+			return ctx.Err()
+		})
+	})
 }

@@ -68,7 +68,7 @@ func main() {
 func runCLI() int {
 	privateProcessUmask()
 	if len(os.Args) > 1 && os.Args[1] == "purge-status-media" {
-		return purgeStatusCLI(os.Args[2:], os.Stdout)
+		return purgeStatusCLI(os.Args[2:], os.Stdout, os.Stderr)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "snapshot" {
 		level := resolveLogLevel(os.Getenv(logLevelEnv))
@@ -294,9 +294,9 @@ func runBridge(cfg bridgeConfig) int {
 	}
 	bridge.StatusRetention = cfg.StatusRetention
 	if cfg.PurgeStatusOnStart {
-		if err := bridge.purgeStatusOnStart(); err != nil {
-			logger.Errorf("Status startup purge incomplete: %v", err)
-			return 1
+		logger.Infof("Status startup purge starting")
+		if err := bridge.purgeStatusOnStartContext(exitCtx); err != nil {
+			logger.Warnf("Status startup purge incomplete; retry next startup: %v", err)
 		}
 	}
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots

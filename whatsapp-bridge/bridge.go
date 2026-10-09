@@ -129,8 +129,10 @@ type Bridge struct {
 	MediaQuotaBytes         uint64
 	MediaEvictTypes         []string
 	mediaQuotaMu            sync.Mutex
-	mediaQuotaLease         chan struct{} // initialization guarded by mediaQuotaMu
-	mediaQuotaNeedsLowWater atomic.Bool   // health reads must not wait for a transfer lease
+	mediaQuotaLease         chan struct{}                   // initialization guarded by mediaQuotaMu
+	mediaQuotaReservations  map[*mediaQuotaReservation]bool // guarded by the accounting lease
+	mediaQuotaLastPause     atomic.Int64
+	mediaQuotaNeedsLowWater atomic.Bool // health reads must not wait for a transfer lease
 	StatusRetention         *time.Duration
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
 	Webhook *webhookSender
