@@ -225,11 +225,15 @@ func (p *operatorPairing) run() {
 				p.action.Unlock()
 				return
 			}
+			if p.b.operatorLogout.Load() {
+				p.action.Unlock()
+				break
+			}
 			if !first && p.paired() {
 				p.action.Unlock()
 				break
 			}
-			if !first {
+			if !first || (p.b.operatorRetiredClient.Load() != nil && p.b.operatorRetiredClient.Load() == p.b.currentClient()) {
 				p.client.Disconnect()
 				client, err := p.factory()
 				if err != nil {
@@ -347,7 +351,7 @@ func (p *operatorPairing) snapshot() operatorPairingState {
 	if state.StepExpiresAt != nil && !p.now().Before(*state.StepExpiresAt) {
 		state.Passkey, state.ConfirmationCode = nil, ""
 	}
-	if p.paired() {
+	if !p.b.operatorLogout.Load() && p.paired() {
 		state.State, state.QR, state.PairCode, state.Passkey, state.ConfirmationCode = "paired", nil, nil, nil, ""
 		if p.connected() {
 			state.State = "connected"
@@ -458,7 +462,7 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	p.mu.Lock()
-	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && !problem.restrictsAccount())
+	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccount())
 	p.mu.Unlock()
 	if active {
 		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")
@@ -474,6 +478,13 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 	if failed {
 		writeErrorCode(w, 503, "state_persistence_failed", "Saved connection restriction could not be cleared")
 		return
+	}
+	if p.b.operatorLogout.Load() {
+		if _, err := p.b.Store.db.Exec("DELETE FROM operator_state WHERE id=1"); err != nil {
+			writeErrorCode(w, 503, "state_persistence_failed", "Operator idle state could not be cleared")
+			return
+		}
+		p.b.operatorLogout.Store(false)
 	}
 	p.mu.Lock()
 	p.state.Generation++
@@ -600,5 +611,5 @@ func (p *operatorPairing) passkeyConfirm(w http.ResponseWriter, r *http.Request)
 }
 
 func (p *operatorPairing) routes() operatorRoutes {
-	return operatorRoutes{health: p.b.handleHealth(), ready: p.b.handleReady(), pairing: func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, p.snapshot()) }, code: p.code, restart: p.restart, passkeyResponse: p.passkeyResponse, passkeyConfirm: p.passkeyConfirm}
+	return operatorRoutes{health: p.b.handleHealth(), ready: p.b.handleReady(), pairing: func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, p.snapshot()) }, code: p.code, restart: p.restart, passkeyResponse: p.passkeyResponse, passkeyConfirm: p.passkeyConfirm, settings: p.b.handleRuntimeSettings, logout: p.logout}
 }

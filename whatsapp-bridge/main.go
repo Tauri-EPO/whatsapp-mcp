@@ -283,8 +283,16 @@ func runBridge(cfg bridgeConfig) int {
 	bridge.MediaRetention, bridge.MediaAutoDownloadStatus = cfg.MediaRetention, cfg.StatusMedia
 	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
 	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools
+	bridge.RuntimeDefaults = cfg.RuntimeDefaults
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)
+	// Install exit before exposing operator mutations on a paired device.
+	bridge.Exit = func(reason string, code int) {
+		logger.Errorf("%s", reason)
+		_ = messageStore.Close()
+		lock.Release()
+		os.Exit(code)
+	}
 	pairingOut := io.Writer(os.Stdout)
 	if !cfg.PairingStdout {
 		pairingOut = io.Discard
@@ -298,19 +306,17 @@ func runBridge(cfg bridgeConfig) int {
 			bridge.installClient(freshClient, false, reconnectChan)
 			return freshClient, nil
 		}, bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
+	}
+	if err := bridge.restoreOperatorIdle(); err != nil {
+		logger.Errorf("Failed to restore operator idle state")
+		return 1
+	}
+	if bridge.operatorPairing != nil {
 		bridge.operatorServer, err = startOperatorServer(cfg.Operator, bridge.operatorPairing.routes(), logger)
 		if err != nil {
 			logger.Errorf("Failed to start operator listener: %v", err)
 			return 1
 		}
-	}
-	// Unrecoverable conditions (LoggedOut, ClientOutdated) end the process here so
-	// the store is closed and the lock released before the supervisor restarts us.
-	bridge.Exit = func(reason string, code int) {
-		logger.Errorf("%s", reason)
-		_ = messageStore.Close()
-		lock.Release()
-		os.Exit(code)
 	}
 	logger.Infof("Allowed media roots: %v", bridge.MediaRoots)
 
@@ -333,7 +339,7 @@ func runBridge(cfg bridgeConfig) int {
 	go bridge.runGroupRosterSync()
 	bridge.startSessionKeepalive()
 
-	if !bridge.isPaired() {
+	if !bridge.isPaired() && !bridge.operatorLogout.Load() {
 		bridge.notifyConnection("pairing_required", "unpaired", true, false)
 	}
 	if bridge.operatorPairing != nil {
@@ -344,7 +350,7 @@ func runBridge(cfg bridgeConfig) int {
 	// deadline; a rotated-code timeout starts the next attempt at once
 	// (pairing.go). The signal context aborts pairing while the bridge lifecycle
 	// remains alive until Shutdown drains accepted REST requests.
-	if bridge.operatorPairing == nil {
+	if bridge.operatorPairing == nil && !bridge.operatorLogout.Load() {
 		if err := connectOrPair(exitCtx, client, bridge.isPaired(), pairingOptions{
 			attempts:          3,
 			attemptTimeout:    5 * time.Minute,

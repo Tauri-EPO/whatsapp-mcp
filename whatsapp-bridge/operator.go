@@ -17,6 +17,7 @@ import (
 type operatorRoutes struct {
 	health, ready, pairing                         http.HandlerFunc
 	code, restart, passkeyResponse, passkeyConfirm http.HandlerFunc
+	settings, logout                               http.HandlerFunc
 }
 
 type operatorBucket struct {
@@ -82,7 +83,8 @@ func operatorOriginAllowed(r *http.Request) bool {
 
 type operatorStatusWriter struct {
 	http.ResponseWriter
-	status int
+	status  int
+	onFlush func()
 }
 
 func (w *operatorStatusWriter) WriteHeader(status int) {
@@ -96,6 +98,18 @@ func (w *operatorStatusWriter) Write(body []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(body)
+}
+
+func (w *operatorStatusWriter) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	if w.onFlush != nil {
+		w.onFlush()
+	}
 }
 
 func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.Logger) http.Handler {
@@ -112,9 +126,10 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		{"health", "GET", routes.health}, {"ready", "GET", routes.ready}, {"pairing", "GET", routes.pairing},
 		{"pairing/code", "POST", routes.code}, {"pairing/restart", "POST", routes.restart},
 		{"pairing/passkey/response", "POST", routes.passkeyResponse}, {"pairing/passkey/confirm", "POST", routes.passkeyConfirm},
+		{"settings", "", routes.settings}, {"logout", "POST", routes.logout},
 	} {
 		path := "/operator/v1/" + route.name
-		if route.method == http.MethodPost {
+		if route.method == http.MethodPost || route.name == "settings" {
 			mutations[path] = true
 		}
 		handler := route.handler
@@ -123,7 +138,11 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 				writeErrorCode(w, http.StatusServiceUnavailable, "operator_unavailable", "Operator pairing controller unavailable")
 			}
 		}
-		mux.HandleFunc(path, requireMethod(route.method, handler))
+		if route.method == "" {
+			mux.HandleFunc(path, handler)
+		} else {
+			mux.HandleFunc(path, requireMethod(route.method, handler))
+		}
 	}
 	peers, token := newOperatorLimiter(120), newOperatorLimiter(60)
 	limit := func(w http.ResponseWriter, delay int) {
@@ -151,18 +170,26 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if r.Method == http.MethodPost && mutations[r.URL.Path] {
-			defer func() {
+		if (r.Method == http.MethodPost || r.Method == http.MethodPatch) && mutations[r.URL.Path] {
+			audited := false
+			audit := func() {
+				if audited {
+					return
+				}
+				audited = true
 				status := out.status
 				if status == 0 {
 					status = http.StatusInternalServerError
 				}
 				if status == 401 || status == 403 || status == 429 {
-					logger.Debugf("Operator POST %s peer=%s outcome=%d", r.URL.Path, peer, status)
+					logger.Debugf("Operator %s %s peer=%s outcome=%d", r.Method, r.URL.Path, peer, status)
 				} else {
-					logger.Infof("Operator POST %s peer=%s outcome=%d", r.URL.Path, peer, status)
+					logger.Infof("Operator %s %s peer=%s outcome=%d", r.Method, r.URL.Path, peer, status)
 				}
-			}()
+			}
+			defer audit()
+			// Logout can os.Exit after flushing, before the middleware returns.
+			out.onFlush = audit
 		}
 		if delay := peers.take(peer); delay != 0 {
 			limit(out, delay)

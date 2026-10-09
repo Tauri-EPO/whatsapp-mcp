@@ -254,11 +254,44 @@ this override. SDK DEBUG is suppressed while the operator is enabled; bridge
 and database DEBUG remain available. Explicit stdout opt-in is for trusted
 console operators only.
 
-Logout, runtime settings, transcription usage and MCP admin forwarding remain
-separate work tracked in #643/#644/#637/#638. A private authenticated pairing
+Operator `GET/PATCH /operator/v1/settings` changes `tools.allow`, `tools.deny`
+and `transcription.ingest_chats` without a restart. See the precedence and
+atomic PATCH contract in [Runtime overrides](CONFIGURATION.md#runtime-overrides).
+Transcription caps and send limits remain tracked in #637/#635. A private authenticated pairing
 response reports a bounded `failure_reason` after a passkey failure; health,
 metrics and INFO never expose that text. Real passkey eligibility and a native
 WhatsApp authenticator still need the live verification tracked in #487/#647.
+
+## Removing an instance
+
+Unlink the linked device before deleting its store volume. From a client on
+the private operator network, with the separate secret in `OPERATOR_TOKEN`:
+
+```bash
+scripts/operator-logout.sh http://127.0.0.1:8090 idle
+```
+
+The helper calls `POST /operator/v1/logout` with `{"after":"idle"}`. A native
+client may also send that JSON directly with the operator bearer token.
+`after` defaults to `exit`: the bridge flushes the response and exits 3 for the
+supervisor to restart into pairing. `idle` leaves it serving health/operator
+routes with `logged_out_by_operator`, no QR or automatic pairing; this state
+survives a process restart and is cleared only by `POST pairing/restart`.
+The operator token works under `WHATSAPP_READ_ONLY`; data-plane tokens do not.
+Unpaired devices return 409 without contacting WhatsApp.
+
+Response: `{"server_unlinked":true,"local_session_wiped":true}`. Unlink is
+bounded to five seconds, followed by an independent five-second local wipe,
+even if the server is offline or the caller disconnects. A server failure
+reports `server_unlinked:false`; retry removal on the phone when needed.
+A local wipe failure returns 500 with `local_session_wiped:false` and keeps
+the instance parked: resolve that failure before removing storage. A
+successful wipe emits connection `logged_out` with `reason:"operator"`.
+
+After a successful local wipe, stop the stack and remove its instance volume
+(or let your stack manager remove it). Existing backups still contain old
+session keys; unlink does not erase those backups. No logout/settings route
+is exposed on bridge REST or MCP, and neither is an MCP tool.
 
 ## Configuration
 

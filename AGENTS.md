@@ -59,6 +59,8 @@ whatsapp-mcp/
 │   ├── operator_config.go      # bounded operator configuration, token-file checks and single-interface bind
 │   ├── operator_probe.go        # credential-free argv/output for the operator smoke probe
 │   ├── operator_pairing.go     # HTTP pairing state, QR/code, explicit restart and passkey actions
+│   ├── operator_logout.go      # bounded operator unlink, local session wipe and durable idle state
+│   ├── runtime_settings.go     # operator GET/PATCH, registry and bridge-owned atomic overrides
 │   ├── runtime_client.go      # atomic client handoff, refreshed REST handlers and retired-event filtering
 │   ├── connection_problem.go   # classified connection failures, persisted ban expiry and dial blocking
 │   ├── connection_events.go    # opt-in safe connection webhooks with debounced disconnection
@@ -162,6 +164,7 @@ whatsapp-mcp/
 │   ├── http_upload.py          # POST /upload: bounded raw-body HTTP uploads, sent by upload_id, one-hour TTL
 │   ├── chat_policy.py          # WHATSAPP_ALLOWED_CHATS for reads and writes
 │   ├── tool_policy.py          # WHATSAPP_READ_ONLY / _ALLOW_TOOLS / _DENY_TOOLS: hides + refuses tools
+│   ├── runtime_settings.py     # read-only runtime snapshot and shared ingest chat filter
 │   ├── untrusted.py            # @untrusted_content: the third-party-data sentence, name sanitisation, WHATSAPP_WRAP_UNTRUSTED
 │   ├── endpoint_cert.py        # WHATSAPP_PUBLIC_URL: TLS expiry of the published endpoint, cached
 │   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
@@ -377,6 +380,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)* | MCP-server-only: background thread that transcribes inbound voice notes as they arrive (`transcribe_worker.py`) instead of waiting for an agent to call `transcribe_audio`. Reads `messages.db`, writes the same `transcript` / `transcript_lang` / `transcript_backend` notes into `notes.db`, idempotent by sha256, concurrency one. Costs CPU on this machine; with no whisper backend configured it stays off with a warning, and so it does when the tool policy does not offer `transcribe_audio` (a policy that hides `download_media` only turns the fetch path off). The status feed (`status@broadcast`) is not walked: its voice notes are neither fetched nor transcribed in the background, whatever `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` says, and `coverage().audio` leaves them out (issue #447). Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300` | Seconds between batches (values below 5 are raised to 5) |
+| `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` preserves the existing audio scope; `direct` walks phone/LID one-to-one chats only. Runtime key `transcription.ingest_chats` overrides it through GET/PATCH `/operator/v1/settings`, stored in bridge-owned `messages.db`; worker and coverage share the filter. Set for both processes. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10` | Voice notes transcribed per batch (capped at 200). A file the backend cannot read gets a `transcript_error` note and is not tried again until that note is cleared; a backend that cannot be reached at all (`BackendUnavailableError`: refused, 502/503/504, a misrouted `WHISPER_URL`, no binary or model) writes no note, three of those in a row end the round with a warning, and the notes an older build wrote for such an outage are cleared when the worker starts |
 | `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)* | Let the ingest worker ask the bridge (`/api/download`, the path `transcribe_audio` uses) for audio whose bytes are not cached, instead of skipping it — what an archive with `WHATSAPP_MEDIA_AUTODOWNLOAD=false` or a retention sweep needs. `TRANSCRIBE_ON_INGEST_BATCH` bounds the attempts, failures included, and the downloaded bytes stay in the store like any other download. A file the bridge cannot send this time is skipped without a note (the next round retries it); three failures in a row end the fetching for that round. A file the bridge answers `media_unavailable` for (the sender's phone was asked to re-upload and said the media is gone, or the row carries no CDN fields to download with) gets a dated `media_unavailable` note, leaves the work list for good and costs no strike (`coverage().audio.unavailable`). An unsafe identity gets a per-message `media_refused` record in `notes.db` (`coverage().audio.refused`), clearable with `clear_media_refusal` or a successful fetch; other copies remain eligible. Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `FFMPEG_TIMEOUT_S` | `120` | Timeout for each ffmpeg conversion (voice-note encode in `audio.py`, 16 kHz WAV prep in `transcribe.py`) |
@@ -384,6 +388,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`) are documented in `.env.example` and `docs/DOCKER.md`. The whisper server is not part of the compose file: `WHISPER_URL` names one the operator runs (`docs/DOCKER.md`, "Voice-note transcription").
 
 When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
+
+Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny` and `transcription.ingest_chats` are read from `messages.db` before each operation, with runtime > env > default precedence. Operator `GET/PATCH /operator/v1/settings` and `POST /operator/v1/logout` require the private operator token, including under read-only. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
 
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 

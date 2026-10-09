@@ -123,6 +123,11 @@ func (b *Bridge) runSessionKeepalive(lastBlip time.Time, reason string) {
 			return
 		}
 		send = func(ctx context.Context, presence types.Presence) error {
+			b.clientGate.RLock()
+			defer b.clientGate.RUnlock()
+			if b.operatorLogout.Load() {
+				return errors.New("device logged out by operator")
+			}
 			return b.currentClient().SendPresence(ctx, presence)
 		}
 	}

@@ -46,7 +46,7 @@ func TestOperatorHTTPAuthenticatesAndHasNoDataPlaneRoutes(t *testing.T) {
 		{"/operator/v1/health", "", 401}, {"/operator/v1/health", "fake-data-plane-token-0123456789abcdef", 401},
 		{"/operator/v1/health", fakeOperatorToken, 200}, {"/operator/v1/ready", fakeOperatorToken, 503},
 		{"/operator/v1/pairing", fakeOperatorToken, 200}, {"/api/send", fakeOperatorToken, 404}, {"/api/download", fakeOperatorToken, 404},
-		{"/operator/v1/logout", fakeOperatorToken, 404}, {"/operator/v1/settings", fakeOperatorToken, 404}, {"/operator/v1/transcription/usage", fakeOperatorToken, 404},
+		{"/operator/v1/logout", fakeOperatorToken, 405}, {"/operator/v1/settings", fakeOperatorToken, 503}, {"/operator/v1/transcription/usage", fakeOperatorToken, 404},
 	} {
 		req, _ := http.NewRequest("GET", server.URL+tc.path, nil)
 		if tc.token != "" {

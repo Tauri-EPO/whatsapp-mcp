@@ -75,7 +75,14 @@ type Bridge struct {
 	// Tools refuses the mutating endpoints whose MCP tools are not allowed
 	// (WHATSAPP_ALLOW_TOOLS / WHATSAPP_DENY_TOOLS, tool_policy.go). Zero value =
 	// unrestricted; main() parses it and refuses to start on an unknown name.
-	Tools toolPolicy
+	Tools                 toolPolicy
+	RuntimeDefaults       map[string]runtimeSetting
+	settingsMu            sync.Mutex
+	operatorLogout        atomic.Bool
+	operatorSessionWiped  atomic.Bool
+	operatorRetiredClient atomic.Pointer[whatsmeow.Client]
+	logoutClient          func(context.Context) error
+	wipeSession           func(context.Context) error
 	// PollVoteDecrypt decodes PollUpdateMessage payloads; nil = votes are skipped.
 	PollVoteDecrypt pollVoteDecrypter
 	// DownloadMedia fetches media for a stored message (defaults to downloadMedia).

@@ -85,6 +85,7 @@ services:
       # select the endpoints those tools call (403 on the rest). Same values for
       # both services.
       WHATSAPP_ALLOW_TOOLS: ${WHATSAPP_ALLOW_TOOLS:-}
+      TRANSCRIBE_ON_INGEST_CHATS: ${TRANSCRIBE_ON_INGEST_CHATS:-all}
       WHATSAPP_DENY_TOOLS: ${WHATSAPP_DENY_TOOLS:-}
       # Webhooks are off by default in the container: the upstream default URL
       # points at localhost:8769, which is nothing inside this namespace.
@@ -172,6 +173,7 @@ services:
       # Background transcription of inbound voice notes as they arrive. Off by
       # default: it spends this container's CPU on whisper. Needs WHISPER_URL.
       TRANSCRIBE_ON_INGEST: ${TRANSCRIBE_ON_INGEST:-}
+      TRANSCRIBE_ON_INGEST_CHATS: ${TRANSCRIBE_ON_INGEST_CHATS:-all}
       TRANSCRIBE_ON_INGEST_INTERVAL_S: ${TRANSCRIBE_ON_INGEST_INTERVAL_S:-}
       TRANSCRIBE_ON_INGEST_BATCH: ${TRANSCRIBE_ON_INGEST_BATCH:-}
       # Let that worker download uncached audio from the bridge (auto-download

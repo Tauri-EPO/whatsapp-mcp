@@ -196,6 +196,10 @@ func (b *Bridge) clearConnectionProblemLocked() {
 
 func (b *Bridge) setPairingState(state string) {
 	b.connectionMu.Lock()
+	if b.operatorLogout.Load() {
+		b.connectionMu.Unlock()
+		return // A cancelled pairing attempt cannot reopen operator idle.
+	}
 	b.pairingState = state
 	b.connectionChangedLocked()
 	b.connectionMu.Unlock()

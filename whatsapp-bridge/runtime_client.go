@@ -75,9 +75,14 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 }
 
 func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, reconnect chan bool) {
+	// Disconnect may wait for SDK callbacks. Retired callbacks cannot wait on
+	// the exclusive logout gate held by that same Disconnect.
+	if b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
+		return
+	}
 	b.clientGate.RLock()
 	defer b.clientGate.RUnlock()
-	if b.currentClient() != client {
+	if b.currentClient() != client || b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
 		return
 	} // Ignore a retired client's late events.
 	switch evt.(type) {
@@ -94,6 +99,11 @@ func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, re
 
 func (b *Bridge) bindRuntimeClient() {
 	b.Connect = func() error {
+		b.clientGate.RLock()
+		defer b.clientGate.RUnlock()
+		if b.operatorLogout.Load() {
+			return errors.New("device logged out by operator")
+		}
 		if b.operatorPairing != nil && !b.isPaired() {
 			return errors.New("unpaired client requires the pairing controller")
 		}

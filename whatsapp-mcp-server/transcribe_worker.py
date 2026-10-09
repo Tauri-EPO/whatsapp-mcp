@@ -72,7 +72,16 @@ import media_notes
 import whatsapp
 from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
-from tool_policy import ALLOW_TOOLS_ENV, DENY_TOOLS_ENV, DOWNLOAD_TOOL, load_tool_policy, parse_bool_env
+from runtime_settings import INGEST_CHATS_ENV, ingest_chat_clause, parse_ingest_chats
+from tool_policy import (
+    ALLOW_TOOLS_ENV,
+    DENY_TOOLS_ENV,
+    DOWNLOAD_TOOL,
+    active_policy,
+    load_tool_policy,
+    parse_bool_env,
+    runtime_policy_enabled,
+)
 from transcribe import BackendUnavailableError, TranscriptionError, load_config, transcribe_file
 from whatsapp import CHAT_POLICY
 
@@ -210,6 +219,7 @@ def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
     """Read the TRANSCRIBE_ON_INGEST_* variables; an unreadable value is an error."""
     source: Mapping[str, str] = os.environ if env is None else env
     enabled = parse_bool_env(source.get(ENABLED_ENV), ENABLED_ENV)
+    parse_ingest_chats(source.get(INGEST_CHATS_ENV))
     return IngestConfig(
         enabled=enabled,
         interval_s=_parse_interval(source.get(INTERVAL_ENV)),
@@ -294,6 +304,7 @@ def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]
             "m.deleted_at IS NULL",
             f"m.chat_jid <> '{whatsapp.STATUS_BROADCAST_JID}'",  # a module constant, never user input
             handled_clause,
+            ingest_chat_clause("m.chat_jid"),
         ]
         params: list[Any] = list(handled_params)
         if after is not None:
@@ -627,6 +638,10 @@ def run_once(
     transcribe = transcribe or _default_transcribe
     started = time.monotonic()
     try:
+        policy = active_policy() if runtime_policy_enabled() else load_tool_policy()
+        if not policy.allows(TRANSCRIBE_TOOL):
+            return BatchResult(0, 0, 0, position=position)
+        fetch = fetch and policy.allows(DOWNLOAD_TOOL)
         selection = find_pending(batch, fetch=fetch, download=download, position=position)
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
@@ -637,6 +652,12 @@ def run_once(
     outages = 0  # consecutive; any answer from the backend clears them
     stopped = False  # ... and MAX_OUTAGE_SKIPS of them ended the round early
     for candidate in pending:
+        try:
+            if runtime_policy_enabled() and not active_policy().allows(TRANSCRIBE_TOOL):
+                return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+        except ToolError:
+            logger.warning("transcribe_on_ingest: runtime policy unavailable; round paused")
+            return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         try:
             result = transcribe(candidate.path)
             text = str(result.get("text") or "").strip()
@@ -754,15 +775,20 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         return None
     policy = load_tool_policy(env)
     if not policy.allows(TRANSCRIBE_TOOL):
+        behavior = (
+            "the worker waits for a runtime policy change" if runtime_policy_enabled() else "the worker stays off"
+        )
         logger.warning(
-            "%s=1 but %s / %s do not offer %s; the worker stays off (list %s to keep it running)",
+            "%s=1 but %s / %s do not offer %s; %s (list %s to keep it running)",
             ENABLED_ENV,
             ALLOW_TOOLS_ENV,
             DENY_TOOLS_ENV,
             TRANSCRIBE_TOOL,
+            behavior,
             TRANSCRIBE_TOOL,
         )
-        return None
+        if not runtime_policy_enabled():
+            return None
     if config.fetch and not policy.allows(DOWNLOAD_TOOL):
         logger.warning(
             "%s=1 but %s / %s do not offer %s; the worker transcribes cached audio only (list %s to fetch)",
@@ -772,7 +798,8 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
             DOWNLOAD_TOOL,
             DOWNLOAD_TOOL,
         )
-        config = replace(config, fetch=False)
+        if not runtime_policy_enabled():
+            config = replace(config, fetch=False)
     if load_config(env).backend is None:
         logger.warning(
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV

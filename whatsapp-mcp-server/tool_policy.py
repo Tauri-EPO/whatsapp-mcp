@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import functools
 import os
+import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -165,12 +166,15 @@ def load_tool_policy(env: Mapping[str, str] | None = None) -> ToolPolicy:
 
 
 _active: ToolPolicy | None = None
+_runtime = False
+_runtime_known: frozenset[str] = frozenset()
 
 
 def set_active_policy(policy: ToolPolicy | None) -> None:
     """Install the policy the call-time guard checks (None = resolve from env again)."""
-    global _active
+    global _active, _runtime
     _active = policy
+    _runtime = False
 
 
 def active_policy() -> ToolPolicy:
@@ -186,7 +190,35 @@ def active_policy() -> ToolPolicy:
             _active = load_tool_policy()
         except ValueError:
             _active = ToolPolicy(read_only=True)
+    if _runtime:
+        import runtime_settings
+
+        try:
+            settings = runtime_settings.snapshot(require_store=True)["settings"]
+            policy = ToolPolicy(
+                read_only=_active.read_only,
+                allow=frozenset(settings["tools.allow"]["value"]),
+                deny=frozenset(settings["tools.deny"]["value"]),
+            )
+            policy.validate(_runtime_known)
+            return policy
+        except (OSError, ValueError, sqlite3.Error):
+            raise ToolError("denied", "Runtime tool policy unavailable") from None
     return _active
+
+
+def install_runtime_tool_policy(server: Any, policy: ToolPolicy) -> None:
+    """Retain registered tools so runtime clears can restore their visibility."""
+    global _runtime, _runtime_known
+    set_active_policy(policy)
+    _runtime_known = registered_tool_names(server)
+    policy.validate(_runtime_known)
+    _runtime = True
+    server.runtime_tool_policy = True
+
+
+def runtime_policy_enabled() -> bool:
+    return _runtime
 
 
 def offers_download() -> bool:

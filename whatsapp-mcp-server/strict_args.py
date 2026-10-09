@@ -30,6 +30,7 @@ from referencing.exceptions import Unresolvable
 
 from errors import ERROR_CODES, ToolError, error, structured_errors, tool_error_result
 from observability import mcp_metrics_owned, metrics
+from tool_policy import active_policy
 
 logger = logging.getLogger("whatsapp_mcp")
 
@@ -84,6 +85,15 @@ def _schema_compatible_error(tool: Tool, result: CallToolResult) -> CallToolResu
 class StrictArgumentServer(MCPServer[Any]):
     """Keep tool failures readable across clients with different schema checks."""
 
+    runtime_tool_policy = False
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        if self.runtime_tool_policy:
+            policy = active_policy()
+            tools = [tool for tool in tools if policy.allows(tool.name)]
+        return tools
+
     def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         super().add_tool(structured_errors(fn), *args, **kwargs)
 
@@ -124,6 +134,13 @@ class StrictArgumentServer(MCPServer[Any]):
     ) -> CallToolResult | InputRequiredResult:
         if tool is None:
             return await super().call_tool(name, arguments, context)
+        if self.runtime_tool_policy:
+            try:
+                policy = active_policy()
+                if not policy.allows(name):
+                    return tool_error_result(ToolError("denied", policy.denial_message(name)).to_dict())
+            except ToolError as exc:
+                return tool_error_result(exc.to_dict())
         declared = declared_arguments(tool)
         unknown = sorted(set(arguments) - declared)
         if unknown:
