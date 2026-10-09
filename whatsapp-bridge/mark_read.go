@@ -178,7 +178,7 @@ func markListedRead(w http.ResponseWriter, r *http.Request, deps markReadDeps, r
 
 	ctx, cancel := requestContext(r, actionDeadline)
 	defer cancel()
-	if deps.allowSend != nil && !deps.allowSend(w, r, receiptChat.String()) {
+	if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(ctx), receiptChat.String()) {
 		return
 	}
 	if err := deps.markRead(ctx, messageIDs, readAt, receiptChat, receiptSender); err != nil {
@@ -286,7 +286,7 @@ func markWholeChatRead(w http.ResponseWriter, r *http.Request, deps markReadDeps
 		for start := 0; start < len(group.ids); start += markReadBatch {
 			end := min(start+markReadBatch, len(group.ids))
 			chunk := group.ids[start:end]
-			if deps.allowSend != nil && !deps.allowSend(w, r, receiptChat.String()) {
+			if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(ctx), receiptChat.String()) {
 				// A refusal can follow completed batches. Preserve their safe
 				// prefix so the next call cannot spend its budget resending them.
 				persistRefusedReceiptProgress(deps, req.ChatJID, pending, acked, overflow)

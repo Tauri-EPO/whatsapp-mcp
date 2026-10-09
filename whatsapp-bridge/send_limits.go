@@ -49,6 +49,23 @@ type sendState struct {
 	rate, refill, last int64
 }
 
+type sendReservationFailure struct {
+	cause         error
+	limitsEnabled bool
+}
+
+func (e *sendReservationFailure) Error() string { return e.cause.Error() }
+func (e *sendReservationFailure) Unwrap() error { return e.cause }
+
+func sendLimitsEnabled(snapshot runtimeSettingsSnapshot) bool {
+	for _, key := range []string{"send.rate_per_minute", "send.rate_per_day", "send.new_chats_per_day", "send.min_interval_ms"} {
+		if setting, ok := snapshot.Settings[key]; ok && setting.Value.(int64) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *Bridge) sendClock() time.Time {
 	if b.sendNow != nil {
 		return b.sendNow().UTC()
@@ -88,9 +105,15 @@ func (b *Bridge) readSendState(ctx context.Context, tx *sql.Tx, now time.Time) (
 
 // Reserve before the network call. Uncertain delivery and archive failure must
 // never refund a send: restarting cannot turn an ambiguous send into free budget.
-func (b *Bridge) reserveSend(ctx context.Context, targets []string) (string, int, error) {
+func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason string, delay int, err error) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
+	known, enabled := false, false
+	defer func() {
+		if err != nil && known {
+			err = &sendReservationFailure{cause: err, limitsEnabled: enabled}
+		}
+	}()
 	tx, err := b.Store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", 0, err
@@ -103,6 +126,7 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (string, int
 	if err != nil {
 		return "", 0, err
 	}
+	known, enabled = true, s.MinuteLimit > 0 || s.DayLimit > 0 || s.NewChatsLimit > 0 || s.MinIntervalMS > 0
 	unique := map[string]bool{}
 	identities := map[string]bool{}
 	var fresh int64
@@ -135,7 +159,6 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (string, int
 		}
 	}
 	count := int64(len(targets))
-	reason, delay := "", 0
 	refuse := func(name string, seconds float64) {
 		if reason == "" {
 			reason, delay = name, max(1, int(math.Ceil(seconds)))
@@ -188,6 +211,7 @@ func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...st
 	}
 	ctx, cancel := requestContext(r, sendDeadline)
 	defer cancel()
+	settingsCtx := ctx
 	// Read-only settings checks do not acquire the WAL writer. With budgets off,
 	// accounting must not change whether an otherwise valid send can proceed.
 	var snapshot runtimeSettingsSnapshot
@@ -199,12 +223,7 @@ func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...st
 		writeErrorCode(w, 503, "send_usage_unavailable", "Send limits unavailable; do not send")
 		return false
 	}
-	enabled := false
-	for key, value := range snapshot.Settings {
-		if strings.HasPrefix(key, "send.") && value.Value.(int64) > 0 {
-			enabled = true
-		}
-	}
+	enabled := sendLimitsEnabled(snapshot)
 	if !enabled {
 		var countCancel context.CancelFunc
 		ctx, countCancel = context.WithTimeout(ctx, 100*time.Millisecond)
@@ -212,6 +231,15 @@ func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...st
 	}
 	reason, delay, err := b.reserveSend(ctx, targets)
 	if err != nil {
+		var failure *sendReservationFailure
+		if errors.As(err, &failure) {
+			enabled = failure.limitsEnabled
+		} else if b.RuntimeDefaults != nil {
+			// No reservation snapshot was obtained. Recheck the live policy
+			// outside the shorter best-effort counting deadline before allowing.
+			current, checkErr := b.settingsSnapshot(settingsCtx)
+			enabled = checkErr != nil || sendLimitsEnabled(current)
+		}
 		if !enabled {
 			b.sendCountSkipped.Add(1)
 			b.Log.Warnf("Send usage counting skipped: store or identity lookup unavailable; limits are off")

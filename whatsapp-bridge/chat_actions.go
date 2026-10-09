@@ -59,7 +59,7 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
-		if !b.allowSendAction(w, r, chatJID.String()) {
+		if !b.allowSendAction(w, r.WithContext(ctx), chatJID.String()) {
 			return
 		}
 		send := b.sendMessage

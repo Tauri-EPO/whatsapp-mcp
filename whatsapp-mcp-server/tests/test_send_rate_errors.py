@@ -13,6 +13,7 @@ from errors import ToolError, tool_errors
 def test_send_429_real_http_tool_envelope(monkeypatch):
     class Refusal(BaseHTTPRequestHandler):
         def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.send_response(429)
             self.send_header("Content-Type", "application/json")
             self.send_header("Retry-After", "37")
