@@ -24,6 +24,7 @@ env_file=".split-smoke-env.$$"
 : > "$env_file"
 base=(--env-file "$env_file" -f docker-compose.yml)
 split=(-f docker-compose.split.yml)
+cleanup_files=("${base[@]}" "${split[@]}")
 image="$WHATSAPP_IMAGE_REGISTRY/whatsapp-mcp-server:$WHATSAPP_IMAGE_TAG"
 SUBNET_A=10.222.0.0/24 SUBNET_B=10.222.1.0/24
 select_instance() {
@@ -49,9 +50,9 @@ cleanup() {
     select_instance "$instance"
     docker rm -f "$run-whisper-$instance" >/dev/null 2>&1 || true
     if [ "$rc" -ne 0 ]; then
-      docker compose "${base[@]}" -f docker-compose.proxy.yml -f docker-compose.operator.yml "${split[@]}" logs --tail 40 || true
+      docker compose "${cleanup_files[@]}" logs --tail 40 || true
     fi
-    docker compose "${base[@]}" -f docker-compose.proxy.yml -f docker-compose.operator.yml "${split[@]}" down -v --remove-orphans || true
+    docker compose "${cleanup_files[@]}" down -v --remove-orphans || true
   done
   docker network rm "$WHATSAPP_PROXY_NETWORK" "$WHATSAPP_OPERATOR_NETWORK" || true
   rm -f "$env_file"
@@ -97,6 +98,7 @@ for mode in split operator proxy combined reversed; do
     reversed) files+=(-f docker-compose.operator.yml -f docker-compose.proxy.yml) ;;
   esac
   files+=("${split[@]}")
+  cleanup_files=("${files[@]}")
   select_instance a
   docker compose "${files[@]}" config --quiet
   echo "split compose config: $mode -> ok"
