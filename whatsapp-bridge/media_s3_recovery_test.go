@@ -28,6 +28,120 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestMinIOPublicationRechecksQuotaAfterConcurrentDeletion(t *testing.T) {
+	b, s := minioTestBridge(t, "instances/test-publication-quota-race")
+	data, filler := []byte("0123456789"), []byte("abcdefghij")
+	old := s3TestRow(t, b, "QUOTAOLD", mediaTestChat, "document", data, time.Now())
+	s3TestWrite(t, b, old, data)
+	b.MediaQuotaBytes = uint64(len(data))
+	next := s3TestRow(t, b, "QUOTAREPUBLISH", mediaTestChat, "document", data, time.Now())
+	other := s3TestRow(t, b, "QUOTAFILLER", mediaTestChat, "document", filler, time.Now())
+	hash := sha256Of(data)
+	unlock, err := s.lockHash(b.ctx, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(unlock) }
+	t.Cleanup(release)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Write(b.ctx, next, func(rel string) (int64, error) {
+			return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
+		})
+		done <- err
+	}()
+	t.Cleanup(func() { release(); <-done })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		waiting := s.locks[hex.EncodeToString(hash)].users == 2
+		s.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("publisher did not wait on the held content lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Execute deletion's remote and catalog operations while holding its real
+	// content lock. Another hash fills the freed budget before this one unlocks.
+	if err := s.removeObject(b.ctx, hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store.db.Exec(`DELETE FROM media_cache WHERE sha256=?`, hash); err != nil {
+		t.Fatal(err)
+	}
+	s3TestWrite(t, b, other, filler)
+	release()
+	err = <-done
+	done <- err // Cleanup also joins the publisher on an early assertion failure.
+	if !errors.Is(err, errMediaQuota) {
+		t.Fatalf("republished deleted hash bypassed the filled quota: %v", err)
+	}
+	usage, err := s.Usage(b.ctx)
+	if err != nil || usage.Bytes != int64(len(filler)) {
+		t.Fatal("quota usage exceeded its ceiling", usage, err)
+	}
+	reader, _, err := s.Open(b.ctx, other, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || !bytes.Equal(actual, filler) {
+		t.Fatal("admitted object's bytes changed", err)
+	}
+}
+
+func TestMinIOColdMCPReadsMeasureActualBytes(t *testing.T) {
+	for _, quota := range []uint64{0, 1} {
+		t.Run(map[uint64]string{0: "cached", 1: "streamed"}[quota], func(t *testing.T) {
+			b, _ := minioTestBridge(t, "instances/test-cold-length-"+map[uint64]string{0: "cached", 1: "streamed"}[quota])
+			data := []byte("cold S3 document bytes")
+			b.MediaQuotaBytes = quota
+			for _, tc := range []struct {
+				id       string
+				declared any
+			}{{"NULL", nil}, {"ZERO", 0}, {"SMALL", 1}, {"EXACT", len(data)}} {
+				for _, consumer := range []string{"TOOL", "RESOURCE"} {
+					row := s3TestRow(t, b, "COLD"+tc.id+consumer, mediaTestChat, "document", data, time.Now())
+					if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=?,filename='sample.txt' WHERE id=? AND chat_jid=?`, tc.declared, row.ID, row.ChatJID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
+			}
+			server := s3ReviewREST(t, b)
+			s3RecoveryMCP(t, b, server.URL, `import asyncio,json
+import main,media_remote
+chat='5511999999999@s.whatsapp.net'
+expected=b'cold S3 document bytes'
+async def run():
+    errors=[]
+    for declared in ('NULL','ZERO','SMALL','EXACT'):
+        try:
+            result=await main.mcp.call_tool('read_media',{'chat_jid':chat,'message_id':'COLD'+declared+'TOOL'})
+            assert not result.is_error, result.content[0].text
+            assert result.content[0].text==expected.decode(), result.content[0].text
+            assert json.loads(result.content[-1].text)['bytes']==len(expected)
+        except Exception as exc: errors.append(declared+' tool: '+str(exc))
+        try:
+            result=await main.mcp.read_resource(media_remote.uri(chat,'COLD'+declared+'RESOURCE'))
+            content=result[0].content
+            if isinstance(content,str): content=content.encode()
+            assert content==expected, repr(content)
+        except Exception as exc: errors.append(declared+' resource: '+str(exc))
+    assert not errors, '; '.join(errors)
+asyncio.run(run())
+print('cold tool/resource: NULL, zero, undersized and exact declarations returned exact measured bytes')`)
+		})
+	}
+}
+
 func TestMinIOInboundWebhookDoesNotWaitForPublication(t *testing.T) {
 	b, s := minioTestBridge(t, "instances/test-inbound-webhook")
 	webhook, payloads := captureWebhook(t)

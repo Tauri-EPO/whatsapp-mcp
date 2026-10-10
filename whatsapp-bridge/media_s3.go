@@ -316,25 +316,35 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 		return 0, errMediaHash
 	}
 	reserved, _ := ctx.Value(s3QuotaReservedKey{}).(bool)
-	if reserved && mediaLimit(ctx) > 0 && uint64(size) > mediaLimit(ctx) {
-		return 0, errMediaQuota
-	}
-	if s.bridge != nil && !reserved {
+	var unlock func()
+	for {
+		if reserved && mediaLimit(ctx) > 0 && uint64(size) > mediaLimit(ctx) {
+			return 0, errMediaQuota
+		}
+		unlock, err = s.lockHash(ctx, hash)
+		if err != nil {
+			return 0, err
+		}
+		if s.bridge == nil || reserved {
+			break
+		}
 		var exists int
 		if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_cache WHERE sha256=? AND backend='s3'`, hash).Scan(&exists); err != nil {
+			unlock()
 			return 0, errMediaS3
 		}
-		if exists == 0 {
-			_, release, err := s.bridge.acquireMediaQuota(ctx, uint64(size))
-			if err != nil {
-				return 0, err
-			}
-			defer release()
+		if exists > 0 {
+			break
 		}
-	}
-	unlock, err := s.lockHash(ctx, hash)
-	if err != nil {
-		return 0, err
+		// Dedupe is authoritative only under the content lock. Release it
+		// before admission, which may evict objects and take content locks.
+		unlock()
+		bounded, release, err := s.bridge.acquireMediaQuota(ctx, uint64(size))
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+		ctx, reserved = bounded, true
 	}
 	defer unlock()
 	release, err := s.transfer(ctx)

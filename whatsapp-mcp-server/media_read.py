@@ -633,6 +633,8 @@ def resolve_media(
             expected = guess_mime(media_type, filename)
             check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge, as_images)), expected, caller)
         path = download_path(chat_jid, message_id)
+        if remote:
+            cached = media_remote.lookup(chat_jid, message_id)
 
     mime = declared_mime(media_type, filename, path)
     if as_images:
@@ -643,9 +645,10 @@ def resolve_media(
         media_text.require_extractable(mime)
     try:
         if remote:
-            size = cached["bytes"] if cached else reported
-            if size is None:
-                size = cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images))
+            # A cold download may publish a measured cache entry. If quota
+            # leaves it uncached, bound the stream by the caller/type ceiling;
+            # a sender's zero or undersized declaration is not a spool limit.
+            size = cached["bytes"] if cached else cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images))
         else:
             size = os.path.getsize(path)
     except OSError as exc:
