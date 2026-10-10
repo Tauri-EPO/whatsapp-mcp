@@ -1599,10 +1599,30 @@ Read the media of a message: the **bytes** come back, not a path. This is the
 tool an agent on another machine uses to actually look at a photo;
 `download_media` only returns a path on the server's own filesystem.
 
+**Agent on another machine:** `download_media.file_path` and `export_messages`
+paths belong to the server; an agent without that filesystem cannot open them.
+To save the original attachment locally, including files above 2 MiB or clients
+that discard resource blobs, call `read_media(as_base64=true)`. Decode its first
+TEXT block as base64, verify `chunk_sha256`, and write the bytes at `offset` on
+the agent's filesystem. Repeat using the JSON block's `next_offset` until it is
+`null`, then verify the assembled SHA256 against `sha256` and `list_media.sha256`.
+Keep the same `sha256` and `total_size` across calls; if either changes or a hash
+fails, discard the partial copy and restart. No download URL is needed.
+
 **Parameters:**
 
 - `chat_jid` (required): JID of the chat containing the message
 - `message_id` (required): ID of the message whose media to read
+- `as_base64` (optional, default false): original bytes as plain base64 TEXT,
+  then JSON metadata; any file type and total size, without conversion. Cannot
+  be combined with `as_text` or `as_images`
+- `offset` (optional, default 0): with `as_base64`, zero-based byte offset;
+  beyond the file size returns `invalid_argument`. At EOF (including an empty
+  file), returns empty base64 and `next_offset: null`
+- `length` (optional, default 1048576 = 1 MiB): with `as_base64`, requested bytes;
+  must be 1 through 4194304 (4 MiB), otherwise `invalid_argument`. The last chunk
+  may be shorter. `max_bytes` and rendering options do not apply in this mode;
+  `length` bounds each response. Nondefault `offset`/`length` require `as_base64`
 - `max_bytes` (optional, default 0): refuse anything larger. `0` means the
   per-type limit below, which is also the ceiling — a larger value does not
   raise it, it only lets a client with a small context lower it
@@ -1629,6 +1649,17 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
+| any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; no total-file cap |
+
+The chunk JSON carries `total_size`, `offset`, `returned_length`, `next_offset`
+(`null` at EOF), `sha256` (the archived whole-file plaintext hash),
+`chunk_sha256` (the returned bytes), `mime`, `bytes` (same as `returned_length`)
+and `notes`. Base64 stays plain even with `WHATSAPP_WRAP_UNTRUSTED=1`.
+The server seeks and reads only the requested range when the archive has the
+whole-file hash; legacy rows without a hash need a streaming hash pass with a
+1 MiB buffer. No temporary copy is created. Chat allow-list, tool policy,
+implicit-download restrictions and read-only mode apply exactly as for other
+`read_media` calls.
 
 <a id="how-large-one-result-can-get"></a>**How large one result can get.** The whole answer is one JSON-RPC
 message, in one HTTP response body, so the largest result is the largest message
@@ -1639,6 +1670,7 @@ a client has to accept. Sizes on the wire (base64 is 4/3 of the bytes):
 | `max_edge=0` on a JPEG/PNG/GIF/WebP (the stored bytes) | **~21.5 MiB**: 16 MiB of file (`MAX_IMAGE_BYTES`) as base64 |
 | `as_images=true` on a PDF | ~10.7 MiB: at most 8 MiB of rendered pages (`media_pdf.MAX_TOTAL_BYTES`) as base64, whatever `max_pages` (20 at most) |
 | audio, or any other file as a resource | ~2.7 MiB: 2 MiB (`MAX_BASE64_BYTES`) as base64 |
+| `as_base64=true` | ~1.4 MiB by default; ~5.4 MiB at `length=4194304`, plus metadata. Lower `length` for a client's response/event limit |
 | an image with the default `max_edge` | a few hundred KiB at 1568 px; **up to ~1.4 MiB** when the stored file is 1 MiB or less and already fits (it is sent as it is), more with a larger `max_edge` |
 | `as_text=true`, or a text-ish file | 200 000 characters at most (`as_text`); 1 MiB of file (text files), a little more once JSON has escaped quotes, newlines and non-ASCII |
 

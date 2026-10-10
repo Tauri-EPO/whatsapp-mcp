@@ -27,6 +27,9 @@ read its size and its notes, and never look at it.
 * with ``as_images=True``, a PDF **rendered** here, one ``ImageContent`` per page
   behind a page marker (media_pdf.py) — the answer for a scan, which has no text
   layer for ``as_text`` to find and which a vision model can simply read.
+* with ``as_base64=True``, an original byte range as plain base64 text, followed
+  by JSON with the whole-file and chunk hashes and ``next_offset``. This also
+  works when a client discards resources and when a file exceeds the blob cap.
 
 Every answer ends with one JSON text block carrying ``sha256``, ``mime``,
 ``bytes`` and the ``notes`` already recorded for the file, so the loop
@@ -41,6 +44,7 @@ is still there for a client that does share the filesystem.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -75,6 +79,8 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_BASE64_BYTES = 2 * 1024 * 1024
 # Text is returned decoded, so the cap is the context it costs, not the wire.
 MAX_TEXT_BYTES = 1024 * 1024
+DEFAULT_CHUNK_BYTES = 1024 * 1024
+MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 # Text-ish types returned as text rather than base64. ``text/*`` covers plain,
 # csv, html and markdown; the rest are the structured formats that arrive as
@@ -580,6 +586,7 @@ def resolve_media(
     as_text: bool = False,
     max_edge: int = 0,
     as_images: bool = False,
+    as_base64: bool = False,
 ) -> ResolvedMedia:
     """The file behind one message, proven readable, or the refusal.
 
@@ -605,7 +612,7 @@ def resolve_media(
         # Refuse a file the row already says is too big instead of paying for
         # it first. The authority is still the size on disk below; this only
         # skips the obvious no.
-        if reported:
+        if reported and not as_base64:
             expected = guess_mime(media_type, filename)
             check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge, as_images)), expected, caller)
         path = download_path(chat_jid, message_id)
@@ -621,8 +628,53 @@ def resolve_media(
         size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
-    check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images)), mime, caller)
+    if not as_base64:
+        check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images)), mime, caller)
     return ResolvedMedia(path, mime, size, sha256, filename)
+
+
+def _base64_blocks(found: ResolvedMedia, offset: int, length: int) -> list[ContentBlock]:
+    """Read only the requested range; use the archive's whole-file plaintext hash.
+
+    Legacy rows without a SHA256 require a bounded streaming hash pass first.
+    The client verifies the assembled file against this hash, catching a changed
+    cache or chunks obtained from different versions of the same attachment.
+    """
+    try:
+        with open(found.path, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            size = before.st_size
+            if offset > size:
+                raise ToolError("invalid_argument", f"offset {offset} exceeds total size {size}")
+            sha256 = found.sha256
+            if not sha256 or len(sha256) != 64:
+                digest = hashlib.sha256()
+                while part := handle.read(DEFAULT_CHUNK_BYTES):
+                    digest.update(part)
+                sha256 = digest.hexdigest()
+            handle.seek(offset)
+            data = handle.read(min(length, size - offset))
+            after = os.fstat(handle.fileno())
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != min(
+                length, size - offset
+            ):
+                raise ToolError("conflict", "the cached file changed during the read; restart from offset 0")
+    except OSError as exc:
+        raise ToolError("internal", f"could not read the cached file: {exc}") from exc
+    next_offset = offset + len(data)
+    return [
+        TextContent(type="text", text=base64.b64encode(data).decode("ascii")),
+        meta_block(
+            sha256,
+            found.mime,
+            len(data),
+            total_size=size,
+            offset=offset,
+            returned_length=len(data),
+            next_offset=next_offset if next_offset < size else None,
+            chunk_sha256=hashlib.sha256(data).hexdigest(),
+        ),
+    ]
 
 
 def _image_blocks(found: ResolvedMedia, max_edge: int, quality: int) -> tuple[list[ContentBlock], dict[str, Any]]:
@@ -723,8 +775,21 @@ def read_media(
     quality: int = media_image.DEFAULT_QUALITY,
     as_images: bool = False,
     first_page: int = 1,
+    as_base64: bool = False,
+    offset: int = 0,
+    length: int = DEFAULT_CHUNK_BYTES,
 ) -> list[ContentBlock]:
     """The media of one message as content blocks. See the module docstring."""
+    if as_base64:
+        if as_text or as_images:
+            raise ToolError("invalid_argument", "as_base64 cannot be combined with as_text or as_images")
+        if type(offset) is not int or offset < 0:
+            raise ToolError("invalid_argument", "offset must be a nonnegative integer")
+        if type(length) is not int or not 1 <= length <= MAX_CHUNK_BYTES:
+            raise ToolError("invalid_argument", f"length must be an integer from 1 to {MAX_CHUNK_BYTES}")
+        return _base64_blocks(resolve_media(chat_jid, message_id, as_base64=True), offset, length)
+    if offset != 0 or length != DEFAULT_CHUNK_BYTES:
+        raise ToolError("invalid_argument", "offset and length require as_base64=true")
     if as_text and as_images:
         raise ToolError(
             "invalid_argument",
