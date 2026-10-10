@@ -367,6 +367,7 @@ newer. It works with neither, either, or both of the proxy/operator overrides:
 # Required in each project's .env: choose a free, different subnet/address.
 # WHATSAPP_AGENT_SUBNET=10.203.11.0/24
 # WHATSAPP_AGENT_BRIDGE_IP=10.203.11.2
+# WHATSAPP_AGENT_MCP_IP=10.203.11.3
 docker compose -f docker-compose.yml -f docker-compose.proxy.yml \
   -f docker-compose.operator.yml -f docker-compose.split.yml up -d
 # Without a proxy or operator, omit the corresponding -f argument.
@@ -381,20 +382,26 @@ Operator-only peers cannot connect to MCP 8000. Proxy-only peers reach MCP
 8000, but cannot connect to bridge REST or operator 8090 (or a custom port).
 The split override disables MCP's unauthenticated metrics by default.
 
-Until [#684](https://github.com/Tauri-EPO/whatsapp-mcp/issues/684), the split
-topology cannot forward to MCP's loopback-only admin listener. Operator
-`GET /operator/v1/transcription/usage` returns a bounded HTTP 503 with
-`mcp_admin_unavailable`; operator health stays available and reports
-`last_mcp_call_at: null`. The default and existing override topologies retain
-their admin forwarding. The follow-up adds the private agent-network transport.
+With operator enabled, bridge forwards usage and activity reads to
+`mcp-admin.<project>_agent:8091`. MCP binds admin to its single pinned local
+agent IPv4 address and to that interface with `SO_BINDTODEVICE`; it accepts
+only the bridge agent IP, the bridge token and the exact qualified Host.
+Proxy/operator peers cannot connect through their interfaces or redirect
+forwarded credentials with the same DNS name. No capabilities or host ports
+are added. If interface binding fails, admin stays closed with one warning and
+operator usage returns 503; MCP's data plane remains available. Default,
+proxy and operator shapes without split keep admin on `127.0.0.1:8091`.
 
 Both services join a project-scoped **internal** `agent` network. Set the
-compose-only `WHATSAPP_AGENT_SUBNET` and `WHATSAPP_AGENT_BRIDGE_IP` per project;
+compose-only `WHATSAPP_AGENT_SUBNET`, `WHATSAPP_AGENT_BRIDGE_IP` and
+`WHATSAPP_AGENT_MCP_IP` per project;
 for a second instance use another free subnet, such as `10.203.12.0/24` and
-`10.203.12.2`. The bridge IP must lie inside its subnet, away from the gateway.
-Compose refuses to start if either setting is missing.
+`10.203.12.2` (bridge) and `10.203.12.3` (MCP). Both IPs must lie inside
+their subnet, distinct from each other and the gateway.
+Compose refuses to start if any setting is missing.
 Both containers receive a trusted `/etc/hosts` entry mapping
-`bridge-agent.<project>_agent` to the static bridge IP. The MCP uses
+`bridge-agent.<project>_agent` to the static bridge IP and
+`mcp-admin.<project>_agent` to the static MCP IP. The MCP uses
 `WHATSAPP_API_URL=http://bridge-agent.<project>_agent:8080/api`, with that exact
 Host and port allowed. Bare or even fully qualified DNS aliases on the proxy
 or operator network cannot override this mapping and receive the bearer.
@@ -1373,6 +1380,8 @@ the container**; publish that port thoughtfully.
 
 When `WHATSAPP_OPERATOR_BIND` is enabled, the MCP service starts its admin
 listener on **127.0.0.1:8091** inside the shared bridge network namespace.
+With the split override, it instead uses the pinned MCP agent IP and the exact
+`mcp-admin.<project>_agent:8091` Host, as described above.
 Do not publish this port or proxy it. Only the bridge calls it with its bridge
 token; the operator token and token file are never passed to MCP. Configure a
 separate `WHATSAPP_MCP_TOKEN` when enabling operator reads so the MCP bearer cannot

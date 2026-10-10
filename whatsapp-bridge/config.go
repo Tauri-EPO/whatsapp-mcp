@@ -41,6 +41,8 @@ type bridgeConfig struct {
 	SendIncludeActions           bool
 	MCPEnvHash                   string
 	MCPFallbackBridge            bool
+
+	MCPAdminHost, MCPAdminAddress string
 }
 
 func loadBridgeConfig() (bridgeConfig, error) { return parseBridgeConfig(os.Getenv) }
@@ -107,6 +109,10 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 	cfg.Operator, err = parseOperatorConfig(getenv, lookup)
 	collect(err)
 	cfg.SplitREST = isSplitBridgeBind(cfg.Bind)
+	if cfg.SplitREST && cfg.Operator.Bind != "" {
+		cfg.MCPAdminHost, cfg.MCPAdminAddress, err = resolveSplitMCPAdmin(cfg.Bind, lookup)
+		collect(err)
+	}
 	cfg.Bind, err = resolveSplitBridgeBind(cfg.Bind, cfg.AllowedHosts, cfg.Port, cfg.Operator.Bind, lookup, localAddrs)
 	collect(err)
 	if cfg.Operator.Bind != "" && cfg.Operator.Port == cfg.Port {

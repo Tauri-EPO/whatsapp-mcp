@@ -329,7 +329,7 @@ func runBridge(cfg bridgeConfig) int {
 		return 1
 	}
 	if bridge.operatorPairing != nil {
-		routes := withMCPAdmin(bridge.operatorRoutes(), bridgeToken, newMCPAdminClient())
+		routes := withMCPAdmin(bridge.operatorRoutes(), bridgeToken, newMCPAdminClient(cfg.MCPAdminAddress), cfg.MCPAdminHost)
 		bridge.operatorServer, err = startOperatorServer(cfg.Operator, routes, logger)
 		if err != nil {
 			logger.Errorf("Failed to start operator listener: %v", err)

@@ -99,6 +99,16 @@ with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, time
 print("REST /api/send named outbox dry_run -> 200 (no WhatsApp send)")
 PY
     if [ "$mode" = combined ]; then
+      docker exec -i "$mcp" python - <<'PY'
+import json, os, urllib.request
+req = urllib.request.Request("http://127.0.0.1:8091/admin/v1/transcription/usage", headers={"Authorization":"Bearer " + os.environ["WHATSAPP_BRIDGE_TOKEN"]})
+with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5) as response:
+    assert response.status == 200 and json.load(response)["requests"] == 0
+# /proc reports the real socket, not a configuration intention.
+listeners = [line.split()[1] for line in open("/proc/net/tcp") if len(line.split()) > 3 and line.split()[3] == "0A"]
+assert [endpoint for endpoint in listeners if endpoint.endswith(":1F9B")] == ["0100007F:1F9B"]
+print("shared proxy+operator admin: actual 127.0.0.1:8091 listener -> authenticated 200")
+PY
       state=$(docker exec "$bridge" whatsapp-bridge --operator-status)
       echo "$WHATSAPP_OPERATOR_ALIAS:8090 private operator -> $state"
       case "$state" in starting|awaiting_qr|expired) ;; *) exit 1 ;; esac

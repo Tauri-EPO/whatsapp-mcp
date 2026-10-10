@@ -41,8 +41,9 @@ outbox volume; a nonempty path retains a bind mount. See
 [Behind a shared reverse proxy](DOCKER.md#behind-a-shared-reverse-proxy).
 
 The split override requires compose-only `WHATSAPP_AGENT_SUBNET` and
-`WHATSAPP_AGENT_BRIDGE_IP`: select a free IPv4 subnet and a bridge address
-inside it, distinct per project. These pin the qualified bridge name through
+`WHATSAPP_AGENT_BRIDGE_IP` and `WHATSAPP_AGENT_MCP_IP`: select a free IPv4 subnet
+and distinct bridge/MCP addresses inside it, distinct per project. These pin
+the qualified bridge and MCP admin names through
 trusted `extra_hosts`, preventing bearer disclosure through cross-network DNS
 aliases. See [Separate MCP namespace](DOCKER.md#separate-mcp-network-namespace).
 
@@ -1348,7 +1349,12 @@ by provider/outcome, and remaining quota seconds (+Inf without a cap).
 No usage endpoint is served on the MCP HTTP transport and no new MCP tool is added.
 
 The bridge authenticates the operator and forwards a bounded GET to the MCP
-admin listener at `127.0.0.1:8091`, using the **bridge token**. The operator
+admin listener at `127.0.0.1:8091`, using the **bridge token**. The
+split shape instead uses `mcp-admin.<project>_agent:8091`, pinned through
+`extra_hosts` to the MCP agent IPv4 address. Admin binds only that local
+interface, requires the bridge agent source IP and exact qualified Host, and
+stays disabled if interface binding fails. Default/proxy/operator shapes
+without split retain loopback. The operator
 secret stays bridge-only. Admin accepts only usage and activity GETs; it is off
 unless `WHATSAPP_OPERATOR_BIND` is set, is never published, and rejects the MCP
 bearer. With the operator enabled, configure `WHATSAPP_MCP_TOKEN` distinct from

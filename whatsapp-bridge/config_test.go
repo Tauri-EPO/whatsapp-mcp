@@ -48,6 +48,9 @@ func TestConfigSplitPinsQualifiedAddressBeforeEffects(t *testing.T) {
 	cfg, err := parseBridgeConfigNetwork(func(key string) string { return values[key] },
 		func(_ context.Context, name string) ([]net.IPAddr, error) {
 			lookups++
+			if name == "mcp-admin.example_agent" {
+				return []net.IPAddr{{IP: net.ParseIP("192.0.2.11")}}, nil
+			}
 			if name != host {
 				t.Fatalf("unscoped startup lookup: %s", name)
 			}
@@ -55,7 +58,8 @@ func TestConfigSplitPinsQualifiedAddressBeforeEffects(t *testing.T) {
 		}, func() ([]net.Addr, error) {
 			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}}, nil
 		})
-	if err != nil || cfg.Bind != "192.0.2.10" || !cfg.SplitREST || lookups != 1 || cfg.AllowedHosts != host+":8080" {
+	if err != nil || cfg.Bind != "192.0.2.10" || !cfg.SplitREST || lookups != 2 || cfg.AllowedHosts != host+":8080" ||
+		cfg.MCPAdminHost != "mcp-admin.example_agent:8091" || cfg.MCPAdminAddress != "192.0.2.11:8091" {
 		t.Fatalf("config did not pin the split address: %+v lookup=%d err=%v", cfg, lookups, err)
 	}
 	if _, err := os.Stat(values[storeDirEnv]); !os.IsNotExist(err) {

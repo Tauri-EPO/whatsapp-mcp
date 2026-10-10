@@ -162,7 +162,7 @@ jobs:
         env:
           WHATSAPP_IMAGE_TAG: ci
         run: bash scripts/smoke-proxy.sh
-      - name: Separate MCP namespace (two unpaired projects)
+      - name: Separate MCP namespace and operator usage (two unpaired projects)
         env:
           WHATSAPP_IMAGE_TAG: ci
         run: bash scripts/smoke-split.sh
