@@ -414,3 +414,6 @@ message membership separately. This schema supports deleting a reference
 without deleting bytes another message still uses. The local backend continues
 to discover its files through the safe filesystem helpers and does not populate
 this catalog. Both tables belong to the bridge; the MCP server never writes them.
+For S3, `media_cache_deletions` journals last-reference removals before remote
+DELETE. Readers and bounded retention passes reconcile those hashes after a
+crash or failed SQL cleanup, allowing missing bytes to be fetched again.

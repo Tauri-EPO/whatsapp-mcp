@@ -221,14 +221,14 @@ func (s *storeStats) invalidate() {
 }
 
 // runMediaRetention sweeps once now and then every mediaSweepInterval until
-// b.ctx is cancelled (Shutdown). b.MediaRetention <= 0 disables it.
+// b.ctx is cancelled (Shutdown). S3 recovery also runs with age retention off.
 func (b *Bridge) runMediaRetention() {
 	maxAge := b.MediaRetention
 	statusAge := maxAge
 	if b.StatusRetention != nil {
 		statusAge = *b.StatusRetention
 	}
-	if maxAge <= 0 && (b.StatusRetention == nil || *b.StatusRetention <= 0) {
+	if maxAge <= 0 && (b.StatusRetention == nil || *b.StatusRetention <= 0) && b.mediaStorage().Backend() != "s3" {
 		return
 	}
 	sweep := func() {

@@ -22,6 +22,13 @@ func (b *Bridge) cacheOutboundMedia(ctx context.Context, sent sentMessage, media
 	if !b.MediaAutoDownload {
 		return
 	}
+	if !b.shouldAutoCache(ctx, media.mediaType) {
+		return
+	}
+	if b.mediaStorage().Backend() == "s3" {
+		b.cacheOutboundS3(ctx, sent, media, data)
+		return
+	}
 	if chatJID, err := types.ParseJID(sent.ChatJID); err == nil && b.skipsStatusMedia(chatJID) {
 		return
 	}
@@ -120,6 +127,18 @@ func mediaLimit(ctx context.Context) uint64 {
 func checkCachedMediaLimit(ctx context.Context, root *os.Root, relPath string) error {
 	limit := mediaLimit(ctx)
 	if limit == 0 {
+		return nil
+	}
+	if transient, _ := ctx.Value(transientMediaKey{}).(string); transient != "" && relPath == transient {
+		storage := transientMediaStorage{localMediaStorage: localMediaStorage{root: root}, rel: transient}
+		reader, size, err := storage.Open(ctx, mediaRow{}, "")
+		if err != nil {
+			return err
+		}
+		defer func() { _ = reader.Close() }()
+		if size < 0 || uint64(size) > limit {
+			return errAutoMediaLimit
+		}
 		return nil
 	}
 	found, err := findCachedMedia(root, path.Dir(relPath), []string{path.Base(relPath)})

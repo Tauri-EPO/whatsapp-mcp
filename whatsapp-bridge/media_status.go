@@ -96,6 +96,10 @@ func purgeStatusCLI(args []string, out, diagnostics io.Writer) int {
 	if flags.NArg() != 0 {
 		return fail(errors.New("unexpected positional arguments"))
 	}
+	backend, err := parseMediaBackend(os.Getenv)
+	if err != nil {
+		return fail(err)
+	}
 	root, err := openStoreRoot()
 	if err != nil {
 		return fail(err)
@@ -126,7 +130,23 @@ func purgeStatusCLI(args []string, out, diagnostics io.Writer) int {
 	store := &MessageStore{db: archive.DB}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	b := &Bridge{Store: store, StoreRoot: root, Log: newTextWriter("Bridge", "INFO", diagnostics, false), ReadOnly: readOnly, Tools: tools, RuntimeDefaults: defaults, storeStats: newStoreStats(root)}
+	if *dry {
+		ctx = context.WithValue(ctx, mediaReadOnlyKey{}, true)
+	}
+	if backend.Backend == "s3" && !*dry {
+		store, err = NewMessageStore()
+		if err != nil {
+			return fail(errors.New("message catalog unavailable"))
+		}
+		defer func() { _ = store.Close() }()
+	}
+	b := &Bridge{ctx: ctx, Store: store, StoreRoot: root, Log: newTextWriter("Bridge", "INFO", diagnostics, false), ReadOnly: readOnly, Tools: tools, RuntimeDefaults: defaults, storeStats: newStoreStats(root)}
+	if backend.Backend == "s3" {
+		b.MediaStorage, err = newS3MediaStorage(ctx, backend, store, root)
+		if err != nil {
+			return fail(errMediaS3)
+		}
+	}
 	if err := b.statusPurgePolicy(ctx); err != nil {
 		return fail(err)
 	}

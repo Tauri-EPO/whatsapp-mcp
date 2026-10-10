@@ -273,9 +273,9 @@ func TestTranscriptionCapEnvironmentDecimalForms(t *testing.T) {
 func TestCompleteRuntimeRegistryAtomicPatchAndRestart(t *testing.T) {
 	b := newSettingsBridge(t)
 	server := settingsServer(t, b)
-	patch := `{"send.rate_per_minute":2,"send.rate_per_day":10,"send.new_chats_per_day":3,"send.min_interval_ms":100,"transcription.monthly_max_minutes":1,"transcription.cap_scope":"all","transcription.ingest_chats":"direct","tools.allow":["list_messages"],"tools.deny":["send_message"],"media.autodownload_status":true,"media.quota_bytes":1024,"media.quota_evict_types":["video"],"media.quota_evict_target_percent":80}`
+	patch := `{"send.rate_per_minute":2,"send.rate_per_day":10,"send.new_chats_per_day":3,"send.min_interval_ms":100,"transcription.monthly_max_minutes":1,"transcription.cap_scope":"all","transcription.ingest_chats":"direct","tools.allow":["list_messages"],"tools.deny":["send_message"],"media.autodownload_status":true,"media.autodownload_types":["image","audio"],"media.quota_bytes":1024,"media.quota_evict_types":["video"],"media.quota_evict_target_percent":80}`
 	status, state := settingsRequest(t, server, "PATCH", patch)
-	if status != 200 || state.Version != 1 || len(state.Settings) != 13 {
+	if status != 200 || state.Version != 1 || len(state.Settings) != 14 {
 		t.Fatalf("complete registry: status=%d state=%+v", status, state)
 	}
 	for key, setting := range state.Settings {

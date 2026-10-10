@@ -65,6 +65,7 @@ from mcp_types import (
 import media_image
 import media_inventory
 import media_pdf
+import media_remote
 import media_text
 import whatsapp
 from errors import ToolError, structured_errors
@@ -318,6 +319,8 @@ def cached_path(chat_jid: str, message_id: str) -> str | None:
     other file in the chat, and the answer is the directory as it is now, not a
     memoised scan — the bytes are opened right after this.
     """
+    if media_remote.enabled():
+        return media_remote.uri(chat_jid, message_id) if media_remote.lookup(chat_jid, message_id) else None
     name = media_inventory.lookup_cached_name(chat_jid, message_id, refuse_unsafe=True)
     if name is None:
         return None
@@ -337,7 +340,7 @@ def download_path(chat_jid: str, message_id: str) -> str:
     path = whatsapp.download_media(message_id, chat_jid)
     if not path:
         raise ToolError("internal", "the bridge reported success without a file path")
-    return _in_chat_dir(chat_jid, path)
+    return path if media_remote.enabled() else _in_chat_dir(chat_jid, path)
 
 
 def cached_only_path(chat_jid: str, message_id: str, caller: str) -> str:
@@ -440,6 +443,12 @@ def declared_mime(media_type: str, filename: str | None, path: str = "") -> str:
     renames (`.jpg` and `.ogg` for everything of that kind). Without ``path``
     — a row whose bytes are not cached — the name is all there is.
     """
+    if path.startswith(MEDIA_URI_PREFIX):
+        # A remote identifier has no bytes to sniff yet. Category cache names
+        # take precedence over the sender's filename for these media kinds;
+        # the private spool is sniffed and checked again before returning it.
+        category_name = "" if media_type in {"image", "audio", "video", "sticker"} else filename
+        return guess_mime(media_type, category_name)
     mime = guess_mime(media_type, filename, path)
     if not path:
         return mime
@@ -457,6 +466,12 @@ def declared_mime(media_type: str, filename: str | None, path: str = "") -> str:
 
 def is_text_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in TEXT_MIMES
+
+
+def spooled_mime(media_type: str, filename: str | None, path: str) -> str:
+    """Sniff a remote spool using the same category precedence as its URI."""
+    category_name = "" if media_type in {"image", "audio", "video", "sticker"} else filename
+    return declared_mime(media_type, category_name, path)
 
 
 def hard_limit(mime: str, as_text: bool = False, max_edge: int = 0, as_images: bool = False) -> int:
@@ -602,7 +617,9 @@ def resolve_media(
     """
     whatsapp._require_allowed(chat_jid)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
-    path = cached_path(chat_jid, message_id)
+    remote = media_remote.enabled()
+    cached = media_remote.lookup(chat_jid, message_id) if remote else None
+    path = (media_remote.uri(chat_jid, message_id) if cached else None) if remote else cached_path(chat_jid, message_id)
     if path is None:
         # Nothing is cached, so reading means a CDN transfer. Whether it may
         # happen at all comes first: "too_large, and download_media returns a
@@ -615,7 +632,7 @@ def resolve_media(
         if reported and not as_base64:
             expected = guess_mime(media_type, filename)
             check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge, as_images)), expected, caller)
-        path = download_path(chat_jid, message_id)
+        path = media_remote.uri(chat_jid, message_id) if remote else download_path(chat_jid, message_id)
 
     mime = declared_mime(media_type, filename, path)
     if as_images:
@@ -625,11 +642,19 @@ def resolve_media(
     elif as_text and not is_text_mime(mime):
         media_text.require_extractable(mime)
     try:
-        size = os.path.getsize(path)
+        if remote:
+            # A cold download may publish a measured cache entry. If quota
+            # leaves it uncached, bound the stream by the caller/type ceiling;
+            # a sender's zero or undersized declaration is not a spool limit.
+            size = cached["bytes"] if cached else cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images))
+        else:
+            size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
     if not as_base64:
         check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images)), mime, caller)
+    elif remote and cached:
+        sha256 = cached["sha256"]
     return ResolvedMedia(path, mime, size, sha256, filename)
 
 
@@ -640,27 +665,32 @@ def _base64_blocks(found: ResolvedMedia, offset: int, length: int) -> list[Conte
     The client verifies the assembled file against this hash, catching a changed
     cache or chunks obtained from different versions of the same attachment.
     """
-    try:
-        with open(found.path, "rb") as handle:
-            before = os.fstat(handle.fileno())
-            size = before.st_size
-            if offset > size:
-                raise ToolError("invalid_argument", f"offset {offset} exceeds total size {size}")
-            sha256 = found.sha256
-            if not sha256 or len(sha256) != 64:
-                digest = hashlib.sha256()
-                while part := handle.read(DEFAULT_CHUNK_BYTES):
-                    digest.update(part)
-                sha256 = digest.hexdigest()
-            handle.seek(offset)
-            data = handle.read(min(length, size - offset))
-            after = os.fstat(handle.fileno())
-            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != min(
-                length, size - offset
-            ):
-                raise ToolError("conflict", "the cached file changed during the read; restart from offset 0")
-    except OSError as exc:
-        raise ToolError("internal", f"could not read the cached file: {exc}") from exc
+    if media_remote.enabled():
+        data, size, sha256 = media_remote.read_range(
+            found.path, offset, length, found.sha256, cache_only=not offers_download()
+        )
+    else:
+        try:
+            with open(found.path, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                size = before.st_size
+                if offset > size:
+                    raise ToolError("invalid_argument", f"offset {offset} exceeds total size {size}")
+                sha256 = found.sha256
+                if not sha256 or len(sha256) != 64:
+                    digest = hashlib.sha256()
+                    while part := handle.read(DEFAULT_CHUNK_BYTES):
+                        digest.update(part)
+                    sha256 = digest.hexdigest()
+                handle.seek(offset)
+                data = handle.read(min(length, size - offset))
+                after = os.fstat(handle.fileno())
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != min(
+                    length, size - offset
+                ):
+                    raise ToolError("conflict", "the cached file changed during the read; restart from offset 0")
+        except OSError as exc:
+            raise ToolError("internal", f"could not read the cached file: {exc}") from exc
     next_offset = offset + len(data)
     return [
         TextContent(type="text", text=base64.b64encode(data).decode("ascii")),
@@ -807,6 +837,23 @@ def read_media(
     found = resolve_media(
         chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_edge=edge, as_images=as_images
     )
+    if media_remote.enabled():
+        with media_remote.local_file(found.path, found.size, found.sha256, cache_only=not offers_download()) as local:
+            found = found._replace(
+                path=local,
+                size=os.path.getsize(local),
+                mime=spooled_mime(_media_row(chat_jid, message_id)[0], found.filename, local),
+            )
+            check_size(found.size, cap(max_bytes, hard_limit(found.mime, as_text, edge, as_images)), found.mime)
+            return _read_resolved_media(
+                chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one
+            )
+    return _read_resolved_media(
+        chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one
+    )
+
+
+def _read_resolved_media(chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one):
     path, mime, size, sha256 = found.path, found.mime, found.size, found.sha256
 
     blocks: list[ContentBlock]

@@ -23,4 +23,15 @@ CREATE INDEX IF NOT EXISTS idx_media_cache_refs_hash ON media_cache_refs(sha256)
 CREATE INDEX IF NOT EXISTS idx_media_cache_refs_chat ON media_cache_refs(chat_jid);
 CREATE INDEX IF NOT EXISTS idx_media_cache_stored_at ON media_cache(stored_at);
 CREATE INDEX IF NOT EXISTS idx_media_cache_last_access_at ON media_cache(last_access_at);
+CREATE INDEX IF NOT EXISTS idx_messages_media_cache_cursor ON messages(timestamp,chat_jid,id);
+CREATE TABLE IF NOT EXISTS media_cache_deletions (
+    sha256 BLOB PRIMARY KEY CHECK(length(sha256) = 32),
+    FOREIGN KEY(sha256) REFERENCES media_cache(sha256) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS media_cache_uploads (
+    sha256 BLOB PRIMARY KEY CHECK(length(sha256) = 32),
+    bytes INTEGER NOT NULL CHECK(bytes >= 0),
+    media_type TEXT NOT NULL CHECK(media_type IN ('image','video','audio','document','sticker','status')),
+    started_at TIMESTAMP NOT NULL
+);
 `

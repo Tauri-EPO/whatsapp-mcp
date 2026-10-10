@@ -311,6 +311,14 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}); err != nil {
 		return fmt.Errorf("media cache schema: %w", err)
 	}
+	// Existing archives already carry media_cache_v1. A separate marker must
+	// install the S3 journals and cursor index introduced after that release.
+	if _, err := applyNamedMigration(db, "media_cache_recovery_v2", func(tx *sql.Tx) error {
+		_, err := tx.Exec(mediaCacheSchema)
+		return err
+	}); err != nil {
+		return fmt.Errorf("media cache recovery schema: %w", err)
+	}
 	// Run data rewrites after their tables and columns exist. Each owns an
 	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {
@@ -640,6 +648,16 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to merge migrated receipt progress: %w", err)
 	}
 
+	// Preserve cache references before deleting source rows (the FK cascades).
+	// A colliding destination message may receive a ref only for its own hash.
+	if _, err := tx.Exec(`INSERT INTO media_cache_refs(id,chat_jid,sha256)
+		SELECT r.id,map.phone_jid,r.sha256 FROM media_cache_refs r
+		JOIN tmp_lid_to_phone map ON map.lid_jid=r.chat_jid
+		JOIN messages dest ON dest.id=r.id AND dest.chat_jid=map.phone_jid
+		WHERE dest.file_sha256=r.sha256
+		ON CONFLICT(id,chat_jid) DO NOTHING`); err != nil {
+		return fmt.Errorf("failed to migrate media cache references: %w", err)
+	}
 	deleteMessagesResult, err := tx.Exec(`
 		DELETE FROM messages
 		WHERE chat_jid IN (SELECT lid_jid FROM tmp_lid_to_phone);

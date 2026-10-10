@@ -419,7 +419,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// WHATSAPP_MEDIA_MAX_BYTES set a file above it is left for download_media,
 	// as is one whose message declares no length: there is nothing to hold
 	// against the cap (issue #474).
-	wanted := mediaType != "" && downloadable && b.MediaAutoDownload
+	wanted := mediaType != "" && downloadable && b.MediaAutoDownload && b.shouldAutoCache(b.ctx, mediaType)
 	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
 	noLength := b.MediaMaxBytes > 0 && !ex.hasLength
 	tooLarge := b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes
@@ -432,6 +432,12 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	var imageData []byte
 	var imageMimeType string
 	switch {
+	case cacheOnArrival && mediaType == "image" && shouldForward && b.mediaStorage().Backend() == "s3":
+		// Publication can take several remote round trips. Keep the event
+		// consumer moving and include only bytes already available to the
+		// bounded optional webhook read.
+		b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
+		imageMimeType, imageData = b.webhookMedia(chatJID, "", ex.fileSHA)
 	case cacheOnArrival && mediaType == "image" && shouldForward:
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.WithValue(withAutomaticCache(withMediaLimit(context.Background(), b.MediaMaxBytes)), quotaTryKey{}, true), msg.Info.ID, chatJID)

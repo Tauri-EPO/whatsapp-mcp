@@ -397,6 +397,19 @@ func (b *Bridge) sendBackend() sendFunc {
 }
 
 func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersistence, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
+	if strings.HasPrefix(mediaPath, "whatsapp://") {
+		local, source, cleanup, err := b.materializeCachedMedia(ctx, mediaPath)
+		if err != nil {
+			return false, "Cached media read failed", sentMessage{}
+		}
+		defer cleanup()
+		mediaPath = local
+		ctx = context.WithValue(ctx, cachedSendSourceKey{}, source)
+		ctx = context.WithValue(ctx, cachedForwardMIMEKey{}, true)
+		if _, exists := ctx.Value(forwardSourceKey{}).(*forwardSource); !exists {
+			ctx = context.WithValue(ctx, forwardSourceKey{}, source)
+		}
+	}
 	network := messageSendNetwork{connected: b.Connected, upload: b.uploadMedia, send: b.sendMessage}
 	network.cache = b.cacheOutboundMedia
 	if network.upload == nil {
@@ -531,6 +544,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		media := outboundMediaColumns(mediaPath, upload)
+		if source, ok := ctx.Value(cachedSendSourceKey{}).(*forwardSource); ok {
+			media.filename = source.filename
+		}
 		// The SDK can change both the destination and our PN/LID identity.
 		// Its successful response is the wire provenance, before normalization.
 		retryChat, retrySender := resp.Chat, resp.Sender
@@ -1085,17 +1101,29 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		// request value is never used as a file path.
 		resolvedMediaPath := ""
 		if req.MediaPath != "" {
-			canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
-			if mpErr != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				_ = json.NewEncoder(w).Encode(SendMessageResponse{
-					Success: false,
-					Message: fmt.Sprintf("media_path rejected: %v", mpErr),
-				})
-				return
+			if strings.HasPrefix(req.MediaPath, "whatsapp://") {
+				chat, _, err := parseMediaURI(req.MediaPath)
+				if err != nil {
+					writeError(w, 400, "Invalid cached media URI")
+					return
+				}
+				if _, ok := authorizeChat(w, b.Policy, chat, false); !ok {
+					return
+				}
+				resolvedMediaPath = req.MediaPath
+			} else {
+				canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
+				if mpErr != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(SendMessageResponse{
+						Success: false,
+						Message: fmt.Sprintf("media_path rejected: %v", mpErr),
+					})
+					return
+				}
+				resolvedMediaPath = canonical
 			}
-			resolvedMediaPath = canonical
 		}
 
 		// Avoid logging req.Message verbatim — it's user content and may

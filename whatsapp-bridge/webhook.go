@@ -265,7 +265,27 @@ func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string
 // the store (the token, a database) under the cached name without any link.
 // Without a hash to compare with, nothing is sent.
 func (b *Bridge) webhookMedia(chatJID, filename string, wantSHA256 []byte) (mimeType string, data []byte) {
-	f, size, err := b.mediaStorage().Open(b.ctx, mediaRow{ChatJID: chatJID}, filename)
+	row := mediaRow{ChatJID: chatJID}
+	if b.mediaStorage().Backend() == "s3" {
+		var id string
+		if err := b.Store.db.QueryRowContext(b.ctx, `SELECT r.id FROM media_cache_refs r JOIN media_cache c ON c.sha256=r.sha256 JOIN messages m ON m.id=r.id AND m.chat_jid=r.chat_jid WHERE r.chat_jid=? AND c.sha256=? AND c.sha256=m.file_sha256 LIMIT 1`, chatJID, wantSHA256).Scan(&id); err != nil {
+			return sniffMIME(nil), nil
+		}
+		var err error
+		row, err = b.Store.MediaRow(id, chatJID)
+		if err != nil {
+			return sniffMIME(nil), nil
+		}
+	}
+	ctx := b.ctx
+	if b.mediaStorage().Backend() == "s3" {
+		// Media is optional in a webhook. A slow remote transfer must not hold
+		// the synchronous WhatsApp event consumer; normal caching stays queued.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+	}
+	f, size, err := b.mediaStorage().Open(ctx, row, filename)
 	if err != nil {
 		b.Log.Warnf("Could not open media file for the webhook: %v", err)
 		return sniffMIME(nil), nil

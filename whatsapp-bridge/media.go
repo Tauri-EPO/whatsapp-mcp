@@ -28,6 +28,8 @@ type DownloadMediaRequest struct {
 
 // DownloadMediaResponse represents the response for the download media API
 type DownloadMediaResponse struct {
+	Cached   *bool  `json:"cached,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
 	Filename string `json:"filename,omitempty"`
@@ -118,7 +120,7 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	for {
 		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
-		if automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota) && !errors.Is(err, errMediaQuotaBusy)) || ctx.Err() != nil {
+		if b.mediaStorage().Backend() == "s3" || automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota) && !errors.Is(err, errMediaQuotaBusy)) || ctx.Err() != nil {
 			return ok, kind, name, path, err
 		}
 		// An uncapped waiter retries after the capped starter cleans up.
@@ -199,6 +201,11 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	// Check if file already exists (under the current or the legacy name)
 	row := mediaRow{ID: messageID, ChatJID: chatJID, MediaType: mediaType, Timestamp: timestamp, Filename: originalName.String}
 	storage := b.mediaStorage()
+	if transient, _ := ctx.Value(transientMediaKey{}).(string); transient != "" {
+		storage = transientMediaStorage{localMediaStorage: localMediaStorage{root: root}, rel: transient}
+		relPath = transient
+		absPath = storePath(transient)
+	}
 	entry, lookupErr := storage.Lookup(ctx, row)
 	cached := ""
 	if entry != nil {
@@ -211,6 +218,15 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		b.Log.Warnf("Cache lookup for message %q in chat %q was refused (%v); downloading the file again", messageID, chatJID, lookupErr)
 	}
 	if cached != "" {
+		if storage.Backend() == "s3" {
+			if entry.Bytes < 0 {
+				return false, "", "", "", errMediaS3
+			}
+			if limit := mediaLimit(ctx); limit > 0 && uint64(entry.Bytes) > limit {
+				return false, "", "", "", errAutoMediaLimit
+			}
+			return true, mediaType, entry.Name, entry.Path, nil
+		}
 		if err := checkCachedMediaLimit(ctx, root, cached); err != nil {
 			return false, "", "", "", err
 		}
@@ -286,7 +302,11 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	// share (and truncate) the same "<file>.part". The first caller starts the
 	// transfer, every caller waits for its result (media_inflight.go). Counters
 	// and the success log therefore count transfers, not callers.
-	if _, err := b.mediaTransfers.do(ctx, absPath, func() (int64, error) {
+	execute := b.mediaTransfers.do
+	if transient, _ := ctx.Value(transientMediaKey{}).(string); transient != "" {
+		execute = func(_ context.Context, _ string, fn func() (int64, error)) (int64, error) { return fn() }
+	}
+	if _, err := execute(ctx, absPath, func() (int64, error) {
 		// The transfer outlives its HTTP waiter. Own a gate for its entire
 		// detached lifetime, including a retry that selects the current client.
 		// Never wait behind a queued writer: the waiter may already hold a
@@ -300,9 +320,17 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		}
 		// Deliberately shadowed: everything below runs under the detached
 		// transfer context, never under the context of one of the callers.
-		ctx, cancel := transferContext(b.ctx, ctx)
+		ctx, cancel := mediaDownloadContext(b.ctx, ctx)
 		defer cancel()
-		if automaticCache(ctx) {
+		if storage.Backend() == "s3" {
+			bounded, release, err := b.acquireS3WriteBudget(ctx, fileSHA256, length)
+			if err != nil {
+				return 0, err
+			}
+			defer release()
+			ctx = bounded
+		}
+		if automaticCache(ctx) && storage.Backend() == "local" {
 			bounded, release, err := b.acquireMediaQuota(context.WithValue(ctx, quotaPathKey{}, relPath), length)
 			if err != nil {
 				return 0, err
@@ -379,8 +407,13 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		// answered "gone" (errMediaUnavailable), and %v would cut that chain.
 		return false, "", "", "", fmt.Errorf("failed to download media: %w", err)
 	}
-	if err := checkCachedMediaLimit(ctx, root, relPath); err != nil {
-		return false, "", "", "", err
+	if storage.Backend() == "local" {
+		if err := checkCachedMediaLimit(ctx, root, relPath); err != nil {
+			return false, "", "", "", err
+		}
+	}
+	if storage.Backend() == "s3" {
+		absPath = mediaBlobURI(chatJID, messageID)
 	}
 	return true, mediaType, filename, absPath, nil
 }
@@ -624,6 +657,11 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 
 		// Handle download result
 		if !success || err != nil {
+			if b.mediaStorage().Backend() == "s3" && errors.Is(err, errMediaQuota) {
+				cached := false
+				writeJSON(w, 200, DownloadMediaResponse{Success: true, Path: mediaBlobURI(req.ChatJID, req.MessageID), Cached: &cached, Reason: "quota", Message: "Media is available through the authenticated stream without caching"})
+				return
+			}
 			errMsg := "Unknown error"
 			if err != nil {
 				errMsg = err.Error()

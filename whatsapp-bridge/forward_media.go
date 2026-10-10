@@ -110,6 +110,7 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 				}
 			}
 		}
+		audio.ContextInfo = outboundContextInfo(quote, nil)
 		return &waE2E.Message{AudioMessage: audio}, "", nil
 	case "sticker":
 		if !isWebP(data) {
@@ -119,6 +120,7 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 		if p != nil {
 			sticker.IsAnimated = p.Animated
 		}
+		sticker.ContextInfo = outboundContextInfo(quote, mentions)
 		return &waE2E.Message{StickerMessage: sticker}, "", nil
 	case "document":
 		name, title := source.filename, source.filename

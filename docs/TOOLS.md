@@ -2,6 +2,16 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
+With the S3 media backend, `download_media.file_path` is a
+`whatsapp://media/<chat>/<message>` identifier. `read_media`, media resources and
+`transcribe_audio` fetch through the authenticated bridge; `send_file` accepts
+cached identifiers and `send_audio_message` accepts audio identifiers. For
+`transcribe_audio`, use `chat_jid`/`message_id`; its `file_path` accepts local paths.
+At the S3 quota, an on-demand fetch reports `cached: false,
+reason: "quota"` and a subsequent read streams without retaining a cache copy.
+Local paths keep their existing behavior. See
+[Media storage backends](CONFIGURATION.md#media-storage-backends).
+
 With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
@@ -1649,15 +1659,35 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
-| any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; no total-file cap |
+| any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; S3 spool capacity below applies |
+
+With the S3 backend, base64 chunks use the authenticated bridge byte-range API;
+the whole-file hash comes from the verified cache catalog. The bridge verifies
+the complete object once in a private temporary file, then reuses those verified
+bytes for subsequent ranges. The file expires after two minutes without readers
+and is removed on shutdown. Verified spools are limited to 512 MiB total and four
+objects, with at most four concurrent readers and four blob responses; a full
+capacity returns HTTP 503 for a later retry. Idle spools can be evicted earlier
+to admit another object. Reads have separate transfer slots from uploads.
+Temporary disk space must hold the complete file; an object over 512 MiB is
+refused by this read path. Quota fallbacks share this pool, reserve a byte budget
+before CDN download (including encryption overhead), verify the plaintext hash
+and reuse the temporary bytes across chunks without publishing an S3 cache row.
+An unknown-length fallback reserves up to 128 MiB; whole-file reads also obey
+the caller's byte limit before writing. Cold reads and the quota fallback support the same
+`offset`/`length` parameters.
+Temporary pressure from other active readers returns a retryable HTTP 503;
+known-length files that cannot currently fit are rejected before download.
+A file exceeding the bridge's own spool size limit returns a permanent HTTP
+413 naming that limit. The caller's `max_bytes` limit has a separate 413 message.
 
 The chunk JSON carries `total_size`, `offset`, `returned_length`, `next_offset`
 (`null` at EOF), `sha256` (the archived whole-file plaintext hash),
 `chunk_sha256` (the returned bytes), `mime`, `bytes` (same as `returned_length`)
 and `notes`. Base64 stays plain even with `WHATSAPP_WRAP_UNTRUSTED=1`.
-The server seeks and reads only the requested range when the archive has the
+The local backend seeks and reads only the requested range when the archive has the
 whole-file hash; legacy rows without a hash need a streaming hash pass with a
-1 MiB buffer. No temporary copy is created. Chat allow-list, tool policy,
+1 MiB buffer. Local reads create no temporary copy. Chat allow-list, tool policy,
 implicit-download restrictions and read-only mode apply exactly as for other
 `read_media` calls.
 

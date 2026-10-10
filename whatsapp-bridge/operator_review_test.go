@@ -368,7 +368,7 @@ func TestOperatorLogoutDrainsBackgroundSessionConsumers(t *testing.T) {
 					identityFinished.Store(true)
 					return false, "", "", "", nil
 				}
-				go func() { b.runAutoDownload(b.ctx, mediaJob{}); close(backgroundDone) }()
+				go func() { b.runAutoDownload(b.ctx, mediaJob{mediaType: "image"}); close(backgroundDone) }()
 			case "labels":
 				b.Connected = func() bool { return true }
 				b.LabelResync = func(context.Context) error {

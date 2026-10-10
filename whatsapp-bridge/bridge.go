@@ -238,7 +238,9 @@ type Bridge struct {
 	mediaTransfers mediaTransferGroup
 	// MediaStorage is configured before handlers or background jobs start.
 	// Nil retains the existing local layout, including in test bridges.
-	MediaStorage mediaStorage
+	MediaStorage           mediaStorage
+	MediaQuotaWarnPercent  int
+	mediaQuotaWarningState atomic.Int64
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc
@@ -370,13 +372,15 @@ func (b *Bridge) sleep(d time.Duration) bool {
 }
 
 // Shutdown stops accepting REST requests, cancels background goroutines and
-// waits (bounded by timeout) for in-flight work. Order matters: drain HTTP
-// first so no handler touches the store after main closes it, then cancel
+// waits (bounded by timeout) for in-flight work. Order matters: cancel private
+// media response streams before draining HTTP, so their cleanup fits the grace
+// period and no handler touches the store after main closes it, then cancel
 // the loops, then wait for history-vote decoding. Disconnecting the WhatsApp
 // client and closing the store stay in main(), after this returns.
 func (b *Bridge) Shutdown(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	b.mediaTransfers.stopRequests()
 	if b.operatorServer != nil {
 		if err := b.operatorServer.Shutdown(ctx); err != nil {
 			b.Log.Warnf("Operator server did not drain cleanly: %v", err)
@@ -389,6 +393,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.labelSyncOnce.Do(func() {})
 	b.cancel()
+	b.mediaTransfers.stop()
 	b.historyVoteMu.Lock()
 	b.historyVoteStopped = true
 	b.historyVoteMu.Unlock()

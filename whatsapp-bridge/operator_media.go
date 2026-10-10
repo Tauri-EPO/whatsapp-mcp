@@ -52,6 +52,10 @@ func (b *Bridge) handleOperatorMediaUsage(w http.ResponseWriter, r *http.Request
 		}
 	}
 	byType := map[string]int64{"image": 0, "video": 0, "audio": 0, "document": 0, "sticker": 0, "status": 0}
+	if b.mediaStorage().Backend() == "s3" {
+		b.handleS3MediaUsage(w, r, limit)
+		return
+	}
 	byChat := map[string]int64{}
 	var total int64
 	err := eachCachedMediaContext(r.Context(), b.StoreRoot, func(chat string, file *cachedMedia) {
@@ -98,7 +102,7 @@ func (b *Bridge) handleOperatorMediaPurge(w http.ResponseWriter, r *http.Request
 		writeError(w, 400, "type is required: image, video, audio, document, sticker, status or all")
 		return
 	}
-	if req.OlderDays < 0 || req.OlderDays > 106751 || (req.IncludeOrphans && req.Type != "status") {
+	if req.OlderDays < 0 || req.OlderDays > 106751 || (req.IncludeOrphans && req.Type != "status" && b.mediaStorage().Backend() != "s3") {
 		writeError(w, 400, "Invalid age or orphan filter")
 		return
 	}
@@ -205,6 +209,9 @@ func (b *Bridge) purgeOperatorMedia(ctx context.Context, req operatorMediaPurge)
 }
 
 func (b *Bridge) purgeOperatorMediaProgress(ctx context.Context, req operatorMediaPurge, progress func(operatorMediaResult)) (operatorMediaResult, error) {
+	if b.mediaStorage().Backend() == "s3" {
+		return b.purgeS3OperatorMedia(ctx, req)
+	}
 	result := operatorMediaResult{DryRun: req.DryRun == nil || *req.DryRun}
 	if b.StoreRoot == nil {
 		return result, errors.New("store unavailable")

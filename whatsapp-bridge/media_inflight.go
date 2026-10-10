@@ -45,7 +45,10 @@ type mediaTransferGroup struct {
 	// wg tracks the transfer goroutines so Shutdown can wait for them: a
 	// transfer outlives the request that started it and must not still be
 	// querying messages.db when main closes it.
-	wg sync.WaitGroup
+	wg              sync.WaitGroup
+	stopped         bool
+	requestsStopped bool
+	requests        map[*int]context.CancelFunc
 }
 
 type mediaTransferCall struct {
@@ -61,6 +64,10 @@ type mediaTransferCall struct {
 // to the ones still waiting. A transfer that fails fails for all of them.
 func (g *mediaTransferGroup) do(ctx context.Context, key string, fn func() (int64, error)) (int64, error) {
 	g.mu.Lock()
+	if g.stopped {
+		g.mu.Unlock()
+		return 0, context.Canceled
+	}
 	call, running := g.inflight[key]
 	if !running {
 		call = &mediaTransferCall{done: make(chan struct{}), err: errTransferAbandoned}
@@ -129,6 +136,47 @@ func (g *mediaTransferGroup) wait() {
 	g.wg.Wait()
 }
 
+func (g *mediaTransferGroup) stop() {
+	g.mu.Lock()
+	g.stopped = true
+	g.mu.Unlock()
+}
+
+// Cancel private response streams before HTTP draining consumes the shutdown
+// deadline; their handlers then remove their spools while the store is open.
+func (g *mediaTransferGroup) stopRequests() {
+	g.mu.Lock()
+	g.requestsStopped = true
+	cancels := make([]context.CancelFunc, 0, len(g.requests))
+	for _, cancel := range g.requests {
+		cancels = append(cancels, cancel)
+	}
+	g.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (g *mediaTransferGroup) trackRequest(ctx context.Context, cancel context.CancelFunc) (func(), error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped || g.requestsStopped || ctx.Err() != nil {
+		return nil, context.Canceled
+	}
+	if g.requests == nil {
+		g.requests = make(map[*int]context.CancelFunc)
+	}
+	key := new(int)
+	g.requests[key] = cancel
+	g.wg.Add(1)
+	return func() {
+		g.mu.Lock()
+		delete(g.requests, key)
+		g.mu.Unlock()
+		g.wg.Done()
+	}, nil
+}
+
 // transferContext is the context a transfer runs under: the bridge lifecycle,
 // so Shutdown cancels it, plus the deadline of the caller that started it, but
 // never that caller's cancellation.
@@ -155,4 +203,25 @@ func transferContext(lifecycle, starter context.Context) (context.Context, conte
 		return context.WithDeadline(base, deadline)
 	}
 	return context.WithCancel(base)
+}
+
+func mediaDownloadContext(lifecycle, starter context.Context) (context.Context, context.CancelFunc) {
+	if transient, _ := starter.Value(transientMediaKey{}).(string); transient != "" {
+		return requestMediaContext(lifecycle, starter)
+	}
+	return transferContext(lifecycle, starter)
+}
+
+// Request-owned spools observe both the caller and bridge shutdown. Unlike
+// shared cache transfers, they must finish cleanup before their request leaves.
+func requestMediaContext(lifecycle, starter context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(starter)
+	if lifecycle == nil {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(lifecycle, cancel)
+	if lifecycle.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
 }

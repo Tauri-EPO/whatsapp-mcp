@@ -134,7 +134,14 @@ def read_media_resource(chat_jid: str, message_id: str) -> ReadResourceContents:
             # at all is not a fact about the message being asked for.
             raise ToolError("denied", active_policy().denial_message(RESOURCE_TOOL))
         found = media_read.resolve_media(chat_jid, message_id, caller="resources/read")
-        data = media_read.read_capped(found.path, found.size)
+        with media_read.media_remote.local_file(
+            found.path, found.size, found.sha256, cache_only=not media_read.offers_download()
+        ) as local:
+            if media_read.media_remote.enabled():
+                mime = media_read.spooled_mime(media_read._media_row(chat_jid, message_id)[0], found.filename, local)
+                found = found._replace(mime=mime, size=os.path.getsize(local))
+                media_read.check_size(found.size, media_read.hard_limit(mime), mime, "resources/read")
+            data = media_read.read_capped(local, found.size)
     except ToolError as exc:
         raise _as_resource_error(exc) from exc
     if media_read.is_text_mime(found.mime):
@@ -167,7 +174,12 @@ def attach_resource_links(items: Sequence[dict[str, Any]]) -> None:
         return
     for item in items:
         cached_file = item.get("cached_file")
-        cached_path = os.path.join(media_inventory.chat_media_dir(item["chat_jid"]), cached_file) if cached_file else ""
+        if cached_file and cached_file.startswith(media_read.MEDIA_URI_PREFIX):
+            cached_path = cached_file
+        else:
+            cached_path = (
+                os.path.join(media_inventory.chat_media_dir(item["chat_jid"]), cached_file) if cached_file else ""
+            )
         mime = media_read.declared_mime(item.get("media_type") or "", item.get("filename"), cached_path)
         size = item.get("cached_bytes") or item.get("bytes")
         if size is not None and size > media_read.hard_limit(mime):

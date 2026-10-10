@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Any
 
 import media_notes
+import media_remote
 import whatsapp
 from errors import ToolError
 from whatsapp import (
@@ -123,6 +124,13 @@ def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
     totals). A single message is answered by ``lookup_cached_name``, a page by
     ``_CacheIndex``. A missing or unreadable directory means nothing is cached.
     """
+    import media_remote
+
+    if media_remote.enabled():
+        return {
+            message_id: CachedFile(media_remote.uri(chat_jid, message_id), item["bytes"])
+            for message_id, item in media_remote.catalog(chat_jid).items()
+        }
     found: dict[str, CachedFile] = {}
     try:
         with _cache_directory(chat_jid) as directory, os.scandir(directory) as entries:
@@ -285,7 +293,31 @@ class _CacheIndex:
     def __init__(self) -> None:
         self._by_chat: dict[str, dict[str, str]] = {}
 
+        self._remote: dict[tuple[str, str], CachedFile | None] = {}
+
+    def prefetch(self, rows: Sequence[Any]) -> None:
+        """Fetch only this page/window, including absent identities."""
+        if not media_remote.enabled():
+            return
+        by_chat: dict[str, list[str]] = {}
+        for row in rows:
+            message_id, chat_jid = str(row[0]), str(row[1])
+            if (chat_jid, message_id) not in self._remote:
+                by_chat.setdefault(chat_jid, []).append(message_id)
+        for chat_jid, ids in by_chat.items():
+            items = media_remote.lookup_many(chat_jid, ids)
+            for message_id in ids:
+                item = items.get(message_id)
+                self._remote[chat_jid, message_id] = (
+                    CachedFile(media_remote.uri(chat_jid, message_id), item["bytes"]) if item else None
+                )
+
     def lookup(self, chat_jid: str, message_id: str) -> CachedFile | None:
+        import media_remote
+
+        if media_remote.enabled():
+            self.prefetch([(message_id, chat_jid)])
+            return self._remote[chat_jid, message_id]
         if chat_jid not in self._by_chat:
             self._by_chat[chat_jid] = cached_names(chat_jid)
         name = self._by_chat[chat_jid].get(message_id)
@@ -478,6 +510,8 @@ def list_media_page(
             sql = _page_sql(clauses, order, copies_clauses if sort == "copies" else None)
             query_params = (*copies_params, *params) if sort == "copies" else tuple(params)
             candidates = conn.execute(sql, (*query_params, window, offset)).fetchall()
+            if min_bytes:
+                cache.prefetch(candidates)
             page_rows = []
             for row in candidates:
                 if min_bytes:
@@ -512,6 +546,7 @@ def list_media_page(
     except sqlite3.Error as exc:
         raise ToolError("internal", f"database error: {exc}") from exc
 
+    cache.prefetch(rows)
     notes, refusals = media_notes.fetch_media_annotations([row[9] for row in rows], [(row[1], row[0]) for row in rows])
     items = [_row_to_item(row, cache, notes) for row in rows]
     for item in items:
@@ -626,7 +661,7 @@ def media_stats(
     by_type = [{"media_type": t, "files": int(n), "bytes": int(b)} for t, n, b in by_type_rows]
     return {
         "chat_jid": chat_jid or None,
-        "media_root": media_root(),
+        "media_root": None if media_remote.enabled() else media_root(),
         "total": {
             "files": sum(c["files"] for c in by_chat),
             "bytes": sum(c["bytes"] for c in by_chat),
