@@ -392,3 +392,22 @@ def test_whole_file_budget_includes_conversion_and_all_parts(provider, tmp_path)
     with pytest.raises(BackendUnavailableError, match="deadline"):
         transcribe_file(str(source), config=replace(load_config(), timeout_s=3))
     assert time.monotonic() - started < 4.8
+
+
+def test_each_part_request_gets_only_the_remaining_budget(provider, tmp_path, monkeypatch):
+    source = tmp_path / "long.wav"
+    _audio(source, seconds=810)
+    seen = []
+
+    def recording_http(part, config, language):
+        seen.append((time.monotonic(), config.timeout_s))
+        time.sleep(0.3)
+        return "part"
+
+    monkeypatch.setattr(transcribe, "_transcribe_http", recording_http)
+    started = time.monotonic()
+    assert transcribe_file(str(source), config=replace(load_config(), timeout_s=30))["text"] == "part part"
+    assert len(seen) == 2
+    for called_at, timeout_s in seen:
+        assert timeout_s <= 30 - (called_at - started) + 0.05
+    assert seen[1][1] < seen[0][1] - 0.25
