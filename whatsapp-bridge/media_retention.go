@@ -24,6 +24,7 @@ package main
 // touches the SQLite files, the token or the lock at the store root.
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -171,14 +172,9 @@ func storeUsageByScope(root *os.Root) (storeBytes, mediaBytes int64, mediaFiles 
 		storeBytes += info.Size()
 		return nil
 	})
-	_ = eachCachedMedia(root, func(chat string, file *cachedMedia) {
-		mediaBytes += file.info.Size()
-		mediaFiles++
-		if chat == "status@broadcast" {
-			statusBytes += file.info.Size()
-			statusFiles++
-		}
-	})
+	usage, _ := (localMediaStorage{root: root}).Usage(context.Background())
+	mediaBytes, mediaFiles = usage.Bytes, usage.Files
+	statusBytes, statusFiles = usage.StatusBytes, usage.StatusFiles
 	return
 }
 
@@ -236,7 +232,7 @@ func (b *Bridge) runMediaRetention() {
 		return
 	}
 	sweep := func() {
-		removed, freed, failed := sweepMediaWithStatus(b.StoreRoot, maxAge, b.StatusRetention, time.Now())
+		removed, freed, failed := b.mediaStorage().Sweep(b.ctx, maxAge, b.StatusRetention, time.Now())
 		b.storeStats.invalidate()
 		if removed > 0 || failed > 0 {
 			b.Log.Infof("Media retention: removed %d files (%d bytes), chat_age=%s status_age=%s, %d failures", removed, freed, maxAge, statusAge, failed)

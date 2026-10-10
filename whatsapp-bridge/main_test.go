@@ -158,6 +158,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	if _, err := db.Exec(runtimeSettingsSchema); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(mediaCacheSchema); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(sendLimitsSchema); err != nil {
 		t.Fatal(err)
 	}

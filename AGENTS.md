@@ -99,6 +99,8 @@ whatsapp-mcp/
 │   ├── forward_media.go        # forward stored category and original presentation, keeping cache names
 │   ├── media_presentation.go   # recipient-visible metadata persisted with the media snapshot
 │   ├── media.go                # inbound media download into store/<chat>/
+│   ├── media_storage.go        # bridge-owned cached media interface and existing local layout
+│   ├── media_catalog.go        # object catalog and cached-message reference schema
 │   ├── media_cache_path.go     # the one rule for where a cached media file is (download lookup, purge, webhook read)
 │   ├── media_path.go           # WHATSAPP_MEDIA_ROOTS: outbound media_path confined to an allow-list
 │   ├── rest.go                 # newRESTMux route table + HTTP server; handlers live next to their features
