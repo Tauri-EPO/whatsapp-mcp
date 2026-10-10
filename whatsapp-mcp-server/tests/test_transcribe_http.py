@@ -50,8 +50,8 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_pa
 
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
-            # Six pieces 0.6 s apart: each gap stays under the 1 s read timeout,
-            # and without the wall deadline the response would take 3 s or more.
+            # Six pieces 0.6 s apart: without the wall deadline the response takes
+            # over 3 s, and a read failure would not carry the "deadline" message.
             pieces = (
                 [
                     b"HTTP/1.1 200 OK\r\n",
