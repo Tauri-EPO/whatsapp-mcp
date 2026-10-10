@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.3.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.2.0...v2.3.0) (2026-10-10)
+
+
+### Features
+
+* add local media operator controls and status cleanup ([#676](https://github.com/Tauri-EPO/whatsapp-mcp/issues/676)) ([db6b8d6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/db6b8d6b6b0f4e80add9ae13828b1ac6e37faadf)), closes [#650](https://github.com/Tauri-EPO/whatsapp-mcp/issues/650) [#657](https://github.com/Tauri-EPO/whatsapp-mcp/issues/657) [#658](https://github.com/Tauri-EPO/whatsapp-mcp/issues/658)
+* add OAuth resource server and HTTP transcription provider ([#672](https://github.com/Tauri-EPO/whatsapp-mcp/issues/672)) ([7a48f6b](https://github.com/Tauri-EPO/whatsapp-mcp/commit/7a48f6bfb09842b940e3ca3d7a15b366f6f41799)), closes [#640](https://github.com/Tauri-EPO/whatsapp-mcp/issues/640) [#636](https://github.com/Tauri-EPO/whatsapp-mcp/issues/636)
+* add opt-in shared proxy compose override ([#679](https://github.com/Tauri-EPO/whatsapp-mcp/issues/679)) ([1c1abb4](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1c1abb4a1fef7062b9b9ffdbe75c7761325ece0e))
+* add persistent send budgets and MCP token rotation ([#673](https://github.com/Tauri-EPO/whatsapp-mcp/issues/673)) ([4235338](https://github.com/Tauri-EPO/whatsapp-mcp/commit/4235338172c65811ee5814a2fe3ad5b6bcda885e)), closes [#635](https://github.com/Tauri-EPO/whatsapp-mcp/issues/635) [#655](https://github.com/Tauri-EPO/whatsapp-mcp/issues/655) [#656](https://github.com/Tauri-EPO/whatsapp-mcp/issues/656) [#644](https://github.com/Tauri-EPO/whatsapp-mcp/issues/644)
+* add runtime settings and operator logout ([#669](https://github.com/Tauri-EPO/whatsapp-mcp/issues/669)) ([d5eea52](https://github.com/Tauri-EPO/whatsapp-mcp/commit/d5eea525362ed4b6f11f853c4120ba8690e60140)), closes [#644](https://github.com/Tauri-EPO/whatsapp-mcp/issues/644) [#638](https://github.com/Tauri-EPO/whatsapp-mcp/issues/638) [#643](https://github.com/Tauri-EPO/whatsapp-mcp/issues/643)
+* bound history and add operator archives ([#674](https://github.com/Tauri-EPO/whatsapp-mcp/issues/674)) ([4893a0e](https://github.com/Tauri-EPO/whatsapp-mcp/commit/4893a0e104bbbdd3dad4ad371901a8a414381fbb)), closes [#645](https://github.com/Tauri-EPO/whatsapp-mcp/issues/645) [#659](https://github.com/Tauri-EPO/whatsapp-mcp/issues/659) [#660](https://github.com/Tauri-EPO/whatsapp-mcp/issues/660)
+* meter transcription usage and enforce monthly ceilings ([#675](https://github.com/Tauri-EPO/whatsapp-mcp/issues/675)) ([e566030](https://github.com/Tauri-EPO/whatsapp-mcp/commit/e56603058c036b0b3966831b9b7aaa6f120abaec))
+
+
+### Bug fixes
+
+* enforce chat allow-list for group participants and webhooks ([#667](https://github.com/Tauri-EPO/whatsapp-mcp/issues/667)) ([6ff501b](https://github.com/Tauri-EPO/whatsapp-mcp/commit/6ff501bb7205bfc6f56a33b7912b90258c23bb05)), closes [#611](https://github.com/Tauri-EPO/whatsapp-mcp/issues/611) [#628](https://github.com/Tauri-EPO/whatsapp-mcp/issues/628)
+* retain inbound edits until their originals arrive ([#668](https://github.com/Tauri-EPO/whatsapp-mcp/issues/668)) ([dcd10d6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/dcd10d667b2010baf6d61bdfdddc991414b42cbe)), closes [#666](https://github.com/Tauri-EPO/whatsapp-mcp/issues/666)
+
+
+### Refactoring
+
+* introduce cached media storage interface ([#681](https://github.com/Tauri-EPO/whatsapp-mcp/issues/681)) ([1b6d6bc](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1b6d6bcfd307a5699509658f5d286c37f4295c8f))
+
+
+### Dependencies
+
+* bump golang.org/x/net to 0.60.0 ([#677](https://github.com/Tauri-EPO/whatsapp-mcp/issues/677)) ([089d006](https://github.com/Tauri-EPO/whatsapp-mcp/commit/089d0068c1a9a39f89276a73b3b7d664f8cae4e8))
+
 ## [2.2.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.1.0...v2.2.0) (2026-10-09)
 
 
