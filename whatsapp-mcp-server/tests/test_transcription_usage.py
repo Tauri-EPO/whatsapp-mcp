@@ -580,7 +580,10 @@ def test_http_deadline_includes_accounting_writer_wait(provider, paired_dbs, mon
 def test_http_completion_reconciles_after_writer_recovery(provider, runtime_archive, monkeypatch, tmp_path, outcome):
     import time
 
-    monkeypatch.setenv("WHISPER_TIMEOUT_S", "3")
+    # Both cases must get past the audio preparation before the deadline: on a
+    # loaded runner starting ffmpeg alone can take several seconds.
+    timeout_s = 8
+    monkeypatch.setenv("WHISPER_TIMEOUT_S", str(timeout_s))
     patch(runtime_archive, {"transcription.monthly_max_minutes": 0.05, "transcription.cap_scope": "all"})
     source = tmp_path / "recovery.wav"
     _audio(source, 1)
@@ -594,7 +597,7 @@ def test_http_completion_reconciles_after_writer_recovery(provider, runtime_arch
         return original_http(*args, **kwargs)
 
     monkeypatch.setattr(transcribe, "_transcribe_http", contended_http)
-    provider["delay"] = 6 if outcome == "error" else 0
+    provider["delay"] = timeout_s + 6 if outcome == "error" else 0
     started = time.monotonic()
     try:
         if outcome == "error":
@@ -603,7 +606,7 @@ def test_http_completion_reconciles_after_writer_recovery(provider, runtime_arch
         else:
             with pytest.raises(transcribe.BackendUnavailableError, match="accounting pending"):
                 transcribe.transcribe_file(str(source))
-        assert time.monotonic() - started < 4.5
+        assert time.monotonic() - started < timeout_s + 4
         token, month = writers[0].execute("SELECT id,month FROM transcription_reservations").fetchone()
         assert writers[0].execute("SELECT COUNT(*) FROM transcription_usage").fetchone()[0] == 0
     finally:
