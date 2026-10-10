@@ -580,7 +580,7 @@ func TestMinIOLazyQuotaRuntimeOperatorAndWarnings(t *testing.T) {
 		transfers.Add(1)
 		return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(lazyData); return err })
 	}
-	b.runAutoDownload(b.ctx, mediaJob{messageID: lazy.ID, chatJID: lazy.ChatJID})
+	b.runAutoDownload(b.ctx, mediaJob{messageID: lazy.ID, chatJID: lazy.ChatJID, mediaType: lazy.MediaType})
 	if transfers.Load() != 0 {
 		t.Fatal("lazy video reached CDN")
 	}
@@ -665,7 +665,7 @@ func TestMinIOLazyQuotaRuntimeOperatorAndWarnings(t *testing.T) {
 		transfers.Add(1)
 		return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(newData); return err })
 	}
-	b.runAutoDownload(b.ctx, mediaJob{messageID: newRow.ID, chatJID: newRow.ChatJID})
+	b.runAutoDownload(b.ctx, mediaJob{messageID: newRow.ID, chatJID: newRow.ChatJID, mediaType: newRow.MediaType})
 	if transfers.Load() != 1 {
 		t.Fatal("full quota automatic fetch reached CDN")
 	}
