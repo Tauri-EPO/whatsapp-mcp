@@ -70,6 +70,12 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	ctx, stopLifecycle := requestMediaContext(b.ctx, ctx)
 	defer stopLifecycle()
+	finish, trackErr := b.mediaTransfers.trackRequest(ctx, stopLifecycle)
+	if trackErr != nil {
+		writeError(w, 503, "Media read cancelled")
+		return
+	}
+	defer finish()
 	storage := b.mediaStorage()
 	entry, err := storage.Lookup(ctx, row)
 	if err != nil {
@@ -90,14 +96,6 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			// Keep the fallback owned by this HTTP request. Its private temporary
 			// local file disappears after streaming, and never enters the catalog.
 			rel := ".media-stream-" + rand.Text()
-			// Track the entire request-owned download, response and cleanup,
-			// rather than detaching a transfer from its private spool.
-			finish, trackErr := b.mediaTransfers.trackRequest(ctx)
-			if trackErr != nil {
-				writeError(w, 502, "Media download cancelled")
-				return
-			}
-			defer finish()
 			ctx = context.WithValue(ctx, transientMediaKey{}, rel)
 			defer func() { _ = b.StoreRoot.Remove(rel); _ = b.StoreRoot.Remove(rel + ".part") }()
 			_, _, _, _, err = b.downloadMediaAttempt(ctx, row.ID, row.ChatJID)

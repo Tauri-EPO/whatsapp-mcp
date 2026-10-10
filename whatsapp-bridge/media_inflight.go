@@ -45,8 +45,10 @@ type mediaTransferGroup struct {
 	// wg tracks the transfer goroutines so Shutdown can wait for them: a
 	// transfer outlives the request that started it and must not still be
 	// querying messages.db when main closes it.
-	wg      sync.WaitGroup
-	stopped bool
+	wg              sync.WaitGroup
+	stopped         bool
+	requestsStopped bool
+	requests        map[*int]context.CancelFunc
 }
 
 type mediaTransferCall struct {
@@ -140,14 +142,39 @@ func (g *mediaTransferGroup) stop() {
 	g.mu.Unlock()
 }
 
-func (g *mediaTransferGroup) trackRequest(ctx context.Context) (func(), error) {
+// Cancel private response streams before HTTP draining consumes the shutdown
+// deadline; their handlers then remove their spools while the store is open.
+func (g *mediaTransferGroup) stopRequests() {
+	g.mu.Lock()
+	g.requestsStopped = true
+	cancels := make([]context.CancelFunc, 0, len(g.requests))
+	for _, cancel := range g.requests {
+		cancels = append(cancels, cancel)
+	}
+	g.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (g *mediaTransferGroup) trackRequest(ctx context.Context, cancel context.CancelFunc) (func(), error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.stopped || ctx.Err() != nil {
+	if g.stopped || g.requestsStopped || ctx.Err() != nil {
 		return nil, context.Canceled
 	}
+	if g.requests == nil {
+		g.requests = make(map[*int]context.CancelFunc)
+	}
+	key := new(int)
+	g.requests[key] = cancel
 	g.wg.Add(1)
-	return g.wg.Done, nil
+	return func() {
+		g.mu.Lock()
+		delete(g.requests, key)
+		g.mu.Unlock()
+		g.wg.Done()
+	}, nil
 }
 
 // transferContext is the context a transfer runs under: the bridge lifecycle,

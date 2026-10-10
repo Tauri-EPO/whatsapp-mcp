@@ -88,7 +88,20 @@ func TestMinIOInboundWebhookDoesNotWaitForPublication(t *testing.T) {
 }
 
 func TestMinIOTransientHTTPStreamStopsWithLifecycle(t *testing.T) {
-	b, _ := minioTestBridge(t, "instances/test-transient-shutdown")
+	testMinIOTransientHTTPShutdown(t, false)
+}
+
+func TestMinIOTransientHTTPGraceExpiryCleansSpool(t *testing.T) {
+	testMinIOTransientHTTPShutdown(t, true)
+}
+
+func testMinIOTransientHTTPShutdown(t *testing.T, httpDrain bool) {
+	t.Helper()
+	prefix := "instances/test-transient-shutdown"
+	if httpDrain {
+		prefix += "-grace"
+	}
+	b, _ := minioTestBridge(t, prefix)
 	data := []byte("temporary quota fallback")
 	row := s3TestRow(t, b, "TRANSIENTSHUTDOWN", mediaTestChat, "document", data, time.Now())
 	b.MediaQuotaBytes = 1
@@ -101,10 +114,16 @@ func TestMinIOTransientHTTPStreamStopsWithLifecycle(t *testing.T) {
 			}
 			close(entered)
 			<-ctx.Done()
+			if httpDrain {
+				time.Sleep(20 * time.Millisecond)
+			}
 			return ctx.Err()
 		})
 	}
 	server := s3ReviewREST(t, b)
+	if httpDrain {
+		b.httpServer = server.Config
+	}
 	req, _ := http.NewRequest("GET", server.URL+"/api/media/blob?chat_jid="+url.QueryEscape(row.ChatJID)+"&message_id="+row.ID, nil)
 	req.Header.Set("Authorization", "Bearer test-bridge-token")
 	requestCtx, cancel := context.WithCancel(context.Background())
@@ -124,7 +143,11 @@ func TestMinIOTransientHTTPStreamStopsWithLifecycle(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("quota fallback did not start")
 	}
-	b.Shutdown(5 * time.Second)
+	if httpDrain {
+		b.Shutdown(200 * time.Millisecond)
+	} else {
+		b.Shutdown(5 * time.Second)
+	}
 	select {
 	case <-finished:
 	default:

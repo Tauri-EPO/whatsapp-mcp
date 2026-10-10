@@ -372,13 +372,15 @@ func (b *Bridge) sleep(d time.Duration) bool {
 }
 
 // Shutdown stops accepting REST requests, cancels background goroutines and
-// waits (bounded by timeout) for in-flight work. Order matters: drain HTTP
-// first so no handler touches the store after main closes it, then cancel
+// waits (bounded by timeout) for in-flight work. Order matters: cancel private
+// media response streams before draining HTTP, so their cleanup fits the grace
+// period and no handler touches the store after main closes it, then cancel
 // the loops, then wait for history-vote decoding. Disconnecting the WhatsApp
 // client and closing the store stay in main(), after this returns.
 func (b *Bridge) Shutdown(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	b.mediaTransfers.stopRequests()
 	if b.operatorServer != nil {
 		if err := b.operatorServer.Shutdown(ctx); err != nil {
 			b.Log.Warnf("Operator server did not drain cleanly: %v", err)
