@@ -35,6 +35,9 @@ func (s *s3MediaStorage) transientIdentity(ctx context.Context, row mediaRow) (s
 	if err != nil {
 		return "", nil, nil, 0, errMediaS3
 	}
+	if (kind != "image" && kind != "video" && kind != "audio" && kind != "document" && kind != "sticker") || !mediaComplete(row.ChatJID, source, direct, key, plain, enc) {
+		return "", nil, nil, 0, errMediaUnavailable
+	}
 	encoded, err := json.Marshal([]any{row.ID, row.ChatJID, plain, enc, key, source, direct, length, kind, name, dbTime(at)})
 	if err != nil {
 		return "", nil, nil, 0, errMediaS3
