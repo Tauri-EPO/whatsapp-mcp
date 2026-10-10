@@ -311,6 +311,14 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}); err != nil {
 		return fmt.Errorf("media cache schema: %w", err)
 	}
+	// Existing archives already carry media_cache_v1. A separate marker must
+	// install the S3 journals and cursor index introduced after that release.
+	if _, err := applyNamedMigration(db, "media_cache_recovery_v2", func(tx *sql.Tx) error {
+		_, err := tx.Exec(mediaCacheSchema)
+		return err
+	}); err != nil {
+		return fmt.Errorf("media cache recovery schema: %w", err)
+	}
 	// Run data rewrites after their tables and columns exist. Each owns an
 	// independent schema_migrations marker; legacy user_version is untouched.
 	if err := migrateCanonicalTimestamps(db); err != nil {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -114,5 +116,76 @@ func TestMinIOFailedPublicationPersistsUploadRecovery(t *testing.T) {
 	waitS3Recovery(t, b, recovered, 0)
 	if _, err := s.client.StatObject(context.Background(), s.cfg.Bucket, key, minio.StatObjectOptions{}); !missingS3Object(err) {
 		t.Fatal("unpublished remote object survived restart recovery", err)
+	}
+}
+
+func TestMinIORecoverySchemaUpgradesExistingCatalog(t *testing.T) {
+	b, s := minioTestBridge(t, "instances/test-recovery-schema-upgrade")
+	data := []byte("existing cached document")
+	row := s3TestRow(t, b, "LEGACYCACHE", mediaTestChat, "document", data, time.Now())
+	s3TestWrite(t, b, row, data)
+	for _, statement := range []string{
+		`DROP TABLE media_cache_uploads`,
+		`DROP TABLE media_cache_deletions`,
+		`DROP INDEX idx_messages_media_cache_cursor`,
+		`DELETE FROM schema_migrations WHERE name='media_cache_recovery_v2'`,
+	} {
+		if _, err := b.Store.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	b.Store = reopened
+	if err := ensureMessageStoreSchema(reopened.db); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := newS3MediaStorage(b.ctx, s.cfg, reopened, b.StoreRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.MediaStorage = upgraded
+	updated := []byte("published after archive upgrade")
+	newRow := s3TestRow(t, b, "AFTERUPGRADE", mediaTestChat, "document", updated, time.Now())
+	s3TestWrite(t, b, newRow, updated)
+	for _, expected := range []struct {
+		row  mediaRow
+		data []byte
+	}{{row, data}, {newRow, updated}} {
+		reader, _, err := upgraded.Open(b.ctx, expected.row, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil || !bytes.Equal(actual, expected.data) {
+			t.Fatal("upgrade changed cached bytes", err)
+		}
+	}
+	var objects, refs, markers, indexes int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM media_cache`).Scan(&objects); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM media_cache_refs`).Scan(&refs); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name='media_cache_recovery_v2'`).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_media_cache_cursor'`).Scan(&indexes); err != nil {
+		t.Fatal(err)
+	}
+	if objects != 2 || refs != 2 || markers != 1 || indexes != 1 {
+		t.Fatal("upgrade schema/counts", objects, refs, markers, indexes)
+	}
+	results, err := upgraded.Delete(b.ctx, []mediaRow{row}, false)
+	if err != nil || len(results) != 1 || !results[0].Purged {
+		t.Fatal("upgraded deletion journal unavailable", results, err)
 	}
 }
