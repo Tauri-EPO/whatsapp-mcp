@@ -117,6 +117,11 @@ func (s *s3MediaStorage) transient(ctx context.Context, row mediaRow, limit int6
 	if declared > reserved {
 		return nil, errMediaSpoolFull
 	}
+	// An unknown length needs the full budget: a partial grant would download
+	// and discard CDN bytes on every retry while another reader holds capacity.
+	if declared == 0 && reserved < budget {
+		return nil, errMediaSpoolFull
+	}
 	overflow := func() error {
 		if reserved < budget {
 			return errMediaSpoolFull

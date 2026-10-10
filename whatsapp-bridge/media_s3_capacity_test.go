@@ -481,7 +481,7 @@ func requestCapacityBlob(t *testing.T, server *httptest.Server, row mediaRow) (i
 }
 
 func TestMinIOTransientSpoolPressureIsRetryable(t *testing.T) {
-	for _, declared := range []int{1024, 0} {
+	for _, declared := range []int{1024, 0, -1, 256} {
 		t.Run(strconv.Itoa(declared), func(t *testing.T) {
 			b, s := minioTestBridge(t, "instances/test-transient-pressure-"+strconv.Itoa(declared))
 			heldData := bytes.Repeat([]byte("a"), 1500)
@@ -494,22 +494,67 @@ func TestMinIOTransientSpoolPressureIsRetryable(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = held.Close() })
 			data := bytes.Repeat([]byte("b"), 1024)
+			if declared == 256 {
+				data = data[:256] // A known length that fits the partial grant still succeeds.
+			}
 			row := s3TestRow(t, b, "PRESSUREFALLBACK", mediaTestChat, "document", data, time.Now())
-			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=? WHERE id=? AND chat_jid=?`, declared, row.ID, row.ChatJID); err != nil {
+			var length any = declared
+			if declared == -1 {
+				length = nil // Legacy NULL length, as well as zero, needs the full budget.
+			}
+			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=? WHERE id=? AND chat_jid=?`, length, row.ID, row.ChatJID); err != nil {
 				t.Fatal(err)
 			}
 			b.MediaQuotaBytes = 1
-			var peak, calls atomic.Int64
-			captureTransientWrites(b, data, &peak, &calls)
+			var cdnBytes atomic.Int64
+			cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				n, _ := w.Write(data)
+				cdnBytes.Add(int64(n))
+			}))
+			defer cdn.Close()
+			b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				return writeMediaDownload(ctx, b.StoreRoot, rel, func(ctx context.Context, f whatsmeow.File) error {
+					req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cdn.URL, nil)
+					response, err := cdn.Client().Do(req)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = response.Body.Close() }()
+					_, err = io.Copy(f, response.Body)
+					return err
+				})
+			}
 			server := s3ReviewREST(t, b)
-			status, body := requestCapacityBlob(t, server, row)
-			if status != http.StatusServiceUnavailable || peak.Load() > 500 || (declared != 0 && calls.Load() != 0) {
-				t.Fatal("temporary spool pressure must be retryable, with declared files rejected before download", status, peak.Load(), calls.Load(), string(body))
+			if declared == 256 {
+				status, body := requestCapacityBlob(t, server, row)
+				if status != http.StatusOK || !bytes.Equal(body, data) {
+					t.Fatal("known length within partial grant was refused", status, string(body))
+				}
+				return
+			}
+			for range 3 {
+				req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/media/blob?chat_jid="+row.ChatJID+"&message_id="+row.ID, nil)
+				req.Header.Set("Authorization", "Bearer test-bridge-token")
+				response, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "1" || cdnBytes.Load() != 0 {
+					t.Fatal("spool pressure must return retryable 503 before fetching any CDN bytes", response.StatusCode, response.Header, cdnBytes.Load(), string(body))
+				}
+				s.spools.mu.Lock()
+				allocated, readers := s.spools.bytes, s.spools.readers
+				s.spools.mu.Unlock()
+				if allocated != int64(len(heldData)) || readers != 1 {
+					t.Fatal("refused retry leaked spool capacity", allocated, readers)
+				}
 			}
 			_ = held.Close()
-			status, body = requestCapacityBlob(t, server, row)
-			if status != http.StatusOK || !bytes.Equal(body, data) {
-				t.Fatal("retry after readers release capacity did not return original bytes", status, string(body))
+			status, body := requestCapacityBlob(t, server, row)
+			if status != http.StatusOK || !bytes.Equal(body, data) || cdnBytes.Load() != int64(len(data)) {
+				t.Fatal("immediate retry after capacity release did not fetch original bytes once", status, cdnBytes.Load(), string(body))
 			}
 		})
 	}

@@ -159,7 +159,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` or `direct` (phone/LID one-to-one chats only). Set for both processes. Worker and `coverage().audio` share this scope; explicit group `transcribe_audio` remains available. Runtime key `transcription.ingest_chats` overrides it. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
-| `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)*                    | Let the background worker download uncached audio from the bridge instead of skipping it. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
+| `TRANSCRIBE_ON_INGEST_FETCH` | *(unset = off)*                    | Let the background worker download uncached audio from the bridge instead of skipping it. A permanent `too_large` answer (caller byte limit or bridge spool size limit) also gets a dated per-hash `media_unavailable` note naming `too_large`, costs no fetch strike, leaves the work list until the note is cleared, and is counted in `coverage().audio.unavailable`. Transient errors (`bridge_unavailable`, HTTP 5xx, timeouts) still cost fetch strikes. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
 | `FFMPEG_TIMEOUT_S`     | `120`                                    | Timeout for each ffmpeg conversion (`send_audio_message` encode, whisper WAV prep) |
 
 **Booleans.** Every on/off variable of the bridge takes `1`, `true`, `yes` or
@@ -1045,7 +1045,8 @@ What to know before turning it on:
   walk comes round; three such failures in a row end the fetching for the newest
   rows or for the walk, whichever was asking, so one round makes at most five
   refused requests.
-- **Media that can never arrive is recorded once.** Two causes, one answer from
+- **Permanent media skips are recorded once.** A permanent `too_large` answer (caller byte limit or bridge spool size limit) also gets a dated per-hash `media_unavailable` note naming `too_large`, costs no fetch strike, leaves the work list until the note is cleared, and is counted in `coverage().audio.unavailable`. Transient errors (`bridge_unavailable`, HTTP 5xx, timeouts) still cost fetch strikes.
+  Two causes of `media_unavailable`, one answer from
   the bridge (`media_unavailable`). WhatsApp media leaves the CDN after a few
   days, and the bridge then asks the *sender's phone* to re-upload it; that
   phone can answer "I no longer have it". Or the message was stored without the
