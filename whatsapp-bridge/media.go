@@ -197,7 +197,13 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	}
 
 	// Check if file already exists (under the current or the legacy name)
-	cached, lookupErr := cachedMediaPath(root, chatDir, mediaType, timestamp, messageID, originalName.String)
+	row := mediaRow{ID: messageID, ChatJID: chatJID, MediaType: mediaType, Timestamp: timestamp, Filename: originalName.String}
+	storage := b.mediaStorage()
+	entry, lookupErr := storage.Lookup(ctx, row)
+	cached := ""
+	if entry != nil {
+		cached = entry.Path
+	}
 	if lookupErr != nil {
 		// Something stands under the cached name, or in front of the directory,
 		// that the lookup will not go through. Say so: the fetch that follows
@@ -304,7 +310,12 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			defer release()
 			ctx = bounded
 		}
-		written, err := b.transferMedia(ctx, downloader, relPath)
+		write := func(msg *MediaDownloader) (int64, error) {
+			return storage.Write(ctx, row, func(rel string) (int64, error) {
+				return b.transferMedia(ctx, msg, rel)
+			})
+		}
+		written, err := write(downloader)
 		if status := cdnRefusalStatus(err); status != 0 {
 			// What the next report has to be read from: the status, how old
 			// the message is and the shape of what was asked, never a token.
@@ -317,7 +328,7 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			if alt := extractDirectPathFromURL(url); pathSource == pathFromMessage && alt != directPath && strings.HasPrefix(alt, "/") {
 				viaURL := *downloader
 				viaURL.DirectPath = alt
-				if n, altErr := b.transferMedia(ctx, &viaURL, relPath); altErr == nil {
+				if n, altErr := write(&viaURL); altErr == nil {
 					b.Log.Warnf("Message %s was downloaded through the path cut out of its url after its direct path was refused", messageID)
 					written, err = n, nil
 				} else if errors.Is(altErr, errAutoMediaLimit) {
@@ -345,7 +356,9 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 				// sender's phone to re-upload and download from the fresh
 				// path. See media_retry.go.
 				b.Log.Warnf("Requesting a media retry from the sender's phone for message %s...", messageID)
-				written, err = b.retryMedia(ctx, messageID, chatJID, downloader, root, relPath)
+				written, err = storage.Write(ctx, row, func(rel string) (int64, error) {
+					return b.retryMedia(ctx, messageID, chatJID, downloader, root, rel)
+				})
 			}
 		}
 		if err != nil {

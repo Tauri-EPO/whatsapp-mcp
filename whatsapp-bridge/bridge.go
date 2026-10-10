@@ -235,6 +235,9 @@ type Bridge struct {
 	// mediaTransfers keeps one transfer in flight per cached file, so callers
 	// that miss the cache together share it (see media_inflight.go).
 	mediaTransfers mediaTransferGroup
+	// MediaStorage is configured before handlers or background jobs start.
+	// Nil retains the existing local layout, including in test bridges.
+	MediaStorage mediaStorage
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc

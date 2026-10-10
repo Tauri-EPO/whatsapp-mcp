@@ -375,6 +375,17 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 		var rows []mediaRow
 		finder := &cachedMediaFinder{root: b.StoreRoot}
 		defer finder.Close()
+		storage := b.mediaStorage()
+		if b.MediaStorage == nil {
+			storage = localMediaStorage{root: b.StoreRoot, finder: finder}
+		}
+		probeRow := func(row mediaRow) PurgeResult {
+			results, err := storage.Delete(r.Context(), []mediaRow{row}, true)
+			if err != nil || len(results) != 1 {
+				return PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Reason: purgeReasonNotResolvable}
+			}
+			return results[0]
+		}
 		var results []PurgeResult
 		truncated, scanTruncated := false, false
 		remaining, unreachable := 0, 0
@@ -420,7 +431,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 					writePurgeResponse(w, http.StatusInternalServerError, MediaPurgeResponse{Message: "Failed to look up message: " + err.Error(), DryRun: dryRun})
 					return
 				}
-				probe := purgeOneUsing(b.StoreRoot, row, true, finder)
+				probe := probeRow(row)
 				if probe.Purged {
 					rows = append(rows, row)
 				} else {
@@ -450,7 +461,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 				}
 				last = row
 				examined++
-				probe := purgeOneUsing(b.StoreRoot, row, true, finder)
+				probe := probeRow(row)
 				switch {
 				case probe.Purged && probe.Bytes >= req.MinBytes:
 					rows = append(rows, row)
@@ -477,8 +488,12 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 		}
 
 		resp := MediaPurgeResponse{Success: true, DryRun: dryRun, Truncated: truncated}
-		for _, row := range rows {
-			res := purgeOneUsing(b.StoreRoot, row, dryRun, finder)
+		deleted, deleteErr := storage.Delete(r.Context(), rows, dryRun)
+		if deleteErr != nil {
+			writeError(w, 503, "Media purge incomplete")
+			return
+		}
+		for _, res := range deleted {
 			if res.Purged {
 				resp.PurgedFiles++
 				resp.PurgedBytes += res.Bytes

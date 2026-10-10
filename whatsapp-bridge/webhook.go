@@ -265,7 +265,7 @@ func (w *webhookSender) SendWebhookWithMessageID(sender, content, chatJID string
 // the store (the token, a database) under the cached name without any link.
 // Without a hash to compare with, nothing is sent.
 func (b *Bridge) webhookMedia(chatJID, filename string, wantSHA256 []byte) (mimeType string, data []byte) {
-	f, size, err := openStoreMedia(b.StoreRoot, chatMediaRel(chatJID), filename)
+	f, size, err := b.mediaStorage().Open(b.ctx, mediaRow{ChatJID: chatJID}, filename)
 	if err != nil {
 		b.Log.Warnf("Could not open media file for the webhook: %v", err)
 		return sniffMIME(nil), nil

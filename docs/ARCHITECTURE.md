@@ -400,3 +400,17 @@ history and live handlers with 5,000 history messages, a concurrent live message
 and FTS enabled, and checks rows, index entries and metrics. Its transaction
 and live-wait timings depend on the machine and load; chunking bounds the input
 count per transaction rather than guaranteeing a latency or writer fairness.
+
+## Cached media storage
+
+The bridge owns the cached-media storage interface (`media_storage.go`):
+lookup, open, write, batch deletion, usage and retention. Its default local
+implementation uses the existing `store/<chat>/` layout and the shared
+no-follow path helpers. CDN downloads and retries retain their existing flow;
+the backend controls where the resulting file is published.
+
+`media_cache` records object identities and `media_cache_refs` records cached
+message membership separately. This schema supports deleting a reference
+without deleting bytes another message still uses. The local backend continues
+to discover its files through the safe filesystem helpers and does not populate
+this catalog. Both tables belong to the bridge; the MCP server never writes them.
