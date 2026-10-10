@@ -25,6 +25,44 @@ INITIALIZE = {
 }
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://bridge-agent:8080/api",
+        "https://bridge-agent.example_agent:8080/api",
+        "http://bridge-agent.example_agent:8080/api?x=1",
+    ],
+)
+def test_split_admin_refuses_unqualified_or_changed_endpoint(monkeypatch, url):
+    import operator_admin
+
+    monkeypatch.setenv("WHATSAPP_API_URL", url)
+    with pytest.raises(OSError, match="invalid split admin endpoint"):
+        operator_admin.admin_endpoint()
+
+
+@pytest.mark.parametrize("addresses", [[], ["192.0.2.10", "192.0.2.11"], ["127.0.0.1"], ["0.0.0.0"], ["::1"]])
+def test_split_admin_refuses_ambiguous_or_unsafe_resolution(monkeypatch, addresses):
+    import operator_admin
+
+    monkeypatch.setenv("WHATSAPP_API_URL", "http://bridge-agent.example_agent:8080/api")
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, (ip, 0)) for ip in addresses]
+    )
+    with pytest.raises(OSError):
+        operator_admin.admin_endpoint()
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:8080/api", "http://localhost:8080/api", "http://bridge.example:8080/api"]
+)
+def test_other_shapes_keep_loopback_admin(monkeypatch, url):
+    import operator_admin
+
+    monkeypatch.setenv("WHATSAPP_API_URL", url)
+    assert operator_admin.admin_endpoint() == ("127.0.0.1", "127.0.0.1", None, None)
+
+
 def startup_env(tmp_path, **settings):
     # The real bridge creates this registry before the MCP container starts.
     # Token rotation intentionally refuses a missing archive on protected HTTP.

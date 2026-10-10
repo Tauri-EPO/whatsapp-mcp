@@ -29,6 +29,7 @@ COMPOSE_ONLY = {
     "WHATSAPP_PROXY_ALIAS",
     "WHATSAPP_AGENT_SUBNET",
     "WHATSAPP_AGENT_BRIDGE_IP",
+    "WHATSAPP_AGENT_MCP_IP",
 }
 # Set by the runtime or the image, never by an operator.
 INTERNAL = {"WHATSAPP_MCP_VERSION"}

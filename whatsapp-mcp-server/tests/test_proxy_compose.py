@@ -87,3 +87,28 @@ def test_proxy_still_allows_explicit_bind_outbox(tmp_path: Path) -> None:
 def test_proxy_alias_required(tmp_path: Path) -> None:
     with pytest.raises(AssertionError, match="set a unique proxy alias"):
         config(tmp_path, ("proxy",), WHATSAPP_PROXY_ALIAS="")
+
+
+@pytest.mark.parametrize(
+    "overrides", [("split",), ("operator", "split"), ("proxy", "split"), ("proxy", "operator", "split")]
+)
+def test_split_pins_admin_only_to_agent_network(tmp_path, overrides):
+    model = config(
+        tmp_path,
+        overrides,
+        WHATSAPP_AGENT_SUBNET="10.203.11.0/24",
+        WHATSAPP_AGENT_BRIDGE_IP="10.203.11.2",
+        WHATSAPP_AGENT_MCP_IP="10.203.11.3",
+    )
+    bridge, mcp = (model["services"][name] for name in ("bridge", "mcp"))
+    for service in (bridge, mcp):
+        hosts = service["extra_hosts"]
+        if isinstance(hosts, list):
+            hosts = dict(entry.split("=", 1) for entry in hosts)
+        assert hosts["mcp-admin.proxy-test_agent"] == "10.203.11.3"
+        assert not service.get("ports")
+    assert mcp["networks"]["agent"]["ipv4_address"] == "10.203.11.3"
+    assert mcp["networks"]["agent"]["aliases"] == ["mcp-admin"]
+    assert "operator" not in mcp["networks"]
+    assert "proxy" not in bridge["networks"]
+    assert mcp["environment"]["WHATSAPP_API_URL"] == "http://bridge-agent.proxy-test_agent:8080/api"

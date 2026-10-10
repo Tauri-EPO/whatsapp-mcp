@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import struct
+import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -28,6 +29,13 @@ def server():
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.server.server_port == 8091 and not self.headers.get("Authorization"):
+                raw = json.dumps({"name_collision": True}).encode()
+                self.send_response(409)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return  # Connectivity checks do not count as forwarded traffic.
             if self.path == "/__stats":
                 body = counts
             else:
@@ -52,6 +60,8 @@ def server():
         def log_message(self, *_):
             pass
 
+    admin = HTTPServer(("0.0.0.0", 8091), Handler)
+    threading.Thread(target=admin.serve_forever, daemon=True).start()
     HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 
 
@@ -83,12 +93,16 @@ def route_probe():
     with OPENER.open(request, timeout=5) as response:
         assert response.status == 200
     gateway = socket.gethostbyname(alias)
+    routed = set()
     for variable, port in (
         ("PROBE_AGENT_BRIDGE_IP", 8080),
         ("PROBE_AGENT_MCP_IP", 8000),
+        ("PROBE_AGENT_MCP_IP", 8091),
     ):
         address = os.environ[variable]
-        add_route(address, gateway)
+        if address not in routed:
+            add_route(address, gateway)
+            routed.add(address)
         try:
             with socket.create_connection((address, port), timeout=3):
                 pass

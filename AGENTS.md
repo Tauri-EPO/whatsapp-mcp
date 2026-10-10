@@ -55,7 +55,7 @@ whatsapp-mcp/
 │   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
-│   ├── operator_mcp.go         # bounded bridge-authenticated forwarding to the loopback MCP admin listener
+│   ├── operator_mcp.go         # bounded bridge-authenticated forwarding to the private MCP admin listener
 │   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
 │   ├── history_limits.go         # bounded pairing requests, history age guard and progress
 │   ├── archive_stats.go          # database size gauges, row count and threshold crossings
@@ -178,7 +178,7 @@ whatsapp-mcp/
 │   ├── private_files.py        # MCP-owned notes/export/upload permissions and shared notes connection factory
 │   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
-│   ├── operator_admin.py       # loopback-only bridge-token reads for operator usage and activity
+│   ├── operator_admin.py       # private loopback or pinned split-agent bridge-token reads for operator usage and activity
 │   ├── transcription_usage.py # MCP-owned durable UTC usage and atomic quota admission
 │   ├── observability.py        # WHATSAPP_MCP_LOG_FORMAT=json + the MCP /metrics middleware
 │   ├── parent_watchdog.py      # stdio: exit once the parent process is gone (WHATSAPP_PARENT_WATCHDOG_S)
@@ -459,7 +459,7 @@ Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing priva
 
 Compose-only proxy knobs: `WHATSAPP_PROXY_NETWORK` (default `proxy`) names an existing external network and `WHATSAPP_PROXY_ALIAS` is required and unique per instance in `docker-compose.proxy.yml`. This override removes host ports and defaults the outbox to a project-scoped named volume; `WHATSAPP_OUTBOX` can still select a bind mount. The base compose topology is unchanged. See `docs/DOCKER.md`.
 
-`docker-compose.split.yml` is applied last: MCP owns its namespace and proxy alias, joins the internal project agent network and default egress network, and never joins operator. Compose-only `WHATSAPP_AGENT_SUBNET` and `WHATSAPP_AGENT_BRIDGE_IP` are required and distinct per project. Trusted `extra_hosts` pin `bridge-agent.<project>_agent` to that static IP on both services: Docker aliases on other networks cannot receive the bearer, even if they register the full qualified name. REST requires the exact qualified Host and one distinct local IP; with an operator this is the only non-loopback bind exception. Forwarding is disabled on both containers; Linux binds REST to its agent device when the kernel permits uid 1000, without adding capabilities (see the documented NET_ADMIN/token residual otherwise). Default topology and existing overrides remain unchanged. No host ports are published. Store remains mounted writable for MCP-owned notes and SQLite WAL/SHM; bridge databases use `mode=ro` handles, never `immutable`, not physical mount enforcement. Only this override defaults exports to `/app/outbox/exports`; uid 1000 and token resolution remain unchanged. See `docs/DOCKER.md` for migration and network boundaries.
+`docker-compose.split.yml` is applied last: MCP owns its namespace and proxy alias, joins the internal project agent network and default egress network, and never joins operator. Compose-only `WHATSAPP_AGENT_SUBNET`, `WHATSAPP_AGENT_BRIDGE_IP` and `WHATSAPP_AGENT_MCP_IP` are required and distinct per project. Trusted `extra_hosts` pin `bridge-agent.<project>_agent` and `mcp-admin.<project>_agent` to their static IPs on both services: Docker aliases on other networks cannot receive the bearer, even if they register the full qualified name. REST requires the exact qualified Host and one distinct local IP; with an operator this is the only non-loopback bind exception. Split admin uses the MCP agent IP and interface, accepts only the bridge agent source IP, bridge token and exact qualified Host, and stays closed with a warning if interface binding fails. Other shapes retain loopback admin on 8091. Forwarding is disabled on both containers; Linux binds REST to its agent device when the kernel permits uid 1000, without adding capabilities (see the documented NET_ADMIN/token residual otherwise). Default topology and existing overrides remain unchanged. No host ports are published. Store remains mounted writable for MCP-owned notes and SQLite WAL/SHM; bridge databases use `mode=ro` handles, never `immutable`, not physical mount enforcement. Only this override defaults exports to `/app/outbox/exports`; uid 1000 and token resolution remain unchanged. See `docs/DOCKER.md` for migration and network boundaries.
 
 ## 8. Gotchas (read before editing)
 

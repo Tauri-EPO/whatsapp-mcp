@@ -1,4 +1,4 @@
-"""Bridge-authenticated, loopback-only reads; the operator secret stays in Go."""
+"""Bridge-authenticated private reads; the operator secret stays in Go."""
 
 from __future__ import annotations
 
@@ -7,11 +7,15 @@ import ipaddress
 import json
 import logging
 import os
+import re
+import socket
+import struct
 import threading
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import cast
+from urllib.parse import urlsplit
 
 authenticated_transport: ContextVar[bool] = ContextVar("authenticated_transport", default=False)
 _lock = threading.Lock()
@@ -37,6 +41,55 @@ class AuthenticatedCalls:
             authenticated_transport.reset(token)
 
 
+def admin_endpoint() -> tuple[str, str, str | None, str | None]:
+    """Split Compose pins both qualified names through trusted extra_hosts."""
+    url = urlsplit(os.getenv("WHATSAPP_API_URL", "http://127.0.0.1:8080/api"))
+    name = url.hostname or ""
+    if not name.startswith("bridge-agent"):
+        return "127.0.0.1", "127.0.0.1", None, None
+    if (
+        not re.fullmatch(r"bridge-agent\.[a-z0-9][a-z0-9_-]*_agent", name)
+        or url.scheme != "http"
+        or url.port != 8080
+        or url.path != "/api"
+        or url.username is not None
+        or url.password is not None
+        or url.query
+        or url.fragment
+    ):
+        raise OSError("invalid split admin endpoint")
+    admin = "mcp-admin." + name.removeprefix("bridge-agent.")
+
+    def resolve(host) -> str:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
+        if len(addresses) != 1:
+            raise OSError("split admin requires one IPv4 address")
+        address = str(addresses.pop())
+        ip = ipaddress.ip_address(address)
+        if ip.version != 4 or ip.is_loopback or ip.is_unspecified or ip.is_multicast:
+            raise OSError("unsafe split admin address")
+        return address
+
+    address, peer = resolve(admin), resolve(name)
+    if address == peer:
+        raise OSError("split admin and bridge addresses must differ")
+    # Linux split containers: require a single local NIC for this pinned IP.
+    import fcntl
+
+    devices = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        for _, device in socket.if_nameindex():
+            try:
+                data = getattr(fcntl, "ioctl")(probe.fileno(), 0x8915, struct.pack("256s", device.encode()))
+            except OSError:
+                continue  # Interfaces without an IPv4 address.
+            if socket.inet_ntoa(data[20:24]) == address:
+                devices.append(device)
+    if len(devices) != 1:
+        raise OSError("split admin IP must belong to exactly one local interface")
+    return address, admin, peer, devices[0]
+
+
 def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
     if not mcp_token or len(bridge_token) < 16 or hmac.compare_digest(bridge_token.encode(), mcp_token.encode()):
         raise ValueError("MCP admin requires a bridge token distinct from the MCP bearer; configure WHATSAPP_MCP_TOKEN")
@@ -47,6 +100,7 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
             raise ValueError("MCP admin requires a bridge token distinct from every effective MCP bearer")
     except AuthStateUnavailableError:
         raise ValueError("MCP admin cannot establish effective credential separation") from None
+    address, hostname, peer, device = admin_endpoint()
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -57,11 +111,15 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
             pass  # No credentials, URLs or request headers in logs.
 
         def do_GET(self):
-            host = f"127.0.0.1:{cast(HTTPServer, self.server).server_port}"
+            host = f"{hostname}:{cast(HTTPServer, self.server).server_port}"
             headers = self.headers
             auth = headers.get_all("Authorization", [])
             if (
-                not ipaddress.ip_address(self.client_address[0]).is_loopback
+                (
+                    self.client_address[0] != peer
+                    if peer
+                    else not ipaddress.ip_address(self.client_address[0]).is_loopback
+                )
                 or len(auth) != 1
                 or not hmac.compare_digest(auth[0].encode(), f"Bearer {bridge_token}".encode())
             ):
@@ -105,7 +163,17 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
             self.wfile.write(body)
             self.close_connection = True
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = HTTPServer((address, port), Handler, bind_and_activate=False)
+    try:
+        if device:
+            # Reject packets arriving on another NIC for the agent IP. No extra
+            # capabilities; if the kernel refuses, keep optional admin closed.
+            server.socket.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_BINDTODEVICE"), device.encode() + b"\0")
+        server.server_bind()
+        server.server_activate()
+    except OSError:
+        server.server_close()
+        raise
     thread = threading.Thread(target=server.serve_forever, name="mcp-admin", daemon=True)
     thread.start()
     return server
@@ -132,6 +200,7 @@ def install_admin(transport: str, port: int):
         )
     except OSError:
         logging.getLogger("whatsapp_mcp").warning(
-            "MCP admin disabled: cannot bind 127.0.0.1:8091; free the admin port; data plane remains available"
+            "MCP admin disabled: cannot bind private endpoint on port 8091; check split agent address/interface "
+            "or free the admin port; data plane remains available"
         )
     return None

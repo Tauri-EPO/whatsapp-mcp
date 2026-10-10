@@ -36,10 +36,12 @@ select_instance() {
     # Empty exercises the real generated .bridge-token handoff.
     export WHATSAPP_BRIDGE_TOKEN=""
     export WHATSAPP_AGENT_SUBNET="$SUBNET_A" WHATSAPP_AGENT_BRIDGE_IP="${SUBNET_A%.0/24}.2"
+    export WHATSAPP_AGENT_MCP_IP="${SUBNET_A%.0/24}.3"
   else
     export WHATSAPP_MCP_TOKEN="$PROBE_TOKEN_B" WHATSAPP_OPERATOR_PORT=8092
     export WHATSAPP_BRIDGE_TOKEN="split-bridge-b-0123456789abcdef"
     export WHATSAPP_AGENT_SUBNET="$SUBNET_B" WHATSAPP_AGENT_BRIDGE_IP="${SUBNET_B%.0/24}.2"
+    export WHATSAPP_AGENT_MCP_IP="${SUBNET_B%.0/24}.3"
   fi
   export WHISPER_URL=http://whisper:8178/inference
 }
@@ -76,10 +78,13 @@ for offset in range(256):
 else:
     raise SystemExit("No free disposable agent subnets")' "$$")
 read -r SUBNET_A SUBNET_B <<< "$subnets"
+export PROBE_ADMIN_IP_A="${SUBNET_A%.0/24}.3" PROBE_ADMIN_IP_B="${SUBNET_B%.0/24}.3"
+export PROBE_ADMIN_NAME_A="mcp-admin.${run}-a_agent" PROBE_ADMIN_NAME_B="mcp-admin.${run}-b_agent"
 start_collision() {
   local role=$1 network=$2 ctr="$run-collision-$1"
   docker create --name "$ctr" --network "$network" --network-alias bridge-agent \
     --network-alias "bridge-agent.${run}-a_agent" --network-alias "bridge-agent.${run}-b_agent" \
+    --network-alias mcp-admin --network-alias "$PROBE_ADMIN_NAME_A" --network-alias "$PROBE_ADMIN_NAME_B" \
     "$image" python /tmp/split-name-collision-check.py >/dev/null
   docker cp scripts/split-name-collision-check.py "$ctr:/tmp/split-name-collision-check.py"
   docker start "$ctr" >/dev/null
@@ -149,6 +154,11 @@ print("distinct namespaces; bridge off proxy; MCP off operator; shared agent -> 
     outboxes+=("$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/outbox"}}{{.Name}}{{end}}{{end}}' "$bridge")")
     tokens+=("$(docker exec "$mcp" python -c 'import hashlib,whatsapp;print(hashlib.sha256(whatsapp._bridge_headers()["Authorization"].encode()).hexdigest())')")
     if [ "$mode" = operator ] || [ "$mode" = combined ]; then
+      docker run --rm -i --network "container:$bridge" \
+        -e PROBE_ROLE=admin -e PROBE_ADMIN_IP="$WHATSAPP_AGENT_MCP_IP" \
+        -e PROBE_ADMIN_NAME="mcp-admin.${COMPOSE_PROJECT_NAME}_agent" \
+        -e PROBE_BRIDGE_TOKEN="$TOKEN" -e WHATSAPP_MCP_TOKEN -e WHATSAPP_OPERATOR_TOKEN \
+        "$image" python - < scripts/split-probe.py
       # A fake health responder must not mask a stopped real bridge.
       docker kill --signal STOP "$bridge" >/dev/null
       health_rc=0
@@ -184,11 +194,13 @@ print("distinct namespaces; bridge off proxy; MCP off operator; shared agent -> 
       "$image" python - < scripts/proxy-probe.py
     docker run --rm -i --network "$WHATSAPP_PROXY_NETWORK" -e PROBE_ROLE=proxy \
       -e PROBE_ALIAS_A -e PROBE_ALIAS_B -e OPERATOR_PORT_B \
+      -e PROBE_ADMIN_IP_A -e PROBE_ADMIN_IP_B -e PROBE_ADMIN_NAME_A -e PROBE_ADMIN_NAME_B \
       "$image" python - < scripts/split-probe.py
   fi
   if [ "$mode" = operator ] || [ "$mode" = combined ]; then
     docker run --rm -i --network "$WHATSAPP_OPERATOR_NETWORK" -e PROBE_ROLE=operator \
       -e OPERATOR_ALIAS_A -e OPERATOR_ALIAS_B -e OPERATOR_PORT_A -e OPERATOR_PORT_B \
+      -e PROBE_ADMIN_IP_A -e PROBE_ADMIN_IP_B -e PROBE_ADMIN_NAME_A -e PROBE_ADMIN_NAME_B \
       -e WHATSAPP_OPERATOR_TOKEN "$image" python - < scripts/split-probe.py
   fi
   if [ "$mode" = proxy ] || [ "$mode" = combined ]; then check_collision proxy; docker rm -f "$run-collision-proxy" >/dev/null; fi

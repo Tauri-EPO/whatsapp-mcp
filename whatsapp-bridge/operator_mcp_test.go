@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -73,6 +74,36 @@ func TestOperatorMCPRealAdminIntegration(t *testing.T) {
 }
 
 type mcpTestTransport func(*http.Request) (*http.Response, error)
+
+func TestMCPAdminPinsDialAddressAndExactHost(t *testing.T) {
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "mcp-admin.example_agent:8091" || r.Header.Get("Authorization") != "Bearer fake-bridge-token" {
+			t.Error("wrong admin authority or credential")
+		}
+		writeJSON(w, 200, map[string]any{"seconds": 12})
+	}))
+	defer admin.Close()
+	client := newMCPAdminClient(strings.TrimPrefix(admin.URL, "http://"))
+	body, err := mcpAdminRead(httptest.NewRequest("GET", "/", nil), client, "fake-bridge-token", "transcription/usage", "mcp-admin.example_agent:8091")
+	if err != nil || !strings.Contains(string(body), `"seconds":12`) {
+		t.Fatalf("pinned admin request failed: %s %v", body, err)
+	}
+}
+
+func TestSplitMCPAdminResolutionRefusesUnsafeAddresses(t *testing.T) {
+	for _, addresses := range [][]net.IPAddr{nil, {{IP: net.ParseIP("127.0.0.1")}}, {{IP: net.ParseIP("0.0.0.0")}},
+		{{IP: net.ParseIP("::1")}}, {{IP: net.ParseIP("192.0.2.10")}, {IP: net.ParseIP("192.0.2.11")}}} {
+		_, _, err := resolveSplitMCPAdmin("bridge-agent.example_agent", func(_ context.Context, name string) ([]net.IPAddr, error) {
+			if name != "mcp-admin.example_agent" {
+				t.Fatal("unqualified admin lookup")
+			}
+			return addresses, nil
+		})
+		if err == nil {
+			t.Fatalf("unsafe addresses accepted: %+v", addresses)
+		}
+	}
+}
 
 func (f mcpTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 

@@ -8,6 +8,7 @@ services:
       net.ipv6.conf.all.forwarding: "0"
     extra_hosts:
       - "bridge-agent.${COMPOSE_PROJECT_NAME}_agent:${WHATSAPP_AGENT_BRIDGE_IP:?set a unique agent bridge IPv4 address}"
+      - "mcp-admin.${COMPOSE_PROJECT_NAME}_agent:${WHATSAPP_AGENT_MCP_IP:?set a unique agent MCP IPv4 address}"
     environment:
       WHATSAPP_BRIDGE_BIND: bridge-agent.${COMPOSE_PROJECT_NAME}_agent
       WHATSAPP_BRIDGE_ALLOWED_HOSTS: bridge-agent.${COMPOSE_PROJECT_NAME}_agent:8080
@@ -27,13 +28,16 @@ services:
       net.ipv6.conf.all.forwarding: "0"
     extra_hosts:
       - "bridge-agent.${COMPOSE_PROJECT_NAME}_agent:${WHATSAPP_AGENT_BRIDGE_IP:?set a unique agent bridge IPv4 address}"
+      - "mcp-admin.${COMPOSE_PROJECT_NAME}_agent:${WHATSAPP_AGENT_MCP_IP:?set a unique agent MCP IPv4 address}"
     environment:
       WHATSAPP_API_URL: http://bridge-agent.${COMPOSE_PROJECT_NAME}_agent:8080/api
       WHATSAPP_EXPORT_DIR: ${WHATSAPP_EXPORT_DIR:-/app/outbox/exports}
       WHATSAPP_MCP_METRICS: "false"
     networks: !override
       default: {}
-      agent: {}
+      agent:
+        aliases: [mcp-admin]
+        ipv4_address: ${WHATSAPP_AGENT_MCP_IP:?set a unique agent MCP IPv4 address}
       proxy:
         aliases: ["${WHATSAPP_PROXY_ALIAS:-mcp-agent}"]
     volumes:
