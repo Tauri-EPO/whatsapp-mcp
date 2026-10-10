@@ -106,6 +106,8 @@ whatsapp-mcp/
 │   ├── media_s3_maintenance.go # dedupe-aware purge, retention and operator accounting
 │   ├── media_s3_recovery.go    # durable deletion journal and bounded per-hash reconciliation
 │   ├── media_s3_quota.go       # S3 quota reservations and oldest eligible reference eviction
+│   ├── media_s3_spools.go      # bounded verified read spools with reuse, expiry and shutdown cleanup
+│   ├── media_s3_transient.go   # bounded quota fallback reads through the storage interface
 │   ├── media_quota_warning.go  # quota crossing warning and optional webhook event
 │   ├── media_types.go          # runtime automatic caching type filter
 │   ├── media_api.go            # authenticated catalog and bounded media streams
