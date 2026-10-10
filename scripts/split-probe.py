@@ -5,8 +5,10 @@ import json
 import os
 import socket
 import sqlite3
+import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -40,10 +42,11 @@ def mcp():
 
     assert os.getuid() == 1000
     url = whatsapp.WHATSAPP_API_BASE_URL + "/health"
+    assert socket.gethostbyname(urlsplit(url).hostname) == os.environ["PROBE_BRIDGE_IP"]
     # Use the production token resolver (including the generated token file).
     token = whatsapp._bridge_headers()["Authorization"].removeprefix("Bearer ")
-    with get(url, token) as response:
-        assert response.status == 200 and json.load(response)["paired"] is False
+    response = whatsapp._bridge_request("GET", "/health", timeout=5)
+    assert response.status_code == 200 and response.json()["paired"] is False
     for label, credential, host in (
         ("missing token", "", None),
         ("wrong token", "other-instance-token", None),
@@ -68,13 +71,9 @@ def mcp():
     with media_notes._connect(create=True) as conn:
         assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] > 0
     assert export.export_dir() == "/app/outbox/exports"
-    with private_files.private_open(
-        export.resolve_export_path("split-smoke.ndjson"), "w"
-    ) as handle:
+    with private_files.private_open(export.resolve_export_path("split-smoke.ndjson"), "w") as handle:
         handle.write('{"fake":true}\n')
-    with private_files.private_open(
-        "/app/outbox/.uploads/split-smoke.txt", "w"
-    ) as handle:
+    with private_files.private_open("/app/outbox/.uploads/split-smoke.txt", "w") as handle:
         handle.write(os.environ["PROBE_INSTANCE"])
     with get(os.environ["WHISPER_URL"].replace("/inference", "/")) as response:
         assert response.status == 200
@@ -93,9 +92,27 @@ def operator():
             os.environ["WHATSAPP_OPERATOR_TOKEN"],
         ) as response:
             assert response.status == 200
+            health = json.load(response)
+            assert "last_mcp_call_at" in health and health["last_mcp_call_at"] is None
+        started = time.monotonic()
+        try:
+            get(f"http://{alias}:{port}/operator/v1/transcription/usage", os.environ["WHATSAPP_OPERATOR_TOKEN"]).close()
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+            assert json.load(exc)["error"]["code"] == "mcp_admin_unavailable"
+        else:
+            raise AssertionError("split admin forwarding unexpectedly available before #684")
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, elapsed
+        print(f"{alias}:{port} usage -> clean 503 in {elapsed:.3f}s; last_mcp_call_at=null (#684)", flush=True)
         print(f"{alias}:{port} authenticated operator health -> 200", flush=True)
         refused(alias, (8000, 8080))
 
 
+def proxy():
+    for instance in ("A", "B"):
+        refused(os.environ[f"PROBE_ALIAS_{instance}"], (int(os.environ["OPERATOR_PORT_B"]),))
+
+
 if __name__ == "__main__":
-    {"mcp": mcp, "operator": operator}[os.environ["PROBE_ROLE"]]()
+    {"mcp": mcp, "operator": operator, "proxy": proxy}[os.environ["PROBE_ROLE"]]()

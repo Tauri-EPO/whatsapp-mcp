@@ -284,6 +284,7 @@ func runBridge(cfg bridgeConfig) int {
 		return 1
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = cfg.Bind, cfg.AllowedHosts
+	bridge.RESTSplit = cfg.SplitREST
 	bridge.MediaRetention, bridge.MediaAutoDownloadStatus = cfg.MediaRetention, cfg.StatusMedia
 	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
 	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools

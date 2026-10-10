@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -306,9 +305,15 @@ func (b *Bridge) startRESTServer(port int, token string) error {
 	// WHATSAPP_BRIDGE_BIND widens that on purpose (rest_bind.go).
 	serverAddr := listenAddr(b.RESTBind, port)
 	b.Log.Infof("Starting REST API server on %s...", serverAddr)
-	listener, err := net.Listen("tcp", serverAddr)
+	listener, deviceBound, err := listenREST(b.RESTBind, port, b.RESTSplit)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", serverAddr, err)
+	}
+	if b.RESTSplit && !deviceBound {
+		b.Log.Warnf("Split REST device binding unavailable; a peer with NET_ADMIN and the bridge token may reach REST through another bridge interface")
+	}
+	if deviceBound {
+		b.Log.Infof("Split REST socket bound to agent interface without added capabilities")
 	}
 
 	// Create server with timeouts for stability

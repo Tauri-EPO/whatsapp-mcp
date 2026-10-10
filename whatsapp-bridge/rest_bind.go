@@ -29,6 +29,26 @@ import (
 	"time"
 )
 
+// Split compose maps this project-qualified name to a static agent IP in
+// /etc/hosts. DNS alone permits peers to shadow even a qualified alias.
+func isSplitBridgeBind(bind string) bool {
+	network, ok := strings.CutPrefix(bind, splitBridgeAlias+".")
+	if !ok {
+		return false
+	}
+	project, ok := strings.CutSuffix(network, "_agent")
+	if !ok || project == "" {
+		return false
+	}
+	for i, ch := range project {
+		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || i > 0 && (ch == '-' || ch == '_') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 const (
 	bridgeBindEnv         = "WHATSAPP_BRIDGE_BIND"
 	bridgeAllowedHostsEnv = "WHATSAPP_BRIDGE_ALLOWED_HOSTS"
@@ -43,18 +63,21 @@ const (
 func resolveSplitBridgeBind(bind, hosts string, port int, operatorBind string,
 	lookup func(context.Context, string) ([]net.IPAddr, error), localAddrs func() ([]net.Addr, error),
 ) (string, error) {
-	if bind != splitBridgeAlias {
+	if !isSplitBridgeBind(bind) {
+		if bind == splitBridgeAlias || strings.HasPrefix(bind, splitBridgeAlias+".") {
+			return "", errors.New("WHATSAPP_BRIDGE_BIND requires bridge-agent.<project>_agent, never the bare alias")
+		}
 		if operatorBind != "" && !isLoopbackBind(bind) {
-			return "", errors.New("WHATSAPP_BRIDGE_BIND must remain loopback or use bridge-agent when WHATSAPP_OPERATOR_BIND is enabled")
+			return "", errors.New("WHATSAPP_BRIDGE_BIND must remain loopback or use bridge-agent.<project>_agent when WHATSAPP_OPERATOR_BIND is enabled")
 		}
 		return bind, nil
 	}
-	if hosts != fmt.Sprintf("%s:%d", splitBridgeAlias, port) {
-		return "", errors.New("WHATSAPP_BRIDGE_ALLOWED_HOSTS must name exactly bridge-agent and the REST port for split topology")
+	if hosts != fmt.Sprintf("%s:%d", bind, port) {
+		return "", errors.New("WHATSAPP_BRIDGE_ALLOWED_HOSTS must name exactly the network-qualified bridge-agent alias and REST port")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	addresses, err := lookup(ctx, splitBridgeAlias)
+	addresses, err := lookup(ctx, bind)
 	if err != nil || len(addresses) == 0 {
 		return "", errors.New("WHATSAPP_BRIDGE_BIND bridge-agent could not be resolved")
 	}

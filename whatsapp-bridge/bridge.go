@@ -168,7 +168,8 @@ type Bridge struct {
 	// supervisor restarts into the pairing path. Tests inject a recorder.
 	Exit func(reason string, code int)
 	// RESTBind is the REST listen address (WHATSAPP_BRIDGE_BIND, default 127.0.0.1).
-	RESTBind string
+	RESTBind  string
+	RESTSplit bool
 	// RESTAllowedHosts is the raw WHATSAPP_BRIDGE_ALLOWED_HOSTS value (see rest_bind.go).
 	RESTAllowedHosts string
 	// MediaRoots are the directories /api/send may read outbound files from (WHATSAPP_MEDIA_ROOTS).

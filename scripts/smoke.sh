@@ -138,7 +138,8 @@ bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
   bind=$(printf '%s' "$bind" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^\[//;s/\]$//')
   bind=${bind:-127.0.0.1}
   case "$bind" in 0.0.0.0) bind=127.0.0.1 ;; ::) bind='[::1]' ;; *:*) bind="[$bind]" ;; esac
-  out=$(bridge_exec wget -Y off -qO- --header "Authorization: Bearer ${TOKEN}" "http://$bind:${port:-8080}$1" 2>&1 </dev/null)
+  # Split names have a trusted static /etc/hosts entry in the bridge container.
+  out=$(bridge_exec wget -Y off -qO- -T 4 --header "Authorization: Bearer ${TOKEN}" "http://$bind:${port:-8080}$1" 2>&1 </dev/null)
   rc=$?
   BRIDGE_BODY=""
   if [ "$rc" -eq 0 ]; then

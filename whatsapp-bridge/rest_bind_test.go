@@ -22,31 +22,33 @@ func TestSplitBridgeBindPinsOnlyDistinctLocalAddress(t *testing.T) {
 		lookupErr, localErr         bool
 		want                        string
 	}{
-		{"split", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10"}, false, false, "192.0.2.10"},
-		{"split without operator", "bridge-agent", "bridge-agent:8080", "", []string{"192.0.2.10"}, false, false, "192.0.2.10"},
-		{"duplicate DNS", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10", "192.0.2.10"}, false, false, "192.0.2.10"},
+		{"split", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"192.0.2.10"}, false, false, "192.0.2.10"},
+		{"split without operator", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "", []string{"192.0.2.10"}, false, false, "192.0.2.10"},
+		{"duplicate DNS", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"192.0.2.10", "192.0.2.10"}, false, false, "192.0.2.10"},
+		{"bare alias", "bridge-agent", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"qualified trailing dot", "bridge-agent.example_agent.", "bridge-agent.example_agent.:8080", "192.0.2.20", nil, false, false, ""},
 		{"loopback", "127.0.0.1", "", "192.0.2.20", nil, false, false, "127.0.0.1"},
 		{"legacy off operator", "0.0.0.0", "", "", nil, false, false, "0.0.0.0"},
-		{"wildcard v4", "0.0.0.0", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
-		{"wildcard v6", "::", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
-		{"arbitrary hostname", "bridge", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
-		{"explicit IP", "192.0.2.10", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
-		{"missing alias", "bridge-agent", "bridge-agent:8080", "192.0.2.20", nil, true, false, ""},
-		{"empty DNS", "bridge-agent", "bridge-agent:8080", "192.0.2.20", nil, false, false, ""},
-		{"multiple IPs", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10", "192.0.2.20"}, false, false, ""},
-		{"operator IP", "bridge-agent", "bridge-agent:8080", "192.0.2.10", []string{"192.0.2.10"}, false, false, ""},
-		{"nonlocal IP", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.30"}, false, false, ""},
-		{"DNS wildcard", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"0.0.0.0"}, false, false, ""},
-		{"DNS loopback", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"127.0.0.1"}, false, false, ""},
-		{"DNS multicast", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"224.0.0.1"}, false, false, ""},
-		{"interface error", "bridge-agent", "bridge-agent:8080", "192.0.2.20", []string{"192.0.2.10"}, false, true, ""},
-		{"host wildcard", "bridge-agent", "*", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
-		{"host missing port", "bridge-agent", "bridge-agent", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
-		{"host extras", "bridge-agent", "bridge-agent:8080,example.test", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
+		{"wildcard v4", "0.0.0.0", "bridge-agent.example_agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"wildcard v6", "::", "bridge-agent.example_agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"arbitrary hostname", "bridge", "bridge-agent.example_agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"explicit IP", "192.0.2.10", "bridge-agent.example_agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"missing alias", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", nil, true, false, ""},
+		{"empty DNS", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", nil, false, false, ""},
+		{"multiple IPs", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"192.0.2.10", "192.0.2.20"}, false, false, ""},
+		{"operator IP", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.10", []string{"192.0.2.10"}, false, false, ""},
+		{"nonlocal IP", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"192.0.2.30"}, false, false, ""},
+		{"DNS wildcard", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"0.0.0.0"}, false, false, ""},
+		{"DNS loopback", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"127.0.0.1"}, false, false, ""},
+		{"DNS multicast", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"224.0.0.1"}, false, false, ""},
+		{"interface error", "bridge-agent.example_agent", "bridge-agent.example_agent:8080", "192.0.2.20", []string{"192.0.2.10"}, false, true, ""},
+		{"host wildcard", "bridge-agent.example_agent", "*", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
+		{"host missing port", "bridge-agent.example_agent", "bridge-agent.example_agent", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
+		{"host extras", "bridge-agent.example_agent", "bridge-agent.example_agent:8080,example.test", "192.0.2.20", []string{"192.0.2.10"}, false, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lookup := func(_ context.Context, name string) ([]net.IPAddr, error) {
-				if name != splitBridgeAlias {
+				if name != tc.bind {
 					t.Fatalf("unexpected lookup %s", name)
 				}
 				if tc.lookupErr {

@@ -3,21 +3,32 @@
 services:
   bridge:
     ports: !reset []
+    sysctls:
+      net.ipv4.ip_forward: "0"
+      net.ipv6.conf.all.forwarding: "0"
+    extra_hosts:
+      - "bridge-agent.${COMPOSE_PROJECT_NAME}_agent:${WHATSAPP_AGENT_BRIDGE_IP:?set a unique agent bridge IPv4 address}"
     environment:
-      WHATSAPP_BRIDGE_BIND: bridge-agent
-      WHATSAPP_BRIDGE_ALLOWED_HOSTS: bridge-agent:8080
+      WHATSAPP_BRIDGE_BIND: bridge-agent.${COMPOSE_PROJECT_NAME}_agent
+      WHATSAPP_BRIDGE_ALLOWED_HOSTS: bridge-agent.${COMPOSE_PROJECT_NAME}_agent:8080
     networks:
       default: {}
       agent:
         aliases: [bridge-agent]
+        ipv4_address: ${WHATSAPP_AGENT_BRIDGE_IP:?set a unique agent bridge IPv4 address}
       proxy: !reset null
     volumes:
       - ${WHATSAPP_OUTBOX:-whatsapp-outbox}:/app/outbox
 
   mcp:
     network_mode: !reset null
+    sysctls:
+      net.ipv4.ip_forward: "0"
+      net.ipv6.conf.all.forwarding: "0"
+    extra_hosts:
+      - "bridge-agent.${COMPOSE_PROJECT_NAME}_agent:${WHATSAPP_AGENT_BRIDGE_IP:?set a unique agent bridge IPv4 address}"
     environment:
-      WHATSAPP_API_URL: http://bridge-agent:8080/api
+      WHATSAPP_API_URL: http://bridge-agent.${COMPOSE_PROJECT_NAME}_agent:8080/api
       WHATSAPP_EXPORT_DIR: ${WHATSAPP_EXPORT_DIR:-/app/outbox/exports}
       WHATSAPP_MCP_METRICS: "false"
     networks: !override
@@ -30,7 +41,11 @@ services:
 
 networks:
   agent:
+    name: ${COMPOSE_PROJECT_NAME}_agent
     internal: true
+    ipam:
+      config:
+        - subnet: ${WHATSAPP_AGENT_SUBNET:?set a unique agent IPv4 subnet per project}
   # Without the proxy override this is an unused project-scoped network.
   # With it, the external network definition is inherited unchanged.
   proxy: {}
