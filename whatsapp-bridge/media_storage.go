@@ -4,6 +4,7 @@ package main
 // identity, never an arbitrary path supplied by a REST caller.
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"os"
@@ -28,10 +29,85 @@ type mediaStorage interface {
 	Backend() string
 	Lookup(context.Context, mediaRow) (*mediaCacheEntry, error)
 	Open(context.Context, mediaRow, string) (io.ReadCloser, int64, error)
+	OpenRange(context.Context, mediaRow, int64, int64) (*mediaByteRange, error)
 	Write(context.Context, mediaRow, func(string) (int64, error)) (int64, error)
 	Delete(context.Context, []mediaRow, bool) ([]PurgeResult, error)
 	Usage(context.Context) (mediaCacheUsage, error)
 	Sweep(context.Context, time.Duration, *time.Duration, time.Time) (int, int64, int)
+}
+
+const maxMediaChunkBytes int64 = 4 * 1024 * 1024
+
+var errMediaRange = errors.New("invalid media byte range")
+
+type mediaByteRange struct {
+	io.ReadCloser
+	Total, Bytes int64
+	SHA256       []byte
+}
+
+type limitedMediaReader struct {
+	io.Reader
+	io.Closer
+}
+
+// Open retains each backend's confinement and integrity checks. The returned
+// reader releases only the requested bytes; closing it also removes S3 spools.
+func openMediaRange(ctx context.Context, storage mediaStorage, row mediaRow, offset, length int64) (*mediaByteRange, error) {
+	if offset < 0 || length < 1 || length > maxMediaChunkBytes {
+		return nil, errMediaRange
+	}
+	f, size, err := storage.Open(ctx, row, "")
+	if err != nil {
+		return nil, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = f.Close()
+		}
+	}()
+	if offset > size {
+		return nil, errMediaRange
+	}
+	seeker, ok := f.(io.Seeker)
+	if !ok {
+		return nil, errors.New("media reader cannot seek")
+	}
+	var hash []byte
+	if verified, ok := f.(interface{ MediaSHA256() []byte }); ok {
+		hash = verified.MediaSHA256()
+	}
+	if len(hash) != sha256.Size {
+		h := sha256.New()
+		n, err := io.Copy(h, &contextMediaReader{ctx: ctx, reader: f})
+		if err != nil || n != size {
+			return nil, errMediaHash
+		}
+		hash = h.Sum(nil)
+	}
+	if _, err := seeker.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	n := min(length, size-offset)
+	keep = true
+	return &mediaByteRange{ReadCloser: &limitedMediaReader{Reader: io.LimitReader(f, n), Closer: f}, Total: size, Bytes: n, SHA256: hash}, nil
+}
+
+type contextMediaReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextMediaReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+func (s localMediaStorage) OpenRange(ctx context.Context, row mediaRow, offset, length int64) (*mediaByteRange, error) {
+	return openMediaRange(ctx, s, row, offset, length)
 }
 
 type localMediaStorage struct {

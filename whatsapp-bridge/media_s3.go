@@ -235,14 +235,22 @@ func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.R
 			return nil, 0, errMediaS3
 		}
 	}
+	reader.hash = hash
 	return reader, size, nil
+}
+
+func (s *s3MediaStorage) OpenRange(ctx context.Context, row mediaRow, offset, length int64) (*mediaByteRange, error) {
+	return openMediaRange(ctx, s, row, offset, length)
 }
 
 type temporaryMediaReader struct {
 	*os.File
 	root *os.Root
 	rel  string
+	hash []byte // Catalog hash, verified against the complete object before Open returns.
 }
+
+func (f *temporaryMediaReader) MediaSHA256() []byte { return f.hash }
 
 func (f *temporaryMediaReader) Close() error {
 	err := f.File.Close()

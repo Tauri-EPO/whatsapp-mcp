@@ -655,6 +655,8 @@ def resolve_media(
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
     if not as_base64:
         check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images)), mime, caller)
+    elif remote and cached:
+        sha256 = cached["sha256"]
     return ResolvedMedia(path, mime, size, sha256, filename)
 
 
@@ -665,27 +667,32 @@ def _base64_blocks(found: ResolvedMedia, offset: int, length: int) -> list[Conte
     The client verifies the assembled file against this hash, catching a changed
     cache or chunks obtained from different versions of the same attachment.
     """
-    try:
-        with open(found.path, "rb") as handle:
-            before = os.fstat(handle.fileno())
-            size = before.st_size
-            if offset > size:
-                raise ToolError("invalid_argument", f"offset {offset} exceeds total size {size}")
-            sha256 = found.sha256
-            if not sha256 or len(sha256) != 64:
-                digest = hashlib.sha256()
-                while part := handle.read(DEFAULT_CHUNK_BYTES):
-                    digest.update(part)
-                sha256 = digest.hexdigest()
-            handle.seek(offset)
-            data = handle.read(min(length, size - offset))
-            after = os.fstat(handle.fileno())
-            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != min(
-                length, size - offset
-            ):
-                raise ToolError("conflict", "the cached file changed during the read; restart from offset 0")
-    except OSError as exc:
-        raise ToolError("internal", f"could not read the cached file: {exc}") from exc
+    if media_remote.enabled():
+        data, size, sha256 = media_remote.read_range(
+            found.path, offset, length, found.sha256, cache_only=not offers_download()
+        )
+    else:
+        try:
+            with open(found.path, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                size = before.st_size
+                if offset > size:
+                    raise ToolError("invalid_argument", f"offset {offset} exceeds total size {size}")
+                sha256 = found.sha256
+                if not sha256 or len(sha256) != 64:
+                    digest = hashlib.sha256()
+                    while part := handle.read(DEFAULT_CHUNK_BYTES):
+                        digest.update(part)
+                    sha256 = digest.hexdigest()
+                handle.seek(offset)
+                data = handle.read(min(length, size - offset))
+                after = os.fstat(handle.fileno())
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != min(
+                    length, size - offset
+                ):
+                    raise ToolError("conflict", "the cached file changed during the read; restart from offset 0")
+        except OSError as exc:
+            raise ToolError("internal", f"could not read the cached file: {exc}") from exc
     next_offset = offset + len(data)
     return [
         TextContent(type="text", text=base64.b64encode(data).decode("ascii")),

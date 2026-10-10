@@ -100,6 +100,48 @@ def _read_error(response: httpx.Response) -> MediaReadError:
     return MediaReadError("bridge_unavailable", "bridge media read failed")
 
 
+def read_range(value: str, offset: int, length: int, sha256: str | None, *, cache_only: bool = False):
+    """A bounded bridge byte range and its verified whole-file identity."""
+    chat, message = identity(value)
+    params = {
+        "chat_jid": chat,
+        "message_id": message,
+        "offset": str(offset),
+        "length": str(length),
+        "cache_only": str(cache_only).lower(),
+    }
+    target = f"{whatsapp.WHATSAPP_API_BASE_URL}/media/blob"
+    try:
+        with whatsapp.bridge_http.stream(
+            "GET", target, params=params, headers=whatsapp._bridge_headers(), timeout=whatsapp.BRIDGE_MEDIA_TIMEOUT_S
+        ) as response:
+            if response.status_code == 400:
+                raise MediaReadError("invalid_argument", "invalid media byte range")
+            if response.status_code != 200:
+                raise _read_error(response)
+            try:
+                size = int(response.headers["X-Media-Total-Bytes"])
+                digest = response.headers["X-Media-SHA256"].lower()
+                valid_hash = len(bytes.fromhex(digest)) == 32 and len(digest) == 64
+            except (KeyError, ValueError) as exc:
+                raise MediaReadError("internal", "invalid media range metadata") from exc
+            if size < offset or not valid_hash:
+                raise MediaReadError("internal", "invalid media range metadata")
+            if sha256 and digest != sha256.lower():
+                raise MediaReadError("conflict", "media changed; restart from offset 0")
+            expected = min(length, size - offset)
+            data = bytearray()
+            for chunk in response.iter_bytes(65536):
+                if len(data) + len(chunk) > expected:
+                    raise MediaReadError("internal", "media range exceeded the requested length")
+                data.extend(chunk)
+            if len(data) != expected:
+                raise MediaReadError("conflict", "media range was incomplete; restart from offset 0")
+            return bytes(data), size, digest
+    except httpx.HTTPError as exc:
+        raise MediaReadError("bridge_unavailable", "bridge media stream failed") from exc
+
+
 @contextmanager
 def local_file(value: str, limit: int, sha256: str | None = None, *, cache_only: bool = False):
     """One bounded, private spool; removed even if rendering/extraction fails."""

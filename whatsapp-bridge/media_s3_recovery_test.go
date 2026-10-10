@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -27,6 +28,100 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestMinIOBase64ChunksReassembleOriginal(t *testing.T) {
+	for _, mode := range []string{"cached", "cold", "quota-streamed"} {
+		t.Run(mode, func(t *testing.T) {
+			b, _ := minioTestBridge(t, "instances/test-base64-"+mode)
+			data := make([]byte, 3*1024*1024+17)
+			for i := range data {
+				data[i] = byte(i % 251)
+			}
+			row := s3TestRow(t, b, "S3CHUNKS", mediaTestChat, "document", data, time.Now())
+			if _, err := b.Store.db.Exec(`UPDATE messages SET filename='sample.bin',file_length=0 WHERE id=? AND chat_jid=?`, row.ID, row.ChatJID); err != nil {
+				t.Fatal(err)
+			}
+			row.Filename = "sample.bin"
+			if mode == "cached" {
+				s3TestWrite(t, b, row, data)
+			}
+			if mode == "quota-streamed" {
+				b.MediaQuotaBytes = 1
+			}
+			b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
+			}
+			var chunks atomic.Int32
+			var transferred atomic.Int64
+			server := s3ReviewRESTWrapped(t, b, func(handler http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/api/media/blob" {
+						handler.ServeHTTP(w, r)
+						return
+					}
+					if !r.URL.Query().Has("offset") || !r.URL.Query().Has("length") {
+						t.Error("chunk requested an unbounded blob")
+					}
+					result := httptest.NewRecorder()
+					handler.ServeHTTP(result, r)
+					for key, values := range result.Header() {
+						w.Header()[key] = values
+					}
+					w.WriteHeader(result.Code)
+					if result.Code == http.StatusOK {
+						chunks.Add(1)
+						transferred.Add(int64(result.Body.Len()))
+					}
+					_, _ = io.Copy(w, result.Body)
+				})
+			})
+			s3RecoveryMCP(t, b, server.URL, `import asyncio,base64,hashlib,json
+import main
+chat='5511999999999@s.whatsapp.net'
+size=3*1024*1024+17
+expected=bytes(range(251))*(size//251)+bytes(range(size%251))
+digest=hashlib.sha256(expected).hexdigest()
+async def run():
+    listed=await main.mcp.call_tool('list_media',{'chat_jid':chat})
+    assert not listed.is_error,listed.content
+    assert listed.structured_content['items'][0]['sha256']==digest
+    assembled=bytearray(); offset=0
+    while True:
+        result=await main.mcp.call_tool('read_media',{'chat_jid':chat,'message_id':'S3CHUNKS','as_base64':True,'offset':offset,'length':786432,'max_bytes':1})
+        assert not result.is_error,result.content[0].text
+        assert [block.type for block in result.content]==['text','text']
+        part=base64.b64decode(result.content[0].text,validate=True)
+        meta=json.loads(result.content[1].text)
+        assert meta['offset']==offset and meta['total_size']==size
+        assert meta['sha256']==digest and meta['chunk_sha256']==hashlib.sha256(part).hexdigest()
+        assert meta['bytes']==meta['returned_length']==len(part)<=786432
+        assembled.extend(part)
+        if meta['next_offset'] is None: break
+        assert meta['next_offset']==offset+len(part)
+        offset=meta['next_offset']
+    assert assembled==expected and hashlib.sha256(assembled).hexdigest()==digest
+    eof=await main.mcp.call_tool('read_media',{'chat_jid':chat,'message_id':'S3CHUNKS','as_base64':True,'offset':size,'length':1})
+    assert not eof.is_error and eof.content[0].text==''
+    assert json.loads(eof.content[1].text)['next_offset'] is None
+    invalid=await main.mcp.call_tool('read_media',{'chat_jid':chat,'message_id':'S3CHUNKS','as_base64':True,'offset':size+1,'length':1})
+    assert invalid.is_error and invalid.structured_content['error']['code']=='invalid_argument'
+asyncio.run(run())
+print('3 MiB + 17 bytes reconstructed from five bounded base64 chunks; whole/chunk SHA256 and EOF/offset checked')`)
+			if chunks.Load() != 6 || transferred.Load() != int64(len(data)) {
+				t.Fatal("range API did not transfer exactly the assembled bytes and EOF", chunks.Load(), transferred.Load())
+			}
+			leaves, err := os.ReadDir(b.StoreRoot.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, leaf := range leaves {
+				if strings.HasPrefix(leaf.Name(), ".media-stage-") || strings.HasPrefix(leaf.Name(), ".media-stream-") {
+					t.Fatal("range left a plaintext spool")
+				}
+			}
+		})
+	}
+}
 
 func TestMinIOPublicationRechecksQuotaAfterConcurrentDeletion(t *testing.T) {
 	b, s := minioTestBridge(t, "instances/test-publication-quota-race")

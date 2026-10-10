@@ -1661,13 +1661,20 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
 | any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; no total-file cap |
 
+With the S3 backend, base64 chunks use the authenticated bridge byte-range API;
+the whole-file hash comes from the verified cache catalog. The bridge verifies
+the complete object in a private temporary file before returning each range, so
+the chunk limit bounds the response while temporary disk space must hold the
+complete file. Cold reads and the quota streaming fallback support the same
+`offset`/`length` parameters.
+
 The chunk JSON carries `total_size`, `offset`, `returned_length`, `next_offset`
 (`null` at EOF), `sha256` (the archived whole-file plaintext hash),
 `chunk_sha256` (the returned bytes), `mime`, `bytes` (same as `returned_length`)
 and `notes`. Base64 stays plain even with `WHATSAPP_WRAP_UNTRUSTED=1`.
-The server seeks and reads only the requested range when the archive has the
+The local backend seeks and reads only the requested range when the archive has the
 whole-file hash; legacy rows without a hash need a streaming hash pass with a
-1 MiB buffer. No temporary copy is created. Chat allow-list, tool policy,
+1 MiB buffer. Local reads create no temporary copy. Chat allow-list, tool policy,
 implicit-download restrictions and read-only mode apply exactly as for other
 `read_media` calls.
 

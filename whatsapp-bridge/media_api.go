@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,10 +53,25 @@ func (s transientMediaStorage) Open(ctx context.Context, _ mediaRow, _ string) (
 	return f, opened.Size(), nil
 }
 
+func (s transientMediaStorage) OpenRange(ctx context.Context, row mediaRow, offset, length int64) (*mediaByteRange, error) {
+	return openMediaRange(ctx, s, row, offset, length)
+}
+
 func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 	chat, ok := authorizeChat(w, b.Policy, r.URL.Query().Get("chat_jid"), false)
 	if !ok {
 		return
+	}
+	ranged := r.URL.Query().Has("offset") || r.URL.Query().Has("length")
+	var offset, length int64
+	if ranged {
+		var offsetErr, lengthErr error
+		offset, offsetErr = strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+		length, lengthErr = strconv.ParseInt(r.URL.Query().Get("length"), 10, 64)
+		if offsetErr != nil || lengthErr != nil || offset < 0 || length < 1 || length > maxMediaChunkBytes {
+			writeErrorCode(w, 400, "invalid_argument", "Invalid media byte range")
+			return
+		}
 	}
 	id := r.URL.Query().Get("message_id")
 	row, err := b.Store.MediaRow(id, chat.String())
@@ -112,8 +129,25 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	f, size, err := storage.Open(ctx, row, "")
+	var f io.ReadCloser
+	var size int64
+	if ranged {
+		var part *mediaByteRange
+		part, err = storage.OpenRange(ctx, row, offset, length)
+		if err == nil {
+			f, size = part, part.Bytes
+			w.Header().Set("X-Media-Total-Bytes", strconv.FormatInt(part.Total, 10))
+			w.Header().Set("X-Media-SHA256", hex.EncodeToString(part.SHA256))
+			w.Header().Set("Content-Length", strconv.FormatInt(part.Bytes, 10))
+		}
+	} else {
+		f, size, err = storage.Open(ctx, row, "")
+	}
 	if err != nil {
+		if errors.Is(err, errMediaRange) {
+			writeErrorCode(w, 400, "invalid_argument", "Invalid media byte range")
+			return
+		}
 		writeError(w, 502, "Media read failed")
 		return
 	}
