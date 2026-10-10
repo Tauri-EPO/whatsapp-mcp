@@ -499,7 +499,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 
 		resp := MediaPurgeResponse{Success: true, DryRun: dryRun, Truncated: truncated}
 		deleted, deleteErr := storage.Delete(r.Context(), rows, dryRun)
-		if deleteErr != nil && len(deleted) == 0 {
+		if deleteErr != nil && len(deleted) < len(rows) {
 			writeError(w, 503, "Media purge incomplete")
 			return
 		}

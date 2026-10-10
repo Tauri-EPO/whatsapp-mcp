@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -126,7 +127,35 @@ func (b *Bridge) handleMediaCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := r.URL.Query().Get("cursor")
-	rows, err := b.Store.db.QueryContext(r.Context(), `SELECT r.id,c.bytes,hex(c.sha256) FROM media_cache_refs r JOIN media_cache c ON c.sha256=r.sha256 JOIN messages m ON m.id=r.id AND m.chat_jid=r.chat_jid WHERE r.chat_jid=? AND c.backend='s3' AND c.sha256=m.file_sha256 AND r.id>? ORDER BY r.id LIMIT 257`, chat.String(), cursor)
+	ids, specific := r.URL.Query()["message_id"]
+	if specific && (len(ids) == 0 || len(ids) > 256) {
+		writeError(w, 400, "Media catalog accepts at most 256 message IDs")
+		return
+	}
+	query := `SELECT r.id,c.bytes,hex(c.sha256) FROM media_cache_refs r JOIN media_cache c ON c.sha256=r.sha256 JOIN messages m ON m.id=r.id AND m.chat_jid=r.chat_jid WHERE r.chat_jid=? AND c.backend='s3' AND c.sha256=m.file_sha256`
+	args := []any{chat.String()}
+	if storage, ok := b.mediaStorage().(*s3MediaStorage); ok && storage.deletionJournal {
+		query += ` AND NOT EXISTS(SELECT 1 FROM media_cache_deletions d WHERE d.sha256=c.sha256)`
+	}
+	if specific {
+		for _, id := range ids {
+			if id == "" {
+				writeError(w, 400, "Media catalog message IDs must not be empty")
+				return
+			}
+		}
+		batch, err := json.Marshal(ids)
+		if err != nil {
+			writeError(w, 400, "Invalid media catalog message IDs")
+			return
+		}
+		query += ` AND r.id IN (SELECT value FROM json_each(?))`
+		args = append(args, string(batch))
+	} else {
+		query += ` AND r.id>?`
+		args = append(args, cursor)
+	}
+	rows, err := b.Store.db.QueryContext(r.Context(), query+` ORDER BY r.id LIMIT 257`, args...)
 	if err != nil {
 		writeError(w, 503, "Media catalog unavailable")
 		return
@@ -238,23 +267,32 @@ func parseMediaURI(raw string) (string, string, error) {
 
 // Only bridge-generated identifiers enter storage. No object key, bucket or
 // credential is accepted from callers or disclosed through these endpoints.
-func (b *Bridge) materializeCachedMedia(ctx context.Context, uri string) (string, func(), error) {
+type cachedSendSourceKey struct{}
+
+func (b *Bridge) materializeCachedMedia(ctx context.Context, uri string) (string, *forwardSource, func(), error) {
 	chat, id, err := parseMediaURI(uri)
 	if err != nil {
-		return "", func() {}, err
+		return "", nil, func() {}, err
 	}
 	row, err := b.Store.MediaRow(id, chat)
 	if err != nil {
-		return "", func() {}, err
+		return "", nil, func() {}, err
+	}
+	source, found, err := b.Store.messageContentLookup(id, chat)
+	if err != nil {
+		return "", nil, func() {}, err
+	}
+	if !found || source.mediaType != row.MediaType || source.filename != row.Filename {
+		return "", nil, func() {}, errMediaSnapshot
 	}
 	reader, _, err := b.mediaStorage().Open(ctx, row, "")
 	if err != nil {
-		return "", func() {}, err
+		return "", nil, func() {}, err
 	}
 	defer func() { _ = reader.Close() }()
 	f, err := os.CreateTemp("", "wamcp-send-*"+path.Ext(mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename)))
 	if err != nil {
-		return "", func() {}, err
+		return "", nil, func() {}, err
 	}
 	cleanup := func() { _ = os.Remove(f.Name()) }
 	_, err = io.Copy(f, reader)
@@ -264,7 +302,7 @@ func (b *Bridge) materializeCachedMedia(ctx context.Context, uri string) (string
 	}
 	if err != nil {
 		cleanup()
-		return "", func() {}, err
+		return "", nil, func() {}, err
 	}
-	return f.Name(), cleanup, nil
+	return f.Name(), &source, cleanup, nil
 }

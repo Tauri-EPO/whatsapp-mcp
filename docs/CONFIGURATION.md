@@ -753,8 +753,9 @@ For R2, add `WHATSAPP_MEDIA_S3_ENDPOINT=https://example.r2.cloudflarestorage.com
 and `WHATSAPP_MEDIA_S3_REGION=auto`. Replace the example endpoint with the origin
 provided by your account. For MinIO, use
 `WHATSAPP_MEDIA_S3_ENDPOINT=http://minio:9000`, region `us-east-1` and
-`WHATSAPP_MEDIA_S3_FORCE_PATH_STYLE=true`. Prefer HTTPS outside a private local
-network. Credential files must be regular, owner-only files of at most 4096
+`WHATSAPP_MEDIA_S3_FORCE_PATH_STYLE=true`. Non-loopback HTTP sends plaintext
+media and signed requests without TLS and emits a startup warning. Use HTTPS
+for remote endpoints. Credential files must be regular, owner-only files of at most 4096
 bytes, mounted separately into the bridge; set each value or its `_FILE`
 alternative, never both. The default compose passthrough does not create mounts.
 
@@ -770,8 +771,14 @@ message's cache reference, and removes the object only after its last reference
 is gone. Freed bytes count actual object removal, so purging one chat may free
 zero bytes. Operator `by_type` charges each unique object to its first cached
 type; its sum equals `bytes`. Per-chat values count references and can overlap.
-Failed remote deletion keeps the object's bytes charged; the next retention
-sweep retries up to 256 unreferenced objects. Operator purge with include_orphans
+Failed remote deletion keeps existing objects referenced and charged for retry.
+Before a last-reference DELETE, the bridge records its hash in the durable
+`media_cache_deletions` journal. If cancellation, a crash or a SQL failure leaves
+that operation incomplete, readers and retention reconcile the exact object by
+HEAD: an existing object keeps its references, a missing object loses its cache
+references so an on-demand read can fetch it again. Inventory excludes pending
+deletions until they are resolved. Retention reconciles up to 256 pending hashes
+and retries up to 256 unreferenced catalog objects. Operator purge with include_orphans
 also removes detached catalog objects within the selected type and age; a chat
 filter excludes them because their chat references are gone. Keep retention enabled if you want
 that automatic cleanup. No global bucket listing or deletion crosses a prefix.
@@ -813,6 +820,21 @@ destinations and skips them, so it can finish interrupted runs. Symlinks, nested
 directories and files without a message mapping stay in place and are reported.
 Switch both processes to the destination backend only after migration succeeds;
 without `--delete-source`, both copies remain until explicitly removed.
+
+A crash after PUT but before catalog commit can leave an object that is not yet
+charged to quota. Resume `migrate-media --to s3`: for each retained mapped local
+source it recomputes the known hash, verifies the existing remote object and
+adopts its reference before deleting any source. Objects with no surviving
+message/source mapping need operator recovery using the bucket's own inventory;
+the bridge never lists the bucket to infer ownership. Startup under the store
+lock removes leftover instance-owned `.media-stage-*` and `.media-stream-*`
+plaintext spools, while keeping canonical local media untouched.
+Dry-run commands preserve these spools; cleanup runs on a real startup/resume.
+Do not switch backend or remove local migration sources before a successful resume.
+
+Remote transfers are bounded to four and serialize only for the same hash.
+Webhook media has a short deadline and may be omitted during a slow remote
+read; the queued automatic caching path remains independent.
 
 ## Runtime overrides
 

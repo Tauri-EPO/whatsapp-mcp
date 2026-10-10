@@ -274,6 +274,9 @@ func runBridge(cfg bridgeConfig) int {
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
 	bridge.MediaQuotaWarnPercent = cfg.MediaBackend.WarnPercent
 	if cfg.MediaBackend.Backend == "s3" {
+		if cfg.MediaBackend.plaintextRemote() {
+			logger.Warnf("S3 uses non-loopback HTTP: media and signed requests travel without TLS; configure HTTPS")
+		}
 		bridge.MediaStorage, err = newS3MediaStorage(bridge.ctx, cfg.MediaBackend, messageStore, storeRoot)
 		if err != nil {
 			logger.Errorf("Refusing to start: S3 media bucket probe failed")

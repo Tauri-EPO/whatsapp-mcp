@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -10,7 +11,9 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -21,13 +24,42 @@ var errMediaS3 = errors.New("S3 media storage unavailable")
 var errMediaHash = errors.New("media plaintext SHA256 mismatch")
 var errMediaSnapshot = errors.New("media snapshot changed during transfer")
 
+// Startup holds the instance lock before this cleanup. All plaintext spools
+// live in that instance's root, so another bridge's active files are untouched.
+func cleanMediaSpools(root *os.Root) error {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".media-stage-") || strings.HasPrefix(e.Name(), ".media-stream-") {
+			if err := root.Remove(e.Name()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *s3MediaStorage) spool() (*os.File, error) {
+	return s.root.OpenFile(".media-stage-"+rand.Text(), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+}
+
 type s3MediaStorage struct {
-	client *minio.Client
-	store  *MessageStore
-	root   *os.Root
-	cfg    mediaBackendConfig
-	gate   chan struct{}
-	bridge *Bridge
+	client          *minio.Client
+	store           *MessageStore
+	root            *os.Root
+	cfg             mediaBackendConfig
+	mu              sync.Mutex
+	locks           map[string]*s3ObjectLock
+	transfers       chan struct{}
+	bridge          *Bridge
+	deletionJournal bool
 }
 
 func newS3MediaStorage(ctx context.Context, cfg mediaBackendConfig, store *MessageStore, root *os.Root) (*s3MediaStorage, error) {
@@ -55,15 +87,59 @@ func newS3MediaStorage(ctx context.Context, cfg mediaBackendConfig, store *Messa
 	if err != nil || !ok {
 		return nil, errMediaS3
 	}
-	return &s3MediaStorage{client: client, cfg: cfg, store: store, root: root, gate: make(chan struct{}, 1)}, nil
+	if readonly, _ := ctx.Value(mediaReadOnlyKey{}).(bool); !readonly {
+		if err := cleanMediaSpools(root); err != nil {
+			return nil, errMediaS3
+		}
+	}
+	// A dry-run can open an older archive without upgrading its schema.
+	var journal int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_cache_deletions'`).Scan(&journal); err != nil {
+		return nil, errMediaS3
+	}
+	return &s3MediaStorage{client: client, cfg: cfg, store: store, root: root, locks: make(map[string]*s3ObjectLock), transfers: make(chan struct{}, 4), deletionJournal: journal != 0}, nil
 }
 
 func (*s3MediaStorage) Backend() string { return "s3" }
 
-func (s *s3MediaStorage) lock(ctx context.Context) (func(), error) {
+type s3ObjectLock struct {
+	gate  chan struct{}
+	users int
+}
+
+// Only operations on the same content hash serialize. The mutex never spans
+// network I/O; idle entries disappear instead of growing with archive size.
+func (s *s3MediaStorage) lockHash(ctx context.Context, hash []byte) (func(), error) {
+	key := hex.EncodeToString(hash)
+	s.mu.Lock()
+	l := s.locks[key]
+	if l == nil {
+		l = &s3ObjectLock{gate: make(chan struct{}, 1)}
+		s.locks[key] = l
+	}
+	l.users++
+	s.mu.Unlock()
+	release := func() {
+		s.mu.Lock()
+		l.users--
+		if l.users == 0 {
+			delete(s.locks, key)
+		}
+		s.mu.Unlock()
+	}
 	select {
-	case s.gate <- struct{}{}:
-		return func() { <-s.gate }, nil
+	case l.gate <- struct{}{}:
+		return func() { <-l.gate; release() }, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	}
+}
+
+func (s *s3MediaStorage) transfer(ctx context.Context) (func(), error) {
+	select {
+	case s.transfers <- struct{}{}:
+		return func() { <-s.transfers }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -88,7 +164,7 @@ func (s *s3MediaStorage) Lookup(ctx context.Context, row mediaRow) (*mediaCacheE
 	if err := checkMediaPathComponents(chatMediaRel(row.ChatJID), mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename)); err != nil {
 		return nil, err
 	}
-	_, size, err := s.reference(ctx, row)
+	_, size, err := s.reconciledReference(ctx, row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -103,15 +179,30 @@ func mediaBlobURI(chat, id string) string {
 }
 
 func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.ReadCloser, int64, error) {
-	unlock, err := s.lock(ctx)
+	hash, size, err := s.reconciledReference(ctx, row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, 0, os.ErrNotExist
+		}
+		return nil, 0, err
+	}
+	unlock, err := s.lockHash(ctx, hash)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer unlock()
-	hash, size, err := s.reference(ctx, row)
-	if err != nil {
-		return nil, 0, os.ErrNotExist
+	if _, err := s.reconcileDeletionLocked(ctx, hash); err != nil {
+		return nil, 0, err
 	}
+	current, _, err := s.reference(ctx, row)
+	if err != nil || !bytes.Equal(current, hash) {
+		return nil, 0, errMediaSnapshot
+	}
+	release, err := s.transfer(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
 	key, err := s.key(hash)
 	if err != nil {
 		return nil, 0, err
@@ -123,11 +214,11 @@ func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.R
 	defer func() { _ = object.Close() }()
 	// Verify before releasing any bytes to a caller. A private disk spool keeps
 	// memory bounded, and is removed when the reader closes, including failures.
-	f, err := os.CreateTemp("", "wamcp-media-*")
+	f, err := s.spool()
 	if err != nil {
 		return nil, 0, errMediaS3
 	}
-	reader := &temporaryMediaReader{File: f}
+	reader := &temporaryMediaReader{File: f, root: s.root, rel: filepath.Base(f.Name())}
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(object, size+1))
 	if err != nil || n != size || !bytes.Equal(h.Sum(nil), hash) {
@@ -147,11 +238,20 @@ func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.R
 	return reader, size, nil
 }
 
-type temporaryMediaReader struct{ *os.File }
+type temporaryMediaReader struct {
+	*os.File
+	root *os.Root
+	rel  string
+}
 
 func (f *temporaryMediaReader) Close() error {
 	err := f.File.Close()
-	remove := os.Remove(f.Name())
+	var remove error
+	if f.root != nil {
+		remove = f.root.Remove(f.rel)
+	} else {
+		remove = os.Remove(f.Name())
+	}
 	if err != nil {
 		return err
 	}
@@ -159,28 +259,33 @@ func (f *temporaryMediaReader) Close() error {
 }
 
 func (s *s3MediaStorage) Write(ctx context.Context, row mediaRow, fill func(string) (int64, error)) (int64, error) {
-	local := localMediaStorage{root: s.root}
 	name := mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename)
 	if err := checkMediaPathComponents(chatMediaRel(row.ChatJID), name); err != nil {
 		return 0, err
 	}
-	if err := s.root.MkdirAll(chatMediaRel(row.ChatJID), storeDirMode); err != nil {
-		return 0, err
-	}
-	// A staged plaintext uses the canonical no-follow writer; S3 publication
-	// cannot expose it as cached until upload verification and the SQL commit.
-	n, err := local.Write(ctx, row, fill)
+	// Download into a private, instance-owned name, never the local cache path.
+	// An incomplete backend migration must leave its existing source intact.
+	f, err := s.spool()
 	if err != nil {
 		return 0, err
 	}
-	rel := path.Join(chatMediaRel(row.ChatJID), name)
-	defer func() { _ = s.root.Remove(rel) }()
-	f, _, err := local.Open(ctx, row, name)
+	rel := filepath.Base(f.Name())
+	_ = f.Close()
+	defer func() { _ = s.root.Remove(rel); _ = s.root.Remove(rel + ".part") }()
+	n, err := fill(rel)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = f.Close() }()
-	return s.put(ctx, row, f, n)
+	stage := transientMediaStorage{localMediaStorage: localMediaStorage{root: s.root}, rel: rel}
+	reader, actual, err := stage.Open(ctx, row, "")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = reader.Close() }()
+	if actual != n {
+		return 0, errMediaHash
+	}
+	return s.put(ctx, row, reader, n)
 }
 
 func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader, size int64) (stored int64, putErr error) {
@@ -188,11 +293,11 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 		return 0, errMediaHash
 	}
 	// Copy a confined source to a private spool, hashing before any upload.
-	f, err := os.CreateTemp("", "wamcp-upload-*")
+	f, err := s.spool()
 	if err != nil {
 		return 0, errMediaS3
 	}
-	tmp := &temporaryMediaReader{File: f}
+	tmp := &temporaryMediaReader{File: f, root: s.root, rel: filepath.Base(f.Name())}
 	defer func() { _ = tmp.Close() }()
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(f, h), reader)
@@ -227,11 +332,16 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 			defer release()
 		}
 	}
-	unlock, err := s.lock(ctx)
+	unlock, err := s.lockHash(ctx, hash)
 	if err != nil {
 		return 0, err
 	}
 	defer unlock()
+	release, err := s.transfer(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	key, err := s.key(hash)
 	if err != nil {
 		return 0, err
@@ -298,6 +408,11 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO media_cache_refs(id,chat_jid,sha256) VALUES(?,?,?) ON CONFLICT(id,chat_jid) DO UPDATE SET sha256=excluded.sha256`, row.ID, row.ChatJID, hash); err != nil {
 		return 0, errMediaS3
+	}
+	if s.deletionJournal {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM media_cache_deletions WHERE sha256=?`, hash); err != nil {
+			return 0, errMediaS3
+		}
 	}
 	if len(expected) == 0 {
 		if _, err = tx.ExecContext(ctx, `UPDATE messages SET file_sha256=? WHERE id=? AND chat_jid=?`, hash, row.ID, row.ChatJID); err != nil {

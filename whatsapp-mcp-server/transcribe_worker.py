@@ -402,6 +402,7 @@ def find_pending(
     parked = False  # out of fetches: the walk stops advancing so nothing is stepped over untried
     walking = False
     caches: dict[str, dict[str, str]] = {}  # chat -> message id -> cached filename
+    remote_lookups: dict[tuple[str, str], dict | None] = {}
     out: list[Candidate] = []
     seen: set[str] = set()
     looked_at: set[tuple[str, str]] = set()  # rows read this round, for the log line
@@ -417,11 +418,13 @@ def find_pending(
         if chat_jid not in caches:
             # Names only: the worker wants the path of a file, never its size,
             # so the chat's map costs one directory read and no stat (#318).
-            caches[chat_jid] = (
-                {message: media_remote.uri(chat_jid, message) for message in media_remote.catalog(chat_jid)}
-                if media_remote.enabled()
-                else media_inventory.list_chat_names(chat_jid)
-            )
+            caches[chat_jid] = {} if media_remote.enabled() else media_inventory.list_chat_names(chat_jid)
+        if media_remote.enabled():
+            identity = (chat_jid, message_id)
+            if identity not in remote_lookups:
+                remote_lookups[identity] = media_remote.lookup(chat_jid, message_id)
+            if remote_lookups[identity]:
+                caches[chat_jid][message_id] = media_remote.uri(chat_jid, message_id)
         cached = caches[chat_jid].get(message_id)
         if cached is None and not traversing:
             if head_budget <= 0 or budget <= 0:
@@ -589,7 +592,7 @@ def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
     return any(
         (str(message_id), str(chat_jid)) != exclude
         and (
-            str(message_id) in media_remote.catalog(str(chat_jid))
+            media_remote.lookup(str(chat_jid), str(message_id)) is not None
             if media_remote.enabled()
             else media_inventory.lookup_cached_name(str(chat_jid), str(message_id)) is not None
         )
@@ -702,6 +705,16 @@ def run_once(
             if not text:
                 raise TranscriptionError("whisper returned no text")
             store_transcript(candidate.sha256, {**result, "text": text})
+        except media_remote.MediaReadError:
+            # One unavailable object must not masquerade as a global accounting
+            # outage and pin healthy candidates behind it forever. Keep the
+            # normal bounded outage/retry policy without a permanent failure note.
+            outages += 1
+            _log_fetch_problem(outages > 1, "remote cached media unavailable")
+            stopped = outages >= MAX_OUTAGE_SKIPS
+            if stopped:
+                break
+            continue
         except ToolError as exc:
             if exc.code == "transcription_quota_exceeded":
                 if isinstance(exc, QuotaExceededError):

@@ -70,6 +70,14 @@ func minioTestBridge(t *testing.T, prefix string) (*Bridge, *s3MediaStorage) {
 	b.MediaStorage = s
 	s.bridge = b
 	t.Cleanup(func() {
+		log := b.Log.(*recordingLogger).String()
+		for _, value := range []string{cfg.SecretKey, cfg.AccessKey, cfg.Bucket, strings.TrimSuffix(cfg.Prefix, "/")} {
+			if strings.Contains(log, value) {
+				t.Error("S3 logger disclosed private backend configuration")
+			}
+		}
+	})
+	t.Cleanup(func() {
 		for object := range client.ListObjects(context.Background(), bucket, minio.ListObjectsOptions{Prefix: cfg.Prefix, Recursive: true}) {
 			if object.Err == nil {
 				_ = client.RemoveObject(context.Background(), bucket, object.Key, minio.RemoveObjectOptions{})
@@ -463,7 +471,7 @@ func TestMinIOMigrationResumeAfterRemoteFailure(t *testing.T) {
 	proxy.Transport = transport
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, blocked) {
-			w.WriteHeader(403)
+			w.WriteHeader(503)
 			_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code></Error>`)
 			return
 		}
@@ -781,8 +789,8 @@ func TestMinIOPartialPurgeAndCorruptObject(t *testing.T) {
 	}
 	operator := mediaOperatorServer(t, b)
 	code, preview := mediaHTTPRequest(t, operator, "POST", "/operator/v1/media/purge", `{"type":"all","include_orphans":true,"dry_run":true}`, fakeOperatorToken)
-	if code != 200 || preview["orphan_files"] != float64(1) || preview["freed_bytes"] != float64(len(aData)) {
-		t.Fatal("orphan preview", code, preview)
+	if code != 200 || preview["orphan_files"] != float64(0) || preview["freed_bytes"] != float64(len(aData)) {
+		t.Fatal("retained reference preview", code, preview)
 	}
 	code, removed := mediaHTTPRequest(t, operator, "POST", "/operator/v1/media/purge", `{"type":"all","include_orphans":true,"dry_run":false}`, fakeOperatorToken)
 	if code != 200 || removed["freed_bytes"] != preview["freed_bytes"] {
@@ -794,13 +802,14 @@ func TestMinIOPartialPurgeAndCorruptObject(t *testing.T) {
 		t.Fatal("retry setup", items, err)
 	}
 	s.client = original
-	freed, failed := s.sweepUnreferenced(b.ctx)
-	if freed != int64(len(aData)) || failed != 0 {
-		t.Fatal("retry failed", freed, failed)
+	items, err := s.Delete(b.ctx, []mediaRow{a}, false)
+	if err != nil || !items[0].Purged || items[0].Bytes != int64(len(aData)) {
+		t.Fatal("retry failed", items, err)
 	}
 	s3TestWrite(t, b, c, cData)
 	key, _ = s.key(sha256Of(cData))
-	if _, err := s.client.PutObject(b.ctx, s.cfg.Bucket, key, bytes.NewReader([]byte("tampered")), 8, minio.PutObjectOptions{DisableMultipart: true}); err != nil {
+	tampered := bytes.Repeat([]byte("X"), len(cData))
+	if _, err := s.client.PutObject(b.ctx, s.cfg.Bucket, key, bytes.NewReader(tampered), int64(len(tampered)), minio.PutObjectOptions{DisableMultipart: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.Open(b.ctx, c, ""); !errors.Is(err, errMediaHash) {

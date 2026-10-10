@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
-	"slices"
+	"path/filepath"
 	"time"
 )
 
@@ -76,40 +76,40 @@ func (b *Bridge) acquireS3MediaQuota(ctx context.Context, incoming uint64) (boun
 		return ctx, func() {}, errMediaQuota
 	}
 	if used >= quota || incoming > quota-min(used, quota) || b.mediaQuotaNeedsLowWater.Load() {
-		rows, err := s.cachedRows(accountingCtx)
-		if err != nil {
-			return ctx, func() {}, err
-		}
 		low := mediaQuotaLowWater(quota, target)
 		var freed uint64
+		predicate, args := s3MediaTypesPredicate(types)
 		// Oldest references first. A shared object's bytes are only freed on
 		// its final eligible reference; an unlisted type keeps its object alive.
-		for _, row := range rows {
-			if used <= low && incoming <= quota-used {
-				break
-			}
-			kind := row.MediaType
-			if row.ChatJID == "status@broadcast" {
-				kind = "status"
-			}
-			if !slices.Contains(types, kind) {
-				continue
-			}
-			results, err := s.Delete(accountingCtx, []mediaRow{row}, false)
-			if err != nil {
-				return ctx, func() {}, err
-			}
-			for _, result := range results {
-				if result.Purged {
-					if result.Bytes < 0 {
-						return ctx, func() {}, errMediaS3
+		err := s.walkCachedRows(accountingCtx, predicate, args, func(rows []mediaRow) (bool, error) {
+			for _, row := range rows {
+				if used <= low && incoming <= quota-used {
+					return false, nil
+				}
+				kind := row.MediaType
+				if row.ChatJID == "status@broadcast" {
+					kind = "status"
+				}
+				results, err := s.Delete(accountingCtx, []mediaRow{row}, false)
+				if err != nil {
+					return false, err
+				}
+				for _, result := range results {
+					if result.Purged {
+						if result.Bytes < 0 {
+							return false, errMediaS3
+						}
+						n := uint64(result.Bytes)
+						used -= min(used, n)
+						freed += n
+						b.metrics.recordMediaEviction(kind, n)
 					}
-					n := uint64(result.Bytes)
-					used -= min(used, n)
-					freed += n
-					b.metrics.recordMediaEviction(kind, n)
 				}
 			}
+			return used > low || incoming > quota-used, nil
+		})
+		if err != nil {
+			return ctx, func() {}, err
 		}
 		b.mediaQuotaNeedsLowWater.Store(len(types) > 0 && used > low)
 		if len(types) > 0 {
@@ -144,9 +144,28 @@ func (b *Bridge) cacheOutboundS3(ctx context.Context, sent sentMessage, media ou
 		return
 	}
 	row := mediaRow{ID: sent.ID, ChatJID: sent.ChatJID, MediaType: media.mediaType, Timestamp: sent.Timestamp, Filename: media.filename}
-	_, err := b.mediaStorage().Write(ctx, row, func(rel string) (int64, error) {
-		return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
-	})
+	name := mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename)
+	key, err := filepath.Abs(storePath(chatMediaRel(row.ChatJID), name))
+	if err == nil {
+		_, err = b.mediaTransfers.do(ctx, "sent-cache:"+key, func() (int64, error) {
+			transferCtx, cancel := transferContext(b.ctx, ctx)
+			defer cancel()
+			for {
+				attempted := false
+				written, err := b.mediaTransfers.do(transferCtx, key, func() (int64, error) {
+					attempted = true
+					return b.mediaStorage().Write(transferCtx, row, func(rel string) (int64, error) {
+						return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
+					})
+				})
+				if err == nil || transferCtx.Err() != nil || attempted {
+					return written, err
+				}
+				// A failed joined download released the key. Retain the bytes
+				// and publish them ourselves; never retry our own write error.
+			}
+		})
+	}
 	if err != nil {
 		b.Log.Warnf("Sent media cache failed: %v", err)
 	}

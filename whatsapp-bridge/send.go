@@ -398,12 +398,17 @@ func (b *Bridge) sendBackend() sendFunc {
 
 func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersistence, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	if strings.HasPrefix(mediaPath, "whatsapp://") {
-		local, cleanup, err := b.materializeCachedMedia(ctx, mediaPath)
+		local, source, cleanup, err := b.materializeCachedMedia(ctx, mediaPath)
 		if err != nil {
 			return false, "Cached media read failed", sentMessage{}
 		}
 		defer cleanup()
 		mediaPath = local
+		ctx = context.WithValue(ctx, cachedSendSourceKey{}, source)
+		ctx = context.WithValue(ctx, cachedForwardMIMEKey{}, true)
+		if _, exists := ctx.Value(forwardSourceKey{}).(*forwardSource); !exists {
+			ctx = context.WithValue(ctx, forwardSourceKey{}, source)
+		}
 	}
 	network := messageSendNetwork{connected: b.Connected, upload: b.uploadMedia, send: b.sendMessage}
 	network.cache = b.cacheOutboundMedia
@@ -539,6 +544,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		media := outboundMediaColumns(mediaPath, upload)
+		if source, ok := ctx.Value(cachedSendSourceKey{}).(*forwardSource); ok {
+			media.filename = source.filename
+		}
 		// The SDK can change both the destination and our PN/LID identity.
 		// Its successful response is the wire provenance, before normalization.
 		retryChat, retrySender := resp.Chat, resp.Sender

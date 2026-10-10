@@ -315,6 +315,7 @@ def _xlsx(path: str, wanted: int) -> Extracted:
     from openpyxl import load_workbook
 
     workbook = None
+    source = None
     cut = _Cut()
     rendered: list[str] = []
     total = 0
@@ -322,7 +323,10 @@ def _xlsx(path: str, wanted: int) -> Extracted:
         # read_only defers the XML parsing to iter_rows, so a truncated file
         # fails inside the loop and not at load: both are bad input, not a
         # server fault, so the whole read is wrapped.
-        workbook = load_workbook(path, read_only=True, data_only=True)
+        # Verified remote spools deliberately carry no sender-controlled
+        # extension. The binary handle lets openpyxl inspect the ZIP itself.
+        source = open(path, "rb")
+        workbook = load_workbook(source, read_only=True, data_only=True)
         sheets = workbook.worksheets
         total = len(sheets)
         for sheet in sheets[:wanted]:
@@ -337,6 +341,8 @@ def _xlsx(path: str, wanted: int) -> Extracted:
     finally:
         if workbook is not None:
             workbook.close()
+        if source is not None:
+            source.close()
     out = _collect(iter(rendered), total, wanted)
     out.truncated = out.truncated or cut.hit
     if not out.sections:

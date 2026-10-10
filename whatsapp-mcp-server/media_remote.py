@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from collections.abc import Sequence
 from contextlib import contextmanager
 from urllib.parse import quote, unquote, urlsplit
 
@@ -12,6 +13,10 @@ import httpx
 
 import whatsapp
 from errors import ToolError
+
+
+class MediaReadError(ToolError):
+    """A remote media failure, distinct from transcription accounting errors."""
 
 
 def enabled() -> bool:
@@ -22,13 +27,16 @@ def uri(chat_jid: str, message_id: str) -> str:
     return f"whatsapp://media/{quote(chat_jid, safe='')}/{quote(message_id, safe='')}"
 
 
-def catalog(chat_jid: str) -> dict[str, dict]:
+def catalog(chat_jid: str, message_id: str | None = None) -> dict[str, dict]:
     whatsapp._require_allowed(chat_jid)
     items = {}
     cursor = ""
+    params = {"chat_jid": chat_jid}
+    if message_id is not None:
+        params["message_id"] = message_id
     while True:
         result = whatsapp._bridge_json(
-            whatsapp._bridge_request("GET", "/media/cache", params={"chat_jid": chat_jid, "cursor": cursor})
+            whatsapp._bridge_request("GET", "/media/cache", params={**params, "cursor": cursor})
         )
         items.update({item["message_id"]: item for item in result["items"]})
         next_cursor = result.get("next_cursor", "")
@@ -37,6 +45,26 @@ def catalog(chat_jid: str) -> dict[str, dict]:
         if next_cursor <= cursor:
             raise ToolError("internal", "media catalog cursor did not advance")
         cursor = next_cursor
+
+
+def lookup(chat_jid: str, message_id: str) -> dict | None:
+    """One indexed bridge query, regardless of how many files a chat has."""
+    return catalog(chat_jid, message_id).get(message_id)
+
+
+def lookup_many(chat_jid: str, message_ids: Sequence[str]) -> dict[str, dict]:
+    """Only the requested identities, in bridge-sized batches of 256."""
+    whatsapp._require_allowed(chat_jid)
+    ids = list(dict.fromkeys(message_ids))
+    items = {}
+    for start in range(0, len(ids), 256):
+        batch = ids[start : start + 256]
+        params = [("chat_jid", chat_jid), *(("message_id", message_id) for message_id in batch)]
+        result = whatsapp._bridge_json(whatsapp._bridge_request("GET", "/media/cache", params=params))
+        if result.get("next_cursor"):
+            raise ToolError("internal", "media identity batch exceeded the catalog bound")
+        items.update({item["message_id"]: item for item in result["items"] if item["message_id"] in batch})
+    return items
 
 
 def identity(value: str) -> tuple[str, str]:
@@ -71,18 +99,18 @@ def local_file(value: str, limit: int, sha256: str | None = None, *, cache_only:
                 timeout=whatsapp.BRIDGE_MEDIA_TIMEOUT_S,
             ) as response:
                 if response.status_code != 200:
-                    raise ToolError("bridge_unavailable", "bridge media read failed")
+                    raise MediaReadError("bridge_unavailable", "bridge media read failed")
                 total = 0
                 digest = hashlib.sha256()
                 with open(path, "xb") as output:
                     for chunk in response.iter_bytes(65536):
                         total += len(chunk)
                         if total > limit:
-                            raise ToolError("too_large", "media exceeds the requested byte limit")
+                            raise MediaReadError("too_large", "media exceeds the requested byte limit")
                         digest.update(chunk)
                         output.write(chunk)
                 if sha256 and digest.hexdigest() != sha256.lower():
-                    raise ToolError("internal", "media plaintext SHA256 mismatch")
+                    raise MediaReadError("internal", "media plaintext SHA256 mismatch")
             yield path
     except httpx.HTTPError as exc:
-        raise ToolError("bridge_unavailable", "bridge media stream failed") from exc
+        raise MediaReadError("bridge_unavailable", "bridge media stream failed") from exc

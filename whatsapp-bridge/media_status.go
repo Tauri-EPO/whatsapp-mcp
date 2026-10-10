@@ -130,6 +130,9 @@ func purgeStatusCLI(args []string, out, diagnostics io.Writer) int {
 	store := &MessageStore{db: archive.DB}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	if *dry {
+		ctx = context.WithValue(ctx, mediaReadOnlyKey{}, true)
+	}
 	if backend.Backend == "s3" && !*dry {
 		store, err = NewMessageStore()
 		if err != nil {

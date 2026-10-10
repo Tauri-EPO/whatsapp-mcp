@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,6 +25,19 @@ const mediaS3AccessEnv = "WHATSAPP_MEDIA_S3_ACCESS_KEY_ID"
 const mediaS3SecretEnv = "WHATSAPP_MEDIA_S3_SECRET_ACCESS_KEY"
 const mediaS3AccessFileEnv = "WHATSAPP_MEDIA_S3_ACCESS_KEY_ID_FILE"
 const mediaS3SecretFileEnv = "WHATSAPP_MEDIA_S3_SECRET_ACCESS_KEY_FILE"
+
+func (c mediaBackendConfig) plaintextRemote() bool {
+	u, err := url.Parse(c.Endpoint)
+	if err != nil || c.Backend != "s3" || u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
+}
 
 // Errors name the setting only: secrets and endpoint credentials never escape.
 func parseMediaBackend(getenv func(string) string) (mediaBackendConfig, error) {

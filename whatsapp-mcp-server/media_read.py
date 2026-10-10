@@ -320,7 +320,7 @@ def cached_path(chat_jid: str, message_id: str) -> str | None:
     memoised scan — the bytes are opened right after this.
     """
     if media_remote.enabled():
-        return media_remote.uri(chat_jid, message_id) if message_id in media_remote.catalog(chat_jid) else None
+        return media_remote.uri(chat_jid, message_id) if media_remote.lookup(chat_jid, message_id) else None
     name = media_inventory.lookup_cached_name(chat_jid, message_id, refuse_unsafe=True)
     if name is None:
         return None
@@ -443,6 +443,12 @@ def declared_mime(media_type: str, filename: str | None, path: str = "") -> str:
     renames (`.jpg` and `.ogg` for everything of that kind). Without ``path``
     — a row whose bytes are not cached — the name is all there is.
     """
+    if path.startswith(MEDIA_URI_PREFIX):
+        # A remote identifier has no bytes to sniff yet. Category cache names
+        # take precedence over the sender's filename for these media kinds;
+        # the private spool is sniffed and checked again before returning it.
+        category_name = "" if media_type in {"image", "audio", "video", "sticker"} else filename
+        return guess_mime(media_type, category_name)
     mime = guess_mime(media_type, filename, path)
     if not path:
         return mime
@@ -460,6 +466,12 @@ def declared_mime(media_type: str, filename: str | None, path: str = "") -> str:
 
 def is_text_mime(mime: str) -> bool:
     return mime.startswith("text/") or mime in TEXT_MIMES
+
+
+def spooled_mime(media_type: str, filename: str | None, path: str) -> str:
+    """Sniff a remote spool using the same category precedence as its URI."""
+    category_name = "" if media_type in {"image", "audio", "video", "sticker"} else filename
+    return declared_mime(media_type, category_name, path)
 
 
 def hard_limit(mime: str, as_text: bool = False, max_edge: int = 0, as_images: bool = False) -> int:
@@ -605,7 +617,9 @@ def resolve_media(
     """
     whatsapp._require_allowed(chat_jid)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
-    path = cached_path(chat_jid, message_id)
+    remote = media_remote.enabled()
+    cached = media_remote.lookup(chat_jid, message_id) if remote else None
+    path = (media_remote.uri(chat_jid, message_id) if cached else None) if remote else cached_path(chat_jid, message_id)
     if path is None:
         # Nothing is cached, so reading means a CDN transfer. Whether it may
         # happen at all comes first: "too_large, and download_media returns a
@@ -628,8 +642,7 @@ def resolve_media(
     elif as_text and not is_text_mime(mime):
         media_text.require_extractable(mime)
     try:
-        if media_remote.enabled():
-            cached = media_remote.catalog(chat_jid).get(message_id)
+        if remote:
             size = cached["bytes"] if cached else reported
             if size is None:
                 size = cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images))
@@ -821,7 +834,7 @@ def read_media(
             found = found._replace(
                 path=local,
                 size=os.path.getsize(local),
-                mime=declared_mime(_media_row(chat_jid, message_id)[0], found.filename, local),
+                mime=spooled_mime(_media_row(chat_jid, message_id)[0], found.filename, local),
             )
             check_size(found.size, cap(max_bytes, hard_limit(found.mime, as_text, edge, as_images)), found.mime)
             return _read_resolved_media(

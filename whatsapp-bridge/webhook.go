@@ -277,7 +277,15 @@ func (b *Bridge) webhookMedia(chatJID, filename string, wantSHA256 []byte) (mime
 			return sniffMIME(nil), nil
 		}
 	}
-	f, size, err := b.mediaStorage().Open(b.ctx, row, filename)
+	ctx := b.ctx
+	if b.mediaStorage().Backend() == "s3" {
+		// Media is optional in a webhook. A slow remote transfer must not hold
+		// the synchronous WhatsApp event consumer; normal caching stays queued.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+	}
+	f, size, err := b.mediaStorage().Open(ctx, row, filename)
 	if err != nil {
 		b.Log.Warnf("Could not open media file for the webhook: %v", err)
 		return sniffMIME(nil), nil

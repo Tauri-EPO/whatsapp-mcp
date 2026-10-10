@@ -4668,7 +4668,7 @@ def send_file(
 
         if media_remote.enabled() and media_path.startswith("whatsapp://"):
             source_chat, message_id = media_remote.identity(media_path)
-            cached = media_remote.catalog(source_chat).get(message_id)
+            cached = media_remote.lookup(source_chat, message_id)
             if cached is None:
                 raise ToolError("not_found", "source media is not cached")
             payload = {"recipient": recipient, "media_path": media_path, "message": caption}
@@ -4760,7 +4760,7 @@ def send_audio_message(
 
         if media_remote.enabled() and media_path.startswith("whatsapp://"):
             source_chat, message_id = media_remote.identity(media_path)
-            cached = media_remote.catalog(source_chat).get(message_id)
+            cached = media_remote.lookup(source_chat, message_id)
             if cached is None:
                 raise ToolError("not_found", "source audio is not cached")
             with media_remote.local_file(
@@ -5417,6 +5417,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     """
     import media_inventory  # local: media_inventory reads this module
     import media_notes
+    import media_remote
 
     clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE}"
     from runtime_settings import ingest_chat_clause
@@ -5495,7 +5496,11 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     )
     cached = backlog_cached = 0
     for chat_jid, rows in by_chat.items():
-        names = list_names(chat_jid)
+        names = (
+            media_remote.lookup_many(chat_jid, [message_id for message_id, _ in rows])
+            if media_remote.enabled()
+            else list_names(chat_jid)
+        )
         for message_id, handled in rows:
             if message_id not in names:
                 continue
@@ -5532,8 +5537,9 @@ def coverage(
     the answer is about one period or one conversation instead of the whole
     archive. `by_chat` swaps the aggregates for the paginated per-chat queue.
 
-    Reads messages.db only (works with the bridge down). Aggregates and the gap
-    scan run in SQL, so nothing proportional to the archive is held in memory.
+    Archive aggregates and gaps read messages.db. With the S3 backend, cached
+    audio counts also query the authenticated bridge for scoped identities.
+    The SQL scans and bounded audio window keep memory independent of archive size.
     Honours WHATSAPP_ALLOWED_CHATS: with an allow-list set, every number
     describes the allowed chats only. A contact stored under both a phone JID
     and a `@lid` counts as one chat, with the messages of both (issue #337).
@@ -5719,7 +5725,7 @@ def _coverage_hint(scope: dict[str, Any], audio: dict[str, int]) -> str:
     if audio["backlog"]:
         backlog = (
             f" {audio['backlog']} of the {audio['messages']} voice notes in scope are still untranscribed, "
-            f"{audio['backlog_cached']} of them with their bytes already on disk: transcribe_audio one at a "
+            f"{audio['backlog_cached']} of them with their bytes already cached: transcribe_audio one at a "
             "time, or set TRANSCRIBE_ON_INGEST=1 to walk them in the background."
         )
     return (

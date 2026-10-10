@@ -88,6 +88,9 @@ func migrateMediaCLI(args []string, out, diagnostic io.Writer) int {
 	defer func() { _ = store.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 	defer cancel()
+	if *dry {
+		ctx = context.WithValue(ctx, mediaReadOnlyKey{}, true)
+	}
 	s3, err := newS3MediaStorage(ctx, cfg, store, root)
 	if err != nil {
 		_, _ = fmt.Fprintln(diagnostic, "S3 bucket probe failed")

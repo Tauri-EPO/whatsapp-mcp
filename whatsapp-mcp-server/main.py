@@ -288,7 +288,7 @@ def coverage(
     audio is the voice-note side of the same scope: {messages, cached,
     transcribed, errors, unavailable, refused, backlog, backlog_cached, cached_examined} —
     inbound voice notes stored (the status feed "status@broadcast" is not
-    counted: no batch walks it), how many have their bytes on disk, how many
+    counted: no batch walks it), how many have their bytes cached, how many
     already have a transcript, a recorded failure (errors) or bytes no download
     brought here (unavailable: the sender's phone no longer has them, or the row
     was stored without the fields a download needs), or an unsafe row identity
@@ -299,6 +299,8 @@ def coverage(
     would have to be downloaded first. cached_examined equals messages unless an
     archive-wide call hit the scan ceiling, in which case the two cached counts
     are floors over the newest voice notes.
+    S3 cache counts use scoped, bounded authenticated bridge queries; local
+    archive totals and gap scans still read messages.db directly.
 
     after/before/chat_jid narrow every number, the gap scan included: scope the
     question to the period you care about instead of reading past sync artefacts
@@ -2624,7 +2626,7 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
 
     cache_status = {}
     if file_path and media_remote.enabled():
-        cached = message_id in media_remote.catalog(chat_jid)
+        cached = media_remote.lookup(chat_jid, message_id) is not None
         cache_status = {"cached": cached, **({"reason": "quota"} if not cached else {})}
 
     if file_path:
