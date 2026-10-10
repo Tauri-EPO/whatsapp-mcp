@@ -162,7 +162,7 @@ func (s *s3MediaStorage) Delete(ctx context.Context, rows []mediaRow, dry bool) 
 
 func (s *s3MediaStorage) Usage(ctx context.Context) (mediaCacheUsage, error) {
 	var usage mediaCacheUsage
-	err := s.store.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(bytes),0),COUNT(*),COALESCE(SUM(CASE WHEN media_type='status' THEN bytes ELSE 0 END),0),COALESCE(SUM(CASE WHEN media_type='status' THEN 1 ELSE 0 END),0) FROM media_cache WHERE backend='s3'`).Scan(&usage.Bytes, &usage.Files, &usage.StatusBytes, &usage.StatusFiles)
+	err := s.store.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(bytes),0),COUNT(*),COALESCE(SUM(CASE WHEN media_type='status' THEN bytes ELSE 0 END),0),COALESCE(SUM(CASE WHEN media_type='status' THEN 1 ELSE 0 END),0) FROM (`+s.chargedObjectsSQL()+`)`).Scan(&usage.Bytes, &usage.Files, &usage.StatusBytes, &usage.StatusFiles)
 	if err != nil {
 		return usage, errMediaS3
 	}
@@ -171,6 +171,7 @@ func (s *s3MediaStorage) Usage(ctx context.Context) (mediaCacheUsage, error) {
 
 func (s *s3MediaStorage) Sweep(ctx context.Context, age time.Duration, statusAge *time.Duration, now time.Time) (int, int64, int) {
 	recoveredBytes, recoveryFailed := s.reconcilePendingDeletions(ctx)
+	uploadBytes, uploadFailed := s.reconcilePendingUploads(ctx)
 	status := age
 	if statusAge != nil {
 		status = *statusAge
@@ -209,7 +210,15 @@ func (s *s3MediaStorage) Sweep(ctx context.Context, age time.Duration, statusAge
 	// Failed deletions or replaced message snapshots may leave an object with
 	// no references. Keep its bytes charged until a later bounded sweep removes it.
 	orphanBytes, orphanFailed := s.sweepUnreferenced(ctx)
-	return files, freed + orphanBytes + recoveredBytes, failed + orphanFailed + recoveryFailed
+	return files, freed + orphanBytes + recoveredBytes + uploadBytes, failed + orphanFailed + recoveryFailed + uploadFailed
+}
+
+func (s *s3MediaStorage) chargedObjectsSQL() string {
+	query := `SELECT sha256,bytes,media_type FROM media_cache WHERE backend='s3'`
+	if s.uploadJournal {
+		query += ` UNION ALL SELECT sha256,bytes,media_type FROM media_cache_uploads u WHERE NOT EXISTS(SELECT 1 FROM media_cache c WHERE c.sha256=u.sha256 AND c.backend='s3')`
+	}
+	return query
 }
 
 func (s *s3MediaStorage) sweepUnreferenced(ctx context.Context) (int64, int) {

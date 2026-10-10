@@ -60,6 +60,7 @@ type s3MediaStorage struct {
 	transfers       chan struct{}
 	bridge          *Bridge
 	deletionJournal bool
+	uploadJournal   bool
 }
 
 func newS3MediaStorage(ctx context.Context, cfg mediaBackendConfig, store *MessageStore, root *os.Root) (*s3MediaStorage, error) {
@@ -97,7 +98,11 @@ func newS3MediaStorage(ctx context.Context, cfg mediaBackendConfig, store *Messa
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_cache_deletions'`).Scan(&journal); err != nil {
 		return nil, errMediaS3
 	}
-	return &s3MediaStorage{client: client, cfg: cfg, store: store, root: root, locks: make(map[string]*s3ObjectLock), transfers: make(chan struct{}, 4), deletionJournal: journal != 0}, nil
+	var uploads int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_cache_uploads'`).Scan(&uploads); err != nil {
+		return nil, errMediaS3
+	}
+	return &s3MediaStorage{client: client, cfg: cfg, store: store, root: root, locks: make(map[string]*s3ObjectLock), transfers: make(chan struct{}, 4), deletionJournal: journal != 0, uploadJournal: uploads != 0}, nil
 }
 
 func (*s3MediaStorage) Backend() string { return "s3" }
@@ -337,7 +342,7 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 			break
 		}
 		var exists int
-		if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_cache WHERE sha256=? AND backend='s3'`, hash).Scan(&exists); err != nil {
+		if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+s.chargedObjectsSQL()+`) WHERE sha256=?`, hash).Scan(&exists); err != nil {
 			unlock()
 			return 0, errMediaS3
 		}
@@ -369,8 +374,10 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 		if putErr != nil && uploaded {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			defer cancel()
-			if err := s.client.RemoveObject(cleanup, s.cfg.Bucket, key, minio.RemoveObjectOptions{}); err != nil && s.bridge != nil {
-				s.bridge.Log.Warnf("Unreferenced S3 upload cleanup failed")
+			if err := s.client.RemoveObject(cleanup, s.cfg.Bucket, key, minio.RemoveObjectOptions{}); err == nil {
+				_, _ = s.store.db.ExecContext(cleanup, `DELETE FROM media_cache_uploads WHERE sha256=?`, hash)
+			} else if s.bridge != nil {
+				s.bridge.Log.Warnf("Unreferenced S3 upload cleanup failed; durable recovery retained")
 			}
 		}
 	}()
@@ -381,6 +388,15 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 			return 0, errMediaS3
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return 0, errMediaS3
+		}
+		kind := row.MediaType
+		if row.ChatJID == "status@broadcast" {
+			kind = "status"
+		}
+		// Durable intent precedes PUT, including an ambiguous cancelled PUT.
+		// Failed verification/SQL/cleanup leaves these bytes charged for recovery.
+		if _, err := s.store.db.ExecContext(ctx, `INSERT INTO media_cache_uploads(sha256,bytes,media_type,started_at) VALUES(?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET bytes=excluded.bytes`, hash, size, kind, dbTime(time.Now())); err != nil {
 			return 0, errMediaS3
 		}
 		uploaded = true
@@ -434,6 +450,11 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 	}
 	if len(expected) == 0 {
 		if _, err = tx.ExecContext(ctx, `UPDATE messages SET file_sha256=? WHERE id=? AND chat_jid=?`, hash, row.ID, row.ChatJID); err != nil {
+			return 0, errMediaS3
+		}
+	}
+	if s.uploadJournal {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM media_cache_uploads WHERE sha256=?`, hash); err != nil {
 			return 0, errMediaS3
 		}
 	}

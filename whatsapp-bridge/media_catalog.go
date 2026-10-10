@@ -28,4 +28,10 @@ CREATE TABLE IF NOT EXISTS media_cache_deletions (
     sha256 BLOB PRIMARY KEY CHECK(length(sha256) = 32),
     FOREIGN KEY(sha256) REFERENCES media_cache(sha256) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS media_cache_uploads (
+    sha256 BLOB PRIMARY KEY CHECK(length(sha256) = 32),
+    bytes INTEGER NOT NULL CHECK(bytes >= 0),
+    media_type TEXT NOT NULL CHECK(media_type IN ('image','video','audio','document','sticker','status')),
+    started_at TIMESTAMP NOT NULL
+);
 `

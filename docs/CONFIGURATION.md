@@ -777,11 +777,12 @@ Before a last-reference DELETE, the bridge records its hash in the durable
 that operation incomplete, readers and retention reconcile the exact object by
 HEAD: an existing object keeps its references, a missing object loses its cache
 references so an on-demand read can fetch it again. Inventory excludes pending
-deletions until they are resolved. Retention reconciles up to 256 pending hashes
+deletions until they are resolved. Startup and daily S3 maintenance reconcile up to 256 pending hashes
 and retries up to 256 unreferenced catalog objects. Operator purge with include_orphans
 also removes detached catalog objects within the selected type and age; a chat
-filter excludes them because their chat references are gone. Keep retention enabled if you want
-that automatic cleanup. No global bucket listing or deletion crosses a prefix.
+filter excludes them because their chat references are gone. Recovery runs even
+when both age retention settings are disabled. No global bucket listing or
+deletion crosses a prefix.
 
 `WHATSAPP_MEDIA_QUOTA_BYTES` counts unique objects and in-flight reservations.
 Eviction remains off until `WHATSAPP_MEDIA_QUOTA_EVICT_TYPES` names eligible
@@ -821,12 +822,13 @@ directories and files without a message mapping stay in place and are reported.
 Switch both processes to the destination backend only after migration succeeds;
 without `--delete-source`, both copies remain until explicitly removed.
 
-A crash after PUT but before catalog commit can leave an object that is not yet
-charged to quota. Resume `migrate-media --to s3`: for each retained mapped local
-source it recomputes the known hash, verifies the existing remote object and
-adopts its reference before deleting any source. Objects with no surviving
-message/source mapping need operator recovery using the bucket's own inventory;
-the bridge never lists the bucket to infer ownership. Startup under the store
+Before PUT, `media_cache_uploads` records the hash, size and type durably. An
+incomplete upload remains charged to quota until confirmed cleanup or verified
+publication; failed cleanup is retried by bounded startup/daily maintenance.
+Resume `migrate-media --to s3`: for each retained mapped local source it
+recomputes the known hash, verifies the existing remote object and adopts its
+reference before deleting any source. Recovery uses only recorded hashes,
+without listing the bucket to infer ownership. Startup under the store
 lock removes leftover instance-owned `.media-stage-*` and `.media-stream-*`
 plaintext spools, while keeping canonical local media untouched.
 Dry-run commands preserve these spools; cleanup runs on a real startup/resume.

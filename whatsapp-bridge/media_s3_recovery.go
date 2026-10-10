@@ -130,3 +130,69 @@ func (s *s3MediaStorage) reconcilePendingDeletions(ctx context.Context) (int64, 
 	}
 	return freed, failed
 }
+
+// The journal owns only exact known hashes in this instance's prefix. Close
+// the bounded SQL page before remote I/O and serialize with publication.
+func (s *s3MediaStorage) reconcilePendingUploads(ctx context.Context) (int64, int) {
+	if !s.uploadJournal {
+		return 0, 0
+	}
+	rows, err := s.store.db.QueryContext(ctx, `SELECT sha256,bytes FROM media_cache_uploads LIMIT 256`)
+	if err != nil {
+		return 0, 1
+	}
+	type intent struct {
+		hash  []byte
+		bytes int64
+	}
+	var intents []intent
+	for rows.Next() {
+		var item intent
+		if err = rows.Scan(&item.hash, &item.bytes); err != nil {
+			break
+		}
+		intents = append(intents, item)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	_ = rows.Close()
+	if err != nil {
+		return 0, 1
+	}
+	var freed int64
+	failed := 0
+	for _, item := range intents {
+		unlock, err := s.lockHash(ctx, item.hash)
+		if err != nil {
+			failed++
+			continue
+		}
+		removed, err := func() (bool, error) {
+			defer unlock()
+			var pending, published int
+			if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_cache_uploads WHERE sha256=?`, item.hash).Scan(&pending); err != nil {
+				return false, errMediaS3
+			}
+			if pending == 0 {
+				return false, nil
+			}
+			if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_cache WHERE sha256=? AND backend='s3'`, item.hash).Scan(&published); err != nil {
+				return false, errMediaS3
+			}
+			if published == 0 {
+				if err := s.removeObject(ctx, item.hash); err != nil {
+					return false, err
+				}
+			}
+			_, err := s.store.db.ExecContext(ctx, `DELETE FROM media_cache_uploads WHERE sha256=?`, item.hash)
+			return published == 0 && err == nil, err
+		}()
+		if err != nil {
+			failed++
+		} else if removed {
+			freed += item.bytes
+		}
+	}
+	return freed, failed
+}

@@ -12,7 +12,7 @@ type s3QuotaReservedKey struct{}
 
 func (b *Bridge) acquireS3WriteBudget(ctx context.Context, hash []byte, incoming uint64) (context.Context, func(), error) {
 	var exists int
-	if err := b.Store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_cache WHERE sha256=? AND backend='s3'`, hash).Scan(&exists); err != nil {
+	if err := b.Store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+b.mediaStorage().(*s3MediaStorage).chargedObjectsSQL()+`) WHERE sha256=?`, hash).Scan(&exists); err != nil {
 		return ctx, func() {}, errMediaS3
 	}
 	if exists > 0 {

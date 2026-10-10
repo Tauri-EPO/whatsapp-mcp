@@ -239,7 +239,8 @@ func (b *Bridge) handleS3MediaUsage(w http.ResponseWriter, r *http.Request, limi
 		return
 	}
 	byType := map[string]int64{"image": 0, "video": 0, "audio": 0, "document": 0, "sticker": 0, "status": 0}
-	rows, err := b.Store.db.QueryContext(ctx, `SELECT media_type,SUM(bytes) FROM media_cache WHERE backend='s3' GROUP BY media_type`)
+	//nolint:gosec // chargedObjectsSQL returns only fixed internal SQL, without request or archive values.
+	rows, err := b.Store.db.QueryContext(ctx, `SELECT media_type,SUM(bytes) FROM (`+b.mediaStorage().(*s3MediaStorage).chargedObjectsSQL()+`) GROUP BY media_type`)
 	if err != nil {
 		writeError(w, 503, "Media usage unavailable")
 		return
