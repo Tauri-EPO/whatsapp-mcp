@@ -1165,6 +1165,11 @@ event without `mediaBase64` is not an error by itself: it means "an image
 arrived and its bytes are not attached" (not cached by configuration, larger
 than the payload limit, or a download that failed).
 
+With S3 storage, a cache miss is queued for background publication. The webhook
+arrives without waiting for an S3 upload; an already cached image may be attached
+if its optional read finishes within 100 ms. Fetch the image through
+`download_media` when its bytes are absent.
+
 **Status updates are not forwarded.** The status feed (`status@broadcast`) is
 every contact's status posts, not a conversation, so by default none of it
 reaches the webhook: no text, no image, no reaction. The posts are still stored

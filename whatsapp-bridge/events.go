@@ -432,6 +432,12 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	var imageData []byte
 	var imageMimeType string
 	switch {
+	case cacheOnArrival && mediaType == "image" && shouldForward && b.mediaStorage().Backend() == "s3":
+		// Publication can take several remote round trips. Keep the event
+		// consumer moving and include only bytes already available to the
+		// bounded optional webhook read.
+		b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
+		imageMimeType, imageData = b.webhookMedia(chatJID, "", ex.fileSHA)
 	case cacheOnArrival && mediaType == "image" && shouldForward:
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.WithValue(withAutomaticCache(withMediaLimit(context.Background(), b.MediaMaxBytes)), quotaTryKey{}, true), msg.Info.ID, chatJID)

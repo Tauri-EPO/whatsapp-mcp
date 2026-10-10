@@ -369,7 +369,7 @@ func (b *Bridge) purgeS3OperatorMedia(ctx context.Context, req operatorMediaPurg
 func (s *s3MediaStorage) operatorOrphans(ctx context.Context, req operatorMediaPurge, result *operatorMediaResult) error {
 	// Detached objects no longer have a chat identity. A chat-scoped request
 	// cannot infer that identity, so it leaves them to an unscoped type cleanup.
-	if req.Chat != "" {
+	if req.Chat != "" && (req.Type != "status" || req.Chat != "status@broadcast") {
 		return nil
 	}
 	after := []byte{}

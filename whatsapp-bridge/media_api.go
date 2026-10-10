@@ -68,6 +68,8 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), downloadDeadline)
 	defer cancel()
+	ctx, stopLifecycle := requestMediaContext(b.ctx, ctx)
+	defer stopLifecycle()
 	storage := b.mediaStorage()
 	entry, err := storage.Lookup(ctx, row)
 	if err != nil {
@@ -88,6 +90,14 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			// Keep the fallback owned by this HTTP request. Its private temporary
 			// local file disappears after streaming, and never enters the catalog.
 			rel := ".media-stream-" + rand.Text()
+			// Track the entire request-owned download, response and cleanup,
+			// rather than detaching a transfer from its private spool.
+			finish, trackErr := b.mediaTransfers.trackRequest(ctx)
+			if trackErr != nil {
+				writeError(w, 502, "Media download cancelled")
+				return
+			}
+			defer finish()
 			ctx = context.WithValue(ctx, transientMediaKey{}, rel)
 			defer func() { _ = b.StoreRoot.Remove(rel); _ = b.StoreRoot.Remove(rel + ".part") }()
 			_, _, _, _, err = b.downloadMediaAttempt(ctx, row.ID, row.ChatJID)
@@ -114,6 +124,8 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 	// Bound writes as well as the upstream transfer.
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Now().Add(downloadDeadline))
+	stopWrite := context.AfterFunc(ctx, func() { _ = controller.SetWriteDeadline(time.Now()) })
+	defer stopWrite()
 	_, _ = io.Copy(w, io.LimitReader(f, size))
 }
 

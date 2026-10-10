@@ -391,6 +391,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.labelSyncOnce.Do(func() {})
 	b.cancel()
+	b.mediaTransfers.stop()
 	b.historyVoteMu.Lock()
 	b.historyVoteStopped = true
 	b.historyVoteMu.Unlock()

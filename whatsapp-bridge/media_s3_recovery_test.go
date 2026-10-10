@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,148 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestMinIOInboundWebhookDoesNotWaitForPublication(t *testing.T) {
+	b, s := minioTestBridge(t, "instances/test-inbound-webhook")
+	webhook, payloads := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", webhook.URL)
+	b.Webhook = newWebhookSender("", true)
+	b.MediaAutoDownload = true
+	data := []byte("fake image bytes")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s3SecurityProxy(t, s, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut {
+			once.Do(func() { close(entered) })
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		return false
+	}, nil)
+	b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
+	}
+	msg := buildImageMessage(phonePN, phonePN, false, "caption")
+	msg.Info.ID = "INBOUNDWEBHOOK"
+	msg.Message.ImageMessage.URL = proto.String("https://example.com/media")
+	msg.Message.ImageMessage.MediaKey = []byte("fake-key")
+	msg.Message.ImageMessage.FileSHA256 = sha256Of(data)
+	msg.Message.ImageMessage.FileEncSHA256 = sha256Of([]byte("encrypted"))
+	msg.Message.ImageMessage.FileLength = proto.Uint64(uint64(len(data)))
+	done := make(chan struct{})
+	go func() { b.handleMessage(msg); close(done) }()
+	t.Cleanup(func() { close(release); <-done; b.Shutdown(5 * time.Second) })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication did not reach MinIO")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("inbound webhook/event consumer waited for S3 PUT")
+	}
+	select {
+	case payload := <-payloads:
+		if payload.MessageID != msg.Info.ID || payload.MediaBase64 != "" {
+			t.Fatal("wrong optional webhook media", payload)
+		}
+	default:
+		t.Fatal("webhook was not delivered")
+	}
+	next := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "next message")
+	next.Info.ID = "AFTERWEBHOOK"
+	b.handleMessage(next)
+	var count int
+	if err := b.Store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=? AND chat_jid=?`, next.Info.ID, phonePN.String()).Scan(&count); err != nil || count != 1 {
+		t.Fatal("following event was not stored", count, err)
+	}
+}
+
+func TestMinIOTransientHTTPStreamStopsWithLifecycle(t *testing.T) {
+	b, _ := minioTestBridge(t, "instances/test-transient-shutdown")
+	data := []byte("temporary quota fallback")
+	row := s3TestRow(t, b, "TRANSIENTSHUTDOWN", mediaTestChat, "document", data, time.Now())
+	b.MediaQuotaBytes = 1
+	entered, finished := make(chan struct{}), make(chan struct{})
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		defer close(finished)
+		return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error {
+			if _, err := f.Write(data); err != nil {
+				return err
+			}
+			close(entered)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}
+	server := s3ReviewREST(t, b)
+	req, _ := http.NewRequest("GET", server.URL+"/api/media/blob?chat_jid="+url.QueryEscape(row.ChatJID)+"&message_id="+row.ID, nil)
+	req.Header.Set("Authorization", "Bearer test-bridge-token")
+	requestCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req = req.WithContext(requestCtx)
+	done := make(chan struct{})
+	go func() {
+		response, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); <-done; <-finished })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("quota fallback did not start")
+	}
+	b.Shutdown(5 * time.Second)
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Shutdown returned with request-owned CDN transfer running")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP fallback did not finish")
+	}
+	files, err := os.ReadDir(storeDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), ".media-stream-") {
+			t.Fatal("plaintext fallback survived shutdown")
+		}
+	}
+}
+
+func TestMinIOStatusPurgeIncludesDetachedStatusObjects(t *testing.T) {
+	b, s := minioTestBridge(t, "instances/test-status-orphan")
+	data := []byte("detached status bytes")
+	row := s3TestRow(t, b, "STATUSORPHAN", "status@broadcast", "image", data, time.Now())
+	s3TestWrite(t, b, row, data)
+	if _, err := b.Store.db.Exec(`DELETE FROM messages WHERE id=? AND chat_jid=?`, row.ID, row.ChatJID); err != nil {
+		t.Fatal(err)
+	}
+	server := s3ReviewREST(t, b)
+	for _, dry := range []bool{true, false} {
+		body, _ := json.Marshal(map[string]any{"scope": "status", "dry_run": dry, "include_orphans": true})
+		code, response := mediaHTTPRequest(t, server, "POST", "/api/media/purge", string(body), "test-bridge-token")
+		if code != 200 || response["orphan_files"] != float64(1) || response["purged_bytes"] != float64(len(data)) {
+			t.Fatal("status orphan was skipped", dry, code, response)
+		}
+	}
+	usage, err := s.Usage(b.ctx)
+	if err != nil || usage.Bytes != 0 {
+		t.Fatal("status orphan remains charged", usage, err)
+	}
+}
 
 func TestMinIODeleteSQLFailureRecoversAndRefetches(t *testing.T) {
 	b, s := minioTestBridge(t, "instances/test-delete-recovery")
