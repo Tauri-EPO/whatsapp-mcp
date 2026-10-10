@@ -63,7 +63,7 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if checkMediaPathComponents(chatMediaRel(row.ChatJID), mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename)) != nil {
-		writeError(w, 403, "Media identity refused")
+		writeErrorCode(w, 403, "media_refused", "Media identity refused")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), downloadDeadline)
@@ -104,7 +104,11 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Media-Reason", "quota")
 		}
 		if err != nil {
-			writeError(w, 502, "Media download failed")
+			code := permanentMediaCode(err)
+			if code == "" {
+				code = errorCode(http.StatusBadGateway)
+			}
+			writeErrorCode(w, 502, code, "Media download failed")
 			return
 		}
 	}

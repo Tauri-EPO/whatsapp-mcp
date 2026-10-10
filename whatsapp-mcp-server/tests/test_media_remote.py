@@ -13,6 +13,30 @@ from errors import ToolError
 CHAT = "5511999999999@s.whatsapp.net"
 
 
+@pytest.mark.parametrize("code", ["media_unavailable", "media_refused", "bridge_unavailable"])
+def test_stream_errors_preserve_permanent_codes_without_remote_diagnostics(monkeypatch, code):
+    def handle(request):
+        return httpx.Response(502, json={"error": {"code": code, "message": "fake-private-sentinel"}})
+
+    monkeypatch.setattr(whatsapp, "bridge_http", httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(media_remote.MediaReadError) as failure:
+        with media_remote.local_file(media_remote.uri(CHAT, "REMOTE1"), 1024):
+            pytest.fail("error became media bytes")
+    assert failure.value.code == code
+    assert "fake-private-sentinel" not in str(failure.value)
+
+
+def test_stream_error_body_is_bounded(monkeypatch):
+    def handle(request):
+        return httpx.Response(502, content=b"x" * 9000)
+
+    monkeypatch.setattr(whatsapp, "bridge_http", httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(media_remote.MediaReadError) as failure:
+        with media_remote.local_file(media_remote.uri(CHAT, "REMOTE1"), 1024):
+            pytest.fail("oversized error became media bytes")
+    assert failure.value.code == "bridge_unavailable"
+
+
 def test_identity_batches_are_bounded_and_deduplicated(monkeypatch):
     batches = []
 

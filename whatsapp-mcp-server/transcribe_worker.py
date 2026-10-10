@@ -639,6 +639,21 @@ def clear_outage_failures() -> int:
     return cleared
 
 
+def _record_remote_media_miss(candidate: Candidate, failure: media_remote.MediaReadError) -> bool:
+    """A definitive media answer costs no outage strike once safely remembered."""
+    try:
+        if failure.code == MEDIA_REFUSED_CODE:
+            media_notes.record_media_refusal(candidate.message_id, candidate.chat_jid, failure.message)
+            return True
+        if failure.code == MEDIA_UNAVAILABLE_CODE:
+            if _cached_copy_exists(candidate.sha256, (candidate.message_id, candidate.chat_jid)):
+                return True
+            return _record_unavailable(candidate.sha256, failure.message)
+    except (ToolError, sqlite3.Error):
+        logger.warning("transcribe_on_ingest: could not record remote media outcome")
+    return False
+
+
 def run_once(
     batch: int,
     *,
@@ -705,7 +720,10 @@ def run_once(
             if not text:
                 raise TranscriptionError("whisper returned no text")
             store_transcript(candidate.sha256, {**result, "text": text})
-        except media_remote.MediaReadError:
+        except media_remote.MediaReadError as exc:
+            if _record_remote_media_miss(candidate, exc):
+                outages = 0
+                continue
             # One unavailable object must not masquerade as a global accounting
             # outage and pin healthy candidates behind it forever. Keep the
             # normal bounded outage/retry policy without a permanent failure note.

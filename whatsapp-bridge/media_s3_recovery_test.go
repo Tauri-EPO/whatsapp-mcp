@@ -254,6 +254,118 @@ func TestMinIODeleteSQLFailureRecoversAndRefetches(t *testing.T) {
 	}
 }
 
+func TestMinIOQuotaStreamPermanentMediaDoesNotStarveIngest(t *testing.T) {
+	b, _ := minioTestBridge(t, "instances/test-permanent-quota-stream")
+	python := os.Getenv("WAMCP_TEST_MCP_PYTHON")
+	if python == "" {
+		t.Skip("real Python ingest proof requires WAMCP_TEST_MCP_PYTHON")
+	}
+	good := []byte("healthy cached voice note")
+	at := time.Now().Add(-48 * time.Hour)
+	row := s3TestRow(t, b, "HEALTHYQUOTA", mediaTestChat, "audio", good, at.Add(-time.Minute))
+	s3TestWrite(t, b, row, good)
+	b.MediaQuotaBytes = uint64(len(good))
+	for i, id := range []string{"LOSTQUOTAA", "LOSTQUOTAB", "LOSTQUOTAC"} {
+		s3TestRow(t, b, id, mediaTestChat, "audio", []byte(id), at.Add(time.Duration(3-i)*time.Second))
+	}
+	var retries atomic.Int32
+	b.mediaTransfer = func(context.Context, whatsmeow.DownloadableMessage, string) (int64, error) {
+		return 0, whatsmeow.ErrMediaDownloadFailedWith404
+	}
+	b.mediaRetryDownload = func(context.Context, string, string, *MediaDownloader, *os.Root, string) (int64, error) {
+		retries.Add(1)
+		return 0, errMediaUnavailable
+	}
+	server := s3ReviewREST(t, b)
+	code, response := mediaHTTPRequest(t, server, "GET", "/api/media/blob?chat_jid="+url.QueryEscape(mediaTestChat)+"&message_id=LOSTQUOTAA", "", "test-bridge-token")
+	if failure, ok := response["error"].(map[string]any); code != 502 || !ok || failure["code"] != "media_unavailable" {
+		t.Error("quota fallback lost permanent media code", code, response)
+	}
+	program := `import hashlib,os
+import media_notes,transcribe_worker
+seen=[]
+def sink(path):
+    with open(path,'rb') as source: assert source.read()==b'healthy cached voice note'
+    seen.append(path)
+    return {'text':'synthetic transcript','language':'en','backend':'test'}
+result=transcribe_worker.run_once(4,transcribe=sink,fetch=True)
+assert result.transcribed==1 and result.failed==0 and not result.outage,result
+assert len(seen)==1 and not os.path.exists(seen[0])
+for identifier in ('LOSTQUOTAA','LOSTQUOTAB','LOSTQUOTAC'):
+    notes=media_notes.get_media_notes(hashlib.sha256(identifier.encode()).hexdigest())['notes']
+    assert 'media_unavailable' in notes and 'transcript_error' not in notes,notes
+again=transcribe_worker.run_once(4,transcribe=sink,fetch=True)
+assert again.pending==0 and not again.outage,again
+print('three permanent quota-stream misses recorded; healthy audio transcribed; next round has no pending work')`
+	cmd := exec.CommandContext(b.ctx, python, "-c", program) //nolint:gosec // Trusted interpreter and literal fake-fixture program.
+	cmd.Dir = filepath.Join("..", "whatsapp-mcp-server")
+	var seq int
+	var dbName, dbFile string
+	if err := b.Store.db.QueryRow(`PRAGMA database_list`).Scan(&seq, &dbName, &dbFile); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), "WHATSAPP_MEDIA_BACKEND=s3", "WHATSAPP_API_URL="+server.URL+"/api", "WHATSAPP_BRIDGE_TOKEN=test-bridge-token", "WHATSAPP_DB_PATH="+dbFile, "WHATSAPP_WRAP_UNTRUSTED=false")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("permanent quota ingest: %v\n%s", err, output)
+	}
+	if retries.Load() != 4 {
+		t.Fatal("permanent notes were retried on the following round", retries.Load())
+	}
+	t.Log(string(output))
+}
+
+func TestMinIOCachedRefusalPreservesReadableDuplicate(t *testing.T) {
+	b, _ := minioTestBridge(t, "instances/test-permanent-refusal")
+	python := os.Getenv("WAMCP_TEST_MCP_PYTHON")
+	if python == "" {
+		t.Skip("real Python ingest proof requires WAMCP_TEST_MCP_PYTHON")
+	}
+	data := []byte("readable shared voice note")
+	for i, id := range []string{"REFUSED..VOICE", "READABLEVOICE"} {
+		row := s3TestRow(t, b, id, mediaTestChat, "audio", data, time.Now().Add(-time.Duration(i)*time.Minute))
+		if id == "READABLEVOICE" {
+			s3TestWrite(t, b, row, data)
+		}
+	}
+	// An old/corrupt catalog can contain an unsafe identity referencing valid
+	// shared bytes. Refusing that row must not suppress the readable copy.
+	if _, err := b.Store.db.Exec(`INSERT INTO media_cache_refs(id,chat_jid,sha256) VALUES(?,?,?)`, "REFUSED..VOICE", mediaTestChat, sha256Of(data)); err != nil {
+		t.Fatal(err)
+	}
+	server := s3ReviewREST(t, b)
+	program := `import hashlib,os
+import media_notes,transcribe_worker
+seen=[]
+def sink(path):
+    with open(path,'rb') as source: assert source.read()==b'readable shared voice note'
+    seen.append(path)
+    return {'text':'synthetic transcript','language':'en','backend':'test'}
+first=transcribe_worker.run_once(2,transcribe=sink,fetch=False)
+assert not first.outage and first.failed==0,first
+refusals=media_notes.fetch_media_refusals([('5511999999999@s.whatsapp.net','REFUSED..VOICE')])
+assert len(refusals)==1,refusals
+sha=hashlib.sha256(b'readable shared voice note').hexdigest()
+assert 'media_unavailable' not in media_notes.get_media_notes(sha)['notes']
+second=transcribe_worker.run_once(2,transcribe=sink,fetch=False)
+assert second.transcribed==1 and not second.outage,second
+assert len(seen)==1 and not os.path.exists(seen[0])
+print('refused identity remembered per message; shared hash stays readable and healthy copy transcribes')`
+	cmd := exec.CommandContext(b.ctx, python, "-c", program) //nolint:gosec // Trusted interpreter and literal fake-fixture program.
+	cmd.Dir = filepath.Join("..", "whatsapp-mcp-server")
+	var seq int
+	var dbName, dbFile string
+	if err := b.Store.db.QueryRow(`PRAGMA database_list`).Scan(&seq, &dbName, &dbFile); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), "WHATSAPP_MEDIA_BACKEND=s3", "WHATSAPP_API_URL="+server.URL+"/api", "WHATSAPP_BRIDGE_TOKEN=test-bridge-token", "WHATSAPP_DB_PATH="+dbFile, "WHATSAPP_WRAP_UNTRUSTED=false")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("permanent identity refusal: %v\n%s", err, output)
+	}
+	t.Log(string(output))
+}
+
 func TestMinIOMisleadingRemoteNamesKeepCategoryMIME(t *testing.T) {
 	for _, kind := range []string{"image", "audio"} {
 		t.Run(kind, func(t *testing.T) {

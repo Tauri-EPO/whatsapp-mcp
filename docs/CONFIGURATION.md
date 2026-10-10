@@ -836,6 +836,10 @@ Remote transfers are bounded to four and serialize only for the same hash.
 Webhook media has a short deadline and may be omitted during a slow remote
 read; the queued automatic caching path remains independent.
 
+Quota streams retain permanent `media_unavailable` and `media_refused` outcomes.
+Ingest records those outcomes and continues to healthy audio; temporary remote
+read failures remain retryable and receive no permanent failure note.
+
 ## Runtime overrides
 
 The private operator listener serves `GET` and `PATCH /operator/v1/settings`.

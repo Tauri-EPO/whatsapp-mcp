@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from collections.abc import Sequence
@@ -79,6 +80,26 @@ def identity(value: str) -> tuple[str, str]:
     return chat, message
 
 
+def _read_error(response: httpx.Response) -> MediaReadError:
+    """Retain permanent outcome codes without forwarding a remote diagnostic."""
+    payload = bytearray()
+    for chunk in response.iter_bytes(4096):
+        payload.extend(chunk)
+        if len(payload) > 8192:
+            return MediaReadError("bridge_unavailable", "bridge media read failed")
+    try:
+        body = json.loads(payload)
+    except (ValueError, UnicodeError):
+        body = None
+    failure = body.get("error") if isinstance(body, dict) else None
+    code = failure.get("code") if isinstance(failure, dict) else None
+    if code == "media_unavailable":
+        return MediaReadError(code, "media is permanently unavailable")
+    if code == "media_refused":
+        return MediaReadError(code, "media identity refused")
+    return MediaReadError("bridge_unavailable", "bridge media read failed")
+
+
 @contextmanager
 def local_file(value: str, limit: int, sha256: str | None = None, *, cache_only: bool = False):
     """One bounded, private spool; removed even if rendering/extraction fails."""
@@ -99,7 +120,7 @@ def local_file(value: str, limit: int, sha256: str | None = None, *, cache_only:
                 timeout=whatsapp.BRIDGE_MEDIA_TIMEOUT_S,
             ) as response:
                 if response.status_code != 200:
-                    raise MediaReadError("bridge_unavailable", "bridge media read failed")
+                    raise _read_error(response)
                 total = 0
                 digest = hashlib.sha256()
                 with open(path, "xb") as output:
