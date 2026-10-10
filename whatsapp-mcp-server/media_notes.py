@@ -539,7 +539,11 @@ def store_transcript(sha256: str, result: dict[str, Any]) -> None:
     ):
         if value:
             annotate_media(sha256, key, str(value))
-    for key, value in (("transcript_provider", result.get("provider")), ("transcript_model", result.get("model"))):
+    for key, value in (
+        ("transcript_provider", result.get("provider")),
+        ("transcript_model", result.get("model")),
+        ("duration_s", result.get("duration_s")),
+    ):
         annotate_media(sha256, key, str(value) if value else "")
     # An empty value deletes. A file that transcribes now is no longer failing,
     # and its bytes were clearly reachable, so a recorded miss is stale too:

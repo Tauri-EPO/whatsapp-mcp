@@ -434,7 +434,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	switch {
 	case cacheOnArrival && mediaType == "image" && shouldForward:
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, dlName, dlPath, dlErr := b.DownloadMedia(withMediaLimit(context.Background(), b.MediaMaxBytes), msg.Info.ID, chatJID)
+		success, _, dlName, dlPath, dlErr := b.DownloadMedia(context.WithValue(withAutomaticCache(withMediaLimit(context.Background(), b.MediaMaxBytes)), quotaTryKey{}, true), msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			// One read through the store root gives the sniffed MIME type and
 			// the bytes for the payload, which must hash to what the message
@@ -444,11 +444,11 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		} else {
 			if errors.Is(dlErr, errAutoMediaLimit) {
 				b.recordAutoSizeSkip(msg.Info.ID, chatJID)
-			} else {
+			} else if !errors.Is(dlErr, errMediaQuota) && !errors.Is(dlErr, errMediaQuotaBusy) {
 				logger.Warnf("❌ Image download failed: %v", dlErr)
 			}
 			// Fall back to a background download so media is cached for future MCP tool calls
-			if permanentMediaCode(dlErr) == "" && !errors.Is(dlErr, errAutoMediaLimit) {
+			if permanentMediaCode(dlErr) == "" && !errors.Is(dlErr, errAutoMediaLimit) && !errors.Is(dlErr, errMediaQuota) {
 				b.queueAutoDownload(msg.Info.ID, chatJID, mediaType)
 			}
 		}

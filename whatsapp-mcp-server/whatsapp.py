@@ -4893,6 +4893,8 @@ def purge_media(
     dry_run: bool = True,
     summary_only: bool = False,
     cursor: str | None = None,
+    scope: str = "",
+    include_orphans: bool = False,
 ) -> dict[str, Any]:
     """Ask the bridge to drop cached media bytes (rows untouched); dry run unless told otherwise.
 
@@ -4902,6 +4904,17 @@ def purge_media(
     """
     chat_jid = (chat_jid or "").strip()
     media_type = (media_type or "").strip()
+    if scope or include_orphans:
+        if scope != "status" or items or chat_jid or older_than_days or min_bytes or media_type or cursor:
+            raise ToolError("invalid_argument", "scope=status is a standalone purge shortcut")
+        payload = _bridge_json(
+            _bridge_request(
+                "POST", "/media/purge", json={"scope": scope, "dry_run": dry_run, "include_orphans": include_orphans}
+            )
+        )
+        if not dry_run:
+            _forget_media_listing(None)
+        return payload
     normalized: list[dict[str, str]] = []
     if len(items or []) > 1000:
         raise ToolError("invalid_argument", "items must contain at most 1000 entries; use criteria for bulk purges")
@@ -5875,6 +5888,13 @@ def bridge_status() -> dict[str, Any]:
         status["transcription_ingest_chats"] = ingest_setting()
     except (OSError, sqlite3.Error, ValueError):
         status["transcription_ingest_chats"] = {"error": "Runtime setting unavailable"}
+    from transcription_usage import current_usage
+
+    try:
+        status["transcription_usage"] = current_usage()
+        status["transcription_usage"]["minutes"] = status["transcription_usage"]["seconds"] / 60
+    except (OSError, sqlite3.Error, ValueError):
+        status["transcription_usage"] = {"error": "Transcription usage unavailable"}
     status.update(_endpoint_cert_status())
     try:
         health = _bridge_request("GET", "/health", timeout=10)
@@ -5896,6 +5916,11 @@ def bridge_status() -> dict[str, Any]:
             "uptime_seconds": body.get("uptime_seconds"),
             "store_bytes": body.get("store_bytes"),
             "media_bytes": body.get("media_bytes"),
+            "media_status_bytes": body.get("media_status_bytes"),
+            "media_status_files": body.get("media_status_files"),
+            "media_status_share": body.get("media_status_share"),
+            "media_quota_bytes": body.get("media_quota_bytes"),
+            "media_caching_paused": body.get("media_caching_paused"),
             "media_files": body.get("media_files"),
             "send_usage": body.get("send_usage"),
         }

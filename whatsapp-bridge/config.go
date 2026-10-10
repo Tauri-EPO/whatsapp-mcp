@@ -20,6 +20,8 @@ type bridgeConfig struct {
 	Bind, AllowedHosts           string
 	MediaRetention               time.Duration
 	StatusMedia                  bool
+	StatusRetention              *time.Duration
+	PurgeStatusOnStart           bool
 	RosterSync, SessionKeepalive time.Duration
 	ReadOnly                     readOnlyPolicy
 	Tools                        toolPolicy
@@ -79,6 +81,10 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	collect(err)
 	cfg.StatusMedia, err = resolveStatusAutoDownload(getenv(mediaAutoDownloadStatusEnv))
 	collect(err)
+	cfg.StatusRetention, err = resolveStatusRetention(getenv(statusRetentionEnv))
+	collect(err)
+	cfg.PurgeStatusOnStart, err = parseBoolEnv(purgeStatusOnStartEnv, getenv(purgeStatusOnStartEnv), false)
+	collect(err)
 	cfg.RosterSync, err = resolveGroupRosterSync(getenv(groupRosterSyncEnv))
 	collect(err)
 	cfg.SessionKeepalive, err = resolveSessionKeepalive(getenv(sessionKeepaliveEnv))
@@ -96,6 +102,9 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	collect(err)
 	if cfg.Operator.Bind != "" && cfg.Operator.Port == cfg.Port {
 		collect(errors.New("WHATSAPP_OPERATOR_PORT must differ from WHATSAPP_BRIDGE_PORT"))
+	}
+	if cfg.Operator.Bind != "" && (cfg.Port == 8091 || cfg.Operator.Port == 8091) {
+		collect(errors.New("Bridge and operator ports must differ from the loopback MCP admin port 8091"))
 	}
 	cfg.PairingStdout, err = parseBoolEnv(pairingStdoutEnv, getenv(pairingStdoutEnv), cfg.Operator.Bind == "")
 	collect(err)

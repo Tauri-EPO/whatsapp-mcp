@@ -67,6 +67,9 @@ func main() {
 // runCLI is the actual startup sequence, including process-wide creation policy.
 func runCLI() int {
 	privateProcessUmask()
+	if len(os.Args) > 1 && os.Args[1] == "purge-status-media" {
+		return purgeStatusCLI(os.Args[2:], os.Stdout, os.Stderr)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "snapshot" {
 		level := resolveLogLevel(os.Getenv(logLevelEnv))
 		if jsonLogsEnabled(os.Getenv(logFormatEnv)) {
@@ -289,6 +292,13 @@ func runBridge(cfg bridgeConfig) int {
 	if cfg.MCPFallbackBridge {
 		bridge.MCPEnvHash = tokenHash(bridgeToken)
 	}
+	bridge.StatusRetention = cfg.StatusRetention
+	if cfg.PurgeStatusOnStart {
+		logger.Infof("Status startup purge starting")
+		if err := bridge.purgeStatusOnStartContext(exitCtx); err != nil {
+			logger.Warnf("Status startup purge incomplete; retry next startup: %v", err)
+		}
+	}
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)
 	// Install exit before exposing operator mutations on a paired device.
@@ -318,7 +328,8 @@ func runBridge(cfg bridgeConfig) int {
 		return 1
 	}
 	if bridge.operatorPairing != nil {
-		bridge.operatorServer, err = startOperatorServer(cfg.Operator, bridge.operatorRoutes(), logger)
+		routes := withMCPAdmin(bridge.operatorRoutes(), bridgeToken, newMCPAdminClient())
+		bridge.operatorServer, err = startOperatorServer(cfg.Operator, routes, logger)
 		if err != nil {
 			logger.Errorf("Failed to start operator listener: %v", err)
 			return 1

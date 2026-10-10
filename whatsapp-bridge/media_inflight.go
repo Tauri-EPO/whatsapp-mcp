@@ -145,6 +145,12 @@ func transferContext(lifecycle, starter context.Context) (context.Context, conte
 	if limit := mediaLimit(starter); limit > 0 {
 		base = withMediaLimit(base, limit)
 	}
+	if automaticCache(starter) {
+		base = withAutomaticCache(base)
+	}
+	if try, _ := starter.Value(quotaTryKey{}).(bool); try {
+		base = context.WithValue(base, quotaTryKey{}, true)
+	}
 	if deadline, ok := starter.Deadline(); ok {
 		return context.WithDeadline(base, deadline)
 	}

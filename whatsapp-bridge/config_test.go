@@ -21,6 +21,7 @@ func invalidStartupValues() map[string]string {
 		bridgePortEnv: "0", bridgeBindEnv: "http://localhost", mediaRetentionEnv: "-1",
 		groupRosterSyncEnv: "-1", sessionKeepaliveEnv: "169", mediaMaxBytesEnv: "50MB",
 		"WHATSAPP_MEDIA_ROOTS": "relative/outbox", "WHATSAPP_BRIDGE_TOKEN": "tiny-secret",
+		statusRetentionEnv: "-1", purgeStatusOnStartEnv: "typo", mediaQuotaEnv: "-1", mediaEvictTypesEnv: "unknown", mediaEvictTargetEnv: "100",
 	}
 }
 

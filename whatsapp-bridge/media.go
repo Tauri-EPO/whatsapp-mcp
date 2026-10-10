@@ -118,7 +118,7 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	for {
 		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
-		if mediaLimit(ctx) != 0 || !errors.Is(err, errAutoMediaLimit) || ctx.Err() != nil {
+		if automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota) && !errors.Is(err, errMediaQuotaBusy)) || ctx.Err() != nil {
 			return ok, kind, name, path, err
 		}
 		// An uncapped waiter retries after the capped starter cleans up.
@@ -197,7 +197,13 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 	}
 
 	// Check if file already exists (under the current or the legacy name)
-	cached, lookupErr := cachedMediaPath(root, chatDir, mediaType, timestamp, messageID, originalName.String)
+	row := mediaRow{ID: messageID, ChatJID: chatJID, MediaType: mediaType, Timestamp: timestamp, Filename: originalName.String}
+	storage := b.mediaStorage()
+	entry, lookupErr := storage.Lookup(ctx, row)
+	cached := ""
+	if entry != nil {
+		cached = entry.Path
+	}
 	if lookupErr != nil {
 		// Something stands under the cached name, or in front of the directory,
 		// that the lookup will not go through. Say so: the fetch that follows
@@ -296,7 +302,20 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 		// transfer context, never under the context of one of the callers.
 		ctx, cancel := transferContext(b.ctx, ctx)
 		defer cancel()
-		written, err := b.transferMedia(ctx, downloader, relPath)
+		if automaticCache(ctx) {
+			bounded, release, err := b.acquireMediaQuota(context.WithValue(ctx, quotaPathKey{}, relPath), length)
+			if err != nil {
+				return 0, err
+			}
+			defer release()
+			ctx = bounded
+		}
+		write := func(msg *MediaDownloader) (int64, error) {
+			return storage.Write(ctx, row, func(rel string) (int64, error) {
+				return b.transferMedia(ctx, msg, rel)
+			})
+		}
+		written, err := write(downloader)
 		if status := cdnRefusalStatus(err); status != 0 {
 			// What the next report has to be read from: the status, how old
 			// the message is and the shape of what was asked, never a token.
@@ -309,7 +328,7 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			if alt := extractDirectPathFromURL(url); pathSource == pathFromMessage && alt != directPath && strings.HasPrefix(alt, "/") {
 				viaURL := *downloader
 				viaURL.DirectPath = alt
-				if n, altErr := b.transferMedia(ctx, &viaURL, relPath); altErr == nil {
+				if n, altErr := write(&viaURL); altErr == nil {
 					b.Log.Warnf("Message %s was downloaded through the path cut out of its url after its direct path was refused", messageID)
 					written, err = n, nil
 				} else if errors.Is(altErr, errAutoMediaLimit) {
@@ -337,10 +356,16 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 				// sender's phone to re-upload and download from the fresh
 				// path. See media_retry.go.
 				b.Log.Warnf("Requesting a media retry from the sender's phone for message %s...", messageID)
-				written, err = b.retryMedia(ctx, messageID, chatJID, downloader, root, relPath)
+				written, err = storage.Write(ctx, row, func(rel string) (int64, error) {
+					return b.retryMedia(ctx, messageID, chatJID, downloader, root, rel)
+				})
 			}
 		}
 		if err != nil {
+			if bounded, _ := ctx.Value(quotaBudgetKey{}).(bool); bounded && errors.Is(err, errAutoMediaLimit) {
+				b.metrics.mediaQuotaRefusals.Add(1)
+				return 0, errMediaQuota
+			}
 			if !errors.Is(err, errAutoMediaLimit) {
 				b.metrics.mediaDownloadFails.Add(1)
 			}
@@ -403,6 +428,11 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 var errMediaPath = errors.New("refusing media path")
 
 func checkMediaPathComponents(chatDir, filename string) error {
+	// A sender-controlled document ID can otherwise name another transfer's
+	// temporary leaf. Temporary files are never cached media or purge targets.
+	if strings.HasSuffix(filename, ".part") {
+		return fmt.Errorf("%w: temporary media leaf", errMediaPath)
+	}
 	for _, c := range []struct{ what, name string }{{"chat JID", chatDir}, {"message ID", filename}} {
 		if c.name == "" || c.name == "." || strings.Contains(c.name, "..") || strings.ContainsAny(c.name, `/\`) || strings.ContainsFunc(c.name, unicode.IsControl) {
 			return fmt.Errorf("%w: the %s does not name a single file inside the store directory", errMediaPath, c.what)

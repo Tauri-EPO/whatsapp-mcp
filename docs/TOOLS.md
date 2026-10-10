@@ -353,6 +353,10 @@ looks like a phone number that is not yours. It comes from the paired store when
 that is readable and from the bridge otherwise, and the key is **absent** (never
 null) when nothing can say — before pairing, for instance.
 
+Local cache fields include `media_status_bytes`, `media_status_files`,
+`media_status_share` (status fraction of cached bytes), `media_quota_bytes`
+and `media_caching_paused` (automatic quota admission paused).
+
 It also answers "can this deployment transcribe voice notes?" in a `whisper`
 block, which is local to the MCP server and therefore reported even when the
 bridge is down:
@@ -2192,6 +2196,13 @@ Free disk space by dropping cached media bytes. Message rows, hashes and notes
 stay; `download_media` can fetch a purged file again later. Nothing is sent to
 WhatsApp. To remove a message itself use `delete_message`.
 
+Status cleanup: `purge_media(scope="status", dry_run=true)` previews the full feed
+internally, regardless of the conversation allow-list; `dry_run=false` removes
+only bytes, keeping rows. Other criteria/items/cursor cannot accompany scope.
+Orphans are reported separately and kept unless `include_orphans=true`; they have
+no row to re-fetch. Tool and read-only restrictions still apply. Status responses
+stream progress heartbeats during the full scan, then return final totals.
+
 **`dry_run` defaults to `true`.** It previews the next real call made with the
 same filters and **the same input cursor**, while the cache is unchanged. Check
 the `notes` field of `list_media` before purging anything marked `keep`.
@@ -2205,8 +2216,11 @@ the `notes` field of `list_media` before purging anything marked `keep`.
 - `dry_run` (default `true`): `false` deletes the selected files.
 - `cursor`: criteria continuation, returned as `next_cursor`; keep the same filters.
 - `summary_only` (default `false`): omit per-file `items` and return totals only.
+- `scope="status"`: separate full-feed cleanup, without items, criteria or cursor.
+- `include_orphans` (default `false`): status scope only; also remove generated
+  row-less status files, which cannot be fetched again from a message row.
 
-Both forms select at most **500 cached files**, not 500 named rows. Missing,
+The conversation forms select at most **500 cached files**, not 500 named rows. Missing,
 uncached, denied and duplicate explicit entries do not consume file slots. Each
 criteria call examines at most 100000 allowed rows. An explicit request accepts
 at most **1000 named items** (HTTP 400 above it); the HTTP body is limited to
@@ -2795,3 +2809,5 @@ group participant additions). A `rate_limited` tool error includes
 of repeatedly retrying. `bridge_status.send_usage` reports UTC daily counts and
 effective limits. Oversized batches return `limit_exceeds_batch` with no retry
 delay; split the batch. See [send budgets](CONFIGURATION.md#outbound-send-budgets-and-mcp-token-rotation).
+
+Transcription results include `duration_s`, `provider` and `model`; successful uncached runs are metered in notes.db. Cache hits return stored metadata; legacy transcripts have null duration_s when no duration was recorded. A monthly cap with scope `all` returns `transcription_quota_exceeded` before provider upload when the file does not fit. `bridge_status.transcription_usage` reports UTC monthly usage and remaining quota.

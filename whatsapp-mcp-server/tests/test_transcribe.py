@@ -6,7 +6,8 @@ import httpx
 import pytest
 
 import transcribe
-from transcribe import BackendUnavailableError, TranscriptionError, WhisperConfig, load_config, transcribe_file
+from transcribe import BackendUnavailableError, TranscriptionError, WhisperConfig, load_config
+from transcribe import _transcribe_file as transcribe_file
 
 
 class TestLoadConfig:

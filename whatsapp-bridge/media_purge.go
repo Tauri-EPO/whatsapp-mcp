@@ -15,6 +15,7 @@ package main
 // a missing field reports what would be removed and removes nothing.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -60,13 +61,15 @@ type PurgeItem struct {
 }
 
 type MediaPurgeRequest struct {
-	Items         []PurgeItem `json:"items"`
-	ChatJID       string      `json:"chat_jid"`
-	OlderThanDays int         `json:"older_than_days"`
-	MinBytes      int64       `json:"min_bytes"`
-	MediaType     string      `json:"media_type"`
-	DryRun        *bool       `json:"dry_run"`
-	Cursor        string      `json:"cursor"`
+	Scope          string      `json:"scope"`
+	IncludeOrphans bool        `json:"include_orphans"`
+	Items          []PurgeItem `json:"items"`
+	ChatJID        string      `json:"chat_jid"`
+	OlderThanDays  int         `json:"older_than_days"`
+	MinBytes       int64       `json:"min_bytes"`
+	MediaType      string      `json:"media_type"`
+	DryRun         *bool       `json:"dry_run"`
+	Cursor         string      `json:"cursor"`
 }
 
 type PurgeResult struct {
@@ -163,6 +166,10 @@ func (store *MessageStore) MediaRow(messageID, chatJID string) (mediaRow, error)
 // caller, never against the sender-declared SQL length. Rows are drained in bounded pages and the cursor is closed before callbacks,
 // so disk work never holds a database connection and fn may query the database.
 func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
+	return store.EachMediaRowMatchingContext(context.Background(), chatJID, before, after, mediaType, policy, maxScan, fn)
+}
+
+func (store *MessageStore) EachMediaRowMatchingContext(ctx context.Context, chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
 	clauses := []string{"media_type IN ('image','video','audio','document','sticker')"}
 	var args []any
 	if chatJID != "" {
@@ -188,7 +195,7 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 			pageClauses = append(pageClauses, "(timestamp, id, chat_jid) > (?, ?, ?)")
 			pageArgs = append(pageArgs, after.Timestamp, after.ID, after.Chat)
 		}
-		rows, err := store.db.Query(
+		rows, err := store.db.QueryContext(ctx,
 			`SELECT id, chat_jid, media_type, timestamp, COALESCE(filename, ''), CAST(timestamp AS TEXT) FROM messages WHERE `+strings.Join(pageClauses, " AND ")+ //nolint:gosec // Literal clauses and bound values only; the limit is fixed.
 				` ORDER BY timestamp ASC, id ASC, chat_jid ASC LIMIT 256`, pageArgs...)
 		if err != nil {
@@ -324,6 +331,16 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			return
 		}
 		dryRun := req.DryRun == nil || *req.DryRun
+		if req.Scope != "" || req.IncludeOrphans {
+			if req.Scope != "status" || len(req.Items) > 0 || req.Cursor != "" || req.ChatJID != "" || req.MediaType != "" || req.OlderThanDays != 0 || req.MinBytes != 0 {
+				writeError(w, 400, "scope=status is a standalone purge shortcut")
+				return
+			}
+			b.streamMediaPurge(w, r, operatorMediaPurge{Type: "status", Chat: "status@broadcast", DryRun: req.DryRun, IncludeOrphans: req.IncludeOrphans}, func(result operatorMediaResult, err error) any {
+				return map[string]any{"success": err == nil, "dry_run": result.DryRun, "purged_files": result.Files, "purged_bytes": result.FreedBytes, "orphan_files": result.OrphanFiles, "orphan_bytes": result.OrphanBytes, "failed": result.Failed, "matched": result.Files, "truncated": false}
+			})
+			return
+		}
 		if len(req.Items) > purgeMaxItems {
 			writePurgeResponse(w, http.StatusBadRequest, MediaPurgeResponse{Message: fmt.Sprintf("items must contain at most %d entries; use criteria for bulk purges", purgeMaxItems), DryRun: dryRun})
 			return
@@ -358,6 +375,17 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 		var rows []mediaRow
 		finder := &cachedMediaFinder{root: b.StoreRoot}
 		defer finder.Close()
+		storage := b.mediaStorage()
+		if b.MediaStorage == nil {
+			storage = localMediaStorage{root: b.StoreRoot, finder: finder}
+		}
+		probeRow := func(row mediaRow) PurgeResult {
+			results, err := storage.Delete(r.Context(), []mediaRow{row}, true)
+			if err != nil || len(results) != 1 {
+				return PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Reason: purgeReasonNotResolvable}
+			}
+			return results[0]
+		}
 		var results []PurgeResult
 		truncated, scanTruncated := false, false
 		remaining, unreachable := 0, 0
@@ -403,7 +431,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 					writePurgeResponse(w, http.StatusInternalServerError, MediaPurgeResponse{Message: "Failed to look up message: " + err.Error(), DryRun: dryRun})
 					return
 				}
-				probe := purgeOneUsing(b.StoreRoot, row, true, finder)
+				probe := probeRow(row)
 				if probe.Purged {
 					rows = append(rows, row)
 				} else {
@@ -433,7 +461,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 				}
 				last = row
 				examined++
-				probe := purgeOneUsing(b.StoreRoot, row, true, finder)
+				probe := probeRow(row)
 				switch {
 				case probe.Purged && probe.Bytes >= req.MinBytes:
 					rows = append(rows, row)
@@ -460,8 +488,12 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 		}
 
 		resp := MediaPurgeResponse{Success: true, DryRun: dryRun, Truncated: truncated}
-		for _, row := range rows {
-			res := purgeOneUsing(b.StoreRoot, row, dryRun, finder)
+		deleted, deleteErr := storage.Delete(r.Context(), rows, dryRun)
+		if deleteErr != nil {
+			writeError(w, 503, "Media purge incomplete")
+			return
+		}
+		for _, res := range deleted {
 			if res.Purged {
 				resp.PurgedFiles++
 				resp.PurgedBytes += res.Bytes

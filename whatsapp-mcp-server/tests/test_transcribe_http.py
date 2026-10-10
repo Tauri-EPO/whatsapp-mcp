@@ -83,6 +83,7 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_pa
 
 @pytest.fixture
 def provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "messages.db"))
     state = {"calls": [], "heads": 0, "status": 200, "body": None, "delay": 0}
 
     class Handler(BaseHTTPRequestHandler):
@@ -162,6 +163,7 @@ def test_transcoded_audio_model_language_auth_and_status(provider, tmp_path, cap
         "backend": "openai_compatible",
         "provider": "openai_compatible",
         "model": "fake-speech-model",
+        "duration_s": 0.1,
     }
     sent = provider["calls"][0]
     assert sent["path"] == "/v1/audio/transcriptions"

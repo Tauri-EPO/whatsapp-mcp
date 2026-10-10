@@ -1,15 +1,22 @@
 package main
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 // Each data rewrite owns a durable name; user_version from old releases is
 // deliberately untouched, so an incomplete or newer rewrite cannot hide another.
 func migrationApplied(db *sql.DB, name string) (bool, error) {
-	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)"); err != nil {
+	return migrationAppliedContext(context.Background(), db, name)
+}
+
+func migrationAppliedContext(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)"); err != nil {
 		return false, err
 	}
 	var applied bool
-	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)", name).Scan(&applied)
+	err := db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)", name).Scan(&applied)
 	return applied, err
 }
 

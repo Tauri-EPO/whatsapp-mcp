@@ -55,6 +55,7 @@ whatsapp-mcp/
 │   ├── main.go                 # startup and wiring only (flags, env, pairing, signal handling)
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
+│   ├── operator_mcp.go         # bounded bridge-authenticated forwarding to the loopback MCP admin listener
 │   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
 │   ├── history_limits.go         # bounded pairing requests, history age guard and progress
 │   ├── archive_stats.go          # database size gauges, row count and threshold crossings
@@ -98,6 +99,8 @@ whatsapp-mcp/
 │   ├── forward_media.go        # forward stored category and original presentation, keeping cache names
 │   ├── media_presentation.go   # recipient-visible metadata persisted with the media snapshot
 │   ├── media.go                # inbound media download into store/<chat>/
+│   ├── media_storage.go        # bridge-owned cached media interface and existing local layout
+│   ├── media_catalog.go        # object catalog and cached-message reference schema
 │   ├── media_cache_path.go     # the one rule for where a cached media file is (download lookup, purge, webhook read)
 │   ├── media_path.go           # WHATSAPP_MEDIA_ROOTS: outbound media_path confined to an allow-list
 │   ├── rest.go                 # newRESTMux route table + HTTP server; handlers live next to their features
@@ -126,6 +129,9 @@ whatsapp-mcp/
 │   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS
 │   ├── config.go               # validates all startup values before filesystem/database/listener effects; one diagnostic, exit 1
 │   ├── env_bool.go             # the one boolean parser (a value it cannot read stops the bridge) + the four default-on switches
+│   ├── media_status.go        # status runtime preference, one-shot purge CLI and upgrade marker
+│   ├── media_quota.go         # local automatic-cache quota, runtime ceilings and per-type eviction
+│   ├── operator_media.go      # private media usage and type-required local purge
 │   ├── media_retention.go      # WHATSAPP_MEDIA_AUTODOWNLOAD / _RETENTION_DAYS, store size
 │   ├── auth.go                 # bearer token + loopback Host allow-list for /api/*
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
@@ -170,6 +176,8 @@ whatsapp-mcp/
 │   ├── private_files.py        # MCP-owned notes/export/upload permissions and shared notes connection factory
 │   ├── triage.py               # mark_handled / snooze + the handled/snoozed/muted SQL filter list_unanswered applies
 │   ├── mcp_config.py           # transport/host/port/allowed-hosts parsing
+│   ├── operator_admin.py       # loopback-only bridge-token reads for operator usage and activity
+│   ├── transcription_usage.py # MCP-owned durable UTC usage and atomic quota admission
 │   ├── observability.py        # WHATSAPP_MCP_LOG_FORMAT=json + the MCP /metrics middleware
 │   ├── parent_watchdog.py      # stdio: exit once the parent process is gone (WHATSAPP_PARENT_WATCHDOG_S)
 │   ├── http_auth.py            # WHATSAPP_MCP_TOKEN bearer middleware
@@ -357,6 +365,11 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` | `false` | Cache the media of status updates (`status@broadcast`) on arrival and after a successful status send. Off by default: the row is stored with its CDN fields, nothing is written under `store/status@broadcast/`, a status image forwarded to the webhook (`WEBHOOK_FORWARD_STATUS`) goes without its bytes, and `/api/download` still fetches a file on demand (`skipsStatusMedia` in `media_retention.go`, issue #447). `true` caches the status feed like any chat; `WHATSAPP_MEDIA_AUTODOWNLOAD=false` wins over it, on the webhook path too. Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_MEDIA_MAX_BYTES` | `268435456` (256 MiB) | Automatic caching checks declared and actual bytes; while a nonzero cap is set an undeclared length is skipped; an explicitly empty file is allowed (`/api/download` still fetches them); `0` = no limit. A decimal unsigned integer (up to `18446744073709551615`); malformed values stop startup. Downloads stream to `<file>.part` then rename (`media.go`) |
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset)* | Daily sweep deletes media files older than N days (`0`–`106751`; `0` keeps forever) under `store/<chat>/`; DB rows untouched |
+| `WHATSAPP_MEDIA_STATUS_RETENTION_DAYS` | empty (global retention) | Status-only retention, 0-106751 whole days; 0 keeps status forever. Recommend 1-2 days. Conversation media still follows the global retention. |
+| `WHATSAPP_MEDIA_PURGE_STATUS_ON_START` | `false` | One-shot status cache purge on upgrade; keeps rows and reports orphans without deleting them. Completion marker in bridge-owned messages.db metadata; failed removals are retried next start. Respects read-only and purge_media tool policy. |
+| `WHATSAPP_MEDIA_QUOTA_BYTES` | empty / `0` (off) | Local automatic-cache byte ceiling. Transfers reserve declared plaintext bytes before network work and run concurrently; actual plaintext cannot exceed the reservation. Temporary files are excluded from reported cache usage. Existing/on-demand downloads retain local behavior; streaming without caching and S3 are pending #649. Runtime key media.quota_bytes may tighten a nonzero deployment ceiling, never disable or raise it. |
+| `WHATSAPP_MEDIA_QUOTA_EVICT_TYPES` | empty (off) | Comma-separated image, video, audio, document, sticker, status. At the local automatic quota, remove oldest cached files of these types only; status is a separate bucket and needs status explicitly. Runtime key media.quota_evict_types is an array, restricted to the explicit deploy list when present. |
+| `WHATSAPP_MEDIA_QUOTA_EVICT_TARGET_PERCENT` | `90` | Local eviction low-water target, 1-99; runtime key media.quota_evict_target_percent can only lower an explicit deploy value. If eligible files cannot free enough, automatic caching pauses. Rows stay. |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6` | How stale a cached group roster may get before the bridge refreshes it in the background (`group_events.go`), one group per second, only while connected. A number of hours too large to represent as a duration is refused at startup. `0` turns the pass off, leaving `group_members` fed only by `/api/group/members`, group events and group messages. It is a read (`GetGroupInfo`), so it keeps running under `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_SESSION_KEEPALIVE_HOURS` | `12` | How often the bridge marks its linked device available for a few seconds and unavailable again (`session_keepalive.go`). WhatsApp logs a linked device out about a month after it was last "opened", and a connection does not count as opening: only this presence blip moved the date the phone shows (issue #576). `0` turns it off, and the bridge is then logged out a month after pairing; more than `168` (a week) is refused at startup. The first blip comes one to two minutes after the session is connected and logged in, never while the QR code is showing; the interval is wall-clock time and the last successful blip is remembered across restarts in `.session-keepalive` (0600). Missing or invalid state means never. For those seconds the account shows as online and the phone may hold a notification back. It keeps the session, it does not act on a chat, so it runs under `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files (bridge). The MCP server reads it too: `media_base64` uploads and ffmpeg voice-note conversions are written under `<first root>/.uploads` (`media_upload.py`) so the bridge may read them, and removed after the send. Set the same value for both processes; compose passes `/app/outbox` to both |
@@ -423,6 +436,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
+| `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
+| `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)* | MCP-server-only: background thread that transcribes inbound voice notes as they arrive (`transcribe_worker.py`) instead of waiting for an agent to call `transcribe_audio`. Reads `messages.db`, writes the same `transcript` / `transcript_lang` / `transcript_backend` notes into `notes.db`, idempotent by sha256, concurrency one. Costs CPU on this machine; with no whisper backend configured it stays off with a warning, and so it does when the tool policy does not offer `transcribe_audio` (a policy that hides `download_media` only turns the fetch path off). The status feed (`status@broadcast`) is not walked: its voice notes are neither fetched nor transcribed in the background, whatever `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` says, and `coverage().audio` leaves them out (issue #447). Same strict boolean parse as `WHATSAPP_READ_ONLY` |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300` | Seconds between batches (values below 5 are raised to 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` preserves the existing audio scope; `direct` walks phone/LID one-to-one chats only. Runtime key `transcription.ingest_chats` overrides it through GET/PATCH `/operator/v1/settings`, stored in bridge-owned `messages.db`; worker and coverage share the filter. Set for both processes. |
@@ -434,7 +449,9 @@ Compose-only knobs (`WHATSAPP_MCP_BIND`, `WHATSAPP_OUTBOX`) are documented in `.
 
 When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.env.example`, and pass it through in `docker-compose.yml` when a container needs it. The README only lists the day-one essentials.
 
-Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats` and the four `send.*` limits are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
+Media runtime keys are `media.autodownload_status`, `media.quota_bytes`, `media.quota_evict_types` and `media.quota_evict_target_percent`. Status defaults off; absent env permits runtime opt-in, explicit env false is a ceiling, env true permits runtime off/on. Quota/runtime limits only tighten an explicit deployment limit.
+
+Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats`, `transcription.monthly_max_minutes`, `transcription.cap_scope`, the four `send.*` limits and the `media.*` keys are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send/transcription/media boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
 
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 
