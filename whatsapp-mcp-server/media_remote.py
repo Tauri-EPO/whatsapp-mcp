@@ -99,6 +99,8 @@ def _read_error(response: httpx.Response) -> MediaReadError:
         return MediaReadError(code, "media identity refused")
     if code == "too_large":
         return MediaReadError(code, "media exceeds the requested byte limit")
+    if code == "spool_too_large":
+        return MediaReadError("too_large", "media exceeds the bridge spool size limit")
     return MediaReadError("bridge_unavailable", "bridge media read failed")
 
 

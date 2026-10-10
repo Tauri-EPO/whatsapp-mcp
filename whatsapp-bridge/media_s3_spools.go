@@ -10,6 +10,7 @@ import (
 )
 
 var errMediaSpoolFull = errors.New("verified media spool capacity exhausted")
+var errMediaSpoolLimit = errors.New("media exceeds bridge spool size limit")
 
 // Both downloading and completed files remain charged, including while a slow
 // client holds a reader. An idle verified object can serve subsequent ranges.
@@ -72,7 +73,10 @@ func (c *s3VerifiedSpools) acquireKey(key string, hash []byte, size int64, flexi
 	if c.closed {
 		return nil, false, os.ErrClosed
 	}
-	if size < 0 || (!flexible && size > c.maxBytes) || c.readers >= c.maxReaders {
+	if !flexible && size > c.maxBytes {
+		return nil, false, errMediaSpoolLimit
+	}
+	if size < 0 || c.readers >= c.maxReaders {
 		return nil, false, errMediaSpoolFull
 	}
 	entry := c.entries[key]

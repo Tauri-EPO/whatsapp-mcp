@@ -1676,6 +1676,10 @@ and reuse the temporary bytes across chunks without publishing an S3 cache row.
 An unknown-length fallback reserves up to 128 MiB; whole-file reads also obey
 the caller's byte limit before writing. Cold reads and the quota fallback support the same
 `offset`/`length` parameters.
+Temporary pressure from other active readers returns a retryable HTTP 503;
+known-length files that cannot currently fit are rejected before download.
+A file exceeding the bridge's own spool size limit returns a permanent HTTP
+413 naming that limit. The caller's `max_bytes` limit has a separate 413 message.
 
 The chunk JSON carries `total_size`, `offset`, `returned_length`, `next_offset`
 (`null` at EOF), `sha256` (the archived whole-file plaintext hash),

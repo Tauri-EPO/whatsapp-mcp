@@ -13,7 +13,9 @@ from errors import ToolError
 CHAT = "5511999999999@s.whatsapp.net"
 
 
-@pytest.mark.parametrize("code", ["media_unavailable", "media_refused", "bridge_unavailable", "too_large"])
+@pytest.mark.parametrize(
+    "code", ["media_unavailable", "media_refused", "bridge_unavailable", "too_large", "spool_too_large"]
+)
 def test_stream_errors_preserve_permanent_codes_without_remote_diagnostics(monkeypatch, code):
     def handle(request):
         return httpx.Response(502, json={"error": {"code": code, "message": "fake-private-sentinel"}})
@@ -22,7 +24,9 @@ def test_stream_errors_preserve_permanent_codes_without_remote_diagnostics(monke
     with pytest.raises(media_remote.MediaReadError) as failure:
         with media_remote.local_file(media_remote.uri(CHAT, "REMOTE1"), 1024):
             pytest.fail("error became media bytes")
-    assert failure.value.code == code
+    assert failure.value.code == ("too_large" if code == "spool_too_large" else code)
+    if code == "spool_too_large":
+        assert "bridge spool size limit" in str(failure.value)
     assert "fake-private-sentinel" not in str(failure.value)
 
 

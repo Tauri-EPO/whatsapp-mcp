@@ -838,6 +838,8 @@ Remote transfers have separate pools of four reads and four publications and
 serialize only for the same hash. Verified read spools are reused for two idle
 minutes, capped at four objects / 512 MiB and four concurrent readers, and removed
 on shutdown. Blob responses are capped at four; full read capacity returns 503.
+Temporary pressure is retryable; a file exceeding the bridge's spool size limit
+returns permanent HTTP 413, separately from the caller's `max_bytes` limit.
 Webhook media has a short deadline and may be omitted during a slow remote
 read; the queued automatic caching path remains independent.
 

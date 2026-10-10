@@ -439,3 +439,161 @@ func TestMinIOVerifiedCachedSpoolPublishesNewReference(t *testing.T) {
 		t.Fatal("verified spool bypassed publication of the new reference", response.StatusCode, refs, err)
 	}
 }
+
+func captureTransientWrites(b *Bridge, data []byte, peak, calls *atomic.Int64) {
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		transient, _ := ctx.Value(transientMediaKey{}).(string)
+		if transient != "" {
+			calls.Add(1)
+		}
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, f whatsmeow.File) error {
+			for start := 0; start < len(data); start += 16 {
+				if _, err := f.Write(data[start:min(start+16, len(data))]); err != nil {
+					return err
+				}
+				info, err := f.Stat()
+				if err != nil {
+					return err
+				}
+				if transient != "" {
+					peak.Store(info.Size())
+				}
+			}
+			return nil
+		})
+	}
+}
+
+func requestCapacityBlob(t *testing.T, server *httptest.Server, row mediaRow) (int, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/media/blob?chat_jid="+row.ChatJID+"&message_id="+row.ID, nil)
+	req.Header.Set("Authorization", "Bearer test-bridge-token")
+	response, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, body
+}
+
+func TestMinIOTransientSpoolPressureIsRetryable(t *testing.T) {
+	for _, declared := range []int{1024, 0} {
+		t.Run(strconv.Itoa(declared), func(t *testing.T) {
+			b, s := minioTestBridge(t, "instances/test-transient-pressure-"+strconv.Itoa(declared))
+			heldData := bytes.Repeat([]byte("a"), 1500)
+			heldRow := s3TestRow(t, b, "PRESSUREHELD", mediaTestChat, "document", heldData, time.Now())
+			s3TestWrite(t, b, heldRow, heldData)
+			s.spools.maxBytes = 2000
+			held, _, err := s.Open(b.ctx, heldRow, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = held.Close() })
+			data := bytes.Repeat([]byte("b"), 1024)
+			row := s3TestRow(t, b, "PRESSUREFALLBACK", mediaTestChat, "document", data, time.Now())
+			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=? WHERE id=? AND chat_jid=?`, declared, row.ID, row.ChatJID); err != nil {
+				t.Fatal(err)
+			}
+			b.MediaQuotaBytes = 1
+			var peak, calls atomic.Int64
+			captureTransientWrites(b, data, &peak, &calls)
+			server := s3ReviewREST(t, b)
+			status, body := requestCapacityBlob(t, server, row)
+			if status != http.StatusServiceUnavailable || peak.Load() > 500 || (declared != 0 && calls.Load() != 0) {
+				t.Fatal("temporary spool pressure must be retryable, with declared files rejected before download", status, peak.Load(), calls.Load(), string(body))
+			}
+			_ = held.Close()
+			status, body = requestCapacityBlob(t, server, row)
+			if status != http.StatusOK || !bytes.Equal(body, data) {
+				t.Fatal("retry after readers release capacity did not return original bytes", status, string(body))
+			}
+		})
+	}
+}
+
+func TestMinIOSpoolSizeLimitIsPermanent(t *testing.T) {
+	for _, mode := range []string{"cached", "declared", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			b, s := minioTestBridge(t, "instances/test-spool-limit-"+mode)
+			data := bytes.Repeat([]byte("x"), 1024)
+			row := s3TestRow(t, b, "PERMANENTSPOOL", mediaTestChat, "document", data, time.Now())
+			if mode == "cached" {
+				s3TestWrite(t, b, row, data)
+			} else {
+				b.MediaQuotaBytes = 1
+			}
+			if mode == "unknown" {
+				if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=0 WHERE id=? AND chat_jid=?`, row.ID, row.ChatJID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.spools.maxBytes = 300
+			var peak, calls atomic.Int64
+			captureTransientWrites(b, data, &peak, &calls)
+			status, body := requestCapacityBlob(t, s3ReviewREST(t, b), row)
+			if status != http.StatusRequestEntityTooLarge || !bytes.Contains(body, []byte("spool_too_large")) || !bytes.Contains(body, []byte("bridge spool size limit")) || bytes.Contains(body, []byte("requested")) || peak.Load() > 300 {
+				t.Fatal("permanent bridge spool limit must be accurate and bounded without max_bytes", status, peak.Load(), string(body))
+			}
+			if mode == "declared" && calls.Load() != 0 {
+				t.Fatal("declared oversize was downloaded", calls.Load())
+			}
+			if mode == "unknown" && (calls.Load() != 1 || peak.Load() == 0) {
+				t.Fatal("unknown-length case did not exercise the SDK write cap", calls.Load(), peak.Load())
+			}
+		})
+	}
+}
+
+func TestMinIOTransientShutdownRemovesLateRenamedSpool(t *testing.T) {
+	b, s := minioTestBridge(t, "instances/test-transient-late-shutdown")
+	data := bytes.Repeat([]byte("x"), 1024)
+	row := s3TestRow(t, b, "LATESPOOLSHUTDOWN", mediaTestChat, "document", data, time.Now())
+	b.MediaQuotaBytes = 1
+	started, release := make(chan string, 1), make(chan struct{})
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		started <- rel
+		<-release
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, f whatsmeow.File) error { _, err := f.Write(data); return err })
+	}
+	server := s3ReviewREST(t, b)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	done := make(chan *http.Response, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/media/blob?chat_jid="+row.ChatJID+"&message_id="+row.ID, nil)
+		req.Header.Set("Authorization", "Bearer test-bridge-token")
+		response, _ := server.Client().Do(req)
+		done <- response
+	}()
+	var rel string
+	select {
+	case rel = <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fallback download did not start")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	once.Do(func() { close(release) })
+	select {
+	case response := <-done:
+		if response == nil {
+			t.Fatal("fallback request failed without a response")
+		}
+		_ = response.Body.Close()
+		if response.StatusCode == 200 {
+			t.Fatal("closed spool pool returned media bytes")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("closed fallback did not finish")
+	}
+	for _, leaf := range []string{rel, rel + ".part"} {
+		if _, err := s.root.Lstat(leaf); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("shutdown retained late renamed spool", leaf, err)
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"time"
 )
@@ -66,13 +67,18 @@ func (s *s3MediaStorage) transient(ctx context.Context, row mediaRow, limit int6
 		return nil, err
 	}
 	defer unlock()
-	if limit <= 0 {
-		limit = 512*1024*1024 - 26
-	}
-	if declared > limit {
+	if limit > 0 && declared > limit {
 		return nil, errAutoMediaLimit
 	}
-	budget := min(limit, max(int64(128*1024*1024-26), declared))
+	s.spools.mu.Lock()
+	budget := min(max(int64(128*1024*1024-26), declared), max(s.spools.maxBytes-26, 0))
+	s.spools.mu.Unlock()
+	if declared > budget || budget == 0 {
+		return nil, errMediaSpoolLimit
+	}
+	if limit > 0 {
+		budget = min(budget, limit)
+	}
 	reader, reused, err := s.spools.acquireKey(key, expected, budget+26, true, !load)
 	if err != nil {
 		return nil, err
@@ -88,7 +94,7 @@ func (s *s3MediaStorage) transient(ctx context.Context, row mediaRow, limit int6
 	}()
 	if reused {
 		reader.hash = append([]byte(nil), reader.entry.digest...)
-		if reader.entry.size > limit {
+		if limit > 0 && reader.entry.size > limit {
 			return nil, errAutoMediaLimit
 		}
 		keep = true
@@ -108,10 +114,30 @@ func (s *s3MediaStorage) transient(ctx context.Context, row mediaRow, limit int6
 	if reserved <= 0 {
 		return nil, errMediaSpoolFull
 	}
+	if declared > reserved {
+		return nil, errMediaSpoolFull
+	}
+	overflow := func() error {
+		if reserved < budget {
+			return errMediaSpoolFull
+		}
+		if limit > 0 && budget == limit {
+			return errAutoMediaLimit
+		}
+		return errMediaSpoolLimit
+	}
 	_ = s.root.Remove(rel)
-	defer func() { _ = s.root.Remove(rel + ".part") }()
+	defer func() {
+		_ = s.root.Remove(rel + ".part")
+		if !keep {
+			_ = s.root.Remove(rel)
+		}
+	}()
 	ctx = withMediaLimit(context.WithValue(ctx, transientMediaKey{}, rel), uint64(reserved))
 	if _, _, _, _, err := s.bridge.downloadMediaAttempt(ctx, row.ID, row.ChatJID); err != nil {
+		if errors.Is(err, errAutoMediaLimit) {
+			return nil, overflow()
+		}
 		return nil, err
 	}
 	f, err := s.root.Open(rel)
@@ -128,8 +154,11 @@ func (s *s3MediaStorage) transient(ctx context.Context, row mediaRow, limit int6
 	s.spools.mu.Unlock()
 	h := sha256.New()
 	n, err := io.Copy(h, io.LimitReader(f, reserved+1))
-	if err != nil || n > reserved {
-		return nil, errAutoMediaLimit
+	if err != nil {
+		return nil, err
+	}
+	if n > reserved {
+		return nil, overflow()
 	}
 	digest := h.Sum(nil)
 	if len(expected) > 0 && !bytes.Equal(expected, digest) {

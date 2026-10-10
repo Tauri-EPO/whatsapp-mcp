@@ -80,7 +80,6 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			writeErrorCode(w, 400, "invalid_argument", "Invalid media byte limit")
 			return
 		}
-		readLimit = min(readLimit, int64(512*1024*1024-26))
 	}
 	id := r.URL.Query().Get("message_id")
 	row, err := b.Store.MediaRow(id, chat.String())
@@ -146,6 +145,10 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Media-Reason", "quota")
 		}
 		if err != nil {
+			if errors.Is(err, errMediaSpoolLimit) {
+				writeErrorCode(w, 413, "spool_too_large", "Media exceeds bridge spool size limit")
+				return
+			}
 			if errors.Is(err, errMediaSpoolFull) {
 				writeError(w, 503, "Media read capacity exhausted; retry later")
 				return
@@ -181,6 +184,10 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 		f, size, err = storage.Open(ctx, row, "")
 	}
 	if err != nil {
+		if errors.Is(err, errMediaSpoolLimit) {
+			writeErrorCode(w, 413, "spool_too_large", "Media exceeds bridge spool size limit")
+			return
+		}
 		if errors.Is(err, errMediaSpoolFull) {
 			writeError(w, 503, "Media read capacity exhausted; retry later")
 			return
