@@ -50,10 +50,26 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_pa
 
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
+            # Six pieces 0.6 s apart: each gap stays under the 1 s read timeout,
+            # and without the wall deadline the response would take 3 s or more.
             pieces = (
-                [b"HTTP/1.1 200 OK\r\n", b"Content-Type: application/json\r\n", b"\r\n", b'{"text":"done"}']
+                [
+                    b"HTTP/1.1 200 OK\r\n",
+                    b"Content-Type: application/json\r\n",
+                    b"X-Pad-A: 1\r\n",
+                    b"X-Pad-B: 1\r\n",
+                    b"\r\n",
+                    b'{"text":"done"}',
+                ]
                 if phase == "headers"
-                else [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n", b'{"text":', b'"done"', b"}"]
+                else [
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+                    b'{"te',
+                    b'xt":',
+                    b'"do',
+                    b'ne"',
+                    b"}",
+                ]
             )
             try:
                 for piece in pieces:
@@ -74,7 +90,7 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_pa
     try:
         with pytest.raises(BackendUnavailableError, match="deadline"):
             transcribe_file(str(source), config=config)
-        assert time.monotonic() - started < 1.6
+        assert time.monotonic() - started < 2.4
     finally:
         server.shutdown()
         server.server_close()
@@ -369,8 +385,10 @@ def test_unicode_audio_upload_with_non_utf8_default_encoding(provider, tmp_path,
 def test_whole_file_budget_includes_conversion_and_all_parts(provider, tmp_path):
     source = tmp_path / "long.wav"
     _audio(source, seconds=810)
-    provider["delay"] = 2
+    # Each part answers inside the 3 s timeout, but the two together cannot:
+    # a budget per part would take the conversion plus 5.6 s.
+    provider["delay"] = 2.8
     started = time.monotonic()
     with pytest.raises(BackendUnavailableError, match="deadline"):
         transcribe_file(str(source), config=replace(load_config(), timeout_s=3))
-    assert time.monotonic() - started < 4
+    assert time.monotonic() - started < 4.8

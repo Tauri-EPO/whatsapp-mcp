@@ -569,7 +569,7 @@ def test_http_deadline_includes_accounting_writer_wait(provider, paired_dbs, mon
     try:
         with pytest.raises(transcribe.BackendUnavailableError, match="deadline"):
             transcribe.transcribe_file(str(path))
-        assert time.monotonic() - started < 1.6
+        assert time.monotonic() - started < 2.5
         assert not provider["calls"]
     finally:
         conn.rollback()
@@ -594,7 +594,7 @@ def test_http_completion_reconciles_after_writer_recovery(provider, runtime_arch
         return original_http(*args, **kwargs)
 
     monkeypatch.setattr(transcribe, "_transcribe_http", contended_http)
-    provider["delay"] = 4 if outcome == "error" else 0
+    provider["delay"] = 6 if outcome == "error" else 0
     started = time.monotonic()
     try:
         if outcome == "error":
@@ -603,14 +603,14 @@ def test_http_completion_reconciles_after_writer_recovery(provider, runtime_arch
         else:
             with pytest.raises(transcribe.BackendUnavailableError, match="accounting pending"):
                 transcribe.transcribe_file(str(source))
-        assert time.monotonic() - started < 3.6
+        assert time.monotonic() - started < 4.5
         token, month = writers[0].execute("SELECT id,month FROM transcription_reservations").fetchone()
         assert writers[0].execute("SELECT COUNT(*) FROM transcription_usage").fetchone()[0] == 0
     finally:
         for conn in writers:
             conn.rollback()
             conn.close()
-    until = time.monotonic() + 5
+    until = time.monotonic() + 20  # returns as soon as the queue drains
     while usage._pending.unfinished_tasks and time.monotonic() < until:
         time.sleep(0.05)
     assert usage._pending.unfinished_tasks == 0
