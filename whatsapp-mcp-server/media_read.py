@@ -65,6 +65,7 @@ from mcp_types import (
 import media_image
 import media_inventory
 import media_pdf
+import media_remote
 import media_text
 import whatsapp
 from errors import ToolError, structured_errors
@@ -318,6 +319,8 @@ def cached_path(chat_jid: str, message_id: str) -> str | None:
     other file in the chat, and the answer is the directory as it is now, not a
     memoised scan — the bytes are opened right after this.
     """
+    if media_remote.enabled():
+        return media_remote.uri(chat_jid, message_id) if message_id in media_remote.catalog(chat_jid) else None
     name = media_inventory.lookup_cached_name(chat_jid, message_id, refuse_unsafe=True)
     if name is None:
         return None
@@ -337,7 +340,7 @@ def download_path(chat_jid: str, message_id: str) -> str:
     path = whatsapp.download_media(message_id, chat_jid)
     if not path:
         raise ToolError("internal", "the bridge reported success without a file path")
-    return _in_chat_dir(chat_jid, path)
+    return path if media_remote.enabled() else _in_chat_dir(chat_jid, path)
 
 
 def cached_only_path(chat_jid: str, message_id: str, caller: str) -> str:
@@ -625,7 +628,13 @@ def resolve_media(
     elif as_text and not is_text_mime(mime):
         media_text.require_extractable(mime)
     try:
-        size = os.path.getsize(path)
+        if media_remote.enabled():
+            cached = media_remote.catalog(chat_jid).get(message_id)
+            size = cached["bytes"] if cached else reported
+            if size is None:
+                size = cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images))
+        else:
+            size = os.path.getsize(path)
     except OSError as exc:
         raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
     if not as_base64:
@@ -807,6 +816,23 @@ def read_media(
     found = resolve_media(
         chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_edge=edge, as_images=as_images
     )
+    if media_remote.enabled():
+        with media_remote.local_file(found.path, found.size, found.sha256, cache_only=not offers_download()) as local:
+            found = found._replace(
+                path=local,
+                size=os.path.getsize(local),
+                mime=declared_mime(_media_row(chat_jid, message_id)[0], found.filename, local),
+            )
+            check_size(found.size, cap(max_bytes, hard_limit(found.mime, as_text, edge, as_images)), found.mime)
+            return _read_resolved_media(
+                chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one
+            )
+    return _read_resolved_media(
+        chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one
+    )
+
+
+def _read_resolved_media(chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one):
     path, mime, size, sha256 = found.path, found.mime, found.size, found.sha256
 
     blocks: list[ContentBlock]

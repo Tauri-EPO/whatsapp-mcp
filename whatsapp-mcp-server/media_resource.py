@@ -134,7 +134,14 @@ def read_media_resource(chat_jid: str, message_id: str) -> ReadResourceContents:
             # at all is not a fact about the message being asked for.
             raise ToolError("denied", active_policy().denial_message(RESOURCE_TOOL))
         found = media_read.resolve_media(chat_jid, message_id, caller="resources/read")
-        data = media_read.read_capped(found.path, found.size)
+        with media_read.media_remote.local_file(
+            found.path, found.size, found.sha256, cache_only=not media_read.offers_download()
+        ) as local:
+            if media_read.media_remote.enabled():
+                mime = media_read.declared_mime(media_read._media_row(chat_jid, message_id)[0], found.filename, local)
+                found = found._replace(mime=mime, size=os.path.getsize(local))
+                media_read.check_size(found.size, media_read.hard_limit(mime), mime, "resources/read")
+            data = media_read.read_capped(local, found.size)
     except ToolError as exc:
         raise _as_resource_error(exc) from exc
     if media_read.is_text_mime(found.mime):

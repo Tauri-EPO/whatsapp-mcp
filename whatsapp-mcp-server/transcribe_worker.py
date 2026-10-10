@@ -69,6 +69,7 @@ from typing import Any
 
 import media_inventory
 import media_notes
+import media_remote
 import whatsapp
 from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
@@ -416,7 +417,11 @@ def find_pending(
         if chat_jid not in caches:
             # Names only: the worker wants the path of a file, never its size,
             # so the chat's map costs one directory read and no stat (#318).
-            caches[chat_jid] = media_inventory.list_chat_names(chat_jid)
+            caches[chat_jid] = (
+                {message: media_remote.uri(chat_jid, message) for message in media_remote.catalog(chat_jid)}
+                if media_remote.enabled()
+                else media_inventory.list_chat_names(chat_jid)
+            )
         cached = caches[chat_jid].get(message_id)
         if cached is None and not traversing:
             if head_budget <= 0 or budget <= 0:
@@ -428,7 +433,7 @@ def find_pending(
             next_position = Position(timestamp=timestamp, message_id=message_id, chat_jid=chat_jid)
         path: str | None = None
         if cached is not None:
-            path = os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
+            path = cached if media_remote.enabled() else os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
         elif budget > 0:
             budget -= 1
             fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
@@ -522,6 +527,10 @@ def _fetch_bytes(
     except Exception as exc:  # noqa: BLE001 - one message must not end the round
         _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
         return Fetched()
+    if media_remote.enabled():
+        if path and media_remote.identity(path) == (chat_jid, message_id):
+            return Fetched(path=path)
+        return Fetched()
     name = media_inventory.lookup_cached_name(chat_jid, message_id)
     if name is not None:
         caches.setdefault(chat_jid, {})[message_id] = name
@@ -579,7 +588,11 @@ def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
         return False
     return any(
         (str(message_id), str(chat_jid)) != exclude
-        and media_inventory.lookup_cached_name(str(chat_jid), str(message_id)) is not None
+        and (
+            str(message_id) in media_remote.catalog(str(chat_jid))
+            if media_remote.enabled()
+            else media_inventory.lookup_cached_name(str(chat_jid), str(message_id)) is not None
+        )
         for message_id, chat_jid in rows
     )
 
@@ -671,12 +684,20 @@ def run_once(
             logger.warning("transcribe_on_ingest: runtime policy unavailable; round paused")
             return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         try:
-            info = os.stat(candidate.path)
-            identity = (candidate.path, candidate.sha256, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-            required = _blocked_quota[1] if _blocked_quota and _blocked_quota[0] == identity else 0
-            if ingest_quota_exhausted(required):
-                return BatchResult(len(pending), transcribed, failed, selection.examined, position)
-            result = transcribe(candidate.path)
+            with media_remote.local_file(
+                candidate.path, 256 * 1024 * 1024, candidate.sha256, cache_only=not fetch
+            ) as local:
+                info = os.stat(local)
+                file_identity = (
+                    (0, 0, info.st_size, 0)
+                    if media_remote.enabled()
+                    else (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                )
+                identity = (candidate.path, candidate.sha256, *file_identity)
+                required = _blocked_quota[1] if _blocked_quota and _blocked_quota[0] == identity else 0
+                if ingest_quota_exhausted(required):
+                    return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+                result = transcribe(local)
             text = str(result.get("text") or "").strip()
             if not text:
                 raise TranscriptionError("whisper returned no text")

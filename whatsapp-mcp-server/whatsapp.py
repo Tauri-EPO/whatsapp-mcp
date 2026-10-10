@@ -385,6 +385,9 @@ class _BridgeHTTP:
     def post(self, url: str, **kwargs: Any) -> httpx.Response:
         return self._client_or_new().post(url, **kwargs)
 
+    def stream(self, method: str, url: str, **kwargs: Any):
+        return self._client_or_new().stream(method, url, **kwargs)
+
 
 bridge_http = _BridgeHTTP()
 
@@ -4661,6 +4664,27 @@ def send_file(
         with media_upload.uploaded_path(upload_id, consume=not dry_run) as path:
             return send_file(recipient, path, caption, dry_run=dry_run)
     if source == "path":
+        import media_remote
+
+        if media_remote.enabled() and media_path.startswith("whatsapp://"):
+            source_chat, message_id = media_remote.identity(media_path)
+            cached = media_remote.catalog(source_chat).get(message_id)
+            if cached is None:
+                raise ToolError("not_found", "source media is not cached")
+            payload = {"recipient": recipient, "media_path": media_path, "message": caption}
+            if dry_run:
+                return (
+                    True,
+                    DRY_RUN_MESSAGE,
+                    _dry_run(
+                        "POST /api/send",
+                        payload,
+                        media={"path": media_path, "exists": True, "bytes": cached["bytes"]},
+                        **_recipient_preview(recipient),
+                    ),
+                )
+            result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
+            return True, result.get("message", "File sent"), _sent_info(result)
         if not os.path.isfile(media_path):
             raise ToolError(
                 "not_found",
@@ -4731,6 +4755,18 @@ def send_audio_message(
     if source == "upload":
         with media_upload.uploaded_path(upload_id) as path:
             return send_audio_message(recipient, path)
+    if source == "path":
+        import media_remote
+
+        if media_remote.enabled() and media_path.startswith("whatsapp://"):
+            source_chat, message_id = media_remote.identity(media_path)
+            cached = media_remote.catalog(source_chat).get(message_id)
+            if cached is None:
+                raise ToolError("not_found", "source audio is not cached")
+            with media_remote.local_file(
+                media_path, media_upload.MAX_OUTBOX_BYTES, cached["sha256"], cache_only=True
+            ) as local:
+                return send_audio_message(recipient, local)
     cleanup: list[str] = []
     result: dict[str, Any] = {}
     try:
@@ -5920,6 +5956,8 @@ def bridge_status() -> dict[str, Any]:
             "media_status_files": body.get("media_status_files"),
             "media_status_share": body.get("media_status_share"),
             "media_quota_bytes": body.get("media_quota_bytes"),
+            "media_quota_warning": body.get("media_quota_warning"),
+            "media_backend": body.get("media_backend"),
             "media_caching_paused": body.get("media_caching_paused"),
             "media_files": body.get("media_files"),
             "send_usage": body.get("send_usage"),

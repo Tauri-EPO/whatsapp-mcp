@@ -2,6 +2,16 @@
 
 Every MCP tool the server exposes, with parameters and behaviour notes. The tool docstrings in `whatsapp-mcp-server/main.py` are what the model reads; this page is the human copy. Chat allow-listing (`WHATSAPP_ALLOWED_CHATS`) applies to all of them, see [CONFIGURATION.md](CONFIGURATION.md).
 
+With the S3 media backend, `download_media.file_path` is a
+`whatsapp://media/<chat>/<message>` identifier. `read_media`, media resources and
+`transcribe_audio` fetch through the authenticated bridge; `send_file` accepts
+cached identifiers and `send_audio_message` accepts audio identifiers. For
+`transcribe_audio`, use `chat_jid`/`message_id`; its `file_path` accepts local paths.
+At the S3 quota, an on-demand fetch reports `cached: false,
+reason: "quota"` and a subsequent read streams without retaining a cache copy.
+Local paths keep their existing behavior. See
+[Media storage backends](CONFIGURATION.md#media-storage-backends).
+
 With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).

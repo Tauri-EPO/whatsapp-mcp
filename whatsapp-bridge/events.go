@@ -419,7 +419,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// WHATSAPP_MEDIA_MAX_BYTES set a file above it is left for download_media,
 	// as is one whose message declares no length: there is nothing to hold
 	// against the cap (issue #474).
-	wanted := mediaType != "" && downloadable && b.MediaAutoDownload
+	wanted := mediaType != "" && downloadable && b.MediaAutoDownload && b.shouldAutoCache(b.ctx, mediaType)
 	skipStatusMedia := b.skipsStatusMedia(resolvedChat)
 	noLength := b.MediaMaxBytes > 0 && !ex.hasLength
 	tooLarge := b.MediaMaxBytes > 0 && fileLength > b.MediaMaxBytes

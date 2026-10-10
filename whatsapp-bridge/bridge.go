@@ -238,7 +238,9 @@ type Bridge struct {
 	mediaTransfers mediaTransferGroup
 	// MediaStorage is configured before handlers or background jobs start.
 	// Nil retains the existing local layout, including in test bridges.
-	MediaStorage mediaStorage
+	MediaStorage           mediaStorage
+	MediaQuotaWarnPercent  int
+	mediaQuotaWarningState atomic.Int64
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc

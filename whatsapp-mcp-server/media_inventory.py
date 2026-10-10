@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Any
 
 import media_notes
+import media_remote
 import whatsapp
 from errors import ToolError
 from whatsapp import (
@@ -123,6 +124,13 @@ def scan_chat_cache(chat_jid: str) -> dict[str, CachedFile]:
     totals). A single message is answered by ``lookup_cached_name``, a page by
     ``_CacheIndex``. A missing or unreadable directory means nothing is cached.
     """
+    import media_remote
+
+    if media_remote.enabled():
+        return {
+            message_id: CachedFile(media_remote.uri(chat_jid, message_id), item["bytes"])
+            for message_id, item in media_remote.catalog(chat_jid).items()
+        }
     found: dict[str, CachedFile] = {}
     try:
         with _cache_directory(chat_jid) as directory, os.scandir(directory) as entries:
@@ -285,7 +293,15 @@ class _CacheIndex:
     def __init__(self) -> None:
         self._by_chat: dict[str, dict[str, str]] = {}
 
+        self._remote_by_chat: dict[str, dict[str, CachedFile]] = {}
+
     def lookup(self, chat_jid: str, message_id: str) -> CachedFile | None:
+        import media_remote
+
+        if media_remote.enabled():
+            if chat_jid not in self._remote_by_chat:
+                self._remote_by_chat[chat_jid] = scan_chat_cache(chat_jid)
+            return self._remote_by_chat[chat_jid].get(message_id)
         if chat_jid not in self._by_chat:
             self._by_chat[chat_jid] = cached_names(chat_jid)
         name = self._by_chat[chat_jid].get(message_id)
@@ -626,7 +642,7 @@ def media_stats(
     by_type = [{"media_type": t, "files": int(n), "bytes": int(b)} for t, n, b in by_type_rows]
     return {
         "chat_jid": chat_jid or None,
-        "media_root": media_root(),
+        "media_root": None if media_remote.enabled() else media_root(),
         "total": {
             "files": sum(c["files"] for c in by_chat),
             "bytes": sum(c["bytes"] for c in by_chat),

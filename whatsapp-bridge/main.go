@@ -67,6 +67,9 @@ func main() {
 // runCLI is the actual startup sequence, including process-wide creation policy.
 func runCLI() int {
 	privateProcessUmask()
+	if len(os.Args) > 1 && os.Args[1] == "migrate-media" {
+		return migrateMediaCLI(os.Args[2:], os.Stdout, os.Stderr)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "purge-status-media" {
 		return purgeStatusCLI(os.Args[2:], os.Stdout, os.Stderr)
 	}
@@ -269,6 +272,16 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	bridge.MediaQuotaWarnPercent = cfg.MediaBackend.WarnPercent
+	if cfg.MediaBackend.Backend == "s3" {
+		bridge.MediaStorage, err = newS3MediaStorage(bridge.ctx, cfg.MediaBackend, messageStore, storeRoot)
+		if err != nil {
+			logger.Errorf("Refusing to start: S3 media bucket probe failed")
+			bridge.Shutdown(shutdownTimeout)
+			return 1
+		}
+		bridge.MediaStorage.(*s3MediaStorage).bridge = bridge
+	}
 	bridge.sessionDB = sessionDB
 	bridge.HistoryLimits, bridge.SnapshotDir = cfg.History, cfg.SnapshotDir
 	bridge.Archive = cfg.Archive

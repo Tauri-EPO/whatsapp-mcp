@@ -108,6 +108,7 @@ func parseEvictTarget(raw string) (int, error) {
 
 func mediaSettingDefinitions() []settingDefinition {
 	return []settingDefinition{
+		autoTypesDefinition(),
 		{statusMediaSetting, mediaAutoDownloadStatusEnv, false, func(raw json.RawMessage) (any, error) {
 			var n bool
 			if string(raw) == "null" || json.Unmarshal(raw, &n) != nil {
@@ -145,7 +146,7 @@ func mediaSettingDefinitions() []settingDefinition {
 }
 
 func applyRuntimeMediaCeilings(out *runtimeSettingsSnapshot, defaults map[string]runtimeSetting) {
-	for _, key := range []string{statusMediaSetting, "media.quota_bytes", "media.quota_evict_types", "media.quota_evict_target_percent"} {
+	for _, key := range []string{statusMediaSetting, "media.quota_bytes", "media.quota_evict_types", "media.quota_evict_target_percent", "media.autodownload_types"} {
 		deploy, ok := defaults[key]
 		if !ok || deploy.Source != "env" {
 			continue
@@ -162,7 +163,7 @@ func applyRuntimeMediaCeilings(out *runtimeSettingsSnapshot, defaults map[string
 			if ceiling > 0 && (value == 0 || value > ceiling) {
 				setting.Value = ceiling
 			}
-		case "media.quota_evict_types":
+		case "media.quota_evict_types", "media.autodownload_types":
 			value := []string{}
 			for _, kind := range setting.Value.([]string) {
 				if slices.Contains(deploy.Value.([]string), kind) {
@@ -195,6 +196,9 @@ func (b *Bridge) mediaQuotaSettings(ctx context.Context) (uint64, []string, int,
 // from that walk, preventing both double counting and eviction before release.
 // On-demand downloads keep the existing local behavior pending #649 streaming.
 func (b *Bridge) acquireMediaQuota(ctx context.Context, incoming uint64) (context.Context, func(), error) {
+	if b.mediaStorage().Backend() == "s3" {
+		return b.acquireS3MediaQuota(ctx, incoming)
+	}
 	accountingCtx := ctx
 	try, _ := ctx.Value(quotaTryKey{}).(bool)
 	if try {

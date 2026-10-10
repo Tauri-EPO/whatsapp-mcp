@@ -76,6 +76,11 @@ jobs:
         run: |
           cd whatsapp-bridge
           go test -race -timeout 25m ./...
+      - uses: astral-sh/setup-uv@v7
+      - name: Real MinIO and MCP media integration
+        run: |
+          uv sync --frozen --extra dev --project whatsapp-mcp-server
+          bash scripts/test-s3-media.sh
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:

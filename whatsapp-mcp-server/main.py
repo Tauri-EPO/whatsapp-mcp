@@ -2008,6 +2008,8 @@ def send_file(
     already exists on the server running this MCP (inside its outbox), or
     `media_base64`, the bytes carried in this call together with `filename`,
     or `upload_id`, the opaque ID returned by POST /upload on http/sse.
+    With S3 storage, `media_path` also accepts a cached
+    `whatsapp://media/<chat>/<message>` identifier returned by download_media.
     Use `media_base64` when you run on another machine and have no way to put
     a file on the server; the server writes it into the outbox for the send
     and removes it afterwards. Inline payloads are capped (64 MiB, and the
@@ -2027,7 +2029,8 @@ def send_file(
         chat_jid: Phone number with country code (leading + and the separators
                   listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: Absolute path to the media file (image, video, document) on
-                    the server. Leave empty when sending `media_base64`.
+                    the server, or a cached S3 media identifier. Leave empty
+                    when sending `media_base64`.
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
         dry_run: True previews without sending (default False)
@@ -2050,8 +2053,8 @@ def send_file(
         "mime", "inline": true, "upload_dir"} for media_base64 (nothing is written
         for a dry run). A missing file is reported as not_found in both modes, a
         payload that is not base64 or too large as invalid_argument; the bridge
-        additionally confines media_path to WHATSAPP_MEDIA_ROOTS, which only a real
-        send checks.
+        additionally confines ordinary paths to WHATSAPP_MEDIA_ROOTS, which only
+        a real send checks. Cached identifiers require access to their source chat.
 
     A rate_limited error means stop and report to the operator; split an oversized
     batch rather than retrying it. Optional actions count when configured.
@@ -2082,6 +2085,8 @@ def send_audio_message(
     its outbox), `media_base64` (the bytes in this call), or `upload_id` from
     POST /upload on http/sse (64 MiB default, one-hour expiry). Anything that is not
     already an Opus .ogg is converted with ffmpeg on the server. Use
+    a `whatsapp://media/<chat>/<message>` identifier as `media_path` with S3 storage.
+    Use
     `media_base64` when you run on another machine: the server writes the bytes
     into the outbox for the send and removes them afterwards (64 MiB cap, and the
     HTTP transport's body limit, 4 MiB by default, before that).
@@ -2089,7 +2094,7 @@ def send_audio_message(
     Args:
         chat_jid: Phone number with country code (leading + and the separators
                   listed in docs/TOOLS.md accepted), direct-chat JID or group JID
-        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+        media_path: Absolute audio path or S3 media identifier; converted to Opus .ogg when needed.
         media_base64: The audio bytes, base64-encoded (a data: URL prefix is
                       accepted). Excludes `media_path`.
         filename: Optional name for `media_base64`, default "voice.ogg"; the
@@ -2575,13 +2580,19 @@ def purge_media(
 @tool_errors
 @untrusted_content
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
-    """Cache a WhatsApp message's media on the server and get its **server-side** path.
+    """Fetch a message's media and return its server path or cached media identifier.
 
-    `file_path` is a path on the machine running this server, not on yours: it is
+    With S3 storage, file_path is a whatsapp://media/<chat>/<message> identifier:
+    read_media and transcribe_audio fetch through the bridge. At the cache quota,
+    cached is false with reason "quota"; read_media streams without caching.
+
+    With local storage, `file_path` is a path on this server, not on yours: it is
     only useful to a client that shares that filesystem (a stdio server on your
     laptop). Over a network transport, **call read_media instead** — it returns the
     bytes themselves: images as image content, text as text, and everything else as
     a resource carrying the file's real MIME type.
+    For transcribe_audio with S3, pass chat_jid/message_id; its file_path alternative
+    accepts local paths, so do not pass the media identifier there.
 
     The response carries the file's `sha256` and the `notes` you already recorded
     for it. When `notes` is empty, this file has never been interpreted: read it
@@ -2603,16 +2614,25 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
         message_id: The ID of the message containing the media
 
     Returns:
-        {"success": true, "message", "file_path" (server-side), "sha256" (null when the
-        row has no hash), "notes": {key: value}}
+        {"success": true, "message", "file_path" (local path or media identifier),
+        "sha256" (null when the row has no hash), "notes": {key: value}}. S3 adds
+        "cached" and, for an uncached quota stream, "reason": "quota".
     """
     file_path = whatsapp_download_media(message_id, chat_jid)
+
+    import media_remote
+
+    cache_status = {}
+    if file_path and media_remote.enabled():
+        cached = message_id in media_remote.catalog(chat_jid)
+        cache_status = {"cached": cached, **({"reason": "quota"} if not cached else {})}
 
     if file_path:
         return {
             "success": True,
             "message": "Media downloaded successfully",
             "file_path": file_path,
+            **cache_status,
             **whatsapp_media_notes_for_message(chat_jid, message_id),
         }
     raise ToolError("internal", "Bridge reported success without a file path")
@@ -2869,7 +2889,10 @@ def transcribe_audio(
             raise ToolError("invalid_argument", "Provide chat_jid and message_id, or file_path")
         file_path = _audio_to_transcribe(chat_jid, message_id)
     try:
-        result = transcribe_file(file_path, language=language or None, config=load_whisper_config())
+        import media_remote
+
+        with media_remote.local_file(file_path, 256 * 1024 * 1024, sha256, cache_only=not offers_download()) as local:
+            result = transcribe_file(local, language=language or None, config=load_whisper_config())
     except FileNotFoundError as exc:
         raise ToolError("not_found", str(exc), file_path=file_path) from exc
     except TranscriptionError as exc:

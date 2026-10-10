@@ -16,6 +16,7 @@ import (
 const bridgePortEnv = "WHATSAPP_BRIDGE_PORT"
 
 type bridgeConfig struct {
+	MediaBackend                 mediaBackendConfig
 	Switches                     bridgeSwitches
 	Port                         int
 	Bind, AllowedHosts           string
@@ -67,6 +68,8 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 		}
 	}
 	var err error
+	cfg.MediaBackend, err = parseMediaBackend(getenv)
+	collect(err)
 	cfg.History, err = parseHistoryLimits(getenv)
 	collect(err)
 	cfg.SnapshotDir = strings.TrimSpace(getenv("WHATSAPP_SNAPSHOT_DIR"))

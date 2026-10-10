@@ -79,8 +79,20 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MEDIA_RETENTION_DAYS` | *(unset = keep forever)*        | Daily sweep deletes cached media older than N days (`0`–`106751`; `0` keeps forever); message rows stay and `download_media` re-fetches on demand. On-demand cleanup is the `purge_media` tool |
 | `WHATSAPP_MEDIA_STATUS_RETENTION_DAYS` | empty (global retention) | Status-only retention, 0-106751 whole days; 0 keeps status forever. Recommend 1-2 days. Conversation media still follows the global retention. |
 | `WHATSAPP_MEDIA_PURGE_STATUS_ON_START` | `false` | One-shot status cache purge on upgrade; keeps rows and reports orphans without deleting them. Completion marker in bridge-owned messages.db metadata; failed removals are retried next start. Respects read-only and purge_media tool policy. |
-| `WHATSAPP_MEDIA_QUOTA_BYTES` | empty / `0` (off) | Local automatic-cache byte ceiling. Transfers reserve declared plaintext bytes before network work and run concurrently; actual plaintext cannot exceed the reservation. Temporary files are excluded from reported cache usage. Existing/on-demand downloads retain local behavior; streaming without caching and S3 are pending #649. Runtime key media.quota_bytes may tighten a nonzero deployment ceiling, never disable or raise it. |
-| `WHATSAPP_MEDIA_QUOTA_EVICT_TYPES` | empty (off) | Comma-separated image, video, audio, document, sticker, status. At the local automatic quota, remove oldest cached files of these types only; status is a separate bucket and needs status explicitly. Runtime key media.quota_evict_types is an array, restricted to the explicit deploy list when present. |
+| `WHATSAPP_MEDIA_QUOTA_BYTES` | empty / `0` (off) | Per-instance cache ceiling. Local automatic transfers reserve plaintext bytes; S3 accounts for unique objects and reservations. S3 on-demand reads stream without caching at the quota; local on-demand behavior stays unchanged. Runtime media.quota_bytes may tighten a nonzero deploy ceiling. |
+| `WHATSAPP_MEDIA_BACKEND` | `local` | Local layout or opt-in `s3`. Unknown values stop startup. Set identically for the bridge and MCP server. |
+| `WHATSAPP_MEDIA_S3_ENDPOINT` | empty (AWS) | HTTP(S) origin without credentials, query strings or paths. |
+| `WHATSAPP_MEDIA_S3_REGION` | `auto` | S3 signing region; us-east-1 for MinIO, bucket region for AWS, auto for R2. |
+| `WHATSAPP_MEDIA_S3_BUCKET` | required for s3 | Existing bucket, checked with an authenticated probe before startup. |
+| `WHATSAPP_MEDIA_S3_PREFIX` | required for s3 | Nonempty prefix of plain components; use a distinct prefix per instance. |
+| `WHATSAPP_MEDIA_S3_ACCESS_KEY_ID` | required for s3 | Bridge-only credential; use this or its _FILE alternative. |
+| `WHATSAPP_MEDIA_S3_SECRET_ACCESS_KEY` | required for s3 | Bridge-only secret; use this or its _FILE alternative. |
+| `WHATSAPP_MEDIA_S3_ACCESS_KEY_ID_FILE` | empty | Owner-only regular file of at most 4096 bytes; no symlinks. |
+| `WHATSAPP_MEDIA_S3_SECRET_ACCESS_KEY_FILE` | empty | Owner-only regular file of at most 4096 bytes; no symlinks. |
+| `WHATSAPP_MEDIA_S3_FORCE_PATH_STYLE` | `false` | Path-style bucket addressing, usually true for MinIO. |
+| `WHATSAPP_MEDIA_AUTODOWNLOAD_TYPES` | `image,video,audio,document,sticker` | Which inbound/outbound types are automatically cached. Runtime media.autodownload_types can narrow an explicit deploy list. |
+| `WHATSAPP_MEDIA_QUOTA_WARN_PERCENT` | `80` | Warning threshold, 1-100; one WARN and optional media_quota webhook per crossing. |
+| `WHATSAPP_MEDIA_QUOTA_EVICT_TYPES` | empty (off) | Comma-separated image, video, audio, document, sticker, status. At the automatic quota, remove oldest cached references of these types only; status is a separate bucket and needs status explicitly. Runtime key media.quota_evict_types is an array, restricted to the explicit deploy list when present. |
 | `WHATSAPP_MEDIA_QUOTA_EVICT_TARGET_PERCENT` | `90` | Local eviction low-water target, 1-99; runtime key media.quota_evict_target_percent can only lower an explicit deploy value. If eligible files cannot free enough, automatic caching pauses. Rows stay. |
 | `WHATSAPP_GROUP_ROSTER_SYNC_HOURS` | `6`                          | How stale a cached group roster may get before the bridge refreshes it in the background, so `get_contact_chats` can answer "which groups is this person in?" without a live call per group. One group per second, only while connected, first pass a couple of minutes after start-up. A number of hours too large to represent as a duration is refused at startup. `0` turns the pass off: rosters are then only cached when `list_group_members` is called, when a group join/leave/promote/demote event arrives, and when a group message comes from someone with no row yet. Refreshing is a read, so it keeps running under `WHATSAPP_READ_ONLY` |
 | `WHATSAPP_SESSION_KEEPALIVE_HOURS` | `12`                         | How often the bridge marks its linked device available for a few seconds, so WhatsApp counts it as in use and does not log it out about a month after pairing. `0` turns it off. See [Keeping the linked device](#keeping-the-linked-device) |
@@ -698,7 +710,7 @@ a canceled or unsuccessful attempt.
 These endpoints measure the current local layout through the canonical safe-cache
 helpers. Usage includes generated orphan files, with status as a disjoint type
 bucket; `by_type` sums to total bytes and `by_chat` is ordered and limited (1-100).
-There is no shared-object catalog, S3 backend or dedupe saving field yet (#649).
+The S3 backend uses the shared-object catalog and reports dedupe savings; see Media storage backends below.
 Local eviction is off by default; selecting types deletes their oldest cached
 files down to the low-water target before admitting an automatic cache write.
 Automatic transfers reserve their declared plaintext length under a short accounting
@@ -711,10 +723,96 @@ waiting and give database/disk accounting a 100 ms budget, then fall back to the
 queue on contention or that deadline; quota refusals are not queued. The short
 accounting budget does not shorten the network transfer deadline.
 A full quota with no eligible bytes pauses automatic caching. On-demand downloads
-continue to cache locally, so they can exceed this automatic ceiling; #649 owns
-streaming without caching, S3 and dedupe-aware purge/eviction. Eviction counters
+continue to cache locally, so they can exceed this automatic ceiling. S3 streams
+without caching when quota admission fails. Eviction counters
 are `whatsapp_bridge_media_evicted_bytes_total{type}`; health exposes
 `media_quota_bytes` and `media_caching_paused`.
+
+## Media storage backends
+
+`WHATSAPP_MEDIA_BACKEND=local` keeps the existing `store/<chat>/` layout.
+With `s3`, the bridge stores verified plaintext by SHA-256 under one required
+instance prefix. Messages and notes remain in SQLite; back up those databases
+as well as the bucket. Set the same backend on the bridge and MCP server. Only
+the bridge receives S3 credentials. An authenticated bucket probe must succeed
+before startup opens its REST listener; create the bucket beforehand and grant
+bucket inspection plus object read, write and delete access within the prefix.
+
+For AWS S3, use an existing bucket, its region and a distinct instance prefix:
+
+```dotenv
+WHATSAPP_MEDIA_BACKEND=s3
+WHATSAPP_MEDIA_S3_BUCKET=example-media-bucket
+WHATSAPP_MEDIA_S3_REGION=us-east-1
+WHATSAPP_MEDIA_S3_PREFIX=instances/example/
+WHATSAPP_MEDIA_S3_ACCESS_KEY_ID_FILE=/run/secrets/media-access
+WHATSAPP_MEDIA_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/media-secret
+```
+
+For R2, add `WHATSAPP_MEDIA_S3_ENDPOINT=https://example.r2.cloudflarestorage.com`
+and `WHATSAPP_MEDIA_S3_REGION=auto`. Replace the example endpoint with the origin
+provided by your account. For MinIO, use
+`WHATSAPP_MEDIA_S3_ENDPOINT=http://minio:9000`, region `us-east-1` and
+`WHATSAPP_MEDIA_S3_FORCE_PATH_STYLE=true`. Prefer HTTPS outside a private local
+network. Credential files must be regular, owner-only files of at most 4096
+bytes, mounted separately into the bridge; set each value or its `_FILE`
+alternative, never both. The default compose passthrough does not create mounts.
+
+Agents receive a `whatsapp://media/<chat>/<message>` identifier, never a bucket,
+object key, credential or presigned URL. `read_media`, resources and transcription
+fetch bytes through the authenticated bridge and remove their private temporary
+files afterwards. `send_file` accepts a cached identifier. SQLite listings use
+the bridge catalog for cache availability and size. Temporary disk space is
+still needed for verification, rendering and uploads, even with remote storage.
+
+Identical files in different chats share one object. Purge removes each selected
+message's cache reference, and removes the object only after its last reference
+is gone. Freed bytes count actual object removal, so purging one chat may free
+zero bytes. Operator `by_type` charges each unique object to its first cached
+type; its sum equals `bytes`. Per-chat values count references and can overlap.
+Failed remote deletion keeps the object's bytes charged; the next retention
+sweep retries up to 256 unreferenced objects. Operator purge with include_orphans
+also removes detached catalog objects within the selected type and age; a chat
+filter excludes them because their chat references are gone. Keep retention enabled if you want
+that automatic cleanup. No global bucket listing or deletion crosses a prefix.
+
+`WHATSAPP_MEDIA_QUOTA_BYTES` counts unique objects and in-flight reservations.
+Eviction remains off until `WHATSAPP_MEDIA_QUOTA_EVICT_TYPES` names eligible
+types; only their oldest references are removed down to the configured target.
+A kept reference of an unlisted type protects its object. At the ceiling,
+automatic caching stops before downloading new media. An on-demand S3 fetch
+can stream through the bridge without entering the catalog: `download_media`
+returns `cached: false, reason: "quota"`, and `read_media` returns the bytes.
+Health and metrics report warning/full crossings; optional connection webhooks
+receive `type: "media_quota"` events. Local on-demand downloads keep their
+existing behavior.
+
+For lazy video, set
+`WHATSAPP_MEDIA_AUTODOWNLOAD_TYPES=image,audio,document,sticker`. Video rows are
+still archived, and explicit reads/downloads fetch and cache their bytes when
+quota permits. Fetching later depends on WhatsApp's CDN lifetime; after expiry,
+media retry needs the sender's phone online with the file still present. Lazy
+video cannot guarantee that a future fetch will succeed. Both backends support
+this type list, with runtime overrides bounded by an explicit deployment list.
+
+Stop the bridge before migrating, keep a backup, and retain the S3 settings for
+either direction. The command takes the same store lock as the bridge:
+
+```sh
+whatsapp-bridge migrate-media --to s3 --dry-run --concurrency 2
+whatsapp-bridge migrate-media --to s3 --concurrency 2
+whatsapp-bridge migrate-media --to s3 --delete-source --concurrency 2
+whatsapp-bridge migrate-media --to local --delete-source --concurrency 2
+```
+
+Workers are bounded to 1-4. Dry runs open the existing catalog read-only and
+report files, bytes, dedupe savings and skipped reasons without changing media
+or catalog contents. Real runs verify complete destination bytes by size and
+SHA-256 before `--delete-source` removes anything. Rerunning verifies completed
+destinations and skips them, so it can finish interrupted runs. Symlinks, nested
+directories and files without a message mapping stay in place and are reported.
+Switch both processes to the destination backend only after migration succeeds;
+without `--delete-source`, both copies remain until explicitly removed.
 
 ## Runtime overrides
 

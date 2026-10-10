@@ -380,6 +380,16 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			storage = localMediaStorage{root: b.StoreRoot, finder: finder}
 		}
 		probeRow := func(row mediaRow) PurgeResult {
+			if storage.Backend() == "s3" {
+				entry, err := storage.Lookup(r.Context(), row)
+				if err != nil {
+					return PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Reason: purgeReasonNotResolvable}
+				}
+				if entry == nil {
+					return PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Reason: purgeReasonNotCached}
+				}
+				return PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Purged: true, Bytes: entry.Bytes}
+			}
 			results, err := storage.Delete(r.Context(), []mediaRow{row}, true)
 			if err != nil || len(results) != 1 {
 				return PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Reason: purgeReasonNotResolvable}
@@ -489,7 +499,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 
 		resp := MediaPurgeResponse{Success: true, DryRun: dryRun, Truncated: truncated}
 		deleted, deleteErr := storage.Delete(r.Context(), rows, dryRun)
-		if deleteErr != nil {
+		if deleteErr != nil && len(deleted) == 0 {
 			writeError(w, 503, "Media purge incomplete")
 			return
 		}

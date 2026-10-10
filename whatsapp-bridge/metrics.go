@@ -62,6 +62,11 @@ func (b *Bridge) renderMetrics() string {
 	if b.storeStats != nil {
 		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles = b.storeStats.snapshotScoped(time.Now())
 	}
+	if b.mediaStorage().Backend() == "s3" {
+		if usage, err := b.mediaStorage().Usage(b.ctx); err == nil {
+			mediaBytes, mediaFiles, statusBytes, statusFiles = usage.Bytes, usage.Files, usage.StatusBytes, usage.StatusFiles
+		}
+	}
 	bool01 := func(v bool) int {
 		if v {
 			return 1
@@ -115,6 +120,11 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_media_files", "Cached media files.", "gauge", fmt.Sprint(mediaFiles))
 	out = append(out, "# HELP whatsapp_bridge_media_cached_bytes Cached bytes by scope.", "# TYPE whatsapp_bridge_media_cached_bytes gauge", fmt.Sprintf("whatsapp_bridge_media_cached_bytes{scope=\"status\"} %d", statusBytes), fmt.Sprintf("whatsapp_bridge_media_cached_bytes{scope=\"chats\"} %d", mediaBytes-statusBytes), "# HELP whatsapp_bridge_media_cached_files Cached files by scope.", "# TYPE whatsapp_bridge_media_cached_files gauge", fmt.Sprintf("whatsapp_bridge_media_cached_files{scope=\"status\"} %d", statusFiles), fmt.Sprintf("whatsapp_bridge_media_cached_files{scope=\"chats\"} %d", mediaFiles-statusFiles))
 	out = append(out, b.mediaQuotaMetrics()...)
+	out = append(out, fmt.Sprintf("whatsapp_bridge_media_cached_bytes{backend=%q} %d", b.mediaStorage().Backend(), mediaBytes), fmt.Sprintf("whatsapp_bridge_media_cached_files{backend=%q} %d", b.mediaStorage().Backend(), mediaFiles))
+	if quota, _, _, err := b.mediaQuotaSettings(b.ctx); err == nil {
+		add("whatsapp_bridge_media_quota_bytes", "Instance media cache ceiling.", "gauge", fmt.Sprint(quota))
+		b.observeMediaQuota(quota, mediaBytes)
+	}
 	add("whatsapp_bridge_messages_stored_total", "Inbound/outbound messages written from live events.", "counter", fmt.Sprint(m.messagesStored.Load()))
 	add("whatsapp_bridge_session_keepalives_total", "Times the device was marked available and unavailable again so WhatsApp counts it as in use.", "counter", fmt.Sprint(m.sessionKeepalives.Load()))
 	add("whatsapp_bridge_history_messages_total", "Messages written from history sync.", "counter", fmt.Sprint(m.historyMessages.Load()))

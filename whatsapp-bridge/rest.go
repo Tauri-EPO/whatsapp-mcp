@@ -78,6 +78,8 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		return auth(b.ReadOnly.guard(b.runtimeToolGuard(h)))
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/media/blob", auth(requireMethod(http.MethodGet, b.handleMediaBlob)))
+	mux.HandleFunc("/api/media/cache", auth(requireMethod(http.MethodGet, b.handleMediaCache)))
 	mux.HandleFunc("/api/labels", auth(requireMethod(http.MethodGet, handleLabels(messageStore, b.Policy, func(ctx context.Context, chat types.JID) (types.JID, error) {
 		if client == nil || client.Store == nil || client.Store.LIDs == nil {
 			return types.EmptyJID, nil
@@ -267,6 +269,12 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 	}
 	if stats != nil {
 		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles := stats.snapshotScoped(time.Now())
+		if b.mediaStorage().Backend() == "s3" {
+			if usage, err := b.mediaStorage().Usage(ctx); err == nil {
+				mediaBytes, mediaFiles, statusBytes, statusFiles = usage.Bytes, usage.Files, usage.StatusBytes, usage.StatusFiles
+			}
+		}
+		body["media_backend"] = b.mediaStorage().Backend()
 		body["store_bytes"] = storeBytes
 		body["media_bytes"] = mediaBytes
 		body["media_files"] = mediaFiles
@@ -278,6 +286,7 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["media_status_share"] = share
 		if quota, types, target, err := b.mediaQuotaSettings(ctx); err == nil {
 			body["media_quota_bytes"], body["media_caching_paused"] = quota, b.mediaCachingPaused(quota, mediaBytes, types, target)
+			body["media_quota_warning"] = b.observeMediaQuota(quota, mediaBytes)
 		}
 		_, _, _, warning := b.archiveStats(time.Now())
 		body["store_warning"] = warning

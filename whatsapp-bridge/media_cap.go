@@ -22,6 +22,13 @@ func (b *Bridge) cacheOutboundMedia(ctx context.Context, sent sentMessage, media
 	if !b.MediaAutoDownload {
 		return
 	}
+	if !b.shouldAutoCache(ctx, media.mediaType) {
+		return
+	}
+	if b.mediaStorage().Backend() == "s3" {
+		b.cacheOutboundS3(ctx, sent, media, data)
+		return
+	}
 	if chatJID, err := types.ParseJID(sent.ChatJID); err == nil && b.skipsStatusMedia(chatJID) {
 		return
 	}

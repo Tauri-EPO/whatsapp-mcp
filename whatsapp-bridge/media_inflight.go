@@ -156,3 +156,10 @@ func transferContext(lifecycle, starter context.Context) (context.Context, conte
 	}
 	return context.WithCancel(base)
 }
+
+func mediaDownloadContext(lifecycle, starter context.Context) (context.Context, context.CancelFunc) {
+	if transient, _ := starter.Value(transientMediaKey{}).(string); transient != "" {
+		return context.WithCancel(starter)
+	}
+	return transferContext(lifecycle, starter)
+}
