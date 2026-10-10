@@ -7,6 +7,16 @@
 set -eu
 
 port="${WHATSAPP_BRIDGE_PORT:-8080}"
+# The split file maps its qualified name to a static IP in /etc/hosts on this
+# container. A peer's DNS alias must never choose this probe's destination.
+bind="${WHATSAPP_BRIDGE_BIND:-127.0.0.1}"
+bind=$(printf '%s' "$bind" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^\[//;s/\]$//')
+bind=${bind:-127.0.0.1}
+case "$bind" in
+    0.0.0.0) bind=127.0.0.1 ;;
+    ::) bind='[::1]' ;;
+    *:*) bind="[$bind]" ;;
+esac
 token="${WHATSAPP_BRIDGE_TOKEN:-}"
 store="${WHATSAPP_STORE_DIR:-/app/store}"
 if [ -z "$token" ] && [ -r "$store/.bridge-token" ]; then
@@ -16,4 +26,4 @@ fi
 # This probe is always local: never send its bearer token to an HTTP proxy.
 exec wget -Y off -q -O /dev/null -T 4 \
     --header="Authorization: Bearer ${token}" \
-    "http://127.0.0.1:${port}/api/health"
+    "http://${bind}:${port}/api/health"

@@ -127,6 +127,8 @@ whatsapp-mcp/
 │   ├── logging_json.go         # WHATSAPP_LOG_FORMAT=json line logger
 │   ├── metrics.go              # counters + GET /metrics (Prometheus text)
 │   ├── rest_bind.go            # WHATSAPP_BRIDGE_BIND / WHATSAPP_BRIDGE_ALLOWED_HOSTS
+│   ├── rest_device_linux.go    # split REST socket bound to the agent interface without added capabilities
+│   ├── rest_device_other.go    # other platforms retain IP/Host/bearer checks and log the device-binding limit
 │   ├── config.go               # validates all startup values before filesystem/database/listener effects; one diagnostic, exit 1
 │   ├── env_bool.go             # the one boolean parser (a value it cannot read stops the bridge) + the four default-on switches
 │   ├── media_status.go        # status runtime preference, one-shot purge CLI and upgrade marker
@@ -194,6 +196,7 @@ whatsapp-mcp/
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp — docs/DOCKER.md (no whisper: WHISPER_URL points at a server you run)
 ├── docker-compose.operator.yml # optional private operator network; no operator host port
+├── docker-compose.split.yml    # optional MCP namespace separation; apply last after other overrides
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), operator-logout.sh (private unlink/cleanup), upstream-harvest.sh, merge-when-green.sh (update / wait for CI / squash-merge a PR)
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
@@ -353,7 +356,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_BRIDGE_BIND` | `127.0.0.1` | Bridge REST listen address; `0.0.0.0` / `::` for other containers or hosts (`rest_bind.go`) |
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)* | Extra `Host` values accepted by the bridge (`host` any port, `host:port` exact, `*` any). Same semantics as `WHATSAPP_MCP_ALLOWED_HOSTS`; loopback spellings always included; a non-loopback bind without it stays loopback-only (403) |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge listens on |
-| `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback. |
+| `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback or use the validated split agent address. |
 | `WHATSAPP_OPERATOR_PORT` | `8090` | Operator port; no host publication in compose. |
 | `WHATSAPP_OPERATOR_TOKEN` | required when enabled | At least 32 random bytes encoded as 64 hex or 43-256 unpadded base64url characters; low-entropy/repeated values refused. Generate with `openssl rand -hex 32`. Distinct from the effective bridge token, including its stored fallback. |
 | `WHATSAPP_OPERATOR_TOKEN_FILE` | empty | Alternative owner-only regular token file; symlinks, permissive modes and oversized files refused. Set token or file, never both. |
@@ -455,6 +458,8 @@ Runtime overrides are the exception to startup-only configuration: `tools.allow`
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 
 Compose-only proxy knobs: `WHATSAPP_PROXY_NETWORK` (default `proxy`) names an existing external network and `WHATSAPP_PROXY_ALIAS` is required and unique per instance in `docker-compose.proxy.yml`. This override removes host ports and defaults the outbox to a project-scoped named volume; `WHATSAPP_OUTBOX` can still select a bind mount. The base compose topology is unchanged. See `docs/DOCKER.md`.
+
+`docker-compose.split.yml` is applied last: MCP owns its namespace and proxy alias, joins the internal project agent network and default egress network, and never joins operator. Compose-only `WHATSAPP_AGENT_SUBNET` and `WHATSAPP_AGENT_BRIDGE_IP` are required and distinct per project. Trusted `extra_hosts` pin `bridge-agent.<project>_agent` to that static IP on both services: Docker aliases on other networks cannot receive the bearer, even if they register the full qualified name. REST requires the exact qualified Host and one distinct local IP; with an operator this is the only non-loopback bind exception. Forwarding is disabled on both containers; Linux binds REST to its agent device when the kernel permits uid 1000, without adding capabilities (see the documented NET_ADMIN/token residual otherwise). Default topology and existing overrides remain unchanged. No host ports are published. Store remains mounted writable for MCP-owned notes and SQLite WAL/SHM; bridge databases use `mode=ro` handles, never `immutable`, not physical mount enforcement. Only this override defaults exports to `/app/outbox/exports`; uid 1000 and token resolution remain unchanged. See `docs/DOCKER.md` for migration and network boundaries.
 
 ## 8. Gotchas (read before editing)
 

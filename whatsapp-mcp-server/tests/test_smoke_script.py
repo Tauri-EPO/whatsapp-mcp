@@ -84,6 +84,8 @@ case "$cmd" in
   printenv)
     case "$1" in
       WHATSAPP_BRIDGE_TOKEN)      value="${FAKE_ENV_BRIDGE_TOKEN:-}" ;;
+      WHATSAPP_BRIDGE_BIND)       value="${FAKE_ENV_BRIDGE_BIND:-}" ;;
+      WHATSAPP_BRIDGE_PORT)       value="${FAKE_ENV_BRIDGE_PORT:-}" ;;
       WHATSAPP_MCP_TOKEN)         value="${FAKE_ENV_MCP_TOKEN:-}" ;;
       WHATSAPP_MCP_METRICS)       value="${FAKE_ENV_MCP_METRICS:-}" ;;
       WHATSAPP_MCP_METRICS_TOKEN) value="${FAKE_ENV_MCP_METRICS_TOKEN:-}" ;;
@@ -258,6 +260,22 @@ def test_compose_mode_unpaired_exits_2(stack: Stack) -> None:
     assert "not paired yet" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("bind", "target"),
+    [("bridge-agent", "bridge-agent"), (" [::] ", "[::1]"), (" 127.0.0.1 ", "127.0.0.1"), ("  ", "127.0.0.1")],
+)
+def test_split_smoke_probes_selected_rest_interface(stack: Stack, bind: str, target: str) -> None:
+    result = stack.run(
+        FAKE_COMPOSE_PS="  bridge: running healthy\n",
+        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
+        FAKE_ENV_BRIDGE_BIND=bind,
+        FAKE_ENV_BRIDGE_PORT="8080",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"http://{target}:8080/api/health" in stack.docker_calls()
+    assert f"http://{target}:8080/api/ready" in stack.docker_calls()
+
+
 def test_loopback_smoke_refuses_inherited_proxy(stack: Stack) -> None:
     result = stack.run(
         FAKE_COMPOSE_PS="  bridge: running healthy\n",
@@ -287,6 +305,37 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("bind", "target"),
+    [
+        ("[::]", "[::1]"),
+        (" [::1] ", "[::1]"),
+        (" 127.0.0.1 ", "127.0.0.1"),
+        ("  ", "127.0.0.1"),
+        (" bridge-agent ", "bridge-agent"),
+    ],
+)
+def test_healthcheck_normalizes_accepted_bind(tmp_path: Path, bind: str, target: str) -> None:
+    wget = tmp_path / "wget"
+    wget.write_text('#!/bin/sh\nfor arg in "$@"; do :; done\nprintf "%s" "$arg"\n', encoding="utf-8")
+    wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
+    result = subprocess.run(
+        [BASH, str(ROOT / "whatsapp-bridge" / "docker-healthcheck.sh")],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
+            "WHATSAPP_BRIDGE_BIND": bind,
+            "WHATSAPP_BRIDGE_PORT": "8080",
+            "WHATSAPP_BRIDGE_TOKEN": "bridge-token-0123456789",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"http://{target}:8080/api/health"
 
 
 def test_project_mode_talks_to_the_containers(stack: Stack) -> None:

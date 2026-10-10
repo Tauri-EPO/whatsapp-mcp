@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -11,6 +12,56 @@ import (
 	"testing"
 	"time"
 )
+
+func TestConfigOperatorRefusesWildcardREST(t *testing.T) {
+	for _, bind := range []string{"0.0.0.0", "::"} {
+		t.Run(bind, func(t *testing.T) {
+			values := map[string]string{
+				bridgeBindEnv: bind, operatorBindEnv: "192.0.2.20",
+				operatorTokenEnv: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+			}
+			if _, err := parseBridgeConfig(func(key string) string { return values[key] }); err == nil || !strings.Contains(err.Error(), bridgeBindEnv) {
+				t.Fatalf("operator with REST %s accepted: %v", bind, err)
+			}
+		})
+	}
+}
+
+func TestConfigDefaultDoesNotResolveNetwork(t *testing.T) {
+	cfg, err := parseBridgeConfigNetwork(func(string) string { return "" },
+		func(context.Context, string) ([]net.IPAddr, error) { t.Fatal("default consulted DNS"); return nil, nil },
+		func() ([]net.Addr, error) { t.Fatal("default consulted interfaces"); return nil, nil })
+	if err != nil || cfg.Bind != defaultBridgeBind || cfg.SplitREST {
+		t.Fatalf("default changed: %+v %v", cfg, err)
+	}
+}
+
+func TestConfigSplitPinsQualifiedAddressBeforeEffects(t *testing.T) {
+	const host = "bridge-agent.example_agent"
+	values := map[string]string{
+		bridgeBindEnv: host, bridgeAllowedHostsEnv: host + ":8080",
+		operatorBindEnv:  "192.0.2.20",
+		operatorTokenEnv: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+		storeDirEnv:      filepath.Join(t.TempDir(), "not-created"),
+	}
+	lookups := 0
+	cfg, err := parseBridgeConfigNetwork(func(key string) string { return values[key] },
+		func(_ context.Context, name string) ([]net.IPAddr, error) {
+			lookups++
+			if name != host {
+				t.Fatalf("unscoped startup lookup: %s", name)
+			}
+			return []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}}, nil
+		}, func() ([]net.Addr, error) {
+			return []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}}, nil
+		})
+	if err != nil || cfg.Bind != "192.0.2.10" || !cfg.SplitREST || lookups != 1 || cfg.AllowedHosts != host+":8080" {
+		t.Fatalf("config did not pin the split address: %+v lookup=%d err=%v", cfg, lookups, err)
+	}
+	if _, err := os.Stat(values[storeDirEnv]); !os.IsNotExist(err) {
+		t.Fatalf("config created store: %v", err)
+	}
+}
 
 func invalidStartupValues() map[string]string {
 	return map[string]string{

@@ -3,6 +3,7 @@ package main
 // Parse the whole environment before startup opens the store, a listener or
 // an outbox. Filesystem failures are handled later, with startup's defers.
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -18,6 +19,7 @@ type bridgeConfig struct {
 	Switches                     bridgeSwitches
 	Port                         int
 	Bind, AllowedHosts           string
+	SplitREST                    bool
 	MediaRetention               time.Duration
 	StatusMedia                  bool
 	StatusRetention              *time.Duration
@@ -44,6 +46,12 @@ type bridgeConfig struct {
 func loadBridgeConfig() (bridgeConfig, error) { return parseBridgeConfig(os.Getenv) }
 
 func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
+	return parseBridgeConfigNetwork(getenv, net.DefaultResolver.LookupIPAddr, net.InterfaceAddrs)
+}
+
+func parseBridgeConfigNetwork(getenv func(string) string,
+	lookup func(context.Context, string) ([]net.IPAddr, error), localAddrs func() ([]net.Addr, error),
+) (bridgeConfig, error) {
 	cfg := bridgeConfig{
 		Port: 8080, AllowedHosts: getenv(bridgeAllowedHostsEnv),
 		DeviceName: strings.TrimSpace(getenv("WHATSAPP_DEVICE_NAME")),
@@ -96,11 +104,11 @@ func parseBridgeConfig(getenv func(string) string) (bridgeConfig, error) {
 	_, err = resolveMediaRootsValue(cfg.MediaRoots, true)
 	collect(err)
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
-	cfg.Operator, err = parseOperatorConfig(getenv, net.DefaultResolver.LookupIPAddr)
+	cfg.Operator, err = parseOperatorConfig(getenv, lookup)
 	collect(err)
-	if cfg.Operator.Bind != "" && !isLoopbackBind(cfg.Bind) {
-		collect(errors.New("WHATSAPP_BRIDGE_BIND must remain loopback when WHATSAPP_OPERATOR_BIND is enabled"))
-	}
+	cfg.SplitREST = isSplitBridgeBind(cfg.Bind)
+	cfg.Bind, err = resolveSplitBridgeBind(cfg.Bind, cfg.AllowedHosts, cfg.Port, cfg.Operator.Bind, lookup, localAddrs)
+	collect(err)
 	if cfg.Operator.Bind != "" && cfg.Operator.Port == cfg.Port {
 		collect(errors.New("WHATSAPP_OPERATOR_PORT must differ from WHATSAPP_BRIDGE_PORT"))
 	}

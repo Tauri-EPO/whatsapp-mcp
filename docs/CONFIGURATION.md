@@ -40,14 +40,20 @@ per-instance `WHATSAPP_PROXY_ALIAS` select the external network in the opt-in
 outbox volume; a nonempty path retains a bind mount. See
 [Behind a shared reverse proxy](DOCKER.md#behind-a-shared-reverse-proxy).
 
+The split override requires compose-only `WHATSAPP_AGENT_SUBNET` and
+`WHATSAPP_AGENT_BRIDGE_IP`: select a free IPv4 subnet and a bridge address
+inside it, distinct per project. These pin the qualified bridge name through
+trusted `extra_hosts`, preventing bearer disclosure through cross-network DNS
+aliases. See [Separate MCP namespace](DOCKER.md#separate-mcp-network-namespace).
+
 Copy `.env.example` to `.env` and configure as needed. The bridge validates startup values before opening the store, creating its outbox or binding a listener. If any are invalid, one diagnostic names every bad variable and the process exits with status 1; startup I/O failures also exit non-zero after cleanup.
 
 | Variable               | Default                                  | Description                                  |
 | ---------------------- | ---------------------------------------- | -------------------------------------------- |
-| `WHATSAPP_BRIDGE_BIND`  | `127.0.0.1`                              | Address the bridge REST API listens on. `0.0.0.0` / `::` to expose it to other containers or hosts (pair with `WHATSAPP_BRIDGE_ALLOWED_HOSTS`) |
+| `WHATSAPP_BRIDGE_BIND`  | `127.0.0.1`                              | Address the bridge REST API listens on. `0.0.0.0` / `::` to expose it to other containers or hosts (pair with `WHATSAPP_BRIDGE_ALLOWED_HOSTS`). With operator enabled, only loopback or the split topology's `bridge-agent.<project>_agent` name is allowed: one local address, distinct from operator, with exact qualified Host and port. The split file pins that name through static IPv4 and trusted `extra_hosts`; the bare alias is refused. See [Docker namespace separation](DOCKER.md#separate-mcp-network-namespace) |
 | `WHATSAPP_BRIDGE_ALLOWED_HOSTS` | *(loopback only)*                 | Comma-separated `Host` values accepted besides loopback (`host` = any port, `host:port` exact, `*` any). Off-loopback binds refuse non-loopback Hosts until this names them |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
-| `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback. |
+| `WHATSAPP_OPERATOR_BIND` | empty (off) | Separate operator listener: one explicit IP or hostname resolving to one private network address; wildcard binds refused. Bridge REST must remain loopback or use the validated split agent address. |
 | `WHATSAPP_OPERATOR_PORT` | `8090` | Operator port; no host publication in compose. |
 | `WHATSAPP_OPERATOR_TOKEN` | required when enabled | At least 32 random bytes encoded as 64 hex or 43-256 unpadded base64url characters; low-entropy/repeated values refused. Generate with `openssl rand -hex 32`. Distinct from the effective bridge token, including its stored fallback. |
 | `WHATSAPP_OPERATOR_TOKEN_FILE` | empty | Alternative owner-only regular token file; symlinks, permissive modes and oversized files refused. Set token or file, never both. |
