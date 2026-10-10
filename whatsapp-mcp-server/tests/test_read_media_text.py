@@ -446,4 +446,7 @@ class TestScope:
             "quality",
             "as_images",
             "first_page",
+            "as_base64",
+            "offset",
+            "length",
         }

@@ -41,8 +41,8 @@ from media_notes import clear_media_refusal as notes_clear_media_refusal
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
+from media_read import DEFAULT_CHUNK_BYTES, content_tool
 from media_read import cached_only_path as media_cached_only_path
-from media_read import content_tool
 from media_read import read_media as media_read_bytes
 from media_resource import MediaResourceServer, attach_resource_links
 from media_upload import upload_dir
@@ -2632,11 +2632,26 @@ def read_media(
     quality: int = DEFAULT_QUALITY,
     as_images: bool = False,
     first_page: int = 1,
+    as_base64: bool = False,
+    offset: int = 0,
+    length: int = DEFAULT_CHUNK_BYTES,
 ) -> list[ContentBlock]:
     """Read the media of a WhatsApp message: the bytes come back, not a path.
 
     This is how you actually look at a photo, and it works over any transport —
     download_media only hands back a path on the server's own filesystem.
+
+    **To save the original file on another machine, use as_base64=True.** The
+    first block is plain base64 TEXT (even if your client drops resource blobs),
+    followed by JSON with total_size, offset, returned_length, next_offset,
+    sha256 (the whole file) and chunk_sha256. Start at offset=0, decode the first
+    block, verify chunk_sha256, and append the decoded bytes in offset order.
+    Repeat with offset=next_offset until next_offset is null, then verify the
+    assembled file's SHA256 against sha256 and list_media.sha256. length defaults
+    to 1 MiB and must be 1..4194304 bytes; lower it for clients with small response
+    limits. This mode works for any file size and type, returns original bytes
+    without conversion, and cannot be combined with as_text or as_images.
+    max_bytes and rendering options do not apply; length bounds each chunk.
 
     What you get back:
       - an image (photo, sticker, and also TIFF, BMP, HEIC) as image content you
@@ -2710,6 +2725,9 @@ def read_media(
         quality: JPEG quality when an image is re-encoded, 1-100 (default 85)
         as_images: Render a PDF's pages as images instead of returning its bytes
         first_page: With as_images, the page to start at, counting from 1 (default 1)
+        as_base64: Return an original byte range as base64 text, then JSON metadata
+        offset: With as_base64, zero-based byte offset (0 through total_size)
+        length: With as_base64, bytes requested (default 1048576, maximum 4194304)
 
     Returns:
         A list of content blocks: the file (or its text, or its pages), then the JSON
@@ -2729,6 +2747,9 @@ def read_media(
         quality=quality,
         as_images=as_images,
         first_page=first_page,
+        as_base64=as_base64,
+        offset=offset,
+        length=length,
     )
 
 
