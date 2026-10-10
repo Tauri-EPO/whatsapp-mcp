@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -73,6 +72,16 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var readLimit int64
+	if !ranged && r.URL.Query().Has("max_bytes") {
+		var limitErr error
+		readLimit, limitErr = strconv.ParseInt(r.URL.Query().Get("max_bytes"), 10, 64)
+		if limitErr != nil || readLimit < 1 {
+			writeErrorCode(w, 400, "invalid_argument", "Invalid media byte limit")
+			return
+		}
+		readLimit = min(readLimit, int64(512*1024*1024-26))
+	}
 	id := r.URL.Query().Get("message_id")
 	row, err := b.Store.MediaRow(id, chat.String())
 	if err != nil {
@@ -87,6 +96,9 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	ctx, stopLifecycle := requestMediaContext(b.ctx, ctx)
 	defer stopLifecycle()
+	if readLimit > 0 {
+		ctx = withMediaLimit(ctx, uint64(readLimit))
+	}
 	finish, trackErr := b.mediaTransfers.trackRequest(ctx, stopLifecycle)
 	if trackErr != nil {
 		writeError(w, 503, "Media read cancelled")
@@ -94,6 +106,15 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	defer finish()
 	storage := b.mediaStorage()
+	if remote, ok := storage.(*s3MediaStorage); ok {
+		select {
+		case remote.blobSlots <- struct{}{}:
+			defer func() { <-remote.blobSlots }()
+		default:
+			writeError(w, 503, "Media read capacity exhausted; retry later")
+			return
+		}
+	}
 	entry, err := storage.Lookup(ctx, row)
 	if err != nil {
 		writeError(w, 503, "Media cache unavailable")
@@ -104,23 +125,35 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "Media is not cached")
 			return
 		}
-		if !b.Connected() {
+		var private mediaStorage
+		if remote, ok := storage.(*s3MediaStorage); ok {
+			private, err = remote.transient(ctx, row, readLimit, false)
+		}
+		if err == nil && private == nil && !b.Connected() {
 			writeError(w, 503, "WhatsApp client is not connected")
 			return
 		}
-		_, _, _, _, err = b.DownloadMedia(ctx, row.ID, row.ChatJID)
+		if err == nil && private == nil {
+			_, _, _, _, err = b.DownloadMedia(ctx, row.ID, row.ChatJID)
+		}
 		if errors.Is(err, errMediaQuota) {
-			// Keep the fallback owned by this HTTP request. Its private temporary
-			// local file disappears after streaming, and never enters the catalog.
-			rel := ".media-stream-" + rand.Text()
-			ctx = context.WithValue(ctx, transientMediaKey{}, rel)
-			defer func() { _ = b.StoreRoot.Remove(rel); _ = b.StoreRoot.Remove(rel + ".part") }()
-			_, _, _, _, err = b.downloadMediaAttempt(ctx, row.ID, row.ChatJID)
-			storage = transientMediaStorage{localMediaStorage: localMediaStorage{root: b.StoreRoot}, rel: rel}
+			private, err = storage.(*s3MediaStorage).transient(ctx, row, readLimit, true)
+		}
+		if private != nil {
+			storage = private
+			defer func() { _ = private.(verifiedTransientStorage).reader.Close() }()
 			w.Header().Set("X-Media-Cached", "false")
 			w.Header().Set("X-Media-Reason", "quota")
 		}
 		if err != nil {
+			if errors.Is(err, errMediaSpoolFull) {
+				writeError(w, 503, "Media read capacity exhausted; retry later")
+				return
+			}
+			if errors.Is(err, errAutoMediaLimit) {
+				writeErrorCode(w, 413, "too_large", "Media exceeds requested byte limit")
+				return
+			}
 			code := permanentMediaCode(err)
 			if code == "" {
 				code = errorCode(http.StatusBadGateway)
@@ -128,6 +161,10 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 			writeErrorCode(w, 502, code, "Media download failed")
 			return
 		}
+	}
+	if entry != nil && readLimit > 0 && entry.Bytes > readLimit {
+		writeErrorCode(w, 413, "too_large", "Media exceeds requested byte limit")
+		return
 	}
 	var f io.ReadCloser
 	var size int64
@@ -144,6 +181,10 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 		f, size, err = storage.Open(ctx, row, "")
 	}
 	if err != nil {
+		if errors.Is(err, errMediaSpoolFull) {
+			writeError(w, 503, "Media read capacity exhausted; retry later")
+			return
+		}
 		if errors.Is(err, errMediaRange) {
 			writeErrorCode(w, 400, "invalid_argument", "Invalid media byte range")
 			return

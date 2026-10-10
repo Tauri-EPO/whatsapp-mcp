@@ -632,9 +632,7 @@ def resolve_media(
         if reported and not as_base64:
             expected = guess_mime(media_type, filename)
             check_size(reported, cap(max_bytes, hard_limit(expected, as_text, max_edge, as_images)), expected, caller)
-        path = download_path(chat_jid, message_id)
-        if remote:
-            cached = media_remote.lookup(chat_jid, message_id)
+        path = media_remote.uri(chat_jid, message_id) if remote else download_path(chat_jid, message_id)
 
     mime = declared_mime(media_type, filename, path)
     if as_images:

@@ -448,6 +448,7 @@ func (s *s3MediaStorage) removeObject(ctx context.Context, hash []byte) error {
 	if err := s.client.RemoveObject(ctx, s.cfg.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		return errMediaS3
 	}
+	s.spools.discard(hash)
 	return nil
 }
 

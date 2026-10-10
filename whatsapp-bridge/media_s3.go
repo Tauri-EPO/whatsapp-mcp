@@ -37,7 +37,7 @@ func cleanMediaSpools(root *os.Root) error {
 		return err
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".media-stage-") || strings.HasPrefix(e.Name(), ".media-stream-") {
+		if strings.HasPrefix(e.Name(), ".media-stage-") || strings.HasPrefix(e.Name(), ".media-stream-") || strings.HasPrefix(e.Name(), ".media-verified-") {
 			if err := root.Remove(e.Name()); err != nil {
 				return err
 			}
@@ -58,6 +58,10 @@ type s3MediaStorage struct {
 	mu              sync.Mutex
 	locks           map[string]*s3ObjectLock
 	transfers       chan struct{}
+	writeTransfers  chan struct{}
+	blobSlots       chan struct{}
+	spools          *s3VerifiedSpools
+	stopSpools      func() bool
 	bridge          *Bridge
 	deletionJournal bool
 	uploadJournal   bool
@@ -102,7 +106,15 @@ func newS3MediaStorage(ctx context.Context, cfg mediaBackendConfig, store *Messa
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_cache_uploads'`).Scan(&uploads); err != nil {
 		return nil, errMediaS3
 	}
-	return &s3MediaStorage{client: client, cfg: cfg, store: store, root: root, locks: make(map[string]*s3ObjectLock), transfers: make(chan struct{}, 4), deletionJournal: journal != 0, uploadJournal: uploads != 0}, nil
+	s := &s3MediaStorage{client: client, cfg: cfg, store: store, root: root, locks: make(map[string]*s3ObjectLock), transfers: make(chan struct{}, 4), writeTransfers: make(chan struct{}, 4), blobSlots: make(chan struct{}, 4), deletionJournal: journal != 0, uploadJournal: uploads != 0}
+	s.spools = newS3VerifiedSpools(root)
+	s.stopSpools = context.AfterFunc(ctx, func() { _ = s.spools.Close() })
+	return s, nil
+}
+
+func (s *s3MediaStorage) Close() error {
+	s.stopSpools()
+	return s.spools.Close()
 }
 
 func (*s3MediaStorage) Backend() string { return "s3" }
@@ -142,9 +154,13 @@ func (s *s3MediaStorage) lockHash(ctx context.Context, hash []byte) (func(), err
 }
 
 func (s *s3MediaStorage) transfer(ctx context.Context) (func(), error) {
+	return acquireS3Transfer(ctx, s.transfers)
+}
+
+func acquireS3Transfer(ctx context.Context, slots chan struct{}) (func(), error) {
 	select {
-	case s.transfers <- struct{}{}:
-		return func() { <-s.transfers }, nil
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -203,6 +219,25 @@ func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.R
 	if err != nil || !bytes.Equal(current, hash) {
 		return nil, 0, errMediaSnapshot
 	}
+	reader, reused, err := s.spools.acquire(hash, size)
+	if err != nil {
+		return nil, 0, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = reader.Close()
+		}
+	}()
+	if reused {
+		if readonly, _ := ctx.Value(mediaReadOnlyKey{}).(bool); !readonly {
+			if _, err := s.store.db.ExecContext(ctx, `UPDATE media_cache SET last_access_at=? WHERE sha256=?`, dbTime(time.Now()), hash); err != nil {
+				return nil, 0, errMediaS3
+			}
+		}
+		keep = true
+		return reader, size, nil
+	}
 	release, err := s.transfer(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -218,15 +253,13 @@ func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.R
 	}
 	defer func() { _ = object.Close() }()
 	// Verify before releasing any bytes to a caller. A private disk spool keeps
-	// memory bounded, and is removed when the reader closes, including failures.
-	f, err := s.spool()
-	if err != nil {
-		return nil, 0, errMediaS3
-	}
-	reader := &temporaryMediaReader{File: f, root: s.root, rel: filepath.Base(f.Name())}
+	// memory bounded. Verified files are reused until idle expiry or shutdown;
+	// failed downloads are removed immediately.
+	f := reader.File
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(object, size+1))
-	if err != nil || n != size || !bytes.Equal(h.Sum(nil), hash) {
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(object, size))
+	extra, extraErr := io.Copy(io.Discard, io.LimitReader(object, 1))
+	if err != nil || extraErr != nil || n != size || extra != 0 || !bytes.Equal(h.Sum(nil), hash) {
 		_ = reader.Close()
 		return nil, 0, errMediaHash
 	}
@@ -240,7 +273,10 @@ func (s *s3MediaStorage) Open(ctx context.Context, row mediaRow, _ string) (io.R
 			return nil, 0, errMediaS3
 		}
 	}
-	reader.hash = hash
+	if err := s.spools.verified(reader); err != nil {
+		return nil, 0, err
+	}
+	keep = true
 	return reader, size, nil
 }
 
@@ -329,6 +365,11 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 		return 0, errMediaHash
 	}
 	reserved, _ := ctx.Value(s3QuotaReservedKey{}).(bool)
+	if s.bridge != nil && reserved {
+		if err := s.bridge.bindS3QuotaReservation(ctx, hash, size); err != nil {
+			return 0, err
+		}
+	}
 	var unlock func()
 	for {
 		if reserved && mediaLimit(ctx) > 0 && uint64(size) > mediaLimit(ctx) {
@@ -352,7 +393,8 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 		// Dedupe is authoritative only under the content lock. Release it
 		// before admission, which may evict objects and take content locks.
 		unlock()
-		bounded, release, err := s.bridge.acquireMediaQuota(ctx, uint64(size))
+		quotaCtx := context.WithValue(ctx, s3QuotaHashKey{}, hex.EncodeToString(hash))
+		bounded, release, err := s.bridge.acquireMediaQuota(quotaCtx, uint64(size))
 		if err != nil {
 			return 0, err
 		}
@@ -360,7 +402,7 @@ func (s *s3MediaStorage) put(ctx context.Context, row mediaRow, reader io.Reader
 		ctx, reserved = bounded, true
 	}
 	defer unlock()
-	release, err := s.transfer(ctx)
+	release, err := acquireS3Transfer(ctx, s.writeTransfers)
 	if err != nil {
 		return 0, err
 	}

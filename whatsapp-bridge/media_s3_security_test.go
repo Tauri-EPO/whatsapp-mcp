@@ -246,7 +246,7 @@ func TestMinIOStartupCleansSpoolsAndMigrationAdoptsPendingObject(t *testing.T) {
 	if _, err := s.client.PutObject(b.ctx, s.cfg.Bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{DisableMultipart: true}); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range []string{".media-stage-crash", ".media-stage-crash.part", ".media-stream-crash", ".media-stream-crash.part"} {
+	for _, rel := range []string{".media-stage-crash", ".media-stage-crash.part", ".media-stream-crash", ".media-stream-crash.part", ".media-verified-crash"} {
 		f, err := b.StoreRoot.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			t.Fatal(err)
@@ -260,7 +260,7 @@ func TestMinIOStartupCleansSpoolsAndMigrationAdoptsPendingObject(t *testing.T) {
 	}
 	resumed.bridge = b
 	b.MediaStorage = resumed
-	for _, rel := range []string{".media-stage-crash", ".media-stage-crash.part", ".media-stream-crash", ".media-stream-crash.part"} {
+	for _, rel := range []string{".media-stage-crash", ".media-stage-crash.part", ".media-stream-crash", ".media-stream-crash.part", ".media-verified-crash"} {
 		if _, err := b.StoreRoot.Lstat(rel); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("startup retained stale plaintext", err)
 		}
@@ -348,7 +348,7 @@ func TestMinIODryRunCLIsPreservePlaintextSpools(t *testing.T) {
 			for key, value := range map[string]string{"WHATSAPP_MEDIA_BACKEND": "s3", "WHATSAPP_MEDIA_S3_ENDPOINT": s.cfg.Endpoint, "WHATSAPP_MEDIA_S3_REGION": s.cfg.Region, "WHATSAPP_MEDIA_S3_BUCKET": s.cfg.Bucket, "WHATSAPP_MEDIA_S3_PREFIX": s.cfg.Prefix, "WHATSAPP_MEDIA_S3_ACCESS_KEY_ID": s.cfg.AccessKey, "WHATSAPP_MEDIA_S3_SECRET_ACCESS_KEY": s.cfg.SecretKey, "WHATSAPP_MEDIA_S3_FORCE_PATH_STYLE": "true"} {
 				t.Setenv(key, value)
 			}
-			for _, name := range []string{".media-stage-dry", ".media-stream-dry"} {
+			for _, name := range []string{".media-stage-dry", ".media-stream-dry", ".media-verified-dry"} {
 				if err := b.StoreRoot.WriteFile(name, []byte("unchanged dry-run evidence"), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -363,7 +363,7 @@ func TestMinIODryRunCLIsPreservePlaintextSpools(t *testing.T) {
 			if code != 0 {
 				t.Fatal("dry-run CLI failed", code, &diagnostic)
 			}
-			for _, name := range []string{".media-stage-dry", ".media-stream-dry"} {
+			for _, name := range []string{".media-stage-dry", ".media-stream-dry", ".media-verified-dry"} {
 				got, err := b.StoreRoot.ReadFile(name)
 				if err != nil || string(got) != "unchanged dry-run evidence" {
 					t.Fatal("dry-run removed plaintext spool", command, name, err)

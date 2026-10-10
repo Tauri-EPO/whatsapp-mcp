@@ -13,7 +13,7 @@ from errors import ToolError
 CHAT = "5511999999999@s.whatsapp.net"
 
 
-@pytest.mark.parametrize("code", ["media_unavailable", "media_refused", "bridge_unavailable"])
+@pytest.mark.parametrize("code", ["media_unavailable", "media_refused", "bridge_unavailable", "too_large"])
 def test_stream_errors_preserve_permanent_codes_without_remote_diagnostics(monkeypatch, code):
     def handle(request):
         return httpx.Response(502, json={"error": {"code": code, "message": "fake-private-sentinel"}})
@@ -105,6 +105,7 @@ def test_bounded_remote_spool_cleanup_and_hash(monkeypatch):
             assert source.read() == payload
     assert not os.path.exists(path)
     assert seen[0].url.params["chat_jid"] == CHAT
+    assert seen[0].url.params["max_bytes"] == str(len(payload))
     with pytest.raises(ToolError, match="limit"):
         with media_remote.local_file(media_remote.uri(CHAT, "REMOTE1"), len(payload) - 1):
             pytest.fail("oversize file was exposed")

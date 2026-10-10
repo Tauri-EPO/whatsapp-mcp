@@ -1659,13 +1659,22 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
 | anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
-| any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; no total-file cap |
+| any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; S3 spool capacity below applies |
 
 With the S3 backend, base64 chunks use the authenticated bridge byte-range API;
 the whole-file hash comes from the verified cache catalog. The bridge verifies
-the complete object in a private temporary file before returning each range, so
-the chunk limit bounds the response while temporary disk space must hold the
-complete file. Cold reads and the quota streaming fallback support the same
+the complete object once in a private temporary file, then reuses those verified
+bytes for subsequent ranges. The file expires after two minutes without readers
+and is removed on shutdown. Verified spools are limited to 512 MiB total and four
+objects, with at most four concurrent readers and four blob responses; a full
+capacity returns HTTP 503 for a later retry. Idle spools can be evicted earlier
+to admit another object. Reads have separate transfer slots from uploads.
+Temporary disk space must hold the complete file; an object over 512 MiB is
+refused by this read path. Quota fallbacks share this pool, reserve a byte budget
+before CDN download (including encryption overhead), verify the plaintext hash
+and reuse the temporary bytes across chunks without publishing an S3 cache row.
+An unknown-length fallback reserves up to 128 MiB; whole-file reads also obey
+the caller's byte limit before writing. Cold reads and the quota fallback support the same
 `offset`/`length` parameters.
 
 The chunk JSON carries `total_size`, `offset`, `returned_length`, `next_offset`

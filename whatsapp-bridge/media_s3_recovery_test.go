@@ -32,7 +32,7 @@ import (
 func TestMinIOBase64ChunksReassembleOriginal(t *testing.T) {
 	for _, mode := range []string{"cached", "cold", "quota-streamed"} {
 		t.Run(mode, func(t *testing.T) {
-			b, _ := minioTestBridge(t, "instances/test-base64-"+mode)
+			b, s := minioTestBridge(t, "instances/test-base64-"+mode)
 			data := make([]byte, 3*1024*1024+17)
 			for i := range data {
 				data[i] = byte(i % 251)
@@ -45,11 +45,24 @@ func TestMinIOBase64ChunksReassembleOriginal(t *testing.T) {
 			if mode == "cached" {
 				s3TestWrite(t, b, row, data)
 			}
+			var objectGets atomic.Int32
+			objectKey, _ := s.key(sha256Of(data))
+			s3SecurityProxy(t, s, func(_ http.ResponseWriter, r *http.Request) bool {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, objectKey) {
+					objectGets.Add(1)
+				}
+				return false
+			}, nil)
 			if mode == "quota-streamed" {
 				b.MediaQuotaBytes = 1
 			}
-			b.mediaTransfer = func(_ context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
-				return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write(data); return err })
+			var cdnDownloads atomic.Int32
+			b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				n, err := writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, f whatsmeow.File) error { _, err := f.Write(data); return err })
+				if err == nil {
+					cdnDownloads.Add(1)
+				}
+				return n, err
 			}
 			var chunks atomic.Int32
 			var transferred atomic.Int64
@@ -110,12 +123,22 @@ print('3 MiB + 17 bytes reconstructed from five bounded base64 chunks; whole/chu
 			if chunks.Load() != 6 || transferred.Load() != int64(len(data)) {
 				t.Fatal("range API did not transfer exactly the assembled bytes and EOF", chunks.Load(), transferred.Load())
 			}
+			wantGets := map[string]int32{"cached": 1, "cold": 2, "quota-streamed": 0}[mode]
+			if objectGets.Load() != wantGets {
+				t.Fatal("unexpected remote downloads", objectGets.Load(), wantGets)
+			}
+			if mode == "quota-streamed" && cdnDownloads.Load() != 1 {
+				t.Fatal("transient ranges repeated complete CDN download", cdnDownloads.Load())
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
 			leaves, err := os.ReadDir(b.StoreRoot.Name())
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, leaf := range leaves {
-				if strings.HasPrefix(leaf.Name(), ".media-stage-") || strings.HasPrefix(leaf.Name(), ".media-stream-") {
+				if strings.HasPrefix(leaf.Name(), ".media-stage-") || strings.HasPrefix(leaf.Name(), ".media-stream-") || strings.HasPrefix(leaf.Name(), ".media-verified-") {
 					t.Fatal("range left a plaintext spool")
 				}
 			}

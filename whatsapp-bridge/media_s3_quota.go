@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +11,8 @@ import (
 )
 
 type s3QuotaReservedKey struct{}
+type s3QuotaReservationKey struct{}
+type s3QuotaHashKey struct{}
 
 func (b *Bridge) acquireS3WriteBudget(ctx context.Context, hash []byte, incoming uint64) (context.Context, func(), error) {
 	var exists int
@@ -18,6 +22,7 @@ func (b *Bridge) acquireS3WriteBudget(ctx context.Context, hash []byte, incoming
 	if exists > 0 {
 		return ctx, func() {}, nil
 	}
+	ctx = context.WithValue(ctx, s3QuotaHashKey{}, hex.EncodeToString(hash))
 	bounded, release, err := b.acquireS3MediaQuota(ctx, incoming)
 	return context.WithValue(bounded, s3QuotaReservedKey{}, true), release, err
 }
@@ -56,21 +61,30 @@ func (b *Bridge) acquireS3MediaQuota(ctx context.Context, incoming uint64) (boun
 		return ctx, func() {}, errors.New("invalid eviction target")
 	}
 	s := b.mediaStorage().(*s3MediaStorage)
-	usage, err := s.Usage(accountingCtx)
-	if err != nil {
-		return ctx, func() {}, err
-	}
-	if usage.Bytes < 0 {
-		return ctx, func() {}, errMediaS3
-	}
-	used := uint64(usage.Bytes)
+	var reservedBytes uint64
+	hashes := []string{}
 	for reservation := range b.mediaQuotaReservations {
 		if reservation.finished.Load() {
 			delete(b.mediaQuotaReservations, reservation)
 		} else {
-			used += reservation.bytes
+			reservedBytes += reservation.bytes
+			if reservation.s3Hash != "" {
+				hashes = append(hashes, reservation.s3Hash)
+			}
 		}
 	}
+	// The reservation continues to own its bytes while PUT/verification is
+	// active. Exclude those hashes from durable charges in the same SQL read;
+	// once release finishes, the catalog or recovery intent owns the bytes.
+	excluded, err := json.Marshal(hashes)
+	if err != nil {
+		return ctx, func() {}, errMediaS3
+	}
+	var charged int64
+	if err := s.store.db.QueryRowContext(accountingCtx, `SELECT COALESCE(SUM(bytes),0) FROM (`+s.chargedObjectsSQL()+`) WHERE lower(hex(sha256)) NOT IN (SELECT value FROM json_each(?))`, string(excluded)).Scan(&charged); err != nil || charged < 0 {
+		return ctx, func() {}, errMediaS3
+	}
+	used := uint64(charged) + reservedBytes
 	if incoming > quota {
 		b.recordQuotaPause()
 		return ctx, func() {}, errMediaQuota
@@ -128,11 +142,32 @@ func (b *Bridge) acquireS3MediaQuota(ctx context.Context, incoming uint64) (boun
 		limit = min(limit, current)
 	}
 	r := &mediaQuotaReservation{bytes: limit}
+	r.s3Hash, _ = ctx.Value(s3QuotaHashKey{}).(string)
 	if b.mediaQuotaReservations == nil {
 		b.mediaQuotaReservations = map[*mediaQuotaReservation]bool{}
 	}
 	b.mediaQuotaReservations[r] = true
-	return withMediaLimit(context.WithValue(ctx, quotaBudgetKey{}, true), limit), func() { r.finished.Store(true) }, nil
+	bounded = context.WithValue(ctx, s3QuotaReservationKey{}, r)
+	return withMediaLimit(context.WithValue(bounded, quotaBudgetKey{}, true), limit), func() { r.finished.Store(true) }, nil
+}
+
+func (b *Bridge) bindS3QuotaReservation(ctx context.Context, hash []byte, size int64) error {
+	if size < 0 {
+		return errMediaHash
+	}
+	r, _ := ctx.Value(s3QuotaReservationKey{}).(*mediaQuotaReservation)
+	if r == nil {
+		return nil
+	}
+	// Called before the content lock, preserving quota -> content lock order.
+	unlock, err := b.lockMediaQuota(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	r.s3Hash = hex.EncodeToString(hash)
+	r.bytes = min(r.bytes, uint64(size))
+	return nil
 }
 
 func (b *Bridge) cacheOutboundS3(ctx context.Context, sent sentMessage, media outboundMedia, data []byte) {

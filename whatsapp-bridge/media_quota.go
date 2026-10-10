@@ -27,6 +27,7 @@ type quotaTryKey struct{}
 type quotaPathKey struct{}
 type mediaQuotaReservation struct {
 	path     string
+	s3Hash   string // Guarded by the quota lease; bound before a durable upload intent.
 	bytes    uint64
 	finished atomic.Bool
 }

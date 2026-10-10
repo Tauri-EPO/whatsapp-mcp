@@ -69,6 +69,7 @@ func minioTestBridge(t *testing.T, prefix string) (*Bridge, *s3MediaStorage) {
 	}
 	b.MediaStorage = s
 	s.bridge = b
+	t.Cleanup(func() { _ = s.Close() })
 	t.Cleanup(func() {
 		log := b.Log.(*recordingLogger).String()
 		for _, value := range []string{cfg.SecretKey, cfg.AccessKey, cfg.Bucket, strings.TrimSuffix(cfg.Prefix, "/")} {

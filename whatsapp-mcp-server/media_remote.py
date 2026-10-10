@@ -97,6 +97,8 @@ def _read_error(response: httpx.Response) -> MediaReadError:
         return MediaReadError(code, "media is permanently unavailable")
     if code == "media_refused":
         return MediaReadError(code, "media identity refused")
+    if code == "too_large":
+        return MediaReadError(code, "media exceeds the requested byte limit")
     return MediaReadError("bridge_unavailable", "bridge media read failed")
 
 
@@ -149,7 +151,12 @@ def local_file(value: str, limit: int, sha256: str | None = None, *, cache_only:
         yield value
         return
     chat, message = identity(value)
-    params = {"chat_jid": chat, "message_id": message, "cache_only": str(cache_only).lower()}
+    params = {
+        "chat_jid": chat,
+        "message_id": message,
+        "cache_only": str(cache_only).lower(),
+        "max_bytes": str(max(1, limit)),
+    }
     target = f"{whatsapp.WHATSAPP_API_BASE_URL}/media/blob"
     try:
         with tempfile.TemporaryDirectory(prefix="wamcp-read-") as directory:

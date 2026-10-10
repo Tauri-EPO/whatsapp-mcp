@@ -829,12 +829,15 @@ Resume `migrate-media --to s3`: for each retained mapped local source it
 recomputes the known hash, verifies the existing remote object and adopts its
 reference before deleting any source. Recovery uses only recorded hashes,
 without listing the bucket to infer ownership. Startup under the store
-lock removes leftover instance-owned `.media-stage-*` and `.media-stream-*`
+lock removes leftover instance-owned `.media-stage-*`, `.media-stream-*` and `.media-verified-*`
 plaintext spools, while keeping canonical local media untouched.
 Dry-run commands preserve these spools; cleanup runs on a real startup/resume.
 Do not switch backend or remove local migration sources before a successful resume.
 
-Remote transfers are bounded to four and serialize only for the same hash.
+Remote transfers have separate pools of four reads and four publications and
+serialize only for the same hash. Verified read spools are reused for two idle
+minutes, capped at four objects / 512 MiB and four concurrent readers, and removed
+on shutdown. Blob responses are capped at four; full read capacity returns 503.
 Webhook media has a short deadline and may be omitted during a slow remote
 read; the queued automatic caching path remains independent.
 

@@ -52,7 +52,7 @@ type limitedMediaReader struct {
 }
 
 // Open retains each backend's confinement and integrity checks. The returned
-// reader releases only the requested bytes; closing it also removes S3 spools.
+// reader releases only the requested bytes; closing it releases its spool lease.
 func openMediaRange(ctx context.Context, storage mediaStorage, row mediaRow, offset, length int64) (*mediaByteRange, error) {
 	if offset < 0 || length < 1 || length > maxMediaChunkBytes {
 		return nil, errMediaRange

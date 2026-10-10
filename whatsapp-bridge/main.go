@@ -284,6 +284,7 @@ func runBridge(cfg bridgeConfig) int {
 			return 1
 		}
 		bridge.MediaStorage.(*s3MediaStorage).bridge = bridge
+		defer func() { _ = bridge.MediaStorage.(*s3MediaStorage).Close() }()
 	}
 	bridge.sessionDB = sessionDB
 	bridge.HistoryLimits, bridge.SnapshotDir = cfg.History, cfg.SnapshotDir

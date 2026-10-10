@@ -96,6 +96,7 @@ func migrateMediaCLI(args []string, out, diagnostic io.Writer) int {
 		_, _ = fmt.Fprintln(diagnostic, "S3 bucket probe failed")
 		return 1
 	}
+	defer func() { _ = s3.Close() }()
 	result, err := migrateMedia(ctx, store, root, s3, *to, *dry, *remove, *concurrency)
 	_ = json.NewEncoder(out).Encode(result)
 	if err != nil || result.Failed > 0 {
