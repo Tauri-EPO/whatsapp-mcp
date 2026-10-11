@@ -457,6 +457,9 @@ def find_pending(
                 # Recording it is what makes the walk stop asking, and it
                 # then costs no strike — an archive full of expired media would
                 # otherwise end every round after three rows (issue #378).
+                # Only injected fetchers currently produce too_large here:
+                # /api/download does not emit 413 or preserve that named code.
+                # Production S3 size refusals arrive from the blob stream.
                 if fetched.too_large and media_remote.enabled():
                     # A catalog entry alone does not establish readability.
                     # Try an alternative through the bounded stream below.
@@ -532,6 +535,8 @@ def _fetch_bytes(
     except ToolError as exc:
         if exc.code == MEDIA_REFUSED_CODE:
             return Fetched(refused=exc.message, refusal_recorded=exc._media_refusal_recorded)
+        # too_large supports injected fetchers. The production /api/download
+        # path cannot produce it; S3 blob refusals are handled while streaming.
         if exc.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
             # Expected on an old archive, and per file, so it stays at debug:
             # the round logs how many it recorded.
@@ -681,6 +686,18 @@ def clear_outage_failures() -> int:
         return 0
     if cleared:
         logger.info("transcribe_on_ingest: %d voice notes parked by a whisper outage are queued again", cleared)
+    return cleared
+
+
+def clear_oversized_failures() -> int:
+    """Recheck size refusals once per start, including after a build raises a limit."""
+    try:
+        cleared = media_notes.clear_notes_containing(MEDIA_UNAVAILABLE_KEY, ["too_large:"])
+    except (ToolError, sqlite3.Error, ValueError) as exc:
+        logger.warning("transcribe_on_ingest: could not clear oversized media skips: %s", exc)
+        return 0
+    if cleared:
+        logger.info("transcribe_on_ingest: %d oversized voice notes queued again", cleared)
     return cleared
 
 
@@ -932,6 +949,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         )
         return None
     clear_outage_failures()
+    clear_oversized_failures()
     logger.info(
         "%s=1: transcribing up to %d inbound voice notes every %.0fs (%s)%s",
         ENABLED_ENV,

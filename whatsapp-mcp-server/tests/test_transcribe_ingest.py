@@ -981,6 +981,39 @@ def test_the_repair_runs_when_the_worker_is_installed(archive, monkeypatch):
     assert media_notes.fetch_notes([SHA["AUD1"]]) == {}
 
 
+def test_worker_start_rechecks_only_oversized_notes(archive, monkeypatch):
+    _add_audio(archive, "OUT1", ALICE, from_me=1)
+    media_notes.annotate_media(SHA["AUD1"], "media_unavailable", "2026-10-09: too_large: requested byte limit")
+    media_notes.annotate_media(SHA["AUD2"], "media_unavailable", "2026-10-09: phone no longer has the file")
+    media_notes.annotate_media(SHA["OUT1"], "transcript_error", "too_large: unrelated transcription failure")
+    assert transcribe_worker.install_ingest_worker({}) is None
+    assert "media_unavailable" in media_notes.fetch_notes([SHA["AUD1"]])[SHA["AUD1"]]
+    stop, results = threading.Event(), []
+    original_start = transcribe_worker.start_worker
+    backend = FakeBackend()
+
+    def round_once(batch, **kwargs):
+        try:
+            result = transcribe_worker.run_once(batch, transcribe=backend, **kwargs)
+            results.append(result)
+            return result
+        finally:
+            stop.set()
+
+    monkeypatch.setattr(
+        transcribe_worker, "start_worker", lambda config: original_start(config, stop=stop, run=round_once)
+    )
+    thread = transcribe_worker.install_ingest_worker(ON)
+    assert thread is not None
+    thread.join(timeout=5)
+    assert not thread.is_alive() and len(results) == 1 and results[0].transcribed == 1
+    notes = media_notes.fetch_notes([SHA["AUD1"], SHA["AUD2"], SHA["OUT1"]])
+    assert notes[SHA["AUD1"]]["transcript"] == "spoken words" and "media_unavailable" not in notes[SHA["AUD1"]]
+    assert "phone no longer" in notes[SHA["AUD2"]]["media_unavailable"]
+    assert "too_large:" in notes[SHA["OUT1"]]["transcript_error"]
+    assert transcribe_worker.clear_oversized_failures() == 0
+
+
 def test_a_missing_notes_db_is_nothing_to_repair(paired_dbs):
     assert transcribe_worker.clear_outage_failures() == 0
 

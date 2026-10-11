@@ -52,10 +52,30 @@ type mediaTransferGroup struct {
 }
 
 type mediaTransferCall struct {
+	limit   uint64
 	done    chan struct{}
 	waiters atomic.Int64
 	written int64
 	err     error
+}
+
+// A shared refusal belongs to the starter's cap, not every waiter's cap.
+type mediaTransferLimitError struct {
+	cause error
+	limit uint64
+}
+
+func (e *mediaTransferLimitError) Error() string { return e.cause.Error() }
+func (e *mediaTransferLimitError) Unwrap() error { return e.cause }
+
+func (c *mediaTransferCall) result(ctx context.Context) (int64, error) {
+	if limit := mediaLimit(ctx); c.err == nil && c.written > 0 && limit > 0 && uint64(c.written) > limit {
+		return c.written, errAutoMediaLimit
+	}
+	if c.limit > 0 && errors.Is(c.err, errAutoMediaLimit) {
+		return c.written, &mediaTransferLimitError{cause: c.err, limit: c.limit}
+	}
+	return c.written, c.err
 }
 
 // do starts fn for the first caller of key and shares its result with every
@@ -70,7 +90,7 @@ func (g *mediaTransferGroup) do(ctx context.Context, key string, fn func() (int6
 	}
 	call, running := g.inflight[key]
 	if !running {
-		call = &mediaTransferCall{done: make(chan struct{}), err: errTransferAbandoned}
+		call = &mediaTransferCall{done: make(chan struct{}), err: errTransferAbandoned, limit: mediaLimit(ctx)}
 		if g.inflight == nil {
 			g.inflight = make(map[string]*mediaTransferCall)
 		}
@@ -106,12 +126,12 @@ func (g *mediaTransferGroup) do(ctx context.Context, key string, fn func() (int6
 	// moment: the file is cached, reporting it as cancelled would be a lie.
 	select {
 	case <-call.done:
-		return call.written, call.err
+		return call.result(ctx)
 	default:
 	}
 	select {
 	case <-call.done:
-		return call.written, call.err
+		return call.result(ctx)
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
