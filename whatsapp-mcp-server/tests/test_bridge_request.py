@@ -194,8 +194,8 @@ def test_expired_link_message_reaches_download_read_and_transcribe(monkeypatch, 
     """Keep the bridge's remedy intact through real HTTP and each tool's error envelope."""
     chat = "5511999999999@s.whatsapp.net"
     message = (
-        "Failed to download media: failed to download media: this message was stored before the bridge kept "
-        "the file's own direct path; its legacy link expired on 2020-01-02 (UTC); "
+        "Failed to download media: failed to download media: this row has no direct path for the file; "
+        "its legacy link expired on 2020-01-02 (UTC); "
         "a history sync that re-delivers this message can repair its locator, then retry download_media; "
         "request_history only backfills messages older than the oldest stored one and does not reach this row; "
         "otherwise ask for the file again: "

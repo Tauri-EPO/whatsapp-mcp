@@ -31,7 +31,7 @@ type storedMessage struct {
 	EditAuthorAlias                     string // verified outside the writer, never inferred from digits
 	EditChatAlias                       string // verified alternative DM chat, prepared before the writer
 	EditPreparation                     *pendingEditPreparation
-	HistoryReplay                       bool // history may fill a locator, never replace one already stored
+	HistoryReplay                       bool // history preserves complete stored snapshots with another locator
 }
 
 // sqlExecer is satisfied by *sql.DB and *sql.Tx.
@@ -41,9 +41,15 @@ type sqlExecer interface {
 
 // Replace a snapshot only with complete incoming credentials or when the old
 // row has no media fields yet. Partial replays must not combine different keys
-// and hashes. A history replay cannot replace a non-empty direct path, so it
-// preserves the snapshot too when its locator differs or is omitted.
+// and hashes. A history replay preserves a complete stored snapshot when its
+// locator differs or is omitted, but can repair an incomplete snapshot atomically.
+// Stored completeness mirrors mediaComplete, including unencrypted newsletters;
+// file length is deliberately excluded because an empty file is complete.
 const replaceMediaSQL = `((:complete_media AND NOT (:history_replay AND COALESCE(messages.direct_path, '') <> ''
+	AND COALESCE(length(messages.file_sha256), 0) > 0
+	AND ((COALESCE(length(messages.media_key), 0) > 0 AND COALESCE(length(messages.file_enc_sha256), 0) > 0)
+		OR (substr(messages.chat_jid, -11) = '@newsletter'
+			AND COALESCE(length(messages.media_key), 0) = 0 AND COALESCE(length(messages.file_enc_sha256), 0) = 0))
 	AND excluded.direct_path IS NOT messages.direct_path)) OR (
 	COALESCE(messages.url, '') = '' AND COALESCE(messages.direct_path, '') = ''
 	AND COALESCE(length(messages.media_key), 0) = 0

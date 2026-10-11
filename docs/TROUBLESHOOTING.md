@@ -540,20 +540,24 @@ reporting with it.
 
 ## `media_unavailable` on a document the phone still opens
 
-`download_media` / `read_media` answer `media_unavailable` with **"this message
-was stored before the bridge kept the file's own direct path; its legacy link
-expired on <date> (UTC)"**, followed by the sender's phone answering `NOT_FOUND`
+`download_media` / `read_media` answer `media_unavailable` with **"this row
+has no direct path for the file; its legacy link expired on <date> (UTC)"**,
+followed by the sender's phone answering `NOT_FOUND`
 to the media retry.
 
 Media messages carry both a legacy `url` and their own `directPath`, which is
-what the phone downloads by. Rows stored before v2.1 / PR #541 kept only the
-legacy URL; its `oe` stamp may already be expired when the message arrives,
-even while the message's own direct path still downloads successfully. The
+what the phone downloads by. A row can lack `direct_path` because it was stored
+before v2.1 / PR #541 or because the message carried none. Its legacy URL's
+`oe` stamp may already be expired when the message arrives, even while the
+message's own direct path still downloads successfully. The
 phone opening the document does not imply it had a local copy. A newer bridge
-stores and uses `direct_path`, but cannot reconstruct it from an older row's URL.
+stores and uses `direct_path`, but cannot reconstruct it from the legacy URL.
 
-A history sync that re-delivers this message repairs its missing direct path
-without replacing an existing one; then retry `download_media`. The current
+A history sync from your own phone that re-delivers this message with its direct
+path repairs the missing locator; it can also replace an incomplete download
+snapshot with complete media information. A complete stored snapshot keeps its
+locator when the replay names a different path. Then retry `download_media`.
+Shared history bundles skip existing rows and cannot repair them. The current
 `request_history(chat_jid)` only backfills messages **older than the oldest
 stored one**, so it does not reach this already-stored row. WhatsApp controls
 which messages it re-delivers; otherwise ask for the file again. The error

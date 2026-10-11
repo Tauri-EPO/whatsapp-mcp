@@ -494,7 +494,7 @@ func TestDownloadMediaUnavailableExplainsOnlyExpiredLinks(t *testing.T) {
 				t.Fatalf("media_unavailable classification changed: %v", err)
 			}
 			if tc.explain {
-				for _, want := range []string{"stored before the bridge kept the file's own direct path", "legacy link expired on 2020-01-02 (UTC)", "history sync that re-delivers this message", "then retry download_media", "request_history only backfills messages older than the oldest stored one", "does not reach this row", "ask for the file again"} {
+				for _, want := range []string{"this row has no direct path for the file", "legacy link expired on 2020-01-02 (UTC)", "history sync that re-delivers this message", "then retry download_media", "request_history only backfills messages older than the oldest stored one", "does not reach this row", "ask for the file again"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q lacks %q", err, want)
 					}
@@ -559,6 +559,7 @@ func TestHistorySyncRepairsMissingDirectPathWithoutReplacingExisting(t *testing.
 			}
 			repaired := fixtureDocument()
 			repaired.DirectPath = proto.String("/o1/v/CURRENT.enc?oe=7FFFFFFF&oh=TOKEN")
+			repaired.FileLength = proto.Uint64(0) // Empty files still have complete credentials.
 			replay(repaired)
 			if got := storedDirectPath(t, ms, "REPAIR1", phonePN.String()); got.String != repaired.GetDirectPath() {
 				t.Fatalf("history did not repair missing path: %v", got)
@@ -594,7 +595,128 @@ func TestHistorySyncRepairsMissingDirectPathWithoutReplacingExisting(t *testing.
 			if string(key) != string(repaired.MediaKey) || string(hash) != string(repaired.FileSHA256) {
 				t.Error("history mixed a preserved path with another snapshot's credentials")
 			}
+			// Complete credentials for the same locator can still refresh the
+			// snapshot: preserving the path must not freeze the entire row.
+			refresh := fixtureDocument()
+			refresh.DirectPath = repaired.DirectPath
+			refresh.MediaKey = []byte(strings.Repeat("r", 32))
+			refresh.FileSHA256 = []byte(strings.Repeat("n", 32))
+			refresh.FileEncSHA256 = []byte(strings.Repeat("c", 32))
+			refresh.FileLength = proto.Uint64(5432)
+			replay(refresh)
+			var path string
+			var encHash []byte
+			var length uint64
+			if err := ms.db.QueryRow("SELECT direct_path,media_key,file_sha256,file_enc_sha256,file_length FROM messages WHERE id=? AND chat_jid=?", "REPAIR1", phonePN.String()).Scan(&path, &key, &hash, &encHash, &length); err != nil {
+				t.Fatal(err)
+			}
+			if path != repaired.GetDirectPath() || string(key) != string(refresh.MediaKey) || string(hash) != string(refresh.FileSHA256) || string(encHash) != string(refresh.FileEncSHA256) || length != refresh.GetFileLength() {
+				t.Errorf("same-path history did not refresh complete media: path=%q key=%q hash=%q enc=%q length=%d", path, key, hash, encHash, length)
+			}
+			partial := fixtureDocument()
+			partial.DirectPath = refresh.DirectPath
+			partial.MediaKey, partial.FileSHA256, partial.FileEncSHA256, partial.FileLength = nil, nil, nil, nil
+			replay(partial)
+			if err := ms.db.QueryRow("SELECT direct_path,media_key,file_sha256,file_enc_sha256,file_length FROM messages WHERE id=? AND chat_jid=?", "REPAIR1", phonePN.String()).Scan(&path, &key, &hash, &encHash, &length); err != nil {
+				t.Fatal(err)
+			}
+			if path != refresh.GetDirectPath() || string(key) != string(refresh.MediaKey) || string(hash) != string(refresh.FileSHA256) || string(encHash) != string(refresh.FileEncSHA256) || length != refresh.GetFileLength() {
+				t.Error("incomplete replay blanked a stored media snapshot")
+			}
 		})
+	}
+}
+
+func TestHistorySyncRepairsIncompleteMediaWithAnExistingPath(t *testing.T) {
+	for _, missing := range []string{"key", "sha256", "enc_sha256"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Setenv(storeDirEnv, t.TempDir())
+			ms := newConcurrentTestStore(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+			b.MediaAutoDownload = false
+			ts := time.Now().Add(-time.Hour)
+			partial := fixtureDocument()
+			switch missing {
+			case "key":
+				partial.MediaKey = nil
+			case "sha256":
+				partial.FileSHA256 = nil
+			case "enc_sha256":
+				partial.FileEncSHA256 = nil
+			}
+			if err := persistMessage(ms, "PARTIAL1", phonePN.String(), phonePN.String(), ts, false,
+				extractMessage(&waE2E.Message{DocumentMessage: partial}, ts, "PARTIAL1"), true, b.Log); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, _, err := b.downloadMedia(context.Background(), "PARTIAL1", phonePN.String()); !errors.Is(err, errMediaUnavailable) {
+				t.Fatalf("partial snapshot: err=%v, want media_unavailable", err)
+			}
+			complete := fixtureDocument()
+			complete.DirectPath = proto.String("/o1/v/COMPLETE.enc?oe=7FFFFFFF")
+			b.handleHistorySync(&events.HistorySync{Data: &waHistorySync.HistorySync{
+				SyncType: waHistorySync.HistorySync_ON_DEMAND.Enum(),
+				Conversations: []*waHistorySync.Conversation{{
+					ID: proto.String(phonePN.String()),
+					Messages: []*waHistorySync.HistorySyncMsg{{Message: &waWeb.WebMessageInfo{
+						Key:              &waCommon.MessageKey{ID: proto.String("PARTIAL1"), FromMe: proto.Bool(false)},
+						MessageTimestamp: proto.Uint64(uint64(ts.Unix())), //nolint:gosec // test fixture
+						Message:          &waE2E.Message{DocumentMessage: complete},
+					}}},
+				}},
+			}})
+			transfers := 0
+			b.mediaTransfer = func(_ context.Context, msg whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				transfers++
+				if msg.GetDirectPath() != complete.GetDirectPath() || !reflect.DeepEqual(msg.GetMediaKey(), complete.GetMediaKey()) || !reflect.DeepEqual(msg.GetFileSHA256(), complete.GetFileSHA256()) || !reflect.DeepEqual(msg.GetFileEncSHA256(), complete.GetFileEncSHA256()) {
+					t.Error("repaired download did not use the complete snapshot")
+				}
+				return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error {
+					_, err := f.Write([]byte("document"))
+					return err
+				})
+			}
+			if ok, _, _, _, err := b.downloadMedia(context.Background(), "PARTIAL1", phonePN.String()); err != nil || !ok || transfers != 1 {
+				t.Fatalf("complete history did not repair partial snapshot: ok=%v transfers=%d err=%v", ok, transfers, err)
+			}
+		})
+	}
+}
+
+func TestHistoryReplayPreservesCompleteNewsletterSnapshot(t *testing.T) {
+	const chat = "12345@newsletter"
+	ms := newTestMessageStore(t)
+	ts := time.Now()
+	if err := ms.StoreChat(chat, "", ts); err != nil {
+		t.Fatal(err)
+	}
+	stored := storedMessage{
+		ID: "CHANNEL1", ChatJID: chat, Timestamp: ts, MediaType: "document",
+		URL: fixtureMediaURL, FileSHA256: []byte(strings.Repeat("s", 32)), FileLength: uint64(0),
+		Media: messageMediaOptions{directPath: fixtureDirectPath},
+	}
+	if !mediaComplete(chat, stored.URL, stored.Media.directPath, stored.MediaKey, stored.FileSHA256, stored.FileEncSHA256) {
+		t.Fatal("unencrypted newsletter fixture is not complete")
+	}
+	if err := ms.StoreMessage(stored); err != nil {
+		t.Fatal(err)
+	}
+	replay := stored
+	replay.Media.directPath = "/o1/v/OTHER.enc"
+	replay.FileSHA256 = []byte(strings.Repeat("n", 32))
+	if err := ms.Batch(func(batch *messageBatch) error {
+		batch.historyReplay = true
+		return batch.StoreMessage(replay)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	var hash []byte
+	var length uint64
+	if err := ms.db.QueryRow("SELECT direct_path,file_sha256,file_length FROM messages WHERE id=? AND chat_jid=?", stored.ID, chat).Scan(&path, &hash, &length); err != nil {
+		t.Fatal(err)
+	}
+	if path != fixtureDirectPath || !reflect.DeepEqual(hash, stored.FileSHA256) || length != 0 {
+		t.Error("history replaced a complete unencrypted newsletter snapshot")
 	}
 }
 
