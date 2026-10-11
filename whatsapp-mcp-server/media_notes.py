@@ -488,6 +488,28 @@ def clear_notes_containing(key: str, needles: Sequence[str]) -> int:
     return deleted
 
 
+def clear_dated_notes_with_prefix(key: str, prefix: str) -> int:
+    """Clear only worker-shaped notes: YYYY-MM-DD followed by the exact prefix."""
+    if key == TRANSCRIPT_KEY:
+        raise ValueError("transcripts are indexed; delete them through annotate_media")
+    if not prefix:
+        return 0
+    conn = _connect(create=False)
+    if conn is None:
+        return 0
+    date_shape = "[0-9]" * 4 + "-" + "[0-9]" * 2 + "-" + "[0-9]" * 2 + ": "
+    try:
+        deleted = conn.execute(
+            "DELETE FROM media_notes WHERE key = ? AND substr(value, 1, 12) GLOB ? "
+            "AND substr(value, 13, length(?)) = ?",
+            (key, date_shape, prefix, prefix),
+        ).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return deleted
+
+
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     """Set (or, with an empty value, delete) one note on a visible hash."""
     sha = normalize_sha256(sha256)

@@ -644,11 +644,18 @@ func TestMinIOTransientShutdownRemovesLateRenamedSpool(t *testing.T) {
 }
 
 func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
-	for _, limits := range [][2]int64{{16, 16}, {16, 32}, {16, 256 * 1024 * 1024}, {256 * 1024 * 1024, 16}} {
-		starterLimit, largeLimit := limits[0], limits[1]
+	for _, limits := range []struct {
+		starter, waiter int64
+		quota           uint64
+	}{{16, 16, 0}, {16, 32, 0}, {16, 256 * 1024 * 1024, 0}, {256 * 1024 * 1024, 16, 0}, {16, 256 * 1024 * 1024, 128}} {
+		starterLimit, largeLimit := limits.starter, limits.waiter
 		label := strconv.FormatInt(starterLimit, 10) + "-" + strconv.FormatInt(largeLimit, 10)
+		if limits.quota > 0 {
+			label += "-quota"
+		}
 		t.Run(label, func(t *testing.T) {
 			b, _ := minioTestBridge(t, "instances/test-waiter-limit-"+label)
+			b.MediaQuotaBytes = limits.quota
 			data := bytes.Repeat([]byte("w"), 64)
 			row := s3TestRow(t, b, "SHAREDLIMIT", mediaTestChat, "audio", data, time.Now())
 			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=NULL WHERE id=? AND chat_jid=?`, row.ID, row.ChatJID); err != nil {
@@ -751,6 +758,14 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 			}
 			if largeLimit >= int64(len(data)) {
 				wantStatus = 200
+			}
+			if limits.quota > 0 {
+				// The shared cache write maps its small cap to errMediaQuota;
+				// each caller then takes its own bounded transient fallback.
+				wantCalls = 3
+				if b.metrics.mediaQuotaRefusals.Load() == 0 {
+					t.Fatal("small starter did not refuse its quota-bounded cache write")
+				}
 			}
 			if waiter.err != nil || waiter.status != wantStatus || calls.Load() != wantCalls || served.Load() != wantCalls*int64(len(data)) {
 				t.Fatalf("waiter status=%d error=%v CDN calls=%d bytes=%d; want status=%d calls=%d", waiter.status, waiter.err, calls.Load(), served.Load(), wantStatus, wantCalls)

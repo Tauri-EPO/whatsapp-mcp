@@ -578,7 +578,7 @@ def _record_unavailable(sha256: str, reason: str) -> bool:
     dated = f"{datetime.now(UTC).date().isoformat()}: {reason or 'this media can no longer be fetched'}"
     try:
         media_notes.annotate_media(sha256, MEDIA_UNAVAILABLE_KEY, dated[:MAX_ERROR_CHARS])
-    except (ToolError, sqlite3.Error) as exc:
+    except (ToolError, sqlite3.Error, OSError) as exc:
         logger.warning("transcribe_on_ingest: could not record the missing media of %s: %s", sha256[:12], exc)
         return False
     return True
@@ -681,7 +681,7 @@ def clear_outage_failures() -> int:
     """
     try:
         cleared = media_notes.clear_notes_containing(TRANSCRIPT_ERROR_KEY, OUTAGE_NOTE_MARKERS)
-    except (ToolError, sqlite3.Error, ValueError) as exc:
+    except (ToolError, sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("transcribe_on_ingest: could not clear the failures a whisper outage left: %s", exc)
         return 0
     if cleared:
@@ -692,8 +692,8 @@ def clear_outage_failures() -> int:
 def clear_oversized_failures() -> int:
     """Recheck size refusals once per start, including after a build raises a limit."""
     try:
-        cleared = media_notes.clear_notes_containing(MEDIA_UNAVAILABLE_KEY, ["too_large:"])
-    except (ToolError, sqlite3.Error, ValueError) as exc:
+        cleared = media_notes.clear_dated_notes_with_prefix(MEDIA_UNAVAILABLE_KEY, "too_large:")
+    except (ToolError, sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("transcribe_on_ingest: could not clear oversized media skips: %s", exc)
         return 0
     if cleared:

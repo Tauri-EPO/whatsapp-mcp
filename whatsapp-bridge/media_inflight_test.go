@@ -151,6 +151,71 @@ func TestDownloadMediaSharesOneTransferPerDestination(t *testing.T) {
 	}
 }
 
+func TestDownloadMediaCappedLocalWaiterRetriesLargerLimit(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms := newConcurrentTestStore(t)
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
+	dest := seedMediaRowIn(t, ms, mediaTestChat, "LOCALWAIT")
+	if _, err := ms.db.Exec(`UPDATE messages SET file_length=NULL WHERE id=? AND chat_jid=?`, "LOCALWAIT", mediaTestChat); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("local media that fits the larger capped waiter")
+	started, release := make(chan struct{}), make(chan struct{})
+	var closed atomic.Bool
+	closeRelease := func() {
+		if closed.CompareAndSwap(false, true) {
+			close(release)
+		}
+	}
+	t.Cleanup(closeRelease)
+	var transfers atomic.Int32
+	b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+		if transfers.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		return writeMediaDownload(ctx, b.StoreRoot, rel, func(_ context.Context, f whatsmeow.File) error {
+			_, err := f.Write(payload)
+			return err
+		})
+	}
+	small := startDownload(withMediaLimit(context.Background(), 16), b, "LOCALWAIT", mediaTestChat)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("small local transfer did not start")
+	}
+	large := startDownload(withMediaLimit(context.Background(), 256), b, "LOCALWAIT", mediaTestChat)
+	awaitCallers(t, &b.mediaTransfers, dest, 2)
+	closeRelease()
+	receive := func(out <-chan downloadResult) downloadResult {
+		select {
+		case result := <-out:
+			return result
+		case <-time.After(5 * time.Second):
+			t.Fatal("local caller did not finish")
+			return downloadResult{}
+		}
+	}
+	if result := receive(small); result.ok || !errors.Is(result.err, errAutoMediaLimit) {
+		t.Fatalf("small local caller: %+v", result)
+	}
+	if result := receive(large); !result.ok || result.err != nil || result.path != dest {
+		t.Fatalf("larger capped local caller: %+v", result)
+	}
+	got, err := os.ReadFile(dest) //nolint:gosec // destination seeded under this test's store
+	if err != nil || string(got) != string(payload) || transfers.Load() != 2 {
+		t.Fatalf("local bytes=%q error=%v transfers=%d", got, err, transfers.Load())
+	}
+	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
+		t.Fatal("local retry retained a partial file")
+	}
+}
+
 // A caller that gives up (its request was cancelled) neither cancels the
 // transfer nor touches its files, whether it started that transfer or joined it.
 func TestDownloadMediaCancellationLeavesTheTransferAlone(t *testing.T) {

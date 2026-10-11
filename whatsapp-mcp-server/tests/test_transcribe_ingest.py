@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
 import threading
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -983,9 +989,15 @@ def test_the_repair_runs_when_the_worker_is_installed(archive, monkeypatch):
 
 def test_worker_start_rechecks_only_oversized_notes(archive, monkeypatch):
     _add_audio(archive, "OUT1", ALICE, from_me=1)
+    _add_audio(archive, "AUD3", ALICE)
+    _add_audio(archive, "AUD4", ALICE)
     media_notes.annotate_media(SHA["AUD1"], "media_unavailable", "2026-10-09: too_large: requested byte limit")
     media_notes.annotate_media(SHA["AUD2"], "media_unavailable", "2026-10-09: phone no longer has the file")
-    media_notes.annotate_media(SHA["OUT1"], "transcript_error", "too_large: unrelated transcription failure")
+    media_notes.annotate_media(
+        SHA["OUT1"], "transcript_error", "2026-10-09: too_large: unrelated transcription failure"
+    )
+    media_notes.annotate_media(SHA["AUD3"], "media_unavailable", "not-a-date: too_large: keep this hand-written note")
+    media_notes.annotate_media(SHA["AUD4"], "media_unavailable", "2026-10-09: too_large without the worker's colon")
     assert transcribe_worker.install_ingest_worker({}) is None
     assert "media_unavailable" in media_notes.fetch_notes([SHA["AUD1"]])[SHA["AUD1"]]
     stop, results = threading.Event(), []
@@ -1007,15 +1019,163 @@ def test_worker_start_rechecks_only_oversized_notes(archive, monkeypatch):
     assert thread is not None
     thread.join(timeout=5)
     assert not thread.is_alive() and len(results) == 1 and results[0].transcribed == 1
-    notes = media_notes.fetch_notes([SHA["AUD1"], SHA["AUD2"], SHA["OUT1"]])
+    notes = media_notes.fetch_notes([SHA["AUD1"], SHA["AUD2"], SHA["OUT1"], SHA["AUD3"], SHA["AUD4"]])
     assert notes[SHA["AUD1"]]["transcript"] == "spoken words" and "media_unavailable" not in notes[SHA["AUD1"]]
     assert "phone no longer" in notes[SHA["AUD2"]]["media_unavailable"]
     assert "too_large:" in notes[SHA["OUT1"]]["transcript_error"]
+    assert notes[SHA["AUD3"]]["media_unavailable"] == "not-a-date: too_large: keep this hand-written note"
+    assert notes[SHA["AUD4"]]["media_unavailable"] == "2026-10-09: too_large without the worker's colon"
     assert transcribe_worker.clear_oversized_failures() == 0
 
 
 def test_a_missing_notes_db_is_nothing_to_repair(paired_dbs):
     assert transcribe_worker.clear_outage_failures() == 0
+    assert transcribe_worker.clear_oversized_failures() == 0
+
+
+@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0, reason="needs a separate Unix uid")
+def test_stdio_server_and_worker_start_with_read_only_notes(archive):
+    """A different uid cannot chmod/open notes.db for writing; MCP still serves."""
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    media_notes.annotate_media(SHA["AUD1"], "media_unavailable", "2026-10-09: too_large: requested byte limit")
+    media_notes.annotate_media(SHA["AUD2"], "transcript_error", "whisper server request failed: Connection refused")
+    with tempfile.TemporaryDirectory(prefix="wamcp-ingest-read-only-") as directory:
+        root = Path(directory)
+        root.chmod(0o755)
+        for source in (archive.messages_db, archive.whatsmeow_db, Path(media_notes.notes_db_path())):
+            destination = root / source.name
+            with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
+                src.backup(dst)
+                dst.execute("PRAGMA journal_mode=DELETE")
+            destination.chmod(0o444 if source.name == "notes.db" else 0o644)
+        main_path = Path(__file__).resolve().parents[1] / "main.py"
+        script = (
+            "import os,runpy,sys\n"
+            "os.setgroups([]); os.setgid(65534); os.setuid(65534)\n"
+            f"try: os.close(os.open({str(root / 'notes.db')!r}, os.O_RDWR))\n"
+            "except PermissionError: print('READ_ONLY_CONFIRMED', file=sys.stderr)\n"
+            "else: raise AssertionError('notes.db is writable; invalid permission test')\n"
+            f"runpy.run_path({str(main_path)!r}, run_name='__main__')\n"
+        )
+        env = {
+            "WHATSAPP_STORE_DIR": str(root),
+            "WHATSAPP_MCP_TRANSPORT": "stdio",
+            "TRANSCRIBE_ON_INGEST": "1",
+            "WHISPER_URL": ON["WHISPER_URL"],
+            "WHATSAPP_PARENT_WATCHDOG_S": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        parameters = StdioServerParameters(command=sys.executable, args=["-c", script], env=env)
+
+        async def initialize_and_list(errlog):
+            async with stdio_client(parameters, errlog=errlog) as (reader, writer):
+                async with ClientSession(reader, writer, read_timeout_seconds=20) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    assert "transcribe_audio" in {tool.name for tool in tools.tools}
+
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
+            try:
+                asyncio.run(initialize_and_list(errlog))
+            except Exception as exc:
+                errlog.seek(0)
+                exc.add_note(errlog.read())
+                raise
+            errlog.seek(0)
+            logs = errlog.read()
+        assert "READ_ONLY_CONFIRMED" in logs
+        assert "could not clear the failures a whisper outage left" in logs
+        assert "could not clear oversized media skips" in logs
+        assert "TRANSCRIBE_ON_INGEST=1" in logs
+        with sqlite3.connect(f"file:{root / 'notes.db'}?mode=ro", uri=True) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM media_notes").fetchone()[0] == 2
+
+
+@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0, reason="needs a separate Unix uid")
+def test_s3_worker_retries_when_oversized_note_cannot_be_created(paired_dbs):
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    calls = []
+    token = "fake-ingest-read-only-token"
+
+    class BridgeHTTP(BaseHTTPRequestHandler):
+        def respond(self, status, body):
+            assert self.headers.get("Authorization") == f"Bearer {token}"
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            assert self.path == "/api/download"
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert payload["chat_jid"] == ALICE
+            path = media_remote.uri(ALICE, payload["message_id"])
+            self.respond(200, json.dumps({"success": True, "path": path}).encode())
+
+        def do_GET(self):
+            target = urlsplit(self.path)
+            if target.path == "/api/media/cache":
+                self.respond(200, b'{"items": [], "next_cursor": ""}')
+                return
+            assert target.path == "/api/media/blob"
+            query = parse_qs(target.query)
+            assert query["chat_jid"] == [ALICE] and query["cache_only"] == ["false"]
+            calls.append(query["message_id"][0])
+            self.respond(413, b'{"error": {"code": "too_large", "message": "fake size refusal"}}')
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BridgeHTTP)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="wamcp-ingest-no-notes-") as directory:
+            root = Path(directory)
+            root.chmod(0o755)  # readable, but uid 65534 cannot create notes.db
+            for source in (paired_dbs.messages_db, paired_dbs.whatsmeow_db):
+                destination = root / source.name
+                with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
+                    src.backup(dst)
+                    dst.execute("PRAGMA journal_mode=DELETE")
+                destination.chmod(0o644)
+            script = (
+                "import os,threading\n"
+                "os.setgroups([]); os.setgid(65534); os.setuid(65534)\n"
+                "import transcribe_worker as worker\n"
+                "stop, rounds = threading.Event(), []\n"
+                "def run(batch, **kwargs):\n"
+                "    result = worker.run_once(batch, fetch=True, **kwargs)\n"
+                "    assert result.outage and result.transcribed == 0 and result.failed == 0\n"
+                "    rounds.append(result)\n"
+                "    if len(rounds) == 2: stop.set()\n"
+                "    return result\n"
+                "thread = worker.start_worker(worker.IngestConfig(True, 0, 10, True), stop=stop, run=run)\n"
+                "thread.join(timeout=15)\n"
+                "assert not thread.is_alive() and len(rounds) == 2\n"
+                "print('TWO_BOUNDED_ROUNDS_COMPLETED')\n"
+            )
+            env = {
+                **os.environ,
+                "WHATSAPP_STORE_DIR": str(root),
+                "WHATSAPP_MEDIA_BACKEND": "s3",
+                "WHATSAPP_API_URL": f"http://127.0.0.1:{server.server_port}/api",
+                "WHATSAPP_BRIDGE_TOKEN": token,
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            child = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=20)
+            assert child.returncode == 0, child.stdout + child.stderr
+            assert "TWO_BOUNDED_ROUNDS_COMPLETED" in child.stdout
+            assert "could not record the missing media" in child.stderr and "Permission denied" in child.stderr
+            assert not (root / "notes.db").exists()
+            assert calls == ["AUD4", "AUD3", "AUD2"] * 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
 
 
 def test_an_empty_transcript_is_a_failure_not_an_endless_retry(archive):
