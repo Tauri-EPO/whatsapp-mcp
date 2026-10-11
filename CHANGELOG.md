@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.4.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.3.0...v2.4.0) (2026-10-11)
+
+
+### Features
+
+* add opt-in S3 media cache and verified migration ([#683](https://github.com/Tauri-EPO/whatsapp-mcp/issues/683)) ([ff9acd6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ff9acd66ddf0c44ae47273161378d17fc7adde42)), closes [#649](https://github.com/Tauri-EPO/whatsapp-mcp/issues/649) [#657](https://github.com/Tauri-EPO/whatsapp-mcp/issues/657) [#658](https://github.com/Tauri-EPO/whatsapp-mcp/issues/658)
+* isolate MCP from the private operator network ([#680](https://github.com/Tauri-EPO/whatsapp-mcp/issues/680)) ([953abf7](https://github.com/Tauri-EPO/whatsapp-mcp/commit/953abf715d90f651d20b95bb9d2ccd973e6a1ef6)), closes [#678](https://github.com/Tauri-EPO/whatsapp-mcp/issues/678)
+* read original media as verified base64 chunks ([#687](https://github.com/Tauri-EPO/whatsapp-mcp/issues/687)) ([1934a7c](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1934a7c0e3778de70168ce19971b4a413a0cb26a)), closes [#682](https://github.com/Tauri-EPO/whatsapp-mcp/issues/682)
+
+
+### Bug fixes
+
+* restore operator usage in split topology ([#686](https://github.com/Tauri-EPO/whatsapp-mcp/issues/686)) ([5825ed4](https://github.com/Tauri-EPO/whatsapp-mcp/commit/5825ed486d8d56d051a92ecaa5d90dcaa25f9e8e)), closes [#684](https://github.com/Tauri-EPO/whatsapp-mcp/issues/684)
+* stop oversized ingest retries and partial spool downloads ([#693](https://github.com/Tauri-EPO/whatsapp-mcp/issues/693)) ([5fc86dc](https://github.com/Tauri-EPO/whatsapp-mcp/commit/5fc86dc204e71d17fcf637c20d555ab9a5d47476)), closes [#691](https://github.com/Tauri-EPO/whatsapp-mcp/issues/691) [#692](https://github.com/Tauri-EPO/whatsapp-mcp/issues/692)
+
 ## [2.3.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.2.0...v2.3.0) (2026-10-10)
 
 
