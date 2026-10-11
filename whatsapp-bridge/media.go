@@ -396,8 +396,8 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 				})
 				if expiry, ok := linkExpiry(directPath); pathSource == pathFromURL && ok && expiry.Before(time.Now()) && errors.Is(err, errMediaUnavailable) {
 					err = fmt.Errorf("this row has no direct path for the file; its legacy link expired on %s (UTC); "+
-						"a history sync that re-delivers this message can repair its locator, then retry download_media; "+
-						"request_history only backfills messages older than the oldest stored one and does not reach this row; otherwise ask for the file again: %w",
+						"call request_history(chat_jid, before_message_id=<id>) with this message's id, then download_media after the replay arrives; "+
+						"the phone decides whether it re-delivers the locator; otherwise ask for the file again: %w",
 						expiry.UTC().Format("2006-01-02"), err)
 				}
 			}

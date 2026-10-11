@@ -494,7 +494,7 @@ func TestDownloadMediaUnavailableExplainsOnlyExpiredLinks(t *testing.T) {
 				t.Fatalf("media_unavailable classification changed: %v", err)
 			}
 			if tc.explain {
-				for _, want := range []string{"this row has no direct path for the file", "legacy link expired on 2020-01-02 (UTC)", "history sync that re-delivers this message", "then retry download_media", "request_history only backfills messages older than the oldest stored one", "does not reach this row", "ask for the file again"} {
+				for _, want := range []string{"this row has no direct path for the file", "legacy link expired on 2020-01-02 (UTC)", "request_history(chat_jid, before_message_id=<id>)", "then download_media after the replay arrives", "the phone decides whether it re-delivers the locator", "ask for the file again"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q lacks %q", err, want)
 					}

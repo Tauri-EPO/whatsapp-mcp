@@ -5133,12 +5133,15 @@ HISTORY_DEFAULT_COUNT = 50
 HISTORY_MAX_COUNT = 500  # maxHistoryCount in whatsapp-bridge/history_ondemand.go
 
 
-def request_history(chat_jid: str, count: int = HISTORY_DEFAULT_COUNT) -> dict[str, Any]:
+def request_history(
+    chat_jid: str, count: int = HISTORY_DEFAULT_COUNT, before_message_id: str | None = None
+) -> dict[str, Any]:
     """Ask the phone for messages older than the oldest one stored for a chat.
 
     Wraps POST /api/history. The bridge anchors the request on the oldest stored
     message, so the chat must already have one (404 otherwise), and needs a live
-    WhatsApp connection (503 otherwise); both surface as a ToolError.
+    WhatsApp connection (503 otherwise); both surface as a ToolError. An optional
+    before_message_id targets a stored row for replay, including the row itself.
     """
     chat_jid = (chat_jid or "").strip()
     if not chat_jid:
@@ -5151,14 +5154,22 @@ def request_history(chat_jid: str, count: int = HISTORY_DEFAULT_COUNT) -> dict[s
     if count < 1:
         raise ToolError("invalid_argument", "count must be at least 1")
     count = min(count, HISTORY_MAX_COUNT)
-    payload = _bridge_json(_bridge_request("POST", "/history", json={"chat_jid": chat_jid, "count": count}))
+    request: dict[str, Any] = {"chat_jid": chat_jid, "count": count}
+    if before_message_id is not None:
+        if not isinstance(before_message_id, str) or not before_message_id.strip():
+            raise ToolError("invalid_argument", "before_message_id must be a nonempty message id")
+        request["before_message_id"] = before_message_id
+    payload = _bridge_json(_bridge_request("POST", "/history", json=request))
     return {
         "success": True,
         "chat_jid": chat_jid,
         "requested_count": count,
         "message": payload.get("message") or f"Requested up to {count} older messages for {chat_jid}",
         "note": (
-            "The phone answers asynchronously and decides how much it returns; nothing is stored yet when "
+            "The phone answers asynchronously and decides whether to replay the target; nothing is stored yet "
+            "when this call succeeds. To check a media repair, retry download_media on that message after the replay."
+            if before_message_id is not None
+            else "The phone answers asynchronously and decides how much it returns; nothing is stored yet when "
             "this call succeeds. Verify with list_messages(chat_jid=..., sort_by='oldest', limit=1) and "
             "compare the timestamp of that first message before and after."
         ),

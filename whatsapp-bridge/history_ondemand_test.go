@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -30,6 +33,108 @@ func TestClampHistoryCount(t *testing.T) {
 				t.Fatalf("clampHistoryCount(%d) = %d, want %d", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestHistoryRepairRequest(t *testing.T) {
+	phone := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	other := "5511888888888@s.whatsapp.net"
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 123000000, time.UTC)
+	for _, tc := range []struct {
+		name, requestChat, storedChat, target, wantID string
+		wantFromMe                                    bool
+		wantTime                                      time.Time
+		status                                        int
+	}{
+		{"default backfill unchanged", phone.String(), phone.String(), "BACKFILL", "M1", false, ts.Add(-time.Minute), 200},
+		{"successor with tied timestamp", phone.String(), phone.String(), "M2", "M3", true, ts, 200},
+		{"successor with later timestamp", phone.String(), phone.String(), "M3", "M4", false, ts.Add(time.Minute), 200},
+		{"newest timestamp fallback", phone.String(), phone.String(), "M4", "", false, ts.Add(time.Minute + time.Second), 200},
+		{"LID resolves phone storage", lid.String(), phone.String(), "M2", "M3", true, ts, 200},
+		{"phone resolves LID storage", phone.String(), lid.String(), "M2", "M3", true, ts, 200},
+		{"canonical spelling", " 5511999999999@S.WHATSAPP.NET ", phone.String(), "M2", "M3", true, ts, 200},
+		{"unknown id", phone.String(), phone.String(), "MISSING", "", false, time.Time{}, 400},
+		{"another chat id", phone.String(), phone.String(), "OTHER", "", false, time.Time{}, 400},
+		{"empty id", phone.String(), phone.String(), "", "", false, time.Time{}, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestMessageStore(t)
+			for _, msg := range []storedMessage{
+				{ID: "M4", ChatJID: tc.storedChat, Timestamp: ts.Add(time.Minute)},
+				{ID: "M3", ChatJID: tc.storedChat, Timestamp: ts, IsFromMe: true},
+				{ID: "M2", ChatJID: tc.storedChat, Timestamp: ts},
+				{ID: "M1", ChatJID: tc.storedChat, Timestamp: ts.Add(-time.Minute)},
+				{ID: "M2", ChatJID: other, Timestamp: ts.Add(-time.Hour)},
+				{ID: "OTHER", ChatJID: other, Timestamp: ts},
+			} {
+				msg.Content = "hello"
+				if err := store.StoreMessage(msg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := newTestClientWithSelf(&mockLIDStore{
+				lidByPN: map[types.JID]types.JID{phone: lid},
+				pnByLID: map[types.JID]types.JID{lid: phone},
+			}, phone)
+			var sent *waE2E.Message
+			mux := http.NewServeMux()
+			registerHistoryEndpointWithSender(mux, func(h http.HandlerFunc) http.HandlerFunc { return h },
+				client, func() bool { return true }, store, chatPolicy{}, func(_ context.Context, msg *waE2E.Message) error {
+					sent = msg
+					return nil
+				})
+			var beforeID *string
+			if tc.target != "BACKFILL" {
+				beforeID = &tc.target
+			}
+			body, err := json.Marshal(HistoryRequest{ChatJID: tc.requestChat, Count: 7, BeforeMessageID: beforeID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/history", strings.NewReader(string(body))))
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.status != http.StatusOK {
+				var failure apiError
+				if err := json.Unmarshal(rec.Body.Bytes(), &failure); err != nil {
+					t.Fatal(err)
+				}
+				if sent != nil || failure.Error.Code != "invalid_argument" || !strings.Contains(failure.Message, "in this chat") {
+					t.Fatalf("invalid target sent a request or lost its error: sent=%v failure=%+v", sent, failure)
+				}
+				return
+			}
+			anchor := sent.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
+			requestedChat, err := canonicalChatJID(tc.requestChat, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if anchor == nil || anchor.GetChatJID() != requestedChat.String() || anchor.GetOldestMsgID() != tc.wantID ||
+				anchor.GetOldestMsgFromMe() != tc.wantFromMe || anchor.GetOldestMsgTimestampMS() != tc.wantTime.Unix() ||
+				anchor.GetOnDemandMsgCount() != 7 {
+				t.Fatalf("built request = %v; want chat=%s id=%q fromMe=%v timestamp=%d count=7",
+					anchor, requestedChat, tc.wantID, tc.wantFromMe, tc.wantTime.Unix())
+			}
+		})
+	}
+}
+
+func TestHistoryRepairDenied(t *testing.T) {
+	mux := http.NewServeMux()
+	registerHistoryEndpointWithSender(mux, func(h http.HandlerFunc) http.HandlerFunc { return h }, nil,
+		func() bool { t.Fatal("denied request checked connection"); return true }, nil,
+		parseChatPolicy("5511888888888@s.whatsapp.net"), func(context.Context, *waE2E.Message) error {
+			t.Fatal("denied request sent to phone")
+			return nil
+		})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/history", strings.NewReader(
+		`{"chat_jid":"5511999999999@s.whatsapp.net","before_message_id":"M2"}`)))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "WHATSAPP_ALLOWED_CHATS") {
+		t.Fatalf("denial = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

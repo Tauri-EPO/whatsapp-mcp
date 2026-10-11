@@ -354,7 +354,7 @@ def coverage(
 @mcp.tool()
 @tool_errors
 @mutating_tool
-def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
+def request_history(chat_jid: str, count: int = 50, before_message_id: str | None = None) -> dict[str, Any]:
     """Ask the phone to send older messages for one chat, to fill a gap in the archive.
 
     The archive only holds what the phone pushed at pair time plus everything
@@ -362,6 +362,14 @@ def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
     WhatsApp for messages *older* than the oldest one already stored for that
     chat; call it again to page further back, since the anchor moves back as
     older messages land.
+
+    To repair a media row stored without direct_path, pass that message's id as
+    before_message_id: request_history(chat_jid, before_message_id=<id>), then
+    retry download_media after the replay arrives. The bridge anchors on the next
+    stored message in that chat, or a timestamp just after the target when it is
+    the newest stored message, so the target itself is requested. The phone may
+    still send nothing or omit the direct path; a successful request proves only
+    that it was sent.
 
     The result is asynchronous. A successful call means "the request was sent",
     not "the messages are here": they arrive later (usually seconds, sometimes
@@ -375,15 +383,17 @@ def request_history(chat_jid: str, count: int = 50) -> dict[str, Any]:
     Errors: not_found means the chat has no stored message to anchor on (send or
     receive one message there first); bridge_unavailable means the bridge is not
     connected to WhatsApp right now.
+    invalid_argument means before_message_id is empty, unknown or in another chat.
 
     Args:
         chat_jid: Chat to backfill (direct-chat JID ...@s.whatsapp.net or group JID ...@g.us)
         count: Messages to request, 1-500 (default 50; higher values are capped at 500)
+        before_message_id: Stored message id in this chat to include in a repair replay (optional)
 
     Returns:
         {"success": true, "chat_jid", "requested_count", "message", "note"}
     """
-    return whatsapp_request_history(chat_jid, count)
+    return whatsapp_request_history(chat_jid, count, before_message_id)
 
 
 @mcp.tool()
@@ -2611,8 +2621,9 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     list_media shows the dated refusal; clear_media_refusal allows another try
     after the bridge's path rule changes. Retry `bridge_unavailable` later.
     If `media_unavailable` names an expired legacy link on a row missing its direct
-    path, a history sync that re-delivers that message can repair it; request_history
-    only backfills older messages and cannot reach this row, so otherwise ask for the file again.
+    path, call request_history(chat_jid, before_message_id=<id>) then download_media
+    after the replay arrives. The phone decides whether it re-delivers the locator;
+    otherwise ask for the file again.
 
     Args:
         chat_jid: The JID of the chat containing the message
@@ -2737,8 +2748,9 @@ def read_media(
     knows it is over the limit — and where download_media is disabled that fetch is
     refused with `denied`, so only media already in the store can be read.
     If `media_unavailable` names an expired legacy link on a row missing its direct
-    path, a history sync that re-delivers that message can repair it; request_history
-    only backfills older messages and cannot reach this row, so otherwise ask for the file again.
+    path, call request_history(chat_jid, before_message_id=<id>) then download_media
+    after the replay arrives. The phone decides whether it re-delivers the locator;
+    otherwise ask for the file again.
 
     Args:
         chat_jid: JID of the chat containing the message
