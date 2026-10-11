@@ -1,5 +1,9 @@
 """request_history: POST /api/history through the bridge client."""
 
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 
 import whatsapp
@@ -112,7 +116,7 @@ def test_request_history_tool_envelope_on_error(monkeypatch):
     monkeypatch.setattr(
         main,
         "whatsapp_request_history",
-        lambda chat_jid, count: (_ for _ in ()).throw(ToolError("not_found", "no anchor")),
+        lambda chat_jid, count, before_message_id: (_ for _ in ()).throw(ToolError("not_found", "no anchor")),
     )
     assert main.request_history(CHAT) == {"error": {"code": "not_found", "message": "no anchor"}}
 
@@ -120,5 +124,81 @@ def test_request_history_tool_envelope_on_error(monkeypatch):
 def test_request_history_tool_passes_arguments(monkeypatch):
     import main
 
-    monkeypatch.setattr(main, "whatsapp_request_history", lambda chat_jid, count: {"chat_jid": chat_jid, "n": count})
+    monkeypatch.setattr(
+        main, "whatsapp_request_history", lambda chat_jid, count, before_message_id: {"chat_jid": chat_jid, "n": count}
+    )
     assert main.request_history(CHAT, 200) == {"chat_jid": CHAT, "n": 200}
+
+
+@pytest.mark.parametrize("anchor", ["", "   ", 7])
+def test_request_history_rejects_empty_anchor(monkeypatch, anchor):
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge called"))
+    with pytest.raises(ToolError) as exc:
+        whatsapp.request_history(CHAT, before_message_id=anchor)
+    assert exc.value.code == "invalid_argument"
+
+
+def test_request_history_anchor_denied(monkeypatch):
+    monkeypatch.setattr(whatsapp.bridge_http, "post", lambda *a, **k: pytest.fail("bridge called"))
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
+    with pytest.raises(ToolError) as exc:
+        whatsapp.request_history(CHAT, before_message_id="M2")
+    assert exc.value.code == "denied"
+
+
+async def test_request_history_anchor_over_http(monkeypatch):
+    """Real MCP argument dispatch -> HTTP -> captured body and error response."""
+    import main
+
+    calls = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, payload, self.headers.get("Authorization")))
+            invalid = payload["before_message_id"] == "UNKNOWN"
+            response = (
+                {"success": False, "message": "before_message_id must identify a stored message in this chat"}
+                if invalid
+                else {"success": True, "message": "Requested target replay"}
+            )
+            raw = json.dumps(response).encode()
+            self.send_response(400 if invalid else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(whatsapp, "WHATSAPP_API_BASE_URL", f"http://127.0.0.1:{server.server_port}/api")
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([]))
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token-0123456789")
+    try:
+        result = await main.mcp.call_tool(
+            "request_history", {"chat_jid": CHAT, "count": 7, "before_message_id": "  M2  "}
+        )
+        assert not result.is_error
+        assert result.structured_content["success"] is True
+        assert "download_media" in result.structured_content["note"]
+        invalid = await main.mcp.call_tool(
+            "request_history", {"chat_jid": CHAT, "count": 7, "before_message_id": "UNKNOWN"}
+        )
+        assert invalid.structured_content["error"]["code"] == "invalid_argument"
+        assert "in this chat" in invalid.structured_content["error"]["message"]
+        assert calls == [
+            (
+                "/api/history",
+                {"chat_jid": CHAT, "count": 7, "before_message_id": anchor},
+                "Bearer test-token-0123456789",
+            )
+            for anchor in ("M2", "UNKNOWN")
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

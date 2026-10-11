@@ -18,6 +18,7 @@ package main
 // (see AGENTS.md gotcha #4), so Count is a request, not a guarantee.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,13 +27,15 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
 // HistoryRequest is the JSON body accepted by POST /api/history.
 type HistoryRequest struct {
-	ChatJID string `json:"chat_jid"`
-	Count   int    `json:"count,omitempty"`
+	ChatJID         string  `json:"chat_jid"`
+	Count           int     `json:"count,omitempty"`
+	BeforeMessageID *string `json:"before_message_id,omitempty"`
 }
 
 const (
@@ -59,7 +62,7 @@ func clampHistoryCount(n int) int {
 
 // historyAnchorInfo builds the anchor MessageInfo for an on-demand history
 // request. The phone returns messages from *before* this message, so callers
-// pass the oldest message already stored for the chat.
+// pass the oldest stored message for backfill, or the successor of a repair target.
 //
 // BuildHistorySyncRequest reads only Chat, ID, IsFromMe and Timestamp — the
 // HistorySyncOnDemandRequest wire message carries no field for the anchor's
@@ -94,8 +97,51 @@ func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe
 	return id, fromMe, anchorTime(rawTS), nil
 }
 
+// repairHistoryAnchor finds the target only in the requested chat or its known
+// phone/LID twin, then uses the first non-pointer message in a later second.
+// The target itself must be included in the replay, rather than excluded as the
+// SDK's "oldest message". With no successor, use a timestamp-only anchor one
+// second later: BuildHistorySyncRequest serializes seconds despite its MS name.
+func repairHistoryAnchor(ctx context.Context, store *MessageStore, chat, twin, target string) (storedChat, id string, fromMe bool, ts time.Time, err error) {
+	var rawTS any
+	err = store.db.QueryRowContext(ctx, `SELECT chat_jid, timestamp FROM messages
+		WHERE id = ? AND chat_jid IN (?, ?)
+		ORDER BY CASE WHEN chat_jid = ? THEN 0 ELSE 1 END LIMIT 1`,
+		target, chat, twin, chat).Scan(&storedChat, &rawTS)
+	if err != nil {
+		return "", "", false, time.Time{}, err
+	}
+	targetTime := anchorTime(rawTS)
+	if targetTime.IsZero() {
+		return storedChat, "", false, time.Time{}, nil
+	}
+	// Reactions and poll votes are pointer rows. Revoke/edit update originals;
+	// other content-free protocol envelopes do not create message rows.
+	err = store.db.QueryRowContext(ctx, `SELECT id, is_from_me, timestamp FROM messages
+		WHERE chat_jid = ? AND timestamp >
+			(SELECT timestamp FROM messages WHERE id = ? AND chat_jid = ?)
+		AND COALESCE(media_type, '') NOT IN ('reaction', 'poll_vote')
+		ORDER BY timestamp, id LIMIT 1`, storedChat, target, storedChat).Scan(&id, &fromMe, &rawTS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storedChat, "", false, targetTime.Add(time.Second), nil
+	}
+	if err != nil {
+		return storedChat, "", false, time.Time{}, err
+	}
+	return storedChat, id, fromMe, anchorTime(rawTS), nil
+}
+
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
 func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy) {
+	registerHistoryEndpointWithSender(mux, auth, client, connected, messageStore, policy,
+		func(ctx context.Context, msg *waE2E.Message) error {
+			_, err := client.SendPeerMessage(ctx, msg)
+			return err
+		})
+}
+
+// Only the network send is replaced in tests; the pinned SDK builds the request.
+func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy, send func(context.Context, *waE2E.Message) error) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -135,8 +181,29 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			return
 		}
 
-		id, fromMe, ts, err := oldestStoredMessage(messageStore, req.ChatJID)
+		ctx, cancel := requestContext(r, actionDeadline)
+		defer cancel()
+		var id string
+		var fromMe bool
+		var ts time.Time
+		var err error
+		if req.BeforeMessageID == nil {
+			id, fromMe, ts, err = oldestStoredMessage(messageStore, req.ChatJID)
+		} else {
+			twin, _ := lookupAltJID(ctx, client, chatJID)
+			var storedChat string
+			storedChat, id, fromMe, ts, err = repairHistoryAnchor(ctx, messageStore, chatJID.String(), twin.ToNonAD().String(), *req.BeforeMessageID)
+			if err == nil {
+				// Use the target's archived spelling for the phone to locate it.
+				// Whether phone/LID spelling affects replay needs a live check.
+				chatJID, err = types.ParseJID(storedChat)
+			}
+		}
 		if errors.Is(err, sql.ErrNoRows) {
+			if req.BeforeMessageID != nil {
+				writeError(w, http.StatusBadRequest, "before_message_id must identify a stored message in this chat")
+				return
+			}
 			writeErr(http.StatusNotFound,
 				"No stored message for this chat to anchor the request; send or receive one message first")
 			return
@@ -161,19 +228,23 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 		// SendPeerMessage is the transport whatsmeow documents for this request
 		// type. It resolves our own JID and sets the peer flag internally, so
 		// that addressing logic isn't duplicated (and drifted) here.
-		ctx, cancel := requestContext(r, actionDeadline)
-		defer cancel()
-		if _, err := client.SendPeerMessage(ctx, msg); err != nil {
+		if err := send(ctx, msg); err != nil {
 			writeErr(http.StatusInternalServerError, fmt.Sprintf("Failed to send history request: %v", err))
 			return
 		}
 
 		bridgeLog.Debugf("← /api/history chat=%q count=%d anchor=%q", req.ChatJID, count, id)
+		message := fmt.Sprintf(
+			"Requested up to %d messages older than %s for %s. History arrives asynchronously; the phone decides how much is returned.",
+			count, ts.Format(time.RFC3339), req.ChatJID)
+		if req.BeforeMessageID != nil {
+			message = fmt.Sprintf(
+				"Requested re-delivery of up to %d messages up to and including the target for %s. History arrives asynchronously; the phone decides how much is returned.",
+				count, req.ChatJID)
+		}
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: true,
-			Message: fmt.Sprintf(
-				"Requested up to %d messages older than %s for %s. History arrives asynchronously; the phone decides how much is returned.",
-				count, ts.Format(time.RFC3339), req.ChatJID),
+			Message: message,
 		})
 	}))
 }

@@ -10,10 +10,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
 // storedMessage names one archive snapshot, including its two distinct hashes.
@@ -270,6 +273,58 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 		}
 		return consumePendingEdits(b.tx, message, now)
 	})
+}
+
+// A phone replay can normalize a formerly unmapped LID to the phone chat.
+// Repair an existing twin after the canonical chunk commits. An optional alias
+// failure must never roll back that chunk. Never create an alias or consume edits.
+func (store *MessageStore) repairHistoryMediaAlias(ctx context.Context, message storedMessage, alias string, logger waLog.Logger) {
+	if alias == "" || alias == message.ChatJID || message.Media.directPath == "" ||
+		!mediaComplete(message.ChatJID, message.URL, message.Media.directPath, message.MediaKey, message.FileSHA256, message.FileEncSHA256) {
+		return
+	}
+	err := store.BatchContext(ctx, func(b *messageBatch) error {
+		var rawTS any
+		err := b.tx.QueryRow(`SELECT COALESCE(CASE WHEN sender_server IS NULL THEN sender
+			ELSE sender || '@' || sender_server END, ''), COALESCE(content, ''), timestamp,
+			COALESCE(quoted_message_id, ''), COALESCE(mentions, '')
+			FROM messages WHERE id = ? AND chat_jid = ? AND is_from_me = ?
+			AND media_type IN ('image', 'video', 'audio', 'document', 'sticker')`,
+			message.ID, alias, message.IsFromMe).Scan(&message.Sender, &message.Content, &rawTS, &message.QuotedMessageID, &message.Mentions)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		message.ChatJID = alias
+		message.Timestamp = anchorTime(rawTS)
+		if message.Timestamp.IsZero() {
+			return fmt.Errorf("stored media alias has an unreadable timestamp")
+		}
+		// Reuse #695's atomic snapshot replacement/preservation rules.
+		message.HistoryReplay = true
+		_, err = b.stmt.ExecContext(b.ctx, messageArgs(message)...)
+		return err
+	})
+	if err != nil {
+		logger.Warnf("Failed optional history media alias repair for %s in %s: %v", message.ID, alias, err)
+	}
+}
+
+// One bounded discovery read per committed chunk, scoped to the verified twin.
+func (store *MessageStore) historyMediaAliasExists(ctx context.Context, alias string, media []storedMessage) (bool, error) {
+	args := make([]any, 1, len(media)+1)
+	args[0] = alias
+	for _, message := range media {
+		args = append(args, message.ID)
+	}
+	var found bool
+	// Only placeholder count enters SQL; all chat/message values are bound.
+	query := `SELECT EXISTS(SELECT 1 FROM messages WHERE chat_jid = ? AND media_type
+		IN ('image', 'video', 'audio', 'document', 'sticker') AND id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(media)), ",") + `))`
+	err := store.db.QueryRowContext(ctx, query, args...).Scan(&found)
+	return found, err
 }
 
 // MarkViewOnce is MessageStore.MarkViewOnce inside the batch.

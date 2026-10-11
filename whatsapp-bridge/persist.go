@@ -138,6 +138,24 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 		}
 		return matched, err
 	}
+	if err := w.StoreMessage(storedMessageSnapshot(id, chatJID, sender, ts, fromMe, e, quoted)); err != nil {
+		return false, err
+	}
+	if e.poll != nil {
+		if err := w.StorePoll(id, chatJID, e.poll, ts); err != nil {
+			return false, fmt.Errorf("poll metadata: %w", err)
+		}
+	}
+	if e.viewOnce {
+		if err := w.MarkViewOnce(id, chatJID); err != nil {
+			return false, fmt.Errorf("view-once: %w", err)
+		}
+	}
+	return false, nil
+}
+
+// One snapshot spelling for canonical writes and existing-alias media repair.
+func storedMessageSnapshot(id, chatJID, sender string, ts time.Time, fromMe bool, e extractedMessage, quoted bool) storedMessage {
 	quotedID := ""
 	if quoted {
 		quotedID = e.quotedID
@@ -146,7 +164,7 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 	if e.hasLength {
 		length = storedMediaLength(e.fileLen)
 	}
-	if err := w.StoreMessage(storedMessage{
+	return storedMessage{
 		EditAuthorAlias: e.editAuthorAlias,
 		EditChatAlias:   e.editChatAlias,
 		EditPreparation: e.editPreparation,
@@ -166,18 +184,5 @@ func persistMessageResult(w messageWriter, id, chatJID, sender string, ts time.T
 		QuotedMessageID: quotedID,
 		Mentions:        mentionsColumn(e.mentions),
 		Media:           messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location, retryChat: e.retryChat, retrySender: e.retrySender},
-	}); err != nil {
-		return false, err
 	}
-	if e.poll != nil {
-		if err := w.StorePoll(id, chatJID, e.poll, ts); err != nil {
-			return false, fmt.Errorf("poll metadata: %w", err)
-		}
-	}
-	if e.viewOnce {
-		if err := w.MarkViewOnce(id, chatJID); err != nil {
-			return false, fmt.Errorf("view-once: %w", err)
-		}
-	}
-	return false, nil
 }

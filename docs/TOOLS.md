@@ -549,6 +549,19 @@ land.
 
 - `chat_jid` (required): chat to backfill (`…@s.whatsapp.net` or `…@g.us`)
 - `count` (optional, default `50`): messages to request, 1-500; larger values are capped at 500
+- `before_message_id` (optional): stored message id in this chat to include in a repair replay.
+  To repair a media row stored without `direct_path`, call
+  `request_history(chat_jid, before_message_id=<id>)`, then `download_media` after
+  the replay arrives. The anchor is the first stored non-pointer message with a
+  timestamp strictly greater than the target's, or one second after the target
+  when none exists. Same-second rows, reactions and poll votes cannot be anchors.
+  Known phone and `@lid` spellings resolve to the same chat; the request uses the
+  spelling under which the target is stored. Whether that spelling affects replay
+  remains to be checked on a paired phone. The phone
+  decides whether to replay the target and whether to include its direct path.
+  On-demand phone replays also attempt to repair existing mapped LID media rows.
+  An alias repair problem logs a warning and keeps the canonical phone-chat
+  replay; pair-time, recent and shared history imports leave those aliases unchanged.
 
 Returns `{"success": true, "chat_jid", "requested_count", "message", "note"}`.
 
@@ -562,7 +575,8 @@ after the call: an older first message means the backfill worked.
 
 Errors: `not_found` when the chat has no stored message to anchor on (send or
 receive one there first), `bridge_unavailable` when the bridge is not connected
-to WhatsApp. Respects `WHATSAPP_ALLOWED_CHATS`.
+to WhatsApp; `invalid_argument` when `before_message_id` is empty, unknown or in
+another chat. Respects `WHATSAPP_ALLOWED_CHATS`.
 
 Group messages shared when a member is added use a separate encrypted bundle.
 The bridge imports a received bundle automatically through history sync, on
@@ -1581,10 +1595,10 @@ on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.
 
 When `media_unavailable` names an expired legacy link on a row missing its
-direct path, a history sync that re-delivers that message can fill its locator,
-then `download_media` can be retried. `request_history` only backfills messages
-older than the oldest stored one; it cannot reach this row. Otherwise ask for
-the file again.
+direct path, call `request_history(chat_jid, before_message_id=<id>)`, then retry
+`download_media` after the replay arrives. A history sync that re-delivers that
+message with its locator can repair the row. The phone decides whether to send
+it and whether to include the direct path; otherwise ask for the file again.
 
 An unsafe chat JID or message ID answers `media_refused`, before any transfer.
 Manual download, read, transcription and forwarding calls, as well as the ingest
