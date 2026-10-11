@@ -5158,7 +5158,7 @@ def request_history(
     if before_message_id is not None:
         if not isinstance(before_message_id, str) or not before_message_id.strip():
             raise ToolError("invalid_argument", "before_message_id must be a nonempty message id")
-        request["before_message_id"] = before_message_id
+        request["before_message_id"] = before_message_id.strip()
     payload = _bridge_json(_bridge_request("POST", "/history", json=request))
     return {
         "success": True,

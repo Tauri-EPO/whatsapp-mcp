@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -269,6 +270,40 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 			return nil // a bulk import without pending edits does no per-row edit SQL
 		}
 		return consumePendingEdits(b.tx, message, now)
+	})
+}
+
+// A phone replay can normalize a formerly unmapped LID to the phone chat.
+// Repair an existing twin's media in the same transaction, keeping its key and
+// non-media fields. Never create an alias row or run its pending edits twice.
+func (b *messageBatch) repairHistoryMediaAlias(message storedMessage, alias string) error {
+	if alias == "" || alias == message.ChatJID || message.Media.directPath == "" ||
+		!mediaComplete(message.ChatJID, message.URL, message.Media.directPath, message.MediaKey, message.FileSHA256, message.FileEncSHA256) {
+		return nil
+	}
+	return b.write(func() error {
+		var rawTS any
+		err := b.tx.QueryRow(`SELECT COALESCE(CASE WHEN sender_server IS NULL THEN sender
+			ELSE sender || '@' || sender_server END, ''), COALESCE(content, ''), timestamp,
+			COALESCE(quoted_message_id, ''), COALESCE(mentions, '')
+			FROM messages WHERE id = ? AND chat_jid = ? AND is_from_me = ?
+			AND media_type IN ('image', 'video', 'audio', 'document', 'sticker')`,
+			message.ID, alias, message.IsFromMe).Scan(&message.Sender, &message.Content, &rawTS, &message.QuotedMessageID, &message.Mentions)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		message.ChatJID = alias
+		message.Timestamp = anchorTime(rawTS)
+		if message.Timestamp.IsZero() {
+			return fmt.Errorf("stored media alias has an unreadable timestamp")
+		}
+		// Reuse #695's atomic snapshot replacement/preservation rules.
+		message.HistoryReplay = true
+		_, err = b.stmt.ExecContext(b.ctx, messageArgs(message)...)
+		return err
 	})
 }
 

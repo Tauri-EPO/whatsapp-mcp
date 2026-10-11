@@ -365,9 +365,11 @@ def request_history(chat_jid: str, count: int = 50, before_message_id: str | Non
 
     To repair a media row stored without direct_path, pass that message's id as
     before_message_id: request_history(chat_jid, before_message_id=<id>), then
-    retry download_media after the replay arrives. The bridge anchors on the next
-    stored message in that chat, or a timestamp just after the target when it is
-    the newest stored message, so the target itself is requested. The phone may
+    retry download_media after the replay arrives. The bridge anchors on the first
+    non-pointer message with a strictly later timestamp, or one second after the
+    target when none exists, so the target itself is requested. Reactions and poll
+    votes cannot be anchors. The request uses the target's stored phone/LID spelling;
+    whether that spelling affects replay still needs a live check. The phone may
     still send nothing or omit the direct path; a successful request proves only
     that it was sent.
 

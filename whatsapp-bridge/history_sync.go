@@ -165,6 +165,49 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 				}
 			}
+			// Only complete media with an archived LID candidate needs another
+			// SDK lookup. Prepare it after chat creation and outside the writer;
+			// unrelated text/edit histories retain their session retry ordering.
+			mediaAlias := ""
+			var aliasErr error
+			if !preserveExisting && resolved.Server == types.DefaultUserServer {
+				if jid.Server == types.HiddenUserServer {
+					mediaAlias = jid.ToNonAD().String() // already verified by resolution above
+				} else {
+					for _, row := range messages {
+						if row == nil || row.Message == nil {
+							continue
+						}
+						media := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID())
+						if media.directPath == "" || !mediaComplete(chatJID, media.url, media.directPath, media.mediaKey, media.fileSHA, media.fileEnc) {
+							continue
+						}
+						var candidate bool
+						aliasErr = retry(func() error {
+							return messageStore.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages
+								WHERE id = ? AND chat_jid LIKE '%@lid'
+								AND media_type IN ('image', 'video', 'audio', 'document', 'sticker'))`, row.Message.GetKey().GetID()).Scan(&candidate)
+						})
+						if aliasErr != nil {
+							break
+						}
+						if !candidate {
+							continue
+						}
+						if alt, err := lookupAltJID(ctx, client, resolved); err == nil && alt.Server == types.HiddenUserServer {
+							mediaAlias = alt.ToNonAD().String()
+						}
+						break
+					}
+				}
+			}
+			if aliasErr != nil {
+				if stopping() {
+					return
+				}
+				b.noteHistoryLoss(messages, timestamp, chatJID, aliasErr)
+				continue
+			}
 
 			// Poll votes are decoded after the loop so the poll rows exist
 			// first (history chunks are newest-first). See polls.go.
@@ -276,6 +319,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					// carry a usable ContextInfo.
 					var consumed bool
 					consumed, err = persistMessageResult(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
+					if err == nil && !consumed && mediaAlias != "" {
+						err = batch.repairHistoryMediaAlias(storedMessageSnapshot(msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false), mediaAlias)
+					}
 					if err == nil {
 						err = batch.failure
 					}

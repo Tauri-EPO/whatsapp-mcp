@@ -48,12 +48,13 @@ func TestHistoryRepairRequest(t *testing.T) {
 		status                                        int
 	}{
 		{"default backfill unchanged", phone.String(), phone.String(), "BACKFILL", "M1", false, ts.Add(-time.Minute), 200},
-		{"successor with tied timestamp", phone.String(), phone.String(), "M2", "M3", true, ts, 200},
-		{"successor with later timestamp", phone.String(), phone.String(), "M3", "M4", false, ts.Add(time.Minute), 200},
+		{"tied timestamp is skipped", phone.String(), phone.String(), "M2", "M4", true, ts.Add(time.Minute), 200},
+		{"successor with later timestamp", phone.String(), phone.String(), "M3", "M4", true, ts.Add(time.Minute), 200},
 		{"newest timestamp fallback", phone.String(), phone.String(), "M4", "", false, ts.Add(time.Minute + time.Second), 200},
-		{"LID resolves phone storage", lid.String(), phone.String(), "M2", "M3", true, ts, 200},
-		{"phone resolves LID storage", phone.String(), lid.String(), "M2", "M3", true, ts, 200},
-		{"canonical spelling", " 5511999999999@S.WHATSAPP.NET ", phone.String(), "M2", "M3", true, ts, 200},
+		{"LID resolves phone storage", lid.String(), phone.String(), "M2", "M4", true, ts.Add(time.Minute), 200},
+		{"phone resolves LID storage", phone.String(), lid.String(), "M2", "M4", true, ts.Add(time.Minute), 200},
+		{"canonical spelling", " 5511999999999@S.WHATSAPP.NET ", phone.String(), "M2", "M4", true, ts.Add(time.Minute), 200},
+		{"skip reaction and poll vote", phone.String(), phone.String(), "M1", "M2", false, ts, 200},
 		{"unknown id", phone.String(), phone.String(), "MISSING", "", false, time.Time{}, 400},
 		{"another chat id", phone.String(), phone.String(), "OTHER", "", false, time.Time{}, 400},
 		{"empty id", phone.String(), phone.String(), "", "", false, time.Time{}, 400},
@@ -61,10 +62,15 @@ func TestHistoryRepairRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestMessageStore(t)
 			for _, msg := range []storedMessage{
-				{ID: "M4", ChatJID: tc.storedChat, Timestamp: ts.Add(time.Minute)},
+				{ID: "M4", ChatJID: tc.storedChat, Timestamp: ts.Add(time.Minute), IsFromMe: true},
+				{ID: "M4Z", ChatJID: tc.storedChat, Timestamp: ts.Add(time.Minute), IsFromMe: true},
 				{ID: "M3", ChatJID: tc.storedChat, Timestamp: ts, IsFromMe: true},
 				{ID: "M2", ChatJID: tc.storedChat, Timestamp: ts},
 				{ID: "M1", ChatJID: tc.storedChat, Timestamp: ts.Add(-time.Minute)},
+				{ID: "R1", ChatJID: tc.storedChat, Timestamp: ts.Add(-30 * time.Second), MediaType: "reaction"},
+				{ID: "V1", ChatJID: tc.storedChat, Timestamp: ts.Add(-20 * time.Second), MediaType: "poll_vote"},
+				{ID: "R2", ChatJID: tc.storedChat, Timestamp: ts.Add(2 * time.Minute), MediaType: "reaction"},
+				{ID: "V2", ChatJID: tc.storedChat, Timestamp: ts.Add(3 * time.Minute), MediaType: "poll_vote"},
 				{ID: "M2", ChatJID: other, Timestamp: ts.Add(-time.Hour)},
 				{ID: "OTHER", ChatJID: other, Timestamp: ts},
 			} {
@@ -108,15 +114,15 @@ func TestHistoryRepairRequest(t *testing.T) {
 				return
 			}
 			anchor := sent.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
-			requestedChat, err := canonicalChatJID(tc.requestChat, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if anchor == nil || anchor.GetChatJID() != requestedChat.String() || anchor.GetOldestMsgID() != tc.wantID ||
+			if anchor == nil || anchor.GetChatJID() != tc.storedChat || anchor.GetOldestMsgID() != tc.wantID ||
 				anchor.GetOldestMsgFromMe() != tc.wantFromMe || anchor.GetOldestMsgTimestampMS() != tc.wantTime.Unix() ||
 				anchor.GetOnDemandMsgCount() != 7 {
 				t.Fatalf("built request = %v; want chat=%s id=%q fromMe=%v timestamp=%d count=7",
-					anchor, requestedChat, tc.wantID, tc.wantFromMe, tc.wantTime.Unix())
+					anchor, tc.storedChat, tc.wantID, tc.wantFromMe, tc.wantTime.Unix())
+			}
+			if tc.target != "BACKFILL" && (!strings.Contains(rec.Body.String(), "up to and including the target") ||
+				strings.Contains(rec.Body.String(), "older than")) {
+				t.Fatalf("repair success text = %s", rec.Body.String())
 			}
 		})
 	}

@@ -98,35 +98,37 @@ func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe
 }
 
 // repairHistoryAnchor finds the target only in the requested chat or its known
-// phone/LID twin, then uses the next row in the store's (timestamp, id) order.
+// phone/LID twin, then uses the first non-pointer message in a later second.
 // The target itself must be included in the replay, rather than excluded as the
 // SDK's "oldest message". With no successor, use a timestamp-only anchor one
 // second later: BuildHistorySyncRequest serializes seconds despite its MS name.
-func repairHistoryAnchor(ctx context.Context, store *MessageStore, chat, twin, target string) (id string, fromMe bool, ts time.Time, err error) {
-	var storedChat string
+func repairHistoryAnchor(ctx context.Context, store *MessageStore, chat, twin, target string) (storedChat, id string, fromMe bool, ts time.Time, err error) {
 	var rawTS any
 	err = store.db.QueryRowContext(ctx, `SELECT chat_jid, timestamp FROM messages
 		WHERE id = ? AND chat_jid IN (?, ?)
 		ORDER BY CASE WHEN chat_jid = ? THEN 0 ELSE 1 END LIMIT 1`,
 		target, chat, twin, chat).Scan(&storedChat, &rawTS)
 	if err != nil {
-		return "", false, time.Time{}, err
+		return "", "", false, time.Time{}, err
 	}
 	targetTime := anchorTime(rawTS)
 	if targetTime.IsZero() {
-		return "", false, time.Time{}, nil
+		return storedChat, "", false, time.Time{}, nil
 	}
+	// Reactions and poll votes are pointer rows. Revoke/edit update originals;
+	// other content-free protocol envelopes do not create message rows.
 	err = store.db.QueryRowContext(ctx, `SELECT id, is_from_me, timestamp FROM messages
-		WHERE chat_jid = ? AND (timestamp, id) >
-			(SELECT timestamp, id FROM messages WHERE id = ? AND chat_jid = ?)
+		WHERE chat_jid = ? AND timestamp >
+			(SELECT timestamp FROM messages WHERE id = ? AND chat_jid = ?)
+		AND COALESCE(media_type, '') NOT IN ('reaction', 'poll_vote')
 		ORDER BY timestamp, id LIMIT 1`, storedChat, target, storedChat).Scan(&id, &fromMe, &rawTS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, targetTime.Add(time.Second), nil
+		return storedChat, "", false, targetTime.Add(time.Second), nil
 	}
 	if err != nil {
-		return "", false, time.Time{}, err
+		return storedChat, "", false, time.Time{}, err
 	}
-	return id, fromMe, anchorTime(rawTS), nil
+	return storedChat, id, fromMe, anchorTime(rawTS), nil
 }
 
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
@@ -189,7 +191,13 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 			id, fromMe, ts, err = oldestStoredMessage(messageStore, req.ChatJID)
 		} else {
 			twin, _ := lookupAltJID(ctx, client, chatJID)
-			id, fromMe, ts, err = repairHistoryAnchor(ctx, messageStore, chatJID.String(), twin.ToNonAD().String(), *req.BeforeMessageID)
+			var storedChat string
+			storedChat, id, fromMe, ts, err = repairHistoryAnchor(ctx, messageStore, chatJID.String(), twin.ToNonAD().String(), *req.BeforeMessageID)
+			if err == nil {
+				// Use the target's archived spelling for the phone to locate it.
+				// Whether phone/LID spelling affects replay needs a live check.
+				chatJID, err = types.ParseJID(storedChat)
+			}
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			if req.BeforeMessageID != nil {
@@ -226,11 +234,17 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 		}
 
 		bridgeLog.Debugf("← /api/history chat=%q count=%d anchor=%q", req.ChatJID, count, id)
+		message := fmt.Sprintf(
+			"Requested up to %d messages older than %s for %s. History arrives asynchronously; the phone decides how much is returned.",
+			count, ts.Format(time.RFC3339), req.ChatJID)
+		if req.BeforeMessageID != nil {
+			message = fmt.Sprintf(
+				"Requested re-delivery of up to %d messages up to and including the target for %s. History arrives asynchronously; the phone decides how much is returned.",
+				count, req.ChatJID)
+		}
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: true,
-			Message: fmt.Sprintf(
-				"Requested up to %d messages older than %s for %s. History arrives asynchronously; the phone decides how much is returned.",
-				count, ts.Format(time.RFC3339), req.ChatJID),
+			Message: message,
 		})
 	}))
 }

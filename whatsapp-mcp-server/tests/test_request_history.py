@@ -179,7 +179,9 @@ async def test_request_history_anchor_over_http(monkeypatch):
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([]))
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token-0123456789")
     try:
-        result = await main.mcp.call_tool("request_history", {"chat_jid": CHAT, "count": 7, "before_message_id": "M2"})
+        result = await main.mcp.call_tool(
+            "request_history", {"chat_jid": CHAT, "count": 7, "before_message_id": "  M2  "}
+        )
         assert not result.is_error
         assert result.structured_content["success"] is True
         assert "download_media" in result.structured_content["note"]

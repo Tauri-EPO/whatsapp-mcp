@@ -559,9 +559,11 @@ snapshot with complete media information. A complete stored snapshot keeps its
 locator when the replay names a different path. Then retry `download_media`.
 Shared history bundles skip existing rows and cannot repair them. Call
 `request_history(chat_jid, before_message_id=<id>)` with this message's id, then
-`download_media` after the replay arrives. The bridge anchors on the next stored
-message in that chat, or a timestamp one second after the target when it is the
-newest stored message. Without this option, `request_history(chat_jid)` still
+`download_media` after the replay arrives. The bridge anchors on the first stored
+non-pointer message with a strictly later timestamp, or one second after the
+target when none exists; same-second rows, reactions and poll votes are skipped.
+It sends the chat spelling under which the target was stored, an assumption that
+still needs the paired-phone check. Without this option, `request_history(chat_jid)` still
 backfills messages **older than the oldest stored one**. WhatsApp controls
 whether it answers a mid-history request and re-delivers the direct path;
 otherwise ask for the file again. The error

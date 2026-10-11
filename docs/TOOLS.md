@@ -552,10 +552,15 @@ land.
 - `before_message_id` (optional): stored message id in this chat to include in a repair replay.
   To repair a media row stored without `direct_path`, call
   `request_history(chat_jid, before_message_id=<id>)`, then `download_media` after
-  the replay arrives. The anchor is the next stored message in `(timestamp, id)`
-  order, or a timestamp one second after the target if it is the newest stored
-  message. Known phone and `@lid` spellings resolve to the same chat. The phone
+  the replay arrives. The anchor is the first stored non-pointer message with a
+  timestamp strictly greater than the target's, or one second after the target
+  when none exists. Same-second rows, reactions and poll votes cannot be anchors.
+  Known phone and `@lid` spellings resolve to the same chat; the request uses the
+  spelling under which the target is stored. Whether that spelling affects replay
+  remains to be checked on a paired phone. The phone
   decides whether to replay the target and whether to include its direct path.
+  Phone replays also repair existing mapped LID media rows; shared history
+  imports leave them unchanged.
 
 Returns `{"success": true, "chat_jid", "requested_count", "message", "note"}`.
 

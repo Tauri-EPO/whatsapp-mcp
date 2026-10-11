@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
@@ -622,6 +624,136 @@ func TestHistorySyncRepairsMissingDirectPathWithoutReplacingExisting(t *testing.
 			}
 			if path != refresh.GetDirectPath() || string(key) != string(refresh.MediaKey) || string(hash) != string(refresh.FileSHA256) || string(encHash) != string(refresh.FileEncSHA256) || length != refresh.GetFileLength() {
 				t.Error("incomplete replay blanked a stored media snapshot")
+			}
+		})
+	}
+}
+
+func TestHistoryRepairLIDReplayDownload(t *testing.T) {
+	for _, tc := range []struct {
+		name, requestChat, replayChat string
+		complete, peer, failAlias     bool
+	}{
+		{"LID replay", phonePN.String(), phoneLID.String(), false, false, false},
+		{"phone replay", phoneLID.String(), phonePN.String(), false, false, false},
+		{"complete alias preserved", phonePN.String(), phoneLID.String(), true, false, false},
+		{"peer cannot repair alias", phonePN.String(), phonePN.String(), false, true, false},
+		{"alias failure rolls back canonical row", phonePN.String(), phonePN.String(), false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(storeDirEnv, t.TempDir())
+			ms := newConcurrentTestStore(t)
+			client := newTestClientWithSelf(&mockLIDStore{
+				lidByPN: map[types.JID]types.JID{phonePN: phoneLID},
+				pnByLID: map[types.JID]types.JID{phoneLID: phonePN},
+			}, selfPhone)
+			b := testBridge(t, client, ms, testLogger())
+			b.MediaAutoDownload = false
+			ts := time.Now().Add(-time.Hour).Truncate(time.Second)
+			legacy := fixtureDocument()
+			legacy.DirectPath = nil
+			if tc.complete {
+				legacy.DirectPath = proto.String("/o1/v/PRESERVED.enc?oe=7FFFFFFF")
+			}
+			if err := persistMessage(ms, "REPAIR1", phoneLID.String(), phoneLID.String(), ts, false,
+				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "REPAIR1"), true, b.Log); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ms.db.Exec("UPDATE messages SET content='archived caption' WHERE id=? AND chat_jid=?", "REPAIR1", phoneLID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.failAlias {
+				if _, err := ms.db.Exec(`CREATE TRIGGER deny_alias BEFORE UPDATE ON messages
+					WHEN OLD.id='REPAIR1' AND OLD.chat_jid LIKE '%@lid'
+					BEGIN SELECT RAISE(ABORT, 'alias write refused'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const other = "5511888888888@s.whatsapp.net"
+			if err := persistMessage(ms, "REPAIR1", other, other, ts, false,
+				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "REPAIR1"), true, b.Log); err != nil {
+				t.Fatal(err)
+			}
+			repaired := fixtureDocument()
+			repaired.Caption = proto.String("replay caption")
+			mux := http.NewServeMux()
+			registerHistoryEndpointWithSender(mux, func(h http.HandlerFunc) http.HandlerFunc { return h }, client,
+				func() bool { return true }, ms, chatPolicy{}, func(_ context.Context, msg *waE2E.Message) error {
+					anchor := msg.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
+					if anchor.GetChatJID() != phoneLID.String() {
+						t.Fatalf("request lost stored identity: %v", anchor)
+					}
+					b.handleHistorySyncWithShares(&events.HistorySync{Data: &waHistorySync.HistorySync{
+						SyncType: waHistorySync.HistorySync_ON_DEMAND.Enum(),
+						Conversations: []*waHistorySync.Conversation{{
+							ID: proto.String(tc.replayChat),
+							Messages: []*waHistorySync.HistorySyncMsg{{Message: &waWeb.WebMessageInfo{
+								Key:              &waCommon.MessageKey{ID: proto.String("REPAIR1"), FromMe: proto.Bool(false)},
+								MessageTimestamp: proto.Uint64(uint64(ts.Unix())), //nolint:gosec // test fixture
+								Message:          &waE2E.Message{DocumentMessage: repaired},
+							}}, {Message: &waWeb.WebMessageInfo{
+								Key:              &waCommon.MessageKey{ID: proto.String("NEW1"), FromMe: proto.Bool(false)},
+								MessageTimestamp: proto.Uint64(uint64(ts.Unix())), //nolint:gosec // test fixture
+								Message:          &waE2E.Message{DocumentMessage: repaired},
+							}}},
+						}},
+					}}, false, tc.peer)
+					return nil
+				})
+			rec := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"chat_jid":%q,"before_message_id":"REPAIR1"}`, tc.requestChat)
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/history", strings.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("request failed: %d %s", rec.Code, rec.Body.String())
+			}
+			wantPath := repaired.GetDirectPath()
+			if tc.complete || tc.peer || tc.failAlias {
+				wantPath = legacy.GetDirectPath()
+			}
+			if got := storedDirectPath(t, ms, "REPAIR1", phoneLID.String()); got.String != wantPath {
+				t.Fatalf("replay did not preserve/repair selected LID row: got=%v want=%q", got, wantPath)
+			}
+			if got := storedDirectPath(t, ms, "REPAIR1", other); got.String != legacy.GetDirectPath() {
+				t.Fatal("replay crossed a different chat's message key")
+			}
+			var content, senderServer, stamp string
+			if err := ms.db.QueryRow("SELECT content,sender_server,CAST(timestamp AS TEXT) FROM messages WHERE id=? AND chat_jid=?", "REPAIR1", phoneLID.String()).Scan(&content, &senderServer, &stamp); err != nil {
+				t.Fatal(err)
+			}
+			if content != "archived caption" || senderServer != types.HiddenUserServer || stamp != dbTime(ts) {
+				t.Fatalf("alias non-media metadata changed: content=%q server=%q stamp=%q", content, senderServer, stamp)
+			}
+			var aliases, canonical int
+			if err := ms.db.QueryRow("SELECT count(*) FROM messages WHERE id=? AND chat_jid=?", "NEW1", phoneLID.String()).Scan(&aliases); err != nil || aliases != 0 {
+				t.Fatalf("created a new alias row: count=%d err=%v", aliases, err)
+			}
+			if err := ms.db.QueryRow("SELECT count(*) FROM messages WHERE id=? AND chat_jid=?", "REPAIR1", phonePN.String()).Scan(&canonical); err != nil {
+				t.Fatal(err)
+			}
+			if tc.failAlias && canonical != 0 {
+				t.Fatal("failed alias write committed the canonical target")
+			}
+			if tc.peer || tc.failAlias {
+				return
+			}
+			transfers := 0
+			b.mediaTransfer = func(_ context.Context, msg whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				transfers++
+				if msg.GetDirectPath() != wantPath {
+					t.Errorf("download locator=%q want=%q", msg.GetDirectPath(), wantPath)
+				}
+				return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error { _, err := f.Write([]byte("document")); return err })
+			}
+			ok, _, _, path, err := b.downloadMedia(context.Background(), "REPAIR1", phoneLID.String())
+			if err != nil || !ok || transfers != 1 {
+				t.Fatalf("original LID download failed: ok=%v transfers=%d err=%v", ok, transfers, err)
+			}
+			rel, err := filepath.Rel(b.StoreRoot.Name(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if data, err := b.StoreRoot.ReadFile(rel); err != nil || string(data) != "document" {
+				t.Fatalf("downloaded artifact=%q err=%v", data, err)
 			}
 		})
 	}
