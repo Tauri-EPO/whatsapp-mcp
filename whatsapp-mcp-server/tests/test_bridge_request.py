@@ -1,11 +1,13 @@
 """_bridge_request: every bridge call carries a timeout; connection errors retry, read timeouts do not."""
 
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
 
+import main
 import whatsapp
 from errors import ToolError
 
@@ -186,6 +188,58 @@ class _Failed:
 
     def json(self):
         return self._body
+
+
+def test_expired_link_message_reaches_download_read_and_transcribe(monkeypatch, paired_dbs, tmp_path):
+    """Keep the bridge's remedy intact through real HTTP and each tool's error envelope."""
+    chat = "5511999999999@s.whatsapp.net"
+    message = (
+        "Failed to download media: failed to download media: this message was stored before the bridge kept "
+        "the file's own direct path; its legacy link expired on 2020-01-02 (UTC); "
+        "a history sync that re-delivers this message can repair its locator, then retry download_media; "
+        "request_history only backfills messages older than the oldest stored one and does not reach this row; "
+        "otherwise ask for the file again: "
+        "sender's phone declined media retry: NOT_FOUND: the sender's phone no longer has this media"
+    )
+    calls = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        def do_POST(self):
+            calls.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            body = json.dumps({"error": {"code": "media_unavailable", "message": message}}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    with paired_dbs.messages() as conn:
+        conn.execute(
+            "INSERT INTO messages (id,chat_jid,sender,timestamp,media_type,filename) VALUES (?,?,?,?,?,?)",
+            ("EXPIRED1", chat, "5511999999999", "2020-01-03 00:00:00", "audio", "voice.ogg"),
+        )
+    monkeypatch.setenv("WHATSAPP_STORE_DIR", str(tmp_path))
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: "t" * 32)
+    monkeypatch.setattr(main, "load_whisper_config", lambda: "unused")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(whatsapp, "WHATSAPP_API_BASE_URL", f"http://127.0.0.1:{server.server_port}/api")
+    expected = {"error": {"code": "media_unavailable", "message": message}}
+    try:
+        assert main.download_media(chat, "EXPIRED1") == expected
+        read = main.read_media(chat, "EXPIRED1")
+        assert read.is_error and read.structured_content == expected
+        assert json.loads(read.content[0].text) == expected
+        assert main.transcribe_audio(chat_jid=chat, message_id="EXPIRED1") == expected
+        assert calls == [("/api/download", {"message_id": "EXPIRED1", "chat_jid": chat})] * 3
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_the_bridge_can_name_a_code_its_status_does_not_carry(monkeypatch, paired_dbs):

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -437,6 +438,163 @@ func TestDownloadMediaFreshMessageWithAnExpiredLinkGoesToTheMediaRetry(t *testin
 	}
 	if retry.calls != 1 {
 		t.Errorf("media retry calls = %d, want 1 for a link stamped as expired", retry.calls)
+	}
+}
+
+func TestDownloadMediaUnavailableExplainsOnlyExpiredLinks(t *testing.T) {
+	past := time.Date(2020, 1, 2, 0, 30, 0, 0, time.UTC)
+	future := time.Now().Add(24 * time.Hour)
+	gone := fmt.Errorf("sender's phone declined media retry: NOT_FOUND: %w", errMediaUnavailable)
+	for _, tc := range []struct {
+		name     string
+		stamp    string
+		legacy   bool
+		retryErr error
+		explain  bool
+	}{
+		{"past with own path", fmt.Sprintf("&oe=%X", past.Unix()), false, gone, false},
+		{"past URL fallback", fmt.Sprintf("&oe=%X", past.Unix()), true, gone, true},
+		{"future", fmt.Sprintf("&oe=%X", future.Unix()), true, gone, false},
+		{"absent", "", true, gone, false},
+		{"invalid", "&oe=invalid", true, gone, false},
+		{"transient retry", fmt.Sprintf("&oe=%X", past.Unix()), true, errors.New("retry timed out"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(storeDirEnv, t.TempDir())
+			ms := newTestMessageStore(t)
+			b := testBridge(t, nil, ms, installRecordingLogger(t))
+			path := "/v/f/SECRETFILENAME.enc?oh=SECRETTOKEN" + tc.stamp
+			// Old messages retry even without a past stamp, so all cases
+			// exercise the same NOT_FOUND path rather than the fresh guard.
+			seedDocumentRow(t, ms, "GONE1", path, time.Now().Add(-2*cdnFreshWindow))
+			if _, err := ms.db.Exec("UPDATE messages SET url=?, direct_path=? WHERE id=? AND chat_jid=?",
+				mediaURLFromDirectPath(path), path, "GONE1", mediaTestChat); err != nil {
+				t.Fatal(err)
+			}
+			if tc.legacy {
+				if _, err := ms.db.Exec("UPDATE messages SET direct_path=NULL WHERE id=? AND chat_jid=?", "GONE1", mediaTestChat); err != nil {
+					t.Fatal(err)
+				}
+			}
+			transfers := 0
+			b.mediaTransfer = func(_ context.Context, msg whatsmeow.DownloadableMessage, _ string) (int64, error) {
+				transfers++
+				if msg.GetDirectPath() != path {
+					t.Errorf("download path = %q, want %q", msg.GetDirectPath(), path)
+				}
+				return 0, whatsmeow.ErrMediaDownloadFailedWith403
+			}
+			retry := &retryRecorder{err: tc.retryErr}
+			b.mediaRetryDownload = retry.retry
+			_, _, _, _, err := b.downloadMedia(context.Background(), "GONE1", mediaTestChat)
+			if err == nil || transfers != 1 || retry.calls != 1 || !errors.Is(err, tc.retryErr) {
+				t.Fatalf("transfers=%d retries=%d err=%v", transfers, retry.calls, err)
+			}
+			if errors.Is(err, errMediaUnavailable) != errors.Is(tc.retryErr, errMediaUnavailable) {
+				t.Fatalf("media_unavailable classification changed: %v", err)
+			}
+			if tc.explain {
+				for _, want := range []string{"stored before the bridge kept the file's own direct path", "legacy link expired on 2020-01-02 (UTC)", "history sync that re-delivers this message", "then retry download_media", "request_history only backfills messages older than the oldest stored one", "does not reach this row", "ask for the file again"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q lacks %q", err, want)
+					}
+				}
+			} else if want := "failed to download media: " + tc.retryErr.Error(); err.Error() != want {
+				t.Errorf("error = %q, want unchanged %q", err, want)
+			}
+			for _, secret := range []string{"SECRETTOKEN", "SECRETFILENAME", path, mediaCDNHost} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error exposed %q", secret)
+				}
+			}
+			if tc.retryErr == gone {
+				b.Connected = func() bool { return true }
+				const token = "test-token-0123456789"
+				rec := httptest.NewRecorder()
+				body := fmt.Sprintf(`{"message_id":"GONE1","chat_jid":%q}`, mediaTestChat)
+				b.newRESTMux(8080, token).ServeHTTP(rec, downloadRequest(token, body))
+				var response apiError
+				if decodeErr := json.Unmarshal(rec.Body.Bytes(), &response); decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				if rec.Code != http.StatusInternalServerError || response.Error.Code != "media_unavailable" || response.Error.Message != "Failed to download media: "+err.Error() {
+					t.Fatalf("REST error: %d %s", rec.Code, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestHistorySyncRepairsMissingDirectPathWithoutReplacingExisting(t *testing.T) {
+	for _, syncType := range []waHistorySync.HistorySync_HistorySyncType{
+		waHistorySync.HistorySync_INITIAL_BOOTSTRAP, waHistorySync.HistorySync_ON_DEMAND,
+	} {
+		t.Run(syncType.String(), func(t *testing.T) {
+			t.Setenv(storeDirEnv, t.TempDir())
+			ms := newConcurrentTestStore(t)
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, selfPhone), ms, testLogger())
+			b.MediaAutoDownload = false
+			ts := time.Now().Add(-time.Hour)
+			legacy := fixtureDocument()
+			legacy.DirectPath = nil
+			if err := persistMessage(ms, "REPAIR1", phonePN.String(), phonePN.String(), ts, false,
+				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "REPAIR1"), true, b.Log); err != nil {
+				t.Fatal(err)
+			}
+			if got := storedDirectPath(t, ms, "REPAIR1", phonePN.String()); got.Valid {
+				t.Fatalf("legacy row already has a direct path: %v", got)
+			}
+			replay := func(doc *waE2E.DocumentMessage) {
+				b.handleHistorySync(&events.HistorySync{Data: &waHistorySync.HistorySync{
+					SyncType: syncType.Enum(),
+					Conversations: []*waHistorySync.Conversation{{
+						ID: proto.String(phonePN.String()),
+						Messages: []*waHistorySync.HistorySyncMsg{{Message: &waWeb.WebMessageInfo{
+							Key:              &waCommon.MessageKey{ID: proto.String("REPAIR1"), FromMe: proto.Bool(false)},
+							MessageTimestamp: proto.Uint64(uint64(ts.Unix())), //nolint:gosec // test fixture
+							Message:          &waE2E.Message{DocumentMessage: doc},
+						}}},
+					}},
+				}})
+			}
+			repaired := fixtureDocument()
+			repaired.DirectPath = proto.String("/o1/v/CURRENT.enc?oe=7FFFFFFF&oh=TOKEN")
+			replay(repaired)
+			if got := storedDirectPath(t, ms, "REPAIR1", phonePN.String()); got.String != repaired.GetDirectPath() {
+				t.Fatalf("history did not repair missing path: %v", got)
+			}
+			transfers := 0
+			b.mediaTransfer = func(_ context.Context, msg whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				transfers++
+				if msg.GetDirectPath() != repaired.GetDirectPath() {
+					t.Errorf("download asked for %q, want repaired locator", msg.GetDirectPath())
+				}
+				return writeMediaFile(b.StoreRoot, rel, func(f *os.File) error {
+					_, err := f.Write([]byte("document"))
+					return err
+				})
+			}
+			if ok, _, _, _, err := b.downloadMedia(context.Background(), "REPAIR1", phonePN.String()); err != nil || !ok || transfers != 1 {
+				t.Fatalf("repaired download: ok=%v transfers=%d err=%v", ok, transfers, err)
+			}
+			// A later history replay must not roll back a locator refreshed by
+			// a download, nor mix that locator with another snapshot's keys.
+			replacement := fixtureDocument()
+			replacement.DirectPath = proto.String("/o1/v/OTHER.enc?oe=7FFFFFFF")
+			replacement.MediaKey = []byte(strings.Repeat("z", 32))
+			replacement.FileSHA256 = []byte(strings.Repeat("h", 32))
+			replay(replacement)
+			if got := storedDirectPath(t, ms, "REPAIR1", phonePN.String()); got.String != repaired.GetDirectPath() {
+				t.Errorf("history replaced existing path: %v", got)
+			}
+			var key, hash []byte
+			if err := ms.db.QueryRow("SELECT media_key,file_sha256 FROM messages WHERE id=? AND chat_jid=?", "REPAIR1", phonePN.String()).Scan(&key, &hash); err != nil {
+				t.Fatal(err)
+			}
+			if string(key) != string(repaired.MediaKey) || string(hash) != string(repaired.FileSHA256) {
+				t.Error("history mixed a preserved path with another snapshot's credentials")
+			}
+		})
 	}
 }
 

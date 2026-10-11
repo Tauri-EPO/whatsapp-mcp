@@ -518,8 +518,9 @@ How to read it:
   path the CDN cannot authorise; a `?` in the list is a piece that was not
   `name=value`.
 - **`expiry stamp in the future` / `in the past` / `no expiry stamp`**: what
-  the link's own `oe` parameter says. `in the past` on a recent message is an
-  old upload sent again, and goes to the media retry.
+  the requested link's `oe` parameter says. A legacy URL can already be expired
+  while the message's own direct path works (the case below); a refused link
+  stamped `in the past` goes to the media retry.
 - **`same as the url's path`**, **`same object as the url's path, other
   parameters`** (the ordinary case: clients add a parameter of their own to
   the url) or **`another object than the url's path`**: how the message's
@@ -536,6 +537,27 @@ The line carries no token, file name or hash, only the shape above, so it can
 be attached to a report once the message ID is replaced by a placeholder. A
 file that keeps failing with this line while the phone opens it is a bug worth
 reporting with it.
+
+## `media_unavailable` on a document the phone still opens
+
+`download_media` / `read_media` answer `media_unavailable` with **"this message
+was stored before the bridge kept the file's own direct path; its legacy link
+expired on <date> (UTC)"**, followed by the sender's phone answering `NOT_FOUND`
+to the media retry.
+
+Media messages carry both a legacy `url` and their own `directPath`, which is
+what the phone downloads by. Rows stored before v2.1 / PR #541 kept only the
+legacy URL; its `oe` stamp may already be expired when the message arrives,
+even while the message's own direct path still downloads successfully. The
+phone opening the document does not imply it had a local copy. A newer bridge
+stores and uses `direct_path`, but cannot reconstruct it from an older row's URL.
+
+A history sync that re-delivers this message repairs its missing direct path
+without replacing an existing one; then retry `download_media`. The current
+`request_history(chat_jid)` only backfills messages **older than the oldest
+stored one**, so it does not reach this already-stored row. WhatsApp controls
+which messages it re-delivers; otherwise ask for the file again. The error
+gives only the UTC expiry date, never the URL or its tokens.
 
 ## Tool output schema errors
 

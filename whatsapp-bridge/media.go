@@ -394,6 +394,12 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 				written, err = storage.Write(ctx, row, func(rel string) (int64, error) {
 					return b.retryMedia(ctx, messageID, chatJID, downloader, root, rel)
 				})
+				if expiry, ok := linkExpiry(directPath); pathSource == pathFromURL && ok && expiry.Before(time.Now()) && errors.Is(err, errMediaUnavailable) {
+					err = fmt.Errorf("this message was stored before the bridge kept the file's own direct path; its legacy link expired on %s (UTC); "+
+						"a history sync that re-delivers this message can repair its locator, then retry download_media; "+
+						"request_history only backfills messages older than the oldest stored one and does not reach this row; otherwise ask for the file again: %w",
+						expiry.UTC().Format("2006-01-02"), err)
+				}
 			}
 		}
 		if err != nil {
