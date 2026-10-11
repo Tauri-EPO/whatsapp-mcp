@@ -31,6 +31,7 @@ type storedMessage struct {
 	EditAuthorAlias                     string // verified outside the writer, never inferred from digits
 	EditChatAlias                       string // verified alternative DM chat, prepared before the writer
 	EditPreparation                     *pendingEditPreparation
+	HistoryReplay                       bool // history preserves complete stored snapshots with another locator
 }
 
 // sqlExecer is satisfied by *sql.DB and *sql.Tx.
@@ -40,8 +41,16 @@ type sqlExecer interface {
 
 // Replace a snapshot only with complete incoming credentials or when the old
 // row has no media fields yet. Partial replays must not combine different keys
-// and hashes. The named flag comes from the download's canonical predicate.
-const replaceMediaSQL = `(:complete_media OR (
+// and hashes. A history replay preserves a complete stored snapshot when its
+// locator differs or is omitted, but can repair an incomplete snapshot atomically.
+// Stored completeness mirrors mediaComplete, including unencrypted newsletters;
+// file length is deliberately excluded because an empty file is complete.
+const replaceMediaSQL = `((:complete_media AND NOT (:history_replay AND COALESCE(messages.direct_path, '') <> ''
+	AND COALESCE(length(messages.file_sha256), 0) > 0
+	AND ((COALESCE(length(messages.media_key), 0) > 0 AND COALESCE(length(messages.file_enc_sha256), 0) > 0)
+		OR (substr(messages.chat_jid, -11) = '@newsletter'
+			AND COALESCE(length(messages.media_key), 0) = 0 AND COALESCE(length(messages.file_enc_sha256), 0) = 0))
+	AND excluded.direct_path IS NOT messages.direct_path)) OR (
 	COALESCE(messages.url, '') = '' AND COALESCE(messages.direct_path, '') = ''
 	AND COALESCE(length(messages.media_key), 0) = 0
 	AND COALESCE(length(messages.file_sha256), 0) = 0
@@ -146,6 +155,7 @@ type messageBatch struct {
 	pendingChecked bool
 	pendingActive  bool
 	editPrepared   map[pendingOriginalKey]bool
+	historyReplay  bool
 }
 
 type pendingOriginalKey struct {
@@ -225,6 +235,7 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 	if message.Content == "" && message.MediaType == "" {
 		return nil
 	}
+	message.HistoryReplay = b.historyReplay
 	return b.write(func() error {
 		key := pendingOriginalKey{id: message.ID, own: message.IsFromMe}
 		if prepared := message.EditPreparation; prepared != nil && !b.editPrepared[key] {
@@ -280,8 +291,9 @@ func (b *messageBatch) StorePoll(messageID, chatJID string, p *pollCreation, cre
 // the same UTC spelling. The optional direct path is inserted atomically with
 // the credentials and recipient-visible presentation; an omitted/empty path
 // becomes NULL for URL-only snapshots.
-// On a complete write, omitting the optional path therefore clears the stored
-// direct_path. Incomplete writes keep the previous snapshot, including its path.
+// On a complete live write, omitting the optional path clears direct_path.
+// History replays preserve an existing path and its matching credentials;
+// incomplete writes keep the previous snapshot, including its path.
 func messageArgs(m storedMessage) []any {
 	length := m.FileLength
 	switch m.MediaType {
@@ -312,5 +324,6 @@ func messageArgs(m storedMessage) []any {
 	return []any{m.ID, m.ChatJID, sender, server, m.Content, dbTime(m.Timestamp), m.IsFromMe,
 		m.MediaType, m.Filename, m.URL, m.MediaKey, m.FileSHA256, m.FileEncSHA256, length, quote,
 		path, m.Media.presentation.forFile(m.MediaType, m.FileSHA256).column(), m.Media.location.column(), m.Media.retryChat, retrySender, mentions,
-		sql.Named("complete_media", mediaComplete(m.ChatJID, m.URL, m.Media.directPath, m.MediaKey, m.FileSHA256, m.FileEncSHA256))}
+		sql.Named("complete_media", mediaComplete(m.ChatJID, m.URL, m.Media.directPath, m.MediaKey, m.FileSHA256, m.FileEncSHA256)),
+		sql.Named("history_replay", m.HistoryReplay)}
 }

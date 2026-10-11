@@ -1580,6 +1580,12 @@ cacheable. With `WHATSAPP_MEDIA_MAX_BYTES=0`, undeclared lengths are cached too;
 on the file's hash, so `list_media` and `get_media_notes` show which files are
 gone and when that was found out.
 
+When `media_unavailable` names an expired legacy link on a row missing its
+direct path, a history sync that re-delivers that message can fill its locator,
+then `download_media` can be retried. `request_history` only backfills messages
+older than the oldest stored one; it cannot reach this row. Otherwise ask for
+the file again.
+
 An unsafe chat JID or message ID answers `media_refused`, before any transfer.
 Manual download, read, transcription and forwarding calls, as well as the ingest
 worker, remember it in `notes.db`'s `media_refusals`, keyed by the exact

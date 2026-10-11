@@ -2610,6 +2610,9 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     cache file: it is recorded per message, so other copies remain usable.
     list_media shows the dated refusal; clear_media_refusal allows another try
     after the bridge's path rule changes. Retry `bridge_unavailable` later.
+    If `media_unavailable` names an expired legacy link on a row missing its direct
+    path, a history sync that re-delivers that message can repair it; request_history
+    only backfills older messages and cannot reach this row, so otherwise ask for the file again.
 
     Args:
         chat_jid: The JID of the chat containing the message
@@ -2733,6 +2736,9 @@ def read_media(
     not cached yet is fetched through the bridge first, unless the archive already
     knows it is over the limit — and where download_media is disabled that fetch is
     refused with `denied`, so only media already in the store can be read.
+    If `media_unavailable` names an expired legacy link on a row missing its direct
+    path, a history sync that re-delivers that message can repair it; request_history
+    only backfills older messages and cannot reach this row, so otherwise ask for the file again.
 
     Args:
         chat_jid: JID of the chat containing the message

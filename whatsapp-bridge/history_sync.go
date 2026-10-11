@@ -187,6 +187,9 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			storedInBatch := 0
 			var chunkPeerRows map[string]struct{}
 			storeChunk := func(batch *messageBatch) error {
+				// Replays repair pre-direct-path rows, but must not roll back
+				// a refreshed locator or mix its path with another snapshot.
+				batch.historyReplay = true
 				ownedRows := make(map[string]struct{})
 				for _, msg := range chunk {
 					if preserveExisting && ctx.Err() != nil {
