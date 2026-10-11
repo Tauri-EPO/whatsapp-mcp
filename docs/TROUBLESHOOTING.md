@@ -557,6 +557,10 @@ A history sync from your own phone that re-delivers this message with its direct
 path repairs the missing locator; it can also replace an incomplete download
 snapshot with complete media information. A complete stored snapshot keeps its
 locator when the replay names a different path. Then retry `download_media`.
+An on-demand replay also attempts repair of an existing mapped LID media row.
+`Failed optional history media alias ...` warnings mean that alias was left
+unchanged; the canonical phone-chat replay is still stored. Pair-time and recent
+syncs do not run this extra alias repair.
 Shared history bundles skip existing rows and cannot repair them. Call
 `request_history(chat_jid, before_message_id=<id>)` with this message's id, then
 `download_media` after the replay arrives. The bridge anchors on the first stored

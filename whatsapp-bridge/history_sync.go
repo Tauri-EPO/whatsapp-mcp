@@ -165,48 +165,40 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					logger.Warnf("Failed to store history sync ephemeral settings for %s: %v", chatJID, err)
 				}
 			}
-			// Only complete media with an archived LID candidate needs another
-			// SDK lookup. Prepare it after chat creation and outside the writer;
-			// unrelated text/edit histories retain their session retry ordering.
+			// Only request_history's phone response repairs existing LID twins.
+			// Collect already-extracted snapshots; optional discovery and writes
+			// happen after the canonical chunk commits, outside its writer.
+			repairAliases := !preserveExisting && historySync.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND && resolved.Server == types.DefaultUserServer
+			var aliasMedia []storedMessage
 			mediaAlias := ""
-			var aliasErr error
-			if !preserveExisting && resolved.Server == types.DefaultUserServer {
-				if jid.Server == types.HiddenUserServer {
-					mediaAlias = jid.ToNonAD().String() // already verified by resolution above
-				} else {
-					for _, row := range messages {
-						if row == nil || row.Message == nil {
-							continue
-						}
-						media := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID())
-						if media.directPath == "" || !mediaComplete(chatJID, media.url, media.directPath, media.mediaKey, media.fileSHA, media.fileEnc) {
-							continue
-						}
-						var candidate bool
-						aliasErr = retry(func() error {
-							return messageStore.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages
-								WHERE id = ? AND chat_jid LIKE '%@lid'
-								AND media_type IN ('image', 'video', 'audio', 'document', 'sticker'))`, row.Message.GetKey().GetID()).Scan(&candidate)
-						})
-						if aliasErr != nil {
-							break
-						}
-						if !candidate {
-							continue
-						}
-						if alt, err := lookupAltJID(ctx, client, resolved); err == nil && alt.Server == types.HiddenUserServer {
-							mediaAlias = alt.ToNonAD().String()
-						}
-						break
-					}
-				}
-			}
-			if aliasErr != nil {
-				if stopping() {
+			aliasResolved := false
+			repairCommittedAliases := func() {
+				if len(aliasMedia) == 0 {
 					return
 				}
-				b.noteHistoryLoss(messages, timestamp, chatJID, aliasErr)
-				continue
+				if !aliasResolved {
+					aliasResolved = true // at most one local SDK lookup per chat
+					if jid.Server == types.HiddenUserServer {
+						mediaAlias = jid.ToNonAD().String() // verified by resolution above
+					} else if alt, err := lookupAltJID(ctx, client, resolved); err != nil {
+						logger.Warnf("Failed optional history media alias lookup for %s: %v", chatJID, err)
+					} else if alt.Server == types.HiddenUserServer {
+						mediaAlias = alt.ToNonAD().String()
+					}
+				}
+				if mediaAlias == "" {
+					return
+				}
+				found, err := messageStore.historyMediaAliasExists(ctx, mediaAlias, aliasMedia)
+				if err != nil {
+					logger.Warnf("Failed optional history media alias discovery for %s: %v", chatJID, err)
+					return
+				}
+				if found {
+					for _, media := range aliasMedia {
+						messageStore.repairHistoryMediaAlias(ctx, media, mediaAlias, logger)
+					}
+				}
 			}
 
 			// Poll votes are decoded after the loop so the poll rows exist
@@ -319,8 +311,8 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					// carry a usable ContextInfo.
 					var consumed bool
 					consumed, err = persistMessageResult(batch, msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false, logger)
-					if err == nil && !consumed && mediaAlias != "" {
-						err = batch.repairHistoryMediaAlias(storedMessageSnapshot(msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false), mediaAlias)
+					if err == nil && !consumed && repairAliases && ex.directPath != "" && mediaComplete(chatJID, ex.url, ex.directPath, ex.mediaKey, ex.fileSHA, ex.fileEnc) {
+						aliasMedia = append(aliasMedia, storedMessageSnapshot(msgID, chatJID, storedSenderJID, msgTimestamp, isFromMe, ex, false))
 					}
 					if err == nil {
 						err = batch.failure
@@ -380,12 +372,14 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						}
 						attempt++
 						storedInBatch = 0
+						aliasMedia = nil // a failed/retried chunk owns no committed repairs
 						chunkPeerRows = make(map[string]struct{})
 						return writeBatch(storeChunk)
 					})
 				})
 			}
 			countCommitted := func() {
+				repairCommittedAliases()
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))

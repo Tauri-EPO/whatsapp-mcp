@@ -559,8 +559,9 @@ land.
   spelling under which the target is stored. Whether that spelling affects replay
   remains to be checked on a paired phone. The phone
   decides whether to replay the target and whether to include its direct path.
-  Phone replays also repair existing mapped LID media rows; shared history
-  imports leave them unchanged.
+  On-demand phone replays also attempt to repair existing mapped LID media rows.
+  An alias repair problem logs a warning and keeps the canonical phone-chat
+  replay; pair-time, recent and shared history imports leave those aliases unchanged.
 
 Returns `{"success": true, "chat_jid", "requested_count", "message", "note"}`.
 
