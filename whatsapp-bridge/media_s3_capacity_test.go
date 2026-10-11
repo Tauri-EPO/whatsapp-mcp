@@ -481,7 +481,7 @@ func requestCapacityBlob(t *testing.T, server *httptest.Server, row mediaRow) (i
 }
 
 func TestMinIOTransientSpoolPressureIsRetryable(t *testing.T) {
-	for _, declared := range []int{1024, 0} {
+	for _, declared := range []int{1024, 0, -1, 256} {
 		t.Run(strconv.Itoa(declared), func(t *testing.T) {
 			b, s := minioTestBridge(t, "instances/test-transient-pressure-"+strconv.Itoa(declared))
 			heldData := bytes.Repeat([]byte("a"), 1500)
@@ -494,22 +494,67 @@ func TestMinIOTransientSpoolPressureIsRetryable(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = held.Close() })
 			data := bytes.Repeat([]byte("b"), 1024)
+			if declared == 256 {
+				data = data[:256] // A known length that fits the partial grant still succeeds.
+			}
 			row := s3TestRow(t, b, "PRESSUREFALLBACK", mediaTestChat, "document", data, time.Now())
-			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=? WHERE id=? AND chat_jid=?`, declared, row.ID, row.ChatJID); err != nil {
+			var length any = declared
+			if declared == -1 {
+				length = nil // Legacy NULL length, as well as zero, needs the full budget.
+			}
+			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=? WHERE id=? AND chat_jid=?`, length, row.ID, row.ChatJID); err != nil {
 				t.Fatal(err)
 			}
 			b.MediaQuotaBytes = 1
-			var peak, calls atomic.Int64
-			captureTransientWrites(b, data, &peak, &calls)
+			var cdnBytes atomic.Int64
+			cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				n, _ := w.Write(data)
+				cdnBytes.Add(int64(n))
+			}))
+			defer cdn.Close()
+			b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				return writeMediaDownload(ctx, b.StoreRoot, rel, func(ctx context.Context, f whatsmeow.File) error {
+					req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cdn.URL, nil)
+					response, err := cdn.Client().Do(req)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = response.Body.Close() }()
+					_, err = io.Copy(f, response.Body)
+					return err
+				})
+			}
 			server := s3ReviewREST(t, b)
-			status, body := requestCapacityBlob(t, server, row)
-			if status != http.StatusServiceUnavailable || peak.Load() > 500 || (declared != 0 && calls.Load() != 0) {
-				t.Fatal("temporary spool pressure must be retryable, with declared files rejected before download", status, peak.Load(), calls.Load(), string(body))
+			if declared == 256 {
+				status, body := requestCapacityBlob(t, server, row)
+				if status != http.StatusOK || !bytes.Equal(body, data) {
+					t.Fatal("known length within partial grant was refused", status, string(body))
+				}
+				return
+			}
+			for range 3 {
+				req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/media/blob?chat_jid="+row.ChatJID+"&message_id="+row.ID, nil)
+				req.Header.Set("Authorization", "Bearer test-bridge-token")
+				response, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "1" || cdnBytes.Load() != 0 {
+					t.Fatal("spool pressure must return retryable 503 before fetching any CDN bytes", response.StatusCode, response.Header, cdnBytes.Load(), string(body))
+				}
+				s.spools.mu.Lock()
+				allocated, readers := s.spools.bytes, s.spools.readers
+				s.spools.mu.Unlock()
+				if allocated != int64(len(heldData)) || readers != 1 {
+					t.Fatal("refused retry leaked spool capacity", allocated, readers)
+				}
 			}
 			_ = held.Close()
-			status, body = requestCapacityBlob(t, server, row)
-			if status != http.StatusOK || !bytes.Equal(body, data) {
-				t.Fatal("retry after readers release capacity did not return original bytes", status, string(body))
+			status, body := requestCapacityBlob(t, server, row)
+			if status != http.StatusOK || !bytes.Equal(body, data) || cdnBytes.Load() != int64(len(data)) {
+				t.Fatal("immediate retry after capacity release did not fetch original bytes once", status, cdnBytes.Load(), string(body))
 			}
 		})
 	}
@@ -595,5 +640,139 @@ func TestMinIOTransientShutdownRemovesLateRenamedSpool(t *testing.T) {
 		if _, err := s.root.Lstat(leaf); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("shutdown retained late renamed spool", leaf, err)
 		}
+	}
+}
+
+func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
+	for _, limits := range []struct {
+		starter, waiter int64
+		quota           uint64
+	}{{16, 16, 0}, {16, 32, 0}, {16, 256 * 1024 * 1024, 0}, {256 * 1024 * 1024, 16, 0}, {16, 256 * 1024 * 1024, 128}} {
+		starterLimit, largeLimit := limits.starter, limits.waiter
+		label := strconv.FormatInt(starterLimit, 10) + "-" + strconv.FormatInt(largeLimit, 10)
+		if limits.quota > 0 {
+			label += "-quota"
+		}
+		t.Run(label, func(t *testing.T) {
+			b, _ := minioTestBridge(t, "instances/test-waiter-limit-"+label)
+			b.MediaQuotaBytes = limits.quota
+			data := bytes.Repeat([]byte("w"), 64)
+			row := s3TestRow(t, b, "SHAREDLIMIT", mediaTestChat, "audio", data, time.Now())
+			if _, err := b.Store.db.Exec(`UPDATE messages SET file_length=NULL WHERE id=? AND chat_jid=?`, row.ID, row.ChatJID); err != nil {
+				t.Fatal(err)
+			}
+			started, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			t.Cleanup(func() { once.Do(func() { close(release) }) })
+			var calls, served atomic.Int64
+			cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if calls.Add(1) == 1 {
+					close(started)
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				n, _ := w.Write(data)
+				served.Add(int64(n))
+			}))
+			defer func() {
+				once.Do(func() { close(release) })
+				cdn.Close()
+			}()
+			b.mediaTransfer = func(ctx context.Context, _ whatsmeow.DownloadableMessage, rel string) (int64, error) {
+				return writeMediaDownload(ctx, b.StoreRoot, rel, func(ctx context.Context, f whatsmeow.File) error {
+					req, err := http.NewRequestWithContext(ctx, http.MethodGet, cdn.URL, nil)
+					if err != nil {
+						return err
+					}
+					response, err := cdn.Client().Do(req)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = response.Body.Close() }()
+					_, err = io.Copy(f, response.Body)
+					return err
+				})
+			}
+			server := s3ReviewREST(t, b)
+			type answer struct {
+				status int
+				data   []byte
+				err    error
+			}
+			fetch := func(limit int64, out chan answer) {
+				req, err := http.NewRequest(http.MethodGet, server.URL+"/api/media/blob?chat_jid="+row.ChatJID+"&message_id="+row.ID+"&max_bytes="+strconv.FormatInt(limit, 10), nil)
+				if err != nil {
+					out <- answer{err: err}
+					return
+				}
+				req.Header.Set("Authorization", "Bearer test-bridge-token")
+				response, err := server.Client().Do(req)
+				if err != nil {
+					out <- answer{err: err}
+					return
+				}
+				body, err := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				out <- answer{response.StatusCode, body, err}
+			}
+			small, large := make(chan answer, 1), make(chan answer, 1)
+			go fetch(starterLimit, small)
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("small-limit transfer did not start")
+			}
+			go fetch(largeLimit, large)
+			key := storePath(chatMediaRel(row.ChatJID), mediaFileName(row.MediaType, row.Timestamp, row.ID, row.Filename))
+			deadline := time.Now().Add(10 * time.Second)
+			for b.mediaTransfers.waiting(key) != 2 {
+				if time.Now().After(deadline) {
+					t.Fatal("larger caller did not join the small-limit transfer")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			once.Do(func() { close(release) })
+			receive := func(out chan answer) answer {
+				select {
+				case result := <-out:
+					return result
+				case <-time.After(10 * time.Second):
+					t.Fatal("HTTP caller did not finish")
+					return answer{}
+				}
+			}
+			first, waiter := receive(small), receive(large)
+			starterStatus := 413
+			if starterLimit >= int64(len(data)) {
+				starterStatus = 200
+			}
+			if first.err != nil || first.status != starterStatus || (starterStatus == 413 && !bytes.Contains(first.data, []byte("too_large"))) {
+				t.Fatalf("starter: %+v", first)
+			}
+			wantStatus, wantCalls := 413, int64(1)
+			if largeLimit > starterLimit && starterLimit < int64(len(data)) {
+				wantCalls = 2
+			}
+			if largeLimit >= int64(len(data)) {
+				wantStatus = 200
+			}
+			if limits.quota > 0 {
+				// The shared cache write maps its small cap to errMediaQuota;
+				// each caller then takes its own bounded transient fallback.
+				wantCalls = 3
+				if b.metrics.mediaQuotaRefusals.Load() == 0 {
+					t.Fatal("small starter did not refuse its quota-bounded cache write")
+				}
+			}
+			if waiter.err != nil || waiter.status != wantStatus || calls.Load() != wantCalls || served.Load() != wantCalls*int64(len(data)) {
+				t.Fatalf("waiter status=%d error=%v CDN calls=%d bytes=%d; want status=%d calls=%d", waiter.status, waiter.err, calls.Load(), served.Load(), wantStatus, wantCalls)
+			}
+			if wantStatus == 200 && !bytes.Equal(waiter.data, data) {
+				t.Fatal("waiter did not receive the verified bytes")
+			}
+		})
 	}
 }

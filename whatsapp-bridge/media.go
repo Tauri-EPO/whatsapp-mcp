@@ -120,6 +120,13 @@ func (permanentMediaError) Unwrap() error   { return errMediaUnavailable }
 func (b *Bridge) downloadMedia(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error) {
 	for {
 		ok, kind, name, path, err := b.downloadMediaAttempt(ctx, messageID, chatJID)
+		var shared *mediaTransferLimitError
+		if errors.As(err, &shared) && ctx.Err() == nil &&
+			(mediaLimit(ctx) > shared.limit || (mediaLimit(ctx) == 0 && !automaticCache(ctx))) {
+			// Re-read metadata and transfer under this caller's own limit.
+			// A small-limit starter must not park a larger S3 ingest waiter.
+			continue
+		}
 		if b.mediaStorage().Backend() == "s3" || automaticCache(ctx) || mediaLimit(ctx) != 0 || (!errors.Is(err, errAutoMediaLimit) && !errors.Is(err, errMediaQuota) && !errors.Is(err, errMediaQuotaBusy)) || ctx.Err() != nil {
 			return ok, kind, name, path, err
 		}

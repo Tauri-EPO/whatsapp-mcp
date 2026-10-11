@@ -63,6 +63,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -105,6 +106,7 @@ DEFAULT_INTERVAL_S = 300.0
 MIN_INTERVAL_S = 5.0
 DEFAULT_BATCH = 10
 MAX_BATCH = 200
+INGEST_READ_LIMIT = 256 * 1024 * 1024
 # Rows walked per wanted transcript, past the newest ones. Audio whose bytes were
 # never cached (or were purged) cannot be transcribed and would otherwise fill
 # every round; the walk steps over it a page at a time (see ``Position``).
@@ -179,10 +181,10 @@ class Fetched:
     """One download attempt: the readable path, or why there will never be one."""
 
     path: str | None = None
-    # The bridge's `media_unavailable`: the bytes can never arrive (the phone
-    # no longer has them, or the row has no key). Empty for a failure worth
-    # retrying.
+    # A permanent media_unavailable or too_large answer, with its reason.
+    # Empty for a failure worth retrying.
     unavailable: str = ""
+    too_large: bool = False
     refused: str = ""  # unsafe row identity; other copies of the hash can still be fetched
     refusal_recorded: bool | None = None
 
@@ -451,11 +453,23 @@ def find_pending(
                     except (ToolError, sqlite3.Error) as exc:
                         logger.warning("transcribe_on_ingest: could not record media refusal: %s", exc)
             if fetched.unavailable:
-                # Not the bridge failing: the phone answered, and the answer is
-                # final. Recording it is what makes the walk stop asking, and it
+                # Not the bridge failing: a final answer about this file.
+                # Recording it is what makes the walk stop asking, and it
                 # then costs no strike — an archive full of expired media would
                 # otherwise end every round after three rows (issue #378).
-                if _cached_copy_exists(sha256, (message_id, chat_jid)):
+                # Only injected fetchers currently produce too_large here:
+                # /api/download does not emit 413 or preserve that named code.
+                # Production S3 size refusals arrive from the blob stream.
+                if fetched.too_large and media_remote.enabled():
+                    # A catalog entry alone does not establish readability.
+                    # Try an alternative through the bounded stream below.
+                    path = next(_cached_copy_paths(sha256, (message_id, chat_jid)), None)
+                    if path is not None:
+                        strike = False
+                    elif _record_unavailable(sha256, fetched.unavailable):
+                        unavailable += 1
+                        strike = False
+                elif _cached_copy_exists(sha256, (message_id, chat_jid)):
                     # The same audio is on disk under another row. The note is
                     # per hash, so writing it would hide bytes this process can
                     # already read; the walk transcribes that copy instead.
@@ -510,21 +524,25 @@ def _fetch_bytes(
     download (issue #318). The row is resolved right after this, so nothing in
     this round reads that entry back; it is written to keep the map honest.
 
-    ``media_unavailable`` is the one answer that is not a failure of the bridge:
+    ``media_unavailable`` and ``too_large`` are final answers about this file:
     the sender's phone was asked to re-upload and said it no longer has the file
     (issue #378), or the row was stored without the CDN fields a download needs
-    (issue #392). No later request can change either.
+    (issue #392), or the file exceeds the caller's or bridge's byte limit.
+    Clearing its note queues it again after the relevant limit is raised.
     """
     try:
         path = download(message_id, chat_jid)
     except ToolError as exc:
         if exc.code == MEDIA_REFUSED_CODE:
             return Fetched(refused=exc.message, refusal_recorded=exc._media_refusal_recorded)
-        if exc.code == MEDIA_UNAVAILABLE_CODE:
+        # too_large supports injected fetchers. The production /api/download
+        # path cannot produce it; S3 blob refusals are handled while streaming.
+        if exc.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
             # Expected on an old archive, and per file, so it stays at debug:
             # the round logs how many it recorded.
-            logger.debug("transcribe_on_ingest: %s is gone for good: %s", message_id, exc.message)
-            return Fetched(unavailable=exc.message)
+            logger.debug("transcribe_on_ingest: %s is not fetchable: %s", message_id, exc.message)
+            reason = f"too_large: {exc.message}" if exc.code == "too_large" else exc.message
+            return Fetched(unavailable=reason, too_large=exc.code == "too_large")
         _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
         return Fetched()
     except Exception as exc:  # noqa: BLE001 - one message must not end the round
@@ -545,13 +563,13 @@ def _fetch_bytes(
 
 
 def _record_unavailable(sha256: str, reason: str) -> bool:
-    """Remember that the bytes are gone for good, so the walk stops asking for them.
+    """Remember a permanent media skip, so the walk stops asking for the bytes.
 
     Keyed by content hash like every other note, so the same voice note
     forwarded into three chats is recorded once, and dated in the value as well
     as in ``updated_at`` — ``list_media`` shows values, not timestamps. Clearing
     the note (``annotate_media(sha256, "media_unavailable", "")``) asks the
-    phone again, which is what to do after restoring a backup on it.
+    bridge again after restoring a phone backup or raising the byte limit.
 
     Returns whether the note was written: on a notes.db that cannot be written
     the caller must keep counting the round's strikes, or it would spend a whole
@@ -560,21 +578,14 @@ def _record_unavailable(sha256: str, reason: str) -> bool:
     dated = f"{datetime.now(UTC).date().isoformat()}: {reason or 'this media can no longer be fetched'}"
     try:
         media_notes.annotate_media(sha256, MEDIA_UNAVAILABLE_KEY, dated[:MAX_ERROR_CHARS])
-    except (ToolError, sqlite3.Error) as exc:
+    except (ToolError, sqlite3.Error, OSError) as exc:
         logger.warning("transcribe_on_ingest: could not record the missing media of %s: %s", sha256[:12], exc)
         return False
     return True
 
 
-def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
-    """Is the same audio cached under another message row?
-
-    A note is keyed by content hash, so recording "the sender no longer has
-    this" for one row would also take a copy of the same voice note that is
-    sitting on disk in another chat off the work list — a file this process can
-    read for free. Rare (a forward whose original is still cached) and cheap to
-    rule out: ``file_sha256`` is indexed and only a definitive miss asks.
-    """
+def _cached_copy_paths(sha256: str, exclude: tuple[str, str]) -> Iterator[str]:
+    """Cached identities for this hash, subject to the normal chat policy."""
     clauses = ["file_sha256 = ?"]
     params: list[Any] = [bytes.fromhex(sha256)]
     clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
@@ -588,16 +599,55 @@ def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
             conn.close()
     except (sqlite3.Error, ValueError) as exc:  # unreadable archive, or a hash that is not hex
         logger.debug("transcribe_on_ingest: could not look for other copies of %s: %s", sha256[:12], exc)
-        return False
-    return any(
-        (str(message_id), str(chat_jid)) != exclude
-        and (
-            media_remote.lookup(str(chat_jid), str(message_id)) is not None
-            if media_remote.enabled()
-            else media_inventory.lookup_cached_name(str(chat_jid), str(message_id)) is not None
-        )
-        for message_id, chat_jid in rows
-    )
+        return
+    for message_id, chat_jid in rows:
+        message_id, chat_jid = str(message_id), str(chat_jid)
+        if (message_id, chat_jid) == exclude:
+            continue
+        if media_remote.enabled():
+            if media_remote.lookup(chat_jid, message_id) is not None:
+                yield media_remote.uri(chat_jid, message_id)
+        else:
+            name = media_inventory.lookup_cached_name(chat_jid, message_id)
+            if name is not None:
+                yield os.path.join(media_inventory.chat_media_dir(chat_jid), name)
+
+
+def _cached_copy_exists(sha256: str, exclude: tuple[str, str]) -> bool:
+    """An unavailable row must not hide a cached copy of the same hash."""
+    return next(_cached_copy_paths(sha256, exclude), None) is not None
+
+
+@contextmanager
+def _ingest_local_file(candidate: Candidate, *, cache_only: bool) -> Iterator[str]:
+    """Before parking an oversized hash, actually read any cached alternative."""
+    if media_remote.enabled():
+        chat, message = media_remote.identity(candidate.path)
+        cache_only = cache_only or (message, chat) != (candidate.message_id, candidate.chat_jid)
+    with ExitStack() as stack:
+        try:
+            local = stack.enter_context(
+                media_remote.local_file(candidate.path, INGEST_READ_LIMIT, candidate.sha256, cache_only=cache_only)
+            )
+        except media_remote.MediaReadError as failure:
+            if failure.code != "too_large":
+                raise
+            # Catalog metadata cannot prove that the bytes fit the caller's or
+            # bridge's spool limit. No alternative attempt may fetch from CDN.
+            exclude = media_remote.identity(candidate.path)
+            for path in _cached_copy_paths(candidate.sha256, (exclude[1], exclude[0])):
+                try:
+                    local = stack.enter_context(
+                        media_remote.local_file(path, INGEST_READ_LIMIT, candidate.sha256, cache_only=True)
+                    )
+                except media_remote.MediaReadError as alternative:
+                    if alternative.code in ("too_large", MEDIA_UNAVAILABLE_CODE, MEDIA_REFUSED_CODE):
+                        continue
+                    raise  # An outage cannot establish a permanent hash miss.
+                break
+            else:
+                raise failure
+        yield local
 
 
 def _log_fetch_problem(quiet: bool, message: str) -> None:
@@ -631,11 +681,23 @@ def clear_outage_failures() -> int:
     """
     try:
         cleared = media_notes.clear_notes_containing(TRANSCRIPT_ERROR_KEY, OUTAGE_NOTE_MARKERS)
-    except (ToolError, sqlite3.Error, ValueError) as exc:
+    except (ToolError, sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("transcribe_on_ingest: could not clear the failures a whisper outage left: %s", exc)
         return 0
     if cleared:
         logger.info("transcribe_on_ingest: %d voice notes parked by a whisper outage are queued again", cleared)
+    return cleared
+
+
+def clear_oversized_failures() -> int:
+    """Recheck size refusals once per start, including after a build raises a limit."""
+    try:
+        cleared = media_notes.clear_dated_notes_with_prefix(MEDIA_UNAVAILABLE_KEY, "too_large:")
+    except (ToolError, sqlite3.Error, OSError, ValueError) as exc:
+        logger.warning("transcribe_on_ingest: could not clear oversized media skips: %s", exc)
+        return 0
+    if cleared:
+        logger.info("transcribe_on_ingest: %d oversized voice notes queued again", cleared)
     return cleared
 
 
@@ -645,10 +707,13 @@ def _record_remote_media_miss(candidate: Candidate, failure: media_remote.MediaR
         if failure.code == MEDIA_REFUSED_CODE:
             media_notes.record_media_refusal(candidate.message_id, candidate.chat_jid, failure.message)
             return True
-        if failure.code == MEDIA_UNAVAILABLE_CODE:
-            if _cached_copy_exists(candidate.sha256, (candidate.message_id, candidate.chat_jid)):
+        if failure.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
+            if failure.code == MEDIA_UNAVAILABLE_CODE and _cached_copy_exists(
+                candidate.sha256, (candidate.message_id, candidate.chat_jid)
+            ):
                 return True
-            return _record_unavailable(candidate.sha256, failure.message)
+            reason = f"too_large: {failure.message}" if failure.code == "too_large" else failure.message
+            return _record_unavailable(candidate.sha256, reason)
     except (ToolError, sqlite3.Error):
         logger.warning("transcribe_on_ingest: could not record remote media outcome")
     return False
@@ -702,9 +767,7 @@ def run_once(
             logger.warning("transcribe_on_ingest: runtime policy unavailable; round paused")
             return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         try:
-            with media_remote.local_file(
-                candidate.path, 256 * 1024 * 1024, candidate.sha256, cache_only=not fetch
-            ) as local:
+            with _ingest_local_file(candidate, cache_only=not fetch) as local:
                 info = os.stat(local)
                 file_identity = (
                     (0, 0, info.st_size, 0)
@@ -886,6 +949,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         )
         return None
     clear_outage_failures()
+    clear_oversized_failures()
     logger.info(
         "%s=1: transcribing up to %d inbound voice notes every %.0fs (%s)%s",
         ENABLED_ENV,

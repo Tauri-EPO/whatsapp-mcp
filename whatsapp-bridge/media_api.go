@@ -150,6 +150,7 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if errors.Is(err, errMediaSpoolFull) {
+				w.Header().Set("Retry-After", "1")
 				writeError(w, 503, "Media read capacity exhausted; retry later")
 				return
 			}
