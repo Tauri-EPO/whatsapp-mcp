@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.5.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.4.0...v2.5.0) (2026-10-11)
+
+
+### Features
+
+* anchor history requests for media repair ([#697](https://github.com/Tauri-EPO/whatsapp-mcp/issues/697)) ([57d28fd](https://github.com/Tauri-EPO/whatsapp-mcp/commit/57d28fd0eb6d5e0779f5d6de29cdd743534fe144))
+
+
+### Bug fixes
+
+* repair legacy media locators during history replay ([#695](https://github.com/Tauri-EPO/whatsapp-mcp/issues/695)) ([7e3cbcd](https://github.com/Tauri-EPO/whatsapp-mcp/commit/7e3cbcdefd9b1f2e51702a3eced18b0da717bfad)), closes [#452](https://github.com/Tauri-EPO/whatsapp-mcp/issues/452)
+
 ## [2.4.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.3.0...v2.4.0) (2026-10-11)
 
 
