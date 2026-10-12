@@ -213,7 +213,7 @@ func TestOperatorLogoutExitIdleAndServerFailure(t *testing.T) {
 					if exitCode.Load() != 0 || p.snapshot().State != "logged_out_by_operator" || client.connects.Load() != 0 || client.codes.Load() != 0 {
 						t.Fatal("idle started pairing or exited")
 					}
-					if err := b.restoreOperatorIdle(); err != nil {
+					if err := b.restoreOperatorIdle(true); err != nil {
 						t.Fatal(err)
 					}
 					p.start() // Even a late startup may not run the QR path.
@@ -308,7 +308,7 @@ func TestOperatorLogoutOfflineWipesRealSessionAndIdleSurvivesRestart(t *testing.
 	fresh := testBridge(t, newTestClient(&mockLIDStore{}), b.Store, testLogger())
 	fake := newFakeOperatorClient()
 	fresh.operatorPairing = newOperatorPairing(fresh.ctx, fresh, fake, func() (operatorPairingClient, error) { return newFakeOperatorClient(), nil }, func() bool { return false }, fresh.Connected, io.Discard, make(chan bool, 1))
-	if err := fresh.restoreOperatorIdle(); err != nil || fresh.operatorPairing.snapshot().State != "logged_out_by_operator" {
+	if err := fresh.restoreOperatorIdle(true); err != nil || fresh.operatorPairing.snapshot().State != "logged_out_by_operator" {
 		t.Fatal("durable idle not restored")
 	}
 	pair := fresh.operatorPairing
@@ -483,10 +483,8 @@ func TestOperatorIdleWithoutListenerStillBlocksDial(t *testing.T) {
 	if _, err := b.Store.db.Exec("INSERT INTO operator_state(id,logged_out) VALUES (1,1)"); err != nil {
 		t.Fatal(err)
 	}
-	if b.operatorPairing != nil {
-		t.Fatal("test must exercise listener disabled")
-	}
-	if err := b.restoreOperatorIdle(); err != nil {
+	b.operatorPairing = newOperatorPairing(b.ctx, b, newFakeOperatorClient(), nil, b.isPaired, b.Connected, io.Discard, make(chan bool, 1))
+	if err := b.restoreOperatorIdle(false); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

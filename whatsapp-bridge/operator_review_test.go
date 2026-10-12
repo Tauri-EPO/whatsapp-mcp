@@ -307,7 +307,7 @@ func TestOperatorIdleRestoresIncompleteCleanupWithoutPairedClient(t *testing.T) 
 	}
 	p := newOperatorPairing(b.ctx, b, newFakeOperatorClient(), nil, func() bool { return false }, b.Connected, io.Discard, make(chan bool, 1))
 	b.operatorPairing = p
-	if err := b.restoreOperatorIdle(); err != nil {
+	if err := b.restoreOperatorIdle(true); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()

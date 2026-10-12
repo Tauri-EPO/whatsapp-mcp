@@ -330,12 +330,9 @@ func runBridge(cfg bridgeConfig) int {
 	}
 	bridge.operatorPairing = newOperatorPairing(exitCtx, bridge, client, bridge.pairingClientFactory(exitCtx, container, cfg.History, *fullHistoryPairFlag, clientLog, reconnectChan), bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
 
-	if err := bridge.restoreOperatorIdle(); err != nil {
+	if err := bridge.restoreOperatorIdle(cfg.Operator.Bind != ""); err != nil {
 		logger.Errorf("Failed to restore operator idle state")
 		return 1
-	}
-	if cfg.Operator.Bind == "" && bridge.operatorLogout.Load() {
-		logger.Warnf("State logged_out_by_operator: re-enable WHATSAPP_OPERATOR_BIND and POST /operator/v1/pairing/restart to leave idle")
 	}
 	if cfg.Operator.Bind != "" {
 		routes := withMCPAdmin(bridge.operatorRoutes(), bridgeToken, newMCPAdminClient(cfg.MCPAdminAddress), cfg.MCPAdminHost)
