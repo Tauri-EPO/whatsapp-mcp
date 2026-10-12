@@ -50,6 +50,7 @@ type Bridge struct {
 	problemWait                func(time.Duration) error
 	Client                     *whatsmeow.Client
 	runtimeClient              atomic.Pointer[whatsmeow.Client]
+	clientFactory              runtimeClientFactory
 	clientGate                 sync.RWMutex
 	runtimePaired              atomic.Bool
 	runtimeDeviceID            atomic.Pointer[string]

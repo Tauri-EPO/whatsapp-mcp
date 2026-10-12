@@ -160,7 +160,7 @@ func (b *Bridge) pairingClientFactory(ctx context.Context, container *sqlstore.C
 			}
 		}
 		history.apply(store.DeviceProps, device.ID != nil, fullHistory)
-		fresh := newRuntimeClient(device, logger)
+		fresh := makeRuntimeClient(device, logger, b.clientFactory)
 		b.installClient(fresh, device.ID != nil, reconnect)
 		return fresh, nil
 	}

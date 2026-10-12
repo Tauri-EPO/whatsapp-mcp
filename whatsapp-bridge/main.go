@@ -104,6 +104,10 @@ func run() int {
 }
 
 func runBridge(cfg bridgeConfig) int {
+	return runBridgeWithClientFactory(cfg, nil)
+}
+
+func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) int {
 	if cfg.SnapshotDir != "" {
 		root, dir, err := privateSnapshotDir(cfg.SnapshotDir)
 		if err != nil {
@@ -222,7 +226,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	// Create client instance
-	client := newRuntimeClient(deviceStore, clientLog)
+	client := makeRuntimeClient(deviceStore, clientLog, factory)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return 1
@@ -269,6 +273,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	bridge.clientFactory = factory
 	bridge.MediaQuotaWarnPercent = cfg.MediaBackend.WarnPercent
 	if cfg.MediaBackend.Backend == "s3" {
 		if cfg.MediaBackend.plaintextRemote() {

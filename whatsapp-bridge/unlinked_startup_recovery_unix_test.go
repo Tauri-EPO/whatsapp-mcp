@@ -26,7 +26,7 @@ func TestUnlinkRecoveryRunBridgeHelper(t *testing.T) {
 	if os.Getenv("WAMCP_TEST_UNLINK_RECOVERY") != "1" {
 		return
 	}
-	runtimeClientFactory = func(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
+	factory := func(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
 		client := whatsmeow.NewClient(device, logger)
 		transport := &http.Client{Transport: mcpTestTransport(func(req *http.Request) (*http.Response, error) {
 			outcome := "fresh"
@@ -46,7 +46,7 @@ func TestUnlinkRecoveryRunBridgeHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Exit(runBridge(cfg))
+	os.Exit(runBridgeWithClientFactory(cfg, factory))
 }
 
 func TestPendingUnlinkStartupRunsCleanupAndFreshDialWithoutOperator(t *testing.T) {

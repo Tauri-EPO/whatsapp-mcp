@@ -540,7 +540,7 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	p.mu.Lock()
-	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "pairing_required" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccount())
+	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "pairing_required" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccountAt(p.now()))
 	p.mu.Unlock()
 	if active {
 		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")

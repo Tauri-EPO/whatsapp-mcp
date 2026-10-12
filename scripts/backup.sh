@@ -100,12 +100,19 @@ cmd_restore() {
   run_alpine "$vol" "$src" '
     cd /store
     rm -f ./*.db-wal ./*.db-shm .bridge.lock .session-keepalive
+    kind=
+    if [ -f .connection-problem ]; then
+      kind="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('\''.connection-problem'\'') AS TEXT), '\''$.kind'\'');")" 2>/dev/null || kind=__unreadable__
+      if [ -z "$kind" ]; then kind=__unreadable__; fi
+      if [ "$kind" = __unreadable__ ]; then
+        echo "warning: saved connection state could not be read; keeping it unchanged" >&2
+      fi
+    fi
     for db in messages whatsapp notes; do
       if [ -f /backup/$db.db ]; then
         cp /backup/$db.db ./$db.db
         chmod 600 ./$db.db
-        if [ "$db" = whatsapp ] && [ -f .connection-problem ]; then
-          kind="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('\''.connection-problem'\'') AS TEXT), '\''$.kind'\'');")"
+        if [ "$db" = whatsapp ] && [ -f .connection-problem ] && [ "$kind" != __unreadable__ ]; then
           if [ "$kind" = unlinked ]; then
             rm -f .connection-problem .connection-problem.part
           else

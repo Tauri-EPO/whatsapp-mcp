@@ -15,12 +15,19 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
+type runtimeClientFactory func(*store.Device, waLog.Logger) *whatsmeow.Client
+
 // Wrap the root before the SDK caches child loggers, both on startup and on
 // operator restarts. URL-error redaction must survive every client handoff.
-var runtimeClientFactory = whatsmeow.NewClient
-
 func newRuntimeClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
-	return runtimeClientFactory(device, sdkSafeLogger{logger})
+	return makeRuntimeClient(device, logger, nil)
+}
+
+func makeRuntimeClient(device *store.Device, logger waLog.Logger, factory runtimeClientFactory) *whatsmeow.Client {
+	if factory == nil {
+		factory = whatsmeow.NewClient
+	}
+	return factory(device, sdkSafeLogger{logger})
 }
 
 // The SDK logs raw QR payloads and protocol frames at DEBUG. When pairing

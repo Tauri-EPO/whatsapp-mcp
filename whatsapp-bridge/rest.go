@@ -273,7 +273,7 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 	if b.operatorPairing != nil {
 		state := b.operatorPairing.snapshot().State
 		body["operator_pairing_state"] = state
-		if state == "expired" && !problem.restrictsAccount() {
+		if state == "expired" && !problem.restrictsAccountAt(b.connectionNow()) {
 			body["pairing_action"] = "Restart the bridge or POST /operator/v1/pairing/restart for a new QR"
 		}
 	}

@@ -34,8 +34,10 @@ before authentication completes. Keep the file
 until pairing succeeds; deleting it early removes that protection. If local
 session removal fails, REST stays alive in `pairing_required` without dialing.
 Fix the store error; cleanup retries automatically. A restart resumes pending
-cleanup. Backup restore removes stale connection state only after successfully
-replacing `whatsapp.db`, and a marker for another
+cleanup. After successfully replacing `whatsapp.db`, backup restore strips only
+the old unlink fields and keeps any account-restriction marker. An unreadable
+marker is kept unchanged, with a warning; restore still finishes, and the bridge
+refuses that marker until it is repaired. A marker for another
 device never deletes a newly restored session.
 
 To explicitly retry a blocked account after resolving its restriction, an unpaired instance with the private operator

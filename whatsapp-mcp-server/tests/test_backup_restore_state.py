@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason="needs P
 
 
 @pytest.mark.parametrize("session", ["replacement", "missing", "copy_failure"])
-@pytest.mark.parametrize("kind", ["unlinked", "temporarily_banned", "banned", "locked", "client_outdated"])
+@pytest.mark.parametrize("kind", ["unlinked", "temporarily_banned", "banned", "locked", "client_outdated", "malformed"])
 def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, session: str, kind: str) -> None:
     store = tmp_path / "store"
     backup = tmp_path / "backup"
@@ -26,7 +27,7 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
     original = {
         "kind": kind,
         "code": {"unlinked": 401, "temporarily_banned": 402, "locked": 403, "client_outdated": 405, "banned": 406}[
-            kind
+            kind if kind != "malformed" else "unlinked"
         ],
         "since": "2026-10-12T00:00:00Z",
         "expires_at": "2026-10-13T00:00:00Z",
@@ -34,11 +35,22 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
         "revoked_device": "5511999999999@s.whatsapp.net",
         "session_removed": False,
     }
-    (store / ".connection-problem").write_text(json.dumps(original))
+    marker = "not json" if kind == "malformed" else json.dumps(original)
+    (store / ".connection-problem").write_text(marker)
     (store / ".connection-problem.part").write_text("fake pending marker A")
     (store / "whatsapp.db").write_bytes(b"fake old session A")
     if session != "missing":
         (backup / "whatsapp.db").write_bytes(b"fake restored session B")
+    for database in ("messages", "notes"):
+        (store / f"{database}.db").write_bytes(b"fake old archive")
+        (backup / f"{database}.db").write_bytes(b"fake restored archive")
+    (store / ".bridge-token").write_text("FAKE-OLD-RESTORE-TOKEN")
+    (backup / "bridge-token").write_text("FAKE-NEW-RESTORE-TOKEN")
+    (store / "fake-media.txt").write_text("fake old media")
+    media = tmp_path / "fake-media.txt"
+    media.write_text("fake restored media")
+    with tarfile.open(backup / "media.tar", "w") as archive:
+        archive.add(media, arcname="fake-media.txt")
     # Execute the real restore container body. Only container setup and mount
     # paths are replaced; its rm/cp/chmod operations run against this fixture.
     docker = binaries / "docker"
@@ -85,8 +97,18 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
     assert (store / "whatsapp.db").read_bytes() == (b"fake restored session B" if replaced else b"fake old session A")
     removed = replaced and kind == "unlinked"
     assert (store / ".connection-problem").exists() is not removed
-    assert (store / ".connection-problem.part").exists() is not replaced
-    if not removed:
+    assert (store / ".connection-problem.part").exists() is not (replaced and kind != "malformed")
+    if kind == "malformed":
+        assert (store / ".connection-problem").read_text() == marker
+        assert "could not be read; keeping it unchanged" in result.stderr
+    copied = session != "copy_failure"
+    for database in ("messages", "notes"):
+        assert (store / f"{database}.db").read_bytes() == (b"fake restored archive" if copied else b"fake old archive")
+        if copied:
+            assert (store / f"{database}.db").stat().st_mode & 0o777 == 0o600
+    assert (store / ".bridge-token").read_text() == ("FAKE-NEW-RESTORE-TOKEN" if copied else "FAKE-OLD-RESTORE-TOKEN")
+    assert (store / "fake-media.txt").read_text() == ("fake restored media" if copied else "fake old media")
+    if not removed and kind != "malformed":
         saved = json.loads((store / ".connection-problem").read_text())
         if replaced:
             assert saved == {

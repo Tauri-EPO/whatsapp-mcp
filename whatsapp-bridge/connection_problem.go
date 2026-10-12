@@ -91,6 +91,10 @@ func (p *ConnectionProblem) restrictsAccount() bool {
 	return p != nil && (p.Kind == "temporarily_banned" || p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
 }
 
+func (p *ConnectionProblem) restrictsAccountAt(now time.Time) bool {
+	return p.restrictsAccount() && (p.Kind != "temporarily_banned" || p.ExpiresAt == nil || now.Before(*p.ExpiresAt))
+}
+
 // Revocation is independent of account restrictions. Older unlink markers have
 // only Kind; a ban may coexist with the timestamp and must keep its dial gate.
 func (p *ConnectionProblem) isUnlinked() bool {
