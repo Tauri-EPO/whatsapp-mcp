@@ -721,10 +721,18 @@ func TestHistoryRepairLIDReplayDownload(t *testing.T) {
 			}
 			repaired := fixtureDocument()
 			repaired.Caption = proto.String("replay caption")
+			sends := 0
 			mux := http.NewServeMux()
 			registerHistoryEndpointWithSender(mux, func(h http.HandlerFunc) http.HandlerFunc { return h }, client,
 				func() bool { return true }, ms, chatPolicy{}, func(_ context.Context, msg *waE2E.Message) error {
 					anchor := msg.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
+					sends++
+					if sends == 2 {
+						if anchor.GetChatJID() != phonePN.String() {
+							t.Fatalf("wrong twin: %v", anchor)
+						}
+						return nil
+					}
 					if anchor.GetChatJID() != phoneLID.String() {
 						t.Fatalf("request lost stored identity: %v", anchor)
 					}

@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -79,22 +81,39 @@ func historyAnchorInfo(chat types.JID, msgID string, fromMe bool, ts time.Time) 
 }
 
 // oldestStoredMessage returns the anchor fields for the oldest message the
-// bridge currently holds for a chat. It returns sql.ErrNoRows when the chat has
-// no stored messages to anchor on.
-func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe bool, ts time.Time, err error) {
-	var rawTS any
-	err = store.db.QueryRow(
-		`SELECT id, is_from_me, timestamp
-		   FROM messages
-		  WHERE chat_jid = ?
-		  ORDER BY timestamp ASC
-		  LIMIT 1`,
-		chatJID,
-	).Scan(&id, &fromMe, &rawTS)
-	if err != nil {
-		return "", false, time.Time{}, err
+// bridge currently holds for a chat or its known twin. It returns sql.ErrNoRows
+// when neither spelling has a stored message to anchor on.
+func oldestStoredMessage(ctx context.Context, store *MessageStore, chat, twin string) (storedChat, id string, fromMe bool, ts time.Time, err error) {
+	// Keep each lookup on (chat_jid, timestamp), with at most one row per
+	// spelling. A combined IN/CASE ordering scans and sorts the whole chat.
+	found := false
+	for index, spelling := range []string{chat, twin} {
+		if spelling == "" || (index == 1 && spelling == chat) {
+			continue
+		}
+		var candidateID string
+		var candidateOwn bool
+		var rawTS any
+		err = store.db.QueryRowContext(ctx,
+			`SELECT id, is_from_me, timestamp FROM messages
+			 WHERE chat_jid = ? ORDER BY timestamp ASC LIMIT 1`,
+			spelling).Scan(&candidateID, &candidateOwn, &rawTS)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", "", false, time.Time{}, err
+		}
+		candidateTime := anchorTime(rawTS)
+		if !found || candidateTime.Before(ts) {
+			storedChat, id, fromMe, ts = spelling, candidateID, candidateOwn, candidateTime
+			found = true
+		}
 	}
-	return id, fromMe, anchorTime(rawTS), nil
+	if !found {
+		return "", "", false, time.Time{}, sql.ErrNoRows
+	}
+	return storedChat, id, fromMe, ts, nil
 }
 
 // repairHistoryAnchor finds the target only in the requested chat or its known
@@ -183,21 +202,28 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
+		typedChat := chatJID
+		twin := types.EmptyJID
+		if chatJID.Server == types.DefaultUserServer || chatJID.Server == types.HiddenUserServer {
+			if alt, lookupErr := lookupAltJID(ctx, client, chatJID); lookupErr == nil && !alt.IsEmpty() &&
+				((chatJID.Server == types.DefaultUserServer && alt.Server == types.HiddenUserServer) ||
+					(chatJID.Server == types.HiddenUserServer && alt.Server == types.DefaultUserServer)) {
+				twin = alt.ToNonAD()
+			}
+		}
 		var id string
 		var fromMe bool
 		var ts time.Time
 		var err error
+		var storedChat string
+		anchorTwin := chatJID.String()
+		if !twin.IsEmpty() {
+			anchorTwin = twin.String()
+		}
 		if req.BeforeMessageID == nil {
-			id, fromMe, ts, err = oldestStoredMessage(messageStore, req.ChatJID)
+			storedChat, id, fromMe, ts, err = oldestStoredMessage(ctx, messageStore, chatJID.String(), anchorTwin)
 		} else {
-			twin, _ := lookupAltJID(ctx, client, chatJID)
-			var storedChat string
-			storedChat, id, fromMe, ts, err = repairHistoryAnchor(ctx, messageStore, chatJID.String(), twin.ToNonAD().String(), *req.BeforeMessageID)
-			if err == nil {
-				// Use the target's archived spelling for the phone to locate it.
-				// Whether phone/LID spelling affects replay needs a live check.
-				chatJID, err = types.ParseJID(storedChat)
-			}
+			storedChat, id, fromMe, ts, err = repairHistoryAnchor(ctx, messageStore, chatJID.String(), anchorTwin, *req.BeforeMessageID)
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			if req.BeforeMessageID != nil {
@@ -217,6 +243,21 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 			return
 		}
 
+		// Both spellings may supply an archive anchor, but only allowed
+		// destinations may be named in a peer request. The typed one passed
+		// authorizeChat before any lookup; prefer storage only if allowed too.
+		if policy.Allows(storedChat) {
+			if storedChat == twin.String() {
+				twin = typedChat
+			}
+			chatJID, err = types.ParseJID(storedChat)
+			if err != nil {
+				writeErr(http.StatusInternalServerError, "Stored anchor has an invalid chat spelling")
+				return
+			}
+		} else {
+			twin = types.EmptyJID
+		}
 		info := historyAnchorInfo(chatJID, id, fromMe, ts)
 
 		msg := client.BuildHistorySyncRequest(&info, count)
@@ -229,8 +270,30 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 		// type. It resolves our own JID and sets the peer flag internally, so
 		// that addressing logic isn't duplicated (and drifted) here.
 		if err := send(ctx, msg); err != nil {
-			writeErr(http.StatusInternalServerError, fmt.Sprintf("Failed to send history request: %v", err))
+			failure := historySendError(err, typedChat)
+			bridgeLog.Warnf("Failed to send history request for chat=%q: %s", req.ChatJID, failure)
+			writeErr(http.StatusInternalServerError, "Failed to send history request: "+failure)
 			return
+		}
+		sentKinds := []string{historyChatKind(chatJID)}
+		twinFailed := false
+		if !twin.IsEmpty() && policy.Allows(twin.String()) {
+			info.Chat = twin
+			twinMsg := client.BuildHistorySyncRequest(&info, count)
+			var sendErr error
+			if twinMsg == nil {
+				sendErr = errors.New("failed to build history sync request")
+			} else {
+				sendErr = send(ctx, twinMsg)
+			}
+			if sendErr != nil {
+				// The stored-spelling request already left the bridge. Keep its
+				// success and do not expose the discovered identifier or error.
+				twinFailed = true
+				bridgeLog.Warnf("Failed optional history twin request for chat=%q: %s", req.ChatJID, historySendError(sendErr, typedChat))
+			} else {
+				sentKinds = append(sentKinds, historyChatKind(twin))
+			}
 		}
 
 		bridgeLog.Debugf("← /api/history chat=%q count=%d anchor=%q", req.ChatJID, count, id)
@@ -242,9 +305,44 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 				"Requested re-delivery of up to %d messages up to and including the target for %s. History arrives asynchronously; the phone decides how much is returned.",
 				count, req.ChatJID)
 		}
+		message += fmt.Sprintf(" Sent %d history request(s) under %s spelling(s).", len(sentKinds), strings.Join(sentKinds, ", "))
+		if twinFailed {
+			message += " The optional twin request could not be sent."
+		}
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: true,
 			Message: message,
 		})
 	}))
+}
+
+// Keep the transport cause without exposing discovered JIDs, bare numeric
+// identifiers or network-error URLs in the response or warning.
+func historySendError(err error, typed types.JID) string {
+	message := fmt.Sprint(sdkSafeArgs([]any{err})[0])
+	message = regexp.MustCompile(`[\w.:-]+@[\w.-]+`).ReplaceAllStringFunc(message, func(value string) string {
+		if value == typed.String() {
+			return value
+		}
+		return "[redacted]"
+	})
+	return regexp.MustCompile(`\b[0-9]{5,}\b`).ReplaceAllStringFunc(message, func(value string) string {
+		if value == typed.User {
+			return value
+		}
+		return "[redacted]"
+	})
+}
+
+func historyChatKind(chat types.JID) string {
+	switch chat.Server {
+	case types.DefaultUserServer:
+		return "phone"
+	case types.HiddenUserServer:
+		return "LID"
+	case types.GroupServer:
+		return "group"
+	default:
+		return "chat"
+	}
 }

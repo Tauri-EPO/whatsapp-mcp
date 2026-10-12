@@ -1382,10 +1382,22 @@ so the phone returns messages from before it. Call it repeatedly to page
 further back. Results arrive asynchronously through the normal history-sync
 handler and land in `messages.db` — typically within a few seconds.
 
+For direct chats, plain backfill and anchored repair can read an anchor under
+either locally mapped phone/LID spelling. Every outgoing history request follows
+the allow-list's spelling rule: listing one spelling never opens the other.
+The stored spelling is sent first when allowed; otherwise only the typed,
+allowed spelling is used. A known twin gets a second request only when it too
+is allowed. With no allow-list, both known spellings are sent. Groups and chats
+without a known twin send one request. The response reports successful request
+counts and phone/LID kinds; a failed second send does not fail the first.
+Whether using both helps an unanswered chat is not yet verified on a paired
+phone (#694); the phone still decides whether and how much history to send.
+
 | Field | Required | Description |
 | --------- | -------- | ------------------------------------------------------ |
-| `chat_jid` | yes | Chat to backfill (`...@s.whatsapp.net` or `...@g.us`) |
+| `chat_jid` | yes | Chat to backfill (`...@s.whatsapp.net`, `...@lid` or `...@g.us`) |
 | `count` | no | Messages to request; default `50`, capped at `500` |
+| `before_message_id` | no | Stored message id in this chat to include in a repair replay |
 
 Caveats:
 
