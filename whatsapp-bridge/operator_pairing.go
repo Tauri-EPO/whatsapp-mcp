@@ -344,10 +344,8 @@ func (p *operatorPairing) run() {
 				// Final device save can succeed after the passkey deadline. The
 				// QR consumer's stale failure must not park this valid session.
 				p.b.setPairingState("")
-				if !problem.restrictsAccount() {
-					p.b.scheduleReconnect(p.reconnect)
-				}
-				break // Retain the paired device; only the gated consumer may redial.
+				p.b.scheduleReconnect(p.reconnect) // The consumer retains all account/expiry gates.
+				break                              // Retain the paired device; only the gated consumer may redial.
 			}
 			if !errors.Is(err, errPairingOperator) && problem != nil && problem.Kind == "temporarily_banned" && problem != attemptProblem {
 				p.b.setPairingState("")

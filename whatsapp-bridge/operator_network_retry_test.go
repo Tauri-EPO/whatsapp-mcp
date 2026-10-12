@@ -3,12 +3,15 @@ package main
 import (
 	"errors"
 	"io"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 )
 
 func TestTransportFailuresRetainQRBudgetAndRetryWithBackoff(t *testing.T) {
@@ -67,5 +70,68 @@ func TestShutdownDuringCleanupDoesNotLogPairingFailureOrExpiry(t *testing.T) {
 	<-p.done
 	if strings.Contains(log.String(), "could not be initialized") || strings.Contains(log.String(), "QR sequence expired") {
 		t.Fatalf("shutdown logged false pairing failure: %s", log.String())
+	}
+}
+
+func TestPairedStartupTemporaryBanTransportFailureReachesGatedRetries(t *testing.T) {
+	for _, cooldown := range []time.Duration{-time.Second, 100 * time.Millisecond} {
+		t.Run(cooldown.String(), func(t *testing.T) {
+			client := newFakeOperatorClient()
+			client.connectErr = errors.New("fake offline startup transport")
+			b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, types.NewJID("5511999999999", types.DefaultUserServer)), newTestMessageStore(t), testLogger())
+			expiry := time.Now().Add(cooldown)
+			b.connectionProblem = &ConnectionProblem{Kind: "temporarily_banned", Code: 402, Since: time.Now(), ExpiresAt: &expiry}
+			var connected atomic.Bool
+			var retries, replacements atomic.Int64
+			firstDial := make(chan time.Time, 1)
+			b.Connected = connected.Load
+			b.Disconnect = client.Disconnect
+			reconnect := make(chan bool, 1)
+			b.Connect = func() error {
+				count := retries.Add(1)
+				if count == 1 {
+					firstDial <- time.Now()
+				}
+				if count < 3 {
+					return errors.New("fake offline retry")
+				}
+				connected.Store(true)
+				b.handleEvent(&events.Connected{}, reconnect)
+				return nil
+			}
+			b.ReconnectInitialBackoff = time.Millisecond
+			b.ReconnectMaxBackoff = time.Millisecond
+			p := newOperatorPairing(b.ctx, b, client, func() (operatorPairingClient, error) {
+				replacements.Add(1)
+				return nil, errors.New("paired keys must survive")
+			}, b.isPaired, b.Connected, io.Discard, reconnect)
+			b.operatorPairing = p
+			done := make(chan struct{})
+			go func() { defer close(done); b.reconnectLoop(reconnect) }()
+			p.start()
+			defer func() { b.cancel(); <-p.done; <-done }()
+			select {
+			case at := <-firstDial:
+				if at.Before(expiry) {
+					t.Fatal("active cooldown bypassed")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("persisted temporary ban parked transport recovery")
+			}
+			deadline := time.Now().Add(time.Second)
+			for !connected.Load() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if !connected.Load() || retries.Load() != 3 || replacements.Load() != 0 || client.connects.Load() != 1 {
+				t.Fatal("gated backoff did not recover existing paired session")
+			}
+			req := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/ready", nil)
+			req.Header.Set("Authorization", "Bearer fake-data-plane-token-0123456789abcdef")
+			out := httptest.NewRecorder()
+			b.runtimeRESTHandler(8080, "fake-data-plane-token-0123456789abcdef").ServeHTTP(out, req)
+			if out.Code != 200 {
+				t.Fatalf("runtime readiness after recovery=%d %s", out.Code, out.Body.String())
+			}
+		})
 	}
 }
