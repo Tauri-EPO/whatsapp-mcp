@@ -198,17 +198,10 @@ func runBridge(cfg bridgeConfig) int {
 		logger.Errorf("Refusing to connect with unreadable saved connection state: %v", err)
 		return 1
 	}
-	prepareCtx, finishPrepare := context.WithTimeout(context.Background(), 5*time.Second)
-	deviceStore, problem, err := startupDevice(prepareCtx, container, storeRoot, problem)
-	finishPrepare()
-	unlinkPending := err != nil && problem != nil && problem.Kind == "unlinked"
+	deviceStore, unlinkPending, err := initialSessionDevice(context.Background(), container, problem)
 	if err != nil {
-		if !unlinkPending {
-			logger.Errorf("Failed to prepare device: %v", err)
-			return 1
-		}
-		logger.Warnf("Revoked session removal incomplete; staying in pairing_required: %v", err)
-		deviceStore = container.NewDevice() // Never expose the revoked device to a dial.
+		logger.Errorf("Failed to prepare device: %v", err)
+		return 1
 	}
 
 	cfg.History.apply(store.DeviceProps, deviceStore.ID != nil, *fullHistoryPairFlag)
@@ -302,6 +295,8 @@ func runBridge(cfg bridgeConfig) int {
 	bridge.connectionProblem = problem
 	if unlinkPending {
 		bridge.pairingState = "pairing_required"
+		bridge.operatorRetiredClient.Store(client)
+		logger.Warnf("Revoked session cleanup pending; serving health while cleanup resumes")
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = cfg.Bind, cfg.AllowedHosts
 	bridge.RESTSplit = cfg.SplitREST
@@ -333,29 +328,14 @@ func runBridge(cfg bridgeConfig) int {
 	if !cfg.PairingStdout {
 		pairingOut = io.Discard
 	}
-	bridge.operatorPairing = newOperatorPairing(exitCtx, bridge, client, func() (operatorPairingClient, error) {
-		// Only an unpaired restart or unlink reaches this factory. Deleted
-		// SDK clients cannot be reused, and old QR contexts cannot disconnect
-		// this new client's socket.
-		cfg.History.apply(store.DeviceProps, false, *fullHistoryPairFlag)
-		device := container.NewDevice()
-		problem, _ := bridge.connectionSnapshot()
-		if problem != nil && problem.Kind == "unlinked" {
-			ctx, cancel := context.WithTimeout(bridge.ctx, 5*time.Second)
-			defer cancel()
-			var err error
-			device, err = bridge.unlinkedDevice(ctx, container)
-			if err != nil {
-				return nil, err
-			}
-		}
-		freshClient := newRuntimeClient(device, clientLog)
-		bridge.installClient(freshClient, device.ID != nil, reconnectChan)
-		return freshClient, nil
-	}, bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
+	bridge.operatorPairing = newOperatorPairing(exitCtx, bridge, client, bridge.pairingClientFactory(exitCtx, container, cfg.History, *fullHistoryPairFlag, clientLog, reconnectChan), bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
+
 	if err := bridge.restoreOperatorIdle(); err != nil {
 		logger.Errorf("Failed to restore operator idle state")
 		return 1
+	}
+	if cfg.Operator.Bind == "" && bridge.operatorLogout.Load() {
+		logger.Warnf("State logged_out_by_operator: re-enable WHATSAPP_OPERATOR_BIND and POST /operator/v1/pairing/restart to leave idle")
 	}
 	if cfg.Operator.Bind != "" {
 		routes := withMCPAdmin(bridge.operatorRoutes(), bridgeToken, newMCPAdminClient(cfg.MCPAdminAddress), cfg.MCPAdminHost)
@@ -392,6 +372,9 @@ func runBridge(cfg bridgeConfig) int {
 	// One controller owns pairing in both stdout and private-operator mode.
 	// It stays alive after an unlink and never reuses the revoked SDK client.
 	bridge.operatorPairing.start()
+	if unlinkPending {
+		bridge.operatorPairing.kick <- struct{}{}
+	}
 
 	bridgeLog.Infof("REST server is running. Press Ctrl+C to disconnect and exit.")
 

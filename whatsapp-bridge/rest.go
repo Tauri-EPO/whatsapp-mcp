@@ -268,7 +268,14 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["pairing_state"], body["status"] = pairingState, pairingState
 	}
 	if b.operatorPairing != nil {
-		body["operator_pairing_state"] = b.operatorPairing.snapshot().State
+		state := b.operatorPairing.snapshot().State
+		body["operator_pairing_state"] = state
+		if state == "expired" && !problem.restrictsAccount() {
+			body["pairing_action"] = "Restart the bridge or POST /operator/v1/pairing/restart for a new QR"
+		}
+	}
+	if problem != nil && problem.Kind == "unlinked" && !problem.SessionRemoved {
+		body["pairing_action"] = "Session cleanup is pending and retries automatically; wait for a fresh QR"
 	}
 	if stats != nil {
 		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles := stats.snapshotScoped(time.Now())

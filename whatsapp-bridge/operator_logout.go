@@ -25,8 +25,6 @@ func (b *Bridge) restoreOperatorIdle() error {
 		b.pairingState = "logged_out_by_operator" // Before any consumers start.
 		if b.operatorPairing != nil {
 			b.operatorPairing.state.State = "logged_out_by_operator"
-		} else {
-			b.Log.Warnf("State logged_out_by_operator: re-enable WHATSAPP_OPERATOR_BIND and POST /operator/v1/pairing/restart to leave idle")
 		}
 	}
 	return nil

@@ -425,7 +425,8 @@ func TestUnlinkReplacementSurvivesRestartBeforeConnected(t *testing.T) {
 		t.Fatal(err)
 	}
 	jid := types.NewJID("5511999999999", types.DefaultUserServer)
-	jid.Device = 42
+	// A successful replacement can reuse the same device identity with new keys.
+	// The durable completion flag, rather than identity inequality, protects it.
 	replacement.ID = &jid
 	replacement.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{1}, AccountSignature: make([]byte, 64), AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
 	if err := replacement.Save(b.ctx); err != nil {

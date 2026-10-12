@@ -5983,7 +5983,7 @@ def bridge_status() -> dict[str, Any]:
     status["ok"] = status["connected"] and status["paired"]
     if not status["ok"]:
         status["reason"] = (
-            "bridge is up but not paired: scan the QR code in its log"
+            "bridge is up but not paired: scan an active QR in its log; if expired, restart the bridge or POST /operator/v1/pairing/restart"
             if not status["paired"]
             else "bridge is paired but disconnected from WhatsApp; it reconnects automatically"
         )
@@ -5996,6 +5996,14 @@ def bridge_status() -> dict[str, Any]:
         if kind in ("banned", "locked", "client_outdated", "temporarily_banned"):
             status["ok"] = False
             status["reason"] = f"WhatsApp connection problem: {kind}; see docs/TROUBLESHOOTING.md"
+    action = body.get("pairing_action")
+    if isinstance(action, str) and action:
+        status["pairing_action"] = action
+        if not status["paired"]:
+            status["reason"] = action
+    if pairing_state in ("pairing_required", "expired"):
+        status["pairing_state"] = pairing_state
+        status["ok"] = False
     if pairing_state in ("passkey_required", "passkey_confirm", "passkey_failed"):
         status["pairing_state"] = pairing_state
         status["ok"] = False

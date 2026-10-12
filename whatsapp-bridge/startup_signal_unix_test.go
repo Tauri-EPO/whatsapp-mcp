@@ -354,7 +354,7 @@ func TestUnlinkStartupDeleteFailureServesHealthWithoutDial(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("parked startup did not stop")
 	}
-	if strings.Contains(output.String(), "Connection attempt") || strings.Contains(output.String(), "QR code") || !strings.Contains(output.String(), "staying in pairing_required") {
+	if strings.Contains(output.String(), "Connection attempt") || strings.Contains(output.String(), "QR code") || !strings.Contains(output.String(), "cleanup pending; serving health") {
 		t.Fatalf("startup dialed or failed to park: %s", &output)
 	}
 }

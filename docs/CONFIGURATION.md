@@ -8,10 +8,11 @@ Every environment variable and CLI flag, plus the transport, authentication and 
 `connected` and `paired` booleans. `/api/ready` is HTTP 200 only when status
 is `ok`. `whatsapp_bridge_connected` and `whatsapp_bridge_paired` retain those
 names and boolean gauge meanings; renaming them requires a major version.
-Account enforcement adds `connection_problem` and passkey steps add the safe
-`pairing_state` string, never their credential material.
+Account enforcement adds `connection_problem`; pairing and cleanup add the
+safe `pairing_state` and recovery guidance in `pairing_action`, never credentials.
 `connection_problem_persistence_failed` reports failure to save that state;
-only account restrictions block dialing on a write failure, with write retries.
+Account restrictions block dialing on a write failure; pending unlink cleanup
+retries automatically without dialing revoked credentials.
 An outdated-client problem includes `build_version` and is cleared at startup
 when the build identity changes, so deploying an upgrade permits another dial.
 
@@ -25,11 +26,13 @@ connection transitions POST this separate payload to `WEBHOOK_URL`:
 `state` is `connected`, `disconnected`, `logged_out`, `pairing_required` or
 `paired`. `reason` is a bridge-defined diagnostic label. Optional
 `connection_problem` has the health object; optional `pairing_state` is a
-passkey step. No account identifier, message, QR, challenge, assertion or
+pairing/cleanup state. A revoked device identity is stored only in the private
+marker and is excluded from health and webhooks. No account identifier, message, QR, challenge, assertion or
 confirmation code is included. Ordinary disconnections wait five seconds;
 reconnection within that window cancels the POST. Account problems bypass
-that debounce. A terminal logout POST completes or reaches its two-second
-deadline before the process exits. Delivery is best-effort with failure
+that debounce. A logout POST completes or reaches its two-second deadline. Phone unlink
+keeps the bridge alive in `pairing_required`; only an explicit operator logout
+with `after:exit` exits afterward. Delivery is best-effort with failure
 metrics, not a durable event queue; polling remains available.
 
 ## Environment variables

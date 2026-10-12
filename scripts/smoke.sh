@@ -380,7 +380,7 @@ operator_state=disabled
 if bridge_exec printenv WHATSAPP_OPERATOR_BIND >/dev/null 2>&1; then
   operator_state=$(bridge_exec whatsapp-bridge --operator-status </dev/null) || operator_state=unavailable
   case "$operator_state" in
-    starting|awaiting_qr|code_issued|completing|paired|connected|expired|logged_out|logged_out_by_operator|passkey_required|passkey_submitted|passkey_confirm|passkey_failed)
+    starting|awaiting_qr|code_issued|completing|paired|connected|expired|pairing_required|logged_out|logged_out_by_operator|passkey_required|passkey_submitted|passkey_confirm|passkey_failed)
       echo "Operator pairing state: $operator_state (GET /operator/v1/pairing)" ;;
     disabled) ;;
     *) echo "Operator pairing state unavailable; check the private listener and token." ;;
@@ -388,7 +388,11 @@ if bridge_exec printenv WHATSAPP_OPERATOR_BIND >/dev/null 2>&1; then
 fi
 if [ "$operator_state" = logged_out_by_operator ]; then
   echo "Stack is up; logged out by operator. Restart pairing explicitly through the private operator listener."
+elif [ "$operator_state" = pairing_required ]; then
+  echo "Stack is up; session cleanup is pending and retries automatically. Wait for a fresh QR."
+elif [ "$operator_state" = expired ]; then
+  echo "QR sequence expired: restart the bridge or POST /operator/v1/pairing/restart for a new QR."
 else
-  echo "Stack is up but WhatsApp is not paired yet: run 'docker compose logs -f bridge' and scan the QR code."
+  echo "Stack is up but WhatsApp is not paired yet: run 'docker compose logs -f bridge' and scan the active QR. If the QR sequence expired, restart the bridge or POST /operator/v1/pairing/restart for a new QR."
 fi
 exit 2

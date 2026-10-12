@@ -101,7 +101,12 @@ cmd_restore() {
     cd /store
     rm -f ./*.db-wal ./*.db-shm .bridge.lock .session-keepalive
     for db in messages whatsapp notes; do
-      [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db && chmod 600 ./$db.db
+      if [ -f /backup/$db.db ]; then
+        cp /backup/$db.db ./$db.db
+        chmod 600 ./$db.db
+        # Keep the old account fence unless its session was replaced.
+        [ "$db" != whatsapp ] || rm -f .connection-problem .connection-problem.part
+      fi
     done
     [ -f /backup/media.tar ] && tar -xf /backup/media.tar -C /store
     [ -f /backup/bridge-token ] && cp /backup/bridge-token .bridge-token && chmod 600 .bridge-token

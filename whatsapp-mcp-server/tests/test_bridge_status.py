@@ -143,3 +143,37 @@ def test_passkey_state_reaches_the_mcp_tool(monkeypatch, state):
     out = main.bridge_status()
     assert out["ok"] is False and out["pairing_state"] == state
     assert "operator intervention" in out["reason"]
+
+
+@pytest.mark.parametrize(
+    "state,action",
+    [
+        ("pairing_required", "Session cleanup is pending and retries automatically; wait for a fresh QR"),
+        ("expired", "Restart the bridge or POST /operator/v1/pairing/restart for a new QR"),
+    ],
+)
+def test_pairing_recovery_guidance_reaches_the_mcp_tool(monkeypatch, state, action):
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "get",
+        _get(
+            {
+                "/health": Resp(
+                    200,
+                    {
+                        "status": state,
+                        "connected": False,
+                        "paired": False,
+                        "pairing_state": state,
+                        "pairing_action": action,
+                    },
+                ),
+                "/version": Resp(500, {}),
+                "/me": Resp(503, {}),
+            }
+        ),
+    )
+    out = main.bridge_status()
+    assert out["ok"] is False
+    assert out["pairing_state"] == state
+    assert out["pairing_action"] == action and out["reason"] == action

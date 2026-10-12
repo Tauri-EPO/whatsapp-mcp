@@ -351,6 +351,10 @@ func (p *operatorPairing) run() {
 				}
 			}
 		}
+		if !p.paired() && !p.b.operatorLogout.Load() && p.snapshot().State == "expired" {
+			p.b.setPairingState("pairing_required")
+			p.b.Log.Warnf("QR sequence expired or stopped; restart the bridge or POST /operator/v1/pairing/restart for a new QR")
+		}
 		select {
 		case <-p.ctx.Done():
 			return
@@ -497,13 +501,7 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 	}
 	// Keep the unlink fence until the factory has removed the revoked session.
 	if problem != nil && problem.Kind == "unlinked" {
-		p.b.connectionMu.Lock()
-		changed := p.b.connectionProblem != problem
-		if !changed && p.b.StoreRoot != nil {
-			p.b.persistConnectionProblemLocked()
-		}
-		p.b.connectionMu.Unlock()
-		if changed {
+		if !p.b.persistConnectionProblemIf(problem) {
 			writeErrorCode(w, 409, "connection_state_changed", "Unlink state changed; read the current state before retrying")
 			return
 		}

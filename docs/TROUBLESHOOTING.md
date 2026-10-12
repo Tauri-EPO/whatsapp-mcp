@@ -21,13 +21,18 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 
 The last problem is saved as the owner-only file `store/.connection-problem`.
 It survives container restarts. For `unlinked`, this file also prevents startup
-from connecting with revoked keys: it deletes any surviving device rows and
-verifies their absence before creating a fresh pairing client. It then saves
+from connecting with revoked keys: it removes the device the marker names
+and verifies its absence before creating a fresh pairing client. Legacy markers
+without an identity remove the single-account session. Cleanup starts after
+REST is available, has no short deadline, retries database contention/storage
+failures and is cancelled only on shutdown. Health stays responsive during it. It then saves
 `session_removed:true` so a session saved by the new pairing survives a restart
 before authentication completes. Keep the file
 until pairing succeeds; deleting it early removes that protection. If local
 session removal fails, REST stays alive in `pairing_required` without dialing.
-Fix the store error and restart pairing (or the container) to retry deletion.
+Fix the store error; cleanup retries automatically. A restart resumes pending
+cleanup. Backup restore removes stale connection state, and a marker for another
+device never deletes a newly restored session.
 
 To explicitly retry a blocked account after resolving its restriction, an unpaired instance with the private operator
 listener can use authenticated `POST /operator/v1/pairing/restart`; a live
@@ -81,7 +86,8 @@ a quoted number, a trailing comment or `unlimited` used to silently select
 sweeping nearly all cached media. Empty values retain the defaults.
 
 Startup I/O errors exit with status 1 after cleanup. QR attempts are bounded
-to three; after they expire the bridge stays alive serving REST.
+to three; after they expire the bridge stays alive serving REST. Health and
+logs explain that a new QR requires a bridge restart or operator pairing restart.
 Restart the pairing through the private operator listener, or restart the
 container to begin another sequence. Normal shutdown exits 0.
 

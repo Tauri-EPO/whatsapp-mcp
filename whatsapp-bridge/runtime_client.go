@@ -71,6 +71,11 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 	b.connectionMu.Lock()
 	b.forceReconnect.Store(false)
 	b.runtimePaired.Store(paired)
+	b.runtimeDeviceID.Store(nil)
+	if paired && client.Store.ID != nil {
+		id := client.Store.ID.String()
+		b.runtimeDeviceID.Store(&id)
+	}
 	b.runtimeClient.Store(client)
 	b.connectionMu.Unlock()
 	client.AddEventHandler(func(evt interface{}) {
@@ -91,8 +96,14 @@ func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, re
 	if b.currentClient() != client || b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
 		return
 	} // Ignore a retired client's late events.
-	switch evt.(type) {
-	case *events.PairSuccess, *events.Connected:
+	switch v := evt.(type) {
+	case *events.PairSuccess:
+		if !v.ID.IsEmpty() {
+			id := v.ID.String()
+			b.runtimeDeviceID.Store(&id)
+		}
+		b.runtimePaired.Store(true)
+	case *events.Connected:
 		b.runtimePaired.Store(true)
 	case *events.LoggedOut:
 		b.runtimePaired.Store(false)
