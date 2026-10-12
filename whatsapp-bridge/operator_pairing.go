@@ -123,6 +123,10 @@ func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem
 		p.state.ConfirmationCode = evt.PasskeyConfirmation.Code
 	case "success":
 		p.invalidateLocked("paired")
+		if !p.b.operatorLogout.Load() {
+			p.b.setPairingState("")
+			p.b.notifyConnection("paired", "pairing_succeeded", true, false)
+		}
 	default:
 		if evt.Event == "timeout" || evt.Error != nil {
 			passkey := strings.HasPrefix(p.state.State, "passkey_")
@@ -233,6 +237,17 @@ func (p *operatorPairing) run() {
 				return
 			}
 			if p.b.operatorLogout.Load() {
+				p.action.Unlock()
+				break
+			}
+			_, state := p.b.connectionSnapshot()
+			if first && state == "pairing_required" {
+				// Startup could not remove the revoked session. Park in a state
+				// the operator can restart, before entering the blocked dial gate.
+				first = false
+				p.mu.Lock()
+				p.invalidateLocked("pairing_required")
+				p.mu.Unlock()
 				p.action.Unlock()
 				break
 			}

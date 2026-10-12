@@ -337,3 +337,81 @@ func TestRestrictedLogoutStaysBlockedWhileAlive(t *testing.T) {
 		})
 	}
 }
+
+func TestUnlinkStartupPendingControllerAllowsOperatorRetry(t *testing.T) {
+	b, container := revokedSessionFixture(t)
+	reconnect := make(chan bool, 1)
+	b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, reconnect)
+	db, err := openSessionDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TRIGGER refuse_retry_delete BEFORE DELETE ON whatsmeow_device BEGIN SELECT RAISE(FAIL,'fake pending deletion failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	// This is the new, unpaired placeholder used by startup after failed cleanup.
+	b.installClient(newRuntimeClient(container.NewDevice(), testLogger()), false, reconnect)
+	initial, fresh := newFakeOperatorClient(), newFakeOperatorClient()
+	fresh.items <- whatsmeow.QRChannelItem{Event: "code", Code: "FAKE-RETRY-QR", Timeout: time.Minute}
+	var replacements atomic.Int64
+	p := newOperatorPairing(b.ctx, b, initial, func() (operatorPairingClient, error) {
+		replacements.Add(1)
+		problem, _ := b.connectionSnapshot()
+		device, err := startupDevice(b.ctx, container, problem)
+		if err != nil {
+			return nil, err
+		}
+		b.installClient(newRuntimeClient(device, testLogger()), false, reconnect)
+		return fresh, nil
+	}, b.isPaired, b.Connected, io.Discard, reconnect)
+	b.operatorPairing = p
+	p.state.Attempts = 1
+	p.start()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	wait := func(state string) {
+		t.Helper()
+		for p.snapshot().State != state {
+			select {
+			case <-ticker.C:
+			case <-deadline:
+				t.Fatalf("controller state=%s want=%s", p.snapshot().State, state)
+			}
+		}
+	}
+	wait("pairing_required")
+	server := httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, p.routes(), b.Log))
+	defer server.Close()
+	retry := func() {
+		t.Helper()
+		req, _ := http.NewRequest("POST", server.URL+"/operator/v1/pairing/restart", nil)
+		req.Header.Set("Authorization", "Bearer "+fakeOperatorToken)
+		response, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != 202 {
+			t.Fatalf("pending startup retry=%d", response.StatusCode)
+		}
+	}
+	retry()
+	wait("expired")
+	if initial.connects.Load() != 0 || fresh.connects.Load() != 0 || replacements.Load() != 1 {
+		t.Fatal("failed pending deletion reached a dial")
+	}
+	if _, err := db.Exec("DROP TRIGGER refuse_retry_delete"); err != nil {
+		t.Fatal(err)
+	}
+	retry()
+	wait("awaiting_qr")
+	if initial.connects.Load() != 0 || fresh.connects.Load() != 1 || replacements.Load() != 2 || p.snapshot().QR == nil {
+		t.Fatal("operator could not recover the parked startup")
+	}
+	unlinkHealth(t, b)
+	b.cancel()
+	<-p.done
+}
