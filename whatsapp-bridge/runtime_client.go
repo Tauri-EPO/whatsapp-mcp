@@ -42,6 +42,9 @@ func (b *Bridge) currentClient() *whatsmeow.Client {
 }
 
 func (b *Bridge) isPaired() bool {
+	if b.operatorRetiredClient.Load() == b.currentClient() {
+		return false
+	}
 	if b.runtimeClient.Load() != nil {
 		return b.runtimePaired.Load()
 	}
@@ -58,7 +61,7 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 	if client.Log == nil {
 		client.Log = b.Log
 	}
-	client.Log = connectionProblemLogger{Logger: client.Log, bridge: b, active: func() bool { return b.currentClient() == client }}
+	client.Log = connectionProblemLogger{Logger: client.Log, bridge: b, active: func() bool { return b.currentClient() == client && b.operatorRetiredClient.Load() != client }}
 	client.PrePairCallback = func(types.JID, string, string) bool {
 		if b.currentClient() != client {
 			return false
@@ -126,8 +129,8 @@ func (b *Bridge) bindRuntimeClient() {
 	b.Connect = func() error {
 		// reconnectLoop owns clientGate for the whole reconnect operation.
 		// RWMutex read locks cannot nest when an exclusive writer is queued.
-		if b.operatorLogout.Load() {
-			return errors.New("device logged out by operator")
+		if b.operatorLogout.Load() || b.operatorRetiredClient.Load() == b.currentClient() {
+			return errors.New("device logged out")
 		}
 		if b.operatorPairing != nil && !b.isPaired() {
 			return errors.New("unpaired client requires the pairing controller")
@@ -135,7 +138,10 @@ func (b *Bridge) bindRuntimeClient() {
 		return b.currentClient().ConnectContext(b.ctx)
 	}
 	b.Disconnect = func() { b.currentClient().Disconnect() }
-	b.Connected = func() bool { c := b.currentClient(); return c != nil && c.IsConnected() }
+	b.Connected = func() bool {
+		c := b.currentClient()
+		return c != nil && b.operatorRetiredClient.Load() != c && c.IsConnected()
+	}
 	b.SendAppState = func(ctx context.Context, patch appstate.PatchInfo) error {
 		return b.currentClient().SendAppState(ctx, patch)
 	}

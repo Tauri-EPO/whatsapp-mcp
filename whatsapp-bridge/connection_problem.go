@@ -132,6 +132,9 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 	if !next.restrictsAccount() && b.connectionProblem.restrictsAccount() {
 		return b.connectionProblem
 	}
+	if b.connectionProblem != nil && b.connectionProblem.Kind == "unlinked" && b.operatorRetiredClient.Load() == b.currentClient() {
+		return b.connectionProblem // Late transport events cannot erase the unlink fence.
+	}
 	b.connectionProblem = next
 	b.connectionChangedLocked()
 	if code == 402 && b.metrics != nil {
@@ -166,6 +169,9 @@ func (b *Bridge) persistConnectionProblemLocked() {
 func (b *Bridge) clearConnectionProblem() {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
+	if b.operatorRetiredClient.Load() == b.currentClient() {
+		return
+	}
 	b.clearConnectionProblemLocked()
 }
 

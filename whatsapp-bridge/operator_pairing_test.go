@@ -380,14 +380,14 @@ func TestOperatorPairedStartupFailureReachesGatedReconnectWithoutReplacingDevice
 	}
 }
 
-func TestOperatorNormalUnlinkRetainsExitThree(t *testing.T) {
+func TestOperatorNormalUnlinkStaysAlive(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.operatorPairing = &operatorPairing{}
 	exit := 0
 	b.Exit = func(_ string, code int) { exit = code }
 	b.handleEvent(&events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
-	if exit != exitCodeLoggedOut {
-		t.Fatalf("normal unlink with operator enabled exit=%d, want 3", exit)
+	if exit != 0 {
+		t.Fatalf("normal unlink with operator enabled exit=%d, want 0", exit)
 	}
 }
 

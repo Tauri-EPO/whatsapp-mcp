@@ -8,7 +8,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -597,7 +596,7 @@ func (b *Bridge) handleCallOffer(meta types.BasicCallMeta, callType string, isGr
 		kind, direction, meta.CallID, callType, fromJID, chatJID)
 }
 
-// Exit codes for conditions the bridge cannot recover from in-place.
+// Exit codes for explicit operator logout and unsupported client versions.
 const (
 	exitCodeLoggedOut      = 3
 	exitCodeClientOutdated = 4
@@ -721,6 +720,9 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.Connected:
+		if b.operatorRetiredClient.Load() == b.currentClient() {
+			return
+		}
 		b.startLabelSync()
 		b.clearConnectionProblem()
 		b.recipientNumbers.clear()
@@ -745,18 +747,25 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		if !v.OnConnect && code == 0 {
 			code = 401
 		}
+		if code == 401 {
+			if b.operatorRetiredClient.Load() == b.currentClient() {
+				return // One unlink transition, even if the SDK repeats the event.
+			}
+			b.operatorRetiredClient.Store(b.currentClient())
+			b.runtimePaired.Store(false)
+		}
 		p := b.recordConnectionProblem(code, 0, 0)
 		b.notifyConnection("logged_out", p.Kind, true, true)
 		if code != 401 {
 			return
 		}
-		// whatsmeow has already wiped the device row; the process cannot re-enter
-		// the pairing flow from here. Exit and let the supervisor restart us: the
-		// next start finds no session and prints a fresh QR code.
-		b.Exit(fmt.Sprintf("device logged out by the phone (reason: %v); exiting so the next start pairs again", v.Reason), exitCodeLoggedOut)
+		// Keep REST alive and fence the revoked client. The pairing controller
+		// replaces it outside this callback; startup honours the saved problem.
+		b.setPairingState("pairing_required")
+		b.Log.Warnf("Device unlinked; waiting for a new pairing")
 
 	case *events.Disconnected:
-		if b.operatorLogout.Load() {
+		if b.operatorLogout.Load() || b.operatorRetiredClient.Load() == b.currentClient() {
 			return
 		}
 		b.recipientNumbers.clear()

@@ -254,6 +254,9 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 	b.connectionMu.Unlock()
 	if problem != nil {
 		body["connection_problem"] = problem
+		if problem.Kind == "unlinked" && !paired {
+			body["status"] = "pairing_required"
+		}
 		if problem.Kind == "banned" || problem.Kind == "locked" || problem.Kind == "client_outdated" {
 			body["status"] = "blocked"
 		}

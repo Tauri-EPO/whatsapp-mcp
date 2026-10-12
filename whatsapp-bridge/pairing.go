@@ -17,9 +17,37 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+// LoggedOut is dispatched in a goroutine BEFORE the SDK deletes its device.
+// The saved unlinked problem is a startup fence, even if that delete never ran.
+// Load our own device object: never race the SDK's mutations of Client.Store.
+func startupDevice(ctx context.Context, container *sqlstore.Container, problem *ConnectionProblem) (*store.Device, error) {
+	if problem != nil && problem.Kind == "unlinked" {
+		devices, err := container.GetAllDevices(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, device := range devices {
+			if err := device.Delete(ctx); err != nil {
+				return nil, fmt.Errorf("remove revoked session: %w", err)
+			}
+		}
+		devices, err = container.GetAllDevices(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(devices) != 0 {
+			return nil, errors.New("revoked session still present")
+		}
+		return container.NewDevice(), nil
+	}
+	return container.GetFirstDevice(ctx)
+}
 
 // pairingClient is the slice of *whatsmeow.Client the pairing flow needs.
 type pairingClient interface {

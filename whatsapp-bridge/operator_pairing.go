@@ -145,7 +145,7 @@ func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem
 func (p *operatorPairing) connectionEvent(evt interface{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	switch evt.(type) {
+	switch v := evt.(type) {
 	case *events.Connected:
 		p.invalidateLocked("connected")
 	case *events.PairSuccess:
@@ -159,6 +159,13 @@ func (p *operatorPairing) connectionEvent(evt interface{}) {
 		p.state.Generation++
 		if p.cancelAttempt != nil {
 			p.cancelAttempt()
+		}
+		if v.Reason == events.ConnectFailureLoggedOut || !v.OnConnect && v.Reason == 0 {
+			p.invalidateLocked("pairing_required")
+			select {
+			case p.kick <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -247,6 +254,7 @@ func (p *operatorPairing) run() {
 				p.mu.Lock()
 				p.client = client
 				p.mu.Unlock()
+				p.b.setPairingState("")
 			}
 			first = false
 			ctx, cancel := context.WithCancel(p.ctx)
@@ -466,13 +474,14 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	p.mu.Lock()
-	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccount())
+	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "pairing_required" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccount())
 	p.mu.Unlock()
 	if active {
 		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")
 		return
 	}
-	if !p.b.clearConnectionProblemIf(problem) {
+	// Keep the unlink fence until the factory has removed the revoked session.
+	if (problem == nil || problem.Kind != "unlinked") && !p.b.clearConnectionProblemIf(problem) {
 		writeErrorCode(w, 409, "connection_state_changed", "WhatsApp restriction changed; read the current state before retrying")
 		return
 	}

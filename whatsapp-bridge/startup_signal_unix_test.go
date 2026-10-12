@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow/types/events"
 )
 
 func TestOperatorStartupHelper(t *testing.T) {
@@ -126,7 +129,7 @@ func TestSIGTERMDuringBlockedStartupExitsCleanly(t *testing.T) {
 			if strings.Contains(output.String(), "context canceled") || strings.Contains(output.String(), "QR code") {
 				t.Fatal("shutdown logged an error or drew a QR")
 			}
-			if !strings.Contains(output.String(), "Shutting down during connection startup") {
+			if !strings.Contains(output.String(), "Shutting down: draining REST") {
 				t.Fatal("clean startup shutdown not observed")
 			}
 			if ctx.Err() != nil {
@@ -217,7 +220,7 @@ func TestStartupStatusPurgeFailureStillServesHealth(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("signal did not cancel startup purge")
 				}
-				if !strings.Contains(output.String(), "Status startup purge starting") || !strings.Contains(output.String(), "Shutting down during connection startup") {
+				if !strings.Contains(output.String(), "Status startup purge starting") || !strings.Contains(output.String(), "Shutting down: draining REST") {
 					t.Fatal(output.String())
 				}
 				applied, err := migrationApplied(b.Store.db, statusPurgeMarker)
@@ -281,4 +284,77 @@ func (w *startupPurgeSignalWriter) Write(data []byte) (int, error) {
 		w.signal()
 	}
 	return n, err
+}
+
+// Exercise the actual startup and signal path with a revoked SQLite session.
+// A failed delete keeps the process alive and prevents even a pairing dial.
+func TestUnlinkStartupDeleteFailureServesHealthWithoutDial(t *testing.T) {
+	b, _ := revokedSessionFixture(t)
+	b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
+	db, err := openSessionDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER refuse_startup_delete BEFORE DELETE ON whatsmeow_device BEGIN SELECT RAISE(FAIL,'fake startup deletion failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_, port, _ := net.SplitHostPort(address)
+	_ = listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartupBlockedSignalHelper$") //nolint:gosec // Re-executes this test binary using the fake revoked store.
+	cmd.Env = append(os.Environ(), "WAMCP_TEST_BLOCKED_SIGNAL=1", storeDirEnv+"="+storeDir(), "WHATSAPP_BRIDGE_TOKEN=fake-startup-signal-token-0123456789", bridgePortEnv+"="+port, bridgeBindEnv+"=127.0.0.1", "WEBHOOK_ENABLED=false", "WHATSAPP_MEDIA_ROOTS="+t.TempDir(), logLevelEnv+"=INFO", operatorBindEnv+"=")
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	defer func() { _ = cmd.Process.Kill() }()
+	client := &http.Client{Timeout: 100 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	for {
+		req, _ := http.NewRequestWithContext(ctx, "GET", "http://"+address+"/api/health", nil)
+		req.Header.Set("Authorization", "Bearer fake-startup-signal-token-0123456789")
+		response, err := client.Do(req)
+		if err == nil {
+			var health map[string]any
+			err = json.NewDecoder(response.Body).Decode(&health)
+			_ = response.Body.Close()
+			if err == nil && response.StatusCode == 200 {
+				if health["paired"] != false || health["connected"] != false || health["status"] != "pairing_required" {
+					t.Fatalf("startup health=%v", health)
+				}
+				break
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("startup exited before health: %v", err)
+		case <-ctx.Done():
+			t.Fatal("startup did not serve health")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("parked startup exit=%v output=%s", err, &output)
+		}
+	case <-ctx.Done():
+		t.Fatal("parked startup did not stop")
+	}
+	if strings.Contains(output.String(), "Connection attempt") || strings.Contains(output.String(), "QR code") || !strings.Contains(output.String(), "staying in pairing_required") {
+		t.Fatalf("startup dialed or failed to park: %s", &output)
+	}
 }

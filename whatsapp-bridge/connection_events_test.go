@@ -82,13 +82,9 @@ func TestConnectionWebhookDebouncesBriefDisconnectAndPublishesLongGap(t *testing
 	}
 }
 
-func TestConnectionLogoutPostsBeforeExitAndCarriesClassifiedProblem(t *testing.T) {
+func TestConnectionLogoutStaysAliveAndCarriesClassifiedProblem(t *testing.T) {
 	b, posts := connectionTestReceiver(t)
-	b.Exit = func(_ string, code int) {
-		if code != 3 || len(posts) != 1 {
-			t.Errorf("exit before webhook: code=%d posts=%d", code, len(posts))
-		}
-	}
+	b.Exit = func(string, int) { t.Error("phone unlink must stay alive") }
 	b.handleEvent(&events.LoggedOut{Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
 	p := <-posts
 	if p.State != "logged_out" || p.Problem == nil || p.Problem.Kind != "unlinked" || p.Problem.Code != 401 {

@@ -11,7 +11,7 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 
 | Kind | Operator action |
 |---|---|
-| `unlinked` (401) | Normal device unlink: the bridge exits with code 3; restart and scan a QR. |
+| `unlinked` (401) | Device unlink: the bridge stays up in `pairing_required`, discards the revoked session and starts a fresh QR flow. Scan the new QR to link again. |
 | `locked` (403) | Check primary-device account access in official WhatsApp; automatic pairing is blocked. |
 | `banned` (406) | Resolve the account restriction through official WhatsApp; automatic pairing is blocked. |
 | `temporarily_banned` (402) | Wait until `expires_at`; the bridge suspends all dials and resumes afterward. An unknown duration uses one hour. |
@@ -20,8 +20,14 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 | `other` | Inspect the numeric code; normal reconnect backoff continues. |
 
 The last problem is saved as the owner-only file `store/.connection-problem`.
-It survives container restarts. To explicitly retry a blocked account after
-resolving its restriction, an unpaired instance with the private operator
+It survives container restarts. For `unlinked`, this file also prevents startup
+from connecting with revoked keys: it deletes any surviving device rows and
+verifies their absence before creating a fresh pairing client. Keep the file
+until pairing succeeds; deleting it early removes that protection. If local
+session removal fails, REST stays alive in `pairing_required` without dialing.
+Fix the store error and restart pairing (or the container) to retry deletion.
+
+To explicitly retry a blocked account after resolving its restriction, an unpaired instance with the private operator
 listener can use authenticated `POST /operator/v1/pairing/restart`; a live
 paired session refuses this operation. Without that listener, stop the bridge,
 remove that single saved state file from its store volume, and restart. Keep
@@ -72,10 +78,10 @@ a quoted number, a trailing comment or `unlimited` used to silently select
 `106751`; larger values used to overflow, potentially disabling retention or
 sweeping nearly all cached media. Empty values retain the defaults.
 
-Startup I/O errors, failure to connect after three attempts, a QR pairing
-timeout and failure to establish a stable connection now exit with status 1
-after cleanup. A supervisor using restart-on-failure therefore retries even an
-unpaired bridge. Normal shutdown after a successful connection exits 0.
+Startup I/O errors exit with status 1 after cleanup. QR attempts are bounded
+to three; after they expire the bridge stays alive serving REST.
+Restart the pairing through the private operator listener, or restart the
+container to begin another sequence. Normal shutdown exits 0.
 
 ## Authentication Issues
 
@@ -461,7 +467,7 @@ Restarts now honour the last blip saved in the store's `.session-keepalive` file
 the new INFO line says when the next blip is due. To force one after the session
 settles, delete that file in the store directory and restart the bridge.
 
-If the device was already logged out, the bridge exits and waits for a new QR
+If the device was already logged out, the bridge stays alive and waits for a new QR
 scan: `docker compose logs -f bridge`, scan, done. The archive in `messages.db`
 is kept; only the session in `whatsapp.db` is replaced.
 
