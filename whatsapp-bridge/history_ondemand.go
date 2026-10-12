@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -183,6 +184,14 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
+		twin := types.EmptyJID
+		if chatJID.Server == types.DefaultUserServer || chatJID.Server == types.HiddenUserServer {
+			if alt, lookupErr := lookupAltJID(ctx, client, chatJID); lookupErr == nil && !alt.IsEmpty() &&
+				((chatJID.Server == types.DefaultUserServer && alt.Server == types.HiddenUserServer) ||
+					(chatJID.Server == types.HiddenUserServer && alt.Server == types.DefaultUserServer)) {
+				twin = alt.ToNonAD()
+			}
+		}
 		var id string
 		var fromMe bool
 		var ts time.Time
@@ -190,12 +199,13 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 		if req.BeforeMessageID == nil {
 			id, fromMe, ts, err = oldestStoredMessage(messageStore, req.ChatJID)
 		} else {
-			twin, _ := lookupAltJID(ctx, client, chatJID)
 			var storedChat string
 			storedChat, id, fromMe, ts, err = repairHistoryAnchor(ctx, messageStore, chatJID.String(), twin.ToNonAD().String(), *req.BeforeMessageID)
 			if err == nil {
-				// Use the target's archived spelling for the phone to locate it.
-				// Whether phone/LID spelling affects replay needs a live check.
+				// The archived spelling goes first, then its known twin.
+				if storedChat == twin.String() {
+					twin = chatJID
+				}
 				chatJID, err = types.ParseJID(storedChat)
 			}
 		}
@@ -229,8 +239,22 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 		// type. It resolves our own JID and sets the peer flag internally, so
 		// that addressing logic isn't duplicated (and drifted) here.
 		if err := send(ctx, msg); err != nil {
-			writeErr(http.StatusInternalServerError, fmt.Sprintf("Failed to send history request: %v", err))
+			// The transport error may name a locally discovered identifier.
+			writeErr(http.StatusInternalServerError, "Failed to send history request")
 			return
+		}
+		sentKinds := []string{historyChatKind(chatJID)}
+		twinFailed := false
+		if !twin.IsEmpty() {
+			info.Chat = twin
+			twinMsg := client.BuildHistorySyncRequest(&info, count)
+			if twinMsg == nil || send(ctx, twinMsg) != nil {
+				// The stored-spelling request already left the bridge. Keep its
+				// success and do not expose the discovered identifier or error.
+				twinFailed = true
+			} else {
+				sentKinds = append(sentKinds, historyChatKind(twin))
+			}
 		}
 
 		bridgeLog.Debugf("← /api/history chat=%q count=%d anchor=%q", req.ChatJID, count, id)
@@ -242,9 +266,26 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 				"Requested re-delivery of up to %d messages up to and including the target for %s. History arrives asynchronously; the phone decides how much is returned.",
 				count, req.ChatJID)
 		}
+		message += fmt.Sprintf(" Sent %d history request(s) under %s spelling(s).", len(sentKinds), strings.Join(sentKinds, ", "))
+		if twinFailed {
+			message += " The optional twin request could not be sent."
+		}
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: true,
 			Message: message,
 		})
 	}))
+}
+
+func historyChatKind(chat types.JID) string {
+	switch chat.Server {
+	case types.DefaultUserServer:
+		return "phone"
+	case types.HiddenUserServer:
+		return "LID"
+	case types.GroupServer:
+		return "group"
+	default:
+		return "chat"
+	}
 }

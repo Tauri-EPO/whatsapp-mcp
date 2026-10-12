@@ -83,11 +83,11 @@ func TestHistoryRepairRequest(t *testing.T) {
 				lidByPN: map[types.JID]types.JID{phone: lid},
 				pnByLID: map[types.JID]types.JID{lid: phone},
 			}, phone)
-			var sent *waE2E.Message
+			var sent []*waE2E.Message
 			mux := http.NewServeMux()
 			registerHistoryEndpointWithSender(mux, func(h http.HandlerFunc) http.HandlerFunc { return h },
 				client, func() bool { return true }, store, chatPolicy{}, func(_ context.Context, msg *waE2E.Message) error {
-					sent = msg
+					sent = append(sent, msg)
 					return nil
 				})
 			var beforeID *string
@@ -108,17 +108,30 @@ func TestHistoryRepairRequest(t *testing.T) {
 				if err := json.Unmarshal(rec.Body.Bytes(), &failure); err != nil {
 					t.Fatal(err)
 				}
-				if sent != nil || failure.Error.Code != "invalid_argument" || !strings.Contains(failure.Message, "in this chat") {
+				if len(sent) != 0 || failure.Error.Code != "invalid_argument" || !strings.Contains(failure.Message, "in this chat") {
 					t.Fatalf("invalid target sent a request or lost its error: sent=%v failure=%+v", sent, failure)
 				}
 				return
 			}
-			anchor := sent.GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
+			if len(sent) != 2 {
+				t.Fatalf("sent %d requests, want both spellings", len(sent))
+			}
+			anchor := sent[0].GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
 			if anchor == nil || anchor.GetChatJID() != tc.storedChat || anchor.GetOldestMsgID() != tc.wantID ||
 				anchor.GetOldestMsgFromMe() != tc.wantFromMe || anchor.GetOldestMsgTimestampMS() != tc.wantTime.Unix() ||
 				anchor.GetOnDemandMsgCount() != 7 {
 				t.Fatalf("built request = %v; want chat=%s id=%q fromMe=%v timestamp=%d count=7",
 					anchor, tc.storedChat, tc.wantID, tc.wantFromMe, tc.wantTime.Unix())
+			}
+			wantTwin := lid.String()
+			if tc.storedChat == lid.String() {
+				wantTwin = phone.String()
+			}
+			twinAnchor := sent[1].GetProtocolMessage().GetPeerDataOperationRequestMessage().GetHistorySyncOnDemandRequest()
+			if twinAnchor.GetChatJID() != wantTwin || twinAnchor.GetOldestMsgID() != tc.wantID ||
+				twinAnchor.GetOldestMsgFromMe() != tc.wantFromMe || twinAnchor.GetOldestMsgTimestampMS() != tc.wantTime.Unix() ||
+				twinAnchor.GetOnDemandMsgCount() != 7 {
+				t.Fatalf("twin request = %v, want chat=%s with same anchor", twinAnchor, wantTwin)
 			}
 			if tc.target != "BACKFILL" && (!strings.Contains(rec.Body.String(), "up to and including the target") ||
 				strings.Contains(rec.Body.String(), "older than")) {

@@ -547,7 +547,7 @@ land.
 
 **Parameters:**
 
-- `chat_jid` (required): chat to backfill (`…@s.whatsapp.net` or `…@g.us`)
+- `chat_jid` (required): chat to backfill (`…@s.whatsapp.net`, `…@lid` or `…@g.us`)
 - `count` (optional, default `50`): messages to request, 1-500; larger values are capped at 500
 - `before_message_id` (optional): stored message id in this chat to include in a repair replay.
   To repair a media row stored without `direct_path`, call
@@ -555,10 +555,14 @@ land.
   the replay arrives. The anchor is the first stored non-pointer message with a
   timestamp strictly greater than the target's, or one second after the target
   when none exists. Same-second rows, reactions and poll votes cannot be anchors.
-  Known phone and `@lid` spellings resolve to the same chat; the request uses the
-  spelling under which the target is stored. Whether that spelling affects replay
-  remains to be checked on a paired phone. The phone
-  decides whether to replay the target and whether to include its direct path.
+  Known phone and `@lid` spellings resolve to the same chat. Both repair and plain
+  requests use the stored spelling first, then its twin when the local LID map
+  knows one, sending at most two peer messages per call. Groups send one request.
+  The response message reports how many requests were sent and their kinds
+  (phone/LID), without revealing the discovered identifier. A failed second send
+  keeps the first request's success. Whether the twin request helps an unanswered
+  chat remains unproven until the coordinator's paired-phone live check.
+  The phone decides whether to replay the target and include its direct path.
   On-demand phone replays also attempt to repair existing mapped LID media rows.
   An alias repair problem logs a warning and keeps the canonical phone-chat
   replay; pair-time, recent and shared history imports leave those aliases unchanged.
