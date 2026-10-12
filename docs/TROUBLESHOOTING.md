@@ -567,12 +567,15 @@ Shared history bundles skip existing rows and cannot repair them. Call
 non-pointer message with a strictly later timestamp, or one second after the
 target when none exists; same-second rows, reactions and poll votes are skipped.
 For a direct chat with a locally known phone/LID mapping, both repair and plain
-requests send the stored spelling first and its twin second (at most two peer
-messages per call); groups and chats without a known twin send one. The response
+requests look up the anchor under either spelling. Each outgoing request must
+name a spelling allowed by `WHATSAPP_ALLOWED_CHATS`: send the stored spelling
+first when allowed, otherwise the typed spelling, and send the twin only if it
+is also allowed. Without an allow-list, both known spellings are used (at most
+two peer messages per call); groups and chats without a known twin send one. The response
 reports the number sent and their phone/LID kinds; a failed second send does not
 fail the first request. The phone may ignore a spelling it does not recognise.
-Whether sending both helps an unanswered chat remains unproven until the
-coordinator's paired-phone live check. Without this option, `request_history(chat_jid)` still
+Whether sending both helps an unanswered chat is not yet verified on a paired
+phone (#694). Without this option, `request_history(chat_jid)` still
 backfills messages **older than the oldest stored one**. WhatsApp controls
 whether it answers a mid-history request and re-delivers the direct path;
 otherwise ask for the file again. The error

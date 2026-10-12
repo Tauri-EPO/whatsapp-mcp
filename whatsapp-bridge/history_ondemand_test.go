@@ -48,6 +48,9 @@ func TestHistoryRepairRequest(t *testing.T) {
 		status                                        int
 	}{
 		{"default backfill unchanged", phone.String(), phone.String(), "BACKFILL", "M1", false, ts.Add(-time.Minute), 200},
+		{"plain LID resolves phone storage", lid.String(), phone.String(), "BACKFILL", "M1", false, ts.Add(-time.Minute), 200},
+		{"plain phone resolves LID storage", phone.String(), lid.String(), "BACKFILL", "M1", false, ts.Add(-time.Minute), 200},
+		{"plain canonical spelling", " 5511999999999@S.WHATSAPP.NET ", phone.String(), "BACKFILL", "M1", false, ts.Add(-time.Minute), 200},
 		{"tied timestamp is skipped", phone.String(), phone.String(), "M2", "M4", true, ts.Add(time.Minute), 200},
 		{"successor with later timestamp", phone.String(), phone.String(), "M3", "M4", true, ts.Add(time.Minute), 200},
 		{"newest timestamp fallback", phone.String(), phone.String(), "M4", "", false, ts.Add(time.Minute + time.Second), 200},

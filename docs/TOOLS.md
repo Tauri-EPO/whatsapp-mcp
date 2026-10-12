@@ -555,13 +555,16 @@ land.
   the replay arrives. The anchor is the first stored non-pointer message with a
   timestamp strictly greater than the target's, or one second after the target
   when none exists. Same-second rows, reactions and poll votes cannot be anchors.
-  Known phone and `@lid` spellings resolve to the same chat. Both repair and plain
-  requests use the stored spelling first, then its twin when the local LID map
-  knows one, sending at most two peer messages per call. Groups send one request.
+  Both repair and plain requests look up anchors under either locally known
+  phone/`@lid` spelling. Every peer request must name a spelling allowed by
+  `WHATSAPP_ALLOWED_CHATS`: use the stored spelling first when allowed, otherwise
+  the typed spelling, and send the twin only when it is also allowed. Without
+  an allow-list, both known spellings are used. At most two peer messages leave
+  per call; groups send one request.
   The response message reports how many requests were sent and their kinds
   (phone/LID), without revealing the discovered identifier. A failed second send
   keeps the first request's success. Whether the twin request helps an unanswered
-  chat remains unproven until the coordinator's paired-phone live check.
+  chat is not yet verified on a paired phone (#694).
   The phone decides whether to replay the target and include its direct path.
   On-demand phone replays also attempt to repair existing mapped LID media rows.
   An alias repair problem logs a warning and keeps the canonical phone-chat
