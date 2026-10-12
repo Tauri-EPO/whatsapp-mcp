@@ -249,6 +249,20 @@ func TestRevokedMarkerDoesNotDeleteAnotherRestoredDevice(t *testing.T) {
 	if err != nil || client == nil || !b.isPaired() {
 		t.Fatal("production factory did not retain restored B for connection")
 	}
+	var dials atomic.Int64
+	b.currentClient().SetWebsocketHTTPClient(&http.Client{Transport: mcpTestTransport(func(*http.Request) (*http.Response, error) {
+		dials.Add(1)
+		return nil, errors.New("fake restored-device transport refusal")
+	})})
+	b.setPairingState("") // The shared controller clears this after the factory.
+	ctx, cancel := context.WithTimeout(b.ctx, time.Second)
+	defer cancel()
+	err = connectOrPair(ctx, client, b.isPaired(), pairingOptions{attempts: 1, log: testLogger(), beforeDial: func() error {
+		return b.waitConnectionAllowedContext(ctx)
+	}})
+	if err == nil || dials.Load() != 1 || b.currentClient().Store.ID == nil || *b.currentClient().Store.ID != jid {
+		t.Fatalf("restored B did not reach Connect with its own identity: dials=%d err=%v", dials.Load(), err)
+	}
 	data, err := json.Marshal(b.healthStatus())
 	if err != nil || bytes.Contains(data, []byte(revoked)) || bytes.Contains(data, []byte(jid.String())) {
 		t.Fatal("private marker identity escaped through health")
