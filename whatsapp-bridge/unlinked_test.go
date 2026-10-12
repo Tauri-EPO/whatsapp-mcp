@@ -467,6 +467,9 @@ func TestUnlinkCleanupPublicationFailureDoesNotAdmitPairing(t *testing.T) {
 	if device, err := b.unlinkedDevice(b.ctx, container); err == nil || device != nil {
 		t.Fatal("failed completion publication admitted a new client")
 	}
+	if b.healthStatus()["connection_problem_persistence_failed"] != true {
+		t.Fatal("completion publication failure was not diagnosed")
+	}
 	devices, err := container.GetAllDevices(b.ctx)
 	if err != nil || len(devices) != 0 {
 		t.Fatalf("cleanup fixture failed: %d %v", len(devices), err)
@@ -483,5 +486,115 @@ func TestUnlinkCleanupPublicationFailureDoesNotAdmitPairing(t *testing.T) {
 	device, _, err := startupDevice(b.ctx, container, root, saved)
 	if err != nil || device.ID != nil {
 		t.Fatalf("retry could not recover empty revoked store: %+v %v", device, err)
+	}
+}
+
+func TestUnlinkNewReplacementRevocationRequiresCleanupAgain(t *testing.T) {
+	b, container := revokedSessionFixture(t)
+	now := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	b.problemNow = func() time.Time { return now }
+	reconnect := make(chan bool, 1)
+	b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, reconnect)
+	replacement, err := b.unlinkedDevice(b.ctx, container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jid := types.NewJID("5511999999999", types.DefaultUserServer)
+	jid.Device = 43
+	replacement.ID = &jid
+	replacement.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{1}, AccountSignature: make([]byte, 64), AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
+	if err := replacement.Save(b.ctx); err != nil {
+		t.Fatal(err)
+	}
+	client := newRuntimeClient(replacement, testLogger())
+	b.installClient(client, true, reconnect)
+	b.handleClientEvent(client, &events.PairSuccess{ID: jid}, reconnect)
+	db, err := openSessionDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TRIGGER refuse_second_unlink BEFORE DELETE ON whatsmeow_device BEGIN SELECT RAISE(FAIL,'fake second unlink failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	b.handleClientEvent(client, &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, reconnect)
+	saved, err := readConnectionProblem(b.StoreRoot)
+	if err != nil || saved == nil {
+		t.Fatalf("new unlink not persisted: %+v %v", saved, err)
+	}
+	if device, _, err := startupDevice(b.ctx, container, b.StoreRoot, saved); err == nil || device != nil {
+		t.Fatal("newly revoked replacement was admitted after restart")
+	}
+	if !saved.Since.Equal(now) {
+		t.Fatal("new unlink reused the prior transition")
+	}
+	if _, err := db.Exec("DROP TRIGGER refuse_second_unlink"); err != nil {
+		t.Fatal(err)
+	}
+	device, _, err := startupDevice(b.ctx, container, b.StoreRoot, saved)
+	if err != nil || device.ID != nil {
+		t.Fatalf("second unlink could not recover: %+v %v", device, err)
+	}
+}
+
+func TestUnlinkPersistenceRepairRecoversExplicitRetryAndCompletion(t *testing.T) {
+	for _, operator := range []bool{true, false} {
+		name := "completion"
+		if operator {
+			name = "operator_retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, container := revokedSessionFixture(t)
+			part := connectionProblemFile + ".part"
+			if err := b.StoreRoot.Mkdir(part, storeDirMode); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.StoreRoot.WriteFile(part+"/block", []byte("fake obstruction"), storeFileMode); err != nil {
+				t.Fatal(err)
+			}
+			b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
+			if b.healthStatus()["connection_problem_persistence_failed"] != true {
+				t.Fatal("fixture did not fail persistence")
+			}
+			if err := b.StoreRoot.Remove(part + "/block"); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.StoreRoot.Remove(part); err != nil {
+				t.Fatal(err)
+			}
+			if operator {
+				p := newOperatorPairing(b.ctx, b, newFakeOperatorClient(), nil, b.isPaired, b.Connected, io.Discard, make(chan bool, 1))
+				b.operatorPairing = p
+				p.state.State = "expired"
+				server := httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, p.routes(), b.Log))
+				defer server.Close()
+				req, _ := http.NewRequest("POST", server.URL+"/operator/v1/pairing/restart", nil)
+				req.Header.Set("Authorization", "Bearer "+fakeOperatorToken)
+				response, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = io.Copy(io.Discard, response.Body)
+				_ = response.Body.Close()
+				if response.StatusCode != 202 {
+					t.Fatalf("repaired persistence retry=%d", response.StatusCode)
+				}
+				saved, err := readConnectionProblem(b.StoreRoot)
+				if err != nil || saved == nil || saved.Kind != "unlinked" || saved.SessionRemoved {
+					t.Fatalf("explicit retry lost pending fence: %+v %v", saved, err)
+				}
+			}
+			if device, err := b.unlinkedDevice(b.ctx, container); err != nil || device.ID != nil {
+				t.Fatalf("repaired completion=%+v %v", device, err)
+			}
+			if b.healthStatus()["connection_problem_persistence_failed"] != false {
+				t.Fatal("successful persistence repair remained failed")
+			}
+			saved, err := readConnectionProblem(b.StoreRoot)
+			if err != nil || saved == nil || !saved.SessionRemoved {
+				t.Fatalf("repaired completion not durable: %+v %v", saved, err)
+			}
+		})
 	}
 }

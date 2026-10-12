@@ -27,6 +27,8 @@ import (
 // LoggedOut is dispatched in a goroutine BEFORE the SDK deletes its device.
 // The saved unlinked problem is a startup fence, even if that delete never ran.
 // Load our own device object: never race the SDK's mutations of Client.Store.
+var errSessionCleanupPublication = errors.New("session cleanup completion could not be saved")
+
 func startupDevice(ctx context.Context, container *sqlstore.Container, root *os.Root, problem *ConnectionProblem) (*store.Device, *ConnectionProblem, error) {
 	if problem != nil && problem.Kind == "unlinked" && !problem.SessionRemoved {
 		devices, err := container.GetAllDevices(ctx)
@@ -50,7 +52,7 @@ func startupDevice(ctx context.Context, container *sqlstore.Container, root *os.
 		next := *problem
 		next.SessionRemoved = true
 		if err := writeConnectionProblem(root, &next); err != nil {
-			return nil, problem, err
+			return nil, problem, errors.Join(errSessionCleanupPublication, err)
 		}
 		return container.NewDevice(), &next, nil
 	}
@@ -69,7 +71,10 @@ func (b *Bridge) unlinkedDevice(ctx context.Context, container *sqlstore.Contain
 	device, problem, err := startupDevice(ctx, container, b.StoreRoot, b.connectionProblem)
 	if err == nil {
 		b.connectionProblem = problem
+		b.problemPersistenceFailed = false
 		b.connectionChangedLocked()
+	} else if errors.Is(err, errSessionCleanupPublication) {
+		b.problemPersistenceFailed = true
 	}
 	return device, err
 }

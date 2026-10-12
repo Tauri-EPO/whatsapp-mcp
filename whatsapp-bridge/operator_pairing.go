@@ -496,7 +496,18 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	// Keep the unlink fence until the factory has removed the revoked session.
-	if (problem == nil || problem.Kind != "unlinked") && !p.b.clearConnectionProblemIf(problem) {
+	if problem != nil && problem.Kind == "unlinked" {
+		p.b.connectionMu.Lock()
+		changed := p.b.connectionProblem != problem
+		if !changed && p.b.StoreRoot != nil {
+			p.b.persistConnectionProblemLocked()
+		}
+		p.b.connectionMu.Unlock()
+		if changed {
+			writeErrorCode(w, 409, "connection_state_changed", "Unlink state changed; read the current state before retrying")
+			return
+		}
+	} else if !p.b.clearConnectionProblemIf(problem) {
 		writeErrorCode(w, 409, "connection_state_changed", "WhatsApp restriction changed; read the current state before retrying")
 		return
 	}
