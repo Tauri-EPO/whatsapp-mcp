@@ -368,8 +368,15 @@ def request_history(chat_jid: str, count: int = 50, before_message_id: str | Non
     retry download_media after the replay arrives. The bridge anchors on the first
     non-pointer message with a strictly later timestamp, or one second after the
     target when none exists, so the target itself is requested. Reactions and poll
-    votes cannot be anchors. The request uses the target's stored phone/LID spelling;
-    whether that spelling affects replay still needs a live check. The phone may
+    votes cannot be anchors. Both repair and plain requests can read an anchor
+    under either locally mapped phone/LID spelling. Each outgoing request must
+    use a spelling allowed by WHATSAPP_ALLOWED_CHATS: the stored spelling first
+    when allowed, otherwise the typed spelling, then the twin only if also allowed.
+    Without an allow-list, both known spellings are used, at most two peer messages
+    per call; groups send one. The response reports how many requests were sent
+    and their phone/LID kinds. A failed second send keeps the first one's success.
+    Whether using both helps an unanswered chat is not yet verified on a paired
+    phone (#694). The phone may
     still send nothing or omit the direct path; a successful request proves only
     that it was sent.
 
@@ -388,7 +395,7 @@ def request_history(chat_jid: str, count: int = 50, before_message_id: str | Non
     invalid_argument means before_message_id is empty, unknown or in another chat.
 
     Args:
-        chat_jid: Chat to backfill (direct-chat JID ...@s.whatsapp.net or group JID ...@g.us)
+        chat_jid: Chat to backfill (...@s.whatsapp.net, ...@lid or ...@g.us)
         count: Messages to request, 1-500 (default 50; higher values are capped at 500)
         before_message_id: Stored message id in this chat to include in a repair replay (optional)
 
