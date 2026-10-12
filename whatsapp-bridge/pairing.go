@@ -32,7 +32,7 @@ var errSessionCleanupPublication = errors.New("session cleanup completion could 
 // only the identity the unlink named; old markers without an identity use the
 // legacy single-account store cleanup. The caller's context is shutdown only.
 func prepareSessionDevice(ctx context.Context, container *sqlstore.Container, problem *ConnectionProblem) (*store.Device, *ConnectionProblem, error) {
-	if problem != nil && problem.Kind == "unlinked" && !problem.SessionRemoved {
+	if problem.isUnlinked() && !problem.SessionRemoved {
 		devices, err := container.GetAllDevices(ctx)
 		if err != nil {
 			return nil, problem, err
@@ -81,7 +81,7 @@ func startupDevice(ctx context.Context, container *sqlstore.Container, root *os.
 }
 
 func initialSessionDevice(ctx context.Context, container *sqlstore.Container, problem *ConnectionProblem) (*store.Device, bool, error) {
-	if problem != nil && problem.Kind == "unlinked" && !problem.SessionRemoved {
+	if problem.isUnlinked() && !problem.SessionRemoved {
 		return container.NewDevice(), true, nil
 	}
 	device, err := container.GetFirstDevice(ctx)
@@ -92,7 +92,7 @@ func initialSessionDevice(ctx context.Context, container *sqlstore.Container, pr
 // marker writes, and only the snapshot cleaned here may publish completion.
 func (b *Bridge) unlinkedDevice(ctx context.Context, container *sqlstore.Container) (*store.Device, error) {
 	expected, _ := b.connectionSnapshot()
-	if expected == nil || expected.Kind != "unlinked" {
+	if !expected.isUnlinked() {
 		return nil, errors.New("unlink state changed")
 	}
 	cleanup := b.sessionCleanup
@@ -126,7 +126,7 @@ func (b *Bridge) pairingClientFactory(ctx context.Context, container *sqlstore.C
 	return func() (operatorPairingClient, error) {
 		device := container.NewDevice()
 		problem, _ := b.connectionSnapshot()
-		if problem != nil && problem.Kind == "unlinked" {
+		if problem.isUnlinked() {
 			warned := false
 			for {
 				var err error
@@ -138,7 +138,7 @@ func (b *Bridge) pairingClientFactory(ctx context.Context, container *sqlstore.C
 					return nil, ctx.Err()
 				}
 				current, _ := b.connectionSnapshot()
-				if current == nil || current.Kind != "unlinked" {
+				if !current.isUnlinked() {
 					return nil, err // Preserve a newer restriction or explicit reset.
 				}
 				b.setPairingState("pairing_required")

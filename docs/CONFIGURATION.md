@@ -13,8 +13,11 @@ safe `pairing_state` and recovery guidance in `pairing_action`, never credential
 `connection_problem_persistence_failed` reports failure to save that state;
 Account restrictions block dialing on a write failure; pending unlink cleanup
 retries automatically without dialing revoked credentials.
-An outdated-client problem includes `build_version` and is cleared at startup
-when the build identity changes, so deploying an upgrade permits another dial.
+`unlinked_at` records revocation independently of `kind`: an earlier or later
+ban retains its reason and expiry, while session cleanup still prevents reuse of
+revoked keys. Both ban and unlink gauges can be active. An outdated-client
+problem includes `build_version`; a changed build clears that restriction while
+preserving any pending unlink cleanup before another dial.
 
 With `WEBHOOK_FORWARD_CONNECTION_EVENTS=true` and `WEBHOOK_ENABLED=true`,
 connection transitions POST this separate payload to `WEBHOOK_URL`:

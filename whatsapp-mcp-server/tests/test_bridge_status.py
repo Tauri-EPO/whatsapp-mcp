@@ -177,3 +177,32 @@ def test_pairing_recovery_guidance_reaches_the_mcp_tool(monkeypatch, state, acti
     assert out["ok"] is False
     assert out["pairing_state"] == state
     assert out["pairing_action"] == action and out["reason"] == action
+
+
+@pytest.mark.parametrize("kind", ["temporarily_banned", "banned", "locked", "client_outdated"])
+def test_unlink_cleanup_guidance_keeps_account_restriction_reason(monkeypatch, kind):
+    action = "Session cleanup is pending and retries automatically; wait for a fresh QR"
+    monkeypatch.setattr(
+        whatsapp.bridge_http,
+        "get",
+        _get(
+            {
+                "/health": Resp(
+                    200,
+                    {
+                        "status": "blocked",
+                        "connected": False,
+                        "paired": False,
+                        "pairing_state": "pairing_required",
+                        "pairing_action": action,
+                        "connection_problem": {"kind": kind, "unlinked_at": "2026-10-12T00:00:00Z"},
+                    },
+                ),
+                "/version": Resp(500, {}),
+                "/me": Resp(503, {}),
+            }
+        ),
+    )
+    out = main.bridge_status()
+    assert out["ok"] is False and out["connection_problem"]["kind"] == kind
+    assert out["pairing_action"] == action and kind in out["reason"]

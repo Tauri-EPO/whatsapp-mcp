@@ -155,7 +155,8 @@ func (b *Bridge) renderMetrics() string {
 	problem, _ := b.connectionSnapshot()
 	out = append(out, "# HELP whatsapp_bridge_connection_problem Current connection problem.", "# TYPE whatsapp_bridge_connection_problem gauge")
 	for _, kind := range []string{"unlinked", "locked", "banned", "temporarily_banned", "client_outdated", "server_error", "other"} {
-		out = append(out, fmt.Sprintf("whatsapp_bridge_connection_problem{kind=%q} %d", kind, bool01(problem != nil && problem.Kind == kind)))
+		current := problem != nil && problem.Kind == kind || kind == "unlinked" && problem.isUnlinked()
+		out = append(out, fmt.Sprintf("whatsapp_bridge_connection_problem{kind=%q} %d", kind, bool01(current)))
 	}
 	m.mu.Lock()
 	out = append(out, "# HELP whatsapp_bridge_temp_bans_total Temporary bans by WhatsApp reason (0 is unknown).", "# TYPE whatsapp_bridge_temp_bans_total counter")

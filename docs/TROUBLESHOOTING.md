@@ -8,6 +8,9 @@ Symptoms and fixes for pairing, auth, sync and app-state problems. For container
 with `kind`, numeric WhatsApp `code`, `since`, and, for temporary bans,
 `temp_ban_reason` and `expires_at`. Metrics expose a gauge per kind and
 temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
+An unlink can coexist with a restriction: `unlinked_at` records the revocation,
+while `kind`, reason and expiry keep reporting the ban or lock. Both gauges can
+be active. Cleanup removes the revoked session even while dialing stays blocked.
 
 | Kind | Operator action |
 |---|---|
@@ -20,7 +23,7 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 | `other` | Inspect the numeric code; normal reconnect backoff continues. |
 
 The last problem is saved as the owner-only file `store/.connection-problem`.
-It survives container restarts. For `unlinked`, this file also prevents startup
+It survives container restarts. Unlink information in this file prevents startup
 from connecting with revoked keys: it removes the device the marker names
 and verifies its absence before creating a fresh pairing client. Legacy markers
 without an identity remove the single-account session. Cleanup starts after
@@ -31,13 +34,17 @@ before authentication completes. Keep the file
 until pairing succeeds; deleting it early removes that protection. If local
 session removal fails, REST stays alive in `pairing_required` without dialing.
 Fix the store error; cleanup retries automatically. A restart resumes pending
-cleanup. Backup restore removes stale connection state, and a marker for another
+cleanup. Backup restore removes stale connection state only after successfully
+replacing `whatsapp.db`, and a marker for another
 device never deletes a newly restored session.
 
 To explicitly retry a blocked account after resolving its restriction, an unpaired instance with the private operator
 listener can use authenticated `POST /operator/v1/pairing/restart`; a live
 paired session refuses this operation. Without that listener, stop the bridge,
-remove that single saved state file from its store volume, and restart. Keep
+remove that single saved state file only if it contains no pending unlink, and
+restart. For a mixed restriction and unlink, enable the private listener and
+restart pairing there: that action clears the resolved restriction while
+preserving the revoked identity and cleanup completion. Keep
 the databases and account keys.
 Do not clear a temporary ban early. An unreadable/corrupt state stops startup
 before any connection or QR. `connection_problem_persistence_failed` in health
@@ -45,7 +52,9 @@ reports a write error. Only account restrictions block dials on that error;
 the gate retries their write while retaining the restriction in memory.
 Transient failures keep normal reconnect backoff. `client_outdated` records
 the build version, commit and whatsmeow identity; a different build clears
-only that class, preserving account bans and locks.
+only that class, preserving account bans, locks and any pending unlink fence.
+Temporary bans received during a QR attempt resume pairing through the expiry
+gate automatically; they do not require an operator restart after expiry.
 Connection-event webhooks are available through
 `WEBHOOK_FORWARD_CONNECTION_EVENTS` ([payload and debounce](CONFIGURATION.md#connection-monitoring-contract)).
 Temporary-ban reasons 101, 102, 103, 104 and 106 are

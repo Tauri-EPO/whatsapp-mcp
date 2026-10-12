@@ -5999,7 +5999,10 @@ def bridge_status() -> dict[str, Any]:
     action = body.get("pairing_action")
     if isinstance(action, str) and action:
         status["pairing_action"] = action
-        if not status["paired"]:
+        if not status["paired"] and (
+            not isinstance(problem, dict)
+            or problem.get("kind") not in ("banned", "locked", "client_outdated", "temporarily_banned")
+        ):
             status["reason"] = action
     if pairing_state in ("pairing_required", "expired"):
         status["pairing_state"] = pairing_state

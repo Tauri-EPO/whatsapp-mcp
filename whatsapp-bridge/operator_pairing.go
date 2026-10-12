@@ -272,6 +272,7 @@ func (p *operatorPairing) run() {
 				p.b.setPairingState("")
 			}
 			first = false
+			attemptProblem, _ := p.b.connectionSnapshot()
 			ctx, cancel := context.WithCancel(p.ctx)
 			p.mu.Lock()
 			p.state.Generation++
@@ -335,7 +336,12 @@ func (p *operatorPairing) run() {
 				}
 				break // Retain the paired device; only the gated consumer may redial.
 			}
-			if errors.Is(err, errPairingOperator) || problem.restrictsAccount() {
+			if !errors.Is(err, errPairingOperator) && problem != nil && problem.Kind == "temporarily_banned" && problem != attemptProblem {
+				p.b.setPairingState("")
+				attempt = 0 // A new temporary ban owns the expiry gate, not a QR attempt.
+				continue
+			}
+			if errors.Is(err, errPairingOperator) || problem.restrictsAccount() && problem.Kind != "temporarily_banned" {
 				break
 			}
 			if attempt < p.state.Attempts {
@@ -499,13 +505,8 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")
 		return
 	}
-	// Keep the unlink fence until the factory has removed the revoked session.
-	if problem != nil && problem.Kind == "unlinked" {
-		if !p.b.persistConnectionProblemIf(problem) {
-			writeErrorCode(w, 409, "connection_state_changed", "Unlink state changed; read the current state before retrying")
-			return
-		}
-	} else if !p.b.clearConnectionProblemIf(problem) {
+	// Release the acknowledged restriction without discarding pending revocation.
+	if !p.b.resolveConnectionProblemIf(problem) {
 		writeErrorCode(w, 409, "connection_state_changed", "WhatsApp restriction changed; read the current state before retrying")
 		return
 	}

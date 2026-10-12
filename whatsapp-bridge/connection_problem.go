@@ -44,6 +44,7 @@ func (l connectionProblemLogger) Sub(module string) waLog.Logger {
 }
 
 type ConnectionProblem struct {
+	UnlinkedAt     *time.Time `json:"unlinked_at,omitempty"`
 	RevokedDevice  string     `json:"-"` // Private disk identity; never returned in health or webhooks.
 	SessionRemoved bool       `json:"session_removed,omitempty"`
 	Kind           string     `json:"kind"`
@@ -90,6 +91,21 @@ func (p *ConnectionProblem) restrictsAccount() bool {
 	return p != nil && (p.Kind == "temporarily_banned" || p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
 }
 
+// Revocation is independent of account restrictions. Older unlink markers have
+// only Kind; a ban may coexist with the timestamp and must keep its dial gate.
+func (p *ConnectionProblem) isUnlinked() bool {
+	return p != nil && (p.Kind == "unlinked" || p.UnlinkedAt != nil)
+}
+
+func (p *ConnectionProblem) unlinkOnly() *ConnectionProblem {
+	next := *p
+	next.Kind, next.Code, next.TempBanReason, next.ExpiresAt, next.BuildVersion = "unlinked", 401, 0, nil, ""
+	if p.UnlinkedAt != nil {
+		next.Since = *p.UnlinkedAt
+	}
+	return &next
+}
+
 func (b *Bridge) connectionSnapshot() (*ConnectionProblem, string) {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
@@ -132,18 +148,30 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 		b.connectionMu.Unlock()
 		return nil
 	}
-	next := classifyConnectionProblem(code, reason, expire, b.connectionNow())
-	if !next.restrictsAccount() && b.connectionProblem.restrictsAccount() {
-		p := b.connectionProblem
-		b.connectionMu.Unlock()
-		return p
+	now := b.connectionNow().UTC()
+	next := classifyConnectionProblem(code, reason, expire, now)
+	previous := b.connectionProblem
+	if !next.restrictsAccount() && previous.restrictsAccount() {
+		if code != 401 {
+			b.connectionMu.Unlock()
+			return previous
+		}
+		preserved := *previous
+		next = &preserved // Retain ban kind, expiry, reason and original since.
 	}
-	if code != 401 && b.connectionProblem != nil && b.connectionProblem.Kind == "unlinked" && b.operatorRetiredClient.Load() == b.currentClient() {
-		p := b.connectionProblem
-		b.connectionMu.Unlock()
-		return p
+	if code != 401 && previous.isUnlinked() {
+		if !next.restrictsAccount() && b.operatorRetiredClient.Load() == b.currentClient() {
+			b.connectionMu.Unlock()
+			return previous
+		}
+		next.UnlinkedAt, next.RevokedDevice, next.SessionRemoved = previous.UnlinkedAt, previous.RevokedDevice, previous.SessionRemoved
+		if next.UnlinkedAt == nil {
+			at := previous.Since // Preserve revocation in a legacy Kind-only marker.
+			next.UnlinkedAt = &at
+		}
 	}
 	if code == 401 {
+		next.UnlinkedAt, next.SessionRemoved, next.RevokedDevice = &now, false, ""
 		if id := b.runtimeDeviceID.Load(); id != nil {
 			next.RevokedDevice = *id
 		}
@@ -164,7 +192,7 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 		b.metrics.tempBans[reason]++
 		b.metrics.mu.Unlock()
 	}
-	b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", next.Kind, code, reason)
+	b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", next.Kind, next.Code, next.TempBanReason)
 	if b.StoreRoot != nil {
 		_ = b.persistConnectionSnapshot(next)
 	}
@@ -223,6 +251,31 @@ func (b *Bridge) clearConnectionProblemIf(expected *ConnectionProblem) bool {
 		return false
 	}
 	b.clearConnectionSnapshot(false)
+	return true
+}
+
+// An explicit operator acknowledgement releases the restriction, while any
+// revoked-session identity and completion remain durable before the new kick.
+func (b *Bridge) resolveConnectionProblemIf(expected *ConnectionProblem) bool {
+	if !expected.isUnlinked() {
+		return b.clearConnectionProblemIf(expected)
+	}
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
+	current, _ := b.connectionSnapshot()
+	if current != expected {
+		return false
+	}
+	next := expected.unlinkOnly()
+	if b.StoreRoot != nil {
+		if err := b.persistConnectionSnapshot(next); err != nil {
+			return true // Caller reports the persisted failure flag as 503.
+		}
+	}
+	b.connectionMu.Lock()
+	b.connectionProblem = next
+	b.connectionChangedLocked()
+	b.connectionMu.Unlock()
 	return true
 }
 
@@ -362,6 +415,9 @@ func readConnectionProblem(root *os.Root) (*ConnectionProblem, error) {
 	}
 	p := saved.ConnectionProblem
 	p.RevokedDevice = saved.RevokedDevice
+	if p.UnlinkedAt != nil && p.UnlinkedAt.IsZero() {
+		return nil, errors.New("invalid saved unlink time")
+	}
 	if p.RevokedDevice != "" {
 		jid, err := types.ParseJID(p.RevokedDevice)
 		if err != nil || jid.IsEmpty() || jid.String() != p.RevokedDevice {
@@ -377,6 +433,13 @@ func readConnectionProblem(root *os.Root) (*ConnectionProblem, error) {
 
 func clearOutdatedBuildProblem(root *os.Root, p *ConnectionProblem, runningBuild string) (*ConnectionProblem, error) {
 	if p.Kind == "client_outdated" && p.BuildVersion != runningBuild {
+		if p.isUnlinked() {
+			next := p.unlinkOnly()
+			if err := writeConnectionProblem(root, next); err != nil {
+				return nil, err
+			}
+			return next, nil // An upgrade releases 405, never the unlink fence.
+		}
 		if err := root.Remove(connectionProblemFile); err != nil {
 			return nil, err
 		}

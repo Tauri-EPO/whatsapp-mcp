@@ -940,7 +940,8 @@ authentication on that endpoint, so keep it inside a network you trust.
   bridge stays up in `pairing_required`: REST and `/api/health` remain alive,
   health reports `paired:false`, and `/api/ready` returns 503. A fresh QR flow
   appears in `docker compose logs -f bridge` (or the private operator listener).
-  The saved `unlinked` state prevents reuse of revoked keys across restarts;
+  Saved unlink information prevents reuse of revoked keys across restarts,
+  including when a ban or lock keeps its own diagnostic kind and dial gate;
   startup serves REST while cleanup removes and verifies the named revoked
   session before pairing. Cleanup retries contention and storage errors without
   a short deadline; shutdown interrupts it and the next start resumes it.
