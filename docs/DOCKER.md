@@ -944,7 +944,9 @@ authentication on that endpoint, so keep it inside a network you trust.
   including when a ban or lock keeps its own diagnostic kind and dial gate;
   startup serves REST while cleanup removes and verifies the named revoked
   session before pairing. Cleanup retries contention and storage errors without
-  a short deadline; shutdown interrupts it and the next start resumes it.
+  a short deadline. Shutdown cancels the transaction; if deletion does not
+  finish within the 30-second stop grace, its work rolls back and the next
+  start retries deletion from the beginning.
   Durable cleanup completion preserves a newly paired replacement across
   restarts before its first authenticated connection. Archives
   are kept. `restart: unless-stopped` cannot turn an unlink into an exit loop.

@@ -17,8 +17,10 @@ import (
 
 // Wrap the root before the SDK caches child loggers, both on startup and on
 // operator restarts. URL-error redaction must survive every client handoff.
+var runtimeClientFactory = whatsmeow.NewClient
+
 func newRuntimeClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
-	return whatsmeow.NewClient(device, sdkSafeLogger{logger})
+	return runtimeClientFactory(device, sdkSafeLogger{logger})
 }
 
 // The SDK logs raw QR payloads and protocol frames at DEBUG. When pairing
@@ -89,11 +91,23 @@ func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, re
 	active := func() bool {
 		return !b.operatorLogout.Load() && b.operatorRetiredClient.Load() != client && b.currentClient() == client
 	}
+	drainCompletion := func() {
+		// A retired client may still be finishing the SDK's asynchronous save.
+		// Drain only its terminal completion; never publish its paired state.
+		if b.operatorPairing != nil {
+			switch evt.(type) {
+			case *events.PairSuccess, *events.PairError:
+				b.operatorPairing.finishRetiredCompletion(client)
+			}
+		}
+	}
 	if !b.admitClientCallback(active) {
+		drainCompletion()
 		return
 	}
 	defer b.clientGate.RUnlock()
 	if b.currentClient() != client || b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
+		drainCompletion()
 		return
 	} // Ignore a retired client's late events.
 	switch v := evt.(type) {

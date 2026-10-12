@@ -309,3 +309,29 @@ func TestSharedControllerResumesAfterTemporaryBanDuringFinalQRAttempt(t *testing
 		t.Fatal("temporary ban replayed the old attempt")
 	}
 }
+
+func TestUnlinkDeleteMustVerifyRevokedRowActuallyDisappeared(t *testing.T) {
+	b, container := revokedSessionFixture(t)
+	b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
+	db, err := openSessionDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TRIGGER fake_ignore_delete BEFORE DELETE ON whatsmeow_device BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if device, err := b.unlinkedDevice(b.ctx, container); err == nil || device != nil {
+		t.Fatal("SDK delete returned nil without removing row, but cleanup admitted it")
+	}
+	saved, err := readConnectionProblem(b.StoreRoot)
+	if err != nil || saved == nil || saved.SessionRemoved {
+		t.Fatal("failed row verification published completion")
+	}
+	if _, err := db.Exec("DROP TRIGGER fake_ignore_delete"); err != nil {
+		t.Fatal(err)
+	}
+	if device, err := b.unlinkedDevice(b.ctx, container); err != nil || device.ID != nil {
+		t.Fatalf("verification retry=%+v %v", device, err)
+	}
+}

@@ -104,8 +104,18 @@ cmd_restore() {
       if [ -f /backup/$db.db ]; then
         cp /backup/$db.db ./$db.db
         chmod 600 ./$db.db
-        # Keep the old account fence unless its session was replaced.
-        [ "$db" != whatsapp ] || rm -f .connection-problem .connection-problem.part
+        if [ "$db" = whatsapp ] && [ -f .connection-problem ]; then
+          kind="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('\''.connection-problem'\'') AS TEXT), '\''$.kind'\'');")"
+          if [ "$kind" = unlinked ]; then
+            rm -f .connection-problem .connection-problem.part
+          else
+            # The replacement session does not release an account restriction.
+            # Clear only revocation belonging to the previous session.
+            sqlite3 :memory: "SELECT json_remove(CAST(readfile('\''.connection-problem'\'') AS TEXT), '\''$.unlinked_at'\'', '\''$.revoked_device'\'', '\''$.session_removed'\'');" > .connection-problem.part
+            chmod 600 .connection-problem.part
+            mv .connection-problem.part .connection-problem
+          fi
+        fi
       fi
     done
     [ -f /backup/media.tar ] && tar -xf /backup/media.tar -C /store

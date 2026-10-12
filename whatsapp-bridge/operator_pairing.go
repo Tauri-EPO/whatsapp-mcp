@@ -205,6 +205,14 @@ func (p *operatorPairing) completeLocked() {
 	}
 }
 
+func (p *operatorPairing) finishRetiredCompletion(client pairingClient) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.client == client {
+		p.completeLocked()
+	}
+}
+
 func (p *operatorPairing) waitCompletion() bool {
 	p.mu.Lock()
 	var done <-chan struct{}
@@ -226,6 +234,7 @@ func (p *operatorPairing) waitCompletion() bool {
 func (p *operatorPairing) run() {
 	defer close(p.done)
 	first := true
+	transportFailures := 0
 	for {
 		for attempt := 1; attempt <= p.state.Attempts; attempt++ {
 			if p.ctx.Err() != nil {
@@ -259,6 +268,10 @@ func (p *operatorPairing) run() {
 				p.client.Disconnect()
 				client, err := p.factory()
 				if err != nil {
+					if p.ctx.Err() != nil {
+						p.action.Unlock()
+						return
+					}
 					p.b.Log.Errorf("Operator pairing client could not be initialized")
 					p.mu.Lock()
 					p.invalidateLocked("expired")
@@ -344,6 +357,33 @@ func (p *operatorPairing) run() {
 			if errors.Is(err, errPairingOperator) || problem.restrictsAccount() && problem.Kind != "temporarily_banned" {
 				break
 			}
+			if errors.Is(err, errPairingTransport) {
+				transportFailures++
+				attempt-- // No QR was available to scan; keep its attempt budget.
+				p.mu.Lock()
+				p.invalidateLocked("starting")
+				p.mu.Unlock()
+				p.b.setPairingState("")
+				delay := min(p.opt.retryDelay, time.Minute)
+				if delay <= 0 {
+					delay = time.Second
+				}
+				for failure := 1; failure < transportFailures && delay < time.Minute; failure++ {
+					delay = min(delay*2, time.Minute)
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-p.ctx.Done():
+					timer.Stop()
+					return
+				case <-p.kick:
+					timer.Stop()
+					attempt, transportFailures = 0, 0
+				}
+				continue
+			}
+			transportFailures = 0
 			if attempt < p.state.Attempts {
 				timer := time.NewTimer(p.opt.retryDelay)
 				select {
@@ -356,6 +396,9 @@ func (p *operatorPairing) run() {
 					attempt = 0
 				}
 			}
+		}
+		if p.ctx.Err() != nil {
+			return
 		}
 		if !p.paired() && !p.b.operatorLogout.Load() && p.snapshot().State == "expired" {
 			p.b.setPairingState("pairing_required")

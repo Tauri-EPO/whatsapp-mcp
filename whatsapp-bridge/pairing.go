@@ -189,6 +189,7 @@ type pairingOptions struct {
 }
 
 var errPairingTimeout = errors.New("QR pairing timed out")
+var errPairingTransport = errors.New("pairing transport failed")
 var errPairingOperator = errors.New("WhatsApp passkey step requires operator intervention; see docs/DOCKER.md Pairing")
 
 // connectOrPair connects a paired client, or runs the QR pairing flow for an
@@ -213,7 +214,7 @@ func connectOrPair(ctx context.Context, c pairingClient, paired bool, opt pairin
 
 		if paired {
 			if err := pairingConnect(ctx, c, opt); err != nil {
-				lastErr = err
+				lastErr = errors.Join(errPairingTransport, err)
 				opt.log.Errorf("Failed to connect (attempt %d): %v", attempt, err)
 				continue
 			}
@@ -246,7 +247,7 @@ func pairOnce(parent context.Context, c pairingClient, opt pairingOptions, attem
 	}
 	if err := pairingConnect(parent, c, opt); err != nil {
 		opt.log.Errorf("Failed to connect (attempt %d): %v", attempt, err)
-		return err
+		return errors.Join(errPairingTransport, err)
 	}
 
 	// whatsmeow rotates the code roughly every 20 seconds and the phone

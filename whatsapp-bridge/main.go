@@ -370,7 +370,10 @@ func runBridge(cfg bridgeConfig) int {
 	// It stays alive after an unlink and never reuses the revoked SDK client.
 	bridge.operatorPairing.start()
 	if unlinkPending {
-		bridge.operatorPairing.kick <- struct{}{}
+		select {
+		case bridge.operatorPairing.kick <- struct{}{}:
+		default:
+		}
 	}
 
 	bridgeLog.Infof("REST server is running. Press Ctrl+C to disconnect and exit.")

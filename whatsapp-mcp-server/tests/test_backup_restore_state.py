@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -15,13 +16,25 @@ pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason="needs P
 
 
 @pytest.mark.parametrize("session", ["replacement", "missing", "copy_failure"])
-def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, session: str) -> None:
+@pytest.mark.parametrize("kind", ["unlinked", "temporarily_banned", "banned", "locked", "client_outdated"])
+def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, session: str, kind: str) -> None:
     store = tmp_path / "store"
     backup = tmp_path / "backup"
     binaries = tmp_path / "bin"
     for directory in (store, backup, binaries):
         directory.mkdir()
-    (store / ".connection-problem").write_text("fake revoked device A")
+    original = {
+        "kind": kind,
+        "code": {"unlinked": 401, "temporarily_banned": 402, "locked": 403, "client_outdated": 405, "banned": 406}[
+            kind
+        ],
+        "since": "2026-10-12T00:00:00Z",
+        "expires_at": "2026-10-13T00:00:00Z",
+        "unlinked_at": "2026-10-12T00:00:01Z",
+        "revoked_device": "5511999999999@s.whatsapp.net",
+        "session_removed": False,
+    }
+    (store / ".connection-problem").write_text(json.dumps(original))
     (store / ".connection-problem.part").write_text("fake pending marker A")
     (store / "whatsapp.db").write_bytes(b"fake old session A")
     if session != "missing":
@@ -42,6 +55,17 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
         "sys.exit(subprocess.call(['sh', '-euc', body]))\n"
     )
     docker.chmod(0o755)
+    # Supply the CLI's real SQLite JSON evaluation in this local fake container.
+    sqlite_cli = binaries / "sqlite3"
+    sqlite_cli.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sqlite3, sys\n"
+        "conn = sqlite3.connect(':memory:')\n"
+        "conn.setconfig(sqlite3.SQLITE_DBCONFIG_DQS_DML, False)\n"
+        "conn.create_function('readfile', 1, lambda p: pathlib.Path(p).read_bytes())\n"
+        "for row in conn.execute(sys.argv[-1]): print(row[0])\n"
+    )
+    sqlite_cli.chmod(0o755)
     env = os.environ | {
         "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
         "WHATSAPP_STORE_VOLUME": "fake-store-x15",
@@ -59,5 +83,14 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
     assert result.returncode == (1 if session == "copy_failure" else 0), result.stdout + result.stderr
     replaced = session == "replacement"
     assert (store / "whatsapp.db").read_bytes() == (b"fake restored session B" if replaced else b"fake old session A")
-    assert (store / ".connection-problem").exists() is not replaced
+    removed = replaced and kind == "unlinked"
+    assert (store / ".connection-problem").exists() is not removed
     assert (store / ".connection-problem.part").exists() is not replaced
+    if not removed:
+        saved = json.loads((store / ".connection-problem").read_text())
+        if replaced:
+            assert saved == {
+                k: v for k, v in original.items() if k not in {"unlinked_at", "revoked_device", "session_removed"}
+            }
+        else:
+            assert saved == original
