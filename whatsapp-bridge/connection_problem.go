@@ -43,12 +43,13 @@ func (l connectionProblemLogger) Sub(module string) waLog.Logger {
 }
 
 type ConnectionProblem struct {
-	Kind          string     `json:"kind"`
-	Code          int        `json:"code"`
-	TempBanReason int        `json:"temp_ban_reason,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	Since         time.Time  `json:"since"`
-	BuildVersion  string     `json:"build_version,omitempty"`
+	SessionRemoved bool       `json:"session_removed,omitempty"`
+	Kind           string     `json:"kind"`
+	Code           int        `json:"code"`
+	TempBanReason  int        `json:"temp_ban_reason,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	Since          time.Time  `json:"since"`
+	BuildVersion   string     `json:"build_version,omitempty"`
 }
 
 func classifyConnectionProblem(code int, reason int, expire time.Duration, now time.Time) *ConnectionProblem {

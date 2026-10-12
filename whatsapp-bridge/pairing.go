@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -26,27 +27,51 @@ import (
 // LoggedOut is dispatched in a goroutine BEFORE the SDK deletes its device.
 // The saved unlinked problem is a startup fence, even if that delete never ran.
 // Load our own device object: never race the SDK's mutations of Client.Store.
-func startupDevice(ctx context.Context, container *sqlstore.Container, problem *ConnectionProblem) (*store.Device, error) {
-	if problem != nil && problem.Kind == "unlinked" {
+func startupDevice(ctx context.Context, container *sqlstore.Container, root *os.Root, problem *ConnectionProblem) (*store.Device, *ConnectionProblem, error) {
+	if problem != nil && problem.Kind == "unlinked" && !problem.SessionRemoved {
 		devices, err := container.GetAllDevices(ctx)
 		if err != nil {
-			return nil, err
+			return nil, problem, err
 		}
 		for _, device := range devices {
 			if err := device.Delete(ctx); err != nil {
-				return nil, fmt.Errorf("remove revoked session: %w", err)
+				return nil, problem, fmt.Errorf("remove revoked session: %w", err)
 			}
 		}
 		devices, err = container.GetAllDevices(ctx)
 		if err != nil {
-			return nil, err
+			return nil, problem, err
 		}
 		if len(devices) != 0 {
-			return nil, errors.New("revoked session still present")
+			return nil, problem, errors.New("revoked session still present")
 		}
-		return container.NewDevice(), nil
+		// Commit completion before a new QR can save its replacement. A restart
+		// between PairSuccess and Connected must preserve that replacement.
+		next := *problem
+		next.SessionRemoved = true
+		if err := writeConnectionProblem(root, &next); err != nil {
+			return nil, problem, err
+		}
+		return container.NewDevice(), &next, nil
 	}
-	return container.GetFirstDevice(ctx)
+	device, err := container.GetFirstDevice(ctx)
+	return device, problem, err
+}
+
+// The runtime handoff serializes the immutable problem snapshot and its file
+// with all other connection transitions. The SQL cleanup has a caller deadline.
+func (b *Bridge) unlinkedDevice(ctx context.Context, container *sqlstore.Container) (*store.Device, error) {
+	b.connectionMu.Lock()
+	defer b.connectionMu.Unlock()
+	if b.connectionProblem == nil || b.connectionProblem.Kind != "unlinked" {
+		return nil, errors.New("unlink state changed")
+	}
+	device, problem, err := startupDevice(ctx, container, b.StoreRoot, b.connectionProblem)
+	if err == nil {
+		b.connectionProblem = problem
+		b.connectionChangedLocked()
+	}
+	return device, err
 }
 
 // pairingClient is the slice of *whatsmeow.Client the pairing flow needs.

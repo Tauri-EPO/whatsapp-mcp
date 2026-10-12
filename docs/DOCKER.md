@@ -941,7 +941,9 @@ authentication on that endpoint, so keep it inside a network you trust.
   health reports `paired:false`, and `/api/ready` returns 503. A fresh QR flow
   appears in `docker compose logs -f bridge` (or the private operator listener).
   The saved `unlinked` state prevents reuse of revoked keys across restarts;
-  startup removes and verifies any surviving session before pairing. Archives
+  startup removes and verifies any surviving revoked session before pairing.
+  Durable cleanup completion preserves a newly paired replacement across
+  restarts before its first authenticated connection. Archives
   are kept. `restart: unless-stopped` cannot turn an unlink into an exit loop.
   Expired QR attempts leave REST alive; restart pairing explicitly if needed.
 - An outdated client still exits with code 4 and persists `client_outdated`;

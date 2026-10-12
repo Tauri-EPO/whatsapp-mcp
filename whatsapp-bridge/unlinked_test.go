@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -122,7 +124,7 @@ func TestUnlinkFencesNextStartup(t *testing.T) {
 			}
 			restarted := sqlstore.NewWithDB(reopenedDB, "sqlite", testLogger())
 			defer func() { _ = restarted.Close() }()
-			device, err := startupDevice(context.Background(), restarted, saved)
+			device, _, err := startupDevice(context.Background(), restarted, b.StoreRoot, saved)
 			if err != nil || device.ID != nil {
 				t.Fatalf("startup reused revoked session: device=%+v err=%v", device, err)
 			}
@@ -169,8 +171,7 @@ func TestUnlinkControllerReplacesRevokedClientAndStaysAlive(t *testing.T) {
 	fresh.items <- whatsmeow.QRChannelItem{Event: "code", Code: "FAKE-REPLACEMENT-QR", Timeout: time.Minute}
 	var replacements atomic.Int64
 	p := newOperatorPairing(b.ctx, b, initial, func() (operatorPairingClient, error) {
-		problem, _ := b.connectionSnapshot()
-		device, err := startupDevice(b.ctx, container, problem)
+		device, err := b.unlinkedDevice(b.ctx, container)
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +237,7 @@ func TestUnlinkDeleteFailureKeepsStartupAndRestartFenced(t *testing.T) {
 		t.Fatal(err)
 	}
 	problem, _ := b.connectionSnapshot()
-	if _, err := startupDevice(b.ctx, container, problem); err == nil {
+	if _, _, err := startupDevice(b.ctx, container, b.StoreRoot, problem); err == nil {
 		t.Fatal("failed delete admitted startup")
 	}
 	w := httptest.NewRecorder()
@@ -248,7 +249,7 @@ func TestUnlinkDeleteFailureKeepsStartupAndRestartFenced(t *testing.T) {
 	if err != nil || saved == nil || saved.Kind != "unlinked" {
 		t.Fatalf("restart cleared unlink fence before delete: %+v err=%v", saved, err)
 	}
-	if _, err := startupDevice(b.ctx, container, saved); err == nil {
+	if _, _, err := startupDevice(b.ctx, container, b.StoreRoot, saved); err == nil {
 		t.Fatal("restart admitted failed delete")
 	}
 	unlinkHealth(t, b)
@@ -296,7 +297,7 @@ func TestUnlinkPinnedSDKProtocolDispatchSurvivesFailedDelete(t *testing.T) {
 			if _, err := db.Exec("DROP TRIGGER refuse_sdk_delete"); err != nil {
 				t.Fatal(err)
 			}
-			device, err := startupDevice(b.ctx, container, saved)
+			device, _, err := startupDevice(b.ctx, container, b.StoreRoot, saved)
 			if err != nil || device.ID != nil {
 				t.Fatalf("protocol restart reused old session: %+v %v", device, err)
 			}
@@ -357,8 +358,7 @@ func TestUnlinkStartupPendingControllerAllowsOperatorRetry(t *testing.T) {
 	var replacements atomic.Int64
 	p := newOperatorPairing(b.ctx, b, initial, func() (operatorPairingClient, error) {
 		replacements.Add(1)
-		problem, _ := b.connectionSnapshot()
-		device, err := startupDevice(b.ctx, container, problem)
+		device, err := b.unlinkedDevice(b.ctx, container)
 		if err != nil {
 			return nil, err
 		}
@@ -414,4 +414,74 @@ func TestUnlinkStartupPendingControllerAllowsOperatorRetry(t *testing.T) {
 	unlinkHealth(t, b)
 	b.cancel()
 	<-p.done
+}
+
+func TestUnlinkReplacementSurvivesRestartBeforeConnected(t *testing.T) {
+	b, container := revokedSessionFixture(t)
+	reconnect := make(chan bool, 1)
+	b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, reconnect)
+	replacement, err := b.unlinkedDevice(b.ctx, container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jid := types.NewJID("5511999999999", types.DefaultUserServer)
+	jid.Device = 42
+	replacement.ID = &jid
+	replacement.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{1}, AccountSignature: make([]byte, 64), AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
+	if err := replacement.Save(b.ctx); err != nil {
+		t.Fatal(err)
+	}
+	client := newRuntimeClient(replacement, testLogger())
+	b.installClient(client, true, reconnect)
+	b.handleClientEvent(client, &events.PairSuccess{ID: jid}, reconnect)
+	if !b.isPaired() {
+		t.Fatal("replacement PairSuccess did not pair")
+	}
+	// Connected has not occurred. Reopen the actual marker and session database.
+	saved, err := readConnectionProblem(b.StoreRoot)
+	if err != nil || saved == nil || saved.Kind != "unlinked" {
+		t.Fatalf("saved diagnostics=%+v err=%v", saved, err)
+	}
+	db, err := openSessionDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := sqlstore.NewWithDB(db, "sqlite", testLogger())
+	defer func() { _ = restarted.Close() }()
+	restored, _, err := startupDevice(b.ctx, restarted, b.StoreRoot, saved)
+	if err != nil || restored.ID == nil || *restored.ID != jid || !bytes.Equal(restored.NoiseKey.Priv[:], replacement.NoiseKey.Priv[:]) {
+		t.Fatalf("restart erased or changed valid replacement: ID=%v sameID=%t sameNoise=%t originalID=%#v restoredID=%#v err=%v", restored.ID, restored.ID != nil && *restored.ID == jid, bytes.Equal(restored.NoiseKey.Priv[:], replacement.NoiseKey.Priv[:]), jid, restored.ID, err)
+	}
+	devices, err := restarted.GetAllDevices(b.ctx)
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("replacement rows=%d err=%v", len(devices), err)
+	}
+}
+
+func TestUnlinkCleanupPublicationFailureDoesNotAdmitPairing(t *testing.T) {
+	b, container := revokedSessionFixture(t)
+	b.handleClientEvent(b.currentClient(), &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
+	if err := b.StoreRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if device, err := b.unlinkedDevice(b.ctx, container); err == nil || device != nil {
+		t.Fatal("failed completion publication admitted a new client")
+	}
+	devices, err := container.GetAllDevices(b.ctx)
+	if err != nil || len(devices) != 0 {
+		t.Fatalf("cleanup fixture failed: %d %v", len(devices), err)
+	}
+	root, err := os.OpenRoot(storeDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	saved, err := readConnectionProblem(root)
+	if err != nil || saved == nil || saved.SessionRemoved {
+		t.Fatalf("failed publication changed fence: %+v %v", saved, err)
+	}
+	device, _, err := startupDevice(b.ctx, container, root, saved)
+	if err != nil || device.ID != nil {
+		t.Fatalf("retry could not recover empty revoked store: %+v %v", device, err)
+	}
 }

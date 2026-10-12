@@ -22,7 +22,9 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 The last problem is saved as the owner-only file `store/.connection-problem`.
 It survives container restarts. For `unlinked`, this file also prevents startup
 from connecting with revoked keys: it deletes any surviving device rows and
-verifies their absence before creating a fresh pairing client. Keep the file
+verifies their absence before creating a fresh pairing client. It then saves
+`session_removed:true` so a session saved by the new pairing survives a restart
+before authentication completes. Keep the file
 until pairing succeeds; deleting it early removes that protection. If local
 session removal fails, REST stays alive in `pairing_required` without dialing.
 Fix the store error and restart pairing (or the container) to retry deletion.

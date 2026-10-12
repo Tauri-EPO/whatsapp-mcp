@@ -199,7 +199,7 @@ func runBridge(cfg bridgeConfig) int {
 		return 1
 	}
 	prepareCtx, finishPrepare := context.WithTimeout(context.Background(), 5*time.Second)
-	deviceStore, err := startupDevice(prepareCtx, container, problem)
+	deviceStore, problem, err := startupDevice(prepareCtx, container, storeRoot, problem)
 	finishPrepare()
 	unlinkPending := err != nil && problem != nil && problem.Kind == "unlinked"
 	if err != nil {
@@ -344,13 +344,13 @@ func runBridge(cfg bridgeConfig) int {
 			ctx, cancel := context.WithTimeout(bridge.ctx, 5*time.Second)
 			defer cancel()
 			var err error
-			device, err = startupDevice(ctx, container, problem)
+			device, err = bridge.unlinkedDevice(ctx, container)
 			if err != nil {
 				return nil, err
 			}
 		}
 		freshClient := newRuntimeClient(device, clientLog)
-		bridge.installClient(freshClient, false, reconnectChan)
+		bridge.installClient(freshClient, device.ID != nil, reconnectChan)
 		return freshClient, nil
 	}, bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
 	if err := bridge.restoreOperatorIdle(); err != nil {
