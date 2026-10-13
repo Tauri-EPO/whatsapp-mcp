@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.5.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.5.0...v2.5.1) (2026-10-13)
+
+
+### Bug fixes
+
+* prevent restart loops after WhatsApp device unlink ([#700](https://github.com/Tauri-EPO/whatsapp-mcp/issues/700)) ([b6abfc4](https://github.com/Tauri-EPO/whatsapp-mcp/commit/b6abfc4012926ec1ae2863d687a73200f606923b)), closes [#698](https://github.com/Tauri-EPO/whatsapp-mcp/issues/698)
+* request history under allowed chat spellings ([#699](https://github.com/Tauri-EPO/whatsapp-mcp/issues/699)) ([3ec4e51](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3ec4e51ef53eb94793814359d0e6b7f10fad4952)), closes [#694](https://github.com/Tauri-EPO/whatsapp-mcp/issues/694)
+
 ## [2.5.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.4.0...v2.5.0) (2026-10-11)
 
 
