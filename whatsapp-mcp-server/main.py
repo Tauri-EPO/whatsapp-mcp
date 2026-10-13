@@ -375,8 +375,7 @@ def request_history(chat_jid: str, count: int = 50, before_message_id: str | Non
     Without an allow-list, both known spellings are used, at most two peer messages
     per call; groups send one. The response reports how many requests were sent
     and their phone/LID kinds. A failed second send keeps the first one's success.
-    Sending both made one unanswered direct chat answer on a paired phone
-    (#694): one observed case, not a guarantee. The phone may
+    The phone may
     still send nothing or omit the direct path; a successful request proves only
     that it was sent.
 
