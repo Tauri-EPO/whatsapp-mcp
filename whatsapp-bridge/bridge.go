@@ -141,7 +141,8 @@ type Bridge struct {
 	mediaQuotaNeedsLowWater atomic.Bool // health reads must not wait for a transfer lease
 	StatusRetention         *time.Duration
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
-	Webhook *webhookSender
+	Webhook        *webhookSender
+	RuntimeWebhook *runtimeWebhook
 	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.
 	Connect    func() error
 	Disconnect func()
@@ -399,6 +400,9 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.labelSyncOnce.Do(func() {})
 	b.cancel()
+	if b.RuntimeWebhook != nil {
+		b.RuntimeWebhook.remove()
+	}
 	b.mediaTransfers.stop()
 	b.historyVoteMu.Lock()
 	b.historyVoteStopped = true

@@ -322,6 +322,9 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	}
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)
+	if cfg.RuntimeWebhook.Enabled {
+		bridge.RuntimeWebhook = newRuntimeWebhook(bridge.ctx, cfg.RuntimeWebhook)
+	}
 	// Install exit before exposing operator mutations on a paired device.
 	bridge.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)

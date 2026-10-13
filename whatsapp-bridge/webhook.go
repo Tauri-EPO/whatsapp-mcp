@@ -80,7 +80,21 @@ func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 // and broadcast lists are stored regardless, but require separate opt-ins to
 // reach a webhook intended for conversations. The global/self gates always win.
 func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...types.JID) bool {
-	if !b.Webhook.Enabled() || (fromMe && !b.ForwardSelf) {
+	return b.Webhook.Enabled() && b.webhookChatAllowed(chat, fromMe, original...)
+}
+
+// Evaluate once for both senders, including policy-eligible arrivals while the
+// configured runtime receiver is disabled (which must count as delivery loss).
+func (b *Bridge) messageWebhookAllowed(chat types.JID, fromMe bool, id string, original ...types.JID) bool {
+	allowed := (b.Webhook.Enabled() || b.RuntimeWebhook.configured()) && b.webhookChatAllowed(chat, fromMe, original...)
+	if !allowed {
+		b.logWebhookWithheld(chat, id)
+	}
+	return allowed
+}
+
+func (b *Bridge) webhookChatAllowed(chat types.JID, fromMe bool, original ...types.JID) bool {
+	if fromMe && !b.ForwardSelf {
 		return false
 	}
 	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {

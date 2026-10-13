@@ -22,7 +22,8 @@ type operatorRoutes struct {
 	settings, logout                               http.HandlerFunc
 	sendUsage, mcpToken                            http.HandlerFunc
 
-	transcriptionUsage http.HandlerFunc
+	transcriptionUsage   http.HandlerFunc
+	webhook, webhookTest http.HandlerFunc
 }
 
 type operatorBucket struct {
@@ -126,6 +127,11 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 	}
 	mux := http.NewServeMux()
 	mutations := map[string]bool{}
+	if routes.webhook != nil {
+		mux.HandleFunc("/operator/v1/webhook", routes.webhook)
+		mux.HandleFunc("/operator/v1/webhook/test", requireMethod(http.MethodPost, routes.webhookTest))
+		mutations["/operator/v1/webhook"], mutations["/operator/v1/webhook/test"] = true, true
+	}
 	for _, route := range []struct {
 		name, method string
 		handler      http.HandlerFunc
@@ -182,7 +188,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
+		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
 			audited := false
 			audit := func() {
 				if audited {
