@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
 type runtimeWebhookOptions struct {
@@ -112,12 +114,15 @@ type runtimeWebhook struct {
 	backoff                       time.Duration
 	maxAge                        time.Duration
 	tlsConfig                     *tls.Config
+	log                           waLog.Logger
+	lastDropLog                   time.Time
+	pendingDropLog                uint64
 	deliveries, failures, dropped atomic.Uint64
 }
 
 func newRuntimeWebhook(ctx context.Context, options runtimeWebhookOptions) *runtimeWebhook {
 	d := &net.Dialer{Timeout: 3 * time.Second}
-	return &runtimeWebhook{ctx: ctx, options: options, lookup: net.DefaultResolver.LookupIPAddr, dial: d.DialContext, backoff: time.Second, maxAge: 5 * time.Minute}
+	return &runtimeWebhook{ctx: ctx, options: options, lookup: net.DefaultResolver.LookupIPAddr, dial: d.DialContext, backoff: time.Second, maxAge: 5 * time.Minute, log: bridgeLog}
 }
 
 func (w *runtimeWebhook) snapshot() runtimeWebhookState {
@@ -131,13 +136,13 @@ func (w *runtimeWebhook) snapshot() runtimeWebhookState {
 	return s
 }
 
-func (w *runtimeWebhook) accepting() bool {
+func (w *runtimeWebhook) configured() bool {
 	if w == nil {
 		return false
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.generation != nil && w.state.Enabled
+	return w.generation != nil
 }
 
 // Caller holds mu. Logs and process-lifetime counters never carry receiver data.
@@ -147,7 +152,30 @@ func (w *runtimeWebhook) dropLocked(reason string, count uint64) {
 	}
 	w.state.Dropped += count
 	w.dropped.Add(count)
-	bridgeLog.Errorf("Runtime webhook discarded %d event(s): %s", count, reason)
+	if reason == "disabled" || reason == "queue_full" {
+		w.pendingDropLog += count
+		if time.Since(w.lastDropLog) < time.Minute {
+			return
+		}
+		count, w.pendingDropLog = w.pendingDropLog, 0
+		w.lastDropLog = time.Now()
+		reason = "disabled or queue_full"
+	}
+	w.log.Errorf("Runtime webhook discarded %d event(s): %s", count, reason)
+}
+
+// Caller holds mu; admission is stopped before draining a retired queue.
+func (w *runtimeWebhook) drainLocked(g *runtimeWebhookGeneration, reason string) {
+	var count uint64
+	for {
+		select {
+		case <-g.queue:
+			count++
+		default:
+			w.dropLocked(reason, count)
+			return
+		}
+	}
 }
 
 // Restrict IPv6 to native global unicast: mapped IPv4 is checked as IPv4;
@@ -234,6 +262,7 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	defer w.mu.Unlock()
 	if w.generation != nil {
 		w.generation.cancel()
+		w.drainLocked(w.generation, "configuration_changed")
 	}
 	child, cancel := context.WithCancel(w.ctx)
 	g := &runtimeWebhookGeneration{config: cfg, ctx: child, cancel: cancel, queue: make(chan runtimeWebhookDelivery, 256), delivery: make(chan struct{}, 1)}
@@ -251,6 +280,7 @@ func (w *runtimeWebhook) remove() {
 	defer w.mu.Unlock()
 	if w.generation != nil {
 		w.generation.cancel()
+		w.drainLocked(w.generation, "configuration_changed")
 	}
 	w.generation = nil
 	w.state = runtimeWebhookState{}
@@ -270,7 +300,7 @@ func webhookDelivery(event runtimeWebhookEvent) (runtimeWebhookDelivery, error) 
 }
 
 func (w *runtimeWebhook) enqueue(event runtimeWebhookEvent, allowed bool) {
-	if w == nil {
+	if w == nil || !allowed {
 		return
 	}
 	w.mu.Lock()
@@ -280,9 +310,6 @@ func (w *runtimeWebhook) enqueue(event runtimeWebhookEvent, allowed bool) {
 	}
 	if !w.state.Enabled {
 		w.dropLocked("disabled", 1)
-		return
-	}
-	if !allowed {
 		return
 	}
 	d, err := webhookDelivery(event)
@@ -315,13 +342,19 @@ func (w *runtimeWebhook) client(g *runtimeWebhookGeneration, u *url.URL) *http.C
 			ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
 			lastErr := errors.New("no validated receiver addresses")
-			for _, address := range pinned {
+			for i, address := range pinned {
 				host, _, err := net.SplitHostPort(address)
 				if err != nil || !publicWebhookIP(net.ParseIP(host)) {
 					return nil, errors.New("receiver address is forbidden")
 				}
-				// A dead address cannot consume the whole connection budget.
-				attemptCtx, stop := context.WithTimeout(ctx, min(300*time.Millisecond, 3*time.Second/time.Duration(len(pinned))))
+				// Leave time for fallback, but give the sole/last address the
+				// entire remainder rather than imposing a 300 ms ceiling.
+				deadline, _ := ctx.Deadline()
+				budget := time.Until(deadline)
+				if i < len(pinned)-1 {
+					budget = min(300*time.Millisecond, budget/time.Duration(len(pinned)-i))
+				}
+				attemptCtx, stop := context.WithTimeout(ctx, budget)
 				conn, err := w.dial(attemptCtx, network, address)
 				stop()
 				if err == nil {
@@ -394,21 +427,23 @@ func (w *runtimeWebhook) attempt(ctx context.Context, g *runtimeWebhookGeneratio
 	ok, reason := w.deliver(ctx, g, d)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if ok {
+		w.deliveries.Add(1)
+		// A received 2xx remains success after cancellation/reconfiguration,
+		// but an old generation must not change the new receiver's state.
+		if w.generation == g && !d.test {
+			now := time.Now().UTC()
+			w.state.LastSuccess = &now
+			w.state.Failures = 0
+			w.state.Reason = ""
+		}
+		return true, ""
+	}
 	if w.generation != g || g.ctx.Err() != nil {
 		return false, "configuration_changed"
 	}
 	if ctx.Err() != nil {
 		return false, "cancelled"
-	}
-	if ok {
-		w.deliveries.Add(1)
-		if d.test {
-			return ok, reason
-		}
-		now := time.Now().UTC()
-		w.state.LastSuccess = &now
-		w.state.Failures = 0
-		w.state.Reason = ""
 	}
 	return ok, reason
 }
@@ -422,6 +457,7 @@ func (w *runtimeWebhook) run(g *runtimeWebhookGeneration) {
 			ctx, cancel := context.WithDeadline(g.ctx, d.at.Add(w.maxAge))
 			delivered := false
 			reason := "expired"
+			destinationFailure := ""
 			for attempt := range 5 {
 				if ctx.Err() != nil {
 					break
@@ -431,6 +467,9 @@ func (w *runtimeWebhook) run(g *runtimeWebhookGeneration) {
 				if ok {
 					delivered = true
 					break
+				}
+				if reason != "cancelled" && reason != "disabled" && reason != "configuration_changed" {
+					destinationFailure = reason
 				}
 				status, _ := strconv.Atoi(strings.TrimPrefix(reason, "http_"))
 				if attempt == 4 || (status >= 300 && status < 500 && status != 408 && status != 429) {
@@ -447,29 +486,24 @@ func (w *runtimeWebhook) run(g *runtimeWebhookGeneration) {
 			cancel()
 			if !delivered {
 				w.mu.Lock()
-				if w.generation == g && g.ctx.Err() == nil {
-					if locallyCancelled {
-						reason = "expired"
-					}
-					w.dropLocked(reason, 1)
-					if !locallyCancelled {
-						w.failures.Add(1)
-						w.state.Failures++
-						w.state.Reason = reason
-						if w.state.Failures >= w.options.FailureLimit {
-							w.state.Enabled = false
-							g.cancel()
-							bridgeLog.Errorf("Runtime webhook automatically disabled after %d failed events", w.state.Failures)
-						draining:
-							for {
-								select {
-								case <-g.queue:
-									w.dropLocked("disabled", 1)
-								default:
-									break draining
-								}
-							}
-						}
+				active := w.generation == g && g.ctx.Err() == nil
+				if !active {
+					reason = "configuration_changed"
+				} else if destinationFailure != "" {
+					reason = destinationFailure
+				} else if locallyCancelled {
+					reason = "expired"
+				}
+				w.dropLocked(reason, 1)
+				if active && destinationFailure != "" {
+					w.failures.Add(1)
+					w.state.Failures++
+					w.state.Reason = reason
+					if w.state.Failures >= w.options.FailureLimit {
+						w.state.Enabled = false
+						g.cancel()
+						w.log.Errorf("Runtime webhook automatically disabled after %d failed events", w.state.Failures)
+						w.drainLocked(g, "disabled")
 					}
 				}
 				w.mu.Unlock()
@@ -548,7 +582,7 @@ func (b *Bridge) queueRuntimeMessage(allowed bool, event runtimeWebhookEvent) {
 	if event.Type == "" {
 		event.Type = "text"
 	} else if event.Stored && (event.Type == "image" || event.Type == "video" || event.Type == "audio" || event.Type == "document" || event.Type == "sticker") {
-		event.MediaReference = "whatsapp://media/" + url.PathEscape(event.Chat) + "/" + url.PathEscape(event.MessageID)
+		event.MediaReference = mediaBlobURI(event.Chat, event.MessageID)
 	}
 	event.Timestamp = event.Timestamp.UTC()
 	b.RuntimeWebhook.enqueue(event, allowed)

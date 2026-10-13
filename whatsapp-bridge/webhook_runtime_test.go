@@ -300,8 +300,8 @@ func TestRuntimeWebhookRoutesOptInAuthAndValidation(t *testing.T) {
 	if code, _ := webhookOperatorRequest(t, off, "PUT", "/operator/v1/settings", "{}"); code != 405 {
 		t.Fatalf("legacy method=%d", code)
 	}
-	if strings.Contains(logger.String(), "Operator PUT /operator/v1/settings") {
-		t.Fatal("opt-in off changed legacy PUT auditing")
+	if !strings.Contains(logger.String(), "Operator PUT /operator/v1/settings") {
+		t.Fatal("PUT on a mutation route was not audited")
 	}
 	for _, tc := range []struct{ method, path string }{{"GET", "/operator/v1/webhook"}, {"PUT", "/operator/v1/webhook"}, {"DELETE", "/operator/v1/webhook"}, {"POST", "/operator/v1/webhook/test"}} {
 		if code, _ := webhookOperatorRequest(t, off, tc.method, tc.path, "{}"); code != 404 {
@@ -893,8 +893,10 @@ func TestRuntimeWebhookReviewSharedPolicyEvaluatedOnce(t *testing.T) {
 				}
 				b.handleMessage(msg)
 				want := int32(0)
-				if mode == "both" {
+				if mode != "unconfigured" {
 					want = 1
+				}
+				if mode == "both" {
 					_ = receiveWebhook(t, receipts)
 				}
 				if got := lids.lookups.Load(); got != want {
@@ -988,5 +990,243 @@ func TestRuntimeWebhookReviewDisableCountsQueuedDrops(t *testing.T) {
 	waitWebhookDrop(t, b.RuntimeWebhook)
 	if s := b.RuntimeWebhook.snapshot(); s.Enabled || s.Failures != 1 || s.Dropped != 11 || s.Queued != 0 {
 		t.Fatalf("queued discards not observed: %+v", s)
+	}
+}
+
+func TestRuntimeWebhookRound2ConnectBudget(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fallback), func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			rw := b.RuntimeWebhook
+			if fallback {
+				rw.lookup = func(context.Context, string) ([]net.IPAddr, error) {
+					return []net.IPAddr{{IP: net.ParseIP("2606:4700:4700::1111")}, {IP: net.ParseIP("8.8.8.8")}}, nil
+				}
+			}
+			dial := rw.dial
+			rw.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+				if strings.HasPrefix(address, "[") {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				select {
+				case <-time.After(450 * time.Millisecond):
+					return dial(ctx, network, address)
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			configureWebhookHTTP(t, server, destination)
+			start := time.Now()
+			_, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+			if !bytes.Contains(body, []byte(`"delivered":true`)) {
+				t.Fatalf("slow sole/last address refused: %s", body)
+			}
+			if time.Since(start) > 3*time.Second || !verifyWebhookReceipt(receiveWebhook(t, receipts), time.Now()) {
+				t.Fatal("connection exceeded total budget or signature failed")
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookRound2FailureBeforeBackoffExpiry(t *testing.T) {
+	var status atomic.Int32
+	status.Store(503)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
+	rw := b.RuntimeWebhook
+	rw.maxAge, rw.backoff = 150*time.Millisecond, time.Second
+	rw.options.FailureLimit = 2
+	configureWebhookHTTP(t, server, destination)
+	for n := uint64(1); n <= 2; n++ {
+		rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+		_ = receiveWebhook(t, receipts)
+		deadline := time.Now().Add(time.Second)
+		for rw.dropped.Load() < n && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if s := rw.snapshot(); s.Failures != int(n) || s.Reason != "http_503" || s.Enabled != (n < 2) {
+			t.Fatalf("real failure lost during age expiry: %+v", s)
+		}
+	}
+	if rw.failures.Load() != 2 {
+		t.Fatal("failed-event counter lost expired failures")
+	}
+}
+
+func TestRuntimeWebhookRound2AcknowledgedSuccess(t *testing.T) {
+	for _, change := range []bool{false, true} {
+		t.Run(strconv.FormatBool(change), func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			configureWebhookHTTP(t, server, destination)
+			rw := b.RuntimeWebhook
+			g := rw.generation
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			transport := g.client.Transport
+			g.client.Transport = mcpTestTransport(func(r *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(r)
+				if err == nil {
+					// The real TLS receiver has already acknowledged the request.
+					if change {
+						configureWebhookHTTP(t, server, destination)
+					} else {
+						cancel()
+					}
+				}
+				return response, err
+			})
+			response := httptest.NewRecorder()
+			b.handleRuntimeWebhookTest(response, httptest.NewRequest("POST", "/operator/v1/webhook/test", nil).WithContext(ctx))
+			if !bytes.Contains(response.Body.Bytes(), []byte(`"delivered":true`)) || rw.deliveries.Load() != 1 || rw.dropped.Load() != 0 {
+				t.Fatalf("acknowledgement lost: %s", response.Body.String())
+			}
+			_ = receiveWebhook(t, receipts)
+			if rw.snapshot().LastSuccess != nil {
+				t.Fatal("synthetic success changed production state")
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookRound2PolicyAndDropLogRate(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(disabled), func(t *testing.T) {
+			b, server, destination, _, logger := runtimeWebhookFixture(t, nil)
+			configureWebhookHTTP(t, server, destination)
+			rw := b.RuntimeWebhook
+			g := rw.generation
+			g.delivery <- struct{}{}
+			defer func() { <-g.delivery }()
+			if disabled {
+				rw.mu.Lock()
+				rw.state.Enabled = false
+				rw.mu.Unlock()
+			} else {
+				rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+				deadline := time.Now().Add(time.Second)
+				for len(g.queue) != 0 && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				for range 256 {
+					rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+				}
+			}
+			for range 100 {
+				rw.enqueue(runtimeWebhookEvent{Type: "text"}, false)
+			}
+			if rw.dropped.Load() != 0 || strings.Contains(logger.String(), "Runtime webhook discarded") {
+				t.Fatal("policy-withheld events counted or logged as loss")
+			}
+			remaining := 100
+			if disabled {
+				b.ForwardSelf = false
+				b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, true, "self withheld"))
+				if rw.dropped.Load() != 0 {
+					t.Fatal("disabled ingress bypassed self policy")
+				}
+				b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "allowed disabled ingress"))
+				if rw.dropped.Load() != 1 {
+					t.Fatal("policy-eligible disabled ingress was not counted")
+				}
+				remaining = 99
+			}
+			for range remaining {
+				rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+			}
+			if rw.dropped.Load() != 100 || strings.Count(logger.String(), "Runtime webhook discarded") != 1 {
+				t.Fatalf("loss logging is unbounded: drops=%d logs=%s", rw.dropped.Load(), logger.String())
+			}
+			// Advance the interval without sleeping: the next line must include
+			// the 99 suppressed losses and this new one.
+			rw.mu.Lock()
+			rw.lastDropLog = time.Now().Add(-time.Minute)
+			rw.mu.Unlock()
+			rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+			if rw.dropped.Load() != 101 || strings.Count(logger.String(), "Runtime webhook discarded") != 2 || !strings.Contains(logger.String(), "discarded 100 event(s)") {
+				t.Fatal("interval log lost the suppressed count")
+			}
+			rw.remove()
+			if !disabled {
+				deadline := time.Now().Add(time.Second)
+				for rw.dropped.Load() < 358 && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				if rw.dropped.Load() != 358 {
+					t.Fatal("retired queue did not settle")
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookRound2ConfigurationCountsAbandoned(t *testing.T) {
+	for _, method := range []string{"PUT", "DELETE"} {
+		t.Run(method, func(t *testing.T) {
+			b, server, destination, receipts, logger := runtimeWebhookFixture(t, nil, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+			configureWebhookHTTP(t, server, destination)
+			rw := b.RuntimeWebhook
+			rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+			_ = receiveWebhook(t, receipts)
+			for range 10 {
+				rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+			}
+			if method == "PUT" {
+				configureWebhookHTTP(t, server, destination)
+			} else {
+				if code, _ := webhookOperatorRequest(t, server, method, "/operator/v1/webhook", ""); code != 204 {
+					t.Fatalf("delete=%d", code)
+				}
+			}
+			deadline := time.Now().Add(time.Second)
+			for rw.dropped.Load() < 11 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if rw.dropped.Load() != 11 || rw.failures.Load() != 0 || !strings.Contains(logger.String(), "configuration_changed") {
+				t.Fatalf("abandoned events lost: drops=%d failures=%d logs=%s", rw.dropped.Load(), rw.failures.Load(), logger.String())
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookRound2ReactionForwardLog(t *testing.T) {
+	for _, reaction := range []bool{false, true} {
+		t.Run(strconv.FormatBool(reaction), func(t *testing.T) {
+			b, server, destination, receipts, logger := runtimeWebhookFixture(t, nil)
+			configureWebhookHTTP(t, server, destination)
+			msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "forwarded text")
+			if reaction {
+				msg = buildReactionMessage(phonePN, phonePN, false, "FAKE-TARGET", "+1")
+			}
+			b.handleMessage(msg)
+			_ = receiveWebhook(t, receipts)
+			if strings.Contains(logger.String(), "not forwarded") {
+				t.Fatalf("forwarded event logged as withheld: %s", logger.String())
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookRound2RetiredWorkerOwnsLogger(t *testing.T) {
+	b, server, destination, _, logger := runtimeWebhookFixture(t, nil)
+	configureWebhookHTTP(t, server, destination)
+	rw := b.RuntimeWebhook
+	started, release := make(chan struct{}), make(chan struct{})
+	rw.lookup = func(context.Context, string) ([]net.IPAddr, error) {
+		close(started)
+		<-release
+		return nil, errors.New("synthetic cancelled lookup")
+	}
+	rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+	<-started
+	rw.remove()
+	// The retired worker resumes after cleanup changes the sanctioned global.
+	nextLogger := installRecordingLogger(t)
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(logger.String(), "configuration_changed") && !strings.Contains(nextLogger.String(), "configuration_changed") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if rw.dropped.Load() != 1 || !strings.Contains(logger.String(), "configuration_changed") || strings.Contains(nextLogger.String(), "Runtime webhook discarded") {
+		t.Fatal("retired worker used another instance's logger")
 	}
 }

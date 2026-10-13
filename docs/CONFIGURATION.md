@@ -46,8 +46,8 @@ disabled. Loopback, private, link-local, CGNAT, multicast, unspecified, metadata
 and reserved/documentation ranges are refused, including mapped IPv4, IPv6
 translation and tunnel ranges. The transport is reused within each configuration
 generation; every attempt rechecks DNS, and new sockets use only its validated
-IP list. Connect has a 3-second total budget with at most 300 ms per address,
-so an unreachable IPv6 address cannot consume the entire request deadline.
+IP list. Connect has a 3-second total budget; earlier addresses get at most
+300 ms each, and the last or sole address gets the remaining time.
 TLS handshakes have a 3-second limit;
 response headers have 5 seconds, the complete request 10 seconds. Response bodies
 are discarded up to 64 KiB to permit keep-alive, then closed, never logged.
@@ -59,9 +59,12 @@ one in flight). Overflow and oversized events increment `dropped`. An admitted
 event has at most five attempts, with 1, 2, 4 and 8 second delays (backoff capped
 at 30 seconds), and is discarded after five minutes. Permanent 4xx responses
 (except 408 and 429) are not retried. Successful message 2xx responses
-reset consecutive failures and record last success. Failures count events that
-exhaust delivery, not individual attempts; caller cancellation and queue age
-expiration do not count against the receiver. The default failure limit is
+reset consecutive failures and record last success. A received 2xx remains a
+successful delivery after cancellation or configuration replacement; an old
+generation cannot change the new receiver's state. Failures count events that
+exhaust delivery, not individual attempts. Pure local cancellation and queue age
+expiration do not count against the receiver, but an event with a prior destination
+failure still counts when its age expires during backoff. The default failure limit is
 50 events; `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` accepts 1-100. At that
 limit the receiver disables itself and discards its queue. The private
 `GET /operator/v1/health` includes the safe `webhook` snapshot; PUT re-enables it.
@@ -70,7 +73,10 @@ PUT and loses pending events. Delivery can be repeated, so receivers must dedupl
 by event id; this bounded policy does not guarantee eventual receipt across restart,
 queue overflow, exhausted retries, expiration or automatic disablement.
 Automatic disablement and discarded events are logged at ERROR without receiver
-URLs or message identifiers. `/metrics` exposes process-lifetime counters
+URLs or message identifiers. Disabled/queue-full loss logs are limited to one line
+per minute; the next eligible line includes the accumulated suppressed count.
+Only policy-eligible messages count as disabled losses. PUT and DELETE count
+abandoned queued and unacknowledged in-flight messages. `/metrics` exposes process-lifetime counters
 `whatsapp_bridge_runtime_webhook_deliveries_total` (successful POSTs, including tests),
 `whatsapp_bridge_runtime_webhook_failures_total` (failed message events), and
 `whatsapp_bridge_runtime_webhook_dropped_total` (discarded messages, including
@@ -224,7 +230,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable the private operator runtime webhook routes; independent of the legacy sender. See [Runtime message webhook](#runtime-message-webhook). |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; all address restrictions still apply. |
-| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed message events; cancelled/expired events and synthetic tests do not count. PUT re-enables it. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed message events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |

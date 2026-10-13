@@ -188,7 +188,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || (r.Method == http.MethodPut && r.URL.Path == "/operator/v1/webhook")) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
+		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
 			audited := false
 			audit := func() {
 				if audited {
