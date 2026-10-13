@@ -337,5 +337,13 @@ func (b *Bridge) operatorRoutes() operatorRoutes {
 	routes := b.operatorPairing.routes()
 	routes.export, routes.snapshot = b.handleExport(), b.handleSnapshot()
 	routes.mediaUsage, routes.mediaPurge = b.handleOperatorMediaUsage, b.handleOperatorMediaPurge
+	if b.RuntimeWebhook != nil {
+		routes.webhook, routes.webhookTest = b.handleRuntimeWebhook, b.handleRuntimeWebhookTest
+		routes.health = func(w http.ResponseWriter, _ *http.Request) {
+			status := b.healthStatus()
+			status["webhook"] = b.RuntimeWebhook.snapshot()
+			writeJSON(w, 200, status)
+		}
+	}
 	return routes
 }

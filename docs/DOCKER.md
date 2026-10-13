@@ -1,5 +1,37 @@
 # Running WhatsApp MCP with Docker Compose
 
+### Optional runtime message receiver
+
+Enable the private operator listener as described below and set
+`WHATSAPP_WEBHOOK_RUNTIME=true` on the bridge. Compose passes it through and
+defaults it to false. No additional listener, published port, mount or service is
+needed. `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=false` restricts receivers to HTTPS
+port 443, and `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT=10` controls automatic
+disablement. Keep the operator endpoint on its private network.
+
+Use the operator bearer and an allowed Host for `GET`, `PUT`, `DELETE
+/operator/v1/webhook` and `POST /operator/v1/webhook/test`. PUT supplies
+`url`, `events: ["message.received"]`, a dedicated random `secret` and optionally
+`header_prefix` (default `X-Webhook`). GET returns a fingerprint and delivery
+state; health includes the same safe snapshot. Test returns the actual delivery
+outcome. DELETE removes the receiver and cancels pending delivery. Configure it
+again after a restart: configuration and queue are process-local.
+
+Runtime delivery never sends the bridge credential, never follows redirects,
+checks every DNS answer and pins a public IP for the connection. It shares the
+existing status/channel/broadcast/self/chat filters, carries no media bytes and
+uses a bounded retry queue. A failed receiver automatically disables; a new PUT
+re-enables it. The legacy `WEBHOOK_URL` receiver remains independent and retains
+its existing `X-Bridge-Token` contract.
+
+Receivers verify `<timestamp>.<raw body>` with HMAC-SHA256 using the dedicated
+secret and read `<prefix>-Id`, `<prefix>-Timestamp`, `<prefix>-Signature`
+(`sha256=<hex>`). Require a timestamp within five minutes and deduplicate event
+ids. The [runtime webhook reference](CONFIGURATION.md#runtime-message-webhook)
+documents all routes, message payload fields, limits and the Python verification
+snippet. Use `/webhook/test` to check a public HTTPS receiver without pairing a
+WhatsApp number; the local Go tests use a TLS fixture and fake identifiers.
+
 `docker-compose.yml` at the repo root runs the two components as containers on
 an always-on machine (a home server, a NAS, a small VPS) and exposes the MCP
 server over **streamable HTTP** so remote MCP clients can use it.

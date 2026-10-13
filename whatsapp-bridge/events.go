@@ -273,6 +273,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			if rowConsumed {
 				return
 			}
+			b.queueRuntimeMessage(resolvedChat, msg.Info.Chat, msg.Info.IsFromMe, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: sender, Type: "reaction", Text: emoji, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})
 			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat) {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
 			} else {
@@ -399,6 +400,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// tools, but message handling never blocks on a disabled outbound webhook.
 	forwardChat := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat)
 	shouldForward := forwardChat && !bareContentEnvelope(ex.inner, content)
+	if !bareContentEnvelope(ex.inner, content) {
+		b.queueRuntimeMessage(resolvedChat, msg.Info.Chat, msg.Info.IsFromMe, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: sender, Type: mediaType, Text: content, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})
+	}
 
 	if !forwardChat {
 		b.logWebhookWithheld(resolvedChat, msg.Info.ID)

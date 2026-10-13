@@ -35,6 +35,7 @@ type bridgeConfig struct {
 	LogLevel                     string
 	JSONLogs                     bool
 	Operator                     operatorConfig
+	RuntimeWebhook               runtimeWebhookOptions
 	PairingStdout                bool
 	History                      historyLimits
 	SnapshotDir                  string
@@ -110,6 +111,8 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 	collect(err)
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
 	cfg.Operator, err = parseOperatorConfig(getenv, lookup)
+	collect(err)
+	cfg.RuntimeWebhook, err = parseRuntimeWebhookOptions(getenv)
 	collect(err)
 	cfg.SplitREST = isSplitBridgeBind(cfg.Bind)
 	if cfg.SplitREST && cfg.Operator.Bind != "" {

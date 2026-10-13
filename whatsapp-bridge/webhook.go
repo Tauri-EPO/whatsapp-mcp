@@ -80,7 +80,11 @@ func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 // and broadcast lists are stored regardless, but require separate opt-ins to
 // reach a webhook intended for conversations. The global/self gates always win.
 func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...types.JID) bool {
-	if !b.Webhook.Enabled() || (fromMe && !b.ForwardSelf) {
+	return b.Webhook.Enabled() && b.webhookChatAllowed(chat, fromMe, original...)
+}
+
+func (b *Bridge) webhookChatAllowed(chat types.JID, fromMe bool, original ...types.JID) bool {
+	if fromMe && !b.ForwardSelf {
 		return false
 	}
 	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {
