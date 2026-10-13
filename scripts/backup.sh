@@ -100,8 +100,30 @@ cmd_restore() {
   run_alpine "$vol" "$src" '
     cd /store
     rm -f ./*.db-wal ./*.db-shm .bridge.lock .session-keepalive
+    kind=
+    if [ -f .connection-problem ]; then
+      kind="$(sqlite3 :memory: "SELECT json_extract(CAST(readfile('\''.connection-problem'\'') AS TEXT), '\''$.kind'\'');")" 2>/dev/null || kind=__unreadable__
+      if [ -z "$kind" ]; then kind=__unreadable__; fi
+      if [ "$kind" = __unreadable__ ]; then
+        echo "warning: saved connection state could not be read; keeping it unchanged" >&2
+      fi
+    fi
     for db in messages whatsapp notes; do
-      [ -f /backup/$db.db ] && cp /backup/$db.db ./$db.db && chmod 600 ./$db.db
+      if [ -f /backup/$db.db ]; then
+        cp /backup/$db.db ./$db.db
+        chmod 600 ./$db.db
+        if [ "$db" = whatsapp ] && [ -f .connection-problem ] && [ "$kind" != __unreadable__ ]; then
+          if [ "$kind" = unlinked ]; then
+            rm -f .connection-problem .connection-problem.part
+          else
+            # The replacement session does not release an account restriction.
+            # Clear only revocation belonging to the previous session.
+            sqlite3 :memory: "SELECT json_remove(CAST(readfile('\''.connection-problem'\'') AS TEXT), '\''$.unlinked_at'\'', '\''$.revoked_device'\'', '\''$.session_removed'\'');" > .connection-problem.part
+            chmod 600 .connection-problem.part
+            mv .connection-problem.part .connection-problem
+          fi
+        fi
+      fi
     done
     [ -f /backup/media.tar ] && tar -xf /backup/media.tar -C /store
     [ -f /backup/bridge-token ] && cp /backup/bridge-token .bridge-token && chmod 600 .bridge-token

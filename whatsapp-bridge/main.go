@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -106,6 +104,10 @@ func run() int {
 }
 
 func runBridge(cfg bridgeConfig) int {
+	return runBridgeWithClientFactory(cfg, nil)
+}
+
+func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) int {
 	if cfg.SnapshotDir != "" {
 		root, dir, err := privateSnapshotDir(cfg.SnapshotDir)
 		if err != nil {
@@ -194,17 +196,16 @@ func runBridge(cfg bridgeConfig) int {
 		return 1
 	}
 
-	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice(context.Background())
+	// Read the unlink fence before selecting a session or exposing any dial path.
+	problem, err := readConnectionProblem(storeRoot)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// No device exists, create one
-			deviceStore = container.NewDevice()
-			logger.Infof("Created new device")
-		} else {
-			logger.Errorf("Failed to get device: %v", err)
-			return 1
-		}
+		logger.Errorf("Refusing to connect with unreadable saved connection state: %v", err)
+		return 1
+	}
+	deviceStore, unlinkPending, err := initialSessionDevice(context.Background(), container, problem)
+	if err != nil {
+		logger.Errorf("Failed to prepare device: %v", err)
+		return 1
 	}
 
 	cfg.History.apply(store.DeviceProps, deviceStore.ID != nil, *fullHistoryPairFlag)
@@ -225,7 +226,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	// Create client instance
-	client := newRuntimeClient(deviceStore, clientLog)
+	client := makeRuntimeClient(deviceStore, clientLog, factory)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return 1
@@ -272,6 +273,7 @@ func runBridge(cfg bridgeConfig) int {
 	}
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
+	bridge.clientFactory = factory
 	bridge.MediaQuotaWarnPercent = cfg.MediaBackend.WarnPercent
 	if cfg.MediaBackend.Backend == "s3" {
 		if cfg.MediaBackend.plaintextRemote() {
@@ -295,10 +297,11 @@ func runBridge(cfg bridgeConfig) int {
 	bridge.bindRuntimeClient()
 	bridge.installClient(client, client.Store.ID != nil, reconnectChan)
 	defer func() { bridge.Disconnect() }()
-	bridge.connectionProblem, err = readConnectionProblem(storeRoot)
-	if err != nil {
-		logger.Errorf("Refusing to connect with unreadable saved connection state: %v", err)
-		return 1
+	bridge.connectionProblem = problem
+	if unlinkPending {
+		bridge.pairingState = "pairing_required"
+		bridge.operatorRetiredClient.Store(client)
+		logger.Warnf("Revoked session cleanup pending; serving health while cleanup resumes")
 	}
 	bridge.RESTBind, bridge.RESTAllowedHosts = cfg.Bind, cfg.AllowedHosts
 	bridge.RESTSplit = cfg.SplitREST
@@ -330,22 +333,13 @@ func runBridge(cfg bridgeConfig) int {
 	if !cfg.PairingStdout {
 		pairingOut = io.Discard
 	}
-	if cfg.Operator.Bind != "" {
-		bridge.operatorPairing = newOperatorPairing(bridge.ctx, bridge, client, func() (operatorPairingClient, error) {
-			// Only an explicitly unpaired restart reaches this factory. Deleted
-			// SDK clients cannot be reused, and old QR contexts cannot disconnect
-			// this new client's socket.
-			cfg.History.apply(store.DeviceProps, false, *fullHistoryPairFlag)
-			freshClient := newRuntimeClient(container.NewDevice(), clientLog)
-			bridge.installClient(freshClient, false, reconnectChan)
-			return freshClient, nil
-		}, bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
-	}
-	if err := bridge.restoreOperatorIdle(); err != nil {
+	bridge.operatorPairing = newOperatorPairing(exitCtx, bridge, client, bridge.pairingClientFactory(exitCtx, container, cfg.History, *fullHistoryPairFlag, clientLog, reconnectChan), bridge.isPaired, bridge.Connected, pairingOut, reconnectChan)
+
+	if err := bridge.restoreOperatorIdle(cfg.Operator.Bind != ""); err != nil {
 		logger.Errorf("Failed to restore operator idle state")
 		return 1
 	}
-	if bridge.operatorPairing != nil {
+	if cfg.Operator.Bind != "" {
 		routes := withMCPAdmin(bridge.operatorRoutes(), bridgeToken, newMCPAdminClient(cfg.MCPAdminAddress), cfg.MCPAdminHost)
 		bridge.operatorServer, err = startOperatorServer(cfg.Operator, routes, logger)
 		if err != nil {
@@ -377,47 +371,14 @@ func runBridge(cfg bridgeConfig) int {
 	if !bridge.isPaired() && !bridge.operatorLogout.Load() {
 		bridge.notifyConnection("pairing_required", "unpaired", true, false)
 	}
-	if bridge.operatorPairing != nil {
-		bridge.operatorPairing.start()
-	}
-
-	// Connect, or pair over QR on a fresh store. Each attempt has its own
-	// deadline; a rotated-code timeout starts the next attempt at once
-	// (pairing.go). The signal context aborts pairing while the bridge lifecycle
-	// remains alive until Shutdown drains accepted REST requests.
-	if bridge.operatorPairing == nil && !bridge.operatorLogout.Load() {
-		if err := connectOrPair(exitCtx, client, bridge.isPaired(), pairingOptions{
-			attempts:          3,
-			attemptTimeout:    5 * time.Minute,
-			retryDelay:        5 * time.Second,
-			out:               pairingOut,
-			log:               logger,
-			beforeDial:        func() error { return bridge.waitConnectionAllowedContext(exitCtx) },
-			connectionContext: bridge.ctx,
-			state: func(state string) {
-				bridge.setPairingState(state)
-				if state == "" {
-					bridge.notifyConnection("paired", "pairing_succeeded", true, false)
-				}
-			},
-		}); err != nil {
-			if errors.Is(err, context.Canceled) && exitCtx.Err() != nil {
-				logger.Infof("Shutting down during connection startup")
-				return 0
-			}
-			if !errors.Is(err, errPairingOperator) {
-				logger.Errorf("%v", err)
-				return 1
-			}
-			logger.Warnf("%v", err)
+	// One controller owns pairing in both stdout and private-operator mode.
+	// It stays alive after an unlink and never reuses the revoked SDK client.
+	bridge.operatorPairing.start()
+	if unlinkPending {
+		select {
+		case bridge.operatorPairing.kick <- struct{}{}:
+		default:
 		}
-	}
-
-	// Authentication can still need the queued 515 handshake. Consume it in
-	// the gated reconnect loop while REST reports readiness, rather than
-	// exiting before the loop has had a chance to establish the session.
-	if client.IsLoggedIn() {
-		bridgeLog.Infof("Connected to WhatsApp! Type 'help' for commands.")
 	}
 
 	bridgeLog.Infof("REST server is running. Press Ctrl+C to disconnect and exit.")

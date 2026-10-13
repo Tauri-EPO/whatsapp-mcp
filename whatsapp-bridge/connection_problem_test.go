@@ -282,8 +282,8 @@ func TestConcurrentConnectedDoesNotAbortLogoutOrFailure(t *testing.T) {
 			t.Fatalf("%T panicked %d times during recovery", event, panics.Load())
 		}
 		if _, logout := event.(*events.LoggedOut); logout {
-			if exits.Load() != count {
-				t.Fatalf("logout exits=%d want=%d", exits.Load(), count)
+			if exits.Load() != 0 {
+				t.Fatalf("logout exits=%d want=0", exits.Load())
 			}
 		} else if len(reconnect) != count {
 			t.Fatalf("failure reconnects=%d want=%d", len(reconnect), count)

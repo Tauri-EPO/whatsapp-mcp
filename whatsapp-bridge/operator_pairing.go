@@ -123,6 +123,10 @@ func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem
 		p.state.ConfirmationCode = evt.PasskeyConfirmation.Code
 	case "success":
 		p.invalidateLocked("paired")
+		if !p.b.operatorLogout.Load() {
+			p.b.setPairingState("")
+			p.b.notifyConnection("paired", "pairing_succeeded", true, false)
+		}
 	default:
 		if evt.Event == "timeout" || evt.Error != nil {
 			passkey := strings.HasPrefix(p.state.State, "passkey_")
@@ -145,7 +149,7 @@ func (p *operatorPairing) observe(generation uint64, evt whatsmeow.QRChannelItem
 func (p *operatorPairing) connectionEvent(evt interface{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	switch evt.(type) {
+	switch v := evt.(type) {
 	case *events.Connected:
 		p.invalidateLocked("connected")
 	case *events.PairSuccess:
@@ -159,6 +163,13 @@ func (p *operatorPairing) connectionEvent(evt interface{}) {
 		p.state.Generation++
 		if p.cancelAttempt != nil {
 			p.cancelAttempt()
+		}
+		if v.Reason == events.ConnectFailureLoggedOut || !v.OnConnect && v.Reason == 0 {
+			p.invalidateLocked("pairing_required")
+			select {
+			case p.kick <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -194,6 +205,14 @@ func (p *operatorPairing) completeLocked() {
 	}
 }
 
+func (p *operatorPairing) finishRetiredCompletion(client pairingClient) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.client == client {
+		p.completeLocked()
+	}
+}
+
 func (p *operatorPairing) waitCompletion() bool {
 	p.mu.Lock()
 	var done <-chan struct{}
@@ -215,6 +234,7 @@ func (p *operatorPairing) waitCompletion() bool {
 func (p *operatorPairing) run() {
 	defer close(p.done)
 	first := true
+	transportFailures := 0
 	for {
 		for attempt := 1; attempt <= p.state.Attempts; attempt++ {
 			if p.ctx.Err() != nil {
@@ -229,6 +249,17 @@ func (p *operatorPairing) run() {
 				p.action.Unlock()
 				break
 			}
+			_, state := p.b.connectionSnapshot()
+			if first && state == "pairing_required" {
+				// Startup could not remove the revoked session. Park in a state
+				// the operator can restart, before entering the blocked dial gate.
+				first = false
+				p.mu.Lock()
+				p.invalidateLocked("pairing_required")
+				p.mu.Unlock()
+				p.action.Unlock()
+				break
+			}
 			if !first && p.paired() {
 				p.action.Unlock()
 				break
@@ -237,6 +268,10 @@ func (p *operatorPairing) run() {
 				p.client.Disconnect()
 				client, err := p.factory()
 				if err != nil {
+					if p.ctx.Err() != nil {
+						p.action.Unlock()
+						return
+					}
 					p.b.Log.Errorf("Operator pairing client could not be initialized")
 					p.mu.Lock()
 					p.invalidateLocked("expired")
@@ -247,8 +282,10 @@ func (p *operatorPairing) run() {
 				p.mu.Lock()
 				p.client = client
 				p.mu.Unlock()
+				p.b.setPairingState("")
 			}
 			first = false
+			attemptProblem, _ := p.b.connectionSnapshot()
 			ctx, cancel := context.WithCancel(p.ctx)
 			p.mu.Lock()
 			p.state.Generation++
@@ -307,14 +344,44 @@ func (p *operatorPairing) run() {
 				// Final device save can succeed after the passkey deadline. The
 				// QR consumer's stale failure must not park this valid session.
 				p.b.setPairingState("")
-				if !problem.restrictsAccount() {
-					p.b.scheduleReconnect(p.reconnect)
-				}
-				break // Retain the paired device; only the gated consumer may redial.
+				p.b.scheduleReconnect(p.reconnect) // The consumer retains all account/expiry gates.
+				break                              // Retain the paired device; only the gated consumer may redial.
 			}
-			if errors.Is(err, errPairingOperator) || problem.restrictsAccount() {
+			if !errors.Is(err, errPairingOperator) && problem != nil && problem.Kind == "temporarily_banned" && problem != attemptProblem {
+				p.b.setPairingState("")
+				attempt = 0 // A new temporary ban owns the expiry gate, not a QR attempt.
+				continue
+			}
+			if errors.Is(err, errPairingOperator) || problem.restrictsAccount() && problem.Kind != "temporarily_banned" {
 				break
 			}
+			if errors.Is(err, errPairingTransport) {
+				transportFailures++
+				attempt-- // No QR was available to scan; keep its attempt budget.
+				p.mu.Lock()
+				p.invalidateLocked("starting")
+				p.mu.Unlock()
+				p.b.setPairingState("")
+				delay := min(p.opt.retryDelay, time.Minute)
+				if delay <= 0 {
+					delay = time.Second
+				}
+				for failure := 1; failure < transportFailures && delay < time.Minute; failure++ {
+					delay = min(delay*2, time.Minute)
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-p.ctx.Done():
+					timer.Stop()
+					return
+				case <-p.kick:
+					timer.Stop()
+					attempt, transportFailures = 0, 0
+				}
+				continue
+			}
+			transportFailures = 0
 			if attempt < p.state.Attempts {
 				timer := time.NewTimer(p.opt.retryDelay)
 				select {
@@ -327,6 +394,13 @@ func (p *operatorPairing) run() {
 					attempt = 0
 				}
 			}
+		}
+		if p.ctx.Err() != nil {
+			return
+		}
+		if !p.paired() && !p.b.operatorLogout.Load() && p.snapshot().State == "expired" {
+			p.b.setPairingState("pairing_required")
+			p.b.Log.Warnf("QR sequence expired or stopped; restart the bridge or POST /operator/v1/pairing/restart for a new QR")
 		}
 		select {
 		case <-p.ctx.Done():
@@ -466,13 +540,14 @@ func (p *operatorPairing) restart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	p.mu.Lock()
-	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccount())
+	active := p.completing || (p.state.State != "expired" && p.state.State != "passkey_failed" && p.state.State != "logged_out" && p.state.State != "pairing_required" && p.state.State != "logged_out_by_operator" && !problem.restrictsAccountAt(p.now()))
 	p.mu.Unlock()
 	if active {
 		writeErrorCode(w, 409, "pairing_active", "Wait for the current attempt to finish before restarting")
 		return
 	}
-	if !p.b.clearConnectionProblemIf(problem) {
+	// Release the acknowledged restriction without discarding pending revocation.
+	if !p.b.resolveConnectionProblemIf(problem) {
 		writeErrorCode(w, 409, "connection_state_changed", "WhatsApp restriction changed; read the current state before retrying")
 		return
 	}

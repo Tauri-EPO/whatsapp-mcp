@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -115,5 +117,48 @@ func TestRuntimeSDKPrePairHookAndTerminalEventControlCompletion(t *testing.T) {
 	b.installClient(fresh, false, reconnect)
 	if client.PrePairCallback(types.EmptyJID, "", "") {
 		t.Fatal("retired client could save another device")
+	}
+}
+
+func TestRetiredUnlinkClientTerminalEventReleasesCompletionWithoutPairing(t *testing.T) {
+	for _, terminal := range []any{&events.PairSuccess{}, &events.PairError{}} {
+		t.Run(fmt.Sprintf("%T", terminal), func(t *testing.T) {
+			client := newTestClient(&mockLIDStore{})
+			b := testBridge(t, client, newTestMessageStore(t), testLogger())
+			reconnect := make(chan bool, 1)
+			b.installClient(client, false, reconnect)
+			p := newOperatorPairing(b.ctx, b, client, nil, b.isPaired, b.Connected, io.Discard, reconnect)
+			b.operatorPairing = p
+			p.state.State, p.attemptContext = "awaiting_qr", b.ctx
+			if !client.PrePairCallback(types.EmptyJID, "", "") {
+				t.Fatal("completion not admitted")
+			}
+			done := p.completionDone
+			b.handleClientEvent(client, &events.LoggedOut{OnConnect: true, Reason: events.ConnectFailureLoggedOut}, reconnect)
+			if b.operatorRetiredClient.Load() != client {
+				t.Fatal("unlink did not retire its client")
+			}
+			select {
+			case <-done:
+				t.Fatal("completion released before the SDK finished saving")
+			default:
+			}
+			// An unrelated client must not drain this outstanding SDK save.
+			b.handleClientEvent(newTestClient(&mockLIDStore{}), terminal, reconnect)
+			select {
+			case <-done:
+				t.Fatal("unrelated client drained completion")
+			default:
+			}
+			b.handleClientEvent(client, terminal, reconnect)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("retired SDK completion stayed blocked")
+			}
+			if !p.waitCompletion() || b.isPaired() || p.snapshot().State != "pairing_required" {
+				t.Fatal("revoked completion admitted a paired session or blocked recovery")
+			}
+		})
 	}
 }

@@ -40,6 +40,7 @@ type Bridge struct {
 	ConnectionDebounce         time.Duration
 	connectionEventWait        func(context.Context, time.Duration) bool
 	connectionMu               sync.Mutex
+	connectionPersistMu        sync.Mutex
 	connectionProblem          *ConnectionProblem
 	connectionChanged          chan struct{}
 	connectionBlocked          func() // Test observation of a parked dial gate.
@@ -49,8 +50,13 @@ type Bridge struct {
 	problemWait                func(time.Duration) error
 	Client                     *whatsmeow.Client
 	runtimeClient              atomic.Pointer[whatsmeow.Client]
+	clientFactory              runtimeClientFactory
 	clientGate                 sync.RWMutex
 	runtimePaired              atomic.Bool
+	runtimeDeviceID            atomic.Pointer[string]
+	sessionCleanup             sessionCleanupFunc
+	cleanupRetryDelay          time.Duration
+	problemWrite               func(*os.Root, *ConnectionProblem) error
 	operatorPairing            *operatorPairing
 	operatorServer             *http.Server
 	sessionDB                  *sql.DB // Startup-owned session pool, observed without acquiring a connection.

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -82,13 +84,9 @@ func TestConnectionWebhookDebouncesBriefDisconnectAndPublishesLongGap(t *testing
 	}
 }
 
-func TestConnectionLogoutPostsBeforeExitAndCarriesClassifiedProblem(t *testing.T) {
+func TestConnectionLogoutStaysAliveAndCarriesClassifiedProblem(t *testing.T) {
 	b, posts := connectionTestReceiver(t)
-	b.Exit = func(_ string, code int) {
-		if code != 3 || len(posts) != 1 {
-			t.Errorf("exit before webhook: code=%d posts=%d", code, len(posts))
-		}
-	}
+	b.Exit = func(string, int) { t.Error("phone unlink must stay alive") }
 	b.handleEvent(&events.LoggedOut{Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
 	p := <-posts
 	if p.State != "logged_out" || p.Problem == nil || p.Problem.Kind != "unlinked" || p.Problem.Code != 401 {
@@ -205,4 +203,32 @@ func TestConnectionWebhookDeliveryKeepsTransitionOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSharedPairingControllerPublishesSuccessWebhook(t *testing.T) {
+	b, posts := connectionTestReceiver(t)
+	fake := newFakeOperatorClient()
+	fake.items <- whatsmeow.QRChannelItem{Event: "code", Code: "FAKE-SUCCESS-QR", Timeout: time.Minute}
+	fake.items <- whatsmeow.QRChannelItem{Event: "success"}
+	p := newOperatorPairing(b.ctx, b, fake, nil, func() bool { return false }, b.Connected, io.Discard, make(chan bool, 1))
+	b.operatorPairing = p
+	p.start()
+	select {
+	case payload := <-posts:
+		if payload.State != "paired" || payload.Reason != "pairing_succeeded" || payload.PairingState != "" {
+			t.Fatalf("pairing webhook=%+v", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("successful pairing did not publish paired")
+	}
+	// The observer validates the generation and de-duplicates repeated success.
+	state := p.snapshot()
+	p.observe(state.Generation-1, whatsmeow.QRChannelItem{Event: "success"})
+	p.observe(state.Generation, whatsmeow.QRChannelItem{Event: "success"})
+	b.connectionEvents.Wait()
+	if len(posts) != 0 {
+		t.Fatal("duplicate or stale success posted another paired event")
+	}
+	b.cancel()
+	<-p.done
 }

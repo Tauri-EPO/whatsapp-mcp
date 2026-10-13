@@ -15,10 +15,19 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
+type runtimeClientFactory func(*store.Device, waLog.Logger) *whatsmeow.Client
+
 // Wrap the root before the SDK caches child loggers, both on startup and on
 // operator restarts. URL-error redaction must survive every client handoff.
 func newRuntimeClient(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
-	return whatsmeow.NewClient(device, sdkSafeLogger{logger})
+	return makeRuntimeClient(device, logger, nil)
+}
+
+func makeRuntimeClient(device *store.Device, logger waLog.Logger, factory runtimeClientFactory) *whatsmeow.Client {
+	if factory == nil {
+		factory = whatsmeow.NewClient
+	}
+	return factory(device, sdkSafeLogger{logger})
 }
 
 // The SDK logs raw QR payloads and protocol frames at DEBUG. When pairing
@@ -42,6 +51,9 @@ func (b *Bridge) currentClient() *whatsmeow.Client {
 }
 
 func (b *Bridge) isPaired() bool {
+	if b.operatorRetiredClient.Load() == b.currentClient() {
+		return false
+	}
 	if b.runtimeClient.Load() != nil {
 		return b.runtimePaired.Load()
 	}
@@ -58,7 +70,7 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 	if client.Log == nil {
 		client.Log = b.Log
 	}
-	client.Log = connectionProblemLogger{Logger: client.Log, bridge: b, active: func() bool { return b.currentClient() == client }}
+	client.Log = connectionProblemLogger{Logger: client.Log, bridge: b, active: func() bool { return b.currentClient() == client && b.operatorRetiredClient.Load() != client }}
 	client.PrePairCallback = func(types.JID, string, string) bool {
 		if b.currentClient() != client {
 			return false
@@ -68,6 +80,11 @@ func (b *Bridge) installClient(client *whatsmeow.Client, paired bool, reconnect 
 	b.connectionMu.Lock()
 	b.forceReconnect.Store(false)
 	b.runtimePaired.Store(paired)
+	b.runtimeDeviceID.Store(nil)
+	if paired && client.Store.ID != nil {
+		id := client.Store.ID.String()
+		b.runtimeDeviceID.Store(&id)
+	}
 	b.runtimeClient.Store(client)
 	b.connectionMu.Unlock()
 	client.AddEventHandler(func(evt interface{}) {
@@ -81,15 +98,33 @@ func (b *Bridge) handleClientEvent(client *whatsmeow.Client, evt interface{}, re
 	active := func() bool {
 		return !b.operatorLogout.Load() && b.operatorRetiredClient.Load() != client && b.currentClient() == client
 	}
+	drainCompletion := func() {
+		// A retired client may still be finishing the SDK's asynchronous save.
+		// Drain only its terminal completion; never publish its paired state.
+		if b.operatorPairing != nil {
+			switch evt.(type) {
+			case *events.PairSuccess, *events.PairError:
+				b.operatorPairing.finishRetiredCompletion(client)
+			}
+		}
+	}
 	if !b.admitClientCallback(active) {
+		drainCompletion()
 		return
 	}
 	defer b.clientGate.RUnlock()
 	if b.currentClient() != client || b.operatorLogout.Load() || b.operatorRetiredClient.Load() == client {
+		drainCompletion()
 		return
 	} // Ignore a retired client's late events.
-	switch evt.(type) {
-	case *events.PairSuccess, *events.Connected:
+	switch v := evt.(type) {
+	case *events.PairSuccess:
+		if !v.ID.IsEmpty() {
+			id := v.ID.String()
+			b.runtimeDeviceID.Store(&id)
+		}
+		b.runtimePaired.Store(true)
+	case *events.Connected:
 		b.runtimePaired.Store(true)
 	case *events.LoggedOut:
 		b.runtimePaired.Store(false)
@@ -126,8 +161,8 @@ func (b *Bridge) bindRuntimeClient() {
 	b.Connect = func() error {
 		// reconnectLoop owns clientGate for the whole reconnect operation.
 		// RWMutex read locks cannot nest when an exclusive writer is queued.
-		if b.operatorLogout.Load() {
-			return errors.New("device logged out by operator")
+		if b.operatorLogout.Load() || b.operatorRetiredClient.Load() == b.currentClient() {
+			return errors.New("device logged out")
 		}
 		if b.operatorPairing != nil && !b.isPaired() {
 			return errors.New("unpaired client requires the pairing controller")
@@ -135,7 +170,10 @@ func (b *Bridge) bindRuntimeClient() {
 		return b.currentClient().ConnectContext(b.ctx)
 	}
 	b.Disconnect = func() { b.currentClient().Disconnect() }
-	b.Connected = func() bool { c := b.currentClient(); return c != nil && c.IsConnected() }
+	b.Connected = func() bool {
+		c := b.currentClient()
+		return c != nil && b.operatorRetiredClient.Load() != c && c.IsConnected()
+	}
 	b.SendAppState = func(ctx context.Context, patch appstate.PatchInfo) error {
 		return b.currentClient().SendAppState(ctx, patch)
 	}

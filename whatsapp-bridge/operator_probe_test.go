@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,24 @@ func TestOperatorStatusProbeUsesDirectHTTPAndPrintsNoCredentials(t *testing.T) {
 	}
 	if proxyCalls != 0 {
 		t.Fatal("probe followed a redirect or inherited proxy")
+	}
+}
+
+func TestOperatorStatusProbeReadsPairingRequiredFromActualRoutes(t *testing.T) {
+	b := newSettingsBridge(t)
+	p := newOperatorPairing(b.ctx, b, newFakeOperatorClient(), nil, b.isPaired, b.Connected, io.Discard, make(chan bool, 1))
+	p.state.State = "pairing_required"
+	b.operatorPairing = p
+	server := httptest.NewUnstartedServer(nil)
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	cfg := operatorConfig{Bind: "127.0.0.1", Port: port, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}
+	server.Config.Handler = newOperatorHandler(cfg, p.routes(), b.Log)
+	server.Start()
+	defer server.Close()
+	var out bytes.Buffer
+	code := operatorStatusProbe(operatorTestValues(map[string]string{operatorPortEnv: strconv.Itoa(port)}), &out)
+	if code != 0 || out.String() != "pairing_required\n" {
+		t.Fatalf("actual-route cleanup probe exit=%d output=%q", code, out.String())
 	}
 }
 

@@ -8,10 +8,13 @@ Symptoms and fixes for pairing, auth, sync and app-state problems. For container
 with `kind`, numeric WhatsApp `code`, `since`, and, for temporary bans,
 `temp_ban_reason` and `expires_at`. Metrics expose a gauge per kind and
 temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
+An unlink can coexist with a restriction: `unlinked_at` records the revocation,
+while `kind`, reason and expiry keep reporting the ban or lock. Both gauges can
+be active. Cleanup removes the revoked session even while dialing stays blocked.
 
 | Kind | Operator action |
 |---|---|
-| `unlinked` (401) | Normal device unlink: the bridge exits with code 3; restart and scan a QR. |
+| `unlinked` (401) | Device unlink: the bridge stays up in `pairing_required`, discards the revoked session and starts a fresh QR flow. Scan the new QR to link again. |
 | `locked` (403) | Check primary-device account access in official WhatsApp; automatic pairing is blocked. |
 | `banned` (406) | Resolve the account restriction through official WhatsApp; automatic pairing is blocked. |
 | `temporarily_banned` (402) | Wait until `expires_at`; the bridge suspends all dials and resumes afterward. An unknown duration uses one hour. |
@@ -20,11 +23,30 @@ temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 | `other` | Inspect the numeric code; normal reconnect backoff continues. |
 
 The last problem is saved as the owner-only file `store/.connection-problem`.
-It survives container restarts. To explicitly retry a blocked account after
-resolving its restriction, an unpaired instance with the private operator
+It survives container restarts. Unlink information in this file prevents startup
+from connecting with revoked keys: it removes the device the marker names
+and verifies its absence before creating a fresh pairing client. Legacy markers
+without an identity remove the single-account session. Cleanup starts after
+REST is available, has no short deadline, retries database contention/storage
+failures and is cancelled only on shutdown. Health stays responsive during it. It then saves
+`session_removed:true` so a session saved by the new pairing survives a restart
+before authentication completes. Keep the file
+until pairing succeeds; deleting it early removes that protection. If local
+session removal fails, REST stays alive in `pairing_required` without dialing.
+Fix the store error; cleanup retries automatically. A restart resumes pending
+cleanup. After successfully replacing `whatsapp.db`, backup restore strips only
+the old unlink fields and keeps any account-restriction marker. An unreadable
+marker is kept unchanged, with a warning; restore still finishes, and the bridge
+refuses that marker until it is repaired. A marker for another
+device never deletes a newly restored session.
+
+To explicitly retry a blocked account after resolving its restriction, an unpaired instance with the private operator
 listener can use authenticated `POST /operator/v1/pairing/restart`; a live
 paired session refuses this operation. Without that listener, stop the bridge,
-remove that single saved state file from its store volume, and restart. Keep
+remove that single saved state file only if it contains no pending unlink, and
+restart. For a mixed restriction and unlink, enable the private listener and
+restart pairing there: that action clears the resolved restriction while
+preserving the revoked identity and cleanup completion. Keep
 the databases and account keys.
 Do not clear a temporary ban early. An unreadable/corrupt state stops startup
 before any connection or QR. `connection_problem_persistence_failed` in health
@@ -32,7 +54,9 @@ reports a write error. Only account restrictions block dials on that error;
 the gate retries their write while retaining the restriction in memory.
 Transient failures keep normal reconnect backoff. `client_outdated` records
 the build version, commit and whatsmeow identity; a different build clears
-only that class, preserving account bans and locks.
+only that class, preserving account bans, locks and any pending unlink fence.
+Temporary bans received during a QR attempt resume pairing through the expiry
+gate automatically; they do not require an operator restart after expiry.
 Connection-event webhooks are available through
 `WEBHOOK_FORWARD_CONNECTION_EVENTS` ([payload and debounce](CONFIGURATION.md#connection-monitoring-contract)).
 Temporary-ban reasons 101, 102, 103, 104 and 106 are
@@ -72,10 +96,11 @@ a quoted number, a trailing comment or `unlimited` used to silently select
 `106751`; larger values used to overflow, potentially disabling retention or
 sweeping nearly all cached media. Empty values retain the defaults.
 
-Startup I/O errors, failure to connect after three attempts, a QR pairing
-timeout and failure to establish a stable connection now exit with status 1
-after cleanup. A supervisor using restart-on-failure therefore retries even an
-unpaired bridge. Normal shutdown after a successful connection exits 0.
+Startup I/O errors exit with status 1 after cleanup. QR attempts are bounded
+to three; after they expire the bridge stays alive serving REST. Health and
+logs explain that a new QR requires a bridge restart or operator pairing restart.
+Restart the pairing through the private operator listener, or restart the
+container to begin another sequence. Normal shutdown exits 0.
 
 ## Authentication Issues
 
@@ -461,7 +486,7 @@ Restarts now honour the last blip saved in the store's `.session-keepalive` file
 the new INFO line says when the next blip is due. To force one after the session
 settles, delete that file in the store directory and restart the bridge.
 
-If the device was already logged out, the bridge exits and waits for a new QR
+If the device was already logged out, the bridge stays alive and waits for a new QR
 scan: `docker compose logs -f bridge`, scan, done. The archive in `messages.db`
 is kept; only the session in `whatsapp.db` is replaced.
 

@@ -606,7 +606,9 @@ def test_compose_mode_reads_whisper_url_from_dot_env(stack: Stack) -> None:
     assert "compose exec -T mcp python" in stack.docker_calls()
 
 
-@pytest.mark.parametrize("operator_state", ["passkey_required", "logged_out_by_operator"])
+@pytest.mark.parametrize(
+    "operator_state", ["passkey_required", "logged_out_by_operator", "pairing_required", "expired"]
+)
 def test_unpaired_smoke_reports_only_operator_state(stack: Stack, operator_state: str) -> None:
     result = stack.run(
         FAKE_COMPOSE_PS="  bridge: running healthy\n",
@@ -622,6 +624,11 @@ def test_unpaired_smoke_reports_only_operator_state(stack: Stack, operator_state
     if operator_state == "logged_out_by_operator":
         assert "Restart pairing explicitly" in result.stdout
         assert "scan the QR code" not in result.stdout
+    if operator_state == "pairing_required":
+        assert "cleanup is pending and retries automatically" in result.stdout
+        assert "state unavailable" not in result.stdout
+    if operator_state == "expired":
+        assert "restart the bridge or POST /operator/v1/pairing/restart" in result.stdout
     assert "FAKE-QR-CREDENTIAL" not in result.stdout + result.stderr
     assert "FAKE-CODE-CREDENTIAL" not in result.stdout + result.stderr
     assert "fake-operator-token" not in result.stdout + result.stderr

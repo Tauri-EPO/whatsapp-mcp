@@ -936,10 +936,25 @@ authentication on that endpoint, so keep it inside a network you trust.
   (version, commit, Go and whatsmeow versions, FTS5 state); the MCP server
   reports its version in the `initialize` response and its startup log.
 - Backup: see [Backup and restore](#backup-and-restore) below.
-- If the phone unlinks the device (WhatsApp > Linked Devices > Log out) or
-  WhatsApp rejects the client version as outdated, the bridge exits (code 3
-  or 4) instead of idling; `restart: unless-stopped` brings it back into the
-  pairing flow and `docker compose logs -f bridge` shows a fresh QR code.
+- If the phone unlinks the device (WhatsApp > Linked Devices > Log out), the
+  bridge stays up in `pairing_required`: REST and `/api/health` remain alive,
+  health reports `paired:false`, and `/api/ready` returns 503. A fresh QR flow
+  appears in `docker compose logs -f bridge` (or the private operator listener).
+  Saved unlink information prevents reuse of revoked keys across restarts,
+  including when a ban or lock keeps its own diagnostic kind and dial gate;
+  startup serves REST while cleanup removes and verifies the named revoked
+  session before pairing. Cleanup retries contention and storage errors without
+  a short deadline. Shutdown cancels the transaction; if deletion does not
+  finish within the 30-second stop grace, its work rolls back and the next
+  start retries deletion from the beginning.
+  Durable cleanup completion preserves a newly paired replacement across
+  restarts before its first authenticated connection. Archives
+  are kept. `restart: unless-stopped` cannot turn an unlink into an exit loop.
+  Expired QR attempts leave REST alive; health and logs tell you to restart the
+  bridge or use the private pairing restart route for a new QR.
+- An outdated client still exits with code 4 and persists `client_outdated`;
+  upgrade the bridge before retrying. Banned/locked accounts stay blocked and
+  temporary bans suspend dialing until their saved expiry.
 - Only one bridge may use a session at a time. Do not run the compose stack
   and a laptop bridge against the same store, and do not pair the same phone
   twice with two different stores: WhatsApp will keep replacing the stream.

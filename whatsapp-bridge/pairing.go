@@ -14,12 +14,157 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
+
+type sessionCleanupFunc func(context.Context, *sqlstore.Container, *ConnectionProblem) (*store.Device, *ConnectionProblem, error)
+
+var errSessionCleanupPublication = errors.New("session cleanup completion could not be saved")
+
+// SDK Device.Delete mutates its object. Reload an independent object and remove
+// only the identity the unlink named; old markers without an identity use the
+// legacy single-account store cleanup. The caller's context is shutdown only.
+func prepareSessionDevice(ctx context.Context, container *sqlstore.Container, problem *ConnectionProblem) (*store.Device, *ConnectionProblem, error) {
+	if problem.isUnlinked() && !problem.SessionRemoved {
+		devices, err := container.GetAllDevices(ctx)
+		if err != nil {
+			return nil, problem, err
+		}
+		revoked := func(device *store.Device) bool {
+			return problem.RevokedDevice == "" || device.ID.String() == problem.RevokedDevice
+		}
+		for _, device := range devices {
+			if revoked(device) {
+				if err := device.Delete(ctx); err != nil {
+					return nil, problem, fmt.Errorf("remove revoked session: %w", err)
+				}
+			}
+		}
+		devices, err = container.GetAllDevices(ctx)
+		if err != nil {
+			return nil, problem, err
+		}
+		for _, device := range devices {
+			if revoked(device) {
+				return nil, problem, errors.New("revoked session still present")
+			}
+		}
+		next := *problem
+		next.SessionRemoved = true
+		device, err := container.GetFirstDevice(ctx)
+		return device, &next, err
+	}
+	device, err := container.GetFirstDevice(ctx)
+	return device, problem, err
+}
+
+// Startup/test wrapper; the production startup defers cleanup to the factory
+// until after REST serves health. Completion is durable before pairing begins.
+func startupDevice(ctx context.Context, container *sqlstore.Container, root *os.Root, problem *ConnectionProblem) (*store.Device, *ConnectionProblem, error) {
+	device, next, err := prepareSessionDevice(ctx, container, problem)
+	if err != nil {
+		return nil, problem, err
+	}
+	if next != problem {
+		if err := writeConnectionProblem(root, next); err != nil {
+			return nil, problem, errors.Join(errSessionCleanupPublication, err)
+		}
+	}
+	return device, next, nil
+}
+
+func initialSessionDevice(ctx context.Context, container *sqlstore.Container, problem *ConnectionProblem) (*store.Device, bool, error) {
+	if problem.isUnlinked() && !problem.SessionRemoved {
+		return container.NewDevice(), true, nil
+	}
+	device, err := container.GetFirstDevice(ctx)
+	return device, false, err
+}
+
+// SQL and disk work do not hold the health mutex. The publication mutex orders
+// marker writes, and only the snapshot cleaned here may publish completion.
+func (b *Bridge) unlinkedDevice(ctx context.Context, container *sqlstore.Container) (*store.Device, error) {
+	expected, _ := b.connectionSnapshot()
+	if !expected.isUnlinked() {
+		return nil, errors.New("unlink state changed")
+	}
+	cleanup := b.sessionCleanup
+	if cleanup == nil {
+		cleanup = prepareSessionDevice
+	}
+	device, next, err := cleanup(ctx, container, expected)
+	if err != nil {
+		return nil, err
+	}
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
+	current, _ := b.connectionSnapshot()
+	if current != expected {
+		return nil, errors.New("unlink state changed")
+	}
+	if err := b.persistConnectionSnapshot(next); err != nil {
+		return nil, errors.Join(errSessionCleanupPublication, err)
+	}
+	b.connectionMu.Lock()
+	b.connectionProblem = next
+	b.connectionChangedLocked()
+	b.connectionMu.Unlock()
+	return device, nil
+}
+
+// Both startup and post-unlink recovery use this exact factory. SQLite may be
+// busy with the SDK's cascade, or storage may need operator repair; keep health
+// alive and retry without consuming a QR attempt or reusing revoked keys.
+func (b *Bridge) pairingClientFactory(ctx context.Context, container *sqlstore.Container, history historyLimits, fullHistory bool, logger waLog.Logger, reconnect chan bool) func() (operatorPairingClient, error) {
+	return func() (operatorPairingClient, error) {
+		device := container.NewDevice()
+		problem, _ := b.connectionSnapshot()
+		if problem.isUnlinked() {
+			warned := false
+			for {
+				var err error
+				device, err = b.unlinkedDevice(ctx, container)
+				if err == nil {
+					break
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				current, _ := b.connectionSnapshot()
+				if !current.isUnlinked() {
+					return nil, err // Preserve a newer restriction or explicit reset.
+				}
+				b.setPairingState("pairing_required")
+				if !warned {
+					b.Log.Warnf("Revoked session cleanup pending; retrying until shutdown: %v", err)
+					warned = true
+				}
+				delay := b.cleanupRetryDelay
+				if delay <= 0 {
+					delay = time.Second
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
+			}
+		}
+		history.apply(store.DeviceProps, device.ID != nil, fullHistory)
+		fresh := makeRuntimeClient(device, logger, b.clientFactory)
+		b.installClient(fresh, device.ID != nil, reconnect)
+		return fresh, nil
+	}
+}
 
 // pairingClient is the slice of *whatsmeow.Client the pairing flow needs.
 type pairingClient interface {
@@ -44,6 +189,7 @@ type pairingOptions struct {
 }
 
 var errPairingTimeout = errors.New("QR pairing timed out")
+var errPairingTransport = errors.New("pairing transport failed")
 var errPairingOperator = errors.New("WhatsApp passkey step requires operator intervention; see docs/DOCKER.md Pairing")
 
 // connectOrPair connects a paired client, or runs the QR pairing flow for an
@@ -68,7 +214,7 @@ func connectOrPair(ctx context.Context, c pairingClient, paired bool, opt pairin
 
 		if paired {
 			if err := pairingConnect(ctx, c, opt); err != nil {
-				lastErr = err
+				lastErr = errors.Join(errPairingTransport, err)
 				opt.log.Errorf("Failed to connect (attempt %d): %v", attempt, err)
 				continue
 			}
@@ -101,7 +247,7 @@ func pairOnce(parent context.Context, c pairingClient, opt pairingOptions, attem
 	}
 	if err := pairingConnect(parent, c, opt); err != nil {
 		opt.log.Errorf("Failed to connect (attempt %d): %v", attempt, err)
-		return err
+		return errors.Join(errPairingTransport, err)
 	}
 
 	// whatsmeow rotates the code roughly every 20 seconds and the phone

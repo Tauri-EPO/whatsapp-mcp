@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -43,12 +44,15 @@ func (l connectionProblemLogger) Sub(module string) waLog.Logger {
 }
 
 type ConnectionProblem struct {
-	Kind          string     `json:"kind"`
-	Code          int        `json:"code"`
-	TempBanReason int        `json:"temp_ban_reason,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	Since         time.Time  `json:"since"`
-	BuildVersion  string     `json:"build_version,omitempty"`
+	UnlinkedAt     *time.Time `json:"unlinked_at,omitempty"`
+	RevokedDevice  string     `json:"-"` // Private disk identity; never returned in health or webhooks.
+	SessionRemoved bool       `json:"session_removed,omitempty"`
+	Kind           string     `json:"kind"`
+	Code           int        `json:"code"`
+	TempBanReason  int        `json:"temp_ban_reason,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	Since          time.Time  `json:"since"`
+	BuildVersion   string     `json:"build_version,omitempty"`
 }
 
 func classifyConnectionProblem(code int, reason int, expire time.Duration, now time.Time) *ConnectionProblem {
@@ -87,6 +91,25 @@ func (p *ConnectionProblem) restrictsAccount() bool {
 	return p != nil && (p.Kind == "temporarily_banned" || p.Kind == "banned" || p.Kind == "locked" || p.Kind == "client_outdated")
 }
 
+func (p *ConnectionProblem) restrictsAccountAt(now time.Time) bool {
+	return p.restrictsAccount() && (p.Kind != "temporarily_banned" || p.ExpiresAt == nil || now.Before(*p.ExpiresAt))
+}
+
+// Revocation is independent of account restrictions. Older unlink markers have
+// only Kind; a ban may coexist with the timestamp and must keep its dial gate.
+func (p *ConnectionProblem) isUnlinked() bool {
+	return p != nil && (p.Kind == "unlinked" || p.UnlinkedAt != nil)
+}
+
+func (p *ConnectionProblem) unlinkOnly() *ConnectionProblem {
+	next := *p
+	next.Kind, next.Code, next.TempBanReason, next.ExpiresAt, next.BuildVersion = "unlinked", 401, 0, nil, ""
+	if p.UnlinkedAt != nil {
+		next.Since = *p.UnlinkedAt
+	}
+	return &next
+}
+
 func (b *Bridge) connectionSnapshot() (*ConnectionProblem, string) {
 	b.connectionMu.Lock()
 	defer b.connectionMu.Unlock()
@@ -122,18 +145,44 @@ func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration)
 }
 
 func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duration, active func() bool) *ConnectionProblem {
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
 	b.connectionMu.Lock()
-	defer b.connectionMu.Unlock()
 	if active != nil && !active() {
+		b.connectionMu.Unlock()
 		return nil
 	}
-	next := classifyConnectionProblem(code, reason, expire, b.connectionNow())
-	// A transient failure cannot erase an account restriction received earlier.
-	if !next.restrictsAccount() && b.connectionProblem.restrictsAccount() {
-		return b.connectionProblem
+	now := b.connectionNow().UTC()
+	next := classifyConnectionProblem(code, reason, expire, now)
+	previous := b.connectionProblem
+	if !next.restrictsAccount() && previous.restrictsAccount() {
+		if code != 401 {
+			b.connectionMu.Unlock()
+			return previous
+		}
+		preserved := *previous
+		next = &preserved // Retain ban kind, expiry, reason and original since.
+	}
+	if code != 401 && previous.isUnlinked() {
+		if !next.restrictsAccount() && b.operatorRetiredClient.Load() == b.currentClient() {
+			b.connectionMu.Unlock()
+			return previous
+		}
+		next.UnlinkedAt, next.RevokedDevice, next.SessionRemoved = previous.UnlinkedAt, previous.RevokedDevice, previous.SessionRemoved
+		if next.UnlinkedAt == nil {
+			at := previous.Since // Preserve revocation in a legacy Kind-only marker.
+			next.UnlinkedAt = &at
+		}
+	}
+	if code == 401 {
+		next.UnlinkedAt, next.SessionRemoved, next.RevokedDevice = &now, false, ""
+		if id := b.runtimeDeviceID.Load(); id != nil {
+			next.RevokedDevice = *id
+		}
 	}
 	b.connectionProblem = next
 	b.connectionChangedLocked()
+	b.connectionMu.Unlock()
 	if code == 402 && b.metrics != nil {
 		b.metrics.mu.Lock()
 		if b.metrics.tempBans == nil {
@@ -147,51 +196,112 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 		b.metrics.tempBans[reason]++
 		b.metrics.mu.Unlock()
 	}
-	b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", b.connectionProblem.Kind, code, reason)
+	b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", next.Kind, next.Code, next.TempBanReason)
 	if b.StoreRoot != nil {
-		b.persistConnectionProblemLocked()
+		_ = b.persistConnectionSnapshot(next)
 	}
-	return b.connectionProblem
+	return next
 }
 
-func (b *Bridge) persistConnectionProblemLocked() {
+// Caller owns connectionPersistMu. Disk I/O never owns the health/state mutex.
+func (b *Bridge) persistConnectionSnapshot(problem *ConnectionProblem) error {
+	var err error
+	if b.problemWrite != nil {
+		err = b.problemWrite(b.StoreRoot, problem)
+	} else {
+		err = writeConnectionProblem(b.StoreRoot, problem)
+	}
+	b.connectionMu.Lock()
 	wasFailed := b.problemPersistenceFailed
-	err := writeConnectionProblem(b.StoreRoot, b.connectionProblem)
 	b.problemPersistenceFailed = err != nil
+	b.connectionMu.Unlock()
 	if err != nil && !wasFailed {
-		b.Log.Errorf("Could not persist connection problem (account restriction=%t): %v", b.connectionProblem.restrictsAccount(), err)
+		b.Log.Errorf("Could not persist connection problem (account restriction=%t): %v", problem.restrictsAccount(), err)
 	}
+	return err
 }
 
-func (b *Bridge) clearConnectionProblem() {
+func (b *Bridge) persistConnectionProblemIf(expected *ConnectionProblem) bool {
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
 	b.connectionMu.Lock()
-	defer b.connectionMu.Unlock()
-	b.clearConnectionProblemLocked()
-}
-
-// Snapshots are immutable. A recovery may clear only the restriction it
-// validated, never a newer SDK event received while the operator was checking.
-func (b *Bridge) clearConnectionProblemIf(expected *ConnectionProblem) bool {
-	b.connectionMu.Lock()
-	defer b.connectionMu.Unlock()
-	if b.connectionProblem != expected {
+	same := b.connectionProblem == expected
+	b.connectionMu.Unlock()
+	if !same {
 		return false
 	}
-	b.clearConnectionProblemLocked()
+	if b.StoreRoot != nil {
+		_ = b.persistConnectionSnapshot(expected)
+	}
 	return true
 }
 
-func (b *Bridge) clearConnectionProblemLocked() {
+func (b *Bridge) clearConnectionProblem() {
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
+	if b.operatorRetiredClient.Load() == b.currentClient() {
+		return
+	}
+	b.clearConnectionSnapshot(true)
+}
+
+func (b *Bridge) clearConnectionProblemIf(expected *ConnectionProblem) bool {
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
+	b.connectionMu.Lock()
+	same := b.connectionProblem == expected
+	b.connectionMu.Unlock()
+	if !same {
+		return false
+	}
+	b.clearConnectionSnapshot(false)
+	return true
+}
+
+// An explicit operator acknowledgement releases the restriction, while any
+// revoked-session identity and completion remain durable before the new kick.
+func (b *Bridge) resolveConnectionProblemIf(expected *ConnectionProblem) bool {
+	if !expected.isUnlinked() {
+		return b.clearConnectionProblemIf(expected)
+	}
+	b.connectionPersistMu.Lock()
+	defer b.connectionPersistMu.Unlock()
+	current, _ := b.connectionSnapshot()
+	if current != expected {
+		return false
+	}
+	next := expected.unlinkOnly()
+	if b.StoreRoot != nil {
+		if err := b.persistConnectionSnapshot(next); err != nil {
+			return true // Caller reports the persisted failure flag as 503.
+		}
+	}
+	b.connectionMu.Lock()
+	b.connectionProblem = next
+	b.connectionChangedLocked()
+	b.connectionMu.Unlock()
+	return true
+}
+
+// Caller owns connectionPersistMu; immutable snapshots cannot change mid-write.
+func (b *Bridge) clearConnectionSnapshot(keepOperatorIdle bool) {
 	if b.StoreRoot != nil {
 		if err := b.StoreRoot.Remove(connectionProblemFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			b.connectionMu.Lock()
 			b.problemPersistenceFailed = true
+			b.connectionMu.Unlock()
 			b.Log.Errorf("Could not clear saved connection problem: %v", err)
 			return
 		}
 	}
-	b.connectionProblem, b.pairingState = nil, ""
+	b.connectionMu.Lock()
+	b.connectionProblem = nil
+	if !keepOperatorIdle || !b.operatorLogout.Load() {
+		b.pairingState = ""
+	}
 	b.problemPersistenceFailed = false
 	b.connectionChangedLocked()
+	b.connectionMu.Unlock()
 }
 
 func (b *Bridge) setPairingState(state string) {
@@ -221,9 +331,12 @@ func (b *Bridge) waitConnectionAllowedContext(ctx context.Context) error {
 		}
 		p, state, changed := b.connectionWaitSnapshot()
 		b.connectionMu.Lock()
-		if b.problemPersistenceFailed && b.connectionProblem.restrictsAccount() && b.StoreRoot != nil {
-			b.persistConnectionProblemLocked()
+		retry := b.problemPersistenceFailed && p.restrictsAccount() && b.StoreRoot != nil
+		b.connectionMu.Unlock()
+		if retry {
+			b.persistConnectionProblemIf(p)
 		}
+		b.connectionMu.Lock()
 		failed := b.problemPersistenceFailed && b.connectionProblem.restrictsAccount()
 		b.connectionMu.Unlock()
 		if failed {
@@ -297,9 +410,23 @@ func readConnectionProblem(root *os.Root) (*ConnectionProblem, error) {
 	if err != nil {
 		return nil, err
 	}
-	var p ConnectionProblem
-	if len(data) > 4096 || json.Unmarshal(data, &p) != nil || p.Since.IsZero() {
+	var saved struct {
+		ConnectionProblem
+		RevokedDevice string `json:"revoked_device,omitempty"`
+	}
+	if len(data) > 4096 || json.Unmarshal(data, &saved) != nil || saved.Since.IsZero() {
 		return nil, errors.New("invalid saved connection problem")
+	}
+	p := saved.ConnectionProblem
+	p.RevokedDevice = saved.RevokedDevice
+	if p.UnlinkedAt != nil && p.UnlinkedAt.IsZero() {
+		return nil, errors.New("invalid saved unlink time")
+	}
+	if p.RevokedDevice != "" {
+		jid, err := types.ParseJID(p.RevokedDevice)
+		if err != nil || jid.IsEmpty() || jid.String() != p.RevokedDevice {
+			return nil, errors.New("invalid saved revoked device")
+		}
 	}
 	expected := classifyConnectionProblem(p.Code, p.TempBanReason, time.Hour, p.Since)
 	if p.Kind != expected.Kind || p.Kind == "temporarily_banned" && p.ExpiresAt == nil {
@@ -310,6 +437,13 @@ func readConnectionProblem(root *os.Root) (*ConnectionProblem, error) {
 
 func clearOutdatedBuildProblem(root *os.Root, p *ConnectionProblem, runningBuild string) (*ConnectionProblem, error) {
 	if p.Kind == "client_outdated" && p.BuildVersion != runningBuild {
+		if p.isUnlinked() {
+			next := p.unlinkOnly()
+			if err := writeConnectionProblem(root, next); err != nil {
+				return nil, err
+			}
+			return next, nil // An upgrade releases 405, never the unlink fence.
+		}
 		if err := root.Remove(connectionProblemFile); err != nil {
 			return nil, err
 		}
@@ -328,7 +462,10 @@ func writeConnectionProblem(root *os.Root, p *ConnectionProblem) error {
 		return err
 	}
 	defer func() { _ = root.Remove(part) }()
-	writeErr := json.NewEncoder(f).Encode(p)
+	writeErr := json.NewEncoder(f).Encode(struct {
+		*ConnectionProblem
+		RevokedDevice string `json:"revoked_device,omitempty"`
+	}{p, p.RevokedDevice})
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {

@@ -14,7 +14,7 @@ const operatorLogoutSchema = `CREATE TABLE IF NOT EXISTS operator_state (
 	id INTEGER PRIMARY KEY CHECK(id=1), logged_out INTEGER NOT NULL
 )`
 
-func (b *Bridge) restoreOperatorIdle() error {
+func (b *Bridge) restoreOperatorIdle(listenerEnabled bool) error {
 	var idle, wiped bool
 	if err := b.Store.db.QueryRow("SELECT COALESCE((SELECT logged_out FROM operator_state WHERE id=1),0), COALESCE((SELECT local_session_wiped FROM operator_state WHERE id=1),0)").Scan(&idle, &wiped); err != nil {
 		return err
@@ -25,7 +25,8 @@ func (b *Bridge) restoreOperatorIdle() error {
 		b.pairingState = "logged_out_by_operator" // Before any consumers start.
 		if b.operatorPairing != nil {
 			b.operatorPairing.state.State = "logged_out_by_operator"
-		} else {
+		}
+		if !listenerEnabled {
 			b.Log.Warnf("State logged_out_by_operator: re-enable WHATSAPP_OPERATOR_BIND and POST /operator/v1/pairing/restart to leave idle")
 		}
 	}

@@ -19,18 +19,18 @@ func (r *exitRecorder) fn(reason string, code int) {
 	r.code = code
 }
 
-func TestHandleEvent_LoggedOutExitsForRepair(t *testing.T) {
+func TestHandleEvent_LoggedOutStaysAliveForRepair(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	rec := &exitRecorder{}
 	b.Exit = rec.fn
 
 	b.handleEvent(&events.LoggedOut{OnConnect: false, Reason: events.ConnectFailureLoggedOut}, make(chan bool, 1))
 
-	if rec.calls != 1 || rec.code != exitCodeLoggedOut {
-		t.Fatalf("Exit calls=%d code=%d, want 1/%d", rec.calls, rec.code, exitCodeLoggedOut)
+	if rec.calls != 0 || b.isPaired() {
+		t.Fatalf("unlink exits=%d paired=%t", rec.calls, b.isPaired())
 	}
-	if rec.reason == "" {
-		t.Fatal("exit reason must explain what happened")
+	if _, state := b.connectionSnapshot(); state != "pairing_required" {
+		t.Fatalf("unlink state=%s", state)
 	}
 }
 

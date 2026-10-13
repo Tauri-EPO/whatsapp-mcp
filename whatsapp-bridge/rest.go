@@ -254,6 +254,9 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 	b.connectionMu.Unlock()
 	if problem != nil {
 		body["connection_problem"] = problem
+		if problem.isUnlinked() && !paired {
+			body["status"] = "pairing_required"
+		}
 		if problem.Kind == "banned" || problem.Kind == "locked" || problem.Kind == "client_outdated" {
 			body["status"] = "blocked"
 		}
@@ -262,10 +265,20 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		}
 	}
 	if pairingState != "" {
-		body["pairing_state"], body["status"] = pairingState, pairingState
+		body["pairing_state"] = pairingState
+		if body["status"] != "blocked" && body["status"] != "temporarily_banned" {
+			body["status"] = pairingState
+		}
 	}
 	if b.operatorPairing != nil {
-		body["operator_pairing_state"] = b.operatorPairing.snapshot().State
+		state := b.operatorPairing.snapshot().State
+		body["operator_pairing_state"] = state
+		if state == "expired" && !problem.restrictsAccountAt(b.connectionNow()) {
+			body["pairing_action"] = "Restart the bridge or POST /operator/v1/pairing/restart for a new QR"
+		}
+	}
+	if problem.isUnlinked() && !problem.SessionRemoved {
+		body["pairing_action"] = "Session cleanup is pending and retries automatically; wait for a fresh QR"
 	}
 	if stats != nil {
 		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles := stats.snapshotScoped(time.Now())
