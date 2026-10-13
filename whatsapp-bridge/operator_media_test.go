@@ -22,6 +22,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// inboundGuardWait bounds the "must not block" checks below. Each one fails only
+// when the guarded path stays blocked until the test releases it, so the bound
+// is generous: half a second was not enough on a loaded runner (issue #702).
+const inboundGuardWait = 5 * time.Second
+
 func mediaOperatorServer(t *testing.T, b *Bridge) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, operatorRoutes{mediaUsage: b.handleOperatorMediaUsage, mediaPurge: b.handleOperatorMediaPurge, settings: b.handleRuntimeSettings}, b.Log))
@@ -518,7 +523,7 @@ func TestLocalQuotaLeaseWaitHonorsContext(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(inboundGuardWait):
 		once.Do(release)
 		<-done
 		t.Fatal("quota waiter retained lease after its deadline")
@@ -579,7 +584,7 @@ func TestLocalQuotaExpiredAutomaticTransferReleasesClientGate(t *testing.T) {
 			t.Fatal("completed transfer retained its client reader gate")
 		}
 		b.clientGate.Unlock()
-	case <-time.After(time.Second):
+	case <-time.After(inboundGuardWait):
 		t.Fatal("expired automatic transfer stayed behind an unrelated quota lease")
 	}
 }
@@ -743,7 +748,7 @@ func TestLocalQuotaSlowNetworkDoesNotBlockInboundImage(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(inboundGuardWait):
 		t.Fatal("no real transfer admission")
 	}
 	msg := buildImageMessage(phonePN, phonePN, false, "caption")
@@ -757,7 +762,7 @@ func TestLocalQuotaSlowNetworkDoesNotBlockInboundImage(t *testing.T) {
 	go func() { b.handleMessage(msg); close(handled) }()
 	select {
 	case <-handled:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(inboundGuardWait):
 		once.Do(func() { close(finish) })
 		<-handled
 		t.Fatal("unrelated transfer blocked inbound processing")
@@ -831,7 +836,7 @@ func TestLocalQuotaCompletedTransferDoesNotWaitForAccounting(t *testing.T) {
 			go func() { b.mediaTransfers.wait(); close(drained) }()
 			select {
 			case <-drained:
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(inboundGuardWait):
 				unlockOnce.Do(unlock)
 				<-drained
 				t.Fatal("finished transfer retained client gate behind unrelated accounting")
@@ -886,7 +891,7 @@ func TestLocalQuotaConcurrentNetworkReservations(t *testing.T) {
 	for range 2 {
 		select {
 		case <-entered:
-		case <-time.After(time.Second):
+		case <-time.After(inboundGuardWait):
 			t.Fatal("network transfer retained accounting lease")
 		}
 	}
@@ -1046,7 +1051,7 @@ func TestLocalQuotaSynchronousAccountingContentionFallsBack(t *testing.T) {
 	go func() { b.handleMessage(msg); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(inboundGuardWait):
 		once.Do(release)
 		<-done
 		t.Fatal("synchronous image waited on accounting")
@@ -1057,7 +1062,7 @@ func TestLocalQuotaSynchronousAccountingContentionFallsBack(t *testing.T) {
 	once.Do(release)
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(inboundGuardWait):
 		t.Fatal("background fallback not consumed")
 	}
 	b.mediaTransfers.wait()
@@ -1116,7 +1121,7 @@ func TestLocalQuotaSynchronousRuntimeAccountingHasShortBudget(t *testing.T) {
 		if !errors.Is(err, errMediaQuotaBusy) {
 			t.Fatal("sync accounting reached network or returned the wrong refusal", err)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(inboundGuardWait):
 		connectionOnce.Do(func() { _ = conn.Close() })
 		<-result
 		t.Fatal("sync media path waited indefinitely for runtime accounting")
