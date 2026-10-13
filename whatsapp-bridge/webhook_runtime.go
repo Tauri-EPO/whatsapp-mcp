@@ -269,7 +269,12 @@ func (w *runtimeWebhook) deliver(ctx context.Context, g *runtimeWebhookGeneratio
 	if err != nil {
 		return false, "receiver_refused"
 	}
-	transport := &http.Transport{Proxy: nil, TLSClientConfig: w.tlsConfig, TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 5 * time.Second,
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if w.tlsConfig != nil {
+		tlsConfig = w.tlsConfig.Clone()
+	}
+	tlsConfig.ServerName = u.Hostname()
+	transport := &http.Transport{Proxy: nil, TLSClientConfig: tlsConfig, TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 5 * time.Second,
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			var lastErr error
 			for _, address := range pinned {
@@ -286,10 +291,16 @@ func (w *runtimeWebhook) deliver(ctx context.Context, g *runtimeWebhookGeneratio
 		}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(d.body))
+	// The URL authority is an internal transport key, never a user-selected
+	// network destination. Only the checked IP list above can choose a socket;
+	// preserve the receiver's verified TLS name, Host and request target separately.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://runtime-webhook.invalid/", bytes.NewReader(d.body))
 	if err != nil {
 		return false, "request_failed"
 	}
+	req.Host = u.Host
+	req.URL.Path, req.URL.RawPath = u.Path, u.RawPath
+	req.URL.RawQuery, req.URL.ForceQuery = u.RawQuery, u.ForceQuery
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(g.config.Secret))
 	_, _ = mac.Write([]byte(ts + "."))

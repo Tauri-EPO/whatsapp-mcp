@@ -14,7 +14,8 @@ def test_runtime_webhook_documented_verifier():
         code for code in re.findall(r"```python\n(.*?)```", document, re.DOTALL) if "def verify_webhook(" in code
     )
     namespace = {}
-    exec(compile(snippet, "documented_webhook_verifier", "exec"), namespace)
+    # Execute trusted code from this checkout, never webhook or user input.
+    exec(compile(snippet, "documented_webhook_verifier", "exec"), namespace)  # nosec B102
     verify = namespace["verify_webhook"]
     secret = "fake-receiver-verification-secret"
     body = json.dumps({"event_id": "fake-event"}).encode()

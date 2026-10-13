@@ -27,8 +27,9 @@ import (
 const fakeWebhookSecret = "0123456789abcdef-Fake-Webhook-Secret"
 
 type signedWebhookReceipt struct {
-	header http.Header
-	body   []byte
+	header            http.Header
+	body              []byte
+	host, target, sni string
 }
 
 func runtimeWebhookFixture(t *testing.T, status *atomic.Int32) (*Bridge, *httptest.Server, string, <-chan signedWebhookReceipt, *recordingLogger) {
@@ -36,7 +37,7 @@ func runtimeWebhookFixture(t *testing.T, status *atomic.Int32) (*Bridge, *httpte
 	receipts := make(chan signedWebhookReceipt, 32)
 	receiver := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		receipts <- signedWebhookReceipt{r.Header.Clone(), body}
+		receipts <- signedWebhookReceipt{header: r.Header.Clone(), body: body, host: r.Host, target: r.RequestURI, sni: r.TLS.ServerName}
 		if status != nil {
 			w.Header().Set("Location", "https://10.0.0.1/metadata")
 			w.WriteHeader(int(status.Load()))
@@ -544,5 +545,23 @@ func TestRuntimeWebhookFallsBackAcrossPinnedPublicAddresses(t *testing.T) {
 	}
 	if queries.Load() != 2 || dials.Load() != 2 || !verifyWebhookReceipt(receiveWebhook(t, receipts), time.Now()) {
 		t.Fatal("fallback re-resolved DNS, skipped a pinned address, or failed signing")
+	}
+}
+
+func TestRuntimeWebhookPinnedTransportPreservesHostSNIAndEscapedTarget(t *testing.T) {
+	_, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	origin, err := url.Parse(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination += "/receiver/%2F?q=one%2Ftwo&empty="
+	configureWebhookHTTP(t, server, destination)
+	code, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	if code != 200 || !bytes.Contains(body, []byte(`"delivered":true`)) {
+		t.Fatalf("transport=%d %s", code, body)
+	}
+	r := receiveWebhook(t, receipts)
+	if r.host != origin.Host || r.sni != origin.Hostname() || r.target != "/receiver/%2F?q=one%2Ftwo&empty=" || !verifyWebhookReceipt(r, time.Now()) {
+		t.Fatalf("receiver identity/target changed: host=%s sni=%s target=%s", r.host, r.sni, r.target)
 	}
 }
