@@ -107,6 +107,11 @@ func (b *Bridge) renderMetrics() string {
 			fmt.Sprintf("whatsapp_bridge_db_wait_seconds_total{pool=%q} %.9f", pool.name, stats.WaitDuration.Seconds()))
 	}
 	add("whatsapp_bridge_up", "1 while the process serves requests.", "gauge", "1")
+	if rw := b.RuntimeWebhook; rw != nil {
+		add("whatsapp_bridge_runtime_webhook_deliveries_total", "Successful runtime webhook POSTs, including synthetic tests.", "counter", fmt.Sprint(rw.deliveries.Load()))
+		add("whatsapp_bridge_runtime_webhook_failures_total", "Runtime message events whose delivery retries failed.", "counter", fmt.Sprint(rw.failures.Load()))
+		add("whatsapp_bridge_runtime_webhook_dropped_total", "Runtime message events discarded.", "counter", fmt.Sprint(rw.dropped.Load()))
+	}
 	if b.RuntimeDefaults != nil {
 		if snapshot, err := b.settingsSnapshot(b.ctx); err == nil {
 			add("whatsapp_runtime_settings_version", "Last committed runtime settings version.", "gauge", fmt.Sprint(snapshot.Version))

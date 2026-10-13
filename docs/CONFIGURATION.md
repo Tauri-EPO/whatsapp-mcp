@@ -17,10 +17,10 @@ no-store responses and mutation audit. They are not MCP tools or data-plane rout
 
 | Method and path | Contract |
 |---|---|
-| `GET /operator/v1/webhook` | Receiver URL, enabled flag, events, header prefix, SHA-256 secret fingerprint (first 16 hex characters), consecutive failures, last success, reason, queued and dropped counts; never the secret. |
+| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, header prefix, SHA-256 secret fingerprint (first 16 hex characters), consecutive failed events, last success, reason, queued and dropped counts; never the secret. |
 | `PUT /operator/v1/webhook` | Replace configuration and re-enable delivery; JSON below, at most 4096 bytes, unknown fields refused. Cancels previous deliveries and resets delivery state. Returns the same safe snapshot as GET. |
 | `DELETE /operator/v1/webhook` | Remove configuration, cancel in-flight requests and discard the old queue; 204. An already accepted receiver request cannot be recalled. |
-| `POST /operator/v1/webhook/test` | One synchronous synthetic event (`type: test`), bounded to 12 seconds including admission; 200 with `delivered`, `reason`, `event_id`, or 409 without an enabled receiver. It contributes to delivery failure/success state. |
+| `POST /operator/v1/webhook/test` | One synchronous synthetic event (`event: webhook.test`, `type: test`), bounded to 12 seconds including admission; 200 with `delivered`, `reason`, `event_id`, or 409 without an enabled receiver. It does not change consecutive failures, last success or automatic disablement. |
 
 ```json
 {
@@ -44,23 +44,37 @@ back after a connection failure) while TLS still verifies the original hostname.
 Environment proxies and redirects are
 disabled. Loopback, private, link-local, CGNAT, multicast, unspecified, metadata
 and reserved/documentation ranges are refused, including mapped IPv4, IPv6
-translation and tunnel ranges. Connect and TLS handshake have 3-second limits;
+translation and tunnel ranges. The transport is reused within each configuration
+generation; every attempt rechecks DNS, and new sockets use only its validated
+IP list. Connect has a 3-second total budget with at most 300 ms per address,
+so an unreachable IPv6 address cannot consume the entire request deadline.
+TLS handshakes have a 3-second limit;
 response headers have 5 seconds, the complete request 10 seconds. Response bodies
-are closed without reading or logging them. Error reasons are fixed classifications,
+are discarded up to 64 KiB to permit keep-alive, then closed, never logged.
+Error reasons are fixed classifications,
 never URLs, response text or secrets.
 
 Delivery uses one worker and a queue of 256 events, each at most 64 KiB (plus
 one in flight). Overflow and oversized events increment `dropped`. An admitted
 event has at most five attempts, with 1, 2, 4 and 8 second delays (backoff capped
-at 30 seconds), and is discarded after five minutes. Successful 2xx responses
-reset consecutive failures and record last success. The default failure limit is
-10 attempts; `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` accepts 1-100. At that
+at 30 seconds), and is discarded after five minutes. Permanent 4xx responses
+(except 408 and 429) are not retried. Successful message 2xx responses
+reset consecutive failures and record last success. Failures count events that
+exhaust delivery, not individual attempts; caller cancellation and queue age
+expiration do not count against the receiver. The default failure limit is
+50 events; `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` accepts 1-100. At that
 limit the receiver disables itself and discards its queue. The private
 `GET /operator/v1/health` includes the safe `webhook` snapshot; PUT re-enables it.
 Configuration, secret and queue live in memory: a bridge restart requires another
 PUT and loses pending events. Delivery can be repeated, so receivers must deduplicate
 by event id; this bounded policy does not guarantee eventual receipt across restart,
 queue overflow, exhausted retries, expiration or automatic disablement.
+Automatic disablement and discarded events are logged at ERROR without receiver
+URLs or message identifiers. `/metrics` exposes process-lifetime counters
+`whatsapp_bridge_runtime_webhook_deliveries_total` (successful POSTs, including tests),
+`whatsapp_bridge_runtime_webhook_failures_total` (failed message events), and
+`whatsapp_bridge_runtime_webhook_dropped_total` (discarded messages, including
+messages arriving while automatically disabled). PUT does not reset these counters.
 
 Each POST has `Content-Type: application/json` and, with the default prefix:
 
@@ -77,7 +91,7 @@ Message payload example (no media bytes, filesystem paths or CDN credentials):
   "event": "message.received",
   "message_id": "FAKE-MESSAGE-ID",
   "chat": "5511999999999@s.whatsapp.net",
-  "sender": "5511999999999",
+  "sender": "5511999999999@s.whatsapp.net",
   "type": "image",
   "text": "Image caption",
   "timestamp": "2026-10-13T12:00:00Z",
@@ -90,6 +104,10 @@ Message payload example (no media bytes, filesystem paths or CDN credentials):
 `type` is `text` or the bridge's extracted message category, including `reaction`;
 `text` is the content/caption (emoji for a reaction). `timestamp` is the WhatsApp
 message timestamp in UTC. The `(chat, message_id)` pair identifies the stored row.
+`sender` is a full resolved JID, including its namespace; an unmapped sender
+retains `@lid` and must not be treated as a phone number. Reactions include
+`reaction_to_message_id` within `chat` and `reaction_removed` (true for removal,
+false when adding a reaction); a removal carries an empty `text`.
 `stored: false` means archive persistence failed; do not attempt a media lookup.
 `media_reference` is present only for stored media messages; it does not assert that
 bytes are cached. Use the authenticated MCP media resource or download tool to fetch
@@ -108,27 +126,37 @@ import time
 def verify_webhook(headers, raw_body, secret, prefix="X-Webhook"):
     timestamp = headers.get(prefix + "-Timestamp", "")
     try:
+        timestamp_bytes = timestamp.encode("ascii")
+        signature = headers.get(prefix + "-Signature", "").encode("ascii")
         fresh = abs(int(time.time()) - int(timestamp)) <= 300
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, UnicodeError):
         return False
     expected = "sha256=" + hmac.new(
         secret.encode("utf-8"),
-        timestamp.encode("ascii") + b"." + raw_body,
+        timestamp_bytes + b"." + raw_body,
         hashlib.sha256,
     ).hexdigest()
     if not fresh or not hmac.compare_digest(
-        expected, headers.get(prefix + "-Signature", "")
+        expected.encode("ascii"), signature
     ):
         return False
-    event = json.loads(raw_body)
-    return event["event_id"] == headers.get(prefix + "-Id")
+    try:
+        event = json.loads(raw_body)
+    except (ValueError, UnicodeError):
+        return False
+    return (
+        isinstance(event, dict)
+        and isinstance(event.get("event_id"), str)
+        and bool(event["event_id"])
+        and event["event_id"] == headers.get(prefix + "-Id")
+    )
 ```
 
 After verification, atomically store each event id with its processing result and
 acknowledge duplicates with 2xx. Freshness alone does not prevent replay inside
 the five-minute window. Keep clocks synchronized and never log the secret.
 
-### Connection monitoring contract
+## Connection monitoring contract
 
 `/api/health` is liveness (HTTP 200 while the listener serves), with stable
 `connected` and `paired` booleans. `/api/ready` is HTTP 200 only when status
@@ -196,7 +224,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable the private operator runtime webhook routes; independent of the legacy sender. See [Runtime message webhook](#runtime-message-webhook). |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; all address restrictions still apply. |
-| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `10` | Disable the receiver after 1-100 consecutive failed delivery attempts; PUT re-enables it. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed message events; cancelled/expired events and synthetic tests do not count. PUT re-enables it. |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |

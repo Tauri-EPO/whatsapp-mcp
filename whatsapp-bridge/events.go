@@ -273,8 +273,13 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			if rowConsumed {
 				return
 			}
-			b.queueRuntimeMessage(resolvedChat, msg.Info.Chat, msg.Info.IsFromMe, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: sender, Type: "reaction", Text: emoji, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})
-			if b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat) {
+			forwardChat := false
+			if b.Webhook.Enabled() || b.RuntimeWebhook.accepting() {
+				forwardChat = b.webhookChatAllowed(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat)
+			}
+			removed := emoji == ""
+			b.queueRuntimeMessage(forwardChat, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: storedSenderJID, Type: "reaction", Text: emoji, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored, ReactionToMessageID: reactedToID, ReactionRemoved: &removed})
+			if b.Webhook.Enabled() && forwardChat {
 				b.Webhook.SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji, stored)
 			} else {
 				b.logWebhookWithheld(resolvedChat, msg.Info.ID)
@@ -398,10 +403,13 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	forwardChat := b.forwardsToWebhook(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat)
-	shouldForward := forwardChat && !bareContentEnvelope(ex.inner, content)
+	forwardChat := false
+	if b.Webhook.Enabled() || b.RuntimeWebhook.accepting() {
+		forwardChat = b.webhookChatAllowed(resolvedChat, msg.Info.IsFromMe, msg.Info.Chat)
+	}
+	shouldForward := b.Webhook.Enabled() && forwardChat && !bareContentEnvelope(ex.inner, content)
 	if !bareContentEnvelope(ex.inner, content) {
-		b.queueRuntimeMessage(resolvedChat, msg.Info.Chat, msg.Info.IsFromMe, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: sender, Type: mediaType, Text: content, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})
+		b.queueRuntimeMessage(forwardChat, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: storedSenderJID, Type: mediaType, Text: content, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})
 	}
 
 	if !forwardChat {

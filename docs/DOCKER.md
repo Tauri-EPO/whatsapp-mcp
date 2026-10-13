@@ -1,12 +1,13 @@
 # Running WhatsApp MCP with Docker Compose
 
-### Optional runtime message receiver
+## Optional runtime message receiver
 
 Enable the private operator listener as described below and set
 `WHATSAPP_WEBHOOK_RUNTIME=true` on the bridge. Compose passes it through and
 defaults it to false. No additional listener, published port, mount or service is
 needed. `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=false` restricts receivers to HTTPS
-port 443, and `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT=10` controls automatic
+port 443, and `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT=50` counts consecutive failed
+message events for automatic
 disablement. Keep the operator endpoint on its private network.
 
 Use the operator bearer and an allowed Host for `GET`, `PUT`, `DELETE
@@ -31,6 +32,8 @@ ids. The [runtime webhook reference](CONFIGURATION.md#runtime-message-webhook)
 documents all routes, message payload fields, limits and the Python verification
 snippet. Use `/webhook/test` to check a public HTTPS receiver without pairing a
 WhatsApp number; the local Go tests use a TLS fixture and fake identifiers.
+
+## Compose topology
 
 `docker-compose.yml` at the repo root runs the two components as containers on
 an always-on machine (a home server, a NAS, a small VPS) and exposes the MCP

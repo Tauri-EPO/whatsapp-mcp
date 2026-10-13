@@ -21,7 +21,10 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 const fakeWebhookSecret = "0123456789abcdef-Fake-Webhook-Secret"
@@ -30,14 +33,19 @@ type signedWebhookReceipt struct {
 	header            http.Header
 	body              []byte
 	host, target, sni string
+	remote            string
 }
 
-func runtimeWebhookFixture(t *testing.T, status *atomic.Int32) (*Bridge, *httptest.Server, string, <-chan signedWebhookReceipt, *recordingLogger) {
+func runtimeWebhookFixture(t *testing.T, status *atomic.Int32, hooks ...func(http.ResponseWriter, *http.Request)) (*Bridge, *httptest.Server, string, <-chan signedWebhookReceipt, *recordingLogger) {
 	t.Helper()
-	receipts := make(chan signedWebhookReceipt, 32)
+	receipts := make(chan signedWebhookReceipt, 128)
 	receiver := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		receipts <- signedWebhookReceipt{header: r.Header.Clone(), body: body, host: r.Host, target: r.RequestURI, sni: r.TLS.ServerName}
+		receipts <- signedWebhookReceipt{header: r.Header.Clone(), body: body, host: r.Host, target: r.RequestURI, sni: r.TLS.ServerName, remote: r.RemoteAddr}
+		if len(hooks) != 0 {
+			hooks[0](w, r)
+			return
+		}
 		if status != nil {
 			w.Header().Set("Location", "https://10.0.0.1/metadata")
 			w.WriteHeader(int(status.Load()))
@@ -234,10 +242,11 @@ func TestRuntimeWebhookRetriesDisableHealthAndReenable(t *testing.T) {
 	var status atomic.Int32
 	status.Store(503)
 	b, server, destination, receipts, logger := runtimeWebhookFixture(t, &status)
+	b.RuntimeWebhook.options.FailureLimit = 1
 	configureWebhookHTTP(t, server, destination)
 	b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "retry text"))
 	first := receiveWebhook(t, receipts)
-	for range 2 {
+	for range 4 {
 		next := receiveWebhook(t, receipts)
 		if !bytes.Equal(next.body, first.body) || next.header.Get("X-Example-Id") != first.header.Get("X-Example-Id") {
 			t.Fatal("retry changed event identity")
@@ -248,7 +257,7 @@ func TestRuntimeWebhookRetriesDisableHealthAndReenable(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	code, health := webhookOperatorRequest(t, server, "GET", "/operator/v1/health", "")
-	if code != 200 || !bytes.Contains(health, []byte(`"consecutive_failures":3`)) || !bytes.Contains(health, []byte(`"reason":"http_503"`)) || b.RuntimeWebhook.snapshot().Enabled {
+	if code != 200 || !bytes.Contains(health, []byte(`"consecutive_failures":1`)) || !bytes.Contains(health, []byte(`"reason":"http_503"`)) || b.RuntimeWebhook.snapshot().Enabled {
 		t.Fatalf("health=%s", health)
 	}
 	_, get := webhookOperatorRequest(t, server, "GET", "/operator/v1/webhook", "")
@@ -262,8 +271,18 @@ func TestRuntimeWebhookRetriesDisableHealthAndReenable(t *testing.T) {
 	status.Store(204)
 	configureWebhookHTTP(t, server, destination)
 	code, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
-	if code != 200 || !bytes.Contains(body, []byte(`"delivered":true`)) || b.RuntimeWebhook.snapshot().LastSuccess == nil {
+	if code != 200 || !bytes.Contains(body, []byte(`"delivered":true`)) {
 		t.Fatalf("reenable=%d %s", code, body)
+	}
+	_ = receiveWebhook(t, receipts)
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+	_ = receiveWebhook(t, receipts)
+	deadline = time.Now().Add(time.Second)
+	for b.RuntimeWebhook.snapshot().LastSuccess == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if b.RuntimeWebhook.snapshot().LastSuccess == nil {
+		t.Fatal("message success not recorded")
 	}
 	_, _ = webhookOperatorRequest(t, server, "DELETE", "/operator/v1/webhook", "")
 	if s := b.RuntimeWebhook.snapshot(); s.Enabled || s.URL != "" || s.Queued != 0 {
@@ -346,7 +365,7 @@ func TestRuntimeWebhookQueueBoundAndDeleteCancels(t *testing.T) {
 	rw.mu.Unlock()
 	g.delivery <- struct{}{}
 	event := runtimeWebhookEvent{Event: "message.received", Type: "text", Timestamp: time.Now()}
-	rw.enqueue(event)
+	rw.enqueue(event, true)
 	deadline := time.Now().Add(time.Second)
 	for len(g.queue) != 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -355,7 +374,7 @@ func TestRuntimeWebhookQueueBoundAndDeleteCancels(t *testing.T) {
 		t.Fatal("worker did not dequeue first delivery")
 	}
 	for range 258 {
-		rw.enqueue(event)
+		rw.enqueue(event, true)
 	}
 	if s := rw.snapshot(); s.Queued != 256 || s.Dropped != 2 {
 		t.Fatalf("queue bound=%+v", s)
@@ -407,7 +426,7 @@ func TestRuntimeWebhookSharedForwardFilters(t *testing.T) {
 			} else {
 				// A control event queued after handleMessage is a FIFO barrier:
 				// any incorrectly admitted message must reach this receiver first.
-				b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "test", Text: "filter barrier", Timestamp: time.Now()})
+				b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "test", Text: "filter barrier", Timestamp: time.Now()}, true)
 				receipt := receiveWebhook(t, receipts)
 				var event runtimeWebhookEvent
 				if err := json.Unmarshal(receipt.body, &event); err != nil {
@@ -422,7 +441,7 @@ func TestRuntimeWebhookSharedForwardFilters(t *testing.T) {
 }
 func TestRuntimeWebhookStartupOptions(t *testing.T) {
 	o, err := parseRuntimeWebhookOptions(func(string) string { return "" })
-	if err != nil || o.Enabled || o.AllowPorts || o.FailureLimit != 10 {
+	if err != nil || o.Enabled || o.AllowPorts || o.FailureLimit != 50 {
 		t.Fatalf("defaults=%+v %v", o, err)
 	}
 	for key, value := range map[string]string{"WHATSAPP_WEBHOOK_RUNTIME": "maybe", "WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS": "maybe", "WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT": "0"} {
@@ -459,7 +478,7 @@ func TestRuntimeWebhookAttemptAndAgeCaps(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 			s := b.RuntimeWebhook.snapshot()
-			wantFailures := 5
+			wantFailures := 1
 			if expired {
 				wantFailures = 0
 			}
@@ -479,13 +498,13 @@ func TestRuntimeWebhookNonFileMessagesHaveNoMediaReference(t *testing.T) {
 	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
 	configureWebhookHTTP(t, server, destination)
 	for _, category := range []string{"poll", "location", "live_location", "reaction", ""} {
-		b.queueRuntimeMessage(phonePN, phonePN, false, runtimeWebhookEvent{MessageID: "FAKE-ID", Chat: phonePN.String(), Type: category, Stored: true, Timestamp: time.Now()})
+		b.queueRuntimeMessage(true, runtimeWebhookEvent{MessageID: "FAKE-ID", Chat: phonePN.String(), Type: category, Stored: true, Timestamp: time.Now()})
 		r := receiveWebhook(t, receipts)
 		if bytes.Contains(r.body, []byte("media_reference")) {
 			t.Fatalf("non-file reference=%s", r.body)
 		}
 	}
-	b.queueRuntimeMessage(phonePN, phonePN, false, runtimeWebhookEvent{MessageID: "FAKE/ID", Chat: phonePN.String(), Type: "image", Stored: true, Timestamp: time.Now()})
+	b.queueRuntimeMessage(true, runtimeWebhookEvent{MessageID: "FAKE/ID", Chat: phonePN.String(), Type: "image", Stored: true, Timestamp: time.Now()})
 	r := receiveWebhook(t, receipts)
 	var event runtimeWebhookEvent
 	if err := json.Unmarshal(r.body, &event); err != nil {
@@ -505,7 +524,7 @@ func TestRuntimeWebhookFailureLimitConcurrentTestAndQueue(t *testing.T) {
 	// locked on a blocking receive while health/configuration are waiting.
 	for range 10 {
 		configureWebhookHTTP(t, server, destination)
-		b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text", Timestamp: time.Now()})
+		b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text", Timestamp: time.Now()}, true)
 		done := make(chan struct{})
 		go func() { defer close(done); webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "") }()
 		select {
@@ -513,6 +532,7 @@ func TestRuntimeWebhookFailureLimitConcurrentTestAndQueue(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("failure-limit deadlock")
 		}
+		waitWebhookDrop(t, b.RuntimeWebhook)
 		if b.RuntimeWebhook.snapshot().Enabled {
 			t.Fatal("failure did not disable")
 		}
@@ -563,5 +583,410 @@ func TestRuntimeWebhookPinnedTransportPreservesHostSNIAndEscapedTarget(t *testin
 	r := receiveWebhook(t, receipts)
 	if r.host != origin.Host || r.sni != origin.Hostname() || r.target != "/receiver/%2F?q=one%2Ftwo&empty=" || !verifyWebhookReceipt(r, time.Now()) {
 		t.Fatalf("receiver identity/target changed: host=%s sni=%s target=%s", r.host, r.sni, r.target)
+	}
+}
+
+// Coordinator review regressions: the receiver is real TLS, without a paired phone.
+func TestRuntimeWebhookReviewCallerCancellation(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(strconv.FormatBool(deadline), func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+			configureWebhookHTTP(t, server, destination)
+			rw := b.RuntimeWebhook
+			g := rw.generation
+			d, err := webhookDelivery(runtimeWebhookEvent{Event: "message.received", Type: "text"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), 200*time.Millisecond)
+			}
+			defer cancel()
+			done := make(chan struct{})
+			go func() { defer close(done); _, _ = rw.attempt(ctx, g, d) }()
+			_ = receiveWebhook(t, receipts)
+			if !deadline {
+				cancel()
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("attempt did not cancel")
+			}
+			if s := rw.snapshot(); s.Failures != 0 || !s.Enabled || s.Reason != "" {
+				t.Fatalf("local cancellation counted as receiver failure: %+v", s)
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookReviewFailureCountsEventsAndPermanent4xx(t *testing.T) {
+	for _, code := range []int32{400, 401, 404, 408, 429, 503} {
+		t.Run(strconv.Itoa(int(code)), func(t *testing.T) {
+			var status atomic.Int32
+			status.Store(code)
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
+			configureWebhookHTTP(t, server, destination)
+			b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "event failure"))
+			want := 1
+			if code == 408 || code == 429 || code == 503 {
+				want = 5
+			}
+			for range want {
+				_ = receiveWebhook(t, receipts)
+			}
+			waitWebhookDrop(t, b.RuntimeWebhook)
+			if s := b.RuntimeWebhook.snapshot(); s.Failures != 1 || !s.Enabled {
+				t.Fatalf("attempts counted instead of one event: %+v", s)
+			}
+			select {
+			case r := <-receipts:
+				t.Fatalf("permanent 4xx retried: %s", r.body)
+			default:
+			}
+		})
+	}
+}
+
+func waitWebhookDrop(t *testing.T, rw *runtimeWebhook) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for rw.snapshot().Dropped == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if rw.snapshot().Dropped == 0 {
+		t.Fatal("event did not settle")
+	}
+}
+
+func TestRuntimeWebhookReviewRestartTolerance(t *testing.T) {
+	var status atomic.Int32
+	status.Store(503)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
+	o, err := parseRuntimeWebhookOptions(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.RuntimeWebhook.options.FailureLimit = o.FailureLimit
+	configureWebhookHTTP(t, server, destination)
+	for range 2 {
+		b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+		for range 5 {
+			_ = receiveWebhook(t, receipts)
+		}
+	}
+	status.Store(204)
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+	_ = receiveWebhook(t, receipts)
+	deadline := time.Now().Add(time.Second)
+	for b.RuntimeWebhook.snapshot().LastSuccess == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s := b.RuntimeWebhook.snapshot(); !s.Enabled || s.Failures != 0 || s.LastSuccess == nil {
+		t.Fatalf("short restart disabled receiver: %+v", s)
+	}
+	if o.FailureLimit <= 10 {
+		t.Fatalf("default still only %d events", o.FailureLimit)
+	}
+}
+
+func TestRuntimeWebhookReviewDisableAndDropsObservable(t *testing.T) {
+	var status atomic.Int32
+	status.Store(503)
+	b, server, destination, _, logger := runtimeWebhookFixture(t, &status)
+	b.RuntimeWebhook.options.FailureLimit = 1
+	configureWebhookHTTP(t, server, destination+"/?token=fake-query-secret")
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+	waitWebhookDrop(t, b.RuntimeWebhook)
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+	if s := b.RuntimeWebhook.snapshot(); s.Enabled || s.Dropped != 2 {
+		t.Fatalf("disabled drop not counted: %+v", s)
+	}
+	status.Store(204)
+	configureWebhookHTTP(t, server, destination)
+	_, _ = webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	metrics := httptest.NewServer(b.handleMetrics())
+	defer metrics.Close()
+	resp, err := metrics.Client().Get(metrics.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"whatsapp_bridge_runtime_webhook_deliveries_total 1", "whatsapp_bridge_runtime_webhook_failures_total 1", "whatsapp_bridge_runtime_webhook_dropped_total 2"} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Errorf("missing metric %s", want)
+		}
+	}
+	for _, want := range []string{"[ERROR] Runtime webhook automatically disabled", "[ERROR] Runtime webhook discarded"} {
+		if !strings.Contains(logger.String(), want) {
+			t.Errorf("missing log %s", want)
+		}
+	}
+	for _, secret := range []string{destination, "fake-query-secret", fakeWebhookSecret} {
+		if bytes.Contains(data, []byte(secret)) || strings.Contains(logger.String(), secret) {
+			t.Fatal("receiver or secret in metrics/logs")
+		}
+	}
+}
+
+func TestRuntimeWebhookReviewSenderNamespace(t *testing.T) {
+	for _, sender := range []types.JID{phonePN, phoneLID} {
+		t.Run(sender.Server, func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			configureWebhookHTTP(t, server, destination)
+			b.handleMessage(buildTextMessage(phonePN, sender, types.EmptyJID, types.EmptyJID, false, "sender namespace"))
+			var event runtimeWebhookEvent
+			if err := json.Unmarshal(receiveWebhook(t, receipts).body, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Sender != sender.String() {
+				t.Fatalf("sender lost namespace: %s", event.Sender)
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookReviewReactionTargetAndRemoval(t *testing.T) {
+	for _, emoji := range []string{"+1", ""} {
+		t.Run(strconv.FormatBool(emoji == ""), func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			configureWebhookHTTP(t, server, destination)
+			msg := buildTextMessage(phonePN, phoneLID, types.EmptyJID, types.EmptyJID, false, "")
+			msg.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Key: &waCommon.MessageKey{ID: proto.String("FAKE-TARGET")}, Text: proto.String(emoji)}}
+			b.handleMessage(msg)
+			var event map[string]any
+			if err := json.Unmarshal(receiveWebhook(t, receipts).body, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event["reaction_to_message_id"] != "FAKE-TARGET" || event["reaction_removed"] != (emoji == "") || event["sender"] != phoneLID.String() {
+				t.Fatalf("incomplete reaction: %+v", event)
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookReviewSyntheticEventIsIndependent(t *testing.T) {
+	var status atomic.Int32
+	status.Store(400)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
+	b.RuntimeWebhook.options.FailureLimit = 1
+	configureWebhookHTTP(t, server, destination)
+	code, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	if code != 200 || !bytes.Contains(body, []byte(`"delivered":false`)) {
+		t.Fatalf("test result=%d %s", code, body)
+	}
+	var event runtimeWebhookEvent
+	if err := json.Unmarshal(receiveWebhook(t, receipts).body, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Event != "webhook.test" {
+		t.Fatalf("test impersonates message: %s", event.Event)
+	}
+	if s := b.RuntimeWebhook.snapshot(); !s.Enabled || s.Failures != 0 || s.LastSuccess != nil {
+		t.Fatalf("test changed receiver health: %+v", s)
+	}
+	// A successful test must not reset an existing production failure episode.
+	b.RuntimeWebhook.mu.Lock()
+	b.RuntimeWebhook.state.Failures = 1
+	b.RuntimeWebhook.state.Reason = "http_503"
+	b.RuntimeWebhook.mu.Unlock()
+	status.Store(204)
+	_, _ = webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	if s := b.RuntimeWebhook.snapshot(); s.Failures != 1 || s.Reason != "http_503" || s.LastSuccess != nil {
+		t.Fatalf("test reset receiver health: %+v", s)
+	}
+}
+
+func TestRuntimeWebhookReviewSnapshotRedactsQuery(t *testing.T) {
+	_, server, destination, receipts, logger := runtimeWebhookFixture(t, nil)
+	configureWebhookHTTP(t, server, destination+"/receiver/%2F?token=fake-query-secret")
+	for _, path := range []string{"/operator/v1/webhook", "/operator/v1/health"} {
+		code, data := webhookOperatorRequest(t, server, "GET", path, "")
+		if code != 200 || bytes.Contains(data, []byte("fake-query-secret")) || bytes.Contains(data, []byte("token=")) {
+			t.Fatalf("query leaked in %s: %s", path, data)
+		}
+		if !bytes.Contains(data, []byte(destination+"/receiver/%2F")) {
+			t.Fatalf("safe URL lost path: %s", data)
+		}
+	}
+	_, _ = webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	if receiveWebhook(t, receipts).target != "/receiver/%2F?token=fake-query-secret" {
+		t.Fatal("query removed from actual delivery")
+	}
+	if strings.Contains(logger.String(), "fake-query-secret") {
+		t.Fatal("query leaked in log")
+	}
+}
+
+func TestRuntimeWebhookReviewTransportReuseAndDeadAddress(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	var dials atomic.Int32
+	b.RuntimeWebhook.lookup = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("2606:4700:4700::1111")}, {IP: net.ParseIP("8.8.8.8")}}, nil
+	}
+	dial := b.RuntimeWebhook.dial
+	b.RuntimeWebhook.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		if strings.HasPrefix(address, "[") {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return dial(ctx, network, address)
+	}
+	configureWebhookHTTP(t, server, destination)
+	start := time.Now()
+	for range 2 {
+		_, _ = webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	}
+	first, second := receiveWebhook(t, receipts), receiveWebhook(t, receipts)
+	if time.Since(start) > time.Second {
+		t.Fatal("dead address consumed more than one second")
+	}
+	if dials.Load() != 2 || first.remote != second.remote {
+		t.Fatalf("transport not reused: %d dials, %s -> %s", dials.Load(), first.remote, second.remote)
+	}
+}
+
+func TestRuntimeWebhookReviewQueueDeadlineDuringRequest(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	b.RuntimeWebhook.maxAge = 200 * time.Millisecond
+	b.RuntimeWebhook.options.FailureLimit = 1
+	configureWebhookHTTP(t, server, destination)
+	b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "queue deadline"))
+	_ = receiveWebhook(t, receipts)
+	waitWebhookDrop(t, b.RuntimeWebhook)
+	if s := b.RuntimeWebhook.snapshot(); s.Failures != 0 || !s.Enabled || s.Reason != "" {
+		t.Fatalf("queue deadline counted against receiver: %+v", s)
+	}
+}
+
+func TestRuntimeWebhookReviewSharedPolicyEvaluatedOnce(t *testing.T) {
+	for _, mode := range []string{"unconfigured", "both", "disabled"} {
+		for _, reaction := range []bool{false, true} {
+			t.Run(mode+"/"+strconv.FormatBool(reaction), func(t *testing.T) {
+				b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+				lids := &markerBudgetLIDs{mockLIDStore: mockLIDStore{pnByLID: map[types.JID]types.JID{phoneLID: phonePN}}}
+				b.Client = newTestClient(lids)
+				b.Policy = parseChatPolicy(phoneLID.String())
+				if mode != "unconfigured" {
+					configureWebhookHTTP(t, server, destination)
+				}
+				if mode == "disabled" {
+					b.RuntimeWebhook.mu.Lock()
+					b.RuntimeWebhook.state.Enabled = false
+					b.RuntimeWebhook.mu.Unlock()
+				}
+				if mode == "both" {
+					legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
+					defer legacy.Close()
+					b.Webhook.enabled, b.Webhook.url = true, legacy.URL
+				}
+				msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "shared policy")
+				if reaction {
+					msg.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Key: &waCommon.MessageKey{ID: proto.String("FAKE-TARGET")}, Text: proto.String("+1")}}
+				}
+				b.handleMessage(msg)
+				want := int32(0)
+				if mode == "both" {
+					want = 1
+					_ = receiveWebhook(t, receipts)
+				}
+				if got := lids.lookups.Load(); got != want {
+					t.Fatalf("policy lookups=%d want=%d", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestRuntimeWebhookReviewKeepAliveDiscardsBoundedBody(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ignored receiver response"))
+	})
+	configureWebhookHTTP(t, server, destination)
+	for range 2 {
+		_, _ = webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	}
+	first, second := receiveWebhook(t, receipts), receiveWebhook(t, receipts)
+	if first.remote != second.remote {
+		t.Fatal("nonempty response prevented connection reuse")
+	}
+	// A pooled socket must not bypass the next complete DNS-answer check.
+	b.RuntimeWebhook.lookup = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+	}
+	code, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", "")
+	if code != 200 || !bytes.Contains(body, []byte(`"reason":"receiver_refused"`)) {
+		t.Fatalf("pooled socket bypassed DNS: %s", body)
+	}
+	select {
+	case <-receipts:
+		t.Fatal("forbidden DNS reached pooled receiver")
+	default:
+	}
+}
+
+func TestRuntimeWebhookReviewReenableKeepsAdmissionAuthorization(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	configureWebhookHTTP(t, server, destination)
+	rw := b.RuntimeWebhook
+	rw.mu.Lock()
+	rw.state.Enabled = false
+	started, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		close(started)
+		// The message was denied before the operator re-enabled delivery.
+		rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text", Text: "denied before reenable"}, false)
+	}()
+	<-started
+	rw.state.Enabled = true
+	rw.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("admission blocked")
+	}
+	rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text", Text: "authorized FIFO barrier"}, true)
+	var event runtimeWebhookEvent
+	if err := json.Unmarshal(receiveWebhook(t, receipts).body, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Text != "authorized FIFO barrier" {
+		t.Fatal("reenable bypassed message authorization")
+	}
+}
+
+func TestRuntimeWebhookReviewDisableCountsQueuedDrops(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var requests atomic.Int32
+	b, server, destination, _, _ := runtimeWebhookFixture(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.WriteHeader(400)
+	})
+	b.RuntimeWebhook.options.FailureLimit = 1
+	configureWebhookHTTP(t, server, destination)
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+	<-started
+	for range 10 {
+		b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
+	}
+	close(release)
+	waitWebhookDrop(t, b.RuntimeWebhook)
+	if s := b.RuntimeWebhook.snapshot(); s.Enabled || s.Failures != 1 || s.Dropped != 11 || s.Queued != 0 {
+		t.Fatalf("queued discards not observed: %+v", s)
 	}
 }

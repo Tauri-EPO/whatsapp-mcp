@@ -7,8 +7,14 @@ import re
 import time
 from pathlib import Path
 
+import pytest
 
-def test_runtime_webhook_documented_verifier():
+
+@pytest.mark.parametrize(
+    ("hostile_header", "hostile_value"),
+    [("X-Webhook-Signature", "sha256=é"), ("X-Webhook-Timestamp", "１２３")],
+)
+def test_runtime_webhook_documented_verifier(hostile_header, hostile_value):
     document = (Path(__file__).resolve().parents[2] / "docs" / "CONFIGURATION.md").read_text(encoding="utf-8")
     snippet = next(
         code for code in re.findall(r"```python\n(.*?)```", document, re.DOTALL) if "def verify_webhook(" in code
@@ -36,4 +42,7 @@ def test_runtime_webhook_documented_verifier():
     assert not verify(signed_headers(str(int(time.time()) + 301)), body, secret)
     assert not verify({}, body, secret)
     headers["X-Webhook-Id"] = "other-fake-event"
+    assert not verify(headers, body, secret)
+    headers = signed_headers(str(int(time.time())))
+    headers[hostile_header] = hostile_value
     assert not verify(headers, body, secret)
