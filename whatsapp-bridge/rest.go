@@ -67,7 +67,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		b.Log.Warnf("%s", hostWarning)
 	}
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
-		return withAuth(token, allowedHosts, h)
+		return withAuth(token, allowedHosts, b.runtimePolicyGuard(h))
 	}
 	// mutate = auth + the WHATSAPP_READ_ONLY refusal (403, read_only.go) + the
 	// per-tool allow/deny lists (tool_policy.go), in that order: read-only wins,
@@ -75,7 +75,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// with it; reads keep plain auth, so a new route has to be classified when it
 	// is added — and endpointTools must gain a row for it.
 	mutate := func(h http.HandlerFunc) http.HandlerFunc {
-		return auth(b.ReadOnly.guard(b.runtimeToolGuard(h)))
+		return withAuth(token, allowedHosts, b.ReadOnly.guard(b.runtimePolicyGuard(b.runtimeToolGuard(h))))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/media/blob", auth(requireMethod(http.MethodGet, b.handleMediaBlob)))

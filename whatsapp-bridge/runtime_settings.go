@@ -34,6 +34,7 @@ type runtimeSettingsSnapshot struct {
 	Version  int64                     `json:"version"`
 	Settings map[string]runtimeSetting `json:"settings"`
 	policy   toolPolicy
+	chats    chatPolicy
 }
 type settingDefinition struct {
 	key, env     string
@@ -54,7 +55,7 @@ func parseIngestChats(raw string) (string, error) {
 }
 
 // Add a definition here when a consumer introduces another runtime knob.
-// Security boundaries (read-only and chat allow-list) remain deploy-time only.
+// Runtime capability can only narrow deployment security boundaries.
 func settingDefinitions() []settingDefinition {
 	capValue := func(raw json.RawMessage) (any, error) {
 		var value float64
@@ -89,6 +90,18 @@ func settingDefinitions() []settingDefinition {
 		return sortedNames(parseToolList(raw)), nil // Config validates names once, last.
 	}
 	return append([]settingDefinition{
+		{"chats.allowed", chatPolicyEnv, []string{}, func(raw json.RawMessage) (any, error) {
+			var entries []string
+			if json.Unmarshal(raw, &entries) != nil || len(entries) == 0 {
+				return nil, errors.New("expected a nonempty array of chat entries; use null to clear")
+			}
+			for _, entry := range entries {
+				if strings.TrimSpace(entry) == "" || strings.Contains(entry, ",") {
+					return nil, errors.New("expected nonempty chat entries without commas")
+				}
+			}
+			return parseChatPolicy(strings.Join(entries, ",")).entries(), nil
+		}, func(raw string) (any, error) { return parseChatPolicy(raw).entries(), nil }},
 		sendSetting("send.rate_per_minute", sendRateMinuteEnv),
 		sendSetting("send.rate_per_day", sendRateDayEnv),
 		sendSetting("send.new_chats_per_day", sendNewChatsEnv),
@@ -220,6 +233,9 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 		}
 		if err != nil {
 			warn(key, version)
+			if key == "chats.allowed" {
+				out.Settings[key] = runtimeSetting{Value: []string{}, Source: "runtime"}
+			}
 			if key == "tools.allow" {
 				closedAllow = len(defaults[key].Value.([]string)) == 0
 			}
@@ -231,6 +247,15 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 		return out, err
 	}
 	applyRuntimeToolFloor(&out, defaults, closedAllow)
+	chatSetting := out.Settings["chats.allowed"]
+	out.chats = parseChatPolicy(strings.Join(chatSetting.Value.([]string), ","))
+	if chatSetting.Source == "runtime" {
+		out.chats.restricted = true // An empty effective intersection permits nothing.
+		deploy := parseChatPolicy(strings.Join(defaults["chats.allowed"].Value.([]string), ","))
+		out.chats = intersectChatPolicies(out.chats, deploy)
+		chatSetting.Value = out.chats.entries()
+		out.Settings["chats.allowed"] = chatSetting
+	}
 	applyRuntimeSendCeiling(&out, defaults)
 	applyRuntimeMediaCeilings(&out, defaults)
 
@@ -321,7 +346,42 @@ func (b *Bridge) warnSavedSetting(key string, version int64) {
 }
 
 func (b *Bridge) settingsSnapshot(ctx context.Context) (runtimeSettingsSnapshot, error) {
+	if pinned, ok := ctx.Value(runtimeSettingsSnapshotKey{}).(runtimeSettingsSnapshot); ok {
+		return pinned, nil
+	}
 	return readRuntimeSettings(ctx, b.Store.db, b.RuntimeDefaults, b.warnSavedSetting)
+}
+
+func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicy {
+	policy := deploy
+	policy.resolve = func() chatPolicy {
+		if b.RuntimeDefaults == nil {
+			return deploy
+		}
+		snapshot, err := b.settingsSnapshot(b.ctx)
+		if err != nil {
+			return chatPolicy{restricted: true} // Never drop a saved restriction on read failure.
+		}
+		return snapshot.chats
+	}
+	return policy
+}
+
+// Tool and chat guards must authorize under the same committed settings.
+func (b *Bridge) runtimePolicyGuard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if b.RuntimeDefaults == nil || r.URL.Path == "/api/me" || r.URL.Path == "/api/health" || r.URL.Path == "/api/ready" {
+			h(w, r)
+			return
+		}
+		snapshot, err := b.settingsSnapshot(r.Context())
+		if err != nil {
+			writeErrorCode(w, 503, "settings_unavailable", "Runtime chat policy unavailable")
+			return
+		}
+		ctx := context.WithValue(r.Context(), runtimeSettingsSnapshotKey{}, snapshot)
+		h(w, r.WithContext(ctx))
+	}
 }
 
 func (b *Bridge) handleRuntimeSettings(w http.ResponseWriter, r *http.Request) {

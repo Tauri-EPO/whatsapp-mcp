@@ -19,8 +19,12 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 from errors import ToolError
 from phone import br_mobile_alternate, normalize_recipient
@@ -61,6 +65,9 @@ class ChatPolicy:
     @classmethod
     def unrestricted(cls) -> ChatPolicy:
         return cls(exact=frozenset(), servers=frozenset(), restricted=False)
+
+    def effective(self) -> ChatPolicy:
+        return self
 
     @classmethod
     def from_entries(cls, entries: list[str]) -> ChatPolicy:
@@ -130,6 +137,8 @@ class ChatPolicy:
         unambiguous = f"(length({column}) - length(replace({column}, '@', '')) <= 1)"
         if not self.restricted:
             return "1=1", []
+        if not self.exact and not self.servers:
+            return "0=1", []
         parts: list[str] = []
         params: list[str] = []
         if self.exact:
@@ -157,3 +166,62 @@ class ChatPolicy:
 def load_chat_policy(env: Mapping[str, str] | None = None) -> ChatPolicy:
     source: Mapping[str, str] = os.environ if env is None else env
     return ChatPolicy.from_entries(source.get(ENV_VAR, "").split(","))
+
+
+def policy_entries(policy: ChatPolicy) -> list[str]:
+    return sorted(policy.exact | {f"*@{server}" for server in policy.servers})
+
+
+def intersect_policies(runtime: ChatPolicy, deploy: ChatPolicy) -> ChatPolicy:
+    if not deploy.restricted:
+        return runtime
+    exact = {entry for entry in runtime.exact if deploy.allows(entry)}
+    exact.update(entry for entry in deploy.exact if runtime.allows(entry))
+    return ChatPolicy(frozenset(exact), runtime.servers & deploy.servers, True)
+
+
+_operation: ContextVar[dict[Any, ChatPolicy] | None] = ContextVar("chat_policy_operation", default=None)
+
+
+@contextmanager
+def policy_operation():
+    """One lazy immutable policy per tool invocation, including worker threads."""
+    import runtime_settings
+
+    token = _operation.set({}) if _operation.get() is None else None
+    try:
+        with runtime_settings.settings_operation():
+            yield
+    finally:
+        if token is not None:
+            _operation.reset(token)
+
+
+class RuntimeChatPolicy:
+    """Keep imported policy references live; read the bridge table without writing it."""
+
+    def __init__(self, deploy: ChatPolicy):
+        self.deploy = deploy
+
+    def effective(self) -> ChatPolicy:
+        import runtime_settings
+
+        operation = _operation.get()
+        if operation is not None and self in operation:
+            return operation[self]
+        try:
+            setting = runtime_settings.snapshot(require_store=True)["settings"]["chats.allowed"]
+        except (OSError, ValueError, sqlite3.Error):
+            raise ToolError("denied", "Runtime chat policy unavailable") from None
+        policy = self.deploy
+        if setting["source"] == "runtime":
+            entries = ChatPolicy.from_entries(setting["value"])
+            policy = intersect_policies(ChatPolicy(entries.exact, entries.servers, True), self.deploy)
+        if operation is not None:
+            operation[self] = policy
+        return policy
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "warn_invalid_entries":
+            return self.deploy.warn_invalid_entries
+        return getattr(self.effective(), name)

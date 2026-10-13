@@ -87,6 +87,8 @@ func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*
 
 func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		deps := deps
+		deps.policy = deps.policy.effective(r.Context())
 		ctx, cancel := requestContext(r, archiveDeadline)
 		defer cancel()
 		var req struct {

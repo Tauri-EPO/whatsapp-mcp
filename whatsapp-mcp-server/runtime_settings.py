@@ -9,6 +9,8 @@ import os
 import re
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +20,17 @@ CAP_SCOPE_ENV = "TRANSCRIBE_CAP_SCOPE"
 _startup_env: Mapping[str, str] | None = None
 _warned: dict[str, int] = {}
 _warn_lock = threading.Lock()
+_operation: ContextVar[dict[str, Any] | None] = ContextVar("runtime_settings_operation", default=None)
+
+
+@contextmanager
+def settings_operation():
+    token = _operation.set({}) if _operation.get() is None else None
+    try:
+        yield
+    finally:
+        if token is not None:
+            _operation.reset(token)
 
 
 def _warn(key: str, version: int) -> None:
@@ -41,6 +54,22 @@ def _tool_env(raw: str | None) -> list[str]:
     from tool_policy import parse_tool_list
 
     return sorted(parse_tool_list(raw))
+
+
+def _chat_env(raw: str | None) -> list[str]:
+    from chat_policy import ChatPolicy, policy_entries
+
+    return policy_entries(ChatPolicy.from_entries((raw or "").split(",")))
+
+
+def _chat_value(value: Any) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(entry, str) or not entry.strip() or "," in entry for entry in value)
+    ):
+        raise ValueError("expected a nonempty array of chat entries")
+    return _chat_env(",".join(value))
 
 
 def _tool_value(value: Any) -> list[str]:
@@ -103,6 +132,7 @@ class SettingDefinition:
 
 # Extend alongside the bridge registry when another consumer introduces a key.
 DEFINITIONS = {
+    "chats.allowed": SettingDefinition("WHATSAPP_ALLOWED_CHATS", [], _chat_env, _chat_value),
     "tools.allow": SettingDefinition("WHATSAPP_ALLOW_TOOLS", [], _tool_env, _tool_value),
     "tools.deny": SettingDefinition("WHATSAPP_DENY_TOOLS", [], _tool_env, _tool_value),
     "transcription.ingest_chats": SettingDefinition(INGEST_CHATS_ENV, "all", parse_ingest_chats, _ingest_value),
@@ -121,6 +151,18 @@ def capture_environment() -> None:
 def snapshot(
     env: Mapping[str, str] | None = None, *, require_store: bool = False, timeout_s: float | None = None
 ) -> dict[str, Any]:
+    operation = _operation.get() if env is None else None
+    if operation and (not require_store or operation["strict"]):
+        return operation["snapshot"]
+    result, verified = _read_snapshot(env, require_store=require_store, timeout_s=timeout_s)
+    if operation is not None:
+        operation.update(snapshot=result, strict=verified)
+    return result
+
+
+def _read_snapshot(
+    env: Mapping[str, str] | None = None, *, require_store: bool = False, timeout_s: float | None = None
+) -> tuple[dict[str, Any], bool]:
     """One SQLite snapshot per observation: both tool lists change together.
 
     Null rows are tombstones, preserving max(version) after the last clear.
@@ -140,13 +182,13 @@ def snapshot(
     defaults = {key: dict(setting) for key, setting in settings.items()}
     closed_allow = False
     if not require_store and not os.path.exists(whatsapp.MESSAGES_DB_PATH):
-        return _apply_floor(settings, defaults, version, closed_allow)
+        return _apply_floor(settings, defaults, version, closed_allow), False
     conn = whatsapp._connect_messages_db()
     try:
         if timeout_s is not None:
             conn.execute(f"PRAGMA busy_timeout={max(1, int(timeout_s * 1000))}")
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_settings' AND type='table'").fetchone():
-            return _apply_floor(settings, defaults, version, closed_allow)
+            return _apply_floor(settings, defaults, version, closed_allow), True
         rows = conn.execute("SELECT key,value,version FROM runtime_settings").fetchall()
     finally:
         conn.close()
@@ -169,11 +211,13 @@ def snapshot(
                 value = filtered
         except (ValueError, TypeError):
             _warn(key, row_version)
+            if key == "chats.allowed":
+                settings[key] = {"value": [], "source": "runtime"}
             if key == "tools.allow":
                 closed_allow = not defaults[key]["value"]
             continue
         settings[key] = {"value": value, "source": "runtime"}
-    return _apply_floor(settings, defaults, version, closed_allow)
+    return _apply_floor(settings, defaults, version, closed_allow), True
 
 
 def _known_tools() -> set[str]:
@@ -184,6 +228,13 @@ def _known_tools() -> set[str]:
 
 
 def _apply_floor(settings, defaults, version, closed_allow):
+    from chat_policy import ChatPolicy, intersect_policies, policy_entries
+
+    chats = settings["chats.allowed"]
+    if chats["source"] == "runtime":
+        runtime = ChatPolicy.from_entries(chats["value"])
+        deploy = ChatPolicy.from_entries(defaults["chats.allowed"]["value"])
+        chats["value"] = policy_entries(intersect_policies(ChatPolicy(runtime.exact, runtime.servers, True), deploy))
     cap_key, scope_key = "transcription.monthly_max_minutes", "transcription.cap_scope"
     ceiling = defaults[cap_key]["value"]
     cap = settings[cap_key]["value"]

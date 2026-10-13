@@ -174,13 +174,13 @@ func parseParticipants(raw []string, policies ...chatPolicy) ([]types.JID, error
 		}
 		normalized, err := normalizePhoneRecipient(item)
 		if err != nil {
-			if len(policies) == 0 || !policies[0].restricted {
+			if len(policies) == 0 || !policies[0].effective().restricted {
 				return nil, errors.New("invalid participant " + item + " (use a phone number or a user JID)")
 			}
 			return nil, err
 		}
 		jid, err := normalizedUserJID(normalized)
-		if err == nil && len(policies) > 0 && policies[0].restricted {
+		if err == nil && len(policies) > 0 && policies[0].effective().restricted {
 			// Restricted operations validate the complete envelope before
 			// checking identity; unrestricted calls retain their old parsing.
 			jid, err = canonicalChatJID(normalized, true)
@@ -199,6 +199,7 @@ func parseParticipants(raw []string, policies ...chatPolicy) ([]types.JID, error
 
 func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		req, jid, ok := parseGroupRequest(w, r, policy)
 		if !ok {
 			return
@@ -257,6 +258,7 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 
 func handleGroupSubject(ops groupOps, policy chatPolicy, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		req, jid, ok := parseGroupRequest(w, r, policy)
 		if !ok {
 			return
@@ -314,6 +316,7 @@ func handleGroupSubject(ops groupOps, policy chatPolicy, record rosterRecorder) 
 
 func handleGroupInvite(ops groupOps, policy chatPolicy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		req, jid, ok := parseGroupRequest(w, r, policy)
 		if !ok {
 			return
@@ -333,6 +336,7 @@ func handleGroupInvite(ops groupOps, policy chatPolicy) http.HandlerFunc {
 
 func handleGroupLeave(ops groupOps, policy chatPolicy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		_, jid, ok := parseGroupRequest(w, r, policy)
 		if !ok {
 			return

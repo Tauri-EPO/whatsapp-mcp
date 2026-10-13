@@ -162,6 +162,7 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 // Only the network send is replaced in tests; the pinned SDK builds the request.
 func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy, send func(context.Context, *waE2E.Message) error) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return

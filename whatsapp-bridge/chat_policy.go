@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -26,10 +27,62 @@ const chatPolicyEnv = "WHATSAPP_ALLOWED_CHATS"
 
 // chatPolicy is the parsed allow-list. Restricted=false means "allow all".
 type chatPolicy struct {
+	resolve          func() chatPolicy
 	restricted       bool
 	exact            map[string]struct{}
 	servers          map[string]struct{}
 	invalidPositions []int
+}
+
+type runtimeSettingsSnapshotKey struct{}
+
+// effective preserves captured handlers and pins HTTP authorization to one snapshot.
+func (p chatPolicy) effective(contexts ...context.Context) chatPolicy {
+	if p.resolve != nil {
+		if len(contexts) > 0 {
+			if pinned, ok := contexts[0].Value(runtimeSettingsSnapshotKey{}).(runtimeSettingsSnapshot); ok {
+				return pinned.chats
+			}
+		}
+		return p.resolve()
+	}
+	return p
+}
+
+func (p chatPolicy) entries() []string {
+	entries := make([]string, 0, len(p.exact)+len(p.servers))
+	for entry := range p.exact {
+		entries = append(entries, entry)
+	}
+	for server := range p.servers {
+		entries = append(entries, "*@"+server)
+	}
+	sort.Strings(entries)
+	return entries
+}
+
+// intersectChatPolicies compares grammar, never cached identity authorization.
+func intersectChatPolicies(runtime, deploy chatPolicy) chatPolicy {
+	if !deploy.restricted {
+		return runtime
+	}
+	out := chatPolicy{restricted: true, exact: map[string]struct{}{}, servers: map[string]struct{}{}}
+	for entry := range runtime.exact {
+		if deploy.Allows(entry) {
+			out.exact[entry] = struct{}{}
+		}
+	}
+	for entry := range deploy.exact {
+		if runtime.Allows(entry) {
+			out.exact[entry] = struct{}{}
+		}
+	}
+	for server := range runtime.servers {
+		if _, ok := deploy.servers[server]; ok {
+			out.servers[server] = struct{}{}
+		}
+	}
+	return out
 }
 
 // normalizeChatEntry canonicalises an allow-list entry or a request target:
@@ -83,6 +136,7 @@ func loadChatPolicy() chatPolicy {
 // Allows reports whether the policy permits acting on target (a JID or a bare
 // phone number as accepted by the REST API).
 func (p chatPolicy) Allows(target string) bool {
+	p = p.effective()
 	// whatsmeow parses the first two @-separated parts. A policy must never
 	// authorize a different server from the one the client will address.
 	if strings.Count(target, "@") > 1 {
@@ -106,6 +160,7 @@ func (p chatPolicy) Allows(target string) bool {
 // phone/LID twins and Brazilian mobile spellings denote the same user. Send
 // destinations retain their separate typed/registered-number checks.
 func (p chatPolicy) allowsIdentity(ctx context.Context, jid types.JID, twin lidForPNFunc) bool {
+	p = p.effective()
 	if !p.restricted {
 		return true
 	}

@@ -133,7 +133,10 @@ def tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
         started = time.monotonic()
         code: str | None = None
         try:
-            return fn(*args, **kwargs)
+            from chat_policy import policy_operation
+
+            with policy_operation():
+                return fn(*args, **kwargs)
         except ToolError as exc:
             code = exc.code
             return exc.to_dict()

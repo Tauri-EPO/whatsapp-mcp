@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
+from chat_policy import policy_operation
 from errors import ERROR_CODES, ToolError, error, structured_errors, tool_error_result
 from observability import mcp_metrics_owned, metrics
 from tool_policy import active_policy, oauth_allows_tool
@@ -109,7 +110,8 @@ class StrictArgumentServer(MCPServer[Any]):
         result: CallToolResult | InputRequiredResult | None = None
         token = mcp_metrics_owned.set(True)
         try:
-            result = await self._call_tool_result(name, arguments, context, tool)
+            with policy_operation():
+                result = await self._call_tool_result(name, arguments, context, tool)
             if isinstance(result, CallToolResult) and tool is not None:
                 result = _schema_compatible_error(tool, result)
             return result
