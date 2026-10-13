@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/mdp/qrterminal v1.0.1
 	github.com/minio/minio-go/v7 v7.3.0
-	go.mau.fi/whatsmeow v0.0.0-20261007111105-c386243a72ba
+	go.mau.fi/whatsmeow v0.0.0-20261013142727-4cf8bc8e0aeb
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.60.1

@@ -563,8 +563,8 @@ land.
   per call; groups send one request.
   The response message reports how many requests were sent and their kinds
   (phone/LID), without revealing the discovered identifier. A failed second send
-  keeps the first request's success. Whether the twin request helps an unanswered
-  chat is not yet verified on a paired phone (#694).
+  keeps the first request's success. The twin request made one unanswered direct
+  chat answer on a paired phone (#694): one observed case, not a guarantee.
   The phone decides whether to replay the target and include its direct path.
   On-demand phone replays also attempt to repair existing mapped LID media rows.
   An alias repair problem logs a warning and keeps the canonical phone-chat
