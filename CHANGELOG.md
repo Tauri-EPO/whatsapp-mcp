@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.6.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.5.1...v2.6.0) (2026-10-13)
+
+
+### Features
+
+* add runtime HMAC-signed message webhooks ([#708](https://github.com/Tauri-EPO/whatsapp-mcp/issues/708)) ([a35cca6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/a35cca6452b8a87186d72af02be3fd6a9250986b)), closes [#707](https://github.com/Tauri-EPO/whatsapp-mcp/issues/707)
+
+
+### Dependencies
+
+* bump whatsmeow to v0.0.0-20261013142727-4cf8bc8e0aeb ([#717](https://github.com/Tauri-EPO/whatsapp-mcp/issues/717)) ([c62a1c1](https://github.com/Tauri-EPO/whatsapp-mcp/commit/c62a1c1551ba8ccad800150c77c3ad817aceeedc))
+
 ## [2.5.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.5.0...v2.5.1) (2026-10-13)
 
 
