@@ -1393,8 +1393,7 @@ allowed spelling is used. A known twin gets a second request only when it too
 is allowed. With no allow-list, both known spellings are sent. Groups and chats
 without a known twin send one request. The response reports successful request
 counts and phone/LID kinds; a failed second send does not fail the first.
-Whether using both helps an unanswered chat is not yet verified on a paired
-phone (#694); the phone still decides whether and how much history to send.
+The phone still decides whether and how much history to send.
 
 | Field | Required | Description |
 | --------- | -------- | ------------------------------------------------------ |
