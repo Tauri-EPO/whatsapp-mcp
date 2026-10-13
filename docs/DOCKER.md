@@ -130,7 +130,7 @@ helper with that relying-party support; they do not create one or provide a
 browser authenticator. Without such a helper, use the official phone flow and
 restart the attempt after resolving the account's requirements.
 
-The pinned whatsmeow `c386243a72ba` includes passkey support from `b572e5b`;
+The pinned whatsmeow includes passkey support from `b572e5b`;
 its QR channel automatically confirms `SkipHandoffUX` events. A manual
 confirmation remains pending, bounded by the attempt timeout. A passkey request
 uses its advertised timeout (milliseconds), capped at five minutes. Pairing by
