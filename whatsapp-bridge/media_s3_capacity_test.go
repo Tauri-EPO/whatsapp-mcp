@@ -666,11 +666,11 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 			t.Cleanup(func() { once.Do(func() { close(release) }) })
 			var calls, served atomic.Int64
 			var requestMu sync.Mutex
-			var requestLimits []uint64
+			var requestLimits []int64
 			cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestMu.Lock()
 				request := calls.Add(1)
-				limit, _ := strconv.ParseUint(r.Header.Get("X-Test-Limit"), 10, 64)
+				limit, _ := strconv.ParseInt(r.Header.Get("X-Test-Limit"), 10, 64)
 				requestLimits = append(requestLimits, limit)
 				requestMu.Unlock()
 				t.Logf("CDN request=%d max_bytes=%s", request, r.Header.Get("X-Test-Limit"))
@@ -778,15 +778,15 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 				// is reused by the small caller (still 413), whereas a small
 				// overflow must be followed by a fresh large read.
 				wantCalls = 2
-				if len(requestLimits) < 2 || requestLimits[0] != uint64(starterLimit) {
+				if len(requestLimits) < 2 || requestLimits[0] != starterLimit {
 					t.Fatalf("missing shared attempt: CDN limits=%v", requestLimits)
 				}
-				if requestLimits[1] == uint64(starterLimit) {
+				if requestLimits[1] == starterLimit {
 					wantCalls = 3
-				} else if requestLimits[1] < uint64(len(data)) {
+				} else if requestLimits[1] < int64(len(data)) {
 					t.Fatalf("unexpected fallback limit: %v", requestLimits)
 				}
-				if wantCalls == 3 && (len(requestLimits) != 3 || requestLimits[2] < uint64(len(data))) {
+				if wantCalls == 3 && (len(requestLimits) != 3 || requestLimits[2] < int64(len(data))) {
 					t.Fatalf("large fallback missing: CDN limits=%v", requestLimits)
 				}
 				if b.metrics.mediaQuotaRefusals.Load() == 0 {
