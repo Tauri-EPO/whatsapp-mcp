@@ -235,7 +235,7 @@ func TestGroupMembershipFeedsRespectTheAllowList(t *testing.T) {
 		Timestamp: time.Now(),
 		Join:      []types.JID{{User: "5511888888888", Server: types.DefaultUserServer}},
 	})
-	b.noteGroupSender(testGroupJID, types.JID{User: "5511777777777", Server: types.DefaultUserServer}, time.Now())
+	b.noteGroupSender(b.Policy, testGroupJID, types.JID{User: "5511777777777", Server: types.DefaultUserServer}, time.Now())
 
 	if got := len(readMembers(t, store, testGroupJID)); got != 0 {
 		t.Fatalf("an excluded group gained %d cached member(s)", got)
@@ -831,7 +831,7 @@ func TestMessagesAfterOurDepartureDoNotResurrectTheRoster(t *testing.T) {
 		Timestamp: at,
 		Leave:     []types.JID{self},
 	})
-	b.noteGroupSender(testGroupJID, types.JID{User: "5511888888888", Server: types.DefaultUserServer}, at.Add(time.Second))
+	b.noteGroupSender(b.Policy, testGroupJID, types.JID{User: "5511888888888", Server: types.DefaultUserServer}, at.Add(time.Second))
 
 	if got := len(readMembers(t, store, testGroupJID)); got != 0 {
 		t.Fatalf("a late message resurrected %d row(s) of a group we left", got)

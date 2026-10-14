@@ -112,6 +112,7 @@ func parseChatAndMessage(w http.ResponseWriter, policy chatPolicy, rawChat, rawI
 
 func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {
 			writeEditForward(w, http.StatusMethodNotAllowed, editForwardResponse{Message: "method not allowed"})
 			return
@@ -170,6 +171,7 @@ type forwardDeps struct {
 
 func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {
 			writeEditForward(w, http.StatusMethodNotAllowed, editForwardResponse{Message: "method not allowed"})
 			return

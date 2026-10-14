@@ -53,6 +53,7 @@ from pydantic import AnyUrl
 
 import media_inventory
 import media_read
+from chat_policy import policy_operation
 from errors import ToolError
 from strict_args import StrictArgumentServer
 from tool_policy import active_policy
@@ -214,4 +215,5 @@ class MediaResourceServer(StrictArgumentServer):
         # is an HTTP round trip to the bridge that can take as long as
         # WHATSAPP_BRIDGE_TIMEOUT_S allows. Blocking the event loop for that
         # would stall every other client on this endpoint.
-        return [await anyio.to_thread.run_sync(read_media_resource, *reference)]
+        with policy_operation():
+            return [await anyio.to_thread.run_sync(read_media_resource, *reference)]

@@ -101,6 +101,8 @@ type Bridge struct {
 	settingsMu            sync.Mutex
 	settingsWarnMu        sync.Mutex
 	settingsWarned        map[string]int64
+	policyFailLogged      time.Time // both guarded by settingsWarnMu
+	policyFailPending     int64
 	operatorLogout        atomic.Bool
 	operatorSessionWiped  atomic.Bool
 	operatorRetiredClient atomic.Pointer[whatsmeow.Client]
@@ -344,6 +346,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		return b.currentClient().FetchAppState(ctx, appstate.WAPatchRegular, true, false)
 	}
 	b.Policy.warnInvalidEntries(logger)
+	b.Policy = b.runtimeChatPolicy(b.Policy)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if b.Webhook != nil {
 		b.Webhook.failures = &b.metrics.webhookFailures

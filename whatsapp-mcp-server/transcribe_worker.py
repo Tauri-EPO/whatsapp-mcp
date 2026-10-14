@@ -72,6 +72,7 @@ import media_inventory
 import media_notes
 import media_remote
 import whatsapp
+from chat_policy import policy_operation
 from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
 from runtime_settings import INGEST_CHATS_ENV, ingest_chat_clause, parse_ingest_chats
@@ -744,13 +745,14 @@ def run_once(
     try:
         from transcription_usage import QuotaExceededError, ingest_quota_exhausted
 
-        policy = active_policy() if runtime_policy_enabled() else load_tool_policy()
-        if not policy.allows(TRANSCRIBE_TOOL):
-            return BatchResult(0, 0, 0, position=position)
-        if ingest_quota_exhausted():
-            return BatchResult(0, 0, 0, position=position)
-        fetch = fetch and policy.allows(DOWNLOAD_TOOL)
-        selection = find_pending(batch, fetch=fetch, download=download, position=position)
+        with policy_operation():
+            policy = active_policy() if runtime_policy_enabled() else load_tool_policy()
+            if not policy.allows(TRANSCRIBE_TOOL):
+                return BatchResult(0, 0, 0, position=position)
+            if ingest_quota_exhausted():
+                return BatchResult(0, 0, 0, position=position)
+            fetch = fetch and policy.allows(DOWNLOAD_TOOL)
+            selection = find_pending(batch, fetch=fetch, download=download, position=position)
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
         return BatchResult(0, 0, 0, position=position)  # the read failed, the walk did not move
@@ -761,8 +763,11 @@ def run_once(
     stopped = False  # ... and MAX_OUTAGE_SKIPS of them ended the round early
     for candidate in pending:
         try:
-            if runtime_policy_enabled() and not active_policy().allows(TRANSCRIBE_TOOL):
-                return BatchResult(len(pending), transcribed, failed, selection.examined, position)
+            with policy_operation():
+                if not CHAT_POLICY.allows(candidate.chat_jid):
+                    continue
+                if runtime_policy_enabled() and not active_policy().allows(TRANSCRIBE_TOOL):
+                    return BatchResult(len(pending), transcribed, failed, selection.examined, position)
         except ToolError:
             logger.warning("transcribe_on_ingest: runtime policy unavailable; round paused")
             return BatchResult(len(pending), transcribed, failed, selection.examined, position)

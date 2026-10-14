@@ -274,8 +274,8 @@ func (b *Bridge) leftGroup(leaving []types.JID) bool {
 // Groups whose roster we recently failed to fetch — including the one we were
 // just removed from — are skipped: a row written for such a group can never be
 // reconciled against a real roster again.
-func (b *Bridge) noteGroupSender(chatJID string, sender types.JID, now time.Time) {
-	if b.Store == nil || !isGroupJID(chatJID) || !b.Policy.Allows(chatJID) {
+func (b *Bridge) noteGroupSender(policy chatPolicy, chatJID string, sender types.JID, now time.Time) {
+	if b.Store == nil || !isGroupJID(chatJID) || !policy.Allows(chatJID) {
 		return
 	}
 	if b.rosterFailures.recent(chatJID, now, groupRosterRetryAfter) {
@@ -317,11 +317,12 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 		return 0, false
 	}
 	attempted := 0
+	policy := b.Policy.effective() // One settings read for the pass, not one per group.
 	for _, jid := range stale {
 		if ctx.Err() != nil || (b.Connected != nil && !b.Connected()) {
 			return refreshed, true
 		}
-		if !b.Policy.Allows(jid) || b.rosterFailures.recent(jid, now, groupRosterRetryAfter) {
+		if !policy.Allows(jid) || b.rosterFailures.recent(jid, now, groupRosterRetryAfter) {
 			continue
 		}
 		parsed, err := types.ParseJID(jid)

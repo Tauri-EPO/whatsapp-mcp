@@ -69,7 +69,7 @@ func (b *Bridge) handleMarkRead() http.HandlerFunc {
 		markReadHandler(markReadDeps{
 			allowSend: b.allowSendAction,
 			store:     b.Store,
-			policy:    b.Policy,
+			policy:    b.Policy.effective(r.Context()),
 			connected: b.Connected,
 			resolve:   func(jid string) (types.JID, error) { return resolveRecipientJID(client, jid) },
 			markRead: func(ctx context.Context, ids []types.MessageID, readAt time.Time, chat, sender types.JID) error {

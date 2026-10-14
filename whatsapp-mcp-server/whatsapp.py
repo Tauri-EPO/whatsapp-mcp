@@ -22,7 +22,13 @@ import audio
 import endpoint_cert
 import media_upload
 import transcribe
-from chat_policy import DEFAULT_USER_SERVER, load_chat_policy, normalize_chat_entry, validate_chat_target
+from chat_policy import (
+    DEFAULT_USER_SERVER,
+    RuntimeChatPolicy,
+    load_chat_policy,
+    normalize_chat_entry,
+    validate_chat_target,
+)
 from errors import MEDIA_REFUSED_CODE, ToolError
 from phone import br_mobile_alternate, br_national_mobile_alternate, normalize_recipient, phone_digits
 from untrusted import sanitize_name
@@ -57,7 +63,7 @@ SQLITE_BUSY_TIMEOUT_S = 5.0
 
 # Conversation allow-list (WHATSAPP_ALLOWED_CHATS). Read tools filter to these
 # chats, write tools refuse anything else. Unrestricted when unset.
-CHAT_POLICY = load_chat_policy()
+CHAT_POLICY = RuntimeChatPolicy(load_chat_policy())
 
 
 def _policy_denied(jid: str | None) -> str | None:
@@ -1953,6 +1959,7 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None, *, phone
     allow-list naming one of the two keeps hiding exactly what it hid before,
     rather than having the other half of the conversation folded into it.
     """
+    policy = CHAT_POLICY.effective()
     paired = {**(_paired_phone_chats(cur) if phone_pairs else {}), **_paired_lid_chats(cur)}
     wanted = set(only) if only is not None else None
     if wanted is not None:
@@ -1967,8 +1974,8 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None, *, phone
         lid_jid: phone_jid
         for lid_jid, phone_jid in paired.items()
         if (wanted is None or lid_jid in wanted or phone_jid in wanted)
-        and CHAT_POLICY.allows(lid_jid)
-        and CHAT_POLICY.allows(phone_jid)
+        and policy.allows(lid_jid)
+        and policy.allows(phone_jid)
     }
     if not candidates:
         return NO_CHAT_TWINS
@@ -2086,13 +2093,23 @@ def _apply_name_fallback(chats: list[Chat], *, phone_aliases: bool = True) -> No
 
 
 def get_sender_name(sender_jid: str) -> str:
-    hit, cached = _cache_get("name", sender_jid)
+    # Unrestricted lookups may borrow names from another namespace. A narrowed
+    # policy must never reuse that answer; keep concurrent snapshots separate.
+    try:
+        # Read once: outside a pinned operation two reads can straddle a PATCH,
+        # and the key and the query must describe the same policy (issue #466).
+        restricted = CHAT_POLICY.restricted
+    except ToolError:
+        logger.warning("Database error resolving sender name: runtime chat policy unavailable")
+        return sender_jid  # No cached or cross-namespace metadata on a policy outage.
+    cache_key = f"{restricted}:{sender_jid}"
+    hit, cached = _cache_get("name", cache_key)
     if hit:
         return cached
-    return _cache_put("name", sender_jid, _get_sender_name_uncached(sender_jid))
+    return _cache_put("name", cache_key, _get_sender_name_uncached(sender_jid, restricted))
 
 
-def _get_sender_name_uncached(sender_jid: str) -> str:
+def _get_sender_name_uncached(sender_jid: str, restricted: bool) -> str:
     """chats.name for the sender, else the phone book, else the JID back."""
     try:
         conn = _connect_messages_db()
@@ -2103,7 +2120,7 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
         # the table and could match an unrelated JID containing the digits.
         bare = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         candidates = [sender_jid, bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
-        if "@" in sender_jid and CHAT_POLICY.restricted:
+        if "@" in sender_jid and restricted:
             # Under an allow-list a full JID names its own row and no other:
             # the same digits under the other server may be a chat the list
             # does not name, and get_contact would hand its name out (issue

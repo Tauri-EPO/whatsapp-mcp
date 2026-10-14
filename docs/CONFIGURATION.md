@@ -1075,6 +1075,40 @@ by the deploy allow-list when one is set; runtime cannot reopen a deploy-denied
 or read-only tool. GET returns these effective lists; `runtime` identifies an
 applied override even when the deploy floor removes some of its entries.
 
+`chats.allowed` is a nonempty array using the same entries as
+`WHATSAPP_ALLOWED_CHATS`: bare phone numbers, full JIDs and server wildcards
+such as `*@g.us` / `*@s.whatsapp.net`. Entries are trimmed, canonicalized and
+deduplicated. An empty array, a blank entry, an embedded comma and an entry
+that is none of those three forms (`+55 11 99999-9999`, `a@b@c`, `@`) return
+400 and save nothing, other keys of the same PATCH included: such an entry
+would match no chat and deny them all. Use `{"chats.allowed":null}` to clear
+the override. The effective policy is
+the intersection with the deploy list, comparing exact JIDs and wildcards:
+a runtime wildcard cannot authorize any chat outside an explicit deploy list.
+GET returns the canonical effective entries and `runtime`, `env` or `default`.
+A disjoint intersection returns `[]` with source `runtime` and denies every
+chat; `[]` with source `default` (or an empty env policy) remains unrestricted.
+Both processes must receive the same deploy list.
+
+Changes apply to the next MCP call, bridge request and inbound message considered
+for either webhook sender, without restarting either process. The policy also
+bounds participant add/promote, media, notes, search and ingest transcription;
+remove/demote still only requires the group. Ingest rechecks each selected item
+before transcription. Each MCP tool invocation and bridge REST request uses one
+immutable settings snapshot shared by tool and chat authorization, including
+typed/registered destinations, forward
+source/target and participant batches. An operation already admitted may finish
+using that snapshot. Send limits are the exception: a request that could not
+reserve its send rechecks the saved limits, so one enabled mid-request is not
+skipped. Entries are never included in settings audit logs, metrics or health;
+the audit records only the key, source transition and version.
+
+A refusal names the list it came from: `WHATSAPP_ALLOWED_CHATS` for the deploy
+list, `runtime chats.allowed` for the override, and `runtime chats.allowed
+within WHATSAPP_ALLOWED_CHATS (deploy)` when both apply. The bridge startup
+summary reports the effective policy under the same name, with counts only for
+a runtime list.
+
 GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
 "source": "default" }, ... } }`. PATCH accepts a flat JSON object:
 
@@ -1094,7 +1128,7 @@ Bridge consumers read each saved setting before the next automatic cache transfe
 settings survive restart and GET reports effective values. Media keys are bridge
 settings and do not need defaults in the MCP process.
 
-The other nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
+The remaining nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
 names; an empty array removes only the runtime restriction),
 `transcription.ingest_chats` (`all` or `direct`),
 `transcription.monthly_max_minutes` (0..525600), `transcription.cap_scope`
@@ -1113,17 +1147,24 @@ Bridge `/metrics` exposes `whatsapp_runtime_settings_version`.
 
 After a rollback, unknown saved tool names are dropped with one WARN naming
 the key, without printing its value. An invalid saved value falls back to
-env/default and can always be cleared by PATCH null. An unreadable
+env/default and can always be cleared by PATCH null. An unreadable saved
+`chats.allowed` denies every chat until repaired or cleared. An unreadable
 `tools.allow` fails closed: only the deploy allow-list can remain enabled;
 without an explicit deploy allow-list every tool is denied until repaired.
-An unavailable database still fails closed in both processes.
+An unavailable database still fails closed in both processes. Outside a REST
+request (webhook forwarding, group rosters) the bridge then denies every chat,
+logs one ERROR a minute with the number of failed reads and counts them in
+`whatsapp_bridge_chat_policy_read_failures_total`. Chat authorization
+requires the message store, including for notes that remain readable in notes.db;
+a missing-store fallback used by diagnostics cannot grant chat access.
 
 Both lists apply together at the next MCP `tools/list`/tool call and bridge
 request, without restarting either process. The worker uses the next cycle;
 runtime tool denial pauses its transcription/fetching and clearing it permits
 the next cycle again. An in-flight operation may finish under its admitted
 snapshot. `WHATSAPP_READ_ONLY` still wins over both lists, and
-`WHATSAPP_ALLOWED_CHATS` still bounds the chat scope; both remain env-only.
+the deploy `WHATSAPP_ALLOWED_CHATS` list still bounds the runtime chat scope.
+Read-only remains env-only.
 Operator settings and logout stay available under read-only.
 
 ## Transcribing voice notes as they arrive

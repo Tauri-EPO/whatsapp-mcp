@@ -195,7 +195,7 @@ func TestRuntimeWebhookReceiverFiltersAndDeploymentFloor(t *testing.T) {
 						webhookBarrier(t, b, receipts)
 					}
 					// Receiver opt-in cannot widen the legacy sender's deployment filter.
-					if deploy != "true" && !filter.fromMe && b.webhookChatAllowed(filter.chat, filter.fromMe) {
+					if deploy != "true" && !filter.fromMe && b.webhookChatAllowed(b.Policy, filter.chat, filter.fromMe) {
 						t.Fatal("legacy feed filter widened")
 					}
 				})

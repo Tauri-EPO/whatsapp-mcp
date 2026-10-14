@@ -57,7 +57,7 @@ func (s transientMediaStorage) OpenRange(ctx context.Context, row mediaRow, offs
 }
 
 func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
-	chat, ok := authorizeChat(w, b.Policy, r.URL.Query().Get("chat_jid"), false)
+	chat, ok := authorizeChat(w, b.Policy.effective(r.Context()), r.URL.Query().Get("chat_jid"), false)
 	if !ok {
 		return
 	}
@@ -215,7 +215,7 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Bridge) handleMediaCache(w http.ResponseWriter, r *http.Request) {
-	chat, ok := authorizeChat(w, b.Policy, r.URL.Query().Get("chat_jid"), false)
+	chat, ok := authorizeChat(w, b.Policy.effective(r.Context()), r.URL.Query().Get("chat_jid"), false)
 	if !ok {
 		return
 	}

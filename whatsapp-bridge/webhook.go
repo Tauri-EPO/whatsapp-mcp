@@ -80,17 +80,17 @@ func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 // and broadcast lists are stored regardless, but require separate opt-ins to
 // reach a webhook intended for conversations. The global/self gates always win.
 func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...types.JID) bool {
-	return b.Webhook.Enabled() && b.webhookChatAllowed(chat, fromMe, original...)
+	return b.Webhook.Enabled() && b.webhookChatAllowed(b.Policy, chat, fromMe, original...)
 }
 
 // Admit arrivals eligible for either sender, including arrivals while the
 // configured runtime receiver is disabled (which must count as delivery loss).
-func (b *Bridge) messageWebhookAllowed(chat types.JID, fromMe bool, id string, original ...types.JID) (legacy, runtime bool) {
+func (b *Bridge) messageWebhookAllowed(policy chatPolicy, chat types.JID, fromMe bool, id string, original ...types.JID) (legacy, runtime bool) {
 	legacy = b.Webhook.Enabled() && b.webhookFilters().allows(chat, fromMe)
 	if b.RuntimeWebhook.subscribed("message.received") {
 		runtime = b.RuntimeWebhook.snapshot().allows(chat, fromMe)
 	}
-	if (legacy || runtime) && !b.webhookIdentityAllowed(chat, original...) {
+	if (legacy || runtime) && !b.webhookIdentityAllowed(policy, chat, original...) {
 		legacy, runtime = false, false
 	}
 	if !legacy && !runtime {
@@ -99,21 +99,22 @@ func (b *Bridge) messageWebhookAllowed(chat types.JID, fromMe bool, id string, o
 	return legacy, runtime
 }
 
-func (b *Bridge) webhookChatAllowed(chat types.JID, fromMe bool, original ...types.JID) bool {
-	return b.webhookFilters().allows(chat, fromMe) && b.webhookIdentityAllowed(chat, original...)
+func (b *Bridge) webhookChatAllowed(policy chatPolicy, chat types.JID, fromMe bool, original ...types.JID) bool {
+	return b.webhookFilters().allows(chat, fromMe) && b.webhookIdentityAllowed(policy, chat, original...)
 }
 
 func (b *Bridge) webhookFilters() runtimeWebhookFilters {
 	return runtimeWebhookFilters{ForwardSelf: b.ForwardSelf, ForwardStatus: b.ForwardStatus, ForwardChannels: b.ForwardChannels, ForwardBroadcasts: b.ForwardBroadcasts}
 }
 
-func (b *Bridge) webhookIdentityAllowed(chat types.JID, original ...types.JID) bool {
+func (b *Bridge) webhookIdentityAllowed(policy chatPolicy, chat types.JID, original ...types.JID) bool {
 	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {
 		return lookupAltJID(ctx, b.currentClient(), j)
 	}
-	allowed := b.Policy.allowsIdentity(b.ctx, chat, lookup)
+	policy = policy.effective() // One settings read for every identity of the event.
+	allowed := policy.allowsIdentity(b.ctx, chat, lookup)
 	for _, j := range original {
-		allowed = allowed || b.Policy.allowsIdentity(b.ctx, j, lookup)
+		allowed = allowed || policy.allowsIdentity(b.ctx, j, lookup)
 	}
 	return allowed
 }
