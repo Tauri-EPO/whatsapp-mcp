@@ -5,6 +5,7 @@ from datetime import datetime
 
 import pytest
 
+import chat_policy
 import whatsapp
 from tests.conftest import MESSAGES_SCHEMA, WHATSMEOW_SCHEMA
 
@@ -70,11 +71,12 @@ def test_lid_resolves_through_one_whatsmeow_connection(dbs, monkeypatch):
 
 def test_repeated_senders_hit_the_cache(dbs, monkeypatch):
     counts = _count_connections(monkeypatch)
-    for _ in range(50):
-        whatsapp.get_sender_name("5511999999999@s.whatsapp.net")
-        whatsapp.get_sender_name("100000000000006@lid")
-        whatsapp._sender_aliases("5511888888888")
-    assert counts["messages"] == 2, counts  # one per distinct sender
+    with chat_policy.policy_operation():
+        for _ in range(50):
+            whatsapp.get_sender_name("5511999999999@s.whatsapp.net")
+            whatsapp.get_sender_name("100000000000006@lid")
+            whatsapp._sender_aliases("5511888888888")
+    assert counts["messages"] == 3, counts  # one runtime snapshot + one per distinct sender
     assert counts["whatsmeow"] <= 3, counts  # LID name once, aliases once (+ at most one miss path)
 
 
@@ -101,15 +103,17 @@ def test_msg_to_dict_list_resolves_each_sender_once(dbs, monkeypatch):
         )
         for i in range(200)
     ]
-    out = [whatsapp.msg_to_dict(m) for m in msgs]
+    with chat_policy.policy_operation():
+        out = [whatsapp.msg_to_dict(m) for m in msgs]
     assert all(d["sender_name"] == "Alice" for d in out)
-    assert counts["messages"] == 1, counts
+    assert counts["messages"] == 2, counts  # one policy snapshot + one distinct sender
 
 
 def test_get_sender_name_reuses_the_batched_contact_lookup(dbs, monkeypatch):
     """One phone-book cache for chat pages and senders alike (#257)."""
     whatsapp._contact_names(["100000000000006@lid"])  # as a page of chats would
     counts = _count_connections(monkeypatch)
-    assert whatsapp.get_sender_name("100000000000006@lid") == "Bob Silva"
+    with chat_policy.policy_operation():
+        assert whatsapp.get_sender_name("100000000000006@lid") == "Bob Silva"
     assert counts["whatsmeow"] == 0, counts  # already resolved, no second lookup
-    assert counts["messages"] == 1, counts  # chats.name is still tried first
+    assert counts["messages"] == 2, counts  # policy snapshot + chats.name lookup

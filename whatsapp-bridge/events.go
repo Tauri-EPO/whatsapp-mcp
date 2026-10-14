@@ -216,7 +216,8 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 
 	// A group sender we have no roster row for is a member we know about
 	// (group_events.go); no-op for DMs and for members already recorded.
-	b.noteGroupSender(chatJID, resolvedSender, msgTimestamp)
+	policy := b.Policy.once() // The roster note and the webhook gate share one read.
+	b.noteGroupSender(policy, chatJID, resolvedSender, msgTimestamp)
 
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
 	b.handleMessageRevoke(msg.Message, chatJID, msg.Info.Timestamp.Unix())
@@ -273,7 +274,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			if rowConsumed {
 				return
 			}
-			forwardChat := b.messageWebhookAllowed(resolvedChat, msg.Info.IsFromMe, msg.Info.ID, msg.Info.Chat)
+			forwardChat := b.messageWebhookAllowed(policy, resolvedChat, msg.Info.IsFromMe, msg.Info.ID, msg.Info.Chat)
 			removed := emoji == ""
 			b.queueRuntimeMessage(forwardChat, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: storedSenderJID, Type: "reaction", Text: emoji, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored, ReactionToMessageID: reactedToID, ReactionRemoved: &removed})
 			if b.Webhook.Enabled() && forwardChat {
@@ -398,7 +399,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	forwardChat := b.messageWebhookAllowed(resolvedChat, msg.Info.IsFromMe, msg.Info.ID, msg.Info.Chat)
+	forwardChat := b.messageWebhookAllowed(policy, resolvedChat, msg.Info.IsFromMe, msg.Info.ID, msg.Info.Chat)
 	shouldForward := b.Webhook.Enabled() && forwardChat && !bareContentEnvelope(ex.inner, content)
 	if !bareContentEnvelope(ex.inner, content) {
 		b.queueRuntimeMessage(forwardChat, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: storedSenderJID, Type: mediaType, Text: content, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})

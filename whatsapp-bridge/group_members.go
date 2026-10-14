@@ -230,6 +230,7 @@ type rosterRecorder func(groupJID string, members []GroupMember, now time.Time)
 // like /api/download, which caches media the same way.
 func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altOf altJIDResolver, policy chatPolicy, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		raw := strings.TrimSpace(r.URL.Query().Get("jid"))
 		if raw == "" && r.Method == http.MethodPost {

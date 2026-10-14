@@ -328,11 +328,12 @@ def test_coverage_tool_passes_arguments(monkeypatch):
     assert passed["by_chat"] is True and passed["limit"] == 10
 
 
-def test_coverage_database_error_is_internal(monkeypatch, paired_dbs):
+def test_coverage_unavailable_policy_fails_closed(monkeypatch, paired_dbs):
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(paired_dbs.messages_db) + "/missing.db")
     with pytest.raises(ToolError) as exc:
         whatsapp.coverage()
-    assert exc.value.code == "internal"
+    assert exc.value.code == "denied"
+    assert "Runtime chat policy unavailable" in str(exc.value)
 
 
 # --- the audio block (issue #334) ---------------------------------------------

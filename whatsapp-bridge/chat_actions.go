@@ -26,7 +26,7 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "recipient, message_id, and emoji are required")
 			return
 		}
-		chatJID, ok := authorizeChat(w, b.Policy, req.Recipient, false)
+		chatJID, ok := authorizeChat(w, b.Policy.effective(r.Context()), req.Recipient, false)
 		if !ok {
 			return
 		}
@@ -103,7 +103,7 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return
 		}
-		recipientJID, ok := authorizeChat(w, b.Policy, req.Recipient, true)
+		recipientJID, ok := authorizeChat(w, b.Policy.effective(r.Context()), req.Recipient, true)
 		if !ok {
 			return
 		}

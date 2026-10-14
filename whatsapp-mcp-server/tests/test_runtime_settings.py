@@ -22,7 +22,7 @@ import transcribe_worker
 import whatsapp
 from errors import ToolError
 from strict_args import StrictArgumentServer
-from tests.conftest import ALICE, FAMILY
+from tests.conftest import ALICE, BOB, FAMILY
 from tests.test_transcribe_ingest import FakeBackend, _add_audio
 
 
@@ -327,3 +327,358 @@ def test_operator_logout_script_sends_idle_to_private_http_only():
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("deploy", "override", "effective"),
+    [
+        ("", [ALICE], [ALICE]),
+        (ALICE, ["*@s.whatsapp.net"], [ALICE]),
+        ("*@g.us", [ALICE, FAMILY], [FAMILY]),
+        (ALICE, [BOB], []),
+        (ALICE, ["*@g.us"], []),
+        ("*@g.us", ["*@g.us"], ["*@g.us"]),
+    ],
+)
+def test_runtime_chat_floor_matches_sql(runtime_archive, monkeypatch, deploy, override, effective):
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", deploy)
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy())
+    patch(runtime_archive, {"chats.allowed": override})
+    assert runtime_settings.snapshot()["settings"]["chats.allowed"] == {"value": effective, "source": "runtime"}
+    clause, params = policy.sql_clause("jid")
+    with runtime_archive.messages() as conn:
+        selected = {row[0] for row in conn.execute(f"SELECT jid FROM chats WHERE {clause}", params)}
+    assert selected == {jid for jid in (ALICE, BOB, FAMILY) if policy.allows(jid)}
+    assert policy.restricted
+    patch(runtime_archive, {"chats.allowed": None})
+    assert policy.allows(BOB) == chat_policy.load_chat_policy().allows(BOB)
+
+
+@pytest.mark.asyncio
+async def test_runtime_chat_next_http_tool_call_filters_list_read_search_send(runtime_archive, monkeypatch):
+    with runtime_archive.messages() as conn:
+        conn.executemany(
+            "INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me) VALUES (?,?,?,?,?,0)",
+            [
+                ("A1", ALICE, "5511999999999", "runtime hello", "2026-10-09 00:00:00+00:00"),
+                ("B1", BOB, "5511888888888", "runtime hello", "2026-10-09 00:00:00+00:00"),
+            ],
+        )
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    # Modules hold independent imported references in production.
+    import main as tool_main
+    import media_inventory
+    import media_notes
+    import notes
+
+    for module in (tool_main, media_inventory, media_notes, notes, transcribe_worker):
+        monkeypatch.setattr(module, "CHAT_POLICY", policy)
+    monkeypatch.setattr(whatsapp, "_bridge_request", lambda *a, **kw: pytest.fail("denied send reached bridge"))
+    app = main.build_http_app(
+        main.mcp,
+        "streamable-http",
+        "fake-mcp-token-0123456789",
+        host="0.0.0.0",
+        json_response=True,
+        stateless_http=True,
+    )
+    headers = {"Authorization": "Bearer fake-mcp-token-0123456789", "Accept": "application/json, text/event-stream"}
+    with TestClient(app) as client:
+
+        def call(name, arguments):
+            response = client.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+            assert response.status_code == 200, response.text
+            return response.json()["result"]
+
+        assert BOB in json.dumps(call("list_chats", {}))
+        patch(runtime_archive, {"chats.allowed": [ALICE]})
+        for name, arguments in [("list_chats", {}), ("list_messages", {"query": "hello", "include_context": False})]:
+            result = call(name, arguments)
+            assert not result.get("isError"), result
+            assert ALICE in json.dumps(result) and BOB not in json.dumps(result)
+        for name, arguments in [
+            ("get_chat", {"chat_jid": BOB}),
+            ("list_messages", {"chat_jid": BOB}),
+            ("get_message_context", {"message_id": "B1", "chat_jid": BOB}),
+            ("send_message", {"chat_jid": BOB, "message": "fake text"}),
+            ("forward_message", {"chat_jid": BOB, "message_id": "B1", "to_chat_jid": ALICE}),
+        ]:
+            result = call(name, arguments)
+            assert result["isError"] and "denied" in result["content"][0]["text"], result
+        assert not notes.CHAT_POLICY.allows(BOB)
+        assert media_inventory.CHAT_POLICY.allows(ALICE)
+        patch(runtime_archive, {"chats.allowed": None})
+        assert BOB in json.dumps(call("list_chats", {}))
+
+
+def test_runtime_chats_ingest_rechecks_selected_candidates(runtime_archive, monkeypatch):
+    _add_audio(runtime_archive, "AUD1", ALICE)
+    _add_audio(runtime_archive, "AUD2", BOB)
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    monkeypatch.setattr(transcribe_worker, "CHAT_POLICY", policy)
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    real_select = transcribe_worker.find_pending
+
+    def select_then_narrow(*args, **kwargs):
+        selection = real_select(*args, **kwargs)
+        assert len(selection.candidates) == 2
+        patch(runtime_archive, {"chats.allowed": [ALICE]})
+        return selection
+
+    monkeypatch.setattr(transcribe_worker, "find_pending", select_then_narrow)
+    backend = FakeBackend()
+    assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 1
+    assert len(backend.runs) == 1
+    assert transcribe_worker._pending_rows(10) == []
+    assert whatsapp.coverage()["audio"]["messages"] == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        "invalid-json",
+        [" "],
+        [ALICE + "," + BOB],
+        [ALICE, "+55 11 99999-9999"],
+        [ALICE, "a@b@c"],
+        [ALICE, "@"],
+        [ALICE, "1.2@lid"],
+    ],
+)
+def test_bad_saved_chats_fail_closed_and_do_not_log_entries(runtime_archive, caplog, value):
+    patch(runtime_archive, {"chats.allowed": value})
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    assert not policy.allows(ALICE) and not policy.allows(BOB)
+    assert policy.sql_clause("jid") == ("0=1", [])
+    assert ALICE not in caplog.text and BOB not in caplog.text
+    assert len([r for r in caplog.records if "Saved runtime setting" in r.message]) == 1
+    patch(runtime_archive, {"chats.allowed": None})
+    assert policy.allows(ALICE)
+
+
+@pytest.mark.parametrize(
+    ("deploy", "origin"),
+    [("", "runtime chats.allowed"), ("*@g.us", "runtime chats.allowed within WHATSAPP_ALLOWED_CHATS (deploy)")],
+)
+def test_refusal_names_the_list_it_came_from(runtime_archive, deploy, origin):
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": deploy}))
+    assert "is not in WHATSAPP_ALLOWED_CHATS;" in policy.denial_message(BOB)  # no override: the wording of before
+    patch(runtime_archive, {"chats.allowed": [FAMILY]})
+    assert f"is not in {origin};" in policy.denial_message(BOB)
+    with pytest.raises(ToolError, match=re.escape(f"is not in {origin}")):
+        policy.require_participant(BOB)
+
+
+def test_sender_name_reads_the_policy_once_for_key_and_query(runtime_archive, monkeypatch):
+    class Narrowing:  # A PATCH lands between two reads made outside a pinned operation.
+        reads = 0
+
+        @property
+        def restricted(self):
+            self.reads += 1
+            return self.reads == 1
+
+    hidden = BOB.replace("@s.whatsapp.net", "@lid")
+    with runtime_archive.messages() as conn:
+        conn.execute("INSERT INTO chats(jid,name) VALUES (?,?)", (hidden, "Private cached name"))
+        conn.execute("UPDATE chats SET name=NULL WHERE jid=?", (BOB,))
+    policy = Narrowing()
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(runtime_archive.whatsmeow_db) + ".missing")
+    whatsapp._reset_name_cache()
+    assert whatsapp.get_sender_name(BOB) == BOB  # restricted key, restricted query
+    assert policy.reads == 1
+
+
+def test_runtime_chats_restriction_does_not_reuse_cross_namespace_sender_name(runtime_archive, monkeypatch):
+    hidden = BOB.replace("@s.whatsapp.net", "@lid")
+    with runtime_archive.messages() as conn:
+        conn.execute("INSERT INTO chats(jid,name) VALUES (?,?)", (hidden, "Private cached name"))
+        conn.execute(
+            "INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me) VALUES (?,?,?,?,?,0)",
+            ("B1", FAMILY, BOB, "fake text", "2026-10-09 00:00:00+00:00"),
+        )
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    # Hide the legitimate phone book so only the namespace fallback supplies a name.
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(runtime_archive.whatsmeow_db) + ".missing")
+    with runtime_archive.messages() as conn:
+        conn.execute("UPDATE chats SET name=NULL WHERE jid=?", (BOB,))
+    whatsapp._reset_name_cache()
+    assert whatsapp.get_sender_name(BOB) == "Private cached name"
+    patch(runtime_archive, {"chats.allowed": [BOB, FAMILY]})
+    stats = main.message_stats(group_by="sender")
+    assert "Private cached name" not in json.dumps(stats)
+    assert whatsapp.get_sender_name(BOB) == BOB
+    patch(runtime_archive, {"chats.allowed": None})
+    assert whatsapp.get_sender_name(BOB) == "Private cached name"
+
+
+def test_runtime_chat_operation_reads_once_and_refreshes_next_call(runtime_archive, monkeypatch):
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    calls = []
+    real_connect = whatsapp._connect_messages_db
+
+    def connect():
+        calls.append(1)
+        return real_connect()
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", connect)
+    with chat_policy.policy_operation():
+        for _ in range(500):
+            assert policy.allows(ALICE) and policy.allows(BOB)
+        assert not policy.restricted
+    assert len(calls) == 1
+    patch(runtime_archive, {"chats.allowed": [ALICE]})
+    with chat_policy.policy_operation():
+        assert policy.allows(ALICE) and not policy.allows(BOB)
+    assert len(calls) == 2
+
+
+def test_runtime_list_chats_pair_scan_has_bounded_connections(runtime_archive, monkeypatch):
+    # Use the existing synthetic identity-pair seam; no account or phone is touched.
+    pairs = {f"{index}@lid": f"{index}@s.whatsapp.net" for index in range(500)}
+    monkeypatch.setattr(whatsapp, "_paired_lid_chats", lambda cur: pairs)
+    monkeypatch.setattr(whatsapp, "_paired_phone_chats", lambda cur: {})
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({})))
+    calls = []
+    real_connect = whatsapp._connect_messages_db
+
+    def connect():
+        calls.append(1)
+        return real_connect()
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", connect)
+    assert len(whatsapp.list_chats(limit=20)) == 4
+    assert len(calls) <= 6
+    calls.clear()
+    assert len(main.list_chats(limit=20)["items"]) == 4
+    assert len(calls) == 2  # One shared settings snapshot and one archive query connection.
+
+
+def test_runtime_chat_read_failure_never_reuses_cached_sender_metadata(runtime_archive, monkeypatch, caplog):
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    whatsapp._reset_name_cache()
+    assert whatsapp.get_sender_name(ALICE) == "Alice"
+    patch(runtime_archive, {"chats.allowed": [ALICE]})
+
+    def unavailable():
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", unavailable)
+    assert whatsapp.get_sender_name(ALICE) == ALICE
+    with pytest.raises(ToolError, match="Runtime chat policy unavailable"):
+        policy.allows(ALICE)
+    assert ALICE not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_tool_and_chat_permissions_share_one_atomic_snapshot(runtime_archive, monkeypatch):
+    import notes
+    import strict_args
+
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    for module in (whatsapp, main, notes):
+        monkeypatch.setattr(module, "CHAT_POLICY", policy)
+    assert main.annotate("chat", BOB, "summary", "fake private Bob note")["success"]
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy())
+    patch(runtime_archive, {"chats.allowed": [ALICE], "tools.deny": []})
+    real_policy = strict_args.active_policy
+    changed = False
+
+    def admit_then_patch():
+        nonlocal changed
+        admitted = real_policy()
+        if not changed:
+            changed = True
+            patch(runtime_archive, {"chats.allowed": [BOB], "tools.deny": ["get_notes"]})
+        return admitted
+
+    monkeypatch.setattr(strict_args, "active_policy", admit_then_patch)
+    result = await main.mcp.call_tool("get_notes", {"target_type": "chat", "target_id": BOB})
+    assert changed and result.is_error and "denied" in result.content[0].text
+    assert "fake private Bob note" not in result.model_dump_json()
+    # The next call sees the new tool denial, then a jointly enabled version succeeds.
+    assert (await main.mcp.call_tool("get_notes", {"target_type": "chat", "target_id": BOB})).is_error
+    patch(runtime_archive, {"chats.allowed": [BOB], "tools.deny": []})
+    allowed = await main.mcp.call_tool("get_notes", {"target_type": "chat", "target_id": BOB})
+    assert not allowed.is_error and "fake private Bob note" in allowed.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_missing_messages_store_cannot_reopen_private_notes(runtime_archive, monkeypatch):
+    import notes
+    import strict_args
+
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    for module in (whatsapp, main, notes):
+        monkeypatch.setattr(module, "CHAT_POLICY", policy)
+    assert main.annotate("chat", BOB, "summary", "fake private Bob note")["success"]
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy())
+    patch(runtime_archive, {"chats.allowed": [ALICE]})
+    real_policy = strict_args.active_policy
+
+    def admit_then_lose_store():
+        admitted = real_policy()
+        monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(runtime_archive.messages_db) + ".missing")
+        return admitted
+
+    monkeypatch.setattr(strict_args, "active_policy", admit_then_lose_store)
+    result = await main.mcp.call_tool("get_notes", {"target_type": "chat", "target_id": BOB})
+    assert result.is_error and "fake private Bob note" not in result.model_dump_json()
+    # Independent chat authorization also fails closed without the outer tool guard.
+    main.mcp.runtime_tool_policy = False
+    result = await main.mcp.call_tool("get_notes", {"target_type": "chat", "target_id": BOB})
+    assert result.is_error and "Runtime chat policy unavailable" in result.content[0].text
+    assert "fake private Bob note" not in result.model_dump_json()
+
+
+def test_ingest_selection_uses_the_same_snapshot_as_tool_admission(runtime_archive, monkeypatch):
+    _add_audio(runtime_archive, "AUD1", ALICE)
+    _add_audio(runtime_archive, "AUD2", BOB)
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    monkeypatch.setattr(transcribe_worker, "CHAT_POLICY", policy)
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy())
+    patch(runtime_archive, {"chats.allowed": [ALICE], "tools.deny": []})
+    real_select = transcribe_worker.find_pending
+    selected = []
+    changed = False
+
+    def patch_then_select(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            patch(runtime_archive, {"chats.allowed": [BOB], "tools.deny": ["transcribe_audio"]})
+        selection = real_select(*args, **kwargs)
+        selected.append({candidate.chat_jid for candidate in selection.candidates})
+        return selection
+
+    monkeypatch.setattr(transcribe_worker, "find_pending", patch_then_select)
+    backend = FakeBackend()
+    assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 0
+    assert selected == [{ALICE}] and backend.runs == []
+    patch(runtime_archive, {"chats.allowed": [BOB], "tools.deny": []})
+    assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 1
+    assert selected[-1] == {BOB} and len(backend.runs) == 1
+
+
+def test_unverified_missing_store_snapshot_cannot_authorize_chats(runtime_archive, monkeypatch):
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(runtime_archive.messages_db) + ".missing")
+    with chat_policy.policy_operation():
+        assert runtime_settings.snapshot()["settings"]["chats.allowed"]["source"] == "default"
+        with pytest.raises(ToolError, match="Runtime chat policy unavailable"):
+            policy.allows(BOB)

@@ -77,12 +77,17 @@ def _no_cached_owner():
     whatsapp._reset_owner_cache()
 
 
-@pytest.fixture
-def auth_runtime_store(tmp_path, monkeypatch):
-    """HTTP authentication requires the bridge's durable runtime registry."""
-    path = tmp_path / "auth-runtime.db"
+@pytest.fixture(autouse=True)
+def auth_runtime_store(tmp_path_factory, monkeypatch):
+    """Permission checks require a readable store, including HTTP-only unit tests.
+
+    Archive fixtures and explicit missing-path tests override this empty store.
+    Keep it outside tmp_path so file-creation assertions retain their own sandbox.
+    """
+    path = tmp_path_factory.mktemp("permission-registry") / "messages.db"
     conn = sqlite3.connect(path)
     try:
+        conn.executescript(MESSAGES_SCHEMA)
         conn.execute("CREATE TABLE runtime_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT,version INTEGER)")
         conn.commit()
     finally:

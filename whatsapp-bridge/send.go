@@ -1015,6 +1015,7 @@ func placeholderWaveform(duration uint32) []byte {
 // message would go to; only a bridge with no list to protect falls back to
 // the number as typed, which is what every send did before this lookup.
 func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter, recipient string, failures *atomic.Int64) (string, bool) {
+	policy := b.Policy.effective(ctx)
 	// Only the caller owns its endpoint's failure counter. Forward does not
 	// contribute to the /api/send metric and passes nil.
 	countFailure := func() {
@@ -1039,7 +1040,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 		countFailure()
 		writeError(w, http.StatusNotFound, recipient+" is not on WhatsApp: no account is registered under that number (country code first; supported formatting is accepted)")
 		return "", false
-	case errors.Is(err, errRecipientLookup) && b.Policy.restricted:
+	case errors.Is(err, errRecipientLookup) && policy.restricted:
 		countFailure()
 		writeError(w, http.StatusBadGateway, err.Error()+"; nothing was sent")
 		return "", false
@@ -1050,7 +1051,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", false
 	}
-	canonical, ok := authorizeChat(w, b.Policy, registered.String(), true)
+	canonical, ok := authorizeChat(w, policy, registered.String(), true)
 	if !ok {
 		return "", false
 	}
@@ -1063,6 +1064,7 @@ func (b *Bridge) registeredRecipient(ctx context.Context, w http.ResponseWriter,
 // handleSend serves POST /api/send.
 func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := b.Policy.effective(r.Context())
 		b.Log.Debugf("→ /api/send from=%q user_agent=%q", r.RemoteAddr, r.UserAgent())
 
 		// Parse the request body
@@ -1083,7 +1085,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Recipient is required")
 			return
 		}
-		typed, ok := authorizeChat(w, b.Policy, req.Recipient, true)
+		typed, ok := authorizeChat(w, policy, req.Recipient, true)
 		if !ok {
 			return
 		}
@@ -1107,7 +1109,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 					writeError(w, 400, "Invalid cached media URI")
 					return
 				}
-				if _, ok := authorizeChat(w, b.Policy, chat, false); !ok {
+				if _, ok := authorizeChat(w, policy, chat, false); !ok {
 					return
 				}
 				resolvedMediaPath = req.MediaPath
