@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.6.0...v2.7.0) (2026-10-14)
+
+
+### Features
+
+* allow runtime narrowing of the chat allow-list ([#722](https://github.com/Tauri-EPO/whatsapp-mcp/issues/722)) ([85e1abf](https://github.com/Tauri-EPO/whatsapp-mcp/commit/85e1abf960fe27d56833f61659316aed9514c8c7)), closes [#720](https://github.com/Tauri-EPO/whatsapp-mcp/issues/720)
+
 ## [2.6.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.5.1...v2.6.0) (2026-10-13)
 
 
