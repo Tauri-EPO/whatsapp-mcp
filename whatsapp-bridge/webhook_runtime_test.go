@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,10 +25,326 @@ import (
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
 const fakeWebhookSecret = "0123456789abcdef-Fake-Webhook-Secret"
+
+func configureWebhookFields(t *testing.T, server *httptest.Server, destination string, fields map[string]any) (int, []byte) {
+	t.Helper()
+	body := map[string]any{"url": destination, "events": []string{"message.received"}, "secret": fakeWebhookSecret, "header_prefix": "X-Example"}
+	for name, value := range fields {
+		body[name] = value
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return webhookOperatorRequest(t, server, "PUT", "/operator/v1/webhook", string(data))
+}
+
+func webhookBarrier(t *testing.T, b *Bridge, receipts <-chan signedWebhookReceipt) {
+	t.Helper()
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "test", Text: "filter barrier"}, true)
+	r := receiveWebhook(t, receipts)
+	var event runtimeWebhookEvent
+	if err := json.Unmarshal(r.body, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "test" || event.Text != "filter barrier" {
+		t.Fatalf("unexpected delivery before barrier: %s", r.body)
+	}
+}
+
+func TestRuntimeWebhookConnectionSubscriptionsAndSignatures(t *testing.T) {
+	for _, subscribed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			selected := []string{"message.received"}
+			if subscribed {
+				selected = append(selected, "connection.changed")
+			}
+			if code, data := configureWebhookFields(t, server, destination, map[string]any{"events": selected}); code != 200 {
+				t.Fatalf("configure=%d %s", code, data)
+			}
+			b.connectionEventWait = func(context.Context, time.Duration) bool { return true }
+			lastID := ""
+			for _, transition := range []struct {
+				state, reason string
+				event         any
+			}{
+				{"connected", "authenticated", &events.Connected{}},
+				{"disconnected", "transport_lost", &events.Disconnected{}},
+				{"connected", "authenticated", &events.Connected{}},
+				{"logged_out", "operator", nil},
+				{"pairing_required", "unpaired", nil},
+				{"paired", "pairing_succeeded", nil},
+			} {
+				if transition.event != nil {
+					b.handleEvent(transition.event, make(chan bool, 1))
+				} else {
+					b.notifyConnection(transition.state, transition.reason, true, false)
+				}
+				b.connectionEvents.Wait()
+				if !subscribed {
+					webhookBarrier(t, b, receipts)
+					continue
+				}
+				r := receiveWebhook(t, receipts)
+				if !verifyWebhookReceipt(r, time.Now()) || r.header.Get("X-Bridge-Token") != "" {
+					t.Fatal("connection signature failed or bridge token escaped")
+				}
+				var payload connectionPayload
+				if err := json.Unmarshal(r.body, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.State != transition.state || payload.Reason != transition.reason || payload.Type != "connection" || payload.At.IsZero() || payload.At.Location() != time.UTC {
+					t.Fatalf("connection payload=%s", r.body)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(r.body, &fields); err != nil {
+					t.Fatal(err)
+				}
+				var id, event string
+				if err := json.Unmarshal(fields["event_id"], &id); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(fields["event"], &event); err != nil {
+					t.Fatal(err)
+				}
+				if id == "" || id == lastID || id != r.header.Get("X-Example-Id") || event != "connection.changed" {
+					t.Fatalf("connection identity=%s", r.body)
+				}
+				lastID = id
+				delete(fields, "event_id")
+				delete(fields, "event")
+				legacy, _ := json.Marshal(payload)
+				var expected map[string]json.RawMessage
+				if err := json.Unmarshal(legacy, &expected); err != nil {
+					t.Fatal(err)
+				}
+				actual, _ := json.Marshal(fields)
+				want, _ := json.Marshal(expected)
+				if !bytes.Equal(actual, want) {
+					t.Fatalf("runtime added fields to legacy connection payload: %s", r.body)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookReceiverFiltersAndDeploymentFloor(t *testing.T) {
+	for _, filter := range []struct {
+		field, env string
+		chat       types.JID
+		fromMe     bool
+	}{
+		{"forward_self", forwardSelfEnv, phonePN, true},
+		{"forward_channels", webhookForwardChannelsEnv, types.NewJID("example", types.NewsletterServer), false},
+		{"forward_broadcasts", webhookForwardBroadcastsEnv, types.NewJID("example", types.BroadcastServer), false},
+	} {
+		for _, deploy := range []string{"", "true", "false"} {
+			for _, override := range []string{"omitted", "true", "false"} {
+				t.Run(filter.field+"/deploy="+deploy+"/receiver="+override, func(t *testing.T) {
+					b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+					getenv := func(name string) string {
+						if name == filter.env {
+							return deploy
+						}
+						return ""
+					}
+					switches, err := parseBridgeSwitches(getenv)
+					if err != nil {
+						t.Fatal(err)
+					}
+					b.ForwardSelf, b.ForwardChannels, b.ForwardBroadcasts = switches.ForwardSelf, switches.ForwardChannels, switches.ForwardBroadcasts
+					options, err := parseRuntimeWebhookOptions(getenv)
+					if err != nil {
+						t.Fatal(err)
+					}
+					b.RuntimeWebhook.options.DeniedFilters = options.DeniedFilters
+					fields := map[string]any{}
+					if override != "omitted" {
+						fields[filter.field] = override == "true"
+					}
+					code, data := configureWebhookFields(t, server, destination, fields)
+					if deploy == "false" && override == "true" {
+						if code != 400 || b.RuntimeWebhook.configured() {
+							t.Fatalf("deployment floor widened: %d %s", code, data)
+						}
+						return
+					}
+					if code != 200 {
+						t.Fatalf("configure=%d %s", code, data)
+					}
+					want := deploy == "true" || (deploy == "" && filter.fromMe)
+					if override != "omitted" {
+						want = override == "true"
+					}
+					for _, path := range []string{"/operator/v1/webhook", "/operator/v1/health"} {
+						code, snapshot := webhookOperatorRequest(t, server, "GET", path, "")
+						needle := `"` + filter.field + `":` + strconv.FormatBool(want)
+						if code != 200 || !bytes.Contains(snapshot, []byte(needle)) || !bytes.Contains(snapshot, []byte(`"events":["message.received"]`)) || bytes.Contains(snapshot, []byte(fakeWebhookSecret)) {
+							t.Fatalf("snapshot=%d %s", code, snapshot)
+						}
+					}
+					b.handleMessage(buildTextMessage(filter.chat, phonePN, types.EmptyJID, types.EmptyJID, filter.fromMe, "receiver filtered message"))
+					if want {
+						_ = receiveWebhook(t, receipts)
+					} else {
+						webhookBarrier(t, b, receipts)
+					}
+					// Receiver opt-in cannot widen the legacy sender's deployment filter.
+					if deploy != "true" && !filter.fromMe && b.webhookChatAllowed(b.Policy, filter.chat, filter.fromMe) {
+						t.Fatal("legacy feed filter widened")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRuntimeWebhookReceiverChoicesPreserveLegacyDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		field         string
+		chat          types.JID
+		fromMe, optIn bool
+	}{
+		{"forward_self", phonePN, true, false},
+		{"forward_channels", types.NewJID("example", types.NewsletterServer), false, false},
+		{"forward_broadcasts", types.NewJID("example", types.BroadcastServer), false, false},
+		{"forward_channels", types.NewJID("example", types.NewsletterServer), false, true},
+		{"forward_broadcasts", types.NewJID("example", types.BroadcastServer), false, true},
+	} {
+		t.Run(tc.field+"/opt-in="+strconv.FormatBool(tc.optIn), func(t *testing.T) {
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			legacy := make(chan WebhookPayload, 4)
+			receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload WebhookPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				legacy <- payload
+				w.WriteHeader(204)
+			}))
+			defer receiver.Close()
+			b.Webhook.enabled, b.Webhook.url, b.Webhook.client = true, receiver.URL, receiver.Client()
+			b.ForwardSelf, b.ForwardChannels, b.ForwardBroadcasts = !tc.optIn, !tc.optIn, !tc.optIn
+			if code, data := configureWebhookFields(t, server, destination, map[string]any{tc.field: tc.optIn}); code != 200 {
+				t.Fatalf("configure=%d %s", code, data)
+			}
+			b.handleMessage(buildTextMessage(tc.chat, phonePN, types.EmptyJID, types.EmptyJID, tc.fromMe, "independent receiver filters"))
+			if tc.optIn {
+				_ = receiveWebhook(t, receipts)
+				if len(legacy) != 0 {
+					t.Fatal("runtime opt-in widened legacy delivery")
+				}
+			} else {
+				webhookBarrier(t, b, receipts)
+				if len(legacy) != 1 {
+					t.Fatal("runtime opt-out narrowed legacy delivery")
+				}
+				<-legacy
+			}
+			b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "legacy control"))
+			if len(legacy) != 1 {
+				t.Fatal("legacy receiver control not delivered")
+			}
+			<-legacy
+		})
+	}
+}
+
+func TestRuntimeWebhookOptInStillHonorsChatAndStatusPolicy(t *testing.T) {
+	for _, chat := range []types.JID{types.NewJID("example", types.NewsletterServer), types.NewJID("example", types.BroadcastServer), types.StatusBroadcastJID} {
+		b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+		if code, data := configureWebhookFields(t, server, destination, map[string]any{"forward_channels": true, "forward_broadcasts": true}); code != 200 {
+			t.Fatalf("configure=%d %s", code, data)
+		}
+		b.handleMessage(buildTextMessage(types.StatusBroadcastJID, phonePN, types.EmptyJID, types.EmptyJID, false, "deploy-only status"))
+		webhookBarrier(t, b, receipts)
+		b.Policy = parseChatPolicy(mgGroup)
+		b.handleMessage(buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "denied chat"))
+		webhookBarrier(t, b, receipts)
+	}
+}
+
+func TestRuntimeWebhookConnectionSharesQueueAndDebounce(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{"message.received", "connection.changed"}}); code != 200 {
+		t.Fatalf("configure=%d %s", code, data)
+	}
+	b.notifyConnection("connected", "authenticated", true, false)
+	b.connectionEvents.Wait()
+	_ = receiveWebhook(t, receipts)
+	entered := make(chan struct{})
+	b.connectionEventWait = func(ctx context.Context, _ time.Duration) bool { close(entered); <-ctx.Done(); return false }
+	b.notifyConnection("disconnected", "transport_lost", false, false)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("no debounce")
+	}
+	b.notifyConnection("connected", "authenticated", true, false)
+	b.connectionEvents.Wait()
+	webhookBarrier(t, b, receipts)
+	rw := b.RuntimeWebhook
+	rw.mu.Lock()
+	g := rw.generation
+	rw.mu.Unlock()
+	g.delivery <- struct{}{}
+	rw.enqueue(runtimeWebhookEvent{Event: "message.received"}, true)
+	deadline := time.Now().Add(time.Second)
+	for len(g.queue) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(g.queue) != 0 {
+		t.Fatal("worker did not start blocked delivery")
+	}
+	for i := range 256 {
+		if i%2 == 0 {
+			b.queueRuntimeConnection(connectionPayload{Type: "connection", State: "paired"})
+		} else {
+			rw.enqueue(runtimeWebhookEvent{Event: "message.received"}, true)
+		}
+	}
+	b.queueRuntimeConnection(connectionPayload{Type: "connection", State: "logged_out"})
+	if s := rw.snapshot(); s.Queued != 256 || s.Dropped != 1 {
+		t.Fatalf("mixed queue escaped shared bound: %+v", s)
+	}
+	_, _ = webhookOperatorRequest(t, server, "DELETE", "/operator/v1/webhook", "")
+	<-g.delivery
+}
+
+func TestRuntimeWebhookNewFieldsStrictValidationAndConnectionOnly(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	for _, field := range []string{"forward_self", "forward_channels", "forward_broadcasts", "FORWARD_SELF", "FORWARD_CHANNELS", "FORWARD_BROADCASTS"} {
+		for _, value := range []any{nil, "true", 1, []bool{true}, map[string]bool{"value": true}} {
+			if code, data := configureWebhookFields(t, server, destination, map[string]any{field: value}); code != 400 {
+				t.Fatalf("invalid %s accepted=%d %s", field, code, data)
+			}
+		}
+	}
+	for _, fields := range []map[string]any{
+		{"forward_status": true}, {"unknown": false}, {"events": []string{}},
+		{"events": []string{"unknown.event"}}, {"events": []string{"connection.changed", "connection.changed"}},
+	} {
+		if code, data := configureWebhookFields(t, server, destination, fields); code != 400 {
+			t.Fatalf("invalid fields accepted=%d %s", code, data)
+		}
+	}
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{"connection.changed"}}); code != 200 {
+		t.Fatalf("connection-only=%d %s", code, data)
+	}
+	b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "unsubscribed message"))
+	b.notifyConnection("connected", "authenticated", true, false)
+	b.connectionEvents.Wait()
+	r := receiveWebhook(t, receipts)
+	if !verifyWebhookReceipt(r, time.Now()) || !bytes.Contains(r.body, []byte(`"event":"connection.changed"`)) {
+		t.Fatalf("unsubscribed message preceded connection: %s", r.body)
+	}
+}
 
 type signedWebhookReceipt struct {
 	header            http.Header
@@ -335,7 +652,7 @@ func TestRuntimeWebhookRoutesOptInAuthAndValidation(t *testing.T) {
 			t.Fatalf("denied=%d", resp.StatusCode)
 		}
 	}
-	for _, body := range []string{"{}", `{"unknown":true}`, strings.Repeat("x", 4097), `{} {}`, `{"url":"` + destination + `","events":["connection.changed"],"secret":"` + fakeWebhookSecret + `"}`} {
+	for _, body := range []string{"{}", `{"unknown":true}`, strings.Repeat("x", 4097), `{} {}`, `{"url":"` + destination + `","events":["unknown.event"],"secret":"` + fakeWebhookSecret + `"}`} {
 		if code, _ := webhookOperatorRequest(t, server, "PUT", "/operator/v1/webhook", body); code != 400 {
 			t.Fatalf("invalid configuration=%d", code)
 		}
@@ -498,13 +815,13 @@ func TestRuntimeWebhookNonFileMessagesHaveNoMediaReference(t *testing.T) {
 	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
 	configureWebhookHTTP(t, server, destination)
 	for _, category := range []string{"poll", "location", "live_location", "reaction", ""} {
-		b.queueRuntimeMessage(true, runtimeWebhookEvent{MessageID: "FAKE-ID", Chat: phonePN.String(), Type: category, Stored: true, Timestamp: time.Now()})
+		b.queueRuntimeMessage(b.RuntimeWebhook.subscriber("message.received"), runtimeWebhookEvent{MessageID: "FAKE-ID", Chat: phonePN.String(), Type: category, Stored: true, Timestamp: time.Now()})
 		r := receiveWebhook(t, receipts)
 		if bytes.Contains(r.body, []byte("media_reference")) {
 			t.Fatalf("non-file reference=%s", r.body)
 		}
 	}
-	b.queueRuntimeMessage(true, runtimeWebhookEvent{MessageID: "FAKE/ID", Chat: phonePN.String(), Type: "image", Stored: true, Timestamp: time.Now()})
+	b.queueRuntimeMessage(b.RuntimeWebhook.subscriber("message.received"), runtimeWebhookEvent{MessageID: "FAKE/ID", Chat: phonePN.String(), Type: "image", Stored: true, Timestamp: time.Now()})
 	r := receiveWebhook(t, receipts)
 	var event runtimeWebhookEvent
 	if err := json.Unmarshal(r.body, &event); err != nil {
@@ -1092,6 +1409,9 @@ func TestRuntimeWebhookRound2PolicyAndDropLogRate(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
 		t.Run(strconv.FormatBool(disabled), func(t *testing.T) {
 			b, server, destination, _, logger := runtimeWebhookFixture(t, nil)
+			if disabled {
+				b.ForwardSelf = false
+			}
 			configureWebhookHTTP(t, server, destination)
 			rw := b.RuntimeWebhook
 			g := rw.generation
@@ -1102,24 +1422,23 @@ func TestRuntimeWebhookRound2PolicyAndDropLogRate(t *testing.T) {
 				rw.state.Enabled = false
 				rw.mu.Unlock()
 			} else {
-				rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+				rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 				deadline := time.Now().Add(time.Second)
 				for len(g.queue) != 0 && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
 				for range 256 {
-					rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+					rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 				}
 			}
 			for range 100 {
-				rw.enqueue(runtimeWebhookEvent{Type: "text"}, false)
+				rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, false)
 			}
 			if rw.dropped.Load() != 0 || strings.Contains(logger.String(), "Runtime webhook discarded") {
 				t.Fatal("policy-withheld events counted or logged as loss")
 			}
 			remaining := 100
 			if disabled {
-				b.ForwardSelf = false
 				b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, true, "self withheld"))
 				if rw.dropped.Load() != 0 {
 					t.Fatal("disabled ingress bypassed self policy")
@@ -1131,7 +1450,7 @@ func TestRuntimeWebhookRound2PolicyAndDropLogRate(t *testing.T) {
 				remaining = 99
 			}
 			for range remaining {
-				rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+				rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 			}
 			if rw.dropped.Load() != 100 || strings.Count(logger.String(), "Runtime webhook discarded") != 1 {
 				t.Fatalf("loss logging is unbounded: drops=%d logs=%s", rw.dropped.Load(), logger.String())
@@ -1141,7 +1460,7 @@ func TestRuntimeWebhookRound2PolicyAndDropLogRate(t *testing.T) {
 			rw.mu.Lock()
 			rw.lastDropLog = time.Now().Add(-time.Minute)
 			rw.mu.Unlock()
-			rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+			rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 			if rw.dropped.Load() != 101 || strings.Count(logger.String(), "Runtime webhook discarded") != 2 || !strings.Contains(logger.String(), "discarded 100 event(s)") {
 				t.Fatal("interval log lost the suppressed count")
 			}
@@ -1165,10 +1484,10 @@ func TestRuntimeWebhookRound2ConfigurationCountsAbandoned(t *testing.T) {
 			b, server, destination, receipts, logger := runtimeWebhookFixture(t, nil, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
 			configureWebhookHTTP(t, server, destination)
 			rw := b.RuntimeWebhook
-			rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+			rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 			_ = receiveWebhook(t, receipts)
 			for range 10 {
-				rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+				rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 			}
 			if method == "PUT" {
 				configureWebhookHTTP(t, server, destination)
@@ -1216,7 +1535,7 @@ func TestRuntimeWebhookRound2RetiredWorkerOwnsLogger(t *testing.T) {
 		<-release
 		return nil, errors.New("synthetic cancelled lookup")
 	}
-	rw.enqueue(runtimeWebhookEvent{Type: "text"}, true)
+	rw.enqueue(runtimeWebhookEvent{Event: "message.received", Type: "text"}, true)
 	<-started
 	rw.remove()
 	// The retired worker resumes after cleanup changes the sanctioned global.
@@ -1228,5 +1547,111 @@ func TestRuntimeWebhookRound2RetiredWorkerOwnsLogger(t *testing.T) {
 	}
 	if rw.dropped.Load() != 1 || !strings.Contains(logger.String(), "configuration_changed") || strings.Contains(nextLogger.String(), "Runtime webhook discarded") {
 		t.Fatal("retired worker used another instance's logger")
+	}
+}
+
+// Tests queue directly into the current generation, bypassing admission.
+func (w *runtimeWebhook) enqueue(event runtimeWebhookEvent, allowed bool) {
+	if w != nil && allowed {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.enqueueLocked(w.generation, event)
+	}
+}
+
+func configureConnectionWebhook(t *testing.T, server *httptest.Server, destination string, fields map[string]any) {
+	t.Helper()
+	body := map[string]any{"events": []string{"message.received", "connection.changed"}}
+	maps.Copy(body, fields)
+	if code, data := configureWebhookFields(t, server, destination, body); code != 200 {
+		t.Fatalf("configure=%d %s", code, data)
+	}
+}
+
+func receiveConnectionState(t *testing.T, receipts <-chan signedWebhookReceipt, state string) {
+	t.Helper()
+	if r := receiveWebhook(t, receipts); !verifyWebhookReceipt(r, time.Now()) || !bytes.Contains(r.body, []byte(`"event":"connection.changed"`)) || !bytes.Contains(r.body, []byte(`"state":"`+state+`"`)) {
+		t.Fatalf("want signed %s: %s", state, r.body)
+	}
+}
+
+func TestRuntimeWebhookConnectionCurrentStateOnSubscribe(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	// An unpaired bridge announces pairing_required before any runtime configuration exists.
+	b.notifyConnection("pairing_required", "unpaired", true, false)
+	configureWebhookHTTP(t, server, destination)
+	webhookBarrier(t, b, receipts)
+	configureConnectionWebhook(t, server, destination, nil)
+	receiveConnectionState(t, receipts, "pairing_required")
+	// Without the legacy sender, an immediate event creates no legacy delivery order.
+	b.notifyConnection("connected", "authenticated", true, false)
+	receiveConnectionState(t, receipts, "connected")
+	if b.connectionEvents.Wait(); b.connectionDeliveryDone != nil {
+		t.Fatal("legacy delivery ordering created without the legacy sender")
+	}
+	// Same receiver and selection (a secret rotation): no replayed state.
+	configureConnectionWebhook(t, server, destination, map[string]any{"secret": fakeWebhookSecret + "-rotated"})
+	webhookBarrier(t, b, receipts)
+}
+
+func TestRuntimeWebhookUnsubscribedDisconnectKeepsDebounce(t *testing.T) {
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	b.notifyConnection("connected", "authenticated", true, false)
+	entered := make(chan struct{})
+	b.connectionEventWait = func(ctx context.Context, _ time.Duration) bool { close(entered); <-ctx.Done(); return false }
+	b.notifyConnection("disconnected", "transport_lost", false, false)
+	<-entered
+	configureConnectionWebhook(t, server, destination, nil)
+	receiveConnectionState(t, receipts, "connected")
+	b.notifyConnection("connected", "authenticated", true, false)
+	b.connectionEvents.Wait()
+	webhookBarrier(t, b, receipts)
+}
+
+func TestRuntimeWebhookConnectionDeploymentFloor(t *testing.T) {
+	for _, deploy := range []string{"", "true", "false", "off"} {
+		b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
+		options, err := parseRuntimeWebhookOptions(func(name string) string { return map[string]string{webhookForwardConnectionEnv: deploy}[name] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.RuntimeWebhook.options.DeniedConnection = options.DeniedConnection
+		code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{"connection.changed"}})
+		if denied := deploy == "false" || deploy == "off"; denied != (code == 400) || denied && !bytes.Contains(data, []byte(webhookForwardConnectionEnv)) {
+			t.Fatalf("deploy=%q: %d %s", deploy, code, data)
+		}
+	}
+}
+
+func TestRuntimeWebhookWithheldLogNamesOrigin(t *testing.T) {
+	channel := types.NewJID("fakechannelwithheld", types.NewsletterServer)
+	for fields, want := range map[*bool]string{proto.Bool(false): "receiver filter forward_channels=false", nil: "deployment WEBHOOK_FORWARD_CHANNELS=false"} {
+		b, server, destination, receipts, logger := runtimeWebhookFixture(t, nil)
+		b.Webhook.enabled, b.ForwardChannels = true, false
+		body := map[string]any{"events": []string{"message.received"}}
+		if fields != nil {
+			body["forward_channels"] = *fields
+		}
+		configureConnectionWebhook(t, server, destination, body)
+		b.handleMessage(buildTextMessage(channel, phonePN, types.EmptyJID, types.EmptyJID, false, "withheld channel post"))
+		webhookBarrier(t, b, receipts)
+		logs := logger.String()
+		if !strings.Contains(logs, "legacy webhook: deployment WEBHOOK_FORWARD_CHANNELS=false; runtime webhook: "+want) || strings.Contains(logs, channel.User) || strings.Contains(logs, "test-msg-001") {
+			t.Fatalf("withheld log (%s): %s", want, logs)
+		}
+	}
+}
+
+func TestRuntimeWebhookAdmissionBoundToGeneration(t *testing.T) {
+	b, server, destination, receipts, logger := runtimeWebhookFixture(t, nil)
+	channel := types.NewJID("fakechannelwithheld", types.NewsletterServer)
+	configureConnectionWebhook(t, server, destination, map[string]any{"forward_channels": true})
+	legacy, admitted := b.messageWebhookAllowed(b.Policy, channel, false)
+	configureConnectionWebhook(t, server, destination, map[string]any{"forward_channels": false})
+	dropped := b.RuntimeWebhook.dropped.Load()
+	b.queueRuntimeMessage(admitted, runtimeWebhookEvent{MessageID: "FAKE-ID", Chat: channel.String(), Text: "admitted by the replaced receiver"})
+	webhookBarrier(t, b, receipts)
+	if legacy || admitted == nil || b.RuntimeWebhook.dropped.Load() != dropped+1 || !strings.Contains(logger.String(), "configuration_changed") {
+		t.Fatalf("stale admission: legacy=%t admitted=%v logs=%s", legacy, admitted != nil, logger.String())
 	}
 }

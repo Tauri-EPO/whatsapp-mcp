@@ -7,21 +7,32 @@ Enable the private operator listener as described below and set
 defaults it to false. No additional listener, published port, mount or service is
 needed. `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=false` restricts receivers to HTTPS
 port 443, and `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT=50` counts consecutive failed
-message events for automatic
+subscribed events for automatic
 disablement. Keep the operator endpoint on its private network.
 
 Use the operator bearer and an allowed Host for `GET`, `PUT`, `DELETE
 /operator/v1/webhook` and `POST /operator/v1/webhook/test`. PUT supplies
-`url`, `events: ["message.received"]`, a dedicated random `secret` and optionally
-`header_prefix` (default `X-Webhook`). GET returns a fingerprint and delivery
+`url`, `events` selecting `message.received`, `connection.changed` or both, a
+dedicated random `secret` and optionally `header_prefix` (default `X-Webhook`).
+Optional booleans `forward_self`, `forward_channels` and `forward_broadcasts`
+default to the corresponding deployment variables. An explicitly false deploy
+variable is a ceiling (runtime true returns 400); an absent or empty variable
+permits receiver opt-in. Compose's default `FORWARD_SELF=false` therefore blocks
+runtime self-message opt-in unless changed at deploy time. Status posts still
+require deploy-time `WEBHOOK_FORWARD_STATUS=true`; PUT cannot change it.
+GET returns selected events, effective filters, a fingerprint and delivery
 state; health includes the same safe snapshot. Test returns the actual delivery
 outcome. DELETE removes the receiver and cancels pending delivery. Configure it
 again after a restart: configuration and queue are process-local.
 
 Runtime delivery never sends the bridge credential, never follows redirects,
 checks every DNS answer and pins a public IP for the connection. It shares the
-existing status/channel/broadcast/self/chat filters, carries no media bytes and
-uses a bounded retry queue. A failed receiver automatically disables; a new PUT
+deployment status/chat policy, carries no media bytes and
+uses one bounded retry queue for messages and connection transitions. Connection
+payloads match the legacy safe states, with runtime event ids and HMAC headers;
+disconnects are debounced, and connection delivery has the same loss conditions
+as messages, including process exit before queued terminal delivery.
+A failed receiver automatically disables; a new PUT
 re-enables it. The legacy `WEBHOOK_URL` receiver remains independent and retains
 its existing `X-Bridge-Token` contract.
 
