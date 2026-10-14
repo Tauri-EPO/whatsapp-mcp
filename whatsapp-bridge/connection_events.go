@@ -43,8 +43,13 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 	}
 	b.Log.Infof("WhatsApp connection state: %s (%s)", state, reason)
 	legacy := b.ForwardConnection && b.Webhook.Enabled()
-	if !legacy && !b.RuntimeWebhook.subscribed("connection.changed") {
+	// Without the legacy sender an immediate transition is only recorded and
+	// queued for the runtime receiver: no legacy delivery order or goroutine.
+	// A disconnect still waits out the debounce while a runtime receiver can
+	// exist, so a receiver configured meanwhile never replays a quick flap.
+	if !legacy && (immediate || b.RuntimeWebhook == nil) {
 		b.lastConnectionEvent = key
+		b.queueRuntimeConnection(payload)
 		b.connectionEventsMu.Unlock()
 		return
 	}
@@ -93,13 +98,14 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 			b.lastConnectionEvent = key
 			b.connectionDisconnectCancel = nil
 			b.queueRuntimeConnection(payload)
+			if !legacy {
+				b.connectionEventsMu.Unlock()
+				return
+			}
 			previous, delivered = b.queueConnectionDeliveryLocked()
 			b.connectionEventsMu.Unlock()
 		}
 		defer b.finishConnectionDelivery(previous, delivered)
-		if !legacy {
-			return
-		}
 		// Reserving under the transition lock preserves order even when a
 		// debounce expires just before reconnect. Terminal events share the
 		// queue, with their entire wait and POST bounded by the exit deadline.

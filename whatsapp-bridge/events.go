@@ -274,7 +274,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			if rowConsumed {
 				return
 			}
-			forwardLegacy, forwardRuntime := b.messageWebhookAllowed(policy, resolvedChat, msg.Info.IsFromMe, msg.Info.ID, msg.Info.Chat)
+			forwardLegacy, forwardRuntime := b.messageWebhookAllowed(policy, resolvedChat, msg.Info.IsFromMe, msg.Info.Chat)
 			removed := emoji == ""
 			b.queueRuntimeMessage(forwardRuntime, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: storedSenderJID, Type: "reaction", Text: emoji, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored, ReactionToMessageID: reactedToID, ReactionRemoved: &removed})
 			if forwardLegacy {
@@ -399,7 +399,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Avoid webhook-only image work when no webhook will receive the message. Media
 	// still downloads asynchronously in that case so it remains available to MCP
 	// tools, but message handling never blocks on a disabled outbound webhook.
-	forwardLegacy, forwardRuntime := b.messageWebhookAllowed(policy, resolvedChat, msg.Info.IsFromMe, msg.Info.ID, msg.Info.Chat)
+	forwardLegacy, forwardRuntime := b.messageWebhookAllowed(policy, resolvedChat, msg.Info.IsFromMe, msg.Info.Chat)
 	shouldForward := forwardLegacy && !bareContentEnvelope(ex.inner, content)
 	if !bareContentEnvelope(ex.inner, content) {
 		b.queueRuntimeMessage(forwardRuntime, runtimeWebhookEvent{MessageID: msg.Info.ID, Chat: chatJID, Sender: storedSenderJID, Type: mediaType, Text: content, Timestamp: msgTimestamp, FromMe: msg.Info.IsFromMe, Stored: stored})

@@ -40,10 +40,17 @@ and contain only ASCII letters, digits and hyphens (3-48 characters).
 Optional JSON booleans `forward_self`, `forward_channels` and
 `forward_broadcasts` default to `FORWARD_SELF`, `WEBHOOK_FORWARD_CHANNELS` and
 `WEBHOOK_FORWARD_BROADCASTS`, respectively. Without these fields, message
-delivery keeps the existing deployment filters. An explicit false in the
-deployment (including `0`, `no` or `off`) cannot be widened: PUT with true
-returns 400 and preserves the previous receiver. An absent or empty variable
-permits runtime opt-in, and deployment true permits runtime off/on.
+delivery keeps the existing deployment filters. The floor rule is the one
+`WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` uses: an absent or empty variable permits
+the runtime choice, deployment true permits runtime off/on, and only an
+explicit false in the deployment (including `0`, `no` or `off`) forbids it: PUT
+with true returns 400 and preserves the previous receiver. To forbid a filter,
+write `false`; leaving the variable out does not. The Compose file passes
+`FORWARD_SELF=false` unless `.env` sets it, so a Compose receiver can enable
+`forward_self` only when `.env` sets `FORWARD_SELF=true`.
+`connection.changed` follows the same rule through
+`WEBHOOK_FORWARD_CONNECTION_EVENTS`: absent or true permits selecting it, and an
+explicit false makes a PUT that selects it return 400.
 `forward_status` is reported but is not a PUT field: status posts require
 `WEBHOOK_FORWARD_STATUS=true` at deploy time, even when broadcasts are enabled.
 Allowed-chat policy still applies to every message. These receiver choices never
@@ -152,6 +159,11 @@ States are `connected`, `disconnected`, `logged_out`, `pairing_required` and
 sender's safe classifications. No phone, chat, sender, QR or passkey material is
 included. Disconnects wait five seconds by default; a quick reconnect cancels
 the pending disconnect and suppresses a redundant connected notification.
+A PUT that newly selects `connection.changed` (a new receiver URL, a changed
+selection or a re-enabled receiver; not a secret or filter change alone) first
+queues the latest recorded state once, with the `at` of that transition, so a
+receiver configured after startup still learns, for example, that an unpaired
+bridge is waiting in `pairing_required`.
 Connection events use the same HMAC headers, independent event ids, queue age,
 retry and loss limits as messages, without priority over queued messages. Runtime
 terminal events are queued rather than synchronously acknowledged: process exit
@@ -273,7 +285,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |
 | `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the list JID or `*@broadcast`. |
-| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials |
+| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials. An explicit `false` also refuses runtime `connection.changed`; absent permits it |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |

@@ -15,13 +15,13 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -29,6 +29,7 @@ type runtimeWebhookOptions struct {
 	Enabled, AllowPorts bool
 	FailureLimit        int
 	DeniedFilters       runtimeWebhookFilters
+	DeniedConnection    bool // explicit WEBHOOK_FORWARD_CONNECTION_EVENTS=false
 }
 
 func parseRuntimeWebhookOptions(getenv func(string) string) (runtimeWebhookOptions, error) {
@@ -55,6 +56,7 @@ func parseRuntimeWebhookOptions(getenv func(string) string) (runtimeWebhookOptio
 		{forwardSelfEnv, &o.DeniedFilters.ForwardSelf},
 		{webhookForwardChannelsEnv, &o.DeniedFilters.ForwardChannels},
 		{webhookForwardBroadcastsEnv, &o.DeniedFilters.ForwardBroadcasts},
+		{webhookForwardConnectionEnv, &o.DeniedConnection},
 	} {
 		value := getenv(filter.name)
 		allowed, err := parseBoolEnv(filter.name, value, true)
@@ -148,6 +150,10 @@ type runtimeWebhook struct {
 	lastDropLog                   time.Time
 	pendingDropLog                uint64
 	deliveries, failures, dropped atomic.Uint64
+	// The latest recorded connection transition, delivered once to a
+	// configuration that newly selects connection.changed (a receiver configured
+	// after startup still learns that the bridge waits for pairing).
+	lastConnection *connectionPayload
 }
 
 func newRuntimeWebhook(ctx context.Context, options runtimeWebhookOptions) *runtimeWebhook {
@@ -198,26 +204,33 @@ func (cfg *runtimeWebhookConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (w *runtimeWebhook) subscribedLocked(event string) bool {
-	for _, selected := range w.state.Events {
-		if event == selected {
-			return true
-		}
-	}
-	return false
-}
-
-func (w *runtimeWebhook) subscribed(event string) bool {
+// subscriber returns the configured generation selecting event, or nil. Its
+// config and filters never change, so one lock read decides admission and a
+// receiver replaced afterwards is detected at enqueue instead of being
+// filtered with the previous generation's values.
+func (w *runtimeWebhook) subscriber(event string) *runtimeWebhookGeneration {
 	if w == nil {
-		return false
+		return nil
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.generation != nil && w.subscribedLocked(event)
+	if w.generation == nil || !slices.Contains(w.generation.config.Events, event) {
+		return nil
+	}
+	return w.generation
 }
 
+// Recording and queueing share mu with configure, so a receiver configured
+// concurrently gets the current state exactly once and in order.
 func (b *Bridge) queueRuntimeConnection(payload connectionPayload) {
-	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "connection.changed", connection: &payload}, true)
+	w := b.RuntimeWebhook
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastConnection = &payload
+	w.enqueueLocked(w.generation, runtimeWebhookEvent{Event: "connection.changed", connection: &payload})
 }
 
 // Caller holds mu. Logs and process-lifetime counters never carry receiver data.
@@ -330,6 +343,9 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 		}
 		seen[event] = true
 	}
+	if seen["connection.changed"] && w.options.DeniedConnection {
+		return errors.New("connection.changed cannot widen an explicit deployment WEBHOOK_FORWARD_CONNECTION_EVENTS=false")
+	}
 	for _, filter := range []struct {
 		value     *bool
 		effective *bool
@@ -358,9 +374,12 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.generation != nil {
-		w.generation.cancel()
-		w.drainLocked(w.generation, "configuration_changed")
+	prev := w.generation
+	// A new receiver, a new selection or a re-enabled one learns the current state.
+	replay := prev == nil || !w.state.Enabled || prev.config.URL != cfg.URL || !slices.Contains(prev.config.Events, "connection.changed")
+	if prev != nil {
+		prev.cancel()
+		w.drainLocked(prev, "configuration_changed")
 	}
 	child, cancel := context.WithCancel(w.ctx)
 	g := &runtimeWebhookGeneration{config: cfg, filters: filters, ctx: child, cancel: cancel, queue: make(chan runtimeWebhookDelivery, 256), delivery: make(chan struct{}, 1)}
@@ -369,6 +388,9 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	u.RawQuery, u.ForceQuery = "", false
 	w.state = runtimeWebhookState{runtimeWebhookFilters: filters, URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8])}
 	w.generation = g
+	if replay && w.lastConnection != nil {
+		w.enqueueLocked(g, runtimeWebhookEvent{Event: "connection.changed", connection: w.lastConnection})
+	}
 	go w.run(g)
 	return nil
 }
@@ -390,40 +412,30 @@ func webhookDelivery(event runtimeWebhookEvent) (runtimeWebhookDelivery, error) 
 		return runtimeWebhookDelivery{}, err
 	}
 	event.ID = hex.EncodeToString(id)
-	body, err := json.Marshal(event)
+	var payload any = event
 	if event.connection != nil {
-		body, err = json.Marshal(struct {
+		payload = struct {
 			ID    string `json:"event_id"`
 			Event string `json:"event"`
 			*connectionPayload
-		}{event.ID, event.Event, event.connection})
+		}{event.ID, event.Event, event.connection}
 	}
+	body, err := json.Marshal(payload)
 	if err != nil || len(body) > 64<<10 {
 		return runtimeWebhookDelivery{}, errors.New("event exceeds the 64 KiB payload limit")
 	}
 	return runtimeWebhookDelivery{body: body, id: event.ID, at: time.Now(), test: event.Event == "webhook.test"}, nil
 }
 
-func (w *runtimeWebhook) enqueue(event runtimeWebhookEvent, allowed bool) {
-	if w == nil || !allowed {
+// Caller holds mu. g is the generation that admitted the event; an event
+// admitted for a replaced or removed receiver is abandoned like its queue.
+func (w *runtimeWebhook) enqueueLocked(g *runtimeWebhookGeneration, event runtimeWebhookEvent) {
+	if g == nil || !slices.Contains(g.config.Events, event.Event) {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.generation == nil {
+	if g != w.generation {
+		w.dropLocked("configuration_changed", 1)
 		return
-	}
-	if !w.subscribedLocked(event.Event) {
-		return
-	}
-	if event.Event == "message.received" && event.FromMe && !w.generation.filters.ForwardSelf {
-		return
-	}
-	if event.Event == "message.received" && event.Chat != "" {
-		chat, err := types.ParseJID(event.Chat)
-		if err != nil || !w.generation.filters.allows(chat, event.FromMe) {
-			return
-		}
 	}
 	if !w.state.Enabled {
 		w.dropLocked("disabled", 1)
@@ -435,7 +447,7 @@ func (w *runtimeWebhook) enqueue(event runtimeWebhookEvent, allowed bool) {
 		return
 	}
 	select {
-	case w.generation.queue <- d:
+	case g.queue <- d:
 	default:
 		w.dropLocked("queue_full", 1)
 	}
@@ -691,8 +703,8 @@ func (b *Bridge) handleRuntimeWebhookTest(w http.ResponseWriter, r *http.Request
 	writeJSON(w, 200, map[string]any{"delivered": ok, "reason": reason, "event_id": d.id})
 }
 
-func (b *Bridge) queueRuntimeMessage(allowed bool, event runtimeWebhookEvent) {
-	if b.RuntimeWebhook == nil {
+func (b *Bridge) queueRuntimeMessage(g *runtimeWebhookGeneration, event runtimeWebhookEvent) {
+	if g == nil {
 		return
 	}
 	event.Event = "message.received"
@@ -702,5 +714,8 @@ func (b *Bridge) queueRuntimeMessage(allowed bool, event runtimeWebhookEvent) {
 		event.MediaReference = mediaBlobURI(event.Chat, event.MessageID)
 	}
 	event.Timestamp = event.Timestamp.UTC()
-	b.RuntimeWebhook.enqueue(event, allowed)
+	w := b.RuntimeWebhook
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.enqueueLocked(g, event)
 }
