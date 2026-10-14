@@ -665,8 +665,16 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 			var once sync.Once
 			t.Cleanup(func() { once.Do(func() { close(release) }) })
 			var calls, served atomic.Int64
+			var requestMu sync.Mutex
+			var requestLimits []uint64
 			cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if calls.Add(1) == 1 {
+				requestMu.Lock()
+				request := calls.Add(1)
+				limit, _ := strconv.ParseUint(r.Header.Get("X-Test-Limit"), 10, 64)
+				requestLimits = append(requestLimits, limit)
+				requestMu.Unlock()
+				t.Logf("CDN request=%d max_bytes=%s", request, r.Header.Get("X-Test-Limit"))
+				if request == 1 {
 					close(started)
 					select {
 					case <-release:
@@ -687,6 +695,7 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 					if err != nil {
 						return err
 					}
+					req.Header.Set("X-Test-Limit", strconv.FormatUint(mediaLimit(ctx), 10))
 					response, err := cdn.Client().Do(req)
 					if err != nil {
 						return err
@@ -703,6 +712,7 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 				err    error
 			}
 			fetch := func(limit int64, out chan answer) {
+				t.Logf("waiter start max_bytes=%d", limit)
 				req, err := http.NewRequest(http.MethodGet, server.URL+"/api/media/blob?chat_jid="+row.ChatJID+"&message_id="+row.ID+"&max_bytes="+strconv.FormatInt(limit, 10), nil)
 				if err != nil {
 					out <- answer{err: err}
@@ -716,6 +726,7 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 				}
 				body, err := io.ReadAll(response.Body)
 				_ = response.Body.Close()
+				t.Logf("waiter finish max_bytes=%d status=%d", limit, response.StatusCode)
 				out <- answer{response.StatusCode, body, err}
 			}
 			small, large := make(chan answer, 1), make(chan answer, 1)
@@ -745,6 +756,8 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 				}
 			}
 			first, waiter := receive(small), receive(large)
+			// Wait for handler accounting after its final Write before inspecting it.
+			cdn.Close()
 			starterStatus := 413
 			if starterLimit >= int64(len(data)) {
 				starterStatus = 200
@@ -760,9 +773,22 @@ func TestMinIOSharedTransferUsesWaitersOwnLimit(t *testing.T) {
 				wantStatus = 200
 			}
 			if limits.quota > 0 {
-				// The shared cache write maps its small cap to errMediaQuota;
-				// each caller then takes its own bounded transient fallback.
-				wantCalls = 3
+				// The shared refusal sends both callers through transient(). Its
+				// hash lock lets either caller go first: a successful large read
+				// is reused by the small caller (still 413), whereas a small
+				// overflow must be followed by a fresh large read.
+				wantCalls = 2
+				if len(requestLimits) < 2 || requestLimits[0] != uint64(starterLimit) {
+					t.Fatalf("missing shared attempt: CDN limits=%v", requestLimits)
+				}
+				if requestLimits[1] == uint64(starterLimit) {
+					wantCalls = 3
+				} else if requestLimits[1] < uint64(len(data)) {
+					t.Fatalf("unexpected fallback limit: %v", requestLimits)
+				}
+				if wantCalls == 3 && (len(requestLimits) != 3 || requestLimits[2] < uint64(len(data))) {
+					t.Fatalf("large fallback missing: CDN limits=%v", requestLimits)
+				}
 				if b.metrics.mediaQuotaRefusals.Load() == 0 {
 					t.Fatal("small starter did not refuse its quota-bounded cache write")
 				}

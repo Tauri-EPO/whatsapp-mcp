@@ -159,7 +159,7 @@ func TestRuntimeWebhookReceiverFiltersAndDeploymentFloor(t *testing.T) {
 						t.Fatal(err)
 					}
 					b.ForwardSelf, b.ForwardChannels, b.ForwardBroadcasts = switches.ForwardSelf, switches.ForwardChannels, switches.ForwardBroadcasts
-					options, err := parseRuntimeWebhookOptions(getenv)
+					options, err := parseRuntimeWebhookOptions(getenv, switches)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -757,7 +757,7 @@ func TestRuntimeWebhookSharedForwardFilters(t *testing.T) {
 	}
 }
 func TestRuntimeWebhookStartupOptions(t *testing.T) {
-	o, err := parseRuntimeWebhookOptions(func(string) string { return "" })
+	o, err := parseRuntimeWebhookOptions(func(string) string { return "" }, bridgeSwitches{})
 	if err != nil || o.Enabled || o.AllowPorts || o.FailureLimit != 50 {
 		t.Fatalf("defaults=%+v %v", o, err)
 	}
@@ -767,7 +767,7 @@ func TestRuntimeWebhookStartupOptions(t *testing.T) {
 				return value
 			}
 			return ""
-		}); err == nil {
+		}, bridgeSwitches{}); err == nil {
 			t.Fatalf("invalid %s accepted", key)
 		}
 	}
@@ -982,7 +982,7 @@ func TestRuntimeWebhookReviewRestartTolerance(t *testing.T) {
 	var status atomic.Int32
 	status.Store(503)
 	b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
-	o, err := parseRuntimeWebhookOptions(func(string) string { return "" })
+	o, err := parseRuntimeWebhookOptions(func(string) string { return "" }, bridgeSwitches{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1610,15 +1610,22 @@ func TestRuntimeWebhookUnsubscribedDisconnectKeepsDebounce(t *testing.T) {
 
 func TestRuntimeWebhookConnectionDeploymentFloor(t *testing.T) {
 	for _, deploy := range []string{"", "true", "false", "off"} {
-		b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
-		options, err := parseRuntimeWebhookOptions(func(name string) string { return map[string]string{webhookForwardConnectionEnv: deploy}[name] })
-		if err != nil {
-			t.Fatal(err)
-		}
-		b.RuntimeWebhook.options.DeniedConnection = options.DeniedConnection
-		code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{"connection.changed"}})
-		if denied := deploy == "false" || deploy == "off"; denied != (code == 400) || denied && !bytes.Contains(data, []byte(webhookForwardConnectionEnv)) {
-			t.Fatalf("deploy=%q: %d %s", deploy, code, data)
+		for _, event := range []string{"connection.changed", "storage.warning"} {
+			b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
+			getenv := func(name string) string { return map[string]string{webhookForwardConnectionEnv: deploy}[name] }
+			switches, err := parseBridgeSwitches(getenv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options, err := parseRuntimeWebhookOptions(getenv, switches)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.RuntimeWebhook.options.DeniedConnection = options.DeniedConnection
+			code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{event}})
+			if denied := deploy == "false" || deploy == "off"; denied != (code == 400) || denied && !bytes.Contains(data, []byte(webhookForwardConnectionEnv)) {
+				t.Fatalf("deploy=%q: %d %s", deploy, code, data)
+			}
 		}
 	}
 }
@@ -1653,5 +1660,58 @@ func TestRuntimeWebhookAdmissionBoundToGeneration(t *testing.T) {
 	webhookBarrier(t, b, receipts)
 	if legacy || admitted == nil || b.RuntimeWebhook.dropped.Load() != dropped+1 || !strings.Contains(logger.String(), "configuration_changed") {
 		t.Fatalf("stale admission: legacy=%t admitted=%v logs=%s", legacy, admitted != nil, logger.String())
+	}
+}
+
+func TestRuntimeWebhookStorageWarningsSubscriptionsAndSignatures(t *testing.T) {
+	for _, subscribed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
+			storeInScratch(t)
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			if err := b.StoreRoot.WriteFile("warning-fixture", []byte("fake archive bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			b.Webhook.enabled = false
+			selected := []string{"message.received", "connection.changed"}
+			if subscribed {
+				selected = append(selected, "storage.warning")
+			}
+			if code, data := configureWebhookFields(t, server, destination, map[string]any{"events": selected}); code != 200 {
+				t.Fatalf("configure=%d %s", code, data)
+			}
+			b.HistoryLimits.WarnBytes = 1
+			for _, warning := range []struct {
+				kind, state string
+				emit        func()
+			}{
+				{"store", "above_threshold", func() { b.archiveStats(time.Now()) }},
+				{"media_quota", "warning", func() { b.observeMediaQuota(100, 80) }},
+				{"media_quota", "full", func() { b.observeMediaQuota(100, 100) }},
+			} {
+				warning.emit()
+				if !subscribed {
+					webhookBarrier(t, b, receipts)
+					continue
+				}
+				r := receiveWebhook(t, receipts)
+				if !verifyWebhookReceipt(r, time.Now()) || r.header.Get("X-Bridge-Token") != "" {
+					t.Fatal("storage signature failed or bridge token escaped")
+				}
+				var fields map[string]any
+				if err := json.Unmarshal(r.body, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if len(fields) != 5 || fields["event"] != "storage.warning" || fields["type"] != warning.kind || fields["state"] != warning.state || fields["event_id"] != r.header.Get("X-Example-Id") {
+					t.Fatalf("unsafe storage payload=%s", r.body)
+				}
+				var at time.Time
+				if err := json.Unmarshal([]byte(strconv.Quote(fields["at"].(string))), &at); err != nil || at.IsZero() || at.Location() != time.UTC {
+					t.Fatalf("storage timestamp=%v %v", at, err)
+				}
+				// Staying at the same threshold never emits another warning.
+				warning.emit()
+				webhookBarrier(t, b, receipts)
+			}
+		})
 	}
 }

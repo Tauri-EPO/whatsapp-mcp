@@ -27,6 +27,7 @@ func (b *Bridge) observeMediaQuota(quota uint64, bytes int64) bool {
 			label = "full"
 		}
 		b.Log.Warnf("Media quota %s: bytes=%d quota_bytes=%d", label, bytes, quota)
+		b.queueRuntimeStorageWarning("media_quota", label)
 		if b.ForwardConnection && b.Webhook.Enabled() {
 			// Synchronous and bounded; no untracked goroutine survives shutdown.
 			ctx, cancel := context.WithTimeout(b.ctx, connectionEventTimeout)

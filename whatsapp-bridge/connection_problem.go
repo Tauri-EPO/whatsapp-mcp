@@ -15,7 +15,7 @@ import (
 
 const connectionProblemFile = ".connection-problem"
 
-// The pinned library consumes 500/503 before event dispatch. Its public Logger
+// The pinned library consumes generic connect failures before event dispatch. Its public Logger
 // seam is the only observer for these failures: match the constant format and
 // typed numeric argument, never parse server text or a rendered log line.
 type connectionProblemLogger struct {
@@ -30,7 +30,7 @@ func (l connectionProblemLogger) Warnf(format string, args ...any) {
 		return
 	}
 	if format == "Got %d/%s connect failure, assuming automatic reconnect will handle it" && len(args) == 2 {
-		if code, ok := args[0].(int); ok && (code == 500 || code == 503) {
+		if code, ok := args[0].(int); ok {
 			l.bridge.recordConnectionProblemIf(code, 0, 0, l.active)
 		}
 	} else if format == "Got 503 stream error, assuming automatic reconnect will handle it" && len(args) == 0 {
@@ -56,7 +56,7 @@ type ConnectionProblem struct {
 }
 
 func classifyConnectionProblem(code int, reason int, expire time.Duration, now time.Time) *ConnectionProblem {
-	p := &ConnectionProblem{Kind: "other", Code: code, TempBanReason: reason, Since: now.UTC()}
+	p := &ConnectionProblem{Kind: "connect_failure", Code: code, TempBanReason: reason, Since: now.UTC()}
 	switch code {
 	case 401:
 		p.Kind = "unlinked"

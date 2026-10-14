@@ -112,7 +112,7 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
 	cfg.Operator, err = parseOperatorConfig(getenv, lookup)
 	collect(err)
-	cfg.RuntimeWebhook, err = parseRuntimeWebhookOptions(getenv)
+	cfg.RuntimeWebhook, err = parseRuntimeWebhookOptions(getenv, cfg.Switches)
 	collect(err)
 	cfg.SplitREST = isSplitBridgeBind(cfg.Bind)
 	if cfg.SplitREST && cfg.Operator.Bind != "" {

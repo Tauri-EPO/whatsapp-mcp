@@ -43,6 +43,7 @@ func (b *Bridge) archiveStats(now time.Time) (messages, session, rows int64, war
 	above := b.HistoryLimits.WarnBytes > 0 && store > b.HistoryLimits.WarnBytes
 	if above && !s.warning {
 		b.Log.Warnf("Store size above configured warning threshold: bytes=%d", store)
+		b.queueRuntimeStorageWarning("store", "above_threshold")
 		if b.ForwardConnection && b.Webhook.Enabled() {
 			// Use the existing tracked lifecycle delivery pool, with bounded timeout.
 			b.connectionEventsMu.Lock()

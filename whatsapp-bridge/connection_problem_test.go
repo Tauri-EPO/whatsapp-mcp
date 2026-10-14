@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,15 +21,22 @@ import (
 )
 
 func TestPinnedLibraryServerFailuresReachDiagnostics(t *testing.T) {
-	for _, code := range []string{"500", "503"} {
+	for _, code := range []string{"413", "414", "499", "500", "503"} {
 		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 		b.Client.Log = connectionProblemLogger{Logger: b.Log, bridge: b}
 		b.Client.DangerousInternals().HandleConnectFailure(b.ctx, &waBinary.Node{Tag: "failure", Attrs: waBinary.Attrs{"reason": code, "message": "fake diagnostic"}}) //nolint:staticcheck // Test the actual pinned protocol handler; production uses only the public Logger seam.
 		p, _ := b.connectionSnapshot()
-		if p == nil || p.Kind != "server_error" {
+		kind := "connect_failure"
+		if code == "500" || code == "503" {
+			kind = "server_error"
+		}
+		number, _ := strconv.Atoi(code)
+		if p == nil || p.Kind != kind || p.Code != number {
 			t.Fatalf("protocol failure %s not captured: %+v", code, p)
 		}
-		if strings.Contains(b.renderMetrics(), "fake diagnostic") {
+		metrics := b.renderMetrics()
+		if !strings.Contains(metrics, `whatsapp_bridge_connection_problem{kind="`+kind+`"} 1`) { t.Fatal("missing active diagnostic gauge") }
+		if strings.Contains(metrics, "fake diagnostic") {
 			t.Fatal("server message leaked to metrics")
 		}
 	}
@@ -60,7 +68,7 @@ func TestConnectionProblemsReachHTTPAndMetrics(t *testing.T) {
 	for _, tc := range []struct {
 		code int
 		kind string
-	}{{401, "unlinked"}, {402, "temporarily_banned"}, {403, "locked"}, {405, "client_outdated"}, {406, "banned"}, {503, "server_error"}, {409, "other"}} {
+	}{{401, "unlinked"}, {402, "temporarily_banned"}, {403, "locked"}, {405, "client_outdated"}, {406, "banned"}, {503, "server_error"}, {409, "connect_failure"}} {
 		t.Run(tc.kind, func(t *testing.T) {
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 			b.Exit = func(string, int) {}
