@@ -32,7 +32,14 @@ from http_oauth import (
     load_oauth_config,
 )
 from http_upload import UploadApp
-from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
+from mcp_config import (
+    build_transport_security,
+    resolve_host,
+    resolve_port,
+    resolve_socket,
+    resolve_transport,
+    run_http_listeners,
+)
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
 from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY, notes_db_path
@@ -3059,7 +3066,14 @@ if __name__ == "__main__":
     # The localhost default keeps a remote server unreachable until explicitly opened up.
     try:
         transport = resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT"))
+        socket_path = resolve_socket(
+            os.getenv("WHATSAPP_MCP_SOCKET"),
+            os.getenv("WHATSAPP_STORE_DIR") or "../whatsapp-bridge/store",
+            os.getenv("WHATSAPP_MEDIA_ROOTS"),
+        )
         if transport == "stdio":
+            if socket_path:
+                raise ValueError("WHATSAPP_MCP_SOCKET requires http or sse transport")
             install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
             mcp.run(transport="stdio")
             raise SystemExit(0)
@@ -3119,9 +3133,7 @@ if __name__ == "__main__":
         file=sys.stderr,
     )
 
-    import uvicorn
-
-    uvicorn.run(
+    run_http_listeners(
         build_http_app(
             mcp,
             transport,
@@ -3133,6 +3145,5 @@ if __name__ == "__main__":
         ),
         host=host,
         port=port,
-        log_level="info",
-        proxy_headers=False,  # Preserve the socket peer for our explicit forwarding trust boundary.
+        socket_path=socket_path,
     )

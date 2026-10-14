@@ -171,6 +171,10 @@ jobs:
         env:
           WHATSAPP_IMAGE_TAG: ci
         run: bash scripts/smoke-split.sh
+      - name: Additional Unix listeners alongside TCP (unpaired, no egress)
+        env:
+          WHATSAPP_IMAGE_TAG: ci
+        run: python3 scripts/smoke-socket.py
 
   bridge-arm64:
     name: Bridge arm64 (QEMU)

@@ -316,7 +316,11 @@ def resolve_max_body_bytes(value: str | None) -> int:
     return size
 
 
-ProxyNetworks = tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+ProxyNetworks = tuple[ipaddress.IPv4Network | ipaddress.IPv6Network | str, ...]
+
+
+def _trusted_ip(address, networks: ProxyNetworks) -> bool:
+    return any(address in network for network in networks if not isinstance(network, str))
 
 
 def _default_route_gateway() -> ipaddress.IPv4Network:
@@ -358,12 +362,14 @@ def resolve_trusted_proxies(value: str | None) -> ProxyNetworks:
                 networks.extend((ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")))
             elif entry == "gateway":
                 networks.append(_default_route_gateway())
+            elif entry == "unix":
+                networks.append("unix")
             else:
                 networks.append(ipaddress.ip_network(entry, strict=True))
         except ValueError:
             if entry == "gateway":
                 raise
-            raise ValueError("WHATSAPP_MCP_TRUSTED_PROXIES must contain CIDRs, loopback or gateway") from None
+            raise ValueError("WHATSAPP_MCP_TRUSTED_PROXIES must contain CIDRs, loopback, gateway or unix") from None
     return tuple(networks)
 
 
@@ -376,15 +382,16 @@ def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
     if scope.get("oauth_subject"):
         return "oauth:" + scope["oauth_subject"]
     client = scope.get("client")
-    peer = client[0] if client else "unknown"
+    peer = client[0] if client else "unix"
     try:
-        address = ipaddress.ip_address(peer)
+        address = ipaddress.ip_address(peer) if client else None
         headers = [v for n, v in scope.get("headers", []) if n.lower() == b"x-forwarded-for"]
-        if not headers or not any(address in network for network in trusted_proxies):
-            return str(address)
+        trusted = _trusted_ip(address, trusted_proxies) if client else "unix" in trusted_proxies
+        if not headers or not trusted:
+            return peer
         hops = [ipaddress.ip_address(hop.strip()) for v in headers for hop in v.decode("latin-1").split(",")]
         for address in reversed(hops):
-            if not any(address in network for network in trusted_proxies):
+            if not _trusted_ip(address, trusted_proxies):
                 return str(address)
     except ValueError:
         pass
@@ -398,10 +405,15 @@ class ForwardedSchemeMiddleware:
         self.app, self.trusted_proxies = app, trusted_proxies
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") == "http" and scope.get("client"):
+        if scope.get("type") == "http":
             try:
-                peer = ipaddress.ip_address(scope["client"][0])
-                if any(peer in network for network in self.trusted_proxies):
+                client = scope.get("client")
+                trusted = (
+                    _trusted_ip(ipaddress.ip_address(client[0]), self.trusted_proxies)
+                    if client
+                    else "unix" in self.trusted_proxies
+                )
+                if trusted:
                     values = [v for n, v in scope.get("headers", []) if n.lower() == b"x-forwarded-proto"]
                     if values:
                         scheme = values[-1].split(b",")[-1].strip().lower()

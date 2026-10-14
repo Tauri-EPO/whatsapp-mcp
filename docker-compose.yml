@@ -49,6 +49,7 @@ services:
     environment:
       WHATSAPP_PROXY_URL: ${WHATSAPP_PROXY_URL:-}
       WHATSAPP_PROXY_URL_FILE: ${WHATSAPP_PROXY_URL_FILE:-}
+      WHATSAPP_OPERATOR_SOCKET: ${WHATSAPP_OPERATOR_SOCKET:-}
       TZ: ${TZ:-UTC}
       WHATSAPP_BRIDGE_PORT: "8080"
       WHATSAPP_BRIDGE_BIND: ${WHATSAPP_BRIDGE_BIND:-127.0.0.1}
@@ -168,6 +169,7 @@ services:
         condition: service_healthy
         restart: true
     environment:
+      WHATSAPP_MCP_SOCKET: ${WHATSAPP_MCP_SOCKET:-}
       WHATSAPP_MEDIA_BACKEND: ${WHATSAPP_MEDIA_BACKEND:-local}
       TZ: ${TZ:-UTC}
       # Hostnames clients use to reach /mcp (Tailscale MagicDNS name, reverse

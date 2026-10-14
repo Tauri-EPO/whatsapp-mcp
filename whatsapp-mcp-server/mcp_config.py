@@ -1,5 +1,11 @@
 """Side-effect-free helpers for MCP server configuration env vars."""
 
+import errno
+import os
+import socket
+import stat
+from pathlib import Path
+
 # Accepted WHATSAPP_MCP_TRANSPORT values mapped to MCP SDK transport names.
 # "http" is a friendly alias for the spec's current "streamable-http" transport.
 TRANSPORT_ALIASES = {
@@ -150,3 +156,144 @@ def build_transport_security(host: str, allowed_hosts_env: str | None, allowed_o
         allowed_hosts=allowed_hosts,
         allowed_origins=list(dict.fromkeys(origins)),
     )
+
+
+def resolve_socket(value: str | None, store: str, media_roots: str | None = None) -> str | None:
+    """Validate an additional Unix listener without filesystem mutation."""
+    if not value or not value.strip():
+        return None
+    path = Path(value.strip())
+    if os.name != "posix" or not path.is_absolute() or len(os.fsencode(path)) > 100:
+        raise ValueError("WHATSAPP_MCP_SOCKET requires a Unix absolute path of at most 100 bytes")
+    roots = [Path(store), Path.home() / ".local/share/whatsapp-mcp/outbox"]
+    roots += [Path(root) for root in (media_roots or "").split(os.pathsep) if root]
+    if any(path.resolve().is_relative_to(root.resolve()) for root in roots):
+        raise ValueError("WHATSAPP_MCP_SOCKET must be outside store, outbox and media roots")
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("WHATSAPP_MCP_SOCKET refuses symlinks")
+    try:
+        parent = path.parent.stat()
+    except OSError:
+        raise ValueError("WHATSAPP_MCP_SOCKET parent must exist") from None
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o002:
+        raise ValueError("WHATSAPP_MCP_SOCKET parent must not be world-writable")
+    return str(path)
+
+
+def bind_unix_socket(path: str) -> socket.socket:
+    """Bind uid 1000 / mode 0660; replace only our demonstrably stale socket."""
+    if getattr(os, "geteuid")() not in (0, 1000):
+        raise ValueError("WHATSAPP_MCP_SOCKET requires uid 1000")
+    if any(part.is_symlink() for part in (Path(path), *Path(path).parents)):
+        raise ValueError("WHATSAPP_MCP_SOCKET refuses symlinks")
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        info = None
+    if info is not None:
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 1000:
+            raise ValueError("WHATSAPP_MCP_SOCKET refuses an existing non-owned socket or file")
+        with socket.socket(getattr(socket, "AF_UNIX")) as probe:
+            probe.settimeout(1)
+            try:
+                probe.connect(path)
+            except OSError as exc:
+                if exc.errno != errno.ECONNREFUSED:
+                    raise ValueError("WHATSAPP_MCP_SOCKET cannot prove stale socket") from None
+            else:
+                raise ValueError("WHATSAPP_MCP_SOCKET is already listening")
+        if os.lstat(path) != info:
+            raise ValueError("WHATSAPP_MCP_SOCKET changed before removing stale socket")
+        os.unlink(path)
+    listener = socket.socket(getattr(socket, "AF_UNIX"))
+    owned = None
+    try:
+        listener.bind(path)
+        owned = os.lstat(path)
+        os.chmod(path, 0o660)
+        if getattr(os, "geteuid")() == 0:
+            getattr(os, "chown")(path, 1000, 1000)
+        elif getattr(os, "geteuid")() != 1000:
+            raise ValueError("WHATSAPP_MCP_SOCKET requires uid 1000")
+        listener.set_inheritable(True)
+        return listener
+    except BaseException:
+        listener.close()
+        if owned:
+            try:
+                current = os.lstat(path)
+                if (owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino):
+                    os.unlink(path)
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def run_http_listeners(app, host: str, port: int, socket_path: str | None):
+    """One uvicorn Server/app/lifespan, listening on TCP and optional Unix."""
+    import uvicorn
+
+    if not socket_path:
+        # Keep uvicorn's existing hostname resolution and TCP startup behavior.
+        uvicorn.run(app, host=host, port=port, log_level="info", proxy_headers=False)
+        return
+    config = uvicorn.Config(app, host=host, port=port, log_level="info", proxy_headers=False)
+    sockets = []
+    owned = None
+    try:
+        if socket_path:
+            sockets.append(bind_unix_socket(socket_path))
+            owned = os.lstat(socket_path)
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        seen = set()
+        for family, socktype, protocol, _, address in addresses:
+            if (family, address) in seen:
+                continue
+            seen.add((family, address))
+            listener = socket.socket(family, socktype, protocol)
+            sockets.append(listener)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            listener.bind(address)
+            listener.set_inheritable(True)
+        server = uvicorn.Server(config)
+        server.run(sockets=sockets)
+        if not server.started:
+            raise SystemExit(3)  # Preserve uvicorn.run's nonzero startup-failure contract.
+    finally:
+        for listener in sockets:
+            listener.close()
+        if socket_path and owned:
+            try:
+                current = os.lstat(socket_path)
+                if (owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino):
+                    os.unlink(socket_path)
+            except FileNotFoundError:
+                pass
+
+
+def probe_http_health():
+    """Probe TCP and, when configured, Unix without inherited proxy settings."""
+    import http.client
+
+    host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    connections = [http.client.HTTPConnection(host, resolve_port(os.getenv("WHATSAPP_MCP_PORT")), timeout=4)]
+    path = os.getenv("WHATSAPP_MCP_SOCKET")
+    if path:
+        connection = http.client.HTTPConnection("localhost", timeout=4)
+
+        def connect():
+            connection.sock = socket.socket(getattr(socket, "AF_UNIX"))
+            connection.sock.settimeout(4)
+            connection.sock.connect(path)
+
+        connection.connect = connect
+        connections.append(connection)
+    for connection in connections:
+        try:
+            connection.request("GET", "/mcp")
+            connection.getresponse().close()
+        finally:
+            connection.close()
