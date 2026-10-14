@@ -168,6 +168,9 @@ class IngestConfig:
     include_sent: bool = True
 
 
+_ingest_config: IngestConfig | None = None
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One eligible voice note waiting for a transcript."""
@@ -239,6 +242,14 @@ def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
         fetch=parse_bool_env(source.get(FETCH_ENV), FETCH_ENV),
         include_sent=whatsapp.ingest_include_sent(source),
     )
+
+
+def ingest_config() -> IngestConfig:
+    """The startup snapshot shared by coverage and every worker batch."""
+    global _ingest_config
+    if _ingest_config is None:
+        _ingest_config = load_ingest_config()
+    return _ingest_config
 
 
 def _parse_interval(raw: str | None) -> float:
@@ -896,6 +907,8 @@ def start_worker(
     run: Callable[..., BatchResult] | None = None,
 ) -> threading.Thread:
     """Start the poll loop on a daemon thread (so it never holds up shutdown)."""
+    global _ingest_config
+    _ingest_config = config
     event = stop or threading.Event()
     thread = threading.Thread(
         target=run_forever,
@@ -923,7 +936,9 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     ``download_media`` away keeps the archive as it is: the worker then
     transcribes what is cached and asks the bridge for nothing.
     """
+    global _ingest_config
     config = load_ingest_config(env)
+    _ingest_config = config
     if not config.enabled:
         return None
     policy = load_tool_policy(env)
@@ -970,4 +985,5 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
         ", including sent audio" if config.include_sent else ", inbound audio only",
     )
+    _ingest_config = config
     return start_worker(config)

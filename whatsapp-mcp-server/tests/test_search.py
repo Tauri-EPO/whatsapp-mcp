@@ -81,7 +81,8 @@ def test_document_filename_search(tmp_path, monkeypatch, with_fts):
             "VALUES (?, ?, '111', '', '2026-01-01 00:00:00+00:00', 0, ?, ?)",
             [(kind, CHAT, kind, "Relatório técnico.pdf") for kind in ("document", "image", "audio", "video")],
         )
-    for query in ("relatorio", "RELATÓRIO", "tecnico"):
+    queries = ("relatorio", "RELATÓRIO", "tecnico") if with_fts else ("Relatório", "técnico", "pdf")
+    for query in queries:
         assert ids(query, sort_by="relevance") == ["document"]
         assert whatsapp.count_messages(query=query) == 1
         assert main.list_messages(query=query, count_only=True) == {"count": 1}
@@ -95,9 +96,43 @@ def test_document_filename_search(tmp_path, monkeypatch, with_fts):
         ):
             assert ids(query) == ["document"]
         assert ids("relatorio NOT tecnico") == []
+    else:
+        assert ids("relatorio") == []  # same exact Unicode/ASCII LOWER behavior as content
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["222@s.whatsapp.net"]))
     assert ids("relatorio") == []
     assert main.list_messages(query="relatorio", count_only=True) == {"count": 0}
+
+
+@pytest.mark.parametrize("with_fts", [True, False])
+def test_generated_document_names_are_excluded(tmp_path, monkeypatch, with_fts):
+    path = _make_db(tmp_path, monkeypatch, with_fts)
+    rows = [
+        ("generated", "document_20261014_190000_generated"),
+        ("special[*]", "document_20261014_190000_special[*]"),
+        ("real", "document_final.pdf"),
+        ("other", "document_20261014_190000_different.pdf"),
+    ]
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO messages(id, chat_jid, sender, content, timestamp, media_type, filename) "
+            "VALUES (?, ?, '111', '', '2026-01-01 00:00:00+00:00', 'document', ?)",
+            [(mid, CHAT, name) for mid, name in rows],
+        )
+    assert set(ids("document")) == {"real", "other"}
+    assert ids("final") == ["real"]
+
+
+def test_fallback_preserves_combining_marks_like_content(plain_db):
+    filename = "は\u3099な_ก\u0e49.pdf"
+    with sqlite3.connect(plain_db) as conn:
+        conn.execute(
+            "INSERT INTO messages(id, chat_jid, sender, content, timestamp, media_type, filename) "
+            "VALUES ('unicode', ?, '111', '', '2026-01-01 00:00:00+00:00', 'document', ?)",
+            (CHAT, filename),
+        )
+    assert ids("は\u3099な") == ["unicode"]
+    assert ids("はな") == []
+    assert ids("ก\u0e49") == ["unicode"]
 
 
 class TestFtsSearch:

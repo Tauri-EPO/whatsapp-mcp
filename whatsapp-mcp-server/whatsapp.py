@@ -10,7 +10,6 @@ import re
 import sqlite3
 import threading
 import time
-import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -218,9 +217,7 @@ def _connect_messages_db() -> sqlite3.Connection:
             "there, or the path is wrong. The path comes from WHATSAPP_DB_PATH, or from "
             "WHATSAPP_STORE_DIR/messages.db when that is unset",
         )
-    conn = _connect_read_only(MESSAGES_DB_PATH)
-    conn.create_function("search_fold", 1, _search_fold, deterministic=True)
-    return conn
+    return _connect_read_only(MESSAGES_DB_PATH)
 
 
 def _connect_whatsmeow_db() -> sqlite3.Connection:
@@ -2495,14 +2492,16 @@ class MessageFilters:
         return f"(messages.media_type IS NULL OR messages.media_type NOT IN ({placeholders}))", list(MEDIA_TYPES)
 
 
-def _search_fold(value: str | None) -> str:
-    """Case and accent folding for document filenames on the substring path."""
-    return "".join(c for c in unicodedata.normalize("NFD", value or "").casefold() if not unicodedata.combining(c))
-
-
+_DOCUMENT_FILENAME_PREDICATE = (
+    "messages.media_type = 'document' AND NOT ("
+    "substr(messages.filename, 1, 9) = 'document_' "
+    "AND substr(messages.filename, 10, 15) GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]' "
+    "AND substr(messages.filename, 25) = CASE WHEN coalesce(messages.id, '') = '' THEN '' ELSE '_' || messages.id END)"
+)
 _SUBSTRING_PREDICATE = (
     "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0 "
-    "OR (messages.media_type = 'document' AND instr(search_fold(messages.filename), search_fold(?)) > 0))"
+    f"OR ({_DOCUMENT_FILENAME_PREDICATE} "
+    "AND (instr(LOWER(messages.filename), LOWER(?)) > 0 OR instr(messages.filename, ?) > 0)))"
 )
 
 
@@ -2642,11 +2641,11 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
             match_index=0,
         )
     if not transcripts:
-        return QueryPredicate(_SUBSTRING_PREDICATE, [query, query, query])
+        return QueryPredicate(_SUBSTRING_PREDICATE, [query, query, query, query])
     # No index to rank with: the set is right, the order stays newest-first.
     return QueryPredicate(
         f"({_SUBSTRING_PREDICATE} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))",
-        [query, query, query],
+        [query, query, query, query],
     )
 
 
@@ -5441,7 +5440,10 @@ def ingest_include_sent(env: Mapping[str, str] | None = None) -> bool:
 
 
 def ingest_sent_clause(alias: str, include_sent: bool | None = None) -> str:
-    include_sent = ingest_include_sent() if include_sent is None else include_sent
+    if include_sent is None:
+        from transcribe_worker import ingest_config
+
+        include_sent = ingest_config().include_sent
     return "1" if include_sent else f"{alias}.is_from_me = 0"
 
 

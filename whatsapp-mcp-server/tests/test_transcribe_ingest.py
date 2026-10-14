@@ -38,6 +38,11 @@ SHA = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _fresh_ingest_snapshot(monkeypatch):
+    monkeypatch.setattr(transcribe_worker, "_ingest_config", None, raising=False)
+
+
 def _media_filename(message_id: str) -> str:
     return f"audio_20260905_09000{message_id[-1]}_{message_id}.ogg"
 
@@ -345,6 +350,28 @@ def test_sent_audio_respects_direct_scope_allow_list_and_monthly_cap(paired_dbs,
     monkeypatch.setattr(usage, "month_now", lambda: "2026-11")
     assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 1
     assert whatsapp.coverage()["audio"]["backlog"] == 0
+
+
+@pytest.mark.parametrize("include_sent", [True, False])
+def test_startup_sent_snapshot_survives_environment_changes(paired_dbs, monkeypatch, include_sent):
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    installed = []
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config: installed.append(config))
+    transcribe_worker.install_ingest_worker(
+        {
+            "TRANSCRIBE_ON_INGEST": "true",
+            "TRANSCRIBE_ON_INGEST_INCLUDE_SENT": str(include_sent),
+            "WHISPER_URL": "http://127.0.0.1:8178/inference",
+        }
+    )
+    monkeypatch.setenv("TRANSCRIBE_ON_INGEST_INCLUDE_SENT", str(not include_sent))
+    monkeypatch.setattr(whatsapp, "ingest_include_sent", lambda env=None: pytest.fail("reparsed startup env"))
+    expected = 2 if include_sent else 1
+    assert whatsapp.coverage()["audio"]["backlog"] == expected
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend()).transcribed == expected
+    assert whatsapp.coverage()["audio"]["backlog"] == 0
+    assert transcribe_worker.ingest_config() is installed[0]
 
 
 def test_uncached_audio_is_fetched_from_the_bridge_only_with_the_flag_on(paired_dbs):

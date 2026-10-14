@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -127,6 +128,89 @@ func TestEnsureMessagesFTS_TeardownWithoutModule(t *testing.T) {
 	// And inserts keep working afterwards.
 	if _, err := db.Exec(`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES ('x', 'c', 's', 'ok', ?, 0)`, time.Now()); err != nil {
 		t.Fatalf("insert after teardown failed: %v", err)
+	}
+}
+
+func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
+	for _, failure := range []string{"injected migration failure", "no such module: fts5"} {
+		t.Run(failure, func(t *testing.T) {
+			store := newTestMessageStore(t)
+			if _, err := ensureMessagesFTS(store.db); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec("DELETE FROM schema_migrations WHERE name=?", documentFilenameFTSMigration); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(ftsTeardown + `
+				CREATE TABLE messages_fts(content TEXT);
+				CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+					SELECT missing_fts_module();
+				END;`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.StoreMessage(storedMessage{ID: "before-failure", ChatJID: "c", Sender: "s", Content: "broken trigger", Timestamp: time.Now()}); err == nil {
+				t.Fatal("broken leftover trigger must refuse a real StoreMessage before cleanup")
+			}
+			on, err := ensureMessagesFTSMigration(store.db, true, func(tx *sql.Tx) error {
+				if _, err := tx.Exec(ftsTeardown + ftsSchema); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s", failure)
+			})
+			if on || (err == nil) != (failure == "no such module: fts5") {
+				t.Fatalf("on=%v err=%v", on, err)
+			}
+			var triggers int
+			if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'").Scan(&triggers); err != nil || triggers != 0 {
+				t.Fatalf("leftover triggers=%d err=%v", triggers, err)
+			}
+			if exists, _ := messagesFTSExists(store.db); exists {
+				t.Fatal("failed optional index remains active")
+			}
+			if err := store.StoreMessage(storedMessage{ID: "after-failure", ChatJID: "c", Sender: "s", Content: "still writable", Timestamp: time.Now()}); err != nil {
+				t.Fatalf("StoreMessage after failed migration: %v", err)
+			}
+			var content string
+			if err := store.db.QueryRow("SELECT content FROM messages WHERE id='after-failure'").Scan(&content); err != nil || content != "still writable" {
+				t.Fatalf("stored content=%q err=%v", content, err)
+			}
+		})
+	}
+}
+
+func TestMessagesFTSExcludesGeneratedDocumentNames(t *testing.T) {
+	db := newMessagesDB(t)
+	if _, err := db.Exec(`INSERT INTO messages(id, chat_jid, content, media_type, filename)
+		VALUES ('generated', 'c', '', 'document', 'document_20261014_190000_generated'),
+		('special[*]', 'c', '', 'document', 'document_20261014_190000_special[*]'),
+		('real', 'c', '', 'document', 'document_final.pdf'),
+		('other', 'c', '', 'document', 'document_20261014_190000_different.pdf');`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureMessagesFTS(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "document"); got != 2 {
+		t.Fatalf("rebuild document matches=%d want only two original filenames", got)
+	}
+	if _, err := db.Exec(`UPDATE messages SET filename='document_review.pdf' WHERE id='generated';
+		UPDATE messages SET filename='document_20261014_190000_real' WHERE id='real';`); err != nil {
+		t.Fatal(err)
+	}
+	if countMatches(t, db, "final") != 0 || countMatches(t, db, "review") != 1 || countMatches(t, db, "document") != 2 {
+		t.Fatal("filename update did not replace generated/original tokens")
+	}
+	if _, err := db.Exec(`DELETE FROM messages WHERE id IN ('generated','real','special[*]')`); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "document"); got != 1 {
+		t.Fatalf("delete left stale document tokens=%d", got)
+	}
+	if _, err := db.Exec(`UPDATE messages SET id='different.pdf' WHERE id='other'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "document"); got != 0 {
+		t.Fatalf("changed row id left generated document tokens=%d", got)
 	}
 }
 
