@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.8.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.7.0...v2.8.0) (2026-10-14)
+
+
+### Features
+
+* add private operator chat search ([#729](https://github.com/Tauri-EPO/whatsapp-mcp/issues/729)) ([a748e24](https://github.com/Tauri-EPO/whatsapp-mcp/commit/a748e2444a7792281be2f5e376220d3e24b72ad6))
+* add runtime connection webhooks and receiver filters ([#725](https://github.com/Tauri-EPO/whatsapp-mcp/issues/725)) ([1851b79](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1851b79cd39e24e6d8f22c4426090cc25d929ffa))
+
+## [2.7.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.6.0...v2.7.0) (2026-10-14)
+
+
+### Features
+
+* allow runtime narrowing of the chat allow-list ([#722](https://github.com/Tauri-EPO/whatsapp-mcp/issues/722)) ([85e1abf](https://github.com/Tauri-EPO/whatsapp-mcp/commit/85e1abf960fe27d56833f61659316aed9514c8c7)), closes [#720](https://github.com/Tauri-EPO/whatsapp-mcp/issues/720)
+
+## [2.6.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.5.1...v2.6.0) (2026-10-13)
+
+
+### Features
+
+* add runtime HMAC-signed message webhooks ([#708](https://github.com/Tauri-EPO/whatsapp-mcp/issues/708)) ([a35cca6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/a35cca6452b8a87186d72af02be3fd6a9250986b)), closes [#707](https://github.com/Tauri-EPO/whatsapp-mcp/issues/707)
+
+
+### Dependencies
+
+* bump whatsmeow to v0.0.0-20261013142727-4cf8bc8e0aeb ([#717](https://github.com/Tauri-EPO/whatsapp-mcp/issues/717)) ([c62a1c1](https://github.com/Tauri-EPO/whatsapp-mcp/commit/c62a1c1551ba8ccad800150c77c3ad817aceeedc))
+
+## [2.5.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.5.0...v2.5.1) (2026-10-13)
+
+
+### Bug fixes
+
+* prevent restart loops after WhatsApp device unlink ([#700](https://github.com/Tauri-EPO/whatsapp-mcp/issues/700)) ([b6abfc4](https://github.com/Tauri-EPO/whatsapp-mcp/commit/b6abfc4012926ec1ae2863d687a73200f606923b)), closes [#698](https://github.com/Tauri-EPO/whatsapp-mcp/issues/698)
+* request history under allowed chat spellings ([#699](https://github.com/Tauri-EPO/whatsapp-mcp/issues/699)) ([3ec4e51](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3ec4e51ef53eb94793814359d0e6b7f10fad4952)), closes [#694](https://github.com/Tauri-EPO/whatsapp-mcp/issues/694)
+
 ## [2.5.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.4.0...v2.5.0) (2026-10-11)
 
 

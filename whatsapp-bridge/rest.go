@@ -66,8 +66,14 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	if hostWarning != "" {
 		b.Log.Warnf("%s", hostWarning)
 	}
-	auth := func(h http.HandlerFunc) http.HandlerFunc {
+	// plain = bearer + Host only. /api/me, /api/health and /api/ready register
+	// with it so they answer without the settings table; every other route
+	// pins one runtime settings snapshot for the request (runtimePolicyGuard).
+	plain := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
+	}
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return plain(b.runtimePolicyGuard(h))
 	}
 	// mutate = auth + the WHATSAPP_READ_ONLY refusal (403, read_only.go) + the
 	// per-tool allow/deny lists (tool_policy.go), in that order: read-only wins,
@@ -75,7 +81,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// with it; reads keep plain auth, so a new route has to be classified when it
 	// is added — and endpointTools must gain a row for it.
 	mutate := func(h http.HandlerFunc) http.HandlerFunc {
-		return auth(b.ReadOnly.guard(b.runtimeToolGuard(h)))
+		return plain(b.ReadOnly.guard(b.runtimePolicyGuard(b.runtimeToolGuard(h))))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/media/blob", auth(requireMethod(http.MethodGet, b.handleMediaBlob)))
@@ -100,11 +106,11 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// asks the phone to push history and writes the rows into messages.db.
 	registerHistoryEndpoint(mux, mutate, client, func() bool { return b.Connected() }, messageStore, b.Policy)
 
-	b.registerStatusEndpoints(mux, auth)
+	b.registerStatusEndpoints(mux, plain)
 
 	// Own identity (see me.go). Authenticated and separate from /api/health:
 	// the owner's number is personal data, health bodies end up in logs.
-	mux.HandleFunc("/api/me", auth(requireMethod(http.MethodGet, handleMe(clientIdentity(client)))))
+	mux.HandleFunc("/api/me", plain(requireMethod(http.MethodGet, handleMe(clientIdentity(client)))))
 
 	// Group participants (see group_members.go). Needs a live connection.
 	mux.HandleFunc("/api/group/members", auth(handleGroupMembers(

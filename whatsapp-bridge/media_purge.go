@@ -170,6 +170,7 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 }
 
 func (store *MessageStore) EachMediaRowMatchingContext(ctx context.Context, chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
+	policy = policy.effective() // One admitted snapshot for the bounded scan.
 	clauses := []string{"media_type IN ('image','video','audio','document','sticker')"}
 	var args []any
 	if chatJID != "" {
@@ -320,6 +321,7 @@ func (b *Bridge) purgeScanLimit() int {
 // handleMediaPurge serves POST /api/media/purge.
 func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := b.Policy.effective(r.Context())
 		var req MediaPurgeRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, purgeMaxBodyBytes)).Decode(&req); err != nil {
 			message := "Invalid request format"
@@ -365,7 +367,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			return
 		}
 		if req.ChatJID != "" {
-			chat, ok := authorizeChat(w, b.Policy, req.ChatJID, false)
+			chat, ok := authorizeChat(w, policy, req.ChatJID, false)
 			if !ok {
 				return
 			}
@@ -423,8 +425,8 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 					continue
 				}
 				item.ChatJID = chat.String()
-				if !b.Policy.Allows(item.ChatJID) {
-					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "chat not in " + chatPolicyEnv})
+				if !policy.Allows(item.ChatJID) {
+					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "chat not in " + policy.origin()})
 					continue
 				}
 				if seen[item] {
@@ -465,7 +467,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 			// and the same call could never get past it. The probe is the dry run
 			// of purgeOne, so dry_run and the real call see the same set.
 			var last mediaRow
-			scanCut, err := b.Store.EachMediaRowMatching(req.ChatJID, before, after, req.MediaType, b.Policy, scanLimit, func(row mediaRow) bool {
+			scanCut, err := b.Store.EachMediaRowMatching(req.ChatJID, before, after, req.MediaType, policy, scanLimit, func(row mediaRow) bool {
 				if r.Context().Err() != nil {
 					return false // the caller hung up; stop walking the disk for it
 				}

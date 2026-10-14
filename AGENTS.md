@@ -56,6 +56,7 @@ whatsapp-mcp/
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
 │   ├── operator_mcp.go         # bounded bridge-authenticated forwarding to the private MCP admin listener
+│   ├── operator_chats.go       # private identity-only chat search within the deploy allow-list, ignoring the runtime one
 │   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
 │   ├── history_limits.go         # bounded pairing requests, history age guard and progress
 │   ├── archive_stats.go          # database size gauges, row count and threshold crossings
@@ -168,6 +169,7 @@ whatsapp-mcp/
 │   ├── delete_message.go       # /api/delete (revoke / local delete)
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
+│   ├── webhook_runtime.go      # opt-in operator receiver, pinned HTTPS, HMAC and bounded delivery queue
 │   ├── Dockerfile              # alpine, pure-Go sqlite (modernc), CGO_ENABLED=0
 │   └── store/                  # WHATSAPP_STORE_DIR: whatsapp.db, messages.db, media, .bridge-token, .bridge.lock, .session-keepalive (gitignored)
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
@@ -355,6 +357,9 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable private operator webhook configuration; independent of the legacy WEBHOOK_ENABLED/WEBHOOK_URL sender. Process-local configuration, HMAC signatures and no media bytes. |
+| `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; address restrictions still apply. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the runtime receiver after 1-100 consecutive failed subscribed events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
 | `WHATSAPP_SEND_RATE_PER_MINUTE` | `0` (off) | Per-instance token bucket, burst equal to rate; runtime `send.rate_per_minute` may tighten the env ceiling |
 | `WHATSAPP_SEND_RATE_PER_DAY` | `0` (off) | Persistent send reservations per UTC calendar day; runtime `send.rate_per_day` may tighten the env ceiling |
 | `WHATSAPP_SEND_NEW_CHATS_PER_DAY` | `0` (off) | Persistent first-contact ceiling per UTC day; runtime `send.new_chats_per_day` may tighten the env ceiling |
@@ -457,7 +462,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |
 | `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the list JID or `*@broadcast`. |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds) |
-| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | POST safe connection-state transitions to `WEBHOOK_URL` when `WEBHOOK_ENABLED` is on; disconnects wait five seconds and are cancelled on a quick reconnect. Logout finishes a POST bounded to two seconds before exit. No QR, passkey material, phone/JID or message content. Strict boolean parsing |
+| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | POST safe connection-state transitions to `WEBHOOK_URL` when `WEBHOOK_ENABLED` is on; disconnects wait five seconds and are cancelled on a quick reconnect. Logout finishes a POST bounded to two seconds before exit. No QR, passkey material, phone/JID or message content. Strict boolean parsing. Explicit `false` also refuses runtime `connection.changed`; absent permits it |
 | `WHISPER_URL` | *(unset)* | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`transcribe.py`). Wins over `WHISPER_BIN` |
 | `WHISPER_BIN` / `WHISPER_MODEL` | *(unset)* | Local `whisper-cli` binary + `ggml-*.bin` model, alternative backend |
 | `WHISPER_LANGUAGE` | `pt` | Default transcription language; `auto` to detect |
@@ -477,7 +482,7 @@ When adding a new env var: document it here, in `docs/CONFIGURATION.md`, in `.en
 
 Media runtime keys are `media.autodownload_status`, `media.quota_bytes`, `media.quota_evict_types` and `media.quota_evict_target_percent`. Status defaults off; absent env permits runtime opt-in, explicit env false is a ceiling, env true permits runtime off/on. Quota/runtime limits only tighten an explicit deployment limit.
 
-Runtime overrides are the exception to startup-only configuration: `tools.allow`, `tools.deny`, `transcription.ingest_chats`, `transcription.monthly_max_minutes`, `transcription.cap_scope`, the four `send.*` limits and the `media.*` keys are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send/transcription/media boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only/chat allow-list remain env-only. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
+Runtime overrides are the exception to startup-only configuration: `chats.allowed`, `tools.allow`, `tools.deny`, `transcription.ingest_chats`, `transcription.monthly_max_minutes`, `transcription.cap_scope`, the four `send.*` limits and the `media.*` keys are read from `messages.db` before each operation, with runtime > env > default precedence subject to deploy-time tool/send/transcription/media boundaries; runtime cannot lift env send ceilings or lower the minimum interval. Operator `GET/PATCH /operator/v1/settings`, `GET /operator/v1/send/usage`, `POST/DELETE /operator/v1/mcp-token` and `POST /operator/v1/logout` require the private operator token, including under read-only. Token rotation stores only hashes in a private runtime row; GET settings never includes it, and Python reads it before each HTTP request. No operator endpoint is on MCP or bridge REST; read-only remains env-only, and runtime chats.allowed can only narrow the deploy chat allow-list. Logout accepts `after=exit|idle` (default exit), bounds unlink and local deletion independently, and persists idle until explicit pairing restart. See `docs/CONFIGURATION.md` and `docs/DOCKER.md`.
 
 Compose-only operator knobs: `WHATSAPP_OPERATOR_NETWORK` names an existing private network and `WHATSAPP_OPERATOR_ALIAS` is unique per instance in `docker-compose.operator.yml`. Neither is a process setting.
 

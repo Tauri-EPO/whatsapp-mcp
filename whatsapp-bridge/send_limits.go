@@ -237,7 +237,7 @@ func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...st
 		} else if b.RuntimeDefaults != nil {
 			// No reservation snapshot was obtained. Recheck the live policy
 			// outside the shorter best-effort counting deadline before allowing.
-			current, checkErr := b.settingsSnapshot(settingsCtx)
+			current, checkErr := b.liveSettings(settingsCtx)
 			enabled = checkErr != nil || sendLimitsEnabled(current)
 		}
 		if !enabled {

@@ -127,6 +127,7 @@ func (s *MessageStore) listLabels(chats []string, includeDeleted bool) ([]labelR
 
 func handleLabels(s *MessageStore, policy chatPolicy, twin func(context.Context, types.JID) (types.JID, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		policy := policy.effective(r.Context())
 		chat, hasChat := r.URL.Query()["chat_jid"]
 		var chats []string
 		if hasChat {
@@ -165,6 +166,8 @@ type labelDeps struct {
 
 func handleLabelChat(deps labelDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		deps := deps
+		deps.policy = deps.policy.effective(r.Context())
 		ctx, cancel := requestContext(r, archiveDeadline)
 		defer cancel()
 		var req struct {

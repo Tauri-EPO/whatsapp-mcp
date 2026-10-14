@@ -101,6 +101,8 @@ type Bridge struct {
 	settingsMu            sync.Mutex
 	settingsWarnMu        sync.Mutex
 	settingsWarned        map[string]int64
+	policyFailLogged      time.Time // both guarded by settingsWarnMu
+	policyFailPending     int64
 	operatorLogout        atomic.Bool
 	operatorSessionWiped  atomic.Bool
 	operatorRetiredClient atomic.Pointer[whatsmeow.Client]
@@ -141,7 +143,8 @@ type Bridge struct {
 	mediaQuotaNeedsLowWater atomic.Bool // health reads must not wait for a transfer lease
 	StatusRetention         *time.Duration
 	// Webhook delivers inbound events to WEBHOOK_URL (nil = tests that never expect one).
-	Webhook *webhookSender
+	Webhook        *webhookSender
+	RuntimeWebhook *runtimeWebhook
 	// Connect dials WhatsApp (defaults to Client.Connect); the reconnect loop uses it.
 	Connect    func() error
 	Disconnect func()
@@ -343,6 +346,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		return b.currentClient().FetchAppState(ctx, appstate.WAPatchRegular, true, false)
 	}
 	b.Policy.warnInvalidEntries(logger)
+	b.Policy = b.runtimeChatPolicy(b.Policy)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if b.Webhook != nil {
 		b.Webhook.failures = &b.metrics.webhookFailures
@@ -399,6 +403,9 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.labelSyncOnce.Do(func() {})
 	b.cancel()
+	if b.RuntimeWebhook != nil {
+		b.RuntimeWebhook.remove()
+	}
 	b.mediaTransfers.stop()
 	b.historyVoteMu.Lock()
 	b.historyVoteStopped = true

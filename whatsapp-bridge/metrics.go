@@ -33,6 +33,8 @@ type metricsRegistry struct {
 	mediaEvicted       map[string]uint64
 	webhookFailures    atomic.Int64
 	reconnects         atomic.Int64
+	// chatPolicyReadFailures counts background policy reads that failed closed.
+	chatPolicyReadFailures atomic.Int64
 
 	mu       sync.Mutex
 	requests map[string]int64 // by status class: "2xx", "4xx", ...
@@ -107,10 +109,16 @@ func (b *Bridge) renderMetrics() string {
 			fmt.Sprintf("whatsapp_bridge_db_wait_seconds_total{pool=%q} %.9f", pool.name, stats.WaitDuration.Seconds()))
 	}
 	add("whatsapp_bridge_up", "1 while the process serves requests.", "gauge", "1")
+	if rw := b.RuntimeWebhook; rw != nil {
+		add("whatsapp_bridge_runtime_webhook_deliveries_total", "Successful runtime webhook POSTs, including synthetic tests.", "counter", fmt.Sprint(rw.deliveries.Load()))
+		add("whatsapp_bridge_runtime_webhook_failures_total", "Runtime message events whose delivery retries failed.", "counter", fmt.Sprint(rw.failures.Load()))
+		add("whatsapp_bridge_runtime_webhook_dropped_total", "Runtime message events discarded.", "counter", fmt.Sprint(rw.dropped.Load()))
+	}
 	if b.RuntimeDefaults != nil {
 		if snapshot, err := b.settingsSnapshot(b.ctx); err == nil {
 			add("whatsapp_runtime_settings_version", "Last committed runtime settings version.", "gauge", fmt.Sprint(snapshot.Version))
 		}
+		add("whatsapp_bridge_chat_policy_read_failures_total", "Runtime chat policy reads that failed; every chat is denied on one.", "counter", fmt.Sprint(m.chatPolicyReadFailures.Load()))
 	}
 	add("whatsapp_bridge_connected", "1 while connected to WhatsApp.", "gauge", fmt.Sprint(bool01(connected)))
 	add("whatsapp_bridge_paired", "1 while a WhatsApp session is paired.", "gauge", fmt.Sprint(bool01(paired)))

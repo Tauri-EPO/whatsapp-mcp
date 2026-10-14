@@ -2,7 +2,217 @@
 
 Every environment variable and CLI flag, plus the transport, authentication and allow-list semantics behind them. Compose users set these in `.env` (see [DOCKER.md](DOCKER.md)); laptop users export them before launching (see [LAPTOP.md](LAPTOP.md)). `AGENTS.md` section 7 is the agent-facing copy of the same table; keep both in sync when adding a variable.
 
-### Connection monitoring contract
+## Runtime message webhook
+
+Set `WHATSAPP_WEBHOOK_RUNTIME=true` and enable the private operator listener to
+configure a separate message and connection-state receiver. The default is off: the routes are absent
+and the legacy `WEBHOOK_URL` sender, including `X-Bridge-Token`, is unchanged.
+Runtime delivery is independent of `WEBHOOK_ENABLED`; both receivers can operate
+at once. Runtime requests never include `X-Bridge-Token` or the operator bearer.
+Message delivery applies the receiver's self/channel/broadcast filters and the
+deployment's status and allowed-chat filters before creating an event. Select
+`message.received`, `connection.changed`, or both; an unselected event is never delivered.
+
+All routes use the operator bearer, Host/Origin policy, request rate limits,
+no-store responses and mutation audit. They are not MCP tools or data-plane routes.
+
+| Method and path | Contract |
+|---|---|
+| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, effective `forward_self`, `forward_channels`, `forward_broadcasts` and `forward_status` filters, header prefix, SHA-256 secret fingerprint (first 16 hex characters), consecutive failed events, last success, reason, queued and dropped counts; never the secret. |
+| `PUT /operator/v1/webhook` | Replace configuration and re-enable delivery; JSON below, at most 4096 bytes, unknown fields refused. Cancels previous deliveries and resets delivery state. Returns the same safe snapshot as GET. |
+| `DELETE /operator/v1/webhook` | Remove configuration, cancel in-flight requests and discard the old queue; 204. An already accepted receiver request cannot be recalled. |
+| `POST /operator/v1/webhook/test` | One synchronous synthetic event (`event: webhook.test`, `type: test`), bounded to 12 seconds including admission; 200 with `delivered`, `reason`, `event_id`, or 409 without an enabled receiver. It does not change consecutive failures, last success or automatic disablement. |
+
+```json
+{
+  "url": "https://receiver.example.com/whatsapp",
+  "events": ["message.received", "connection.changed"],
+  "secret": "replace-with-at-least-32-random-bytes",
+  "header_prefix": "X-Webhook"
+}
+```
+
+Generate a fresh secret with `openssl rand -hex 32`; the literal UTF-8 bytes of
+the supplied string are the HMAC key (hex strings are not decoded). The secret
+must be 32-256 bytes. The prefix defaults to `X-Webhook`, must start with `X-`
+and contain only ASCII letters, digits and hyphens (3-48 characters).
+
+Optional JSON booleans `forward_self`, `forward_channels` and
+`forward_broadcasts` default to `FORWARD_SELF`, `WEBHOOK_FORWARD_CHANNELS` and
+`WEBHOOK_FORWARD_BROADCASTS`, respectively. Without these fields, message
+delivery keeps the existing deployment filters. The floor rule is the one
+`WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` uses: an absent or empty variable permits
+the runtime choice, deployment true permits runtime off/on, and only an
+explicit false in the deployment (including `0`, `no` or `off`) forbids it: PUT
+with true returns 400 and preserves the previous receiver. To forbid a filter,
+write `false`; leaving the variable out does not. The Compose file passes
+`FORWARD_SELF=false` unless `.env` sets it, so a Compose receiver can enable
+`forward_self` only when `.env` sets `FORWARD_SELF=true`.
+`connection.changed` follows the same rule through
+`WEBHOOK_FORWARD_CONNECTION_EVENTS`: absent or true permits selecting it, and an
+explicit false makes a PUT that selects it return 400.
+`forward_status` is reported but is not a PUT field: status posts require
+`WEBHOOK_FORWARD_STATUS=true` at deploy time, even when broadcasts are enabled.
+Allowed-chat policy still applies to every message. These receiver choices never
+change the legacy `WEBHOOK_URL` sender. Unknown fields, null/nonboolean filters,
+empty event selections, duplicate events and unknown events return 400.
+
+HTTPS is mandatory; credentials and fragments are refused. Port 443 is required
+unless `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=true`. Every DNS answer is checked
+at configuration and before every attempt; an answer containing any forbidden IP
+refuses the request. The connection tries only the checked, pinned IPs (falling
+back after a connection failure) while TLS still verifies the original hostname.
+Environment proxies and redirects are
+disabled. Loopback, private, link-local, CGNAT, multicast, unspecified, metadata
+and reserved/documentation ranges are refused, including mapped IPv4, IPv6
+translation and tunnel ranges. The transport is reused within each configuration
+generation; every attempt rechecks DNS, and new sockets use only its validated
+IP list. Connect has a 3-second total budget; earlier addresses get at most
+300 ms each, and the last or sole address gets the remaining time.
+TLS handshakes have a 3-second limit;
+response headers have 5 seconds, the complete request 10 seconds. Response bodies
+are discarded up to 64 KiB to permit keep-alive, then closed, never logged.
+Error reasons are fixed classifications,
+never URLs, response text or secrets.
+
+Message and connection delivery share one worker and one queue of 256 events,
+each at most 64 KiB (plus
+one in flight). Overflow and oversized events increment `dropped`. An admitted
+event has at most five attempts, with 1, 2, 4 and 8 second delays (backoff capped
+at 30 seconds), and is discarded after five minutes. Permanent 4xx responses
+(except 408 and 429) are not retried. Successful subscribed-event 2xx responses
+reset consecutive failures and record last success. A received 2xx remains a
+successful delivery after cancellation or configuration replacement; an old
+generation cannot change the new receiver's state. Failures count events that
+exhaust delivery, not individual attempts. Pure local cancellation and queue age
+expiration do not count against the receiver, but an event with a prior destination
+failure still counts when its age expires during backoff. The default failure limit is
+50 events; `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` accepts 1-100. At that
+limit the receiver disables itself and discards its queue. The private
+`GET /operator/v1/health` includes the safe `webhook` snapshot; PUT re-enables it.
+Configuration, secret and queue live in memory: a bridge restart requires another
+PUT and loses pending events. Delivery can be repeated, so receivers must deduplicate
+by event id; this bounded policy does not guarantee eventual receipt across restart,
+queue overflow, exhausted retries, expiration or automatic disablement.
+Automatic disablement and discarded events are logged at ERROR without receiver
+URLs or message identifiers. Disabled/queue-full loss logs are limited to one line
+per minute; the next eligible line includes the accumulated suppressed count.
+Only subscribed, eligible events count as disabled losses. PUT and DELETE count
+abandoned queued and unacknowledged in-flight events. `/metrics` exposes process-lifetime counters
+`whatsapp_bridge_runtime_webhook_deliveries_total` (successful POSTs, including tests),
+`whatsapp_bridge_runtime_webhook_failures_total` (failed subscribed events), and
+`whatsapp_bridge_runtime_webhook_dropped_total` (discarded events, including
+eligible events arriving while automatically disabled). PUT does not reset these counters.
+
+Each POST has `Content-Type: application/json` and, with the default prefix:
+
+- `X-Webhook-Id`: random event id, also in the body; stable across retries.
+- `X-Webhook-Timestamp`: Unix seconds for this attempt.
+- `X-Webhook-Signature`: `sha256=<hex HMAC-SHA256>` over
+  `<timestamp>.<raw body>`; the timestamp and signature are renewed on each attempt.
+
+Message payload example (no media bytes, filesystem paths or CDN credentials):
+
+```json
+{
+  "event_id": "00112233445566778899aabbccddeeff",
+  "event": "message.received",
+  "message_id": "FAKE-MESSAGE-ID",
+  "chat": "5511999999999@s.whatsapp.net",
+  "sender": "5511999999999@s.whatsapp.net",
+  "type": "image",
+  "text": "Image caption",
+  "timestamp": "2026-10-13T12:00:00Z",
+  "from_me": false,
+  "stored": true,
+  "media_reference": "whatsapp://media/5511999999999@s.whatsapp.net/FAKE-MESSAGE-ID"
+}
+```
+
+`type` is `text` or the bridge's extracted message category, including `reaction`;
+`text` is the content/caption (emoji for a reaction). `timestamp` is the WhatsApp
+message timestamp in UTC. The `(chat, message_id)` pair identifies the stored row.
+`sender` is a full resolved JID, including its namespace; an unmapped sender
+retains `@lid` and must not be treated as a phone number. Reactions include
+`reaction_to_message_id` within `chat` and `reaction_removed` (true for removal,
+false when adding a reaction); a removal carries an empty `text`.
+`stored: false` means archive persistence failed; do not attempt a media lookup.
+`media_reference` is present only for stored media messages; it does not assert that
+bytes are cached. Use the authenticated MCP media resource or download tool to fetch
+them. Synthetic events omit message identity fields and carry `stored: false`.
+
+Connection payload example (the legacy payload plus runtime event identity):
+
+```json
+{
+  "event_id": "00112233445566778899aabbccddeeff",
+  "event": "connection.changed",
+  "type": "connection",
+  "state": "disconnected",
+  "reason": "transport_lost",
+  "at": "2026-10-13T12:00:00Z"
+}
+```
+
+States are `connected`, `disconnected`, `logged_out`, `pairing_required` and
+`paired`. Optional `connection_problem` and `pairing_state` match the legacy
+sender's safe classifications. No phone, chat, sender, QR or passkey material is
+included. Disconnects wait five seconds by default; a quick reconnect cancels
+the pending disconnect and suppresses a redundant connected notification.
+A PUT that newly selects `connection.changed` (a new receiver URL, a changed
+selection or a re-enabled receiver; not a secret or filter change alone) first
+queues the latest recorded state once, with the `at` of that transition, so a
+receiver configured after startup still learns, for example, that an unpaired
+bridge is waiting in `pairing_required`.
+Connection events use the same HMAC headers, independent event ids, queue age,
+retry and loss limits as messages, without priority over queued messages. Runtime
+terminal events are queued rather than synchronously acknowledged: process exit
+can discard them. The legacy bounded terminal POST remains unchanged.
+
+Reference receiver verification in Python (supply raw request bytes, never
+re-serialize parsed JSON; use the configured prefix):
+
+```python
+import hashlib
+import hmac
+import json
+import time
+
+
+def verify_webhook(headers, raw_body, secret, prefix="X-Webhook"):
+    timestamp = headers.get(prefix + "-Timestamp", "")
+    try:
+        timestamp_bytes = timestamp.encode("ascii")
+        signature = headers.get(prefix + "-Signature", "").encode("ascii")
+        fresh = abs(int(time.time()) - int(timestamp)) <= 300
+    except (ValueError, TypeError, UnicodeError):
+        return False
+    expected = "sha256=" + hmac.new(
+        secret.encode("utf-8"),
+        timestamp_bytes + b"." + raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not fresh or not hmac.compare_digest(
+        expected.encode("ascii"), signature
+    ):
+        return False
+    try:
+        event = json.loads(raw_body)
+    except (ValueError, UnicodeError):
+        return False
+    return (
+        isinstance(event, dict)
+        and isinstance(event.get("event_id"), str)
+        and bool(event["event_id"])
+        and event["event_id"] == headers.get(prefix + "-Id")
+    )
+```
+
+After verification, atomically store each event id with its processing result and
+acknowledge duplicates with 2xx. Freshness alone does not prevent replay inside
+the five-minute window. Keep clocks synchronized and never log the secret.
+
+## Connection monitoring contract
 
 `/api/health` is liveness (HTTP 200 while the listener serves), with stable
 `connected` and `paired` booleans. `/api/ready` is HTTP 200 only when status
@@ -68,11 +278,14 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_PAIRING_STDOUT` | `false` with operator enabled, otherwise `true` | Draw QR codes on stdout. False also suppresses SDK DEBUG logs (QR payloads and raw protocol frames), while bridge/database DEBUG logs remain available. Set false for operator HTTP or exported logs; the operator compose override defaults false. |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
+| `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable the private operator runtime webhook routes; independent of the legacy sender. See [Runtime message webhook](#runtime-message-webhook). |
+| `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; all address restrictions still apply. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed subscribed events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |
 | `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the list JID or `*@broadcast`. |
-| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials |
+| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials. An explicit `false` also refuses runtime `connection.changed`; absent permits it |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |
@@ -853,6 +1066,45 @@ Quota streams retain permanent `media_unavailable` and `media_refused` outcomes.
 Ingest records those outcomes and continues to healthy audio; temporary remote
 read failures remain retryable and receive no permanent failure note.
 
+## Operator chat search
+
+`GET /operator/v1/chats?query=<text>&limit=<n>` is available only on the
+private operator listener, with its separate bearer token and Host/Origin
+policy. It intentionally ignores runtime `chats.allowed`, so an allow-list
+picker can find chats to add, but stays inside the deploy
+`WHATSAPP_ALLOWED_CHATS`: runtime can only narrow that list, so a chat outside
+it could never be allowed and is never shown. It remains available under
+`WHATSAPP_READ_ONLY`.
+
+The response is `{"chats":[{"jid":"5511999999999@s.whatsapp.net",
+"name":"Alice","is_group":false,"last_message_time":"2026-10-09T12:00:00Z"}]}`.
+Only these four identity fields are returned; no message text, media or paths.
+Rows come from the local chat archive, using recorded contact names for empty
+or numeric direct-chat names (full name, push name, first name, business name,
+in that order). Names are resolved under the original identity and its local
+phone/LID alternative; lookups use the account's contact index. No WhatsApp request
+is made; an absent phone book leaves the archive's name or bare JID user.
+
+Omit `query` for the latest chats. Search is a literal substring of the display
+name, compared with Unicode case folding and NFC normalization (a precomposed
+`é` matches a decomposed one), or of the phone digits; common phone separators
+such as `+`, spaces, parentheses and hyphens are accepted, and a Brazilian
+mobile matches with or without its ninth digit. `%` and `_`
+have no wildcard meaning. Results sort by last activity descending, then JID
+ascending for ties; missing activity is last. An unreadable legacy value keeps
+its stored sort position and, like missing activity, is returned as `null`.
+`limit` defaults to 20 and accepts 1-50; empty, repeated or invalid values return
+400. Reads have a five-second deadline and an unavailable archive returns 503.
+
+Search has its own rate limits, 120 requests/minute per socket peer and
+120/minute for the token, so a picker searching on every keystroke never
+rate-limits pairing, settings or logout. Each search is audited at DEBUG with
+the fixed route, socket peer, response status and result count; INFO gets one
+line per active minute with the number of searches that passed authentication. Neither contains the query
+or names. Responses use `Cache-Control: no-store`.
+Search does not update assistant activity, MCP metrics or bridge request
+counters, and is neither an MCP tool nor a bridge `/api/*` route.
+
 ## Runtime overrides
 
 The private operator listener serves `GET` and `PATCH /operator/v1/settings`.
@@ -874,6 +1126,40 @@ by the deploy allow-list when one is set; runtime cannot reopen a deploy-denied
 or read-only tool. GET returns these effective lists; `runtime` identifies an
 applied override even when the deploy floor removes some of its entries.
 
+`chats.allowed` is a nonempty array using the same entries as
+`WHATSAPP_ALLOWED_CHATS`: bare phone numbers, full JIDs and server wildcards
+such as `*@g.us` / `*@s.whatsapp.net`. Entries are trimmed, canonicalized and
+deduplicated. An empty array, a blank entry, an embedded comma and an entry
+that is none of those three forms (`+55 11 99999-9999`, `a@b@c`, `@`) return
+400 and save nothing, other keys of the same PATCH included: such an entry
+would match no chat and deny them all. Use `{"chats.allowed":null}` to clear
+the override. The effective policy is
+the intersection with the deploy list, comparing exact JIDs and wildcards:
+a runtime wildcard cannot authorize any chat outside an explicit deploy list.
+GET returns the canonical effective entries and `runtime`, `env` or `default`.
+A disjoint intersection returns `[]` with source `runtime` and denies every
+chat; `[]` with source `default` (or an empty env policy) remains unrestricted.
+Both processes must receive the same deploy list.
+
+Changes apply to the next MCP call, bridge request and inbound message considered
+for either webhook sender, without restarting either process. The policy also
+bounds participant add/promote, media, notes, search and ingest transcription;
+remove/demote still only requires the group. Ingest rechecks each selected item
+before transcription. Each MCP tool invocation and bridge REST request uses one
+immutable settings snapshot shared by tool and chat authorization, including
+typed/registered destinations, forward
+source/target and participant batches. An operation already admitted may finish
+using that snapshot. Send limits are the exception: a request that could not
+reserve its send rechecks the saved limits, so one enabled mid-request is not
+skipped. Entries are never included in settings audit logs, metrics or health;
+the audit records only the key, source transition and version.
+
+A refusal names the list it came from: `WHATSAPP_ALLOWED_CHATS` for the deploy
+list, `runtime chats.allowed` for the override, and `runtime chats.allowed
+within WHATSAPP_ALLOWED_CHATS (deploy)` when both apply. The bridge startup
+summary reports the effective policy under the same name, with counts only for
+a runtime list.
+
 GET returns `{ "version": 0, "settings": { "tools.allow": { "value": [],
 "source": "default" }, ... } }`. PATCH accepts a flat JSON object:
 
@@ -893,7 +1179,7 @@ Bridge consumers read each saved setting before the next automatic cache transfe
 settings survive restart and GET reports effective values. Media keys are bridge
 settings and do not need defaults in the MCP process.
 
-The other nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
+The remaining nine keys are `tools.allow`, `tools.deny` (arrays of registered tool
 names; an empty array removes only the runtime restriction),
 `transcription.ingest_chats` (`all` or `direct`),
 `transcription.monthly_max_minutes` (0..525600), `transcription.cap_scope`
@@ -912,17 +1198,24 @@ Bridge `/metrics` exposes `whatsapp_runtime_settings_version`.
 
 After a rollback, unknown saved tool names are dropped with one WARN naming
 the key, without printing its value. An invalid saved value falls back to
-env/default and can always be cleared by PATCH null. An unreadable
+env/default and can always be cleared by PATCH null. An unreadable saved
+`chats.allowed` denies every chat until repaired or cleared. An unreadable
 `tools.allow` fails closed: only the deploy allow-list can remain enabled;
 without an explicit deploy allow-list every tool is denied until repaired.
-An unavailable database still fails closed in both processes.
+An unavailable database still fails closed in both processes. Outside a REST
+request (webhook forwarding, group rosters) the bridge then denies every chat,
+logs one ERROR a minute with the number of failed reads and counts them in
+`whatsapp_bridge_chat_policy_read_failures_total`. Chat authorization
+requires the message store, including for notes that remain readable in notes.db;
+a missing-store fallback used by diagnostics cannot grant chat access.
 
 Both lists apply together at the next MCP `tools/list`/tool call and bridge
 request, without restarting either process. The worker uses the next cycle;
 runtime tool denial pauses its transcription/fetching and clearing it permits
 the next cycle again. An in-flight operation may finish under its admitted
 snapshot. `WHATSAPP_READ_ONLY` still wins over both lists, and
-`WHATSAPP_ALLOWED_CHATS` still bounds the chat scope; both remain env-only.
+the deploy `WHATSAPP_ALLOWED_CHATS` list still bounds the runtime chat scope.
+Read-only remains env-only.
 Operator settings and logout stay available under read-only.
 
 ## Transcribing voice notes as they arrive
@@ -1393,8 +1686,7 @@ allowed spelling is used. A known twin gets a second request only when it too
 is allowed. With no allow-list, both known spellings are sent. Groups and chats
 without a known twin send one request. The response reports successful request
 counts and phone/LID kinds; a failed second send does not fail the first.
-Whether using both helps an unanswered chat is not yet verified on a paired
-phone (#694); the phone still decides whether and how much history to send.
+The phone still decides whether and how much history to send.
 
 | Field | Required | Description |
 | --------- | -------- | ------------------------------------------------------ |

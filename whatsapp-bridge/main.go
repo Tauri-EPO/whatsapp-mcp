@@ -322,6 +322,9 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	}
 	bridge.MediaMaxBytes, bridge.MediaRoots = cfg.MediaMaxBytes, mediaRoots
 	defer bridge.Shutdown(shutdownTimeout)
+	if cfg.RuntimeWebhook.Enabled {
+		bridge.RuntimeWebhook = newRuntimeWebhook(bridge.ctx, cfg.RuntimeWebhook)
+	}
 	// Install exit before exposing operator mutations on a paired device.
 	bridge.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)
@@ -357,7 +360,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 		logger.Errorf("Failed to start REST API: %v", err)
 		return 1
 	}
-	logger.Infof("%s", bridge.Policy.Summary())
+	logger.Infof("%s", bridge.Policy.effective().Summary())
 	logger.Infof("%s", bridge.ReadOnly.Summary())
 	logger.Infof("%s", bridge.Tools.Summary())
 	logger.Infof("Media auto-download: %v (status updates: %v); retention: %s", bridge.MediaAutoDownload,

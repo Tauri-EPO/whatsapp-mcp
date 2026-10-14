@@ -644,7 +644,7 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Message ID and Chat JID are required")
 			return
 		}
-		chat, ok := authorizeChat(w, b.Policy, req.ChatJID, false)
+		chat, ok := authorizeChat(w, b.Policy.effective(r.Context()), req.ChatJID, false)
 		if !ok {
 			return
 		}

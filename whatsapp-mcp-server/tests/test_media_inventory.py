@@ -266,7 +266,8 @@ def _statements(monkeypatch, **kwargs) -> list[str]:
         media_inventory.list_media_page(**kwargs)
     finally:
         monkeypatch.setattr(whatsapp, "_connect_messages_db", real)
-    return [q for q in executed if q.lstrip().upper().startswith(("SELECT", "WITH"))]
+    # Measure archive-query planning; runtime registry metadata is independently bounded.
+    return [q for q in executed if q.lstrip().upper().startswith(("SELECT", "WITH")) and "runtime_settings" not in q]
 
 
 @pytest.mark.parametrize(("sort", "materialises"), [("size", False), ("date", False), ("copies", True)])

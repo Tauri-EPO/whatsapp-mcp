@@ -1,5 +1,51 @@
 # Running WhatsApp MCP with Docker Compose
 
+## Optional runtime message receiver
+
+Enable the private operator listener as described below and set
+`WHATSAPP_WEBHOOK_RUNTIME=true` on the bridge. Compose passes it through and
+defaults it to false. No additional listener, published port, mount or service is
+needed. `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=false` restricts receivers to HTTPS
+port 443, and `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT=50` counts consecutive failed
+subscribed events for automatic
+disablement. Keep the operator endpoint on its private network.
+
+Use the operator bearer and an allowed Host for `GET`, `PUT`, `DELETE
+/operator/v1/webhook` and `POST /operator/v1/webhook/test`. PUT supplies
+`url`, `events` selecting `message.received`, `connection.changed` or both, a
+dedicated random `secret` and optionally `header_prefix` (default `X-Webhook`).
+Optional booleans `forward_self`, `forward_channels` and `forward_broadcasts`
+default to the corresponding deployment variables. An explicitly false deploy
+variable is a ceiling (runtime true returns 400); an absent or empty variable
+permits receiver opt-in. Compose's default `FORWARD_SELF=false` therefore blocks
+runtime self-message opt-in unless changed at deploy time. Status posts still
+require deploy-time `WEBHOOK_FORWARD_STATUS=true`; PUT cannot change it.
+GET returns selected events, effective filters, a fingerprint and delivery
+state; health includes the same safe snapshot. Test returns the actual delivery
+outcome. DELETE removes the receiver and cancels pending delivery. Configure it
+again after a restart: configuration and queue are process-local.
+
+Runtime delivery never sends the bridge credential, never follows redirects,
+checks every DNS answer and pins a public IP for the connection. It shares the
+deployment status/chat policy, carries no media bytes and
+uses one bounded retry queue for messages and connection transitions. Connection
+payloads match the legacy safe states, with runtime event ids and HMAC headers;
+disconnects are debounced, and connection delivery has the same loss conditions
+as messages, including process exit before queued terminal delivery.
+A failed receiver automatically disables; a new PUT
+re-enables it. The legacy `WEBHOOK_URL` receiver remains independent and retains
+its existing `X-Bridge-Token` contract.
+
+Receivers verify `<timestamp>.<raw body>` with HMAC-SHA256 using the dedicated
+secret and read `<prefix>-Id`, `<prefix>-Timestamp`, `<prefix>-Signature`
+(`sha256=<hex>`). Require a timestamp within five minutes and deduplicate event
+ids. The [runtime webhook reference](CONFIGURATION.md#runtime-message-webhook)
+documents all routes, message payload fields, limits and the Python verification
+snippet. Use `/webhook/test` to check a public HTTPS receiver without pairing a
+WhatsApp number; the local Go tests use a TLS fixture and fake identifiers.
+
+## Compose topology
+
 `docker-compose.yml` at the repo root runs the two components as containers on
 an always-on machine (a home server, a NAS, a small VPS) and exposes the MCP
 server over **streamable HTTP** so remote MCP clients can use it.
@@ -95,7 +141,7 @@ helper with that relying-party support; they do not create one or provide a
 browser authenticator. Without such a helper, use the official phone flow and
 restart the attempt after resolving the account's requirements.
 
-The pinned whatsmeow `c386243a72ba` includes passkey support from `b572e5b`;
+The pinned whatsmeow includes passkey support from `b572e5b`;
 its QR channel automatically confirms `SkipHandoffUX` events. A manual
 confirmation remains pending, bounded by the attempt timeout. A passkey request
 uses its advertised timeout (milliseconds), capped at five minutes. Pairing by
@@ -173,13 +219,26 @@ the account restriction; restarting does not bypass WhatsApp enforcement.
 `GET health`/`GET ready` are credential-free and authenticated here. All operator
 responses use `Cache-Control: no-store`. Health and metrics never expose a QR,
 phone number, pairing code, assertion or confirmation code. INFO audit lines
-contain only the fixed mutating route, response status and socket peer;
+contain only the fixed audited route, response status and socket peer;
 authentication, origin and rate-limit refusals log at DEBUG. Limits are 120
 requests/minute per socket peer before authentication and 60/minute for the
 authenticated token; forwarded headers do not change the peer. Browser Origin
 must exactly match the listener's scheme and Host, and Host must be explicitly
 allowed; native clients may omit Origin. No CORS or forwarded-origin trust is
 enabled. These examples use native/backend clients on the private network.
+
+For allow-list pickers, `GET /operator/v1/chats?query=Alice&limit=20` searches
+the local archive on this same private listener. It intentionally ignores
+runtime `chats.allowed` and stays inside deploy `WHATSAPP_ALLOWED_CHATS`, the
+most runtime can ever allow. The response contains
+only JID, display name, group flag and last activity, never messages or media.
+The default limit is 20, maximum 50; sorting is latest activity first with JID
+as the tie-break. It has its own rate limits (120/minute per peer and for the
+token); each search is audited at DEBUG with the result count, and INFO
+gets a per-minute search count, never the query or names.
+It makes no MCP call and does not count as assistant activity. See
+[operator chat search](CONFIGURATION.md#operator-chat-search) for the response
+shape and name/phone matching rules.
 
 For a passkey step, `GET pairing` exposes `passkey` request options and
 `step_expires_at` only on this authenticated private listener. An external

@@ -375,8 +375,7 @@ def request_history(chat_jid: str, count: int = 50, before_message_id: str | Non
     Without an allow-list, both known spellings are used, at most two peer messages
     per call; groups send one. The response reports how many requests were sent
     and their phone/LID kinds. A failed second send keeps the first one's success.
-    Whether using both helps an unanswered chat is not yet verified on a paired
-    phone (#694). The phone may
+    The phone may
     still send nothing or omit the direct path; a successful request proves only
     that it was sent.
 
@@ -584,7 +583,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
         answer = whatsapp_listed_reading(jid, candidates)
         if answer is None:
             # get_chat refused `jid` above: that refusal is the answer.
-            raise refusals.get(jid) or ToolError("denied", f"Chat {jid!r} is not in WHATSAPP_ALLOWED_CHATS")
+            raise refusals.get(jid) or ToolError("denied", f"Chat {jid!r} is not in {CHAT_POLICY.origin}")
         jid = whatsapp_phone_book_spelling(answer)
 
     jid_user = jid.split("@", 1)[0]
