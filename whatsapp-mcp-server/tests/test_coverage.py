@@ -340,8 +340,7 @@ def test_coverage_unavailable_policy_fails_closed(monkeypatch, paired_dbs):
 #
 # Alice has four inbound voice notes, three of them cached; Bob has one, never
 # cached. One of Alice's carries a transcript note, another a transcript_error.
-# An outbound voice note and a deleted one are in the table so the counts have
-# something to exclude.
+# A sent voice note is work by default; a deleted one is excluded.
 AUDIO = [
     ("a1", ALICE, "2026-06-07 09:05:00", 0, None, True),
     ("a2", ALICE, "2026-07-22 08:05:00", 0, None, True),
@@ -395,15 +394,15 @@ def audio_archive(archive):
 def test_coverage_audio_counts_the_backlog(audio_archive):
     audio = whatsapp.coverage()["audio"]
 
-    # a1..a4 and b1: the outbound one and the deleted one are not work.
-    assert audio["messages"] == 5
-    assert audio["cached"] == 3  # a1, a2, a3
-    assert audio["cached_examined"] == 5  # nothing was cut, so the cached counts are exact
+    # a1..a4, b1 and o1: only the deleted one is excluded.
+    assert audio["messages"] == 6
+    assert audio["cached"] == 4  # a1, a2, a3, o1
+    assert audio["cached_examined"] == 6  # nothing was cut, so the cached counts are exact
     assert audio["transcribed"] == 1
     assert audio["errors"] == 1
-    assert audio["backlog"] == 3  # a3, a4, b1
-    # Only a3: a1 and a2 are on disk but already handled, a4 and b1 are not on disk.
-    assert audio["backlog_cached"] == 1
+    assert audio["backlog"] == 4  # a3, a4, b1, o1
+    # a3 and o1: a1/a2 are handled; a4/b1 are not cached.
+    assert audio["backlog_cached"] == 2
 
 
 def test_coverage_audio_ignores_rows_without_a_content_hash(audio_archive):
@@ -415,7 +414,7 @@ def test_coverage_audio_ignores_rows_without_a_content_hash(audio_archive):
             (ALICE, ALICE),
         )
     audio = whatsapp.coverage()["audio"]
-    assert audio["messages"] == 5 and audio["backlog"] == 3
+    assert audio["messages"] == 6 and audio["backlog"] == 4
 
 
 def test_coverage_audio_leaves_the_status_feed_out(audio_archive):
@@ -427,7 +426,7 @@ def test_coverage_audio_leaves_the_status_feed_out(audio_archive):
             (whatsapp.STATUS_BROADCAST_JID, ALICE, bytes.fromhex("5a" * 32)),
         )
     audio = whatsapp.coverage()["audio"]
-    assert audio["messages"] == 5 and audio["backlog"] == 3
+    assert audio["messages"] == 6 and audio["backlog"] == 4
     scoped = whatsapp.coverage(chat_jid=whatsapp.STATUS_BROADCAST_JID)["audio"]
     assert scoped["messages"] == 0 and scoped["backlog"] == 0
 
@@ -435,10 +434,10 @@ def test_coverage_audio_leaves_the_status_feed_out(audio_archive):
 def test_coverage_audio_is_scoped_by_the_window(audio_archive):
     audio = whatsapp.coverage(after="2026-08-01")["audio"]
 
-    assert audio["messages"] == 3  # a3, a4, b1
-    assert audio["cached"] == 1 and audio["cached_examined"] == 3
+    assert audio["messages"] == 4  # a3, a4, b1, o1
+    assert audio["cached"] == 2 and audio["cached_examined"] == 4
     assert audio["transcribed"] == 0 and audio["errors"] == 0
-    assert audio["backlog"] == 3 and audio["backlog_cached"] == 1
+    assert audio["backlog"] == 4 and audio["backlog_cached"] == 2
 
 
 def test_coverage_audio_is_scoped_by_chat(audio_archive):
@@ -492,10 +491,10 @@ def test_coverage_audio_on_an_archive_without_voice_notes(archive):
 
 def test_coverage_hint_names_the_backlog_only_when_there_is_one(audio_archive):
     hint = whatsapp.coverage()["hint"]
-    assert "3 of the 5 voice notes" in hint and "1 of them with their bytes" in hint
+    assert "4 of the 6 voice notes" in hint and "2 of them with their bytes" in hint
     assert "TRANSCRIBE_ON_INGEST" in hint
     # Everything transcribed: the sentence would be noise.
-    for message_id in ("a3", "a4", "b1"):
+    for message_id in ("a3", "a4", "b1", "o1"):
         media_notes.annotate_media(AUDIO_SHA[message_id], media_notes.TRANSCRIPT_KEY, "ok")
     assert "voice notes" not in whatsapp.coverage()["hint"]
 
@@ -505,9 +504,9 @@ def test_coverage_audio_bounds_the_cache_scan(audio_archive, monkeypatch):
     monkeypatch.setattr(whatsapp, "COVERAGE_AUDIO_MAX_ROWS", 1)
     audio = whatsapp.coverage()["audio"]
 
-    assert audio["messages"] == 5  # the counts stay exact
-    assert audio["cached_examined"] == 1  # b1, the newest, is not cached
-    assert audio["cached"] == 0 and audio["backlog_cached"] == 0
+    assert audio["messages"] == 6  # the counts stay exact
+    assert audio["cached_examined"] == 1  # o1, the newest, is cached
+    assert audio["cached"] == 1 and audio["backlog_cached"] == 1
     assert audio["transcribed"] == 1 and audio["errors"] == 1
 
 
@@ -516,8 +515,8 @@ def test_coverage_audio_bounds_the_directories_it_reads(audio_archive, monkeypat
     monkeypatch.setattr(whatsapp, "COVERAGE_AUDIO_MAX_CHATS", 1)
     audio = whatsapp.coverage()["audio"]
 
-    assert audio["messages"] == 5
-    assert audio["cached_examined"] == 4 and audio["cached"] == 3  # Alice's four rows, Bob's dropped
+    assert audio["messages"] == 6
+    assert audio["cached_examined"] == 5 and audio["cached"] == 4  # Alice's five rows, Bob's dropped
 
 
 def test_coverage_audio_reads_each_chat_directory_once(audio_archive, monkeypatch):
@@ -542,8 +541,8 @@ def test_coverage_audio_counts_a_row_with_both_notes_once(audio_archive):
     audio = whatsapp.coverage()["audio"]
 
     assert audio["transcribed"] == 2 and audio["errors"] == 2  # a3 is in both
-    # ... but it is one row: a4 and b1 are what is left, not one of them.
-    assert audio["backlog"] == 2
+    # ... but it is one row: a4, b1 and o1 are what is left.
+    assert audio["backlog"] == 3
 
 
 def test_coverage_audio_spends_the_row_ceiling_on_the_backlog(audio_archive, monkeypatch):
@@ -574,7 +573,7 @@ def test_coverage_audio_spends_the_row_ceiling_on_the_backlog(audio_archive, mon
     monkeypatch.setattr(whatsapp, "COVERAGE_AUDIO_MAX_ROWS", 3)
     audio = whatsapp.coverage()["audio"]
 
-    assert audio["messages"] == 7 and audio["backlog"] == 3  # a3, a4, b1
+    assert audio["messages"] == 8 and audio["backlog"] == 4  # a3, a4, b1, o1
     # The three examined rows are the backlog, not n2/n1/b1: a3's bytes are here.
     assert audio["cached_examined"] == 3
     assert audio["backlog_cached"] == 1 and audio["cached"] == 1

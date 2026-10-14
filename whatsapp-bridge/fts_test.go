@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -127,5 +128,160 @@ func TestEnsureMessagesFTS_TeardownWithoutModule(t *testing.T) {
 	// And inserts keep working afterwards.
 	if _, err := db.Exec(`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES ('x', 'c', 's', 'ok', ?, 0)`, time.Now()); err != nil {
 		t.Fatalf("insert after teardown failed: %v", err)
+	}
+}
+
+func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
+	for _, failure := range []string{"injected migration failure", "no such module: fts5"} {
+		t.Run(failure, func(t *testing.T) {
+			store := newTestMessageStore(t)
+			if _, err := ensureMessagesFTS(store.db); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec("DELETE FROM schema_migrations WHERE name=?", documentFilenameFTSMigration); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(ftsTeardown + `
+				CREATE TABLE messages_fts(content TEXT);
+				CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+					SELECT missing_fts_module();
+				END;`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.StoreMessage(storedMessage{ID: "before-failure", ChatJID: "c", Sender: "s", Content: "broken trigger", Timestamp: time.Now()}); err == nil {
+				t.Fatal("broken leftover trigger must refuse a real StoreMessage before cleanup")
+			}
+			on, err := ensureMessagesFTSMigration(store.db, true, func(tx *sql.Tx) error {
+				if _, err := tx.Exec(ftsTeardown + ftsSchema); err != nil {
+					return err
+				}
+				return fmt.Errorf("%s", failure)
+			})
+			if on || (err == nil) != (failure == "no such module: fts5") {
+				t.Fatalf("on=%v err=%v", on, err)
+			}
+			var triggers int
+			if err := store.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'").Scan(&triggers); err != nil || triggers != 0 {
+				t.Fatalf("leftover triggers=%d err=%v", triggers, err)
+			}
+			if exists, _ := messagesFTSExists(store.db); exists {
+				t.Fatal("failed optional index remains active")
+			}
+			if err := store.StoreMessage(storedMessage{ID: "after-failure", ChatJID: "c", Sender: "s", Content: "still writable", Timestamp: time.Now()}); err != nil {
+				t.Fatalf("StoreMessage after failed migration: %v", err)
+			}
+			var content string
+			if err := store.db.QueryRow("SELECT content FROM messages WHERE id='after-failure'").Scan(&content); err != nil || content != "still writable" {
+				t.Fatalf("stored content=%q err=%v", content, err)
+			}
+		})
+	}
+}
+
+func TestMessagesFTSExcludesGeneratedDocumentNames(t *testing.T) {
+	db := newMessagesDB(t)
+	if _, err := db.Exec(`INSERT INTO messages(id, chat_jid, content, media_type, filename)
+		VALUES ('generated', 'c', '', 'document', 'document_20261014_190000_generated'),
+		('special[*]', 'c', '', 'document', 'document_20261014_190000_special[*]'),
+		('real', 'c', '', 'document', 'document_final.pdf'),
+		('other', 'c', '', 'document', 'document_20261014_190000_different.pdf');`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureMessagesFTS(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "document"); got != 2 {
+		t.Fatalf("rebuild document matches=%d want only two original filenames", got)
+	}
+	if _, err := db.Exec(`UPDATE messages SET filename='document_review.pdf' WHERE id='generated';
+		UPDATE messages SET filename='document_20261014_190000_real' WHERE id='real';`); err != nil {
+		t.Fatal(err)
+	}
+	if countMatches(t, db, "final") != 0 || countMatches(t, db, "review") != 1 || countMatches(t, db, "document") != 2 {
+		t.Fatal("filename update did not replace generated/original tokens")
+	}
+	if _, err := db.Exec(`DELETE FROM messages WHERE id IN ('generated','real','special[*]')`); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "document"); got != 1 {
+		t.Fatalf("delete left stale document tokens=%d", got)
+	}
+	if _, err := db.Exec(`UPDATE messages SET id='different.pdf' WHERE id='other'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "document"); got != 0 {
+		t.Fatalf("changed row id left generated document tokens=%d", got)
+	}
+}
+
+func TestDocumentFilenameFTSMigration(t *testing.T) {
+	db := newMessagesDB(t)
+	// An archive from before document filename indexing, with its old triggers.
+	if _, err := db.Exec(`
+		CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='rowid');
+		CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+			INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		END;
+		INSERT INTO messages(id, chat_jid, content, media_type, filename)
+			VALUES ('doc', 'c', 'caption', 'document', 'Relatório técnico.pdf'),
+			('image', 'c', '', 'image', 'Relatório técnico.jpg'),
+			('audio', 'c', '', 'audio', 'Relatório técnico.ogg'),
+			('video', 'c', '', 'video', 'Relatório técnico.mp4');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if got := countMatches(t, db, "relatorio"); got != 0 {
+		t.Fatalf("legacy index filename matches = %d", got)
+	}
+	for range 2 {
+		if on, err := ensureMessagesFTS(db); err != nil || !on {
+			t.Fatalf("migrate/restart: on=%v err=%v", on, err)
+		}
+		for _, query := range []string{"relatorio", "RELATÓRIO", `"relatorio tecnico"`, "relator*", "caption AND tecnico", "caption NOT boleto"} {
+			if got := countMatches(t, db, query); got != 1 {
+				t.Fatalf("MATCH %q = %d, want document only", query, got)
+			}
+		}
+	}
+	var markers int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE name=?", documentFilenameFTSMigration).Scan(&markers); err != nil || markers != 1 {
+		t.Fatalf("migration marker count=%d err=%v", markers, err)
+	}
+	// Prove restart does not rebuild: a failing view only affects rebuild reads.
+	if _, err := db.Exec(`DROP VIEW messages_fts_content;
+		CREATE VIEW messages_fts_content AS SELECT rowid, content, missing_column AS filename FROM messages;`); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on {
+		t.Fatalf("restart must skip rebuild: on=%v err=%v", on, err)
+	}
+	if _, err := db.Exec(`DROP VIEW messages_fts_content;` + ftsSchema); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		sql, absent, present string
+	}{
+		{`UPDATE messages SET filename='Contrato.pdf' WHERE id='doc'`, "relatorio", "contrato"},
+		{`UPDATE messages SET media_type='image' WHERE id='doc'`, "contrato", "caption"},
+		{`UPDATE messages SET media_type='document' WHERE id='image'`, "contrato", "relatorio"},
+		{`DELETE FROM messages WHERE id='image'`, "relatorio", "caption"},
+	} {
+		if _, err := db.Exec(step.sql); err != nil {
+			t.Fatal(err)
+		}
+		if got := countMatches(t, db, step.absent); got != 0 {
+			t.Fatalf("stale filename %q = %d", step.absent, got)
+		}
+		if got := countMatches(t, db, step.present); got != 1 {
+			t.Fatalf("current token %q = %d", step.present, got)
+		}
+	}
+	// Losing FTS support drops the view/table/triggers; reactivation still
+	// rebuilds even though the migration marker is already present.
+	if _, err := ensureMessagesFTSCapability(db, false); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on || countMatches(t, db, "caption") != 1 {
+		t.Fatalf("re-enable: on=%v err=%v", on, err)
 	}
 }

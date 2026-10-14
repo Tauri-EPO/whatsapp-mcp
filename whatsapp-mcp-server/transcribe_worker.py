@@ -1,10 +1,10 @@
-"""Background transcription of inbound voice notes (``TRANSCRIBE_ON_INGEST``).
+"""Background transcription of received and sent voice notes (``TRANSCRIBE_ON_INGEST``).
 
 ``transcribe_audio`` only ever transcribes the one message an agent asks about,
 so a voice-heavy archive stays unreadable until somebody walks it by hand. With
 ``TRANSCRIBE_ON_INGEST=1`` this module runs a single daemon thread inside the
 MCP server process that does the walking: every ``TRANSCRIBE_ON_INGEST_INTERVAL_S``
-seconds it looks for inbound audio rows whose bytes are cached and whose hash has
+seconds it looks for received and sent audio rows whose bytes are cached and whose hash has
 no transcript yet, transcribes up to ``TRANSCRIBE_ON_INGEST_BATCH`` of them
 through the configured whisper backend, and stores the text with
 ``media_notes`` under the same keys ``transcribe_audio`` writes. With
@@ -165,11 +165,15 @@ class IngestConfig:
     interval_s: float
     batch: int
     fetch: bool = False
+    include_sent: bool = True
+
+
+_ingest_config: IngestConfig | None = None
 
 
 @dataclass(frozen=True)
 class Candidate:
-    """One inbound voice note waiting for a transcript."""
+    """One eligible voice note waiting for a transcript."""
 
     message_id: str
     chat_jid: str
@@ -236,7 +240,16 @@ def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
         interval_s=_parse_interval(source.get(INTERVAL_ENV)),
         batch=_parse_batch(source.get(BATCH_ENV)),
         fetch=parse_bool_env(source.get(FETCH_ENV), FETCH_ENV),
+        include_sent=whatsapp.ingest_include_sent(source),
     )
+
+
+def ingest_config() -> IngestConfig:
+    """The startup snapshot shared by coverage and every worker batch."""
+    global _ingest_config
+    if _ingest_config is None:
+        _ingest_config = load_ingest_config()
+    return _ingest_config
 
 
 def _parse_interval(raw: str | None) -> float:
@@ -296,8 +309,8 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
 PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestamp
 
 
-def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]:
-    """Inbound audio with no transcript, newest first, resuming just past ``after``.
+def _pending_rows(limit: int, after: Position | None = None, *, include_sent: bool | None = None) -> list[PendingRow]:
+    """Eligible audio with no transcript, newest first, resuming just past ``after``.
 
     The status feed is left out, the way ``coverage`` counts the backlog
     (``whatsapp._COVERAGE_AUDIO_WHERE``): the bridge keeps status media on the
@@ -310,7 +323,7 @@ def _pending_rows(limit: int, after: Position | None = None) -> list[PendingRow]
         handled_clause, handled_params = _already_handled_clause(conn)
         clauses = [
             "m.media_type = 'audio'",
-            "m.is_from_me = 0",
+            whatsapp.ingest_sent_clause("m", include_sent),
             "m.file_sha256 IS NOT NULL",
             "m.deleted_at IS NULL",
             f"m.chat_jid <> '{whatsapp.STATUS_BROADCAST_JID}'",  # a module constant, never user input
@@ -352,6 +365,7 @@ def find_pending(
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
+    include_sent: bool | None = None,
 ) -> Selection:
     """Up to ``batch`` voice notes to transcribe, one per distinct hash, and where to resume.
 
@@ -395,8 +409,8 @@ def find_pending(
     """
     batch = max(1, batch)
     page_limit = batch * CANDIDATE_FACTOR
-    head = _pending_rows(batch) if position is not None else []
-    page = _pending_rows(page_limit, after=position)
+    head = _pending_rows(batch, include_sent=include_sent) if position is not None else []
+    page = _pending_rows(page_limit, after=position, include_sent=include_sent)
     fetcher = download or whatsapp.download_media
     budget = batch if fetch else 0  # fetch attempts left this round
     head_budget = min(batch - 1, HEAD_FETCHES) if fetch else 0  # ... of which the newest rows may spend these
@@ -727,6 +741,7 @@ def run_once(
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
+    include_sent: bool | None = None,
 ) -> BatchResult:
     """Transcribe one batch from ``position``. Never raises: a broken batch is a logged batch.
 
@@ -752,7 +767,9 @@ def run_once(
             if ingest_quota_exhausted():
                 return BatchResult(0, 0, 0, position=position)
             fetch = fetch and policy.allows(DOWNLOAD_TOOL)
-            selection = find_pending(batch, fetch=fetch, download=download, position=position)
+            selection = find_pending(
+                batch, fetch=fetch, download=download, position=position, include_sent=include_sent
+            )
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
         return BatchResult(0, 0, 0, position=position)  # the read failed, the walk did not move
@@ -873,7 +890,7 @@ def run_forever(
     the same newest page every interval. It lives in this loop only — a restart
     starts at the newest rows again, which is where the new work is.
     """
-    run_batch = run or functools.partial(run_once, fetch=config.fetch)
+    run_batch = run or functools.partial(run_once, fetch=config.fetch, include_sent=config.include_sent)
     position: Position | None = None
     while not stop.is_set():
         position = run_batch(config.batch, position=position).position
@@ -890,6 +907,8 @@ def start_worker(
     run: Callable[..., BatchResult] | None = None,
 ) -> threading.Thread:
     """Start the poll loop on a daemon thread (so it never holds up shutdown)."""
+    global _ingest_config
+    _ingest_config = config
     event = stop or threading.Event()
     thread = threading.Thread(
         target=run_forever,
@@ -917,7 +936,9 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     ``download_media`` away keeps the archive as it is: the worker then
     transcribes what is cached and asks the bridge for nothing.
     """
+    global _ingest_config
     config = load_ingest_config(env)
+    _ingest_config = config
     if not config.enabled:
         return None
     policy = load_tool_policy(env)
@@ -956,11 +977,13 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     clear_outage_failures()
     clear_oversized_failures()
     logger.info(
-        "%s=1: transcribing up to %d inbound voice notes every %.0fs (%s)%s",
+        "%s=1: transcribing up to %d voice notes every %.0fs (%s)%s%s",
         ENABLED_ENV,
         config.batch,
         config.interval_s,
         "configured HTTP provider" if backend_config.provider == "openai_compatible" else "whisper on this machine",
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
+        ", including sent audio" if config.include_sent else ", inbound audio only",
     )
+    _ingest_config = config
     return start_worker(config)
