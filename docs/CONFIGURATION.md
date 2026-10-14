@@ -5,13 +5,13 @@ Every environment variable and CLI flag, plus the transport, authentication and 
 ## Runtime message webhook
 
 Set `WHATSAPP_WEBHOOK_RUNTIME=true` and enable the private operator listener to
-configure a separate message and connection-state receiver. The default is off: the routes are absent
+configure a separate message, connection-state and storage-warning receiver. The default is off: the routes are absent
 and the legacy `WEBHOOK_URL` sender, including `X-Bridge-Token`, is unchanged.
 Runtime delivery is independent of `WEBHOOK_ENABLED`; both receivers can operate
 at once. Runtime requests never include `X-Bridge-Token` or the operator bearer.
 Message delivery applies the receiver's self/channel/broadcast filters and the
 deployment's status and allowed-chat filters before creating an event. Select
-`message.received`, `connection.changed`, or both; an unselected event is never delivered.
+`message.received`, `connection.changed` and/or `storage.warning`; an unselected event is never delivered.
 
 All routes use the operator bearer, Host/Origin policy, request rate limits,
 no-store responses and mutation audit. They are not MCP tools or data-plane routes.
@@ -26,7 +26,7 @@ no-store responses and mutation audit. They are not MCP tools or data-plane rout
 ```json
 {
   "url": "https://receiver.example.com/whatsapp",
-  "events": ["message.received", "connection.changed"],
+  "events": ["message.received", "connection.changed", "storage.warning"],
   "secret": "replace-with-at-least-32-random-bytes",
   "header_prefix": "X-Webhook"
 }
@@ -49,8 +49,10 @@ write `false`; leaving the variable out does not. The Compose file passes
 `FORWARD_SELF=false` unless `.env` sets it, so a Compose receiver can enable
 `forward_self` only when `.env` sets `FORWARD_SELF=true`.
 `connection.changed` follows the same rule through
-`WEBHOOK_FORWARD_CONNECTION_EVENTS`: absent or true permits selecting it, and an
-explicit false makes a PUT that selects it return 400.
+`WEBHOOK_FORWARD_CONNECTION_EVENTS`: absent/empty or true permits selecting it;
+explicit false makes a PUT selecting it return 400. Compose passes an empty
+value by default. `storage.warning` is independent of that switch: its payload
+has no account identifiers, so selecting it is sufficient.
 `forward_status` is reported but is not a PUT field: status posts require
 `WEBHOOK_FORWARD_STATUS=true` at deploy time, even when broadcasts are enabled.
 Allowed-chat policy still applies to every message. These receiver choices never
@@ -87,7 +89,7 @@ generation cannot change the new receiver's state. Failures count events that
 exhaust delivery, not individual attempts. Pure local cancellation and queue age
 expiration do not count against the receiver, but an event with a prior destination
 failure still counts when its age expires during backoff. The default failure limit is
-50 events; `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` accepts 1-100. At that
+50 subscribed message, connection and storage events; `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` accepts 1-100. At that
 limit the receiver disables itself and discards its queue. The private
 `GET /operator/v1/health` includes the safe `webhook` snapshot; PUT re-enables it.
 Configuration, secret and queue live in memory: a bridge restart requires another
@@ -159,6 +161,21 @@ States are `connected`, `disconnected`, `logged_out`, `pairing_required` and
 sender's safe classifications. No phone, chat, sender, QR or passkey material is
 included. Disconnects wait five seconds by default; a quick reconnect cancels
 the pending disconnect and suppresses a redundant connected notification.
+
+`storage.warning` delivers upward store-size threshold crossings (`type: store`,
+`state: above_threshold`) and media quota state changes (`type: media_quota`,
+`state: warning` or `full`). Its JSON contains only `event_id`, `event`, `type`,
+`state` and `at` (UTC), with the same HMAC headers, bounded queue, retries and
+receiver failure limit as the other runtime events. It contains no identifiers,
+paths, media bytes or storage backend details. Selecting `connection.changed`
+alone does not select storage warnings. Runtime warnings work with the legacy
+sender disabled. Thresholds are sampled at startup and every five minutes in
+background, even without health or metrics polling. New crossings/state changes
+emit warnings, and every PUT selecting this event queues the current active
+store/quota warnings again. Cleared warnings are not replayed. If S3 usage cannot
+be measured, the last known quota warning is retained until a successful sample;
+a recovery at the same usage does not emit another crossing warning.
+
 A PUT that newly selects `connection.changed` (a new receiver URL, a changed
 selection or a re-enabled receiver; not a secret or filter change alone) first
 queues the latest recorded state once, with the `at` of that transition, so a
@@ -280,12 +297,12 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable the private operator runtime webhook routes; independent of the legacy sender. See [Runtime message webhook](#runtime-message-webhook). |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; all address restrictions still apply. |
-| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed subscribed events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed subscribed message, connection or storage events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |
 | `WEBHOOK_FORWARD_BROADCASTS` | `false` | Forward broadcast-list messages (`@broadcast`, except `status@broadcast`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. Status posts still need `WEBHOOK_FORWARD_STATUS`. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the list JID or `*@broadcast`. |
-| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials. An explicit `false` also refuses runtime `connection.changed`; absent permits it |
+| `WEBHOOK_FORWARD_CONNECTION_EVENTS` | `false` | Safe lifecycle events on the existing webhook; five-second disconnect debounce, two-second logout deadline. Requires `WEBHOOK_ENABLED`; no identifiers or credentials. An explicit `false` refuses runtime `connection.changed`; absent/empty permits it. Runtime `storage.warning` is independent of this switch |
 | `WHATSAPP_STORE_DIR`   | `./store` (bridge), `../whatsapp-bridge/store` (MCP) | Directory holding `whatsapp.db`, `messages.db`, media, `.bridge-token`, `.bridge.lock`, `.session-keepalive`. Set the same value for both processes; absolute paths recommended for services |
 | `WHATSAPP_DB_PATH`     | `$WHATSAPP_STORE_DIR/messages.db`        | Path to SQLite database (overrides the store dir). The MCP server opens it **read-only** and fails with an error naming this path when the file is not there; it never creates it |
 | `WHATSMEOW_DB_PATH`    | `$WHATSAPP_STORE_DIR/whatsapp.db`        | whatsmeow DB used for LID ↔ phone resolution (overrides the store dir). Also read-only; the tools that use it work without it |

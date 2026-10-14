@@ -27,6 +27,7 @@ func (b *Bridge) observeMediaQuota(quota uint64, bytes int64) bool {
 			label = "full"
 		}
 		b.Log.Warnf("Media quota %s: bytes=%d quota_bytes=%d", label, bytes, quota)
+		b.queueRuntimeStorageWarning("media_quota", label)
 		if b.ForwardConnection && b.Webhook.Enabled() {
 			// Synchronous and bounded; no untracked goroutine survives shutdown.
 			ctx, cancel := context.WithTimeout(b.ctx, connectionEventTimeout)
@@ -34,5 +35,16 @@ func (b *Bridge) observeMediaQuota(quota uint64, bytes int64) bool {
 			cancel()
 		}
 	}
+	if state == 0 && previous != 0 {
+		b.queueRuntimeStorageWarning("media_quota", "")
+	}
 	return state > 0
+}
+
+// A failed remote measurement is not evidence that the quota warning cleared.
+func (b *Bridge) observeMediaQuotaIfKnown(quota uint64, bytes int64, known bool) bool {
+	if !known {
+		return b.mediaQuotaWarningState.Load() > 0
+	}
+	return b.observeMediaQuota(quota, bytes)
 }

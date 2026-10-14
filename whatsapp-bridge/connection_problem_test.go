@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,15 +21,24 @@ import (
 )
 
 func TestPinnedLibraryServerFailuresReachDiagnostics(t *testing.T) {
-	for _, code := range []string{"500", "503"} {
+	for _, code := range []string{"413", "414", "500", "503"} {
 		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 		b.Client.Log = connectionProblemLogger{Logger: b.Log, bridge: b}
 		b.Client.DangerousInternals().HandleConnectFailure(b.ctx, &waBinary.Node{Tag: "failure", Attrs: waBinary.Attrs{"reason": code, "message": "fake diagnostic"}}) //nolint:staticcheck // Test the actual pinned protocol handler; production uses only the public Logger seam.
 		p, _ := b.connectionSnapshot()
-		if p == nil || p.Kind != "server_error" {
+		kind := "other"
+		if code == "500" || code == "503" {
+			kind = "server_error"
+		}
+		number, _ := strconv.Atoi(code)
+		if p == nil || p.Kind != kind || p.Code != number {
 			t.Fatalf("protocol failure %s not captured: %+v", code, p)
 		}
-		if strings.Contains(b.renderMetrics(), "fake diagnostic") {
+		metrics := b.renderMetrics()
+		if !strings.Contains(metrics, `whatsapp_bridge_connection_problem{kind="`+kind+`"} 1`) {
+			t.Fatal("missing active diagnostic gauge")
+		}
+		if strings.Contains(metrics, "fake diagnostic") {
 			t.Fatal("server message leaked to metrics")
 		}
 	}
@@ -359,5 +369,82 @@ func TestPasskeyFailureDoesNotStartAnotherQRSequence(t *testing.T) {
 		if !errors.Is(err, errPairingOperator) || c.qrCalls != 1 || strings.Contains(err.Error(), "secret assertion") {
 			t.Fatalf("err=%v qrCalls=%d", err, c.qrCalls)
 		}
+	}
+}
+
+func TestGenericConnectFailureLoggerCapturesUnknownCode(t *testing.T) {
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	logger := connectionProblemLogger{Logger: b.Log, bridge: b}
+	logger.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", 499, "fake diagnostic")
+	p, _ := b.connectionSnapshot()
+	if p == nil || p.Kind != "other" || p.Code != 499 {
+		t.Fatalf("unknown failure=%+v", p)
+	}
+}
+
+func TestLegacyGenericConnectionProblemSurvivesUpgrade(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	unlinked := at.Add(-time.Hour)
+	legacy := &ConnectionProblem{Kind: "other", Code: 409, Since: at, UnlinkedAt: &unlinked, RevokedDevice: phonePN.String(), SessionRemoved: true}
+	if err := writeConnectionProblem(root, legacy); err != nil {
+		t.Fatal(err)
+	}
+	p, err := readConnectionProblem(root)
+	if err != nil {
+		t.Fatalf("valid legacy diagnostic rejected: %v", err)
+	}
+	if p.Kind != "other" || p.Code != legacy.Code || !p.Since.Equal(at) || p.UnlinkedAt == nil || !p.UnlinkedAt.Equal(unlinked) || p.RevokedDevice != legacy.RevokedDevice || !p.SessionRemoved {
+		t.Fatalf("legacy state changed: %+v", p)
+	}
+}
+
+func TestGenericConnectDiagnosticsStayVolatileAndRollbackSafe(t *testing.T) {
+	for _, code := range []int{413, 414, 499, 500, 503} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			storeInScratch(t)
+			logger := installRecordingLogger(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), logger)
+			adapter := connectionProblemLogger{Logger: logger, bridge: b}
+			adapter.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", code, "fake diagnostic")
+			p, _ := b.connectionSnapshot()
+			want := "other"
+			if code == 500 || code == 503 {
+				want = "server_error"
+			}
+			if p == nil || p.Kind != want || p.Code != code {
+				t.Fatalf("diagnostic=%+v", p)
+			}
+			data, err := b.StoreRoot.ReadFile(connectionProblemFile)
+			if code != 500 && code != 503 {
+				if !os.IsNotExist(err) {
+					t.Fatalf("routine diagnostic persisted: %s %v", data, err)
+				}
+				if strings.Contains(logger.String(), "WARN") {
+					t.Fatalf("routine failure warned: %s", logger.String())
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				var legacy ConnectionProblem
+				if err := json.Unmarshal(data, &legacy); err != nil || legacy.Kind != "server_error" || legacy.Code != code || legacy.Since.IsZero() {
+					t.Fatalf("v2.7.0 reader rejects state: %s %v", data, err)
+				}
+			}
+		})
+	}
+	// The old event writer also remains compatible with v2.7.0's generic rule.
+	storeInScratch(t)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.recordConnectionProblem(409, 0, 0)
+	data, err := b.StoreRoot.ReadFile(connectionProblemFile)
+	var legacy ConnectionProblem
+	if err != nil || json.Unmarshal(data, &legacy) != nil || legacy.Kind != "other" || legacy.Code != 409 {
+		t.Fatalf("legacy generic reader rejected new writer: %s %v", data, err)
 	}
 }
