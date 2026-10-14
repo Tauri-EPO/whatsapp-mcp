@@ -322,6 +322,9 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 			return 0, errors.New("client operation busy; retry download")
 		}
 		defer b.clientGate.RUnlock()
+		if held := b.mediaTransferGateHeld; held != nil {
+			held()
+		}
 		if b.operatorLogout.Load() {
 			return 0, errors.New("device parked by operator logout")
 		}

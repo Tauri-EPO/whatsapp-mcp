@@ -550,29 +550,28 @@ func TestLocalQuotaExpiredAutomaticTransferReleasesClientGate(t *testing.T) {
 		networkCalls <- struct{}{}
 		return 0, errors.New("expired quota waiter must never reach the network")
 	}
+	gateHeld := make(chan struct{}, 1)
+	b.mediaTransferGateHeld = func() { gateHeld <- struct{}{} }
 	release, err := b.lockMediaQuota(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { release(); b.mediaTransfers.wait() }()
-	// The deadline is the subject of this test, so it stays a real one, but it
-	// must leave the detached transfer time to take the gate first: one second
-	// was missed under QEMU (issue #735).
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		_, _, _, _, err := b.DownloadMedia(withAutomaticCache(ctx), "INCOMING", purgeChat)
 		done <- err
 	}()
-	// Observe the real detached transfer holding its client reader gate before
-	// the deadline; otherwise a scheduling miss would make this proof vacuous.
-	for b.clientGate.TryLock() {
-		b.clientGate.Unlock()
-		if ctx.Err() != nil {
-			t.Fatal("transfer never acquired its client reader gate")
-		}
-		time.Sleep(time.Millisecond)
+	// Observe the real detached transfer holding its client reader gate, or
+	// the proof below is vacuous. The transfer reports it itself: probing with
+	// TryLock made the transfer's TryRLock fail and give up, and tying the
+	// observation to the waiter's deadline let a slow runner miss it (#735).
+	select {
+	case <-gateHeld:
+	case <-time.After(blockedGuardWait):
+		t.Fatal("transfer never acquired its client reader gate")
 	}
 	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
@@ -612,7 +611,7 @@ func TestMediaQuotaLeaseDoesNotBlockHealth(t *testing.T) {
 		path, token string
 		status      int
 	}{{rest, "/api/health", purgeToken, 200}, {rest, "/api/ready", purgeToken, 503}, {operator, "/operator/v1/media/usage", fakeOperatorToken, 200}} {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), blockedGuardWait)
 		req, err := http.NewRequestWithContext(ctx, "GET", request.server.URL+request.path, nil)
 		if err != nil {
 			cancel()
@@ -901,7 +900,7 @@ func TestLocalQuotaConcurrentNetworkReservations(t *testing.T) {
 			t.Fatal("network transfer retained accounting lease")
 		}
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), blockedGuardWait)
 	defer cancel()
 	if _, _, _, _, err := b.DownloadMedia(withAutomaticCache(ctx), "THIRD", purgeChat); !errors.Is(err, errMediaQuota) {
 		t.Fatal("third transfer exceeded quota", err)
