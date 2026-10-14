@@ -35,7 +35,17 @@ def bridge(monkeypatch, tmp_path):
     def request(method, endpoint, **kwargs):
         payload = kwargs.get("json", {})
         if endpoint == "/send":
-            calls.append((payload, Path(payload["media_path"]).read_bytes()))
+            data = Path(payload["media_path"]).read_bytes()
+            calls.append((payload, data))
+            if payload.get("as_sticker") and not data.startswith(b"RIFF"):
+
+                class Invalid(Response):
+                    status_code = 400
+
+                    def json(self):
+                        return {"error": {"code": "invalid_argument", "message": "RIFF/WEBP bytes required"}}
+
+                return Invalid()
         return Response()
 
     monkeypatch.setattr(whatsapp, "_bridge_request", request)
@@ -83,7 +93,7 @@ def test_sticker_invalid_never_uploads(data, caption, source, bridge, tmp_path, 
         kwargs = {"media_base64": base64.b64encode(data).decode(), "filename": "fake.webp"}
     result = main.send_file(GROUP, caption=caption, as_sticker=True, **kwargs)
     assert result["error"]["code"] == "invalid_argument"
-    assert bridge == []
+    assert len(bridge) == (1 if source == "path" and not caption else 0)
 
 
 def test_sticker_default_and_preview(bridge, tmp_path):
@@ -93,7 +103,8 @@ def test_sticker_default_and_preview(bridge, tmp_path):
     assert "as_sticker" not in bridge[0][0]
     _, _, preview = whatsapp.send_file(GROUP, str(path), as_sticker=True, dry_run=True)
     assert preview["payload"]["as_sticker"] is True
-    assert len(bridge) == 1
+    assert len(bridge) == 2
+    assert bridge[1][0]["dry_run"] is True
 
 
 def test_permission_code_reaches_mcp(bridge, tmp_path, monkeypatch):
@@ -140,3 +151,66 @@ def test_group_settings_reads_unknown_and_observed(paired_dbs, monkeypatch):
     assert members["group_settings"] == settings
     wrapped = clean_untrusted({"group_settings": {"topic": "A\u200b description"}}, wrap=True)
     assert wrapped["group_settings"]["topic"] == "<untrusted>A description</untrusted>"
+
+
+@pytest.mark.parametrize("failure", [sqlite3.OperationalError("locked"), sqlite3.DatabaseError("corrupt")])
+def test_live_roster_survives_archive_errors(monkeypatch, failure):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([]))
+    monkeypatch.setattr(whatsapp, "_bridge_request", lambda *a, **k: Response())
+
+    def unavailable():
+        raise failure
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", unavailable)
+    result = main.list_group_members(GROUP)
+    assert result["success"] is True
+    assert all(value is None for value in result["group_settings"].values())
+
+
+def test_sticker_outside_roots_defers_to_bridge(bridge, tmp_path, monkeypatch):
+    path = tmp_path / "outside.webp"
+    path.write_bytes(b"arbitrary private file")
+
+    class OutsideRoots(Response):
+        status_code = 403
+
+        def json(self):
+            return {"success": False, "message": "media_path rejected: outside configured media roots"}
+
+    monkeypatch.setattr(whatsapp, "_bridge_request", lambda *a, **k: OutsideRoots())
+    result = main.send_file(GROUP, str(path), as_sticker=True)
+    assert result["error"]["code"] == "denied"
+
+
+def test_live_roster_survives_query_error(monkeypatch):
+    conn = sqlite3.connect(":memory:")  # No chats table, as with a broken migration.
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([]))
+    monkeypatch.setattr(whatsapp, "_bridge_request", lambda *a, **k: Response())
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", lambda: conn)
+    result = main.list_group_members(GROUP)
+    assert result["success"] is True
+    assert all(value is None for value in result["group_settings"].values())
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+
+
+def test_group_settings_missing_row_and_legacy_columns_need_no_pragma():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE chats (jid TEXT)")
+    queries = []
+    conn.set_trace_callback(queries.append)
+    expected = dict.fromkeys(whatsapp.GROUP_SETTING_KEYS)
+    assert whatsapp._stored_group_settings(conn.cursor(), GROUP) == expected
+    for key in whatsapp.GROUP_SETTING_KEYS:
+        conn.execute(f"ALTER TABLE chats ADD COLUMN group_{key}")
+    assert whatsapp._stored_group_settings(conn.cursor(), GROUP) == expected
+    assert not any(query.startswith("PRAGMA") for query in queries)
+    conn.close()
+
+
+def test_sticker_invalid_path_dry_run_is_validated_by_bridge(bridge, tmp_path):
+    path = tmp_path / "fake.webp"
+    path.write_bytes(b"JPEG renamed to webp")
+    result = main.send_file(GROUP, str(path), as_sticker=True, dry_run=True)
+    assert result["error"]["code"] == "invalid_argument"
+    assert bridge[0][0]["dry_run"] is True

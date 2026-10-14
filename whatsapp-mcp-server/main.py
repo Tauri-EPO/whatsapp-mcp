@@ -2053,12 +2053,14 @@ def send_file(
     attachment-with-caption message (one bubble in the WA UI), instead of
     needing a separate follow-up send_message call. For group chats use the JID.
 
-    Use dry_run=true to check the recipient and the file before anything leaves
-    the machine: it resolves the recipient, verifies the file exists and returns
-    the request that would be sent, without contacting WhatsApp.
+    Use dry_run=true to check the recipient and the file and return the request
+    that would be sent, without uploading media or sending a message. Sticker
+    previews may resolve the recipient through WhatsApp or read cached media.
 
     Set `as_sticker=True` to send real WebP bytes as a sticker (static or animated).
     Stickers cannot have a caption; without this option WebP stays a photo.
+    Path-based sticker previews ask the bridge to confine the path and verify
+    RIFF/WEBP bytes without upload, send or budget reservation.
 
     Args:
         chat_jid: Phone number with country code (leading + and the separators

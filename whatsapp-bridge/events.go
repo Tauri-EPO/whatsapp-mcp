@@ -669,10 +669,8 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.GroupInfo:
-		if b.Store == nil || !b.Policy.Allows(v.JID.String()) {
-			return
-		}
-		b.applyGroupSettings(v)
+		policy := b.Policy.once()
+		b.applyGroupSettings(policy, v)
 		if v.Name != nil && strings.TrimSpace(v.Name.Name) != "" {
 			if b.storeLive("group rename", "", v.JID.String(), func() error { return b.Store.RenameChat(v.JID.String(), v.Name.Name) }) {
 				b.Log.Infof("Group %s renamed to %q", v.JID, v.Name.Name)
@@ -688,7 +686,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 			}
 		}
 		// Join/Leave/Promote/Demote keep group_members current (group_events.go).
-		b.applyGroupParticipantChanges(v)
+		b.applyGroupParticipantChangesWithPolicy(policy, v)
 
 	case *events.CallOffer:
 		// 1:1 incoming call. call_type defaults to "voice"; CallOffer

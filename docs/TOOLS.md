@@ -1388,7 +1388,11 @@ from `media_path`, `media_base64` or `upload_id`. Non-WebP bytes (including a JP
 renamed to `.webp`) and any caption return `invalid_argument` before WhatsApp
 upload. Animation comes from the VP8X animation flag. With the default false,
 WebP keeps its existing photo behavior. Stickers are archived and forwarded as
-stickers with no caption. All send policies and budgets still apply.
+stickers with no caption. All send policies and budgets still apply. The bridge
+checks path-based sticker bytes only after media-root confinement, including
+`dry_run`; inline bytes are validated in the MCP process without writing a file.
+A sticker preview may fetch cached media and resolve the recipient, but never
+uploads to WhatsApp, sends a message or reserves send budget.
 
 Text, files and forwards use WhatsApp's permission check. An announce-only
 group where this account is not an admin returns `group_admin_required` with
@@ -2725,7 +2729,11 @@ in canonical UTC. Values and times are null until observed; false and an empty
 topic are known values. Topic uses the same sanitation/untrusted wrapping as
 `list_group_members`. Only current state is stored, with no change history. Join-approval notifications
 trigger a bounded metadata refresh because the SDK event decoder cannot distinguish
-on from off; if the refresh fails, the last observed value stays unchanged.
+on from off. Refresh runs on a bounded background queue, keeping event dispatch
+responsive; if it fails, the last observed value stays unchanged. Live and scheduled
+roster refreshes also populate all four settings, stamped before the fetch, so
+no change notification is required. An unavailable archive leaves live
+`list_group_members` results available with null settings.
 `group_settings` is available through `fields` projection.
 
 Get specific chat metadata by JID.

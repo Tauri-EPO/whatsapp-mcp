@@ -233,6 +233,7 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			sendCtx = context.WithValue(sendCtx, forwardSourceKey{}, &source)
 		}
 		defer cancelSend()
+		sendCtx = withSendReservation(sendCtx)
 		to, ok = deps.resolveRecipient(sendCtx, w, to)
 		if !ok {
 			return

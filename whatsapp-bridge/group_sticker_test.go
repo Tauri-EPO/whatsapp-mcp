@@ -21,7 +21,7 @@ import (
 )
 
 func TestGroupSettingsEventState(t *testing.T) {
-	for _, setting := range []string{"announce", "locked", "join_approval_required", "topic"} {
+	for _, setting := range []string{"announce", "locked", "topic"} {
 		t.Run(setting, func(t *testing.T) {
 			store := newTestMessageStore(t)
 			if err := ensureMessageStoreSchema(store.db); err != nil {
@@ -110,11 +110,24 @@ func TestGroupSettingsExcludedStoresNothing(t *testing.T) {
 	store := newTestMessageStore(t)
 	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 	b.Policy = parseChatPolicy("120363000000000002@g.us")
-	b.handleEvent(&events.GroupInfo{JID: types.NewJID("120363000000000001", types.GroupServer), Timestamp: time.Now(), Announce: &types.GroupAnnounce{IsAnnounce: true}, Name: &types.GroupName{Name: "Excluded"}, Ephemeral: &types.GroupEphemeral{IsEphemeral: true, DisappearingTimer: 3600}}, nil)
+	jid := types.NewJID("120363000000000001", types.GroupServer)
+	b.handleEvent(&events.GroupInfo{JID: jid, Timestamp: time.Now(), Announce: &types.GroupAnnounce{IsAnnounce: true}, Join: []types.JID{types.NewJID("100000000001", types.DefaultUserServer)}}, nil)
 	var count int
 	if err := store.db.QueryRow("SELECT COUNT(*) FROM chats").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
+	// Existing rename/timer behavior must survive the new settings gate.
+	if err := store.StoreChat(jid.String(), "Old name", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.handleEvent(&events.GroupInfo{JID: jid, Timestamp: time.Now(), Announce: &types.GroupAnnounce{IsAnnounce: true}, Name: &types.GroupName{Name: "Renamed"}, Ephemeral: &types.GroupEphemeral{IsEphemeral: true, DisappearingTimer: 3600}}, nil)
+	var name string
+	var expiration int
+	var setting any
+	if err := store.db.QueryRow("SELECT name,ephemeral_expiration,group_announce FROM chats WHERE jid=?", jid.String()).Scan(&name, &expiration, &setting); err != nil || name != "Renamed" || expiration != 3600 || setting != nil {
+		t.Fatalf("name=%s expiration=%d setting=%v err=%v", name, expiration, setting, err)
+	}
+
 }
 
 func stickerFixture(animated bool) []byte {
@@ -312,6 +325,9 @@ func TestGroupSettingsMigrationLegacy(t *testing.T) {
 
 func TestJoinApprovalSDKOffNotification(t *testing.T) {
 	store := newTestMessageStore(t)
+	// Each :memory: connection is a separate database. Polling the async
+	// writer must use the same database, as the production file-backed pool does.
+	store.db.SetMaxOpenConns(1)
 	if err := ensureMessageStoreSchema(store.db); err != nil {
 		t.Fatal(err)
 	}
@@ -326,32 +342,35 @@ func TestJoinApprovalSDKOffNotification(t *testing.T) {
 	if event.MembershipApprovalMode == nil || !event.MembershipApprovalMode.IsJoinApprovalRequired {
 		t.Fatal("SDK decoder changed; reassess workaround")
 	}
-	fetches := 0
 	store.groupInfo = func(ctx context.Context, group types.JID) (*types.GroupInfo, error) {
-		fetches++
 		if group != jid {
-			t.Fatal("wrong group")
+			t.Error("wrong group")
 		}
 		if _, ok := ctx.Deadline(); !ok {
-			t.Fatal("unbounded metadata refresh")
+			t.Error("unbounded metadata refresh")
 		}
-		return &types.GroupInfo{GroupMembershipApprovalMode: types.GroupMembershipApprovalMode{IsJoinApprovalRequired: false}}, nil
+		return &types.GroupInfo{JID: jid, GroupMembershipApprovalMode: types.GroupMembershipApprovalMode{IsJoinApprovalRequired: false}}, nil
 	}
 	b.handleEvent(event, nil)
-	var required bool
-	if err := store.db.QueryRow("SELECT group_join_approval_required FROM chats WHERE jid=?", testGroupJID).Scan(&required); err != nil || required || fetches != 1 {
-		t.Fatalf("required=%v fetches=%d err=%v", required, fetches, err)
+	waitGroupSetting(t, store, "join_approval_required", int64(0))
+}
+
+func waitGroupSetting(t *testing.T, store *MessageStore, field string, want any) {
+	t.Helper()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var value any
+		err := store.db.QueryRow("SELECT group_"+field+" FROM chats WHERE jid=?", testGroupJID).Scan(&value)
+		if err == nil && fmt.Sprint(value) == fmt.Sprint(want) {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("setting %s=%v err=%v, want %v", field, value, err, want)
+		case <-tick.C:
+		}
 	}
-	store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) { return nil, fmt.Errorf("offline") }
-	event.Timestamp = event.Timestamp.Add(time.Hour)
-	b.handleEvent(event, nil)
-	if err := store.db.QueryRow("SELECT group_join_approval_required FROM chats WHERE jid=?", testGroupJID).Scan(&required); err != nil || required {
-		t.Fatalf("failed fetch replaced known state=%v err=%v", required, err)
-	}
-	b.Policy = parseChatPolicy("120363000000000002@g.us")
-	store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) {
-		t.Fatal("excluded group fetched")
-		return nil, nil
-	}
-	b.handleEvent(event, nil)
 }

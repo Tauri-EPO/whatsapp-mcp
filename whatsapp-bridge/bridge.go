@@ -22,6 +22,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -242,7 +243,9 @@ type Bridge struct {
 	// mediaRetry routes MediaRetry events to waiting downloads (see mediaRetryHub).
 	mediaRetry *mediaRetryHub
 	// rosterFailures backs off groups whose roster refresh keeps failing (group_events.go).
-	rosterFailures *rosterFailures
+	rosterFailures           *rosterFailures
+	groupSettingsRefreshOnce sync.Once
+	groupSettingsRefresh     chan types.JID
 	// mediaTransfers keeps one transfer in flight per cached file, so callers
 	// that miss the cache together share it (see media_inflight.go).
 	mediaTransfers mediaTransferGroup

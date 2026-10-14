@@ -130,13 +130,13 @@ func TestGroupSubjectTopicAndCanonicalRoster(t *testing.T) {
 					},
 				}
 				var stamp time.Time
-				record := func(jid string, members []GroupMember, at time.Time) {
+				record := func(jid string, members []GroupMember, at time.Time, info *types.GroupInfo) {
 					records++
 					stamp = at
 					if at.After(fetchStarted) {
 						t.Fatal("roster stamp was captured after the fetch started")
 					}
-					b.recordGroupRoster(jid, members, at)
+					b.recordGroupRoster(jid, members, at, info)
 				}
 				body := `{"group_jid":" ` + mgGroup + ` ","description":"` + description + `"}`
 				code, resp := groupPost(t, handleGroupSubject(ops, chatPolicy{}, record), body)

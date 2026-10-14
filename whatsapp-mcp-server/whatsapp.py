@@ -4274,14 +4274,22 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
             conn.close()
 
 
+GROUP_SETTING_FIELDS = ("announce", "locked", "join_approval_required", "topic")
+GROUP_SETTING_KEYS = tuple(name for field in GROUP_SETTING_FIELDS for name in (field, field + "_updated_at"))
+
+
 def _stored_group_settings(cursor, jid: str) -> dict[str, Any]:
-    fields = ("announce", "locked", "join_approval_required", "topic")
-    columns = {row[1] for row in cursor.execute("PRAGMA table_info(chats)")}
-    names = [name for setting in fields for name in (setting, setting + "_updated_at")]
-    select = ", ".join(f"group_{name}" if f"group_{name}" in columns else "NULL" for name in names)
-    row = cursor.execute(f"SELECT {select} FROM chats WHERE jid = ?", (jid,)).fetchone()
-    result: dict[str, Any] = dict(zip(names, row or [None] * len(names), strict=True))
-    for setting in fields[:3]:
+    select = ", ".join(f"group_{name}" for name in GROUP_SETTING_KEYS)
+    try:
+        row = cursor.execute(f"SELECT {select} FROM chats WHERE jid = ?", (jid,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such column: group_" not in str(exc):
+            raise
+        row = None  # A bridge that has not applied the additive migration yet.
+    if row is None:
+        return dict.fromkeys(GROUP_SETTING_KEYS)
+    result: dict[str, Any] = dict(zip(GROUP_SETTING_KEYS, row, strict=True))
+    for setting in GROUP_SETTING_FIELDS[:3]:
         if result[setting] is not None:
             result[setting] = bool(result[setting])
     return result
@@ -4755,6 +4763,12 @@ def send_file(
             if as_sticker:
                 payload["as_sticker"] = True
             if dry_run:
+                if as_sticker:
+                    _bridge_json(
+                        _bridge_request(
+                            "POST", "/send", json={**payload, "dry_run": True}, timeout=BRIDGE_MEDIA_TIMEOUT_S
+                        )
+                    )
                 return (
                     True,
                     DRY_RUN_MESSAGE,
@@ -4774,15 +4788,16 @@ def send_file(
                 "For a file on another machine, POST /upload and use upload_id (http/sse), "
                 "or provide media_base64 with filename.",
             )
-        if as_sticker:
-            with open(media_path, "rb") as file:
-                _require_webp_sticker(file.read(12))
         payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(media_path)}
         if as_sticker:
             payload["as_sticker"] = True
         if caption:
             payload["message"] = caption
         if dry_run:
+            if as_sticker:
+                _bridge_json(
+                    _bridge_request("POST", "/send", json={**payload, "dry_run": True}, timeout=BRIDGE_MEDIA_TIMEOUT_S)
+                )
             # The bridge additionally confines media_path to WHATSAPP_MEDIA_ROOTS,
             # which only it knows; report what this side can check.
             media = {"path": os.path.abspath(media_path), "exists": True, "bytes": os.path.getsize(media_path)}
@@ -4982,18 +4997,13 @@ def get_group_members(group_jid: str, limit: int = 100, page: int = 0, cursor: s
     next_cursor = encode_cursor({"k": "group_members", "g": group_jid, "o": offset + len(items)}) if has_more else None
     try:
         conn = _connect_messages_db()
-    except MessagesDbNotFoundError:
-        # The live roster remains available before the archive's first startup.
-        payload["group_settings"] = {
-            name: None
-            for setting in ("announce", "locked", "join_approval_required", "topic")
-            for name in (setting, setting + "_updated_at")
-        }
-    else:
         try:
             payload["group_settings"] = _stored_group_settings(conn.cursor(), group_jid)
         finally:
             conn.close()
+    except (MessagesDbNotFoundError, sqlite3.Error):
+        # Archive availability must not affect the live roster.
+        payload["group_settings"] = dict.fromkeys(GROUP_SETTING_KEYS)
     payload["participant_count"] = len(members)
     payload.update(PageResult(items, next_cursor, has_more).to_dict())
     return payload
