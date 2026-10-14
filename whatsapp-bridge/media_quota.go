@@ -46,6 +46,9 @@ func (b *Bridge) lockMediaQuota(ctx context.Context) (func(), error) {
 			return nil, errMediaQuotaBusy
 		}
 	} else {
+		if waiting := b.mediaQuotaWaiting; waiting != nil {
+			waiting()
+		}
 		select {
 		case lease <- struct{}{}:
 		case <-ctx.Done():

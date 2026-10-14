@@ -550,28 +550,48 @@ func TestLocalQuotaExpiredAutomaticTransferReleasesClientGate(t *testing.T) {
 		networkCalls <- struct{}{}
 		return 0, errors.New("expired quota waiter must never reach the network")
 	}
-	gateHeld := make(chan struct{}, 1)
-	b.mediaTransferGateHeld = func() { gateHeld <- struct{}{} }
 	release, err := b.lockMediaQuota(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { release(); b.mediaTransfers.wait() }()
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	// The detached transfer reports, from its own goroutine, that it is parked
+	// on the quota lease this test holds and whether it holds its client reader
+	// gate there. Probing the gate from the test with TryLock made the
+	// transfer's TryRLock fail and give up (issue #735). The send never blocks,
+	// so a second waiter cannot wedge a transfer that holds the gate.
+	parked := make(chan bool, 1)
+	b.mediaQuotaWaiting = func() {
+		held := !b.clientGate.TryLock()
+		if !held {
+			b.clientGate.Unlock()
+		}
+		select {
+		case parked <- held:
+		default:
+		}
+	}
+	// The deadline is the subject of the test, so it is a real one, but long
+	// enough that the transfer parks on the lease before it expires.
+	ctx, cancel := context.WithTimeout(t.Context(), blockedGuardWait)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		_, _, _, _, err := b.DownloadMedia(withAutomaticCache(ctx), "INCOMING", purgeChat)
 		done <- err
 	}()
-	// Observe the real detached transfer holding its client reader gate, or
-	// the proof below is vacuous. The transfer reports it itself: probing with
-	// TryLock made the transfer's TryRLock fail and give up, and tying the
-	// observation to the waiter's deadline let a slow runner miss it (#735).
 	select {
-	case <-gateHeld:
+	case held := <-parked:
+		if !held {
+			t.Fatal("transfer waited for the quota lease without its client reader gate")
+		}
+		if ctx.Err() != nil {
+			t.Fatal("transfer parked only after the waiter's deadline; the proof would be vacuous")
+		}
+	case err := <-done:
+		t.Fatalf("waiter returned before the transfer parked on the quota lease: %v", err)
 	case <-time.After(blockedGuardWait):
-		t.Fatal("transfer never acquired its client reader gate")
+		t.Fatal("transfer never parked on the quota lease")
 	}
 	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)

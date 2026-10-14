@@ -253,10 +253,10 @@ type Bridge struct {
 	// mediaTransfer streams one media file to disk (nil = downloadToPath);
 	// tests inject a blocking fake (see Bridge.transferMedia).
 	mediaTransfer mediaTransferFunc
-	// mediaTransferGateHeld, when set, runs once a detached transfer holds its
-	// client reader gate; tests use it to observe the gate without contending
-	// for it (nil in production).
-	mediaTransferGateHeld func()
+	// mediaQuotaWaiting, when set, runs on the caller's goroutine just before
+	// lockMediaQuota blocks for the lease, so a test can see a waiter parked
+	// there without contending for any lock (nil in production).
+	mediaQuotaWaiting func()
 	// mediaRetryDownload asks the sender's phone to re-upload a file and
 	// downloads it (nil = downloadViaMediaRetry); tests inject a recorder
 	// (see Bridge.retryMedia).
