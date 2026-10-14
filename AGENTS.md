@@ -56,6 +56,7 @@ whatsapp-mcp/
 │   ├── bridge.go               # Bridge struct: runtime dependencies shared by handlers
 │   ├── pairing.go              # QR pairing and first connection, one context per code sequence
 │   ├── operator_mcp.go         # bounded bridge-authenticated forwarding to the private MCP admin listener
+│   ├── operator_chats.go       # private identity-only chat search within the deploy allow-list, ignoring the runtime one
 │   ├── operator.go             # private opt-in listener: separate bearer token, Host/Origin checks, limits and audit
 │   ├── history_limits.go         # bounded pairing requests, history age guard and progress
 │   ├── archive_stats.go          # database size gauges, row count and threshold crossings

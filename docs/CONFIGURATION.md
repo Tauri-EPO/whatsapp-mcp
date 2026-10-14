@@ -1066,6 +1066,45 @@ Quota streams retain permanent `media_unavailable` and `media_refused` outcomes.
 Ingest records those outcomes and continues to healthy audio; temporary remote
 read failures remain retryable and receive no permanent failure note.
 
+## Operator chat search
+
+`GET /operator/v1/chats?query=<text>&limit=<n>` is available only on the
+private operator listener, with its separate bearer token and Host/Origin
+policy. It intentionally ignores runtime `chats.allowed`, so an allow-list
+picker can find chats to add, but stays inside the deploy
+`WHATSAPP_ALLOWED_CHATS`: runtime can only narrow that list, so a chat outside
+it could never be allowed and is never shown. It remains available under
+`WHATSAPP_READ_ONLY`.
+
+The response is `{"chats":[{"jid":"5511999999999@s.whatsapp.net",
+"name":"Alice","is_group":false,"last_message_time":"2026-10-09T12:00:00Z"}]}`.
+Only these four identity fields are returned; no message text, media or paths.
+Rows come from the local chat archive, using recorded contact names for empty
+or numeric direct-chat names (full name, push name, first name, business name,
+in that order). Names are resolved under the original identity and its local
+phone/LID alternative; lookups use the account's contact index. No WhatsApp request
+is made; an absent phone book leaves the archive's name or bare JID user.
+
+Omit `query` for the latest chats. Search is a literal substring of the display
+name, compared with Unicode case folding and NFC normalization (a precomposed
+`é` matches a decomposed one), or of the phone digits; common phone separators
+such as `+`, spaces, parentheses and hyphens are accepted, and a Brazilian
+mobile matches with or without its ninth digit. `%` and `_`
+have no wildcard meaning. Results sort by last activity descending, then JID
+ascending for ties; missing activity is last. An unreadable legacy value keeps
+its stored sort position and, like missing activity, is returned as `null`.
+`limit` defaults to 20 and accepts 1-50; empty, repeated or invalid values return
+400. Reads have a five-second deadline and an unavailable archive returns 503.
+
+Search has its own rate limits, 120 requests/minute per socket peer and
+120/minute for the token, so a picker searching on every keystroke never
+rate-limits pairing, settings or logout. Each search is audited at DEBUG with
+the fixed route, socket peer, response status and result count; INFO gets one
+line per active minute with the number of searches that passed authentication. Neither contains the query
+or names. Responses use `Cache-Control: no-store`.
+Search does not update assistant activity, MCP metrics or bridge request
+counters, and is neither an MCP tool nor a bridge `/api/*` route.
+
 ## Runtime overrides
 
 The private operator listener serves `GET` and `PATCH /operator/v1/settings`.

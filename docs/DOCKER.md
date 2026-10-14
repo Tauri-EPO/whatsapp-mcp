@@ -219,13 +219,26 @@ the account restriction; restarting does not bypass WhatsApp enforcement.
 `GET health`/`GET ready` are credential-free and authenticated here. All operator
 responses use `Cache-Control: no-store`. Health and metrics never expose a QR,
 phone number, pairing code, assertion or confirmation code. INFO audit lines
-contain only the fixed mutating route, response status and socket peer;
+contain only the fixed audited route, response status and socket peer;
 authentication, origin and rate-limit refusals log at DEBUG. Limits are 120
 requests/minute per socket peer before authentication and 60/minute for the
 authenticated token; forwarded headers do not change the peer. Browser Origin
 must exactly match the listener's scheme and Host, and Host must be explicitly
 allowed; native clients may omit Origin. No CORS or forwarded-origin trust is
 enabled. These examples use native/backend clients on the private network.
+
+For allow-list pickers, `GET /operator/v1/chats?query=Alice&limit=20` searches
+the local archive on this same private listener. It intentionally ignores
+runtime `chats.allowed` and stays inside deploy `WHATSAPP_ALLOWED_CHATS`, the
+most runtime can ever allow. The response contains
+only JID, display name, group flag and last activity, never messages or media.
+The default limit is 20, maximum 50; sorting is latest activity first with JID
+as the tie-break. It has its own rate limits (120/minute per peer and for the
+token); each search is audited at DEBUG with the result count, and INFO
+gets a per-minute search count, never the query or names.
+It makes no MCP call and does not count as assistant activity. See
+[operator chat search](CONFIGURATION.md#operator-chat-search) for the response
+shape and name/phone matching rules.
 
 For a passkey step, `GET pairing` exposes `passkey` request options and
 `step_expires_at` only on this authenticated private listener. An external
