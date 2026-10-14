@@ -287,7 +287,8 @@ def coverage(
 
     audio is the voice-note side of the same scope: {messages, cached,
     transcribed, errors, unavailable, refused, backlog, backlog_cached, cached_examined} —
-    inbound voice notes stored (the status feed "status@broadcast" is not
+    received and sent voice notes stored (sent audio is excluded when
+    TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false; the status feed "status@broadcast" is not
     counted: no batch walks it), how many have their bytes cached, how many
     already have a transcript, a recorded failure (errors) or bytes no download
     brought here (unavailable: the sender's phone no longer has them, or the row
@@ -759,13 +760,17 @@ def list_messages(
                an error, not an empty page.
         exclude_chat_jid: Same shape, dropped from the result — the way to read
                everything except a few noisy chats
-        query: Search term to filter messages by content. Accent-insensitive and
+        query: Search message content, stored transcripts and original document
+               filenames (excluding generated names). With FTS this is accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
                (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*'). Voice notes
                whose transcript was already stored (transcribe_audio, or the
                TRANSCRIBE_ON_INGEST worker) match on what was said in them, with
-               the same operators, and are ranked next to the written hits
+               the same operators, and are ranked next to the written hits. Without FTS or
+               for scripts without word spacing, content and document filenames use
+               the same LOWER/instr substring rule: ASCII case folding, otherwise
+               exact Unicode characters and no accent folding
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0); ignored when cursor is set
         include_context: Include surrounding messages for context (default True)

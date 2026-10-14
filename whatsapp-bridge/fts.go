@@ -1,6 +1,6 @@
 package main
 
-// Full-text index over messages.content.
+// Full-text index over message content and original document filenames.
 //
 // The MCP server's list_messages(query=...) used a substring scan
 // (instr()), which cannot fold accents ("orcamento" never finds "orçamento"),
@@ -28,27 +28,49 @@ import (
 )
 
 const messagesFTSTable = "messages_fts"
+const documentFilenameFTSMigration = "messages_fts_document_filename_v2"
 
 // ftsSchema creates the index and its sync triggers. The FTS table is an
-// external-content table over messages (content stays in one place; the index
+// external-content table over a messages view (content stays in one place; the index
 // only stores tokens). Triggers use the "delete" command form required by
 // external-content tables; a plain DELETE on the fts table would corrupt it.
 const ftsSchema = `
+	CREATE VIEW IF NOT EXISTS messages_fts_content AS
+		SELECT rowid, content,
+			CASE WHEN media_type = 'document' AND NOT (
+				substr(filename, 1, 9) = 'document_'
+				AND substr(filename, 10, 15) GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]'
+				AND substr(filename, 25) = CASE WHEN coalesce(id, '') = '' THEN '' ELSE '_' || id END
+			) THEN filename ELSE '' END AS filename
+		FROM messages;
 	CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 		content,
-		content='messages',
+		filename,
+		content='messages_fts_content',
 		content_rowid='rowid',
 		tokenize='unicode61 remove_diacritics 2'
 	);
 	CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
-		INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		INSERT INTO messages_fts(rowid, content, filename)
+			SELECT rowid, content, filename FROM messages_fts_content WHERE rowid = new.rowid;
 	END;
 	CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
-		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+		INSERT INTO messages_fts(messages_fts, rowid, content, filename)
+			VALUES ('delete', old.rowid, old.content, CASE WHEN old.media_type = 'document' AND NOT (
+				substr(old.filename, 1, 9) = 'document_'
+				AND substr(old.filename, 10, 15) GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]'
+				AND substr(old.filename, 25) = CASE WHEN coalesce(old.id, '') = '' THEN '' ELSE '_' || old.id END
+			) THEN old.filename ELSE '' END);
 	END;
-	CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
-		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-		INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+	CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF id, content, filename, media_type ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, content, filename)
+			VALUES ('delete', old.rowid, old.content, CASE WHEN old.media_type = 'document' AND NOT (
+				substr(old.filename, 1, 9) = 'document_'
+				AND substr(old.filename, 10, 15) GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]'
+				AND substr(old.filename, 25) = CASE WHEN coalesce(old.id, '') = '' THEN '' ELSE '_' || old.id END
+			) THEN old.filename ELSE '' END);
+		INSERT INTO messages_fts(rowid, content, filename)
+			SELECT rowid, content, filename FROM messages_fts_content WHERE rowid = new.rowid;
 	END;
 `
 
@@ -59,6 +81,7 @@ const ftsTeardown = `
 	DROP TRIGGER IF EXISTS messages_fts_ad;
 	DROP TRIGGER IF EXISTS messages_fts_au;
 	DROP TABLE IF EXISTS messages_fts;
+	DROP VIEW IF EXISTS messages_fts_content;
 `
 
 // sqliteHasFTS5 reports whether the connected SQLite build exposes the fts5
@@ -85,6 +108,16 @@ func ensureMessagesFTS(db *sql.DB) (bool, error) {
 }
 
 func ensureMessagesFTSCapability(db *sql.DB, available bool) (bool, error) {
+	return ensureMessagesFTSMigration(db, available, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(ftsTeardown + ftsSchema); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')`)
+		return err
+	})
+}
+
+func ensureMessagesFTSMigration(db *sql.DB, available bool, migrate func(*sql.Tx) error) (bool, error) {
 	existed, err := messagesFTSExists(db)
 	if err != nil {
 		return false, fmt.Errorf("inspect fts schema: %w", err)
@@ -96,6 +129,26 @@ func ensureMessagesFTSCapability(db *sql.DB, available bool) (bool, error) {
 			}
 		}
 		return false, nil
+	}
+	// Rebuild existing archives and publish the marker atomically. The view
+	// excludes generated media names on both rebuild and trigger paths.
+	// BenchmarkDocumentFilenameFTSMigration measured 3.312s for a WAL file
+	// with 1,000,000 synthetic rows / 5% documents in Linux amd64 Docker.
+	// This is below the reviewed 20s budget for keeping the one-off startup rebuild.
+	migrated, err := applyNamedMigration(db, documentFilenameFTSMigration, migrate)
+	if err != nil {
+		// Rollback can restore an older index and its triggers. Always remove
+		// them before returning, so a failed optional index cannot break writes.
+		if _, cleanupErr := db.Exec(ftsTeardown); cleanupErr != nil {
+			return false, fmt.Errorf("migrate document filename index: %w (teardown failed: %v)", err, cleanupErr)
+		}
+		if strings.Contains(err.Error(), "no such module") {
+			return false, nil
+		}
+		return false, fmt.Errorf("migrate document filename index: %w", err)
+	}
+	if migrated {
+		return true, nil
 	}
 	if _, err := db.Exec(ftsSchema); err != nil {
 		// Defensive: if creation fails halfway, make sure no trigger survives.

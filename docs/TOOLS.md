@@ -461,7 +461,7 @@ allow-list as the numbers above:
 
 | Field | Meaning |
 | --- | --- |
-| `messages` | Inbound voice notes stored in scope. Outbound, deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it. So is the status feed (`status@broadcast`): the ingest worker does not walk it, and `transcribe_audio` on a status voice note still works |
+| `messages` | Received and sent voice notes stored in scope (`TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false` excludes sent rows). Deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it. So is the status feed (`status@broadcast`): the ingest worker does not walk it, and `transcribe_audio` on a status voice note still works |
 | `cached` | Of those, the ones whose bytes are on disk under the store directory |
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |
@@ -761,7 +761,7 @@ Get messages with filters, date ranges, and sorting.
 - `before` / `after` (optional): ISO-8601 bounds (`2026-01-09` or `2026-01-09T18:00:00`)
 - `sender_jid` (optional): Only messages from this sender (phone number or JID)
 - `include_context` (optional, default `true`), `context_before` / `context_after` (default 1, max 50 each): surrounding messages for every match. The whole result is capped at 2000 rows; with large `limit` values the windows shrink to fit, so prefer `include_context=false` when paging through many matches
-- `query` (optional): Search term. With the bridge's FTS5 index (always available) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use a plain substring match
+- `query` (optional): Search message text, stored audio transcripts and original document filenames (generated image/audio/video names are excluded). With the bridge's FTS5 index (always available) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use the same `LOWER`/`instr` substring rule for content and original document filenames: ASCII case folding and otherwise exact Unicode characters, with no accent folding
 - `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
 - `include_deleted` (optional, default `true`): keep messages that were "deleted for everyone". They are returned with their original text/media and a `deleted_at` timestamp; `false` hides them
 - `unread_only` (optional, default `false`): only inbound messages newer than their chat's read marker (`last_read_time`, as read on any linked device). `unread_only=true, sort_by="oldest", include_context=false` lists what still needs attention, oldest first
@@ -1535,7 +1535,7 @@ note is still worth an `annotate_media(sha256, "summary", ...)` on top — see
 [annotate-after-reading](#annotate-after-reading).
 
 **Filling the cache without being asked.** The server can also transcribe
-inbound voice notes in the background as they arrive, so the archive is already
+received and sent voice notes in the background as they arrive, so the archive is already
 readable when an agent gets to it: set `TRANSCRIBE_ON_INGEST=1` (off by default,
 it spends CPU on the server). The worker writes the same three keys, is
 idempotent by sha256, respects `WHATSAPP_ALLOWED_CHATS`, and parks a file it
