@@ -42,7 +42,8 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 		return
 	}
 	b.Log.Infof("WhatsApp connection state: %s (%s)", state, reason)
-	if !b.ForwardConnection || !b.Webhook.Enabled() {
+	legacy := b.ForwardConnection && b.Webhook.Enabled()
+	if !legacy && !b.RuntimeWebhook.subscribed("connection.changed") {
 		b.lastConnectionEvent = key
 		b.connectionEventsMu.Unlock()
 		return
@@ -55,6 +56,7 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 	}
 	if immediate {
 		b.lastConnectionEvent = key
+		b.queueRuntimeConnection(payload)
 		previous, delivered = b.queueConnectionDeliveryLocked()
 	} else {
 		var cancel context.CancelFunc
@@ -90,10 +92,14 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 			}
 			b.lastConnectionEvent = key
 			b.connectionDisconnectCancel = nil
+			b.queueRuntimeConnection(payload)
 			previous, delivered = b.queueConnectionDeliveryLocked()
 			b.connectionEventsMu.Unlock()
 		}
 		defer b.finishConnectionDelivery(previous, delivered)
+		if !legacy {
+			return
+		}
 		// Reserving under the transition lock preserves order even when a
 		// debounce expires just before reconnect. Terminal events share the
 		// queue, with their entire wait and POST bounded by the exit deadline.

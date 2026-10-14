@@ -358,7 +358,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 |----------|---------|---------|
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable private operator webhook configuration; independent of the legacy WEBHOOK_ENABLED/WEBHOOK_URL sender. Process-local configuration, HMAC signatures and no media bytes. |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; address restrictions still apply. |
-| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the runtime receiver after 1-100 consecutive failed message events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the runtime receiver after 1-100 consecutive failed subscribed events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
 | `WHATSAPP_SEND_RATE_PER_MINUTE` | `0` (off) | Per-instance token bucket, burst equal to rate; runtime `send.rate_per_minute` may tighten the env ceiling |
 | `WHATSAPP_SEND_RATE_PER_DAY` | `0` (off) | Persistent send reservations per UTC calendar day; runtime `send.rate_per_day` may tighten the env ceiling |
 | `WHATSAPP_SEND_NEW_CHATS_PER_DAY` | `0` (off) | Persistent first-contact ceiling per UTC day; runtime `send.new_chats_per_day` may tighten the env ceiling |

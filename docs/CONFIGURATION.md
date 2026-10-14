@@ -5,19 +5,20 @@ Every environment variable and CLI flag, plus the transport, authentication and 
 ## Runtime message webhook
 
 Set `WHATSAPP_WEBHOOK_RUNTIME=true` and enable the private operator listener to
-configure a separate message receiver. The default is off: the routes are absent
+configure a separate message and connection-state receiver. The default is off: the routes are absent
 and the legacy `WEBHOOK_URL` sender, including `X-Bridge-Token`, is unchanged.
 Runtime delivery is independent of `WEBHOOK_ENABLED`; both receivers can operate
 at once. Runtime requests never include `X-Bridge-Token` or the operator bearer.
-They apply the existing `FORWARD_SELF`, status, channel, broadcast and allowed-chat
-filters before creating an event. This version supports `message.received` only.
+Message delivery applies the receiver's self/channel/broadcast filters and the
+deployment's status and allowed-chat filters before creating an event. Select
+`message.received`, `connection.changed`, or both; an unselected event is never delivered.
 
 All routes use the operator bearer, Host/Origin policy, request rate limits,
 no-store responses and mutation audit. They are not MCP tools or data-plane routes.
 
 | Method and path | Contract |
 |---|---|
-| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, header prefix, SHA-256 secret fingerprint (first 16 hex characters), consecutive failed events, last success, reason, queued and dropped counts; never the secret. |
+| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, effective `forward_self`, `forward_channels`, `forward_broadcasts` and `forward_status` filters, header prefix, SHA-256 secret fingerprint (first 16 hex characters), consecutive failed events, last success, reason, queued and dropped counts; never the secret. |
 | `PUT /operator/v1/webhook` | Replace configuration and re-enable delivery; JSON below, at most 4096 bytes, unknown fields refused. Cancels previous deliveries and resets delivery state. Returns the same safe snapshot as GET. |
 | `DELETE /operator/v1/webhook` | Remove configuration, cancel in-flight requests and discard the old queue; 204. An already accepted receiver request cannot be recalled. |
 | `POST /operator/v1/webhook/test` | One synchronous synthetic event (`event: webhook.test`, `type: test`), bounded to 12 seconds including admission; 200 with `delivered`, `reason`, `event_id`, or 409 without an enabled receiver. It does not change consecutive failures, last success or automatic disablement. |
@@ -25,7 +26,7 @@ no-store responses and mutation audit. They are not MCP tools or data-plane rout
 ```json
 {
   "url": "https://receiver.example.com/whatsapp",
-  "events": ["message.received"],
+  "events": ["message.received", "connection.changed"],
   "secret": "replace-with-at-least-32-random-bytes",
   "header_prefix": "X-Webhook"
 }
@@ -35,6 +36,19 @@ Generate a fresh secret with `openssl rand -hex 32`; the literal UTF-8 bytes of
 the supplied string are the HMAC key (hex strings are not decoded). The secret
 must be 32-256 bytes. The prefix defaults to `X-Webhook`, must start with `X-`
 and contain only ASCII letters, digits and hyphens (3-48 characters).
+
+Optional JSON booleans `forward_self`, `forward_channels` and
+`forward_broadcasts` default to `FORWARD_SELF`, `WEBHOOK_FORWARD_CHANNELS` and
+`WEBHOOK_FORWARD_BROADCASTS`, respectively. Without these fields, message
+delivery keeps the existing deployment filters. An explicit false in the
+deployment (including `0`, `no` or `off`) cannot be widened: PUT with true
+returns 400 and preserves the previous receiver. An absent or empty variable
+permits runtime opt-in, and deployment true permits runtime off/on.
+`forward_status` is reported but is not a PUT field: status posts require
+`WEBHOOK_FORWARD_STATUS=true` at deploy time, even when broadcasts are enabled.
+Allowed-chat policy still applies to every message. These receiver choices never
+change the legacy `WEBHOOK_URL` sender. Unknown fields, null/nonboolean filters,
+empty event selections, duplicate events and unknown events return 400.
 
 HTTPS is mandatory; credentials and fragments are refused. Port 443 is required
 unless `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=true`. Every DNS answer is checked
@@ -54,11 +68,12 @@ are discarded up to 64 KiB to permit keep-alive, then closed, never logged.
 Error reasons are fixed classifications,
 never URLs, response text or secrets.
 
-Delivery uses one worker and a queue of 256 events, each at most 64 KiB (plus
+Message and connection delivery share one worker and one queue of 256 events,
+each at most 64 KiB (plus
 one in flight). Overflow and oversized events increment `dropped`. An admitted
 event has at most five attempts, with 1, 2, 4 and 8 second delays (backoff capped
 at 30 seconds), and is discarded after five minutes. Permanent 4xx responses
-(except 408 and 429) are not retried. Successful message 2xx responses
+(except 408 and 429) are not retried. Successful subscribed-event 2xx responses
 reset consecutive failures and record last success. A received 2xx remains a
 successful delivery after cancellation or configuration replacement; an old
 generation cannot change the new receiver's state. Failures count events that
@@ -75,12 +90,12 @@ queue overflow, exhausted retries, expiration or automatic disablement.
 Automatic disablement and discarded events are logged at ERROR without receiver
 URLs or message identifiers. Disabled/queue-full loss logs are limited to one line
 per minute; the next eligible line includes the accumulated suppressed count.
-Only policy-eligible messages count as disabled losses. PUT and DELETE count
-abandoned queued and unacknowledged in-flight messages. `/metrics` exposes process-lifetime counters
+Only subscribed, eligible events count as disabled losses. PUT and DELETE count
+abandoned queued and unacknowledged in-flight events. `/metrics` exposes process-lifetime counters
 `whatsapp_bridge_runtime_webhook_deliveries_total` (successful POSTs, including tests),
-`whatsapp_bridge_runtime_webhook_failures_total` (failed message events), and
-`whatsapp_bridge_runtime_webhook_dropped_total` (discarded messages, including
-messages arriving while automatically disabled). PUT does not reset these counters.
+`whatsapp_bridge_runtime_webhook_failures_total` (failed subscribed events), and
+`whatsapp_bridge_runtime_webhook_dropped_total` (discarded events, including
+eligible events arriving while automatically disabled). PUT does not reset these counters.
 
 Each POST has `Content-Type: application/json` and, with the default prefix:
 
@@ -118,6 +133,29 @@ false when adding a reaction); a removal carries an empty `text`.
 `media_reference` is present only for stored media messages; it does not assert that
 bytes are cached. Use the authenticated MCP media resource or download tool to fetch
 them. Synthetic events omit message identity fields and carry `stored: false`.
+
+Connection payload example (the legacy payload plus runtime event identity):
+
+```json
+{
+  "event_id": "00112233445566778899aabbccddeeff",
+  "event": "connection.changed",
+  "type": "connection",
+  "state": "disconnected",
+  "reason": "transport_lost",
+  "at": "2026-10-13T12:00:00Z"
+}
+```
+
+States are `connected`, `disconnected`, `logged_out`, `pairing_required` and
+`paired`. Optional `connection_problem` and `pairing_state` match the legacy
+sender's safe classifications. No phone, chat, sender, QR or passkey material is
+included. Disconnects wait five seconds by default; a quick reconnect cancels
+the pending disconnect and suppresses a redundant connected notification.
+Connection events use the same HMAC headers, independent event ids, queue age,
+retry and loss limits as messages, without priority over queued messages. Runtime
+terminal events are queued rather than synchronously acknowledged: process exit
+can discard them. The legacy bounded terminal POST remains unchanged.
 
 Reference receiver verification in Python (supply raw request bytes, never
 re-serialize parsed JSON; use the configured prefix):
@@ -230,7 +268,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WEBHOOK_ENABLED`      | `true` (compose: `false`)                | Set to `false` to disable outbound webhooks. A boolean (see below the table); anything else stops the bridge |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable the private operator runtime webhook routes; independent of the legacy sender. See [Runtime message webhook](#runtime-message-webhook). |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; all address restrictions still apply. |
-| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed message events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
+| `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the receiver after 1-100 consecutive failed subscribed events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
 | `FORWARD_SELF`         | `true` (compose: `false`)                | Forward messages sent by self. A boolean; anything else stops the bridge |
 | `WEBHOOK_FORWARD_STATUS` | `false`                                | Forward status updates (`status@broadcast`) to the webhook too. Off by default: the webhook carries conversations, not every contact's status posts. See [What the webhook receives](#what-the-webhook-receives). A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow `status@broadcast` or `*@broadcast`; this forwards every contact's status posts, not only listed contacts. |
 | `WEBHOOK_FORWARD_CHANNELS` | `false` | Forward channel posts (`@newsletter`) to the webhook too. Text, images and reactions require this opt-in; rows are stored either way. A boolean; anything else stops the bridge With `WHATSAPP_ALLOWED_CHATS` set, also allow the channel JID or `*@newsletter`. |

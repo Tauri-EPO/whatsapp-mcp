@@ -21,12 +21,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
 type runtimeWebhookOptions struct {
 	Enabled, AllowPorts bool
 	FailureLimit        int
+	DeniedFilters       runtimeWebhookFilters
 }
 
 func parseRuntimeWebhookOptions(getenv func(string) string) (runtimeWebhookOptions, error) {
@@ -46,17 +48,43 @@ func parseRuntimeWebhookOptions(getenv func(string) string) (runtimeWebhookOptio
 			return o, errors.New("WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT must be 1-100")
 		}
 	}
+	for _, filter := range []struct {
+		name   string
+		denied *bool
+	}{
+		{forwardSelfEnv, &o.DeniedFilters.ForwardSelf},
+		{webhookForwardChannelsEnv, &o.DeniedFilters.ForwardChannels},
+		{webhookForwardBroadcastsEnv, &o.DeniedFilters.ForwardBroadcasts},
+	} {
+		value := getenv(filter.name)
+		allowed, err := parseBoolEnv(filter.name, value, true)
+		if err != nil {
+			return o, err
+		}
+		*filter.denied = strings.TrimSpace(value) != "" && !allowed
+	}
 	return o, nil
 }
 
+type runtimeWebhookFilters struct {
+	ForwardSelf       bool `json:"forward_self"`
+	ForwardChannels   bool `json:"forward_channels"`
+	ForwardBroadcasts bool `json:"forward_broadcasts"`
+	ForwardStatus     bool `json:"forward_status"`
+}
+
 type runtimeWebhookConfig struct {
-	URL          string   `json:"url"`
-	Events       []string `json:"events"`
-	Secret       string   `json:"secret"`
-	HeaderPrefix string   `json:"header_prefix"`
+	URL               string   `json:"url"`
+	Events            []string `json:"events"`
+	Secret            string   `json:"secret"`
+	HeaderPrefix      string   `json:"header_prefix"`
+	ForwardSelf       *bool    `json:"forward_self,omitempty"`
+	ForwardChannels   *bool    `json:"forward_channels,omitempty"`
+	ForwardBroadcasts *bool    `json:"forward_broadcasts,omitempty"`
 }
 
 type runtimeWebhookState struct {
+	runtimeWebhookFilters
 	URL          string     `json:"url"`
 	Enabled      bool       `json:"enabled"`
 	Events       []string   `json:"events"`
@@ -70,6 +98,7 @@ type runtimeWebhookState struct {
 }
 
 type runtimeWebhookEvent struct {
+	connection          *connectionPayload
 	ID                  string    `json:"event_id"`
 	Event               string    `json:"event"`
 	MessageID           string    `json:"message_id,omitempty"`
@@ -92,10 +121,11 @@ type runtimeWebhookDelivery struct {
 	test bool
 }
 type runtimeWebhookGeneration struct {
-	config runtimeWebhookConfig
-	ctx    context.Context
-	cancel context.CancelFunc
-	queue  chan runtimeWebhookDelivery
+	config  runtimeWebhookConfig
+	filters runtimeWebhookFilters
+	ctx     context.Context
+	cancel  context.CancelFunc
+	queue   chan runtimeWebhookDelivery
 	// Serializes synthetic tests with background delivery, including failure state.
 	delivery chan struct{}
 	client   *http.Client
@@ -143,6 +173,51 @@ func (w *runtimeWebhook) configured() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.generation != nil
+}
+
+func (cfg *runtimeWebhookConfig) UnmarshalJSON(data []byte) error {
+	type config runtimeWebhookConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode((*config)(cfg)); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for field, value := range fields {
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			for _, filter := range []string{"forward_self", "forward_channels", "forward_broadcasts"} {
+				if strings.EqualFold(field, filter) {
+					return errors.New("receiver filters must be JSON booleans")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (w *runtimeWebhook) subscribedLocked(event string) bool {
+	for _, selected := range w.state.Events {
+		if event == selected {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *runtimeWebhook) subscribed(event string) bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.generation != nil && w.subscribedLocked(event)
+}
+
+func (b *Bridge) queueRuntimeConnection(payload connectionPayload) {
+	b.RuntimeWebhook.enqueue(runtimeWebhookEvent{Event: "connection.changed", connection: &payload}, true)
 }
 
 // Caller holds mu. Logs and process-lifetime counters never carry receiver data.
@@ -241,12 +316,35 @@ func validWebhookPrefix(prefix string) bool {
 	return true
 }
 
-func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig) error {
+func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig, filters runtimeWebhookFilters) error {
 	if len(cfg.Secret) < 32 || len(cfg.Secret) > 256 {
 		return errors.New("secret must contain 32-256 bytes")
 	}
-	if len(cfg.Events) != 1 || cfg.Events[0] != "message.received" {
-		return errors.New("events must be [message.received]")
+	if len(cfg.Events) < 1 || len(cfg.Events) > 2 {
+		return errors.New("events must select message.received and/or connection.changed")
+	}
+	seen := make(map[string]bool)
+	for _, event := range cfg.Events {
+		if (event != "message.received" && event != "connection.changed") || seen[event] {
+			return errors.New("events must select message.received and/or connection.changed without duplicates")
+		}
+		seen[event] = true
+	}
+	for _, filter := range []struct {
+		value     *bool
+		effective *bool
+		denied    bool
+	}{
+		{cfg.ForwardSelf, &filters.ForwardSelf, w.options.DeniedFilters.ForwardSelf},
+		{cfg.ForwardChannels, &filters.ForwardChannels, w.options.DeniedFilters.ForwardChannels},
+		{cfg.ForwardBroadcasts, &filters.ForwardBroadcasts, w.options.DeniedFilters.ForwardBroadcasts},
+	} {
+		if filter.value != nil {
+			if *filter.value && filter.denied {
+				return errors.New("receiver filters cannot widen an explicit deployment false")
+			}
+			*filter.effective = *filter.value
+		}
 	}
 	if cfg.HeaderPrefix == "" {
 		cfg.HeaderPrefix = "X-Webhook"
@@ -265,11 +363,11 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 		w.drainLocked(w.generation, "configuration_changed")
 	}
 	child, cancel := context.WithCancel(w.ctx)
-	g := &runtimeWebhookGeneration{config: cfg, ctx: child, cancel: cancel, queue: make(chan runtimeWebhookDelivery, 256), delivery: make(chan struct{}, 1)}
+	g := &runtimeWebhookGeneration{config: cfg, filters: filters, ctx: child, cancel: cancel, queue: make(chan runtimeWebhookDelivery, 256), delivery: make(chan struct{}, 1)}
 	g.client = w.client(g, u)
 	sum := sha256.Sum256([]byte(cfg.Secret))
 	u.RawQuery, u.ForceQuery = "", false
-	w.state = runtimeWebhookState{URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8])}
+	w.state = runtimeWebhookState{runtimeWebhookFilters: filters, URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8])}
 	w.generation = g
 	go w.run(g)
 	return nil
@@ -293,6 +391,13 @@ func webhookDelivery(event runtimeWebhookEvent) (runtimeWebhookDelivery, error) 
 	}
 	event.ID = hex.EncodeToString(id)
 	body, err := json.Marshal(event)
+	if event.connection != nil {
+		body, err = json.Marshal(struct {
+			ID    string `json:"event_id"`
+			Event string `json:"event"`
+			*connectionPayload
+		}{event.ID, event.Event, event.connection})
+	}
 	if err != nil || len(body) > 64<<10 {
 		return runtimeWebhookDelivery{}, errors.New("event exceeds the 64 KiB payload limit")
 	}
@@ -307,6 +412,18 @@ func (w *runtimeWebhook) enqueue(event runtimeWebhookEvent, allowed bool) {
 	defer w.mu.Unlock()
 	if w.generation == nil {
 		return
+	}
+	if !w.subscribedLocked(event.Event) {
+		return
+	}
+	if event.Event == "message.received" && event.FromMe && !w.generation.filters.ForwardSelf {
+		return
+	}
+	if event.Event == "message.received" && event.Chat != "" {
+		chat, err := types.ParseJID(event.Chat)
+		if err != nil || !w.generation.filters.allows(chat, event.FromMe) {
+			return
+		}
 	}
 	if !w.state.Enabled {
 		w.dropLocked("disabled", 1)
@@ -533,7 +650,7 @@ func (b *Bridge) handleRuntimeWebhook(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "Expected one JSON object")
 			return
 		}
-		if err := b.RuntimeWebhook.configure(r.Context(), cfg); err != nil {
+		if err := b.RuntimeWebhook.configure(r.Context(), cfg, b.webhookFilters()); err != nil {
 			writeError(w, 400, err.Error())
 			return
 		}
