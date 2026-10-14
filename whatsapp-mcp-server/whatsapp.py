@@ -10,6 +10,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -217,7 +218,9 @@ def _connect_messages_db() -> sqlite3.Connection:
             "there, or the path is wrong. The path comes from WHATSAPP_DB_PATH, or from "
             "WHATSAPP_STORE_DIR/messages.db when that is unset",
         )
-    return _connect_read_only(MESSAGES_DB_PATH)
+    conn = _connect_read_only(MESSAGES_DB_PATH)
+    conn.create_function("search_fold", 1, _search_fold, deterministic=True)
+    return conn
 
 
 def _connect_whatsmeow_db() -> sqlite3.Connection:
@@ -2492,7 +2495,15 @@ class MessageFilters:
         return f"(messages.media_type IS NULL OR messages.media_type NOT IN ({placeholders}))", list(MEDIA_TYPES)
 
 
-_SUBSTRING_PREDICATE = "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)"
+def _search_fold(value: str | None) -> str:
+    """Case and accent folding for document filenames on the substring path."""
+    return "".join(c for c in unicodedata.normalize("NFD", value or "").casefold() if not unicodedata.combining(c))
+
+
+_SUBSTRING_PREDICATE = (
+    "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0 "
+    "OR (messages.media_type = 'document' AND instr(search_fold(messages.filename), search_fold(?)) > 0))"
+)
 
 
 @dataclass(frozen=True)
@@ -2631,11 +2642,11 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
             match_index=0,
         )
     if not transcripts:
-        return QueryPredicate(_SUBSTRING_PREDICATE, [query, query])
+        return QueryPredicate(_SUBSTRING_PREDICATE, [query, query, query])
     # No index to rank with: the set is right, the order stays newest-first.
     return QueryPredicate(
         f"({_SUBSTRING_PREDICATE} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))",
-        [query, query],
+        [query, query, query],
     )
 
 
@@ -5406,22 +5417,38 @@ def _coverage_by_chat(
 COVERAGE_AUDIO_MAX_ROWS = 20_000
 COVERAGE_AUDIO_MAX_CHATS = 200
 
-# Inbound, undeleted voice notes that carry a content hash: exactly what a
+# Undeleted voice notes that carry a content hash: exactly what a
 # transcription batch looks at (transcribe_worker._pending_rows). A row without
 # a hash cannot be keyed to a transcript note, so the worker can never drain it
 # and counting it would leave a backlog that never reaches zero. The status feed
 # is out for the same reason: the worker does not walk it (issue #447).
 _COVERAGE_AUDIO_WHERE = (
-    "messages.media_type = 'audio' AND messages.is_from_me = 0 "
+    "messages.media_type = 'audio' "
     "AND messages.deleted_at IS NULL AND messages.file_sha256 IS NOT NULL "
     f"AND messages.chat_jid <> '{STATUS_BROADCAST_JID}'"
 )
 
 
+INCLUDE_SENT_ENV = "TRANSCRIBE_ON_INGEST_INCLUDE_SENT"
+
+
+def ingest_include_sent(env: Mapping[str, str] | None = None) -> bool:
+    """The default-on sent-audio switch, shared by the worker and coverage."""
+    from tool_policy import parse_bool_env
+
+    source = os.environ if env is None else env
+    return parse_bool_env((source.get(INCLUDE_SENT_ENV) or "").strip() or "true", INCLUDE_SENT_ENV)
+
+
+def ingest_sent_clause(alias: str, include_sent: bool | None = None) -> str:
+    include_sent = ingest_include_sent() if include_sent is None else include_sent
+    return "1" if include_sent else f"{alias}.is_from_me = 0"
+
+
 def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any]) -> dict[str, int]:
     """The voice-note transcription backlog inside the same scope as the aggregates.
 
-    `messages` is every inbound voice note in scope; `transcribed`, `errors` and
+    `messages` is every eligible voice note in scope; `transcribed`, `errors` and
     `unavailable` the ones whose content hash already carries a `transcript` /
     `transcript_error` / `media_unavailable` note — notes.db is attached for the
     query instead of pulling every transcribed hash into the statement as
@@ -5447,7 +5474,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     import media_notes
     import media_remote
 
-    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE}"
+    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE} AND {ingest_sent_clause('messages')}"
     from runtime_settings import ingest_chat_clause
 
     clause += f" AND {ingest_chat_clause('messages.chat_jid')}"

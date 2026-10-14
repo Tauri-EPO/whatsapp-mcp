@@ -230,9 +230,10 @@ services:
       WHATSAPP_MEDIA_ROOTS: /app/outbox
       WHISPER_URL: ${WHISPER_URL:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-pt}
-      # Background transcription of inbound voice notes as they arrive. Off by
+      # Background transcription of received and sent voice notes as they arrive. Off by
       # default: it spends this container's CPU on whisper. Needs WHISPER_URL.
       TRANSCRIBE_ON_INGEST: ${TRANSCRIBE_ON_INGEST:-}
+      TRANSCRIBE_ON_INGEST_INCLUDE_SENT: ${TRANSCRIBE_ON_INGEST_INCLUDE_SENT:-true}
       TRANSCRIBE_MONTHLY_MAX_MINUTES: ${TRANSCRIBE_MONTHLY_MAX_MINUTES:-}
       TRANSCRIBE_CAP_SCOPE: ${TRANSCRIBE_CAP_SCOPE:-ingest}
       TRANSCRIBE_ON_INGEST_CHATS: ${TRANSCRIBE_ON_INGEST_CHATS:-all}

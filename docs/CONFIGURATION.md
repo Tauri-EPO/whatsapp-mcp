@@ -374,7 +374,8 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHISPER_TIMEOUT_S`    | `300`                                    | Per-transcription timeout |
 | `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
 | `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
-| `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe inbound voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
+| `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe received and sent voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
+| `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` | `true` | Include sent audio and its existing backlog, including linked-device history sync. False keeps inbound audio only; empty uses the default. Strict boolean parsing; chat filters, status exclusion and monthly quotas still apply. `coverage().audio` uses the same scope. |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` or `direct` (phone/LID one-to-one chats only). Set for both processes. Worker and `coverage().audio` share this scope; explicit group `transcribe_audio` remains available. Runtime key `transcription.ingest_chats` overrides it. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
@@ -1236,12 +1237,13 @@ does the walking:
 
 ```bash
 TRANSCRIBE_ON_INGEST=1
+TRANSCRIBE_ON_INGEST_INCLUDE_SENT=true # default; false keeps inbound audio only
 TRANSCRIBE_ON_INGEST_INTERVAL_S=300   # seconds between batches (minimum 5)
 TRANSCRIBE_ON_INGEST_BATCH=10         # voice notes per batch (maximum 200)
 TRANSCRIBE_ON_INGEST_FETCH=1          # also download uncached audio (off by default)
 ```
 
-Every interval it looks for **inbound** audio messages whose bytes are cached
+Every interval it looks for **received and sent** audio messages whose bytes are cached
 under the store directory and whose content hash has no `transcript` note yet,
 transcribes up to `TRANSCRIBE_ON_INGEST_BATCH` of them one at a time through the
 configured whisper backend, and stores the text in `notes.db` under exactly the
@@ -1249,6 +1251,13 @@ keys `transcribe_audio` writes (`transcript`, `transcript_lang`,
 `transcript_backend`). From there `list_messages(media_type="audio",
 include_transcripts=true)`, `get_media_notes` and `search_media_notes` read them
 back for free.
+
+Sent audio is included by default, including audio sent from another linked
+device and received through history sync. Existing sent rows without transcripts
+join the normal backlog automatically. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
+keeps only inbound audio; empty uses the default, and invalid boolean values
+stop startup. The chat filter, status exclusion and monthly quota apply to both
+directions, and `coverage().audio` uses the same selection.
 
 What to know before turning it on:
 

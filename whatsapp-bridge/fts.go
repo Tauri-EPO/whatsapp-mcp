@@ -1,6 +1,6 @@
 package main
 
-// Full-text index over messages.content.
+// Full-text index over message content and original document filenames.
 //
 // The MCP server's list_messages(query=...) used a substring scan
 // (instr()), which cannot fold accents ("orcamento" never finds "orçamento"),
@@ -28,27 +28,37 @@ import (
 )
 
 const messagesFTSTable = "messages_fts"
+const documentFilenameFTSMigration = "messages_fts_document_filename_v1"
 
 // ftsSchema creates the index and its sync triggers. The FTS table is an
-// external-content table over messages (content stays in one place; the index
+// external-content table over a messages view (content stays in one place; the index
 // only stores tokens). Triggers use the "delete" command form required by
 // external-content tables; a plain DELETE on the fts table would corrupt it.
 const ftsSchema = `
+	CREATE VIEW IF NOT EXISTS messages_fts_content AS
+		SELECT rowid, content,
+			CASE WHEN media_type = 'document' THEN filename ELSE '' END AS filename
+		FROM messages;
 	CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 		content,
-		content='messages',
+		filename,
+		content='messages_fts_content',
 		content_rowid='rowid',
 		tokenize='unicode61 remove_diacritics 2'
 	);
 	CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
-		INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		INSERT INTO messages_fts(rowid, content, filename)
+			VALUES (new.rowid, new.content, CASE WHEN new.media_type = 'document' THEN new.filename ELSE '' END);
 	END;
 	CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
-		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+		INSERT INTO messages_fts(messages_fts, rowid, content, filename)
+			VALUES ('delete', old.rowid, old.content, CASE WHEN old.media_type = 'document' THEN old.filename ELSE '' END);
 	END;
-	CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
-		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-		INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+	CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content, filename, media_type ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, content, filename)
+			VALUES ('delete', old.rowid, old.content, CASE WHEN old.media_type = 'document' THEN old.filename ELSE '' END);
+		INSERT INTO messages_fts(rowid, content, filename)
+			VALUES (new.rowid, new.content, CASE WHEN new.media_type = 'document' THEN new.filename ELSE '' END);
 	END;
 `
 
@@ -59,6 +69,7 @@ const ftsTeardown = `
 	DROP TRIGGER IF EXISTS messages_fts_ad;
 	DROP TRIGGER IF EXISTS messages_fts_au;
 	DROP TABLE IF EXISTS messages_fts;
+	DROP VIEW IF EXISTS messages_fts_content;
 `
 
 // sqliteHasFTS5 reports whether the connected SQLite build exposes the fts5
@@ -96,6 +107,21 @@ func ensureMessagesFTSCapability(db *sql.DB, available bool) (bool, error) {
 			}
 		}
 		return false, nil
+	}
+	// Rebuild existing archives and publish the marker atomically. The view
+	// excludes generated media names on both rebuild and trigger paths.
+	migrated, err := applyNamedMigration(db, documentFilenameFTSMigration, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(ftsTeardown + ftsSchema); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')`)
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("migrate document filename index: %w", err)
+	}
+	if migrated {
+		return true, nil
 	}
 	if _, err := db.Exec(ftsSchema); err != nil {
 		// Defensive: if creation fails halfway, make sure no trigger survives.

@@ -287,7 +287,8 @@ def coverage(
 
     audio is the voice-note side of the same scope: {messages, cached,
     transcribed, errors, unavailable, refused, backlog, backlog_cached, cached_examined} —
-    inbound voice notes stored (the status feed "status@broadcast" is not
+    received and sent voice notes stored (sent audio is excluded when
+    TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false; the status feed "status@broadcast" is not
     counted: no batch walks it), how many have their bytes cached, how many
     already have a transcript, a recorded failure (errors) or bytes no download
     brought here (unavailable: the sender's phone no longer has them, or the row
@@ -759,7 +760,8 @@ def list_messages(
                an error, not an empty page.
         exclude_chat_jid: Same shape, dropped from the result — the way to read
                everything except a few noisy chats
-        query: Search term to filter messages by content. Accent-insensitive and
+        query: Search message content, stored transcripts and original document
+               filenames (excluding generated image/audio/video names). Accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
                (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*'). Voice notes

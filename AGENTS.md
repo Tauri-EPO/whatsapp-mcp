@@ -151,7 +151,7 @@ whatsapp-mcp/
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
 │   ├── read_only.go            # WHATSAPP_READ_ONLY: 403 on every mutating /api/* endpoint
 │   ├── tool_policy.go          # WHATSAPP_ALLOW_TOOLS / _DENY_TOOLS: tool -> endpoint map, 403 on the rest
-│   ├── fts.go                  # FTS5 index over messages.content
+│   ├── fts.go                  # FTS5 index over content and document filenames
 │   ├── media_inflight.go       # one transfer per destination file; the other callers share its result
 │   ├── media_cap.go           # automatic download byte budget, shared-cache checks
 │   ├── media_length.go        # declared-length presence and the NULL migration
@@ -205,7 +205,7 @@ whatsapp-mcp/
 │   ├── untrusted.py            # @untrusted_content: the third-party-data sentence, name sanitisation, WHATSAPP_WRAP_UNTRUSTED
 │   ├── endpoint_cert.py        # WHATSAPP_PUBLIC_URL: TLS expiry of the published endpoint, cached
 │   ├── transcribe.py           # whisper.cpp backends for transcribe_audio
-│   ├── transcribe_worker.py    # TRANSCRIBE_ON_INGEST: background thread transcribing inbound voice notes
+│   ├── transcribe_worker.py    # TRANSCRIBE_ON_INGEST: background thread transcribing received and sent voice notes
 │   ├── audio.py                # ffmpeg helpers
 │   └── Dockerfile              # python:3.13-slim + ffmpeg + uv, http transport
 ├── docker-compose.yml          # bridge + mcp — docs/DOCKER.md (no whisper: WHISPER_URL points at a server you run)
@@ -469,7 +469,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHISPER_TIMEOUT_S` | `300` | Per-transcription timeout (seconds) |
 | `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
 | `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
-| `TRANSCRIBE_ON_INGEST` | *(unset = off)* | MCP-server-only: background thread that transcribes inbound voice notes as they arrive (`transcribe_worker.py`) instead of waiting for an agent to call `transcribe_audio`. Reads `messages.db`, writes the same `transcript` / `transcript_lang` / `transcript_backend` notes into `notes.db`, idempotent by sha256, concurrency one. Costs CPU on this machine; with no whisper backend configured it stays off with a warning, and so it does when the tool policy does not offer `transcribe_audio` (a policy that hides `download_media` only turns the fetch path off). The status feed (`status@broadcast`) is not walked: its voice notes are neither fetched nor transcribed in the background, whatever `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` says, and `coverage().audio` leaves them out (issue #447). Same strict boolean parse as `WHATSAPP_READ_ONLY` |
+| `TRANSCRIBE_ON_INGEST` | *(unset = off)* | MCP-server-only: background thread that transcribes received and sent voice notes as they arrive (`transcribe_worker.py`) instead of waiting for an agent to call `transcribe_audio`. Reads `messages.db`, writes the same `transcript` / `transcript_lang` / `transcript_backend` notes into `notes.db`, idempotent by sha256, concurrency one. Costs CPU on this machine; with no whisper backend configured it stays off with a warning, and so it does when the tool policy does not offer `transcribe_audio` (a policy that hides `download_media` only turns the fetch path off). The status feed (`status@broadcast`) is not walked: its voice notes are neither fetched nor transcribed in the background, whatever `WHATSAPP_MEDIA_AUTODOWNLOAD_STATUS` says, and `coverage().audio` leaves them out (issue #447). Same strict boolean parse as `WHATSAPP_READ_ONLY` |
+| `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` | `true` | Include sent audio, including linked-device history sync and existing untranscribed rows, in the ingest backlog and `coverage().audio`. False restores inbound-only transcription. Status, chat filters and monthly quotas still apply. Same strict boolean parse as `WHATSAPP_READ_ONLY`; empty uses the default. MCP-server-only. |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300` | Seconds between batches (values below 5 are raised to 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` preserves the existing audio scope; `direct` walks phone/LID one-to-one chats only. Runtime key `transcription.ingest_chats` overrides it through GET/PATCH `/operator/v1/settings`, stored in bridge-owned `messages.db`; worker and coverage share the filter. Set for both processes. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10` | Voice notes transcribed per batch (capped at 200). A file the backend cannot read gets a `transcript_error` note and is not tried again until that note is cleared; a backend that cannot be reached at all (`BackendUnavailableError`: refused, 502/503/504, a misrouted `WHISPER_URL`, no binary or model) writes no note, three of those in a row end the round with a warning, and the notes an older build wrote for such an outage are cleared when the worker starts |

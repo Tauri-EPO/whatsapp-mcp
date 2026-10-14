@@ -1,10 +1,14 @@
 """list_messages(query=...) against the bridge's FTS5 index, with substring fallback."""
 
+import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 
+import main
 import whatsapp
+from chat_policy import ChatPolicy
 from whatsapp import _fts_query_kind, _fts_quote_tokens
 
 SCHEMA = """
@@ -18,21 +22,10 @@ CREATE TABLE messages (
 """
 
 # Mirrors whatsapp-bridge/fts.go (the bridge owns the index; tests replay it).
-FTS_SCHEMA = """
-CREATE VIRTUAL TABLE messages_fts USING fts5(
-    content, content='messages', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
-);
-CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-END;
-CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-END;
-CREATE TRIGGER messages_fts_au AFTER UPDATE OF content ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
-    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-END;
-"""
+FTS_SCHEMA = re.search(
+    r"const ftsSchema = `([^`]+)`",
+    (Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "fts.go").read_text(encoding="utf-8"),
+).group(1)
 
 CHAT = "111@s.whatsapp.net"
 ROWS = [
@@ -77,6 +70,34 @@ def plain_db(tmp_path, monkeypatch):
 def ids(query, **kwargs):
     kwargs.setdefault("include_context", False)
     return [m["id"] for m in whatsapp.list_messages(query=query, **kwargs)]
+
+
+@pytest.mark.parametrize("with_fts", [True, False])
+def test_document_filename_search(tmp_path, monkeypatch, with_fts):
+    path = _make_db(tmp_path, monkeypatch, with_fts)
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename) "
+            "VALUES (?, ?, '111', '', '2026-01-01 00:00:00+00:00', 0, ?, ?)",
+            [(kind, CHAT, kind, "Relatório técnico.pdf") for kind in ("document", "image", "audio", "video")],
+        )
+    for query in ("relatorio", "RELATÓRIO", "tecnico"):
+        assert ids(query, sort_by="relevance") == ["document"]
+        assert whatsapp.count_messages(query=query) == 1
+        assert main.list_messages(query=query, count_only=True) == {"count": 1}
+    if with_fts:
+        for query in (
+            '"relatorio tecnico"',
+            "relator*",
+            "relatorio AND tecnico",
+            "relatorio NOT boleto",
+            "missing OR tecnico",
+        ):
+            assert ids(query) == ["document"]
+        assert ids("relatorio NOT tecnico") == []
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["222@s.whatsapp.net"]))
+    assert ids("relatorio") == []
+    assert main.list_messages(query="relatorio", count_only=True) == {"count": 0}
 
 
 class TestFtsSearch:
