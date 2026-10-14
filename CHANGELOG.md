@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.8.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.7.0...v2.8.0) (2026-10-14)
+
+
+### Features
+
+* add private operator chat search ([#729](https://github.com/Tauri-EPO/whatsapp-mcp/issues/729)) ([a748e24](https://github.com/Tauri-EPO/whatsapp-mcp/commit/a748e2444a7792281be2f5e376220d3e24b72ad6))
+* add runtime connection webhooks and receiver filters ([#725](https://github.com/Tauri-EPO/whatsapp-mcp/issues/725)) ([1851b79](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1851b79cd39e24e6d8f22c4426090cc25d929ffa))
+
 ## [2.7.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.6.0...v2.7.0) (2026-10-14)
 
 
