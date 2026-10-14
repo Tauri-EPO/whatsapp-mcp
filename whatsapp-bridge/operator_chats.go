@@ -154,7 +154,7 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = rows.Close() }()
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
 	digits := operatorPhoneDigits(query)
-	chats := make([]operatorChat, 0, limit)
+	chats := make([]operatorChat, 0, 50)
 	for len(chats) < limit {
 		// Keep both archive and contact working sets bounded independently of
 		// archive size. At most 513 bound parameters, even with every alias.
