@@ -33,7 +33,7 @@ func (l connectionProblemLogger) Warnf(format string, args ...any) {
 		if code, ok := args[0].(int); ok {
 			if code != 500 && code != 503 {
 				l.bridge.recordGenericConnectFailureIf(code, l.active)
-				l.Logger.Infof("Generic connect failure (code %d); automatic reconnect continues", code)
+				l.Infof("Generic connect failure (code %d); automatic reconnect continues", code)
 				return
 			}
 			l.bridge.recordConnectionProblemIf(code, 0, 0, l.active)
