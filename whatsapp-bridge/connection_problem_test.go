@@ -21,7 +21,7 @@ import (
 )
 
 func TestPinnedLibraryServerFailuresReachDiagnostics(t *testing.T) {
-	for _, code := range []string{"413", "414", "499", "500", "503"} {
+	for _, code := range []string{"413", "414", "500", "503"} {
 		b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 		b.Client.Log = connectionProblemLogger{Logger: b.Log, bridge: b}
 		b.Client.DangerousInternals().HandleConnectFailure(b.ctx, &waBinary.Node{Tag: "failure", Attrs: waBinary.Attrs{"reason": code, "message": "fake diagnostic"}}) //nolint:staticcheck // Test the actual pinned protocol handler; production uses only the public Logger seam.
@@ -35,7 +35,9 @@ func TestPinnedLibraryServerFailuresReachDiagnostics(t *testing.T) {
 			t.Fatalf("protocol failure %s not captured: %+v", code, p)
 		}
 		metrics := b.renderMetrics()
-		if !strings.Contains(metrics, `whatsapp_bridge_connection_problem{kind="`+kind+`"} 1`) { t.Fatal("missing active diagnostic gauge") }
+		if !strings.Contains(metrics, `whatsapp_bridge_connection_problem{kind="`+kind+`"} 1`) {
+			t.Fatal("missing active diagnostic gauge")
+		}
 		if strings.Contains(metrics, "fake diagnostic") {
 			t.Fatal("server message leaked to metrics")
 		}
@@ -367,5 +369,36 @@ func TestPasskeyFailureDoesNotStartAnotherQRSequence(t *testing.T) {
 		if !errors.Is(err, errPairingOperator) || c.qrCalls != 1 || strings.Contains(err.Error(), "secret assertion") {
 			t.Fatalf("err=%v qrCalls=%d", err, c.qrCalls)
 		}
+	}
+}
+
+func TestGenericConnectFailureLoggerCapturesUnknownCode(t *testing.T) {
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	logger := connectionProblemLogger{Logger: b.Log, bridge: b}
+	logger.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", 499, "fake diagnostic")
+	p, _ := b.connectionSnapshot()
+	if p == nil || p.Kind != "connect_failure" || p.Code != 499 {
+		t.Fatalf("unknown failure=%+v", p)
+	}
+}
+
+func TestLegacyGenericConnectionProblemSurvivesUpgrade(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	unlinked := at.Add(-time.Hour)
+	legacy := &ConnectionProblem{Kind: "other", Code: 409, Since: at, UnlinkedAt: &unlinked, RevokedDevice: phonePN.String(), SessionRemoved: true}
+	if err := writeConnectionProblem(root, legacy); err != nil {
+		t.Fatal(err)
+	}
+	p, err := readConnectionProblem(root)
+	if err != nil {
+		t.Fatalf("valid legacy diagnostic rejected: %v", err)
+	}
+	if p.Kind != "connect_failure" || p.Code != legacy.Code || !p.Since.Equal(at) || p.UnlinkedAt == nil || !p.UnlinkedAt.Equal(unlinked) || p.RevokedDevice != legacy.RevokedDevice || !p.SessionRemoved {
+		t.Fatalf("legacy state changed: %+v", p)
 	}
 }

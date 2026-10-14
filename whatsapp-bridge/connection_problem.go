@@ -429,6 +429,11 @@ func readConnectionProblem(root *os.Root) (*ConnectionProblem, error) {
 		}
 	}
 	expected := classifyConnectionProblem(p.Code, p.TempBanReason, time.Hour, p.Since)
+	// Older bridges persisted generic diagnostics as "other". Keep their state
+	// readable on upgrade; only the classification name changes.
+	if p.Kind == "other" && expected.Kind == "connect_failure" {
+		p.Kind = expected.Kind
+	}
 	if p.Kind != expected.Kind || p.Kind == "temporarily_banned" && p.ExpiresAt == nil {
 		return nil, errors.New("invalid saved connection classification")
 	}
