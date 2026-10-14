@@ -29,6 +29,7 @@ import (
 type mediaDownloader func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error)
 
 type Bridge struct {
+	ProxyEnabled               bool
 	forceReconnect             atomic.Bool
 	connectionEventsMu         sync.Mutex
 	connectionEvents           sync.WaitGroup

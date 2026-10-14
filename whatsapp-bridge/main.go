@@ -226,6 +226,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	}
 
 	// Create client instance
+	factory = proxyClientFactory(factory, cfg.ProxyURL)
 	client := makeRuntimeClient(deviceStore, clientLog, factory)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
@@ -274,6 +275,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
 	bridge.clientFactory = factory
+	bridge.ProxyEnabled = cfg.ProxyURL != nil
 	bridge.MediaQuotaWarnPercent = cfg.MediaBackend.WarnPercent
 	if cfg.MediaBackend.Backend == "s3" {
 		if cfg.MediaBackend.plaintextRemote() {

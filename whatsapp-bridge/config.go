@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 const bridgePortEnv = "WHATSAPP_BRIDGE_PORT"
 
 type bridgeConfig struct {
+	ProxyURL                     *url.URL
 	MediaBackend                 mediaBackendConfig
 	Switches                     bridgeSwitches
 	Port                         int
@@ -69,6 +71,8 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 		}
 	}
 	var err error
+	cfg.ProxyURL, err = parseWhatsAppProxy(getenv)
+	collect(err)
 	cfg.MediaBackend, err = parseMediaBackend(getenv)
 	collect(err)
 	cfg.History, err = parseHistoryLimits(getenv)

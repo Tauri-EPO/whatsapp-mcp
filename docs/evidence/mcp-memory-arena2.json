@@ -1,0 +1,92 @@
+{
+  "image": "wamcp-lane-e-mcp:baseline",
+  "image_id": "sha256:419361e4fc3b7924cd7d45bc9072ee84a8e5ba14d5738e4cc01844b68baa6fd9",
+  "batch_calls": 100,
+  "synthetic_messages": 1000,
+  "arena_override": 2,
+  "samples": [
+    {
+      "stage": "idle_after_start",
+      "cgroup_version": 1,
+      "current_bytes": 77647872,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 72691712,
+      "anon_source": "total_rss",
+      "file_bytes": 1216512,
+      "threads": 2,
+      "rss_bytes": 95969280
+    },
+    {
+      "stage": "after_first_tool",
+      "cgroup_version": 1,
+      "current_bytes": 81207296,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 75784192,
+      "anon_source": "total_rss",
+      "file_bytes": 1216512,
+      "threads": 4,
+      "rss_bytes": 99315712
+    },
+    {
+      "stage": "after_fixed_batch",
+      "cgroup_version": 1,
+      "current_bytes": 81604608,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 76443648,
+      "anon_source": "total_rss",
+      "file_bytes": 1216512,
+      "threads": 4,
+      "rss_bytes": 99856384
+    }
+  ],
+  "import_profile": [
+    {
+      "module": "mcp.server",
+      "rss_bytes": 73506816,
+      "delta_bytes": 53702656
+    },
+    {
+      "module": "http_oauth",
+      "rss_bytes": 78290944,
+      "delta_bytes": 4784128
+    },
+    {
+      "module": "main",
+      "rss_bytes": 96583680,
+      "delta_bytes": 18292736
+    },
+    {
+      "optional_at_startup": [
+        "PIL.Image"
+      ]
+    },
+    {
+      "module": "PIL.Image",
+      "rss_bytes": 96583680,
+      "delta_bytes": 0
+    },
+    {
+      "module": "pypdfium2",
+      "rss_bytes": 99680256,
+      "delta_bytes": 3096576
+    },
+    {
+      "module": "openpyxl",
+      "rss_bytes": 107880448,
+      "delta_bytes": 8200192
+    },
+    {
+      "module": "docx",
+      "rss_bytes": 110313472,
+      "delta_bytes": 2433024
+    },
+    {
+      "loaded_optional": [
+        "PIL.Image",
+        "pypdfium2",
+        "openpyxl",
+        "docx"
+      ]
+    }
+  ]
+}

@@ -68,6 +68,7 @@ whatsapp-mcp/
 │   ├── snapshot_space_windows.go # snapshot free space and publication on Windows
 │   ├── operator_session_read.go  # bounded archive-reader cancellation before operator logout
 │   ├── operator_config.go      # bounded operator configuration, token-file checks and single-interface bind
+│   ├── proxy.go                # optional WhatsApp-only egress proxy, private URL and log redaction
 │   ├── operator_probe.go        # credential-free argv/output for the operator smoke probe
 │   ├── operator_pairing.go     # HTTP pairing state, QR/code, explicit restart and passkey actions
 │   ├── operator_logout.go      # bounded operator unlink, local session wipe and durable idle state
@@ -357,6 +358,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `WHATSAPP_PROXY_URL` | empty (SDK defaults) | Explicit socks5:// (port required), http:// or https:// egress proxy for WhatsApp pre/post-login websocket and media upload/download only. Never REST/operator/admin, webhook, S3 or transcription clients. Health reports only proxy_enabled. |
+| `WHATSAPP_PROXY_URL_FILE` | empty | Alternative owner-only regular proxy URL file, at most 4096 bytes; symlinks refused. Set URL or file, never both. Credentials are never logged. Mount separately into the bridge. |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable private operator webhook configuration; independent of the legacy WEBHOOK_ENABLED/WEBHOOK_URL sender. Process-local configuration, HMAC signatures and no media bytes. |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; address restrictions still apply. |
 | `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the runtime receiver after 1-100 consecutive failed subscribed message, connection or storage events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |

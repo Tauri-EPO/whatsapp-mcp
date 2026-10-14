@@ -2,6 +2,19 @@
 
 Every environment variable and CLI flag, plus the transport, authentication and allow-list semantics behind them. Compose users set these in `.env` (see [DOCKER.md](DOCKER.md)); laptop users export them before launching (see [LAPTOP.md](LAPTOP.md)). `AGENTS.md` section 7 is the agent-facing copy of the same table; keep both in sync when adding a variable.
 
+## WhatsApp egress proxy
+
+| Variable | Default | Behavior |
+|---|---|---|
+| `WHATSAPP_PROXY_URL` | empty | Explicit `socks5://host:port`, `http://host[:port]` or `https://host[:port]`, optionally with percent-encoded credentials. WhatsApp pre/post-login websocket and media download/upload only. |
+| `WHATSAPP_PROXY_URL_FILE` | empty | Private owner-only regular file, at most 4096 bytes; no symlink. Set URL or file, never both. Mount into bridge separately. |
+
+The egress proxy never changes REST, operator or MCP-admin listeners, MCP-to-bridge
+requests, webhook destinations, S3, transcription or OAuth clients. Empty keeps
+the pinned SDK's existing behavior (including its standard environment proxy
+defaults). Malformed URLs/schemes stop startup in the single configuration
+diagnostic. Health exposes only `proxy_enabled`, never an address or credential.
+
 ## Runtime message webhook
 
 Set `WHATSAPP_WEBHOOK_RUNTIME=true` and enable the private operator listener to

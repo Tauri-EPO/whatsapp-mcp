@@ -1,0 +1,90 @@
+{
+  "image": "wamcp-lane-e-mcp:after",
+  "image_id": "sha256:bc8b03a38cefc52fc31e44985b64609ade53a9aa8e563f65045588218e68cefe",
+  "batch_calls": 100,
+  "synthetic_messages": 1000,
+  "arena_override": null,
+  "samples": [
+    {
+      "stage": "idle_after_start",
+      "cgroup_version": 1,
+      "current_bytes": 77254656,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 72069120,
+      "anon_source": "total_rss",
+      "file_bytes": 1409024,
+      "threads": 2,
+      "rss_bytes": 94842880
+    },
+    {
+      "stage": "after_first_tool",
+      "cgroup_version": 1,
+      "current_bytes": 79335424,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 73936896,
+      "anon_source": "total_rss",
+      "file_bytes": 1409024,
+      "threads": 4,
+      "rss_bytes": 96432128
+    },
+    {
+      "stage": "after_fixed_batch",
+      "cgroup_version": 1,
+      "current_bytes": 79654912,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 74272768,
+      "anon_source": "total_rss",
+      "file_bytes": 1409024,
+      "threads": 4,
+      "rss_bytes": 96972800
+    }
+  ],
+  "import_profile": [
+    {
+      "module": "mcp.server",
+      "rss_bytes": 73740288,
+      "delta_bytes": 53862400
+    },
+    {
+      "module": "http_oauth",
+      "rss_bytes": 78565376,
+      "delta_bytes": 4825088
+    },
+    {
+      "module": "main",
+      "rss_bytes": 95645696,
+      "delta_bytes": 17080320
+    },
+    {
+      "optional_at_startup": []
+    },
+    {
+      "module": "PIL.Image",
+      "rss_bytes": 97488896,
+      "delta_bytes": 1843200
+    },
+    {
+      "module": "pypdfium2",
+      "rss_bytes": 100491264,
+      "delta_bytes": 3002368
+    },
+    {
+      "module": "openpyxl",
+      "rss_bytes": 108154880,
+      "delta_bytes": 7663616
+    },
+    {
+      "module": "docx",
+      "rss_bytes": 110587904,
+      "delta_bytes": 2433024
+    },
+    {
+      "loaded_optional": [
+        "PIL.Image",
+        "pypdfium2",
+        "openpyxl",
+        "docx"
+      ]
+    }
+  ]
+}

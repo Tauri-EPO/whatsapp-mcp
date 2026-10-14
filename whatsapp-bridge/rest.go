@@ -248,6 +248,7 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		status = "disconnected"
 	}
 	body := map[string]interface{}{
+		"proxy_enabled":  b.ProxyEnabled,
 		"status":         status,
 		"connected":      connected,
 		"paired":         paired,

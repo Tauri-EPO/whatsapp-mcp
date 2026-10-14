@@ -709,6 +709,7 @@ class MessageContext:
 # whatsapp.db for the LID map and again for contacts). Names change rarely, so
 # results are cached per process for NAME_CACHE_TTL_S; tests reset the cache.
 NAME_CACHE_TTL_S = 300.0
+NAME_CACHE_MAX_ENTRIES = 4096
 _name_cache: dict[tuple[str, str], tuple[Any, float]] = {}
 _name_cache_lock = threading.Lock()
 
@@ -727,7 +728,15 @@ def _cache_get(kind: str, key: str) -> tuple[bool, Any]:
 
 def _cache_put(kind: str, key: str, value: Any) -> Any:
     with _name_cache_lock:
-        _name_cache[(kind, key)] = (value, time.monotonic() + NAME_CACHE_TTL_S)
+        now = time.monotonic()
+        for expired in [entry for entry, (_, expires) in _name_cache.items() if expires <= now]:
+            del _name_cache[expired]
+        # Updating a key makes it the newest admission; bound even workloads
+        # that never look up an old key again.
+        _name_cache.pop((kind, key), None)
+        while len(_name_cache) >= NAME_CACHE_MAX_ENTRIES:
+            del _name_cache[next(iter(_name_cache))]
+        _name_cache[(kind, key)] = (value, now + NAME_CACHE_TTL_S)
     return value
 
 
