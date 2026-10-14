@@ -555,7 +555,10 @@ func TestLocalQuotaExpiredAutomaticTransferReleasesClientGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { release(); b.mediaTransfers.wait() }()
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	// The deadline is the subject of this test, so it stays a real one, but it
+	// must leave the detached transfer time to take the gate first: one second
+	// was missed under QEMU (issue #735).
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
