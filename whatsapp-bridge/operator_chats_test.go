@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 func operatorChatsServer(t *testing.T, b *Bridge) *httptest.Server {
@@ -50,21 +52,22 @@ func operatorChatsRequest(t *testing.T, server *httptest.Server, query string) (
 	return response.StatusCode, data, body.Chats
 }
 
-func TestOperatorChatsIgnoresBothAllowListsAndReturnsOnlyIdentity(t *testing.T) {
+func TestOperatorChatsIgnoresRuntimeAllowListWithinDeployList(t *testing.T) {
 	for _, runtime := range []bool{false, true} {
 		t.Run(fmt.Sprintf("runtime=%v", runtime), func(t *testing.T) {
 			b := newSettingsBridge(t) // real SQLite archive on disk
-			b.Policy = parseChatPolicy("5511888888888@s.whatsapp.net")
+			const deploy = "5511888888888@s.whatsapp.net,5511999999999@s.whatsapp.net"
 			var err error
 			b.RuntimeDefaults, err = runtimeDefaults(func(name string) string {
 				if name == chatPolicyEnv {
-					return "5511888888888@s.whatsapp.net"
+					return deploy
 				}
 				return ""
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(deploy)) // as wired in production
 			if runtime {
 				err := b.patchRuntimeSettings(context.Background(), map[string]json.RawMessage{"chats.allowed": json.RawMessage(`["5511888888888@s.whatsapp.net"]`)}, []string{"chats.allowed"})
 				if err != nil {
@@ -72,11 +75,15 @@ func TestOperatorChatsIgnoresBothAllowListsAndReturnsOnlyIdentity(t *testing.T) 
 				}
 			}
 			const outside = "5511999999999@s.whatsapp.net"
-			if b.runtimeChatPolicy(b.Policy).Allows(outside) {
-				t.Fatal("fixture did not enforce the allow-list")
+			if b.Policy.Allows(outside) != !runtime {
+				t.Fatal("fixture did not enforce the runtime allow-list")
 			}
 			stamp := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 			if err := b.Store.StoreChat(outside, "Alice Archive", stamp); err != nil {
+				t.Fatal(err)
+			}
+			// Outside the deploy list: runtime could never allow it, so never shown.
+			if err := b.Store.StoreChat("5511777777777@s.whatsapp.net", "Alice Elsewhere", stamp); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := b.Store.db.Exec(`INSERT INTO messages(id,chat_jid,content,media_type,filename,url) VALUES('private',?,'PRIVATE-MESSAGE-TEXT','image','PRIVATE-MEDIA-PATH','PRIVATE-MEDIA-URL')`, outside); err != nil {
@@ -85,6 +92,9 @@ func TestOperatorChatsIgnoresBothAllowListsAndReturnsOnlyIdentity(t *testing.T) 
 			audit := &recordingLogger{}
 			b.Log = audit
 			server := operatorChatsServer(t, b)
+			if status, _, chats := operatorChatsRequest(t, server, "?query=alice"); status != 200 || len(chats) != 1 || chats[0].JID != outside {
+				t.Fatalf("deploy allow-list not applied: status=%d chats=%+v", status, chats)
+			}
 			status, data, chats := operatorChatsRequest(t, server, "?query=alice%20archive")
 			if status != 200 || len(chats) != 1 || chats[0].JID != outside || chats[0].Name != "Alice Archive" || chats[0].IsGroup || chats[0].LastMessageTime == nil || !chats[0].LastMessageTime.Equal(stamp) {
 				t.Fatalf("status=%d chats=%+v", status, chats)
@@ -109,10 +119,10 @@ func TestOperatorChatsIgnoresBothAllowListsAndReturnsOnlyIdentity(t *testing.T) 
 				t.Fatal("message/media data leaked")
 			}
 			logs := audit.String()
-			if !strings.Contains(logs, "GET /operator/v1/chats") || !strings.Contains(logs, "results=1") {
-				t.Fatal("missing identity-only audit", logs)
+			if !strings.Contains(logs, "[DEBUG] Operator GET /operator/v1/chats") || !strings.Contains(logs, "results=1") || strings.Contains(logs, "[INFO]") {
+				t.Fatal("search audit is not per-request DEBUG", logs)
 			}
-			for _, secret := range []string{"alice", "Alice", outside, "PRIVATE-", fakeOperatorToken} {
+			for _, secret := range []string{"alice", "Alice", outside, "5511777777777", "PRIVATE-", fakeOperatorToken} {
 				if strings.Contains(logs, secret) {
 					t.Fatal("query, name or data leaked into audit")
 				}
@@ -385,7 +395,7 @@ func TestOperatorChatsNoAssistantMetricsOrMCPActivityAndDenyPaths(t *testing.T) 
 	if withoutUptime(before) != withoutUptime(b.renderMetrics()) {
 		t.Fatal("operator search changed bridge metrics")
 	}
-	for range 60 {
+	for range 121 {
 		status, _, _ := operatorChatsRequest(t, server, "")
 		if status == 429 {
 			return
@@ -395,4 +405,176 @@ func TestOperatorChatsNoAssistantMetricsOrMCPActivityAndDenyPaths(t *testing.T) 
 		}
 	}
 	t.Fatal("chat route bypassed operator token rate limit")
+}
+
+func operatorChatsContacts(t *testing.T, b *Bridge, fixture string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "contacts.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TABLE whatsmeow_contacts(our_jid TEXT,their_jid TEXT,full_name TEXT,push_name TEXT,first_name TEXT,business_name TEXT,PRIMARY KEY(our_jid,their_jid));
+		CREATE TABLE whatsmeow_lid_map(lid TEXT PRIMARY KEY,pn TEXT UNIQUE NOT NULL);` + fixture); err != nil {
+		t.Fatal(err)
+	}
+	if b.Store.waDB, err = openWhatsmeowContactsDB(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The SDK mutates client.Store.ID during pairing/logout: the account comes
+// from the bridge's atomic snapshot (run under -race).
+func TestOperatorChatsAccountFromAtomicDeviceSnapshot(t *testing.T) {
+	b := newSettingsBridge(t)
+	operatorChatsContacts(t, b, `INSERT INTO whatsmeow_contacts VALUES('5511000000000:1@s.whatsapp.net','5511888888888@s.whatsapp.net','Bob',NULL,NULL,NULL);
+		INSERT INTO whatsmeow_contacts VALUES('5511999999999:1@s.whatsapp.net','5511888888888@s.whatsapp.net','Alice',NULL,NULL,NULL);`)
+	if err := b.Store.StoreChat("5511888888888@s.whatsapp.net", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	device := types.NewADJID("5511999999999", 0, 1)
+	account := device.String()
+	b.runtimeClient.Store(b.Client)
+	b.runtimePaired.Store(true)
+	b.runtimeDeviceID.Store(&account)
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				b.Client.Store.ID = nil
+				b.Client.Store.ID = &device
+			}
+		}
+	}()
+	for range 20 {
+		w := httptest.NewRecorder()
+		b.handleOperatorChats(w, httptest.NewRequest("GET", "/operator/v1/chats", nil))
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"name":"Alice"`) {
+			close(done)
+			<-stopped
+			t.Fatalf("status=%d account not taken from the device snapshot", w.Code)
+		}
+	}
+	close(done)
+	<-stopped
+}
+
+func TestOperatorChatsUnreadableStampIsUnknown(t *testing.T) {
+	b := newSettingsBridge(t)
+	if err := b.Store.StoreChat("5511999999999@s.whatsapp.net", "Alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Migrations leave unreadable legacy values on purpose.
+	if _, err := b.Store.db.Exec(`UPDATE chats SET last_message_time='not-a-time'`); err != nil {
+		t.Fatal(err)
+	}
+	status, _, chats := operatorChatsRequest(t, operatorChatsServer(t, b), "")
+	if status != 200 || len(chats) != 1 || chats[0].LastMessageTime != nil {
+		t.Fatalf("status=%d chats=%+v", status, chats)
+	}
+}
+
+func TestOperatorChatsWhitespaceNameNinthDigitAndUnicodeFolding(t *testing.T) {
+	b := newSettingsBridge(t)
+	for _, row := range []struct{ jid, name string }{
+		{"551188887777@s.whatsapp.net", "Old Mobile"}, {"5511988887777@s.whatsapp.net", "New Mobile"},
+		{"5511999999999@s.whatsapp.net", "   "}, {"120363000000000001@g.us", "Café Grupo"},
+		{"120363000000000002@g.us", "ΟΔΟΣ"}, {"120363000000000003@g.us", ""},
+	} {
+		if err := b.Store.StoreChat(row.jid, row.name, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := operatorChatsServer(t, b)
+	for _, tc := range []struct{ query, want string }{
+		{"+55 11 98888-7777", "Old Mobile"}, {"551188887777", "New Mobile"}, {"11988887777", "Old Mobile"},
+		{"5511999999999", "5511999999999"}, {"café", "Café Grupo"}, {"οδος", "ΟΔΟΣ"},
+		{"120363000000000003", "120363000000000003"}, // a blank group shows, and matches, its JID user
+	} {
+		status, _, chats := operatorChatsRequest(t, server, "?query="+url.QueryEscape(tc.query))
+		found := false
+		for _, chat := range chats {
+			found = found || chat.Name == tc.want
+		}
+		if status != 200 || !found {
+			t.Errorf("query=%q status=%d chats=%+v", tc.query, status, chats)
+		}
+	}
+}
+
+// Contact lookups must not wait on a messages.db connection held by the scan.
+func TestOperatorChatsReleasesArchiveConnectionBeforeContactLookups(t *testing.T) {
+	b := newSettingsBridge(t)
+	if _, err := b.Store.db.Exec(`CREATE TABLE whatsmeow_contacts(our_jid TEXT,their_jid TEXT,full_name TEXT,push_name TEXT,first_name TEXT,business_name TEXT);
+		CREATE TABLE whatsmeow_lid_map(lid TEXT,pn TEXT);
+		INSERT INTO whatsmeow_contacts VALUES('self','5511999999999@s.whatsapp.net','Alice',NULL,NULL,NULL);`); err != nil {
+		t.Fatal(err)
+	}
+	// More rows than one name-lookup page, so the scan is still open then.
+	for i := range 300 {
+		if err := b.Store.StoreChat(fmt.Sprintf("%d@s.whatsapp.net", i+1), "", time.Unix(int64(i+1), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Store.StoreChat("5511999999999@s.whatsapp.net", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.Store.db.SetMaxOpenConns(1) // the contacts handle shares the archive pool
+	b.Store.waDB = b.Store.db
+	t.Cleanup(func() { b.Store.waDB = nil })
+	status, _, chats := operatorChatsRequest(t, operatorChatsServer(t, b), "?query=alice")
+	if status != 200 || len(chats) != 1 || chats[0].Name != "Alice" {
+		t.Fatalf("search held its archive connection: status=%d chats=%+v", status, chats)
+	}
+}
+
+func TestOperatorChatsUnfilteredScanReadsOnlyTheLimit(t *testing.T) {
+	b := newSettingsBridge(t)
+	for i := range 300 {
+		if err := b.Store.StoreChat(fmt.Sprintf("%d@s.whatsapp.net", i+1), "", time.Unix(int64(i+1), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := b.Store.operatorChatRows(context.Background(), chatPolicy{}, "", 20)
+	if err != nil || len(rows) != 20 || rows[0].JID != "300@s.whatsapp.net" {
+		t.Fatalf("unfiltered page not bounded by limit: %d %v", len(rows), err)
+	}
+}
+
+func TestOperatorChatsOwnRateLimitAndAggregatedAudit(t *testing.T) {
+	b := newSettingsBridge(t)
+	server := operatorChatsServer(t, b)
+	for range 60 {
+		if status, _, _ := operatorChatsRequest(t, server, ""); status != 200 {
+			t.Fatal("search refused within its budget", status)
+		}
+	}
+	req, _ := http.NewRequest("GET", server.URL+"/operator/v1/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+fakeOperatorToken)
+	response, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatal("searches exhausted the budget of the other operator routes")
+	}
+	logs := &recordingLogger{}
+	audit := &operatorSearchAudit{interval: 20 * time.Millisecond, logger: logs}
+	for range 3 {
+		audit.record()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "[INFO] Operator GET /operator/v1/chats requests=3 in the last minute") {
+		if time.Now().After(deadline) {
+			t.Fatal("no aggregated INFO audit", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

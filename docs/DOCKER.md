@@ -229,10 +229,13 @@ enabled. These examples use native/backend clients on the private network.
 
 For allow-list pickers, `GET /operator/v1/chats?query=Alice&limit=20` searches
 the local archive on this same private listener. It intentionally ignores
-deploy `WHATSAPP_ALLOWED_CHATS` and runtime `chats.allowed`. The response contains
+runtime `chats.allowed` and stays inside deploy `WHATSAPP_ALLOWED_CHATS`, the
+most runtime can ever allow. The response contains
 only JID, display name, group flag and last activity, never messages or media.
 The default limit is 20, maximum 50; sorting is latest activity first with JID
-as the tie-break. Its audit adds the result count and omits the query and names.
+as the tie-break. It has its own rate limits (120/minute per peer and for the
+token); each search is audited at DEBUG with the result count, and INFO
+gets a per-minute search count, never the query or names.
 It makes no MCP call and does not count as assistant activity. See
 [operator chat search](CONFIGURATION.md#operator-chat-search) for the response
 shape and name/phone matching rules.

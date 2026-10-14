@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Explicit identity-only projection: no message or media columns are read.
@@ -115,6 +118,77 @@ func (store *MessageStore) operatorContacts(ctx context.Context, chats []operato
 	}
 }
 
+// operatorFold is a case-insensitive, composition-insensitive comparison key:
+// "José" typed precomposed matches a name stored decomposed.
+func operatorFold(value string) string {
+	return norm.NFC.String(cases.Fold().String(norm.NFC.String(value)))
+}
+
+// A Brazilian mobile may be archived with or without its ninth digit; either
+// spelling of the query finds either spelling of the chat.
+func operatorChatMatches(chat operatorChat, query, digits string) bool {
+	if strings.Contains(operatorFold(chat.Name), query) {
+		return true
+	}
+	if digits == "" || chat.phone == "" {
+		return false
+	}
+	alternate := brMobileAlternate(digits)
+	for _, phone := range []string{chat.phone, brMobileAlternate(chat.phone)} {
+		if phone != "" && (strings.Contains(phone, digits) || alternate != "" && strings.Contains(phone, alternate)) {
+			return true
+		}
+	}
+	return false
+}
+
+// operatorChatRows copies the candidate identities into memory and closes the
+// cursor before any contact lookup, so a search holds one of the few
+// messages.db connections only for this scan. maxRows 0 reads every row.
+func (store *MessageStore) operatorChatRows(ctx context.Context, deploy chatPolicy, query string, maxRows int) ([]operatorChat, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT jid, COALESCE(name, ''), CAST(last_message_time AS TEXT)
+		FROM chats ORDER BY last_message_time DESC, jid ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var chats []operatorChat
+	for rows.Next() {
+		var chat operatorChat
+		var stamp sql.NullString
+		if err := rows.Scan(&chat.JID, &chat.Name, &stamp); err != nil {
+			return nil, err
+		}
+		if !deploy.Allows(chat.JID) {
+			continue
+		}
+		chat.IsGroup = strings.HasSuffix(chat.JID, "@g.us")
+		user, server, _ := strings.Cut(chat.JID, "@")
+		// A blank name shows the JID user; for a direct chat that is still a
+		// placeholder the contact lookup may replace.
+		if chat.Name = strings.TrimSpace(chat.Name); chat.Name == "" {
+			chat.Name = user
+		}
+		direct := server == "s.whatsapp.net" || server == "lid"
+		// Only a placeholder name can change through contacts, and only a
+		// direct chat has digits to match: skip rows that can never match.
+		if query != "" && !direct && !strings.Contains(operatorFold(chat.Name), query) {
+			continue
+		}
+		if stamp.Valid {
+			// Migrations deliberately leave unreadable legacy values: unknown.
+			if parsed, err := parseDBTime(stamp.String); err == nil {
+				chat.LastMessageTime = &parsed
+			}
+		}
+		chats = append(chats, chat)
+		if len(chats) == maxRows {
+			break
+		}
+	}
+	return chats, rows.Err()
+}
+
 func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 	limit := 20
 	if values, ok := r.URL.Query()["limit"]; ok {
@@ -136,56 +210,40 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	account := ""
-	if client := b.currentClient(); client != nil && client.Store != nil && client.Store.ID != nil {
-		account = client.Store.ID.String()
+	// The SDK mutates client.Store.ID during pairing and logout; read the
+	// bridge's atomic snapshot instead.
+	if id := b.runtimeDeviceID.Load(); id != nil && b.isPaired() {
+		account = *id
 	} else if b.Store.waDB != nil {
 		// Offline archives can still carry a phone book. Select its account once
 		// so every per-identity lookup can use the (our_jid, their_jid) key.
 		_ = b.Store.waDB.QueryRowContext(ctx, `SELECT our_jid FROM whatsmeow_contacts ORDER BY our_jid LIMIT 1`).Scan(&account)
 	}
-	// Intentionally bypass both deploy and runtime allow-lists: the operator
-	// uses these identities to choose which chats an assistant may access.
-	rows, err := b.Store.db.QueryContext(ctx, `SELECT jid, COALESCE(name, ''), CAST(last_message_time AS TEXT)
-		FROM chats ORDER BY last_message_time DESC, jid ASC`)
+	// Ignore only the runtime chats.allowed layer: it can only narrow the
+	// deploy WHATSAPP_ALLOWED_CHATS, so a chat outside the deploy list could
+	// never be allowed and stays outside this search too.
+	deploy := b.Policy
+	deploy.resolve = nil
+	query := operatorFold(strings.TrimSpace(r.URL.Query().Get("query")))
+	digits := operatorPhoneDigits(query)
+	// Without a query every row matches, so read and resolve only the page
+	// asked for. With one, resolve names in pages of 256 identities (at most
+	// 513 bound parameters, even with every alias).
+	page, maxRows := 256, 0
+	if query == "" {
+		page, maxRows = limit, limit
+	}
+	candidates, err := b.Store.operatorChatRows(ctx, deploy, query, maxRows)
 	if err != nil {
 		writeError(w, 503, "Chat archive unavailable")
 		return
 	}
-	defer func() { _ = rows.Close() }()
-	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
-	digits := operatorPhoneDigits(query)
 	chats := make([]operatorChat, 0, 50)
-	for len(chats) < limit {
-		// Keep both archive and contact working sets bounded independently of
-		// archive size. At most 513 bound parameters, even with every alias.
-		page := make([]operatorChat, 0, 256)
-		for len(page) < 256 && rows.Next() {
-			var chat operatorChat
-			var stamp sql.NullString
-			if err := rows.Scan(&chat.JID, &chat.Name, &stamp); err != nil {
-				writeError(w, 503, "Chat archive unavailable")
-				return
-			}
-			chat.IsGroup = strings.HasSuffix(chat.JID, "@g.us")
-			if stamp.Valid {
-				parsed, err := parseDBTime(stamp.String)
-				if err != nil {
-					writeError(w, 503, "Chat archive unavailable")
-					return
-				}
-				chat.LastMessageTime = &parsed
-			}
-			page = append(page, chat)
-		}
-		if len(page) == 0 {
-			break
-		}
-		b.Store.operatorContacts(ctx, page, account, digits != "")
-		for _, chat := range page {
-			if chat.Name == "" {
-				chat.Name, _, _ = strings.Cut(chat.JID, "@")
-			}
-			if query != "" && !strings.Contains(strings.ToLower(chat.Name), query) && (digits == "" || !strings.Contains(chat.phone, digits)) {
+	for start := 0; start < len(candidates) && len(chats) < limit; start += page {
+		batch := candidates[start:min(start+page, len(candidates))]
+		b.Store.operatorContacts(ctx, batch, account, digits != "")
+		for _, chat := range batch {
+			if query != "" && !operatorChatMatches(chat, query, digits) {
 				continue
 			}
 			chats = append(chats, chat)
@@ -194,7 +252,7 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if rows.Err() != nil || ctx.Err() != nil {
+	if ctx.Err() != nil {
 		writeError(w, 503, "Chat archive unavailable")
 		return
 	}

@@ -69,6 +69,35 @@ func (l *operatorLimiter) take(key string) int {
 	return 0
 }
 
+// operatorSearchAudit writes one INFO line per active minute instead of one
+// per search: a picker may search on every keystroke. Each search still logs
+// at DEBUG with its peer, status and result count.
+type operatorSearchAudit struct {
+	mu       sync.Mutex
+	count    int
+	interval time.Duration
+	logger   waLog.Logger
+}
+
+func (a *operatorSearchAudit) record() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.count++
+	if a.count == 1 {
+		time.AfterFunc(a.interval, a.flush)
+	}
+}
+
+func (a *operatorSearchAudit) flush() {
+	a.mu.Lock()
+	count := a.count
+	a.count = 0
+	a.mu.Unlock()
+	a.logger.Infof("Operator GET %s requests=%d in the last minute", operatorChatsPath, count)
+}
+
+const operatorChatsPath = "/operator/v1/chats"
+
 func operatorOriginAllowed(r *http.Request) bool {
 	origins := r.Header.Values("Origin")
 	if len(origins) == 0 {
@@ -166,6 +195,10 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		}
 	}
 	peers, token := newOperatorLimiter(120), newOperatorLimiter(60)
+	// Chat search has budgets of its own, so a picker searching on every
+	// keystroke never leaves pairing, settings or logout rate limited.
+	searchPeers, searchToken := newOperatorLimiter(120), newOperatorLimiter(120)
+	searchAudit := &operatorSearchAudit{interval: time.Minute, logger: logger}
 	limit := func(w http.ResponseWriter, delay int) {
 		w.Header().Set("Retry-After", strconv.Itoa(delay))
 		writeErrorCode(w, http.StatusTooManyRequests, "rate_limited", "Operator rate limit exceeded")
@@ -175,7 +208,11 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			writeErrorCode(w, http.StatusForbidden, "origin_forbidden", "Operator Origin must match this listener")
 			return
 		}
-		if delay := token.take("operator"); delay != 0 {
+		bucket := token
+		if r.URL.Path == operatorChatsPath {
+			bucket = searchToken
+		}
+		if delay := bucket.take("operator"); delay != 0 {
 			limit(w, delay)
 			return
 		}
@@ -191,7 +228,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && (r.URL.Path == "/operator/v1/export" || r.URL.Path == "/operator/v1/chats")) {
+		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && (r.URL.Path == "/operator/v1/export" || r.URL.Path == operatorChatsPath)) {
 			audited := false
 			audit := func() {
 				if audited {
@@ -202,21 +239,26 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 				if status == 0 {
 					status = http.StatusInternalServerError
 				}
-				count := ""
-				if r.URL.Path == "/operator/v1/chats" {
-					count = fmt.Sprintf(" results=%d", out.results)
-				}
-				if status == 401 || status == 403 || status == 429 {
-					logger.Debugf("Operator %s %s peer=%s outcome=%d%s", r.Method, r.URL.Path, peer, status, count)
+				if r.URL.Path == operatorChatsPath {
+					logger.Debugf("Operator %s %s peer=%s outcome=%d results=%d", r.Method, r.URL.Path, peer, status, out.results)
+					if status != 401 && status != 403 && status != 429 {
+						searchAudit.record()
+					}
+				} else if status == 401 || status == 403 || status == 429 {
+					logger.Debugf("Operator %s %s peer=%s outcome=%d", r.Method, r.URL.Path, peer, status)
 				} else {
-					logger.Infof("Operator %s %s peer=%s outcome=%d%s", r.Method, r.URL.Path, peer, status, count)
+					logger.Infof("Operator %s %s peer=%s outcome=%d", r.Method, r.URL.Path, peer, status)
 				}
 			}
 			defer audit()
 			// Logout can os.Exit after flushing, before the middleware returns.
 			out.onFlush = audit
 		}
-		if delay := peers.take(peer); delay != 0 {
+		limiter := peers
+		if r.URL.Path == operatorChatsPath {
+			limiter = searchPeers
+		}
+		if delay := limiter.take(peer); delay != 0 {
 			limit(out, delay)
 			return
 		}
