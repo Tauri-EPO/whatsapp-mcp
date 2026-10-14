@@ -87,7 +87,7 @@ def test_real_mcp_tcp_unix_parity_and_host_bearer_denials(tmp_path, paired_store
         WHATSAPP_MCP_TRANSPORT="http",
         WHATSAPP_MCP_HOST="localhost",
         WHATSAPP_MCP_PORT=str(port),
-        WHATSAPP_MCP_SOCKET=path,
+        WHATSAPP_MCP_SOCKET=f" {path} ",
         WHATSAPP_MCP_TOKEN=token,
         WHATSAPP_MCP_RATE_LIMIT="off",
         WHATSAPP_MCP_ALLOWED_HOSTS="localhost",
@@ -147,6 +147,12 @@ def test_real_mcp_tcp_unix_parity_and_host_bearer_denials(tmp_path, paired_store
                     "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers=ready_headers
                 )
                 assert tools.status_code == 200 and "list_chats" in tools.text
+        subprocess.run(
+            [sys.executable, "-c", "from mcp_config import probe_http_health; probe_http_health()"],
+            env=env,
+            cwd=Path(__file__).parents[1],
+            check=True,
+        )
     finally:
         process.terminate()
         process.communicate(timeout=10)

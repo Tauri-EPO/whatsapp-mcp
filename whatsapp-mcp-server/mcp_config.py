@@ -210,7 +210,7 @@ def bind_unix_socket(path: str) -> socket.socket:
     try:
         listener.bind(path)
         owned = os.lstat(path)
-        os.chmod(path, 0o660)
+        os.chmod(path, 0o660)  # nosec B103 - Unix socket group access is the explicit local proxy boundary.
         if getattr(os, "geteuid")() == 0:
             getattr(os, "chown")(path, 1000, 1000)
         elif getattr(os, "geteuid")() != 1000:
@@ -278,9 +278,9 @@ def probe_http_health():
     import http.client
 
     host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
-    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)  # nosec B104 - Outbound probe maps wildcard binds to loopback.
     connections = [http.client.HTTPConnection(host, resolve_port(os.getenv("WHATSAPP_MCP_PORT")), timeout=4)]
-    path = os.getenv("WHATSAPP_MCP_SOCKET")
+    path = (os.getenv("WHATSAPP_MCP_SOCKET") or "").strip()
     if path:
         connection = http.client.HTTPConnection("localhost", timeout=4)
 
