@@ -144,7 +144,8 @@ type runtimeWebhook struct {
 	// The latest recorded connection transition, delivered once to a
 	// configuration that newly selects connection.changed (a receiver configured
 	// after startup still learns that the bridge waits for pairing).
-	lastConnection *connectionPayload
+	lastConnection             *connectionPayload
+	storeWarning, quotaWarning *storageWarningPayload
 }
 
 func newRuntimeWebhook(ctx context.Context, options runtimeWebhookOptions) *runtimeWebhook {
@@ -239,7 +240,19 @@ func (b *Bridge) queueRuntimeStorageWarning(kind, state string) {
 	payload := storageWarningPayload{Type: kind, State: state, At: time.Now().UTC()}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.enqueueLocked(w.generation, runtimeWebhookEvent{Event: "storage.warning", storage: &payload})
+	var current *storageWarningPayload
+	if state != "" {
+		current = &payload
+	}
+	switch kind {
+	case "store":
+		w.storeWarning = current
+	case "media_quota":
+		w.quotaWarning = current
+	}
+	if current != nil {
+		w.enqueueLocked(w.generation, runtimeWebhookEvent{Event: "storage.warning", storage: current})
+	}
 }
 
 // Caller holds mu. Logs and process-lifetime counters never carry receiver data.
@@ -352,8 +365,8 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 		}
 		seen[event] = true
 	}
-	if (seen["connection.changed"] || seen["storage.warning"]) && w.options.DeniedConnection {
-		return errors.New("lifecycle events cannot widen an explicit deployment WEBHOOK_FORWARD_CONNECTION_EVENTS=false")
+	if seen["connection.changed"] && w.options.DeniedConnection {
+		return errors.New("connection.changed cannot widen an explicit deployment WEBHOOK_FORWARD_CONNECTION_EVENTS=false")
 	}
 	for _, filter := range []struct {
 		value     *bool
@@ -399,6 +412,11 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	w.generation = g
 	if replay && w.lastConnection != nil {
 		w.enqueueLocked(g, runtimeWebhookEvent{Event: "connection.changed", connection: w.lastConnection})
+	}
+	for _, warning := range []*storageWarningPayload{w.storeWarning, w.quotaWarning} {
+		if warning != nil {
+			w.enqueueLocked(g, runtimeWebhookEvent{Event: "storage.warning", storage: warning})
+		}
 	}
 	go w.run(g)
 	return nil

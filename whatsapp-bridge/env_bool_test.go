@@ -99,14 +99,12 @@ func TestParseBridgeSwitches(t *testing.T) {
 	// alone: the four above stay on, and none of them turns it on.
 	for _, on := range boolTrue {
 		sw, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: on}))
-		sw.Explicit = bridgeSwitchPresence{}
 		if err != nil || sw != (bridgeSwitches{ForwardSelf: true, MediaAutoDownload: true, WebhookEnabled: true, Metrics: true, ForwardStatus: true}) {
 			t.Errorf("%s=%s = %+v, %v; want it on and nothing else changed", webhookForwardStatusEnv, on, sw, err)
 		}
 	}
 	for _, off := range boolFalse {
 		sw, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: off}))
-		sw.Explicit = bridgeSwitchPresence{}
 		if err != nil || sw != all {
 			t.Errorf("%s=%s = %+v, %v; want the defaults", webhookForwardStatusEnv, off, sw, err)
 		}
@@ -198,7 +196,7 @@ func TestBridgeSwitchesRuntimeFloorsUseSingleParse(t *testing.T) {
 			t.Fatal(err)
 		}
 		explicit := strings.TrimSpace(raw) != ""
-		presence := bridgeSwitchPresence{explicit, explicit, explicit, explicit, explicit, explicit, explicit, explicit}
+		presence := bridgeSwitchPresence{ForwardSelf: explicit, ForwardChannels: explicit, ForwardBroadcasts: explicit, ForwardConnection: explicit}
 		if sw.Explicit != presence {
 			t.Fatalf("explicit for %q: %+v", raw, sw.Explicit)
 		}

@@ -59,6 +59,69 @@ func (b *Bridge) archiveStats(now time.Time) (messages, session, rows int64, war
 			b.connectionEventsMu.Unlock()
 		}
 	}
+	if !above && s.warning {
+		b.queueRuntimeStorageWarning("store", "")
+	}
 	s.warning = above
 	return s.messagesBytes, s.sessionBytes, s.rows, above
+}
+
+// Observe startup and every cache interval, even without health/metrics polling.
+// Sampling is conditional on configured thresholds, and remote reads are bounded.
+func (b *Bridge) observeStorageWarnings(now time.Time) {
+	if b.ctx.Err() != nil {
+		return
+	}
+	if b.HistoryLimits.WarnBytes > 0 {
+		b.archiveStats(now)
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	defer cancel()
+	quota, _, _, err := b.mediaQuotaSettings(ctx)
+	if err != nil {
+		return
+	}
+	if quota == 0 {
+		b.observeMediaQuota(0, 0)
+		return
+	}
+	usage, err := b.mediaStorage().Usage(ctx)
+	if err == nil {
+		b.observeMediaQuota(quota, usage.Bytes)
+	}
+}
+
+func (b *Bridge) startStorageWarnings() {
+	// Shutdown seals loop admission with the same lifecycle mutex before waiting.
+	b.connectionEventsMu.Lock()
+	defer b.connectionEventsMu.Unlock()
+	if b.connectionEventsClosing || b.ctx.Err() != nil {
+		return
+	}
+	b.storageWarningLoop.Add(1)
+	go func() {
+		defer b.storageWarningLoop.Done()
+		ticks := b.storageWarningTicks
+		if ticks == nil {
+			ticker := time.NewTicker(storeUsageTTL)
+			defer ticker.Stop()
+			ticks = ticker.C
+		}
+		b.observeStorageWarnings(time.Now())
+		for {
+			select {
+			case now, ok := <-ticks:
+				if !ok {
+					return
+				}
+				// Refresh at the exact TTL boundary, including a recently polled cache.
+				if b.storeStats != nil {
+					b.storeStats.invalidate()
+				}
+				b.observeStorageWarnings(now)
+			case <-b.ctx.Done():
+				return
+			}
+		}
+	}()
 }

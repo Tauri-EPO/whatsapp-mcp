@@ -20,7 +20,7 @@ be active. Cleanup removes the revoked session even while dialing stays blocked.
 | `temporarily_banned` (402) | Wait until `expires_at`; the bridge suspends all dials and resumes afterward. An unknown duration uses one hour. |
 | `client_outdated` (405) | Rebuild with an updated whatsmeow version; a changed build identity automatically clears this restriction at startup. |
 | `server_error` (5xx) | Check WhatsApp service availability; normal reconnect backoff continues. |
-| `other` | Inspect the numeric code; normal reconnect backoff continues. |
+| `other` | Carries the numeric connect-failure code, including 413/414 (CAT). Normal reconnect backoff continues; generic SDK failures stay in memory and log at INFO. |
 
 The last problem is saved as the owner-only file `store/.connection-problem`.
 It survives container restarts. Unlink information in this file prevents startup

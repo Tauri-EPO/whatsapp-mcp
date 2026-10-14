@@ -26,7 +26,7 @@ func TestPinnedLibraryServerFailuresReachDiagnostics(t *testing.T) {
 		b.Client.Log = connectionProblemLogger{Logger: b.Log, bridge: b}
 		b.Client.DangerousInternals().HandleConnectFailure(b.ctx, &waBinary.Node{Tag: "failure", Attrs: waBinary.Attrs{"reason": code, "message": "fake diagnostic"}}) //nolint:staticcheck // Test the actual pinned protocol handler; production uses only the public Logger seam.
 		p, _ := b.connectionSnapshot()
-		kind := "connect_failure"
+		kind := "other"
 		if code == "500" || code == "503" {
 			kind = "server_error"
 		}
@@ -70,7 +70,7 @@ func TestConnectionProblemsReachHTTPAndMetrics(t *testing.T) {
 	for _, tc := range []struct {
 		code int
 		kind string
-	}{{401, "unlinked"}, {402, "temporarily_banned"}, {403, "locked"}, {405, "client_outdated"}, {406, "banned"}, {503, "server_error"}, {409, "connect_failure"}} {
+	}{{401, "unlinked"}, {402, "temporarily_banned"}, {403, "locked"}, {405, "client_outdated"}, {406, "banned"}, {503, "server_error"}, {409, "other"}} {
 		t.Run(tc.kind, func(t *testing.T) {
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 			b.Exit = func(string, int) {}
@@ -377,7 +377,7 @@ func TestGenericConnectFailureLoggerCapturesUnknownCode(t *testing.T) {
 	logger := connectionProblemLogger{Logger: b.Log, bridge: b}
 	logger.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", 499, "fake diagnostic")
 	p, _ := b.connectionSnapshot()
-	if p == nil || p.Kind != "connect_failure" || p.Code != 499 {
+	if p == nil || p.Kind != "other" || p.Code != 499 {
 		t.Fatalf("unknown failure=%+v", p)
 	}
 }
@@ -398,7 +398,53 @@ func TestLegacyGenericConnectionProblemSurvivesUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid legacy diagnostic rejected: %v", err)
 	}
-	if p.Kind != "connect_failure" || p.Code != legacy.Code || !p.Since.Equal(at) || p.UnlinkedAt == nil || !p.UnlinkedAt.Equal(unlinked) || p.RevokedDevice != legacy.RevokedDevice || !p.SessionRemoved {
+	if p.Kind != "other" || p.Code != legacy.Code || !p.Since.Equal(at) || p.UnlinkedAt == nil || !p.UnlinkedAt.Equal(unlinked) || p.RevokedDevice != legacy.RevokedDevice || !p.SessionRemoved {
 		t.Fatalf("legacy state changed: %+v", p)
+	}
+}
+
+func TestGenericConnectDiagnosticsStayVolatileAndRollbackSafe(t *testing.T) {
+	for _, code := range []int{413, 414, 499, 500, 503} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			storeInScratch(t)
+			logger := installRecordingLogger(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), logger)
+			adapter := connectionProblemLogger{Logger: logger, bridge: b}
+			adapter.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", code, "fake diagnostic")
+			p, _ := b.connectionSnapshot()
+			want := "other"
+			if code == 500 || code == 503 {
+				want = "server_error"
+			}
+			if p == nil || p.Kind != want || p.Code != code {
+				t.Fatalf("diagnostic=%+v", p)
+			}
+			data, err := b.StoreRoot.ReadFile(connectionProblemFile)
+			if code != 500 && code != 503 {
+				if !os.IsNotExist(err) {
+					t.Fatalf("routine diagnostic persisted: %s %v", data, err)
+				}
+				if strings.Contains(logger.String(), "WARN") {
+					t.Fatalf("routine failure warned: %s", logger.String())
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				var legacy ConnectionProblem
+				if err := json.Unmarshal(data, &legacy); err != nil || legacy.Kind != "server_error" || legacy.Code != code || legacy.Since.IsZero() {
+					t.Fatalf("v2.7.0 reader rejects state: %s %v", data, err)
+				}
+			}
+		})
+	}
+	// The old event writer also remains compatible with v2.7.0's generic rule.
+	storeInScratch(t)
+	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.recordConnectionProblem(409, 0, 0)
+	data, err := b.StoreRoot.ReadFile(connectionProblemFile)
+	var legacy ConnectionProblem
+	if err != nil || json.Unmarshal(data, &legacy) != nil || legacy.Kind != "other" || legacy.Code != 409 {
+		t.Fatalf("legacy generic reader rejected new writer: %s %v", data, err)
 	}
 }

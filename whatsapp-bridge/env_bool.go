@@ -52,14 +52,14 @@ const (
 	webhookForwardConnectionEnv = "WEBHOOK_FORWARD_CONNECTION_EVENTS"
 )
 
+// Only switches that establish runtime floors need explicit-value presence.
+type bridgeSwitchPresence struct {
+	ForwardSelf, ForwardChannels, ForwardBroadcasts, ForwardConnection bool
+}
+
 // bridgeSwitches are the on/off knobs main() loads once, before anything is
 // opened, and hands to newBridge. The first four are on unless turned off; the
 // remaining feed switches are off unless asked for.
-type bridgeSwitchPresence struct {
-	ForwardSelf, MediaAutoDownload, WebhookEnabled, Metrics              bool
-	ForwardStatus, ForwardChannels, ForwardBroadcasts, ForwardConnection bool
-}
-
 type bridgeSwitches struct {
 	Explicit          bridgeSwitchPresence // Empty values use defaults and are not explicit.
 	ForwardSelf       bool                 // FORWARD_SELF: self-sent messages reach the webhook
@@ -84,17 +84,19 @@ func parseBridgeSwitches(getenv func(string) string) (bridgeSwitches, error) {
 		explicit *bool
 	}{
 		{forwardSelfEnv, true, &sw.ForwardSelf, &sw.Explicit.ForwardSelf},
-		{mediaAutoDownloadEnv, true, &sw.MediaAutoDownload, &sw.Explicit.MediaAutoDownload},
-		{webhookEnabledEnv, true, &sw.WebhookEnabled, &sw.Explicit.WebhookEnabled},
-		{metricsEnv, true, &sw.Metrics, &sw.Explicit.Metrics},
-		{webhookForwardStatusEnv, false, &sw.ForwardStatus, &sw.Explicit.ForwardStatus},
+		{mediaAutoDownloadEnv, true, &sw.MediaAutoDownload, nil},
+		{webhookEnabledEnv, true, &sw.WebhookEnabled, nil},
+		{metricsEnv, true, &sw.Metrics, nil},
+		{webhookForwardStatusEnv, false, &sw.ForwardStatus, nil},
 		{webhookForwardChannelsEnv, false, &sw.ForwardChannels, &sw.Explicit.ForwardChannels},
 		{webhookForwardBroadcastsEnv, false, &sw.ForwardBroadcasts, &sw.Explicit.ForwardBroadcasts},
 		{webhookForwardConnectionEnv, false, &sw.ForwardConnection, &sw.Explicit.ForwardConnection},
 	} {
 		raw := getenv(s.name)
 		value, err := parseBoolEnv(s.name, raw, s.def)
-		*s.explicit = strings.TrimSpace(raw) != ""
+		if s.explicit != nil {
+			*s.explicit = strings.TrimSpace(raw) != ""
+		}
 		if err != nil {
 			unreadable = append(unreadable, err.Error())
 		}
