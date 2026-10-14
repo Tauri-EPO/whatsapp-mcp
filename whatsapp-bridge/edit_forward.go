@@ -271,6 +271,14 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 		}
 		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {
+			if sent.ErrorCode != "" {
+				status := http.StatusBadRequest
+				if sent.ErrorCode == groupPermissionCode {
+					status = http.StatusForbidden
+				}
+				writeErrorCode(w, status, sent.ErrorCode, msg)
+				return
+			}
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Forward failed: " + msg})
 			return
 		}

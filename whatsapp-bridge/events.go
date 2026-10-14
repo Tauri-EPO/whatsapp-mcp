@@ -669,6 +669,10 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.GroupInfo:
+		if b.Store == nil || !b.Policy.Allows(v.JID.String()) {
+			return
+		}
+		b.applyGroupSettings(v)
 		if v.Name != nil && strings.TrimSpace(v.Name.Name) != "" {
 			if b.storeLive("group rename", "", v.JID.String(), func() error { return b.Store.RenameChat(v.JID.String(), v.Name.Name) }) {
 				b.Log.Infof("Group %s renamed to %q", v.JID, v.Name.Name)

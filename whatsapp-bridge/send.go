@@ -58,10 +58,12 @@ type sentMessage struct {
 	ID        string
 	ChatJID   string
 	Timestamp time.Time
+	ErrorCode string // Failure only; never a sent receipt.
 }
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
+	AsSticker       bool   `json:"as_sticker,omitempty"`
 	DryRun          bool   `json:"dry_run,omitempty"`
 	Recipient       string `json:"recipient"`
 	Message         string `json:"message"`
@@ -389,6 +391,17 @@ func resolveMentionJIDsContext(ctx context.Context, client *whatsmeow.Client, me
 type outboundUploadFunc func(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 type outboundSendFunc func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error)
 
+const groupPermissionCode = "group_admin_required"
+const groupPermissionMessage = "This group is restricted to admins; this account cannot send messages here"
+
+type stickerSendKey struct{}
+
+func sendWithPermissions(send func(context.Context, types.JID, *waE2E.Message, ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)) outboundSendFunc {
+	return func(ctx context.Context, jid types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
+		return send(ctx, jid, msg, whatsmeow.SendRequestExtra{CheckPermissions: true})
+	}
+}
+
 // sendBackend keeps Bridge defaults and injected calls on the shared sender.
 func (b *Bridge) sendBackend() sendFunc {
 	return func(ctx context.Context, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
@@ -417,7 +430,7 @@ func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersis
 	}
 	if network.send == nil {
 		network.send = func(ctx context.Context, jid types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
-			return b.currentClient().SendMessage(ctx, jid, msg)
+			return sendWithPermissions(b.currentClient().SendMessage)(ctx, jid, msg)
 		}
 	}
 	return sendWhatsAppMessageWithNetwork(ctx, b.currentClient(), b.Store, persist, recipient, message, mediaPath, quotedID, quotedSender, quotedContent, mentions, network)
@@ -495,9 +508,18 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
 		}
 
-		mediaType, mimeType, err := forwardMediaType(ctx, mediaPath, mediaData)
-		if err != nil {
-			return false, err.Error(), sentMessage{}
+		var mediaType whatsmeow.MediaType
+		var mimeType string
+		if asSticker, _ := ctx.Value(stickerSendKey{}).(bool); asSticker {
+			if !isWebP(mediaData) || message != "" {
+				return false, "as_sticker requires RIFF/WEBP bytes and no caption", sentMessage{ErrorCode: "invalid_argument"}
+			}
+			mediaType, mimeType = whatsmeow.MediaImage, "image/webp"
+		} else {
+			mediaType, mimeType, err = forwardMediaType(ctx, mediaPath, mediaData)
+			if err != nil {
+				return false, err.Error(), sentMessage{}
+			}
 		}
 
 		// Upload media to WhatsApp servers
@@ -531,6 +553,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	resp, err := network.send(ctx, recipientJID, msg)
 
 	if err != nil {
+		if errors.Is(err, whatsmeow.ErrNoPermissionInGroup) {
+			return false, groupPermissionMessage, sentMessage{ErrorCode: groupPermissionCode}
+		}
 		return false, fmt.Sprintf("Error sending message: %v", err), sentMessage{}
 	}
 	sent := sentMessage{ID: resp.ID, ChatJID: storageJID.String(), Timestamp: resp.Timestamp}
@@ -1091,6 +1116,10 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 		req.Recipient = typed.String()
 
+		if req.AsSticker && (req.Message != "" || req.MediaPath == "") {
+			writeError(w, http.StatusBadRequest, "as_sticker requires media and no caption")
+			return
+		}
 		if req.Message == "" && req.MediaPath == "" {
 			writeError(w, http.StatusBadRequest, "Message or media path is required")
 			return
@@ -1140,6 +1169,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			return
 		}
 
+		ctx = context.WithValue(ctx, stickerSendKey{}, req.AsSticker)
 		// Send the message
 		if req.DryRun {
 			writeJSON(w, 200, map[string]any{"success": true, "dry_run": true, "chat_jid": recipient})
@@ -1154,6 +1184,14 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			b.metrics.messagesSent.Add(1)
 		} else {
 			b.metrics.sendFailures.Add(1)
+		}
+		if !success && sent.ErrorCode != "" {
+			status := http.StatusBadRequest
+			if sent.ErrorCode == groupPermissionCode {
+				status = http.StatusForbidden
+			}
+			writeErrorCode(w, status, sent.ErrorCode, message)
+			return
 		}
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -425,5 +426,71 @@ func (b *Bridge) runGroupRosterSync() {
 		if more {
 			delay = groupRosterSyncRetryDelay
 		}
+	}
+}
+
+// applyGroupSettings retains only fields present in the event, with independent
+// event stamps so an older replay cannot replace a newer observed setting.
+func (b *Bridge) applyGroupSettings(v *events.GroupInfo) {
+	if b.Store == nil || !b.Policy.Allows(v.JID.String()) {
+		return
+	}
+	values := map[string]any{}
+	if v.Announce != nil {
+		values["announce"] = v.Announce.IsAnnounce
+	}
+	if v.Locked != nil {
+		values["locked"] = v.Locked.IsLocked
+	}
+	if v.MembershipApprovalMode != nil {
+		// The pinned SDK decoder always sets this event flag to true, even
+		// for group_join state=off. Fetch authoritative metadata instead.
+		if b.Store.groupInfo != nil {
+			ctx, cancel := context.WithTimeout(b.ctx, groupRosterFetchTimeout)
+			info, err := b.Store.groupInfo(ctx, v.JID)
+			cancel()
+			if err == nil && info != nil {
+				values["join_approval_required"] = info.IsJoinApprovalRequired
+			} else {
+				b.Log.Warnf("Could not refresh group join approval: %v", err)
+			}
+		}
+	}
+	if v.Topic != nil {
+		topic := v.Topic.Topic
+		if v.Topic.TopicDeleted {
+			topic = ""
+		}
+		values["topic"] = topic
+	}
+	if len(values) == 0 || !b.Policy.Allows(v.JID.String()) {
+		return
+	}
+	at := v.Timestamp
+	if at.IsZero() {
+		at = time.Now()
+	}
+	tx, err := b.Store.db.Begin()
+	if err != nil {
+		b.Log.Warnf("Failed to store group settings: %v", err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for field, value := range values {
+		// field is one of the fixed internal keys above, never event text.
+		column := "group_" + field
+		//nolint:gosec // Column names are the four fixed keys above; event values are bound parameters.
+		query := fmt.Sprintf(`INSERT INTO chats (jid, %[1]s, %[1]s_updated_at) VALUES (?, ?, ?)
+   ON CONFLICT(jid) DO UPDATE SET %[1]s=excluded.%[1]s, %[1]s_updated_at=excluded.%[1]s_updated_at
+   WHERE chats.%[1]s_updated_at IS NULL OR excluded.%[1]s_updated_at >= chats.%[1]s_updated_at`, column)
+		if _, err = tx.Exec(query, v.JID.String(), value, dbTime(at)); err != nil {
+			break
+		}
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		b.Log.Warnf("Failed to store group settings: %v", err)
 	}
 }

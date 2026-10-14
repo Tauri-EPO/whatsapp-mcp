@@ -4261,7 +4261,10 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
         )
         twins.merge([chat])
         _apply_name_fallback([chat], phone_aliases=both_spellings)
-        return chat_to_dict(chat)
+        result = chat_to_dict(chat)
+        if result.get("is_group"):
+            result["group_settings"] = _stored_group_settings(cursor, chat.jid)
+        return result
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)
@@ -4269,6 +4272,19 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
     finally:
         if "conn" in locals():
             conn.close()
+
+
+def _stored_group_settings(cursor, jid: str) -> dict[str, Any]:
+    fields = ("announce", "locked", "join_approval_required", "topic")
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(chats)")}
+    names = [name for setting in fields for name in (setting, setting + "_updated_at")]
+    select = ", ".join(f"group_{name}" if f"group_{name}" in columns else "NULL" for name in names)
+    row = cursor.execute(f"SELECT {select} FROM chats WHERE jid = ?", (jid,)).fetchone()
+    result: dict[str, Any] = dict(zip(names, row or [None] * len(names), strict=True))
+    for setting in fields[:3]:
+        if result[setting] is not None:
+            result[setting] = bool(result[setting])
+    return result
 
 
 def _direct_chat_candidates(value: str) -> tuple[str, str, str]:
@@ -4391,8 +4407,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 # Codes the bridge may assert in its error body, because they say something no
 # HTTP status can: media_unavailable means missing bytes or download fields;
 # media_refused means an unsafe cache identity. Both download and forward name
-# these permanent failures. Every other failure keeps the status map.
-_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", MEDIA_REFUSED_CODE})
+# these permanent failures. group_admin_required distinguishes group send
+# permissions from deployment policy. Every other failure keeps the status map.
+_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", MEDIA_REFUSED_CODE, "group_admin_required"})
 
 
 def _bridge_error_code(status: int) -> str:
@@ -4684,6 +4701,11 @@ def _inline_name(filename: str, default_name: str | None) -> str:
     return media_upload.safe_filename(filename, default_name or "file")
 
 
+def _require_webp_sticker(data: bytes) -> None:
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        raise ToolError("invalid_argument", "as_sticker requires RIFF/WEBP bytes")
+
+
 def send_file(
     recipient: str,
     media_path: str = "",
@@ -4692,6 +4714,7 @@ def send_file(
     media_base64: str = "",
     filename: str = "",
     upload_id: str = "",
+    as_sticker: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Send a media file (image, video, document) with an optional caption.
 
@@ -4707,16 +4730,19 @@ def send_file(
     exists or the payload decodes) and returns the request that would have
     been posted; an inline payload is not written to disk for a dry run.
     """
+    if as_sticker and caption:
+        raise ToolError("invalid_argument", "A sticker cannot have a caption")
     recipient = normalize_recipient(recipient)
     if not recipient:
         raise ToolError("invalid_argument", "chat_jid must be provided")
+    payload: dict[str, Any]
     source = _media_source(media_path, media_base64, upload_id)
     if source == "upload" and filename:
         raise ToolError("invalid_argument", "filename is fixed at upload; omit filename when using upload_id")
     _require_allowed(recipient)
     if source == "upload":
         with media_upload.uploaded_path(upload_id, consume=not dry_run) as path:
-            return send_file(recipient, path, caption, dry_run=dry_run)
+            return send_file(recipient, path, caption, dry_run=dry_run, as_sticker=as_sticker)
     if source == "path":
         import media_remote
 
@@ -4726,6 +4752,8 @@ def send_file(
             if cached is None:
                 raise ToolError("not_found", "source media is not cached")
             payload = {"recipient": recipient, "media_path": media_path, "message": caption}
+            if as_sticker:
+                payload["as_sticker"] = True
             if dry_run:
                 return (
                     True,
@@ -4746,7 +4774,12 @@ def send_file(
                 "For a file on another machine, POST /upload and use upload_id (http/sse), "
                 "or provide media_base64 with filename.",
             )
+        if as_sticker:
+            with open(media_path, "rb") as file:
+                _require_webp_sticker(file.read(12))
         payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(media_path)}
+        if as_sticker:
+            payload["as_sticker"] = True
         if caption:
             payload["message"] = caption
         if dry_run:
@@ -4763,12 +4796,16 @@ def send_file(
 
     name = _inline_name(filename, default_name=None)
     data = media_upload.decode_inline(media_base64)
+    if as_sticker:
+        _require_webp_sticker(data)
     if dry_run:
         upload_dir = media_upload.upload_dir()
         payload = {
             "recipient": recipient,
             "media_path": media_upload.bridge_media_path(os.path.join(upload_dir, "<upload>", name), preview=True),
         }
+        if as_sticker:
+            payload["as_sticker"] = True
         if caption:
             payload["message"] = caption
         media = {
@@ -4783,6 +4820,8 @@ def send_file(
     result: dict[str, Any] = {}
     try:
         payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(path)}
+        if as_sticker:
+            payload["as_sticker"] = True
         if caption:
             payload["message"] = caption
         result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
@@ -4941,6 +4980,20 @@ def get_group_members(group_jid: str, limit: int = 100, page: int = 0, cursor: s
     items = members[offset : offset + limit]
     has_more = offset + len(items) < len(members)
     next_cursor = encode_cursor({"k": "group_members", "g": group_jid, "o": offset + len(items)}) if has_more else None
+    try:
+        conn = _connect_messages_db()
+    except MessagesDbNotFoundError:
+        # The live roster remains available before the archive's first startup.
+        payload["group_settings"] = {
+            name: None
+            for setting in ("announce", "locked", "join_approval_required", "topic")
+            for name in (setting, setting + "_updated_at")
+        }
+    else:
+        try:
+            payload["group_settings"] = _stored_group_settings(conn.cursor(), group_jid)
+        finally:
+            conn.close()
     payload["participant_count"] = len(members)
     payload.update(PageResult(items, next_cursor, has_more).to_dict())
     return payload
