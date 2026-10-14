@@ -64,9 +64,12 @@ func (b *Bridge) renderMetrics() string {
 	if b.storeStats != nil {
 		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles = b.storeStats.snapshotScoped(time.Now())
 	}
+	usageKnown := true
 	if b.mediaStorage().Backend() == "s3" {
 		if usage, err := b.mediaStorage().Usage(b.ctx); err == nil {
 			mediaBytes, mediaFiles, statusBytes, statusFiles = usage.Bytes, usage.Files, usage.StatusBytes, usage.StatusFiles
+		} else {
+			usageKnown = false
 		}
 	}
 	bool01 := func(v bool) int {
@@ -111,8 +114,8 @@ func (b *Bridge) renderMetrics() string {
 	add("whatsapp_bridge_up", "1 while the process serves requests.", "gauge", "1")
 	if rw := b.RuntimeWebhook; rw != nil {
 		add("whatsapp_bridge_runtime_webhook_deliveries_total", "Successful runtime webhook POSTs, including synthetic tests.", "counter", fmt.Sprint(rw.deliveries.Load()))
-		add("whatsapp_bridge_runtime_webhook_failures_total", "Runtime message events whose delivery retries failed.", "counter", fmt.Sprint(rw.failures.Load()))
-		add("whatsapp_bridge_runtime_webhook_dropped_total", "Runtime message events discarded.", "counter", fmt.Sprint(rw.dropped.Load()))
+		add("whatsapp_bridge_runtime_webhook_failures_total", "Runtime subscribed events whose delivery retries failed.", "counter", fmt.Sprint(rw.failures.Load()))
+		add("whatsapp_bridge_runtime_webhook_dropped_total", "Runtime subscribed events discarded.", "counter", fmt.Sprint(rw.dropped.Load()))
 	}
 	if b.RuntimeDefaults != nil {
 		if snapshot, err := b.settingsSnapshot(b.ctx); err == nil {
@@ -131,7 +134,7 @@ func (b *Bridge) renderMetrics() string {
 	out = append(out, fmt.Sprintf("whatsapp_bridge_media_cached_bytes{backend=%q} %d", b.mediaStorage().Backend(), mediaBytes), fmt.Sprintf("whatsapp_bridge_media_cached_files{backend=%q} %d", b.mediaStorage().Backend(), mediaFiles))
 	if quota, _, _, err := b.mediaQuotaSettings(b.ctx); err == nil {
 		add("whatsapp_bridge_media_quota_bytes", "Instance media cache ceiling.", "gauge", fmt.Sprint(quota))
-		b.observeMediaQuota(quota, mediaBytes)
+		b.observeMediaQuotaIfKnown(quota, mediaBytes, usageKnown)
 	}
 	add("whatsapp_bridge_messages_stored_total", "Inbound/outbound messages written from live events.", "counter", fmt.Sprint(m.messagesStored.Load()))
 	add("whatsapp_bridge_session_keepalives_total", "Times the device was marked available and unavailable again so WhatsApp counts it as in use.", "counter", fmt.Sprint(m.sessionKeepalives.Load()))

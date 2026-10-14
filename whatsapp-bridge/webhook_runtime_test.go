@@ -159,7 +159,7 @@ func TestRuntimeWebhookReceiverFiltersAndDeploymentFloor(t *testing.T) {
 						t.Fatal(err)
 					}
 					b.ForwardSelf, b.ForwardChannels, b.ForwardBroadcasts = switches.ForwardSelf, switches.ForwardChannels, switches.ForwardBroadcasts
-					options, err := parseRuntimeWebhookOptions(getenv)
+					options, err := parseRuntimeWebhookOptions(getenv, switches)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -757,7 +757,7 @@ func TestRuntimeWebhookSharedForwardFilters(t *testing.T) {
 	}
 }
 func TestRuntimeWebhookStartupOptions(t *testing.T) {
-	o, err := parseRuntimeWebhookOptions(func(string) string { return "" })
+	o, err := parseRuntimeWebhookOptions(func(string) string { return "" }, bridgeSwitches{})
 	if err != nil || o.Enabled || o.AllowPorts || o.FailureLimit != 50 {
 		t.Fatalf("defaults=%+v %v", o, err)
 	}
@@ -767,7 +767,7 @@ func TestRuntimeWebhookStartupOptions(t *testing.T) {
 				return value
 			}
 			return ""
-		}); err == nil {
+		}, bridgeSwitches{}); err == nil {
 			t.Fatalf("invalid %s accepted", key)
 		}
 	}
@@ -982,7 +982,7 @@ func TestRuntimeWebhookReviewRestartTolerance(t *testing.T) {
 	var status atomic.Int32
 	status.Store(503)
 	b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
-	o, err := parseRuntimeWebhookOptions(func(string) string { return "" })
+	o, err := parseRuntimeWebhookOptions(func(string) string { return "" }, bridgeSwitches{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1610,15 +1610,22 @@ func TestRuntimeWebhookUnsubscribedDisconnectKeepsDebounce(t *testing.T) {
 
 func TestRuntimeWebhookConnectionDeploymentFloor(t *testing.T) {
 	for _, deploy := range []string{"", "true", "false", "off"} {
-		b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
-		options, err := parseRuntimeWebhookOptions(func(name string) string { return map[string]string{webhookForwardConnectionEnv: deploy}[name] })
-		if err != nil {
-			t.Fatal(err)
-		}
-		b.RuntimeWebhook.options.DeniedConnection = options.DeniedConnection
-		code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{"connection.changed"}})
-		if denied := deploy == "false" || deploy == "off"; denied != (code == 400) || denied && !bytes.Contains(data, []byte(webhookForwardConnectionEnv)) {
-			t.Fatalf("deploy=%q: %d %s", deploy, code, data)
+		for _, event := range []string{"connection.changed", "storage.warning"} {
+			b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
+			getenv := func(name string) string { return map[string]string{webhookForwardConnectionEnv: deploy}[name] }
+			switches, err := parseBridgeSwitches(getenv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options, err := parseRuntimeWebhookOptions(getenv, switches)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.RuntimeWebhook.options.DeniedConnection = options.DeniedConnection
+			code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{event}})
+			if denied := event == "connection.changed" && (deploy == "false" || deploy == "off"); denied != (code == 400) || denied && !bytes.Contains(data, []byte(webhookForwardConnectionEnv)) {
+				t.Fatalf("deploy=%q: %d %s", deploy, code, data)
+			}
 		}
 	}
 }
@@ -1654,4 +1661,225 @@ func TestRuntimeWebhookAdmissionBoundToGeneration(t *testing.T) {
 	if legacy || admitted == nil || b.RuntimeWebhook.dropped.Load() != dropped+1 || !strings.Contains(logger.String(), "configuration_changed") {
 		t.Fatalf("stale admission: legacy=%t admitted=%v logs=%s", legacy, admitted != nil, logger.String())
 	}
+}
+
+func TestRuntimeWebhookStorageWarningsSubscriptionsAndSignatures(t *testing.T) {
+	for _, subscribed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(subscribed), func(t *testing.T) {
+			storeInScratch(t)
+			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+			if err := b.StoreRoot.WriteFile("warning-fixture", []byte("fake archive bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			b.Webhook.enabled = false
+			selected := []string{"message.received", "connection.changed"}
+			if subscribed {
+				selected = append(selected, "storage.warning")
+			}
+			if code, data := configureWebhookFields(t, server, destination, map[string]any{"events": selected}); code != 200 {
+				t.Fatalf("configure=%d %s", code, data)
+			}
+			b.HistoryLimits.WarnBytes = 1
+			for _, warning := range []struct {
+				kind, state string
+				emit        func()
+			}{
+				{"store", "above_threshold", func() { b.archiveStats(time.Now()) }},
+				{"media_quota", "warning", func() { b.observeMediaQuota(100, 80) }},
+				{"media_quota", "full", func() { b.observeMediaQuota(100, 100) }},
+			} {
+				warning.emit()
+				if !subscribed {
+					webhookBarrier(t, b, receipts)
+					continue
+				}
+				r := receiveWebhook(t, receipts)
+				if !verifyWebhookReceipt(r, time.Now()) || r.header.Get("X-Bridge-Token") != "" {
+					t.Fatal("storage signature failed or bridge token escaped")
+				}
+				var fields map[string]any
+				if err := json.Unmarshal(r.body, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if len(fields) != 5 || fields["event"] != "storage.warning" || fields["type"] != warning.kind || fields["state"] != warning.state || fields["event_id"] != r.header.Get("X-Example-Id") {
+					t.Fatalf("unsafe storage payload=%s", r.body)
+				}
+				var at time.Time
+				if err := json.Unmarshal([]byte(strconv.Quote(fields["at"].(string))), &at); err != nil || at.IsZero() || at.Location() != time.UTC {
+					t.Fatalf("storage timestamp=%v %v", at, err)
+				}
+				// Staying at the same threshold never emits another warning.
+				warning.emit()
+				webhookBarrier(t, b, receipts)
+			}
+		})
+	}
+}
+
+type warningTestStorage struct {
+	localMediaStorage
+	usage func(context.Context) (mediaCacheUsage, error)
+}
+
+func (s warningTestStorage) Backend() string                                    { return "s3" }
+func (s warningTestStorage) Usage(ctx context.Context) (mediaCacheUsage, error) { return s.usage(ctx) }
+
+func TestRuntimeStorageReplayAndIndependentSubscription(t *testing.T) {
+	storeInScratch(t)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	b.RuntimeWebhook.options.DeniedConnection = true
+	if err := b.StoreRoot.WriteFile("warning-fixture", []byte("fake archive bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b.HistoryLimits.WarnBytes = 1
+	b.archiveStats(time.Now())
+	b.observeMediaQuota(100, 80) // Crossings before the receiver exists.
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"events": []string{"message.received", "storage.warning"}}); code != 200 {
+		t.Fatalf("storage floor: %d %s", code, data)
+	}
+	seen := map[string]bool{}
+	for range 2 {
+		r := receiveWebhook(t, receipts)
+		var payload storageWarningPayload
+		if err := json.Unmarshal(r.body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if !verifyWebhookReceipt(r, time.Now()) {
+			t.Fatal("unsigned current warning")
+		}
+		seen[payload.Type] = true
+	}
+	if !seen["store"] || !seen["media_quota"] {
+		t.Fatalf("current warnings not replayed: %v", seen)
+	}
+	b.observeMediaQuota(100, 0)
+	b.HistoryLimits.WarnBytes = 0
+	b.archiveStats(time.Now())
+	configureConnectionWebhook(t, server, destination, map[string]any{"events": []string{"message.received", "storage.warning"}})
+	webhookBarrier(t, b, receipts) // A cleared warning must not be replayed.
+}
+
+func TestRuntimeStorageUsageFailureKeepsLastWarning(t *testing.T) {
+	storeInScratch(t)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	b.MediaQuotaBytes = 100
+	var unavailable atomic.Bool
+	b.MediaStorage = warningTestStorage{usage: func(context.Context) (mediaCacheUsage, error) {
+		if unavailable.Load() {
+			return mediaCacheUsage{}, errors.New("fake usage failure")
+		}
+		return mediaCacheUsage{Bytes: 80}, nil
+	}}
+	configureConnectionWebhook(t, server, destination, map[string]any{"events": []string{"message.received", "storage.warning"}})
+	b.healthStatus()
+	if r := receiveWebhook(t, receipts); !verifyWebhookReceipt(r, time.Now()) {
+		t.Fatal("unsigned warning")
+	}
+	unavailable.Store(true)
+	if b.healthStatus()["media_quota_warning"] != true {
+		t.Fatal("usage failure cleared warning")
+	}
+	b.renderMetrics()
+	if b.mediaQuotaWarningState.Load() != 1 {
+		t.Fatal("metrics cleared warning on usage failure")
+	}
+	unavailable.Store(false)
+	b.healthStatus()
+	b.renderMetrics()
+	webhookBarrier(t, b, receipts) // Recovery at the same usage emits no duplicate.
+}
+
+func TestRuntimeStorageFailureLimitAndMetricsCoverLifecycle(t *testing.T) {
+	var status atomic.Int32
+	status.Store(400)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, &status)
+	b.RuntimeWebhook.options.FailureLimit = 1
+	configureConnectionWebhook(t, server, destination, map[string]any{"events": []string{"storage.warning"}})
+	b.observeMediaQuota(100, 80)
+	receiveWebhook(t, receipts)
+	waitWebhookDrop(t, b.RuntimeWebhook)
+	if s := b.RuntimeWebhook.snapshot(); s.Enabled || s.Failures != 1 {
+		t.Fatalf("storage not counted: %+v", s)
+	}
+	metrics := b.renderMetrics()
+	if !strings.Contains(metrics, "Runtime subscribed events") || !strings.Contains(metrics, "whatsapp_bridge_runtime_webhook_failures_total 1") {
+		t.Fatal("metrics misdescribe or omit lifecycle failures")
+	}
+}
+
+func TestRuntimeStorageBackgroundTickWithoutPolling(t *testing.T) {
+	storeInScratch(t)
+	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
+	b.HistoryLimits.WarnBytes = 1000
+	b.MediaQuotaBytes = 100
+	var used atomic.Int64
+	measured := make(chan struct{}, 2)
+	b.MediaStorage = warningTestStorage{usage: func(context.Context) (mediaCacheUsage, error) {
+		value := used.Load()
+		measured <- struct{}{}
+		return mediaCacheUsage{Bytes: value}, nil
+	}}
+	ticks := make(chan time.Time)
+	b.storageWarningTicks = ticks
+	configureConnectionWebhook(t, server, destination, map[string]any{"events": []string{"storage.warning"}})
+	b.startStorageWarnings()
+	select {
+	case <-measured:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup warning sample absent")
+	}
+	if err := b.StoreRoot.WriteFile("warning-fixture", bytes.Repeat([]byte("x"), 2000), 0600); err != nil {
+		t.Fatal(err)
+	}
+	used.Store(80)
+	b.storeStats.mu.Lock()
+	firstTick := b.storeStats.measuredAt.Add(storeUsageTTL)
+	b.storeStats.mu.Unlock()
+	select {
+	case ticks <- firstTick:
+	case <-time.After(3 * time.Second):
+		t.Fatal("background tick not consumed")
+	}
+	seen := map[string]bool{}
+	for range 2 {
+		r := receiveWebhook(t, receipts)
+		var payload storageWarningPayload
+		if err := json.Unmarshal(r.body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if !verifyWebhookReceipt(r, time.Now()) {
+			t.Fatal("unsigned background warning")
+		}
+		seen[payload.Type] = true
+	}
+	if !seen["store"] || !seen["media_quota"] {
+		t.Fatalf("background warnings=%v", seen)
+	}
+}
+
+func TestRuntimeStorageSamplerStopsBeforeStoreClose(t *testing.T) {
+	storeInScratch(t)
+	b, _, _, _, _ := runtimeWebhookFixture(t, nil)
+	b.MediaQuotaBytes = 100
+	entered := make(chan struct{})
+	b.MediaStorage = warningTestStorage{usage: func(ctx context.Context) (mediaCacheUsage, error) {
+		close(entered)
+		<-ctx.Done()
+		return mediaCacheUsage{}, ctx.Err()
+	}}
+	b.startStorageWarnings()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sampler did not start")
+	}
+	b.Shutdown(time.Second)
+	done := make(chan struct{})
+	go func() { b.storageWarningLoop.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sampler survived shutdown")
+	}
+	b.startStorageWarnings() // Shutdown seals admission: this must be a no-op.
 }

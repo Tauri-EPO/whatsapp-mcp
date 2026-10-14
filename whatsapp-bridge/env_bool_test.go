@@ -104,7 +104,8 @@ func TestParseBridgeSwitches(t *testing.T) {
 		}
 	}
 	for _, off := range boolFalse {
-		if sw, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: off})); err != nil || sw != all {
+		sw, err := parseBridgeSwitches(env(map[string]string{webhookForwardStatusEnv: off}))
+		if err != nil || sw != all {
 			t.Errorf("%s=%s = %+v, %v; want the defaults", webhookForwardStatusEnv, off, sw, err)
 		}
 	}
@@ -170,5 +171,43 @@ func TestLoadBridgeSwitchesReadsTheEnvironment(t *testing.T) {
 	sw, err := parseBridgeSwitches(os.Getenv)
 	if err != nil || sw.WebhookEnabled || !sw.Metrics || !sw.ForwardSelf || !sw.MediaAutoDownload {
 		t.Fatalf("switches = %+v, %v", sw, err)
+	}
+}
+
+func TestBridgeSwitchesRuntimeFloorsUseSingleParse(t *testing.T) {
+	keys := []string{forwardSelfEnv, mediaAutoDownloadEnv, webhookEnabledEnv, metricsEnv, webhookForwardStatusEnv, webhookForwardChannelsEnv, webhookForwardBroadcastsEnv, webhookForwardConnectionEnv}
+	for _, raw := range []string{"", "  ", "true", " YES ", "false", " OFF "} {
+		reads := make(map[string]int)
+		getenv := func(key string) string {
+			for _, watched := range keys {
+				if key == watched {
+					reads[key]++
+					return raw
+				}
+			}
+			return ""
+		}
+		sw, err := parseBridgeSwitches(getenv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o, err := parseRuntimeWebhookOptions(getenv, sw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		explicit := strings.TrimSpace(raw) != ""
+		presence := bridgeSwitchPresence{ForwardSelf: explicit, ForwardChannels: explicit, ForwardBroadcasts: explicit, ForwardConnection: explicit}
+		if sw.Explicit != presence {
+			t.Fatalf("explicit for %q: %+v", raw, sw.Explicit)
+		}
+		denied := raw == "false" || raw == " OFF "
+		if o.DeniedConnection != denied || o.DeniedFilters.ForwardSelf != denied || o.DeniedFilters.ForwardChannels != denied || o.DeniedFilters.ForwardBroadcasts != denied {
+			t.Fatalf("floors for %q: %+v", raw, o)
+		}
+		for _, key := range keys {
+			if reads[key] != 1 {
+				t.Fatalf("%s parsed %d times", key, reads[key])
+			}
+		}
 	}
 }

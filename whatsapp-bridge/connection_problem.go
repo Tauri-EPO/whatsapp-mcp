@@ -15,7 +15,7 @@ import (
 
 const connectionProblemFile = ".connection-problem"
 
-// The pinned library consumes 500/503 before event dispatch. Its public Logger
+// The pinned library consumes generic connect failures before event dispatch. Its public Logger
 // seam is the only observer for these failures: match the constant format and
 // typed numeric argument, never parse server text or a rendered log line.
 type connectionProblemLogger struct {
@@ -30,7 +30,12 @@ func (l connectionProblemLogger) Warnf(format string, args ...any) {
 		return
 	}
 	if format == "Got %d/%s connect failure, assuming automatic reconnect will handle it" && len(args) == 2 {
-		if code, ok := args[0].(int); ok && (code == 500 || code == 503) {
+		if code, ok := args[0].(int); ok {
+			if code != 500 && code != 503 {
+				l.bridge.recordGenericConnectFailureIf(code, l.active)
+				l.Infof("Generic connect failure (code %d); automatic reconnect continues", code)
+				return
+			}
 			l.bridge.recordConnectionProblemIf(code, 0, 0, l.active)
 		}
 	} else if format == "Got 503 stream error, assuming automatic reconnect will handle it" && len(args) == 0 {
@@ -145,6 +150,14 @@ func (b *Bridge) recordConnectionProblem(code, reason int, expire time.Duration)
 }
 
 func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duration, active func() bool) *ConnectionProblem {
+	return b.recordConnectionProblemStateIf(code, reason, expire, active, true)
+}
+
+func (b *Bridge) recordGenericConnectFailureIf(code int, active func() bool) *ConnectionProblem {
+	return b.recordConnectionProblemStateIf(code, 0, 0, active, false)
+}
+
+func (b *Bridge) recordConnectionProblemStateIf(code, reason int, expire time.Duration, active func() bool, persistent bool) *ConnectionProblem {
 	b.connectionPersistMu.Lock()
 	defer b.connectionPersistMu.Unlock()
 	b.connectionMu.Lock()
@@ -154,6 +167,9 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 	}
 	now := b.connectionNow().UTC()
 	next := classifyConnectionProblem(code, reason, expire, now)
+	if !persistent {
+		next = &ConnectionProblem{Kind: "other", Code: code, Since: now} // No new account restriction.
+	}
 	previous := b.connectionProblem
 	if !next.restrictsAccount() && previous.restrictsAccount() {
 		if code != 401 {
@@ -163,7 +179,7 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 		preserved := *previous
 		next = &preserved // Retain ban kind, expiry, reason and original since.
 	}
-	if code != 401 && previous.isUnlinked() {
+	if (code != 401 || !persistent) && previous.isUnlinked() {
 		if !next.restrictsAccount() && b.operatorRetiredClient.Load() == b.currentClient() {
 			b.connectionMu.Unlock()
 			return previous
@@ -174,7 +190,7 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 			next.UnlinkedAt = &at
 		}
 	}
-	if code == 401 {
+	if code == 401 && persistent {
 		next.UnlinkedAt, next.SessionRemoved, next.RevokedDevice = &now, false, ""
 		if id := b.runtimeDeviceID.Load(); id != nil {
 			next.RevokedDevice = *id
@@ -183,7 +199,7 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 	b.connectionProblem = next
 	b.connectionChangedLocked()
 	b.connectionMu.Unlock()
-	if code == 402 && b.metrics != nil {
+	if code == 402 && persistent && b.metrics != nil {
 		b.metrics.mu.Lock()
 		if b.metrics.tempBans == nil {
 			b.metrics.tempBans = map[int]int64{}
@@ -196,8 +212,12 @@ func (b *Bridge) recordConnectionProblemIf(code, reason int, expire time.Duratio
 		b.metrics.tempBans[reason]++
 		b.metrics.mu.Unlock()
 	}
-	b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", next.Kind, next.Code, next.TempBanReason)
-	if b.StoreRoot != nil {
+	if persistent {
+		b.Log.Warnf("WhatsApp connection problem: %s (code %d, temporary-ban reason %d)", next.Kind, next.Code, next.TempBanReason)
+	} else {
+		b.Log.Infof("WhatsApp connection diagnostic: %s (code %d)", next.Kind, next.Code)
+	}
+	if persistent && b.StoreRoot != nil {
 		_ = b.persistConnectionSnapshot(next)
 	}
 	return next

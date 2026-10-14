@@ -291,7 +291,9 @@ type Bridge struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	// storeStats caches store/media sizes for /api/health (see media_retention.go).
-	storeStats *storeStats
+	storeStats          *storeStats
+	storageWarningLoop  sync.WaitGroup
+	storageWarningTicks <-chan time.Time // nil uses the production five-minute ticker.
 	// metrics feeds GET /metrics (metrics.go).
 	metrics *metricsRegistry
 }
@@ -443,6 +445,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 		// A keepalive blip in progress finishes with "unavailable" before the
 		// caller disconnects the client.
 		b.keepaliveLoop.Wait()
+		b.storageWarningLoop.Wait()
 		b.connectionEvents.Wait()
 		close(done)
 	}()

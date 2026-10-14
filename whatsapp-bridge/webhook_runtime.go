@@ -32,7 +32,7 @@ type runtimeWebhookOptions struct {
 	DeniedConnection    bool // explicit WEBHOOK_FORWARD_CONNECTION_EVENTS=false
 }
 
-func parseRuntimeWebhookOptions(getenv func(string) string) (runtimeWebhookOptions, error) {
+func parseRuntimeWebhookOptions(getenv func(string) string, switches bridgeSwitches) (runtimeWebhookOptions, error) {
 	o := runtimeWebhookOptions{FailureLimit: 50}
 	var err error
 	o.Enabled, err = parseBoolEnv("WHATSAPP_WEBHOOK_RUNTIME", getenv("WHATSAPP_WEBHOOK_RUNTIME"), false)
@@ -49,22 +49,12 @@ func parseRuntimeWebhookOptions(getenv func(string) string) (runtimeWebhookOptio
 			return o, errors.New("WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT must be 1-100")
 		}
 	}
-	for _, filter := range []struct {
-		name   string
-		denied *bool
-	}{
-		{forwardSelfEnv, &o.DeniedFilters.ForwardSelf},
-		{webhookForwardChannelsEnv, &o.DeniedFilters.ForwardChannels},
-		{webhookForwardBroadcastsEnv, &o.DeniedFilters.ForwardBroadcasts},
-		{webhookForwardConnectionEnv, &o.DeniedConnection},
-	} {
-		value := getenv(filter.name)
-		allowed, err := parseBoolEnv(filter.name, value, true)
-		if err != nil {
-			return o, err
-		}
-		*filter.denied = strings.TrimSpace(value) != "" && !allowed
+	o.DeniedFilters = runtimeWebhookFilters{
+		ForwardSelf:       switches.Explicit.ForwardSelf && !switches.ForwardSelf,
+		ForwardChannels:   switches.Explicit.ForwardChannels && !switches.ForwardChannels,
+		ForwardBroadcasts: switches.Explicit.ForwardBroadcasts && !switches.ForwardBroadcasts,
 	}
+	o.DeniedConnection = switches.Explicit.ForwardConnection && !switches.ForwardConnection
 	return o, nil
 }
 
@@ -101,6 +91,7 @@ type runtimeWebhookState struct {
 
 type runtimeWebhookEvent struct {
 	connection          *connectionPayload
+	storage             *storageWarningPayload
 	ID                  string    `json:"event_id"`
 	Event               string    `json:"event"`
 	MessageID           string    `json:"message_id,omitempty"`
@@ -153,7 +144,8 @@ type runtimeWebhook struct {
 	// The latest recorded connection transition, delivered once to a
 	// configuration that newly selects connection.changed (a receiver configured
 	// after startup still learns that the bridge waits for pairing).
-	lastConnection *connectionPayload
+	lastConnection             *connectionPayload
+	storeWarning, quotaWarning *storageWarningPayload
 }
 
 func newRuntimeWebhook(ctx context.Context, options runtimeWebhookOptions) *runtimeWebhook {
@@ -231,6 +223,36 @@ func (b *Bridge) queueRuntimeConnection(payload connectionPayload) {
 	defer w.mu.Unlock()
 	w.lastConnection = &payload
 	w.enqueueLocked(w.generation, runtimeWebhookEvent{Event: "connection.changed", connection: &payload})
+}
+
+// Storage warnings carry only fixed lifecycle fields, never account or storage identity.
+type storageWarningPayload struct {
+	Type  string    `json:"type"`
+	State string    `json:"state"`
+	At    time.Time `json:"at"`
+}
+
+func (b *Bridge) queueRuntimeStorageWarning(kind, state string) {
+	w := b.RuntimeWebhook
+	if w == nil {
+		return
+	}
+	payload := storageWarningPayload{Type: kind, State: state, At: time.Now().UTC()}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var current *storageWarningPayload
+	if state != "" {
+		current = &payload
+	}
+	switch kind {
+	case "store":
+		w.storeWarning = current
+	case "media_quota":
+		w.quotaWarning = current
+	}
+	if current != nil {
+		w.enqueueLocked(w.generation, runtimeWebhookEvent{Event: "storage.warning", storage: current})
+	}
 }
 
 // Caller holds mu. Logs and process-lifetime counters never carry receiver data.
@@ -333,13 +355,13 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	if len(cfg.Secret) < 32 || len(cfg.Secret) > 256 {
 		return errors.New("secret must contain 32-256 bytes")
 	}
-	if len(cfg.Events) < 1 || len(cfg.Events) > 2 {
-		return errors.New("events must select message.received and/or connection.changed")
+	if len(cfg.Events) < 1 || len(cfg.Events) > 3 {
+		return errors.New("events must select message.received, connection.changed and/or storage.warning")
 	}
 	seen := make(map[string]bool)
 	for _, event := range cfg.Events {
-		if (event != "message.received" && event != "connection.changed") || seen[event] {
-			return errors.New("events must select message.received and/or connection.changed without duplicates")
+		if (event != "message.received" && event != "connection.changed" && event != "storage.warning") || seen[event] {
+			return errors.New("events must select message.received, connection.changed and/or storage.warning without duplicates")
 		}
 		seen[event] = true
 	}
@@ -391,6 +413,11 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	if replay && w.lastConnection != nil {
 		w.enqueueLocked(g, runtimeWebhookEvent{Event: "connection.changed", connection: w.lastConnection})
 	}
+	for _, warning := range []*storageWarningPayload{w.storeWarning, w.quotaWarning} {
+		if warning != nil {
+			w.enqueueLocked(g, runtimeWebhookEvent{Event: "storage.warning", storage: warning})
+		}
+	}
 	go w.run(g)
 	return nil
 }
@@ -419,6 +446,13 @@ func webhookDelivery(event runtimeWebhookEvent) (runtimeWebhookDelivery, error) 
 			Event string `json:"event"`
 			*connectionPayload
 		}{event.ID, event.Event, event.connection}
+	}
+	if event.storage != nil {
+		payload = struct {
+			ID    string `json:"event_id"`
+			Event string `json:"event"`
+			*storageWarningPayload
+		}{event.ID, event.Event, event.storage}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil || len(body) > 64<<10 {

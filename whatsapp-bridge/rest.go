@@ -288,9 +288,12 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 	}
 	if stats != nil {
 		storeBytes, mediaBytes, mediaFiles, statusBytes, statusFiles := stats.snapshotScoped(time.Now())
+		usageKnown := true
 		if b.mediaStorage().Backend() == "s3" {
 			if usage, err := b.mediaStorage().Usage(ctx); err == nil {
 				mediaBytes, mediaFiles, statusBytes, statusFiles = usage.Bytes, usage.Files, usage.StatusBytes, usage.StatusFiles
+			} else {
+				usageKnown = false
 			}
 		}
 		body["media_backend"] = b.mediaStorage().Backend()
@@ -305,7 +308,7 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 		body["media_status_share"] = share
 		if quota, types, target, err := b.mediaQuotaSettings(ctx); err == nil {
 			body["media_quota_bytes"], body["media_caching_paused"] = quota, b.mediaCachingPaused(quota, mediaBytes, types, target)
-			body["media_quota_warning"] = b.observeMediaQuota(quota, mediaBytes)
+			body["media_quota_warning"] = b.observeMediaQuotaIfKnown(quota, mediaBytes, usageKnown)
 		}
 		_, _, _, warning := b.archiveStats(time.Now())
 		body["store_warning"] = warning
