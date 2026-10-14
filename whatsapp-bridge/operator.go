@@ -15,6 +15,7 @@ import (
 )
 
 type operatorRoutes struct {
+	chats                                          http.HandlerFunc
 	mediaUsage, mediaPurge                         http.HandlerFunc
 	export, snapshot                               http.HandlerFunc
 	health, ready, pairing                         http.HandlerFunc
@@ -90,6 +91,7 @@ func operatorOriginAllowed(r *http.Request) bool {
 type operatorStatusWriter struct {
 	http.ResponseWriter
 	status  int
+	results int
 	onFlush func()
 }
 
@@ -138,6 +140,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 	}{
 		{"health", "GET", routes.health}, {"ready", "GET", routes.ready}, {"pairing", "GET", routes.pairing},
 		{"export", "GET", routes.export}, {"snapshot", "POST", routes.snapshot},
+		{"chats", "GET", routes.chats},
 		{"media/usage", "GET", routes.mediaUsage}, {"media/purge", "POST", routes.mediaPurge},
 		{"pairing/code", "POST", routes.code}, {"pairing/restart", "POST", routes.restart},
 		{"pairing/passkey/response", "POST", routes.passkeyResponse}, {"pairing/passkey/confirm", "POST", routes.passkeyConfirm},
@@ -188,7 +191,7 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 			peer = "unknown"
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
-		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && r.URL.Path == "/operator/v1/export") {
+		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && (r.URL.Path == "/operator/v1/export" || r.URL.Path == "/operator/v1/chats")) {
 			audited := false
 			audit := func() {
 				if audited {
@@ -199,10 +202,14 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 				if status == 0 {
 					status = http.StatusInternalServerError
 				}
+				count := ""
+				if r.URL.Path == "/operator/v1/chats" {
+					count = fmt.Sprintf(" results=%d", out.results)
+				}
 				if status == 401 || status == 403 || status == 429 {
-					logger.Debugf("Operator %s %s peer=%s outcome=%d", r.Method, r.URL.Path, peer, status)
+					logger.Debugf("Operator %s %s peer=%s outcome=%d%s", r.Method, r.URL.Path, peer, status, count)
 				} else {
-					logger.Infof("Operator %s %s peer=%s outcome=%d", r.Method, r.URL.Path, peer, status)
+					logger.Infof("Operator %s %s peer=%s outcome=%d%s", r.Method, r.URL.Path, peer, status, count)
 				}
 			}
 			defer audit()
