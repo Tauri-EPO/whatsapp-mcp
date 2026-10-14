@@ -426,7 +426,7 @@ func (b *Bridge) handleMediaPurge() http.HandlerFunc {
 				}
 				item.ChatJID = chat.String()
 				if !policy.Allows(item.ChatJID) {
-					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "chat not in " + chatPolicyEnv})
+					results = append(results, PurgeResult{MessageID: item.MessageID, ChatJID: item.ChatJID, Reason: "chat not in " + policy.origin()})
 					continue
 				}
 				if seen[item] {

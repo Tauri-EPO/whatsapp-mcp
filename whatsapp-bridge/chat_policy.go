@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -28,11 +30,16 @@ const chatPolicyEnv = "WHATSAPP_ALLOWED_CHATS"
 // chatPolicy is the parsed allow-list. Restricted=false means "allow all".
 type chatPolicy struct {
 	resolve          func() chatPolicy
+	source           string // set when a runtime override decided this policy
 	restricted       bool
 	exact            map[string]struct{}
 	servers          map[string]struct{}
 	invalidPositions []int
 }
+
+// chatEntryPattern is what a runtime entry may be: a digits-only number, a JID
+// or a server wildcard. Keep it identical to CHAT_ENTRY in runtime_settings.py.
+var chatEntryPattern = regexp.MustCompile(`^(?:[0-9]+|(?:\*|[0-9A-Za-z_:-]+)@[0-9A-Za-z.-]+)$`)
 
 type runtimeSettingsSnapshotKey struct{}
 
@@ -47,6 +54,22 @@ func (p chatPolicy) effective(contexts ...context.Context) chatPolicy {
 		return p.resolve()
 	}
 	return p
+}
+
+// once resolves at most one time for a background pass or event.
+func (p chatPolicy) once() chatPolicy {
+	if p.resolve != nil {
+		p.resolve = sync.OnceValue(p.resolve)
+	}
+	return p
+}
+
+// origin names the list behind a refusal, as tool refusals do.
+func (p chatPolicy) origin() string {
+	if p.source != "" {
+		return p.source
+	}
+	return chatPolicyEnv
 }
 
 func (p chatPolicy) entries() []string {
@@ -284,7 +307,7 @@ func (p chatPolicy) warnInvalidEntries(logger waLog.Logger) {
 // Summary is a one-line description for the startup log.
 func (p chatPolicy) Summary() string {
 	if !p.restricted {
-		return chatPolicyEnv + " unset: all chats allowed"
+		return p.origin() + " unset: all chats allowed"
 	}
 	n := len(p.exact)
 	invalid := len(p.invalidPositions)
@@ -298,18 +321,22 @@ func (p chatPolicy) Summary() string {
 		parts = append(parts, "*@"+s)
 	}
 	desc := strings.Join(parts, ", ")
+	if p.source != "" && desc != "" { // Runtime entries stay out of logs, wildcards included.
+		desc = strconv.Itoa(len(parts)) + " wildcard(s)"
+	}
 	if desc != "" {
 		desc = " + " + desc
 	}
 	if invalid > 0 {
 		desc += " + " + strconv.Itoa(invalid) + " invalid entry(s) refused"
 	}
-	return chatPolicyEnv + ": restricted to " + strconv.Itoa(n) + " chat(s)" + desc
+	return p.origin() + ": restricted to " + strconv.Itoa(n) + " chat(s)" + desc
 }
 
 // rejectByChatPolicy writes the 403 the outbound handlers share when target is
 // outside the allow-list. Returns true when the request was rejected.
 func rejectByChatPolicy(w http.ResponseWriter, policy chatPolicy, target string) bool {
+	policy = policy.effective()
 	if policy.Allows(target) {
 		return false
 	}
@@ -317,7 +344,7 @@ func rejectByChatPolicy(w http.ResponseWriter, policy chatPolicy, target string)
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
-		"message": "chat " + target + " is not in " + chatPolicyEnv + " (this bridge is restricted to an allow-list of conversations)",
+		"message": "chat " + target + " is not in " + policy.origin() + " (this bridge is restricted to an allow-list of conversations)",
 	})
 	return true
 }

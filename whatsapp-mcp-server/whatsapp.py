@@ -2096,17 +2096,20 @@ def get_sender_name(sender_jid: str) -> str:
     # Unrestricted lookups may borrow names from another namespace. A narrowed
     # policy must never reuse that answer; keep concurrent snapshots separate.
     try:
-        cache_key = f"{CHAT_POLICY.restricted}:{sender_jid}"
+        # Read once: outside a pinned operation two reads can straddle a PATCH,
+        # and the key and the query must describe the same policy (issue #466).
+        restricted = CHAT_POLICY.restricted
     except ToolError:
         logger.warning("Database error resolving sender name: runtime chat policy unavailable")
         return sender_jid  # No cached or cross-namespace metadata on a policy outage.
+    cache_key = f"{restricted}:{sender_jid}"
     hit, cached = _cache_get("name", cache_key)
     if hit:
         return cached
-    return _cache_put("name", cache_key, _get_sender_name_uncached(sender_jid))
+    return _cache_put("name", cache_key, _get_sender_name_uncached(sender_jid, restricted))
 
 
-def _get_sender_name_uncached(sender_jid: str) -> str:
+def _get_sender_name_uncached(sender_jid: str, restricted: bool) -> str:
     """chats.name for the sender, else the phone book, else the JID back."""
     try:
         conn = _connect_messages_db()
@@ -2117,7 +2120,7 @@ def _get_sender_name_uncached(sender_jid: str) -> str:
         # the table and could match an unrelated JID containing the digits.
         bare = sender_jid.split("@")[0] if "@" in sender_jid else sender_jid
         candidates = [sender_jid, bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
-        if "@" in sender_jid and CHAT_POLICY.restricted:
+        if "@" in sender_jid and restricted:
             # Under an allow-list a full JID names its own row and no other:
             # the same digits under the other server may be a chat the list
             # does not name, and get_contact would hand its name out (issue

@@ -80,29 +80,30 @@ func (w *webhookSender) Enabled() bool { return w != nil && w.enabled }
 // and broadcast lists are stored regardless, but require separate opt-ins to
 // reach a webhook intended for conversations. The global/self gates always win.
 func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...types.JID) bool {
-	return b.Webhook.Enabled() && b.webhookChatAllowed(chat, fromMe, original...)
+	return b.Webhook.Enabled() && b.webhookChatAllowed(b.Policy, chat, fromMe, original...)
 }
 
 // Evaluate once for both senders, including policy-eligible arrivals while the
 // configured runtime receiver is disabled (which must count as delivery loss).
-func (b *Bridge) messageWebhookAllowed(chat types.JID, fromMe bool, id string, original ...types.JID) bool {
-	allowed := (b.Webhook.Enabled() || b.RuntimeWebhook.configured()) && b.webhookChatAllowed(chat, fromMe, original...)
+func (b *Bridge) messageWebhookAllowed(policy chatPolicy, chat types.JID, fromMe bool, id string, original ...types.JID) bool {
+	allowed := (b.Webhook.Enabled() || b.RuntimeWebhook.configured()) && b.webhookChatAllowed(policy, chat, fromMe, original...)
 	if !allowed {
 		b.logWebhookWithheld(chat, id)
 	}
 	return allowed
 }
 
-func (b *Bridge) webhookChatAllowed(chat types.JID, fromMe bool, original ...types.JID) bool {
+func (b *Bridge) webhookChatAllowed(policy chatPolicy, chat types.JID, fromMe bool, original ...types.JID) bool {
 	if fromMe && !b.ForwardSelf {
 		return false
 	}
 	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {
 		return lookupAltJID(ctx, b.currentClient(), j)
 	}
-	allowed := b.Policy.allowsIdentity(b.ctx, chat, lookup)
+	policy = policy.effective() // One settings read for every identity of the event.
+	allowed := policy.allowsIdentity(b.ctx, chat, lookup)
 	for _, j := range original {
-		allowed = allowed || b.Policy.allowsIdentity(b.ctx, j, lookup)
+		allowed = allowed || policy.allowsIdentity(b.ctx, j, lookup)
 	}
 	if !allowed {
 		return false

@@ -23,7 +23,7 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from errors import ToolError
@@ -61,6 +61,7 @@ class ChatPolicy:
     servers: frozenset[str]  # from "*@server" wildcards
     restricted: bool
     invalid_positions: tuple[int, ...] = ()
+    origin: str = ENV_VAR  # the list a refusal names: the deploy variable or the runtime override
 
     @classmethod
     def unrestricted(cls) -> ChatPolicy:
@@ -127,7 +128,7 @@ class ChatPolicy:
             if namespace == DEFAULT_USER_SERVER and (alternate := br_mobile_alternate(number)):
                 if self.allows(f"{alternate}@{namespace}"):
                     return
-        raise ToolError("denied", f"Participant {raw!r} is not in {ENV_VAR}")
+        raise ToolError("denied", f"Participant {raw!r} is not in {self.origin}")
 
     def sql_clause(self, column: str) -> tuple[str, list[str]]:
         """SQL predicate restricting ``column`` (a chat JID column) to allowed chats.
@@ -152,7 +153,7 @@ class ChatPolicy:
     def denial_message(self, jid: str | None) -> str:
         if (jid or "").count("@") > 1:
             return MALFORMED_TARGET
-        return f"Chat {jid!r} is not in {ENV_VAR}; this server is restricted to an allow-list of conversations"
+        return f"Chat {jid!r} is not in {self.origin}; this server is restricted to an allow-list of conversations"
 
     def warn_invalid_entries(self) -> None:
         if self.invalid_positions:
@@ -217,6 +218,8 @@ class RuntimeChatPolicy:
         if setting["source"] == "runtime":
             entries = ChatPolicy.from_entries(setting["value"])
             policy = intersect_policies(ChatPolicy(entries.exact, entries.servers, True), self.deploy)
+            origin = "runtime chats.allowed" + (f" within {ENV_VAR} (deploy)" if self.deploy.restricted else "")
+            policy = replace(policy, origin=origin)
         if operation is not None:
             operation[self] = policy
         return policy

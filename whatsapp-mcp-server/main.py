@@ -583,7 +583,7 @@ def get_contact(identifier: str) -> dict[str, Any]:
         answer = whatsapp_listed_reading(jid, candidates)
         if answer is None:
             # get_chat refused `jid` above: that refusal is the answer.
-            raise refusals.get(jid) or ToolError("denied", f"Chat {jid!r} is not in WHATSAPP_ALLOWED_CHATS")
+            raise refusals.get(jid) or ToolError("denied", f"Chat {jid!r} is not in {CHAT_POLICY.origin}")
         jid = whatsapp_phone_book_spelling(answer)
 
     jid_user = jid.split("@", 1)[0]

@@ -222,7 +222,7 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 		if action == whatsmeow.ParticipantChangeAdd || action == whatsmeow.ParticipantChangePromote {
 			for _, participant := range participants {
 				if !policy.allowsIdentity(r.Context(), participant, ops.twin) {
-					writeGroupError(w, http.StatusForbidden, "participant "+participant.String()+" is not in "+chatPolicyEnv)
+					writeGroupError(w, http.StatusForbidden, "participant "+participant.String()+" is not in "+policy.origin())
 					return
 				}
 			}

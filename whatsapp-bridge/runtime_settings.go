@@ -96,8 +96,9 @@ func settingDefinitions() []settingDefinition {
 				return nil, errors.New("expected a nonempty array of chat entries; use null to clear")
 			}
 			for _, entry := range entries {
-				if strings.TrimSpace(entry) == "" || strings.Contains(entry, ",") {
-					return nil, errors.New("expected nonempty chat entries without commas")
+				// An entry that can never match would silently deny every chat.
+				if !chatEntryPattern.MatchString(strings.TrimSpace(entry)) {
+					return nil, errors.New("expected each chat entry to be a JID, a digits-only number or a *@server wildcard")
 				}
 			}
 			return parseChatPolicy(strings.Join(entries, ",")).entries(), nil
@@ -253,6 +254,10 @@ func readRuntimeSettings(ctx context.Context, db settingsReader, defaults map[st
 		out.chats.restricted = true // An empty effective intersection permits nothing.
 		deploy := parseChatPolicy(strings.Join(defaults["chats.allowed"].Value.([]string), ","))
 		out.chats = intersectChatPolicies(out.chats, deploy)
+		out.chats.source = "runtime chats.allowed"
+		if deploy.restricted {
+			out.chats.source += " within " + chatPolicyEnv + " (deploy)"
+		}
 		chatSetting.Value = out.chats.entries()
 		out.Settings["chats.allowed"] = chatSetting
 	}
@@ -349,7 +354,27 @@ func (b *Bridge) settingsSnapshot(ctx context.Context) (runtimeSettingsSnapshot,
 	if pinned, ok := ctx.Value(runtimeSettingsSnapshotKey{}).(runtimeSettingsSnapshot); ok {
 		return pinned, nil
 	}
+	return b.liveSettings(ctx)
+}
+
+// liveSettings reads the table even inside a pinned request: send limits
+// follow what the operator committed, not what the request was admitted under.
+func (b *Bridge) liveSettings(ctx context.Context) (runtimeSettingsSnapshot, error) {
 	return readRuntimeSettings(ctx, b.Store.db, b.RuntimeDefaults, b.warnSavedSetting)
+}
+
+// Denying is right, but silently is not: background consumers drop work on it.
+// One ERROR a minute with the count since the last one; never an entry.
+func (b *Bridge) chatPolicyUnreadable(err error) chatPolicy {
+	b.metrics.chatPolicyReadFailures.Add(1)
+	b.settingsWarnMu.Lock()
+	defer b.settingsWarnMu.Unlock()
+	b.policyFailPending++
+	if time.Since(b.policyFailLogged) >= time.Minute {
+		b.Log.Errorf("Runtime chat policy unreadable %d time(s); every chat is denied until it reads again: %v", b.policyFailPending, err)
+		b.policyFailPending, b.policyFailLogged = 0, time.Now()
+	}
+	return chatPolicy{restricted: true, source: "runtime chat policy (unreadable)"}
 }
 
 func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicy {
@@ -360,7 +385,7 @@ func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicy {
 		}
 		snapshot, err := b.settingsSnapshot(b.ctx)
 		if err != nil {
-			return chatPolicy{restricted: true} // Never drop a saved restriction on read failure.
+			return b.chatPolicyUnreadable(err) // Never drop a saved restriction on read failure.
 		}
 		return snapshot.chats
 	}
@@ -368,9 +393,10 @@ func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicy {
 }
 
 // Tool and chat guards must authorize under the same committed settings.
+// Which routes are pinned is decided where they are registered (rest.go).
 func (b *Bridge) runtimePolicyGuard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if b.RuntimeDefaults == nil || r.URL.Path == "/api/me" || r.URL.Path == "/api/health" || r.URL.Path == "/api/ready" {
+		if b.RuntimeDefaults == nil {
 			h(w, r)
 			return
 		}

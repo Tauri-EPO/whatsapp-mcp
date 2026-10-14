@@ -62,11 +62,16 @@ def _chat_env(raw: str | None) -> list[str]:
     return policy_entries(ChatPolicy.from_entries((raw or "").split(",")))
 
 
+# A digits-only number, a JID or a server wildcard: an entry that can never
+# match is refused. Keep identical to chatEntryPattern in whatsapp-bridge/chat_policy.go.
+CHAT_ENTRY = re.compile(r"(?:[0-9]+|(?:\*|[0-9A-Za-z_:-]+)@[0-9A-Za-z.-]+)")
+
+
 def _chat_value(value: Any) -> list[str]:
     if (
         not isinstance(value, list)
         or not value
-        or any(not isinstance(entry, str) or not entry.strip() or "," in entry for entry in value)
+        or any(not isinstance(entry, str) or not CHAT_ENTRY.fullmatch(entry.strip()) for entry in value)
     ):
         raise ValueError("expected a nonempty array of chat entries")
     return _chat_env(",".join(value))

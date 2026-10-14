@@ -101,6 +101,8 @@ type Bridge struct {
 	settingsMu            sync.Mutex
 	settingsWarnMu        sync.Mutex
 	settingsWarned        map[string]int64
+	policyFailLogged      time.Time // both guarded by settingsWarnMu
+	policyFailPending     int64
 	operatorLogout        atomic.Bool
 	operatorSessionWiped  atomic.Bool
 	operatorRetiredClient atomic.Pointer[whatsmeow.Client]

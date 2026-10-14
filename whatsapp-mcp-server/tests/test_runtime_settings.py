@@ -443,7 +443,19 @@ def test_runtime_chats_ingest_rechecks_selected_candidates(runtime_archive, monk
     assert whatsapp.coverage()["audio"]["messages"] == 1
 
 
-@pytest.mark.parametrize("value", [[], "invalid-json", [" "], [ALICE + "," + BOB]])
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        "invalid-json",
+        [" "],
+        [ALICE + "," + BOB],
+        [ALICE, "+55 11 99999-9999"],
+        [ALICE, "a@b@c"],
+        [ALICE, "@"],
+        [ALICE, "1.2@lid"],
+    ],
+)
 def test_bad_saved_chats_fail_closed_and_do_not_log_entries(runtime_archive, caplog, value):
     patch(runtime_archive, {"chats.allowed": value})
     policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({}))
@@ -453,6 +465,40 @@ def test_bad_saved_chats_fail_closed_and_do_not_log_entries(runtime_archive, cap
     assert len([r for r in caplog.records if "Saved runtime setting" in r.message]) == 1
     patch(runtime_archive, {"chats.allowed": None})
     assert policy.allows(ALICE)
+
+
+@pytest.mark.parametrize(
+    ("deploy", "origin"),
+    [("", "runtime chats.allowed"), ("*@g.us", "runtime chats.allowed within WHATSAPP_ALLOWED_CHATS (deploy)")],
+)
+def test_refusal_names_the_list_it_came_from(runtime_archive, deploy, origin):
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": deploy}))
+    assert "is not in WHATSAPP_ALLOWED_CHATS;" in policy.denial_message(BOB)  # no override: the wording of before
+    patch(runtime_archive, {"chats.allowed": [FAMILY]})
+    assert f"is not in {origin};" in policy.denial_message(BOB)
+    with pytest.raises(ToolError, match=re.escape(f"is not in {origin}")):
+        policy.require_participant(BOB)
+
+
+def test_sender_name_reads_the_policy_once_for_key_and_query(runtime_archive, monkeypatch):
+    class Narrowing:  # A PATCH lands between two reads made outside a pinned operation.
+        reads = 0
+
+        @property
+        def restricted(self):
+            self.reads += 1
+            return self.reads == 1
+
+    hidden = BOB.replace("@s.whatsapp.net", "@lid")
+    with runtime_archive.messages() as conn:
+        conn.execute("INSERT INTO chats(jid,name) VALUES (?,?)", (hidden, "Private cached name"))
+        conn.execute("UPDATE chats SET name=NULL WHERE jid=?", (BOB,))
+    policy = Narrowing()
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(runtime_archive.whatsmeow_db) + ".missing")
+    whatsapp._reset_name_cache()
+    assert whatsapp.get_sender_name(BOB) == BOB  # restricted key, restricted query
+    assert policy.reads == 1
 
 
 def test_runtime_chats_restriction_does_not_reuse_cross_namespace_sender_name(runtime_archive, monkeypatch):
