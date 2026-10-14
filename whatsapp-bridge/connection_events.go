@@ -42,8 +42,14 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 		return
 	}
 	b.Log.Infof("WhatsApp connection state: %s (%s)", state, reason)
-	if !b.ForwardConnection || !b.Webhook.Enabled() {
+	legacy := b.ForwardConnection && b.Webhook.Enabled()
+	// Without the legacy sender an immediate transition is only recorded and
+	// queued for the runtime receiver: no legacy delivery order or goroutine.
+	// A disconnect still waits out the debounce while a runtime receiver can
+	// exist, so a receiver configured meanwhile never replays a quick flap.
+	if !legacy && (immediate || b.RuntimeWebhook == nil) {
 		b.lastConnectionEvent = key
+		b.queueRuntimeConnection(payload)
 		b.connectionEventsMu.Unlock()
 		return
 	}
@@ -55,6 +61,7 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 	}
 	if immediate {
 		b.lastConnectionEvent = key
+		b.queueRuntimeConnection(payload)
 		previous, delivered = b.queueConnectionDeliveryLocked()
 	} else {
 		var cancel context.CancelFunc
@@ -90,6 +97,11 @@ func (b *Bridge) notifyConnection(state, reason string, immediate, synchronous b
 			}
 			b.lastConnectionEvent = key
 			b.connectionDisconnectCancel = nil
+			b.queueRuntimeConnection(payload)
+			if !legacy {
+				b.connectionEventsMu.Unlock()
+				return
+			}
 			previous, delivered = b.queueConnectionDeliveryLocked()
 			b.connectionEventsMu.Unlock()
 		}

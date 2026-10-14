@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -83,20 +84,34 @@ func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...type
 	return b.Webhook.Enabled() && b.webhookChatAllowed(b.Policy, chat, fromMe, original...)
 }
 
-// Evaluate once for both senders, including policy-eligible arrivals while the
+// Admit arrivals eligible for either sender, including arrivals while the
 // configured runtime receiver is disabled (which must count as delivery loss).
-func (b *Bridge) messageWebhookAllowed(policy chatPolicy, chat types.JID, fromMe bool, id string, original ...types.JID) bool {
-	allowed := (b.Webhook.Enabled() || b.RuntimeWebhook.configured()) && b.webhookChatAllowed(policy, chat, fromMe, original...)
-	if !allowed {
-		b.logWebhookWithheld(chat, id)
+// runtime is the receiver generation whose filters admitted the message.
+func (b *Bridge) messageWebhookAllowed(policy chatPolicy, chat types.JID, fromMe bool, original ...types.JID) (legacy bool, runtime *runtimeWebhookGeneration) {
+	legacy = b.Webhook.Enabled() && b.webhookFilters().allows(chat, fromMe)
+	receiver := b.RuntimeWebhook.subscriber("message.received")
+	if receiver != nil && receiver.filters.allows(chat, fromMe) {
+		runtime = receiver
 	}
-	return allowed
+	if (legacy || runtime != nil) && !b.webhookIdentityAllowed(policy, chat, original...) {
+		b.Log.Debugf("Message not forwarded: chat allow-list")
+		return false, nil
+	}
+	if !legacy && runtime == nil {
+		b.logWebhookWithheld(chat, fromMe, receiver)
+	}
+	return legacy, runtime
 }
 
 func (b *Bridge) webhookChatAllowed(policy chatPolicy, chat types.JID, fromMe bool, original ...types.JID) bool {
-	if fromMe && !b.ForwardSelf {
-		return false
-	}
+	return b.webhookFilters().allows(chat, fromMe) && b.webhookIdentityAllowed(policy, chat, original...)
+}
+
+func (b *Bridge) webhookFilters() runtimeWebhookFilters {
+	return runtimeWebhookFilters{ForwardSelf: b.ForwardSelf, ForwardStatus: b.ForwardStatus, ForwardChannels: b.ForwardChannels, ForwardBroadcasts: b.ForwardBroadcasts}
+}
+
+func (b *Bridge) webhookIdentityAllowed(policy chatPolicy, chat types.JID, original ...types.JID) bool {
 	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {
 		return lookupAltJID(ctx, b.currentClient(), j)
 	}
@@ -105,39 +120,62 @@ func (b *Bridge) webhookChatAllowed(policy chatPolicy, chat types.JID, fromMe bo
 	for _, j := range original {
 		allowed = allowed || policy.allowsIdentity(b.ctx, j, lookup)
 	}
-	if !allowed {
-		return false
-	}
-	if isStatusChat(chat) {
-		return b.ForwardStatus
-	}
-	switch chat.Server {
-	case types.NewsletterServer:
-		return b.ForwardChannels
-	case types.BroadcastServer:
-		return b.ForwardBroadcasts
-	case types.DefaultUserServer, types.HiddenUserServer, types.HostedServer, types.HostedLIDServer, types.GroupServer:
-		return true
-	default:
-		return false
-	}
+	return allowed
 }
 
-func (b *Bridge) logWebhookWithheld(chat types.JID, id string) {
-	family, gate, on := "", "", false
+func (f runtimeWebhookFilters) allows(chat types.JID, fromMe bool) bool {
+	return f.withheldBy(chat, fromMe) == ""
+}
+
+// withheldBy names the filter that refuses the message, "" when none does.
+func (f runtimeWebhookFilters) withheldBy(chat types.JID, fromMe bool) string {
 	switch {
+	case fromMe && !f.ForwardSelf:
+		return "forward_self"
 	case isStatusChat(chat):
-		family, gate, on = "status", webhookForwardStatusEnv, b.ForwardStatus
+		if !f.ForwardStatus {
+			return "forward_status"
+		}
 	case chat.Server == types.NewsletterServer:
-		family, gate, on = "channel", webhookForwardChannelsEnv, b.ForwardChannels
+		if !f.ForwardChannels {
+			return "forward_channels"
+		}
 	case chat.Server == types.BroadcastServer:
-		family, gate, on = "broadcast list", webhookForwardBroadcastsEnv, b.ForwardBroadcasts
+		if !f.ForwardBroadcasts {
+			return "forward_broadcasts"
+		}
+	default:
+		switch chat.Server {
+		case types.DefaultUserServer, types.HiddenUserServer, types.HostedServer, types.HostedLIDServer, types.GroupServer:
+		default:
+			return "namespace"
+		}
 	}
-	if gate == "" {
-		b.Log.Debugf("Message %s in %s not forwarded: namespace %q; WEBHOOK_ENABLED=%t FORWARD_SELF=%t", id, chat, chat.Server, b.Webhook.Enabled(), b.ForwardSelf)
-		return
+	return ""
+}
+
+var webhookFilterEnv = map[string]string{"forward_self": forwardSelfEnv, "forward_status": webhookForwardStatusEnv, "forward_channels": webhookForwardChannelsEnv, "forward_broadcasts": webhookForwardBroadcastsEnv}
+
+// Names what withheld the message from each sender: a deployment key or the
+// runtime receiver's own filter. Never the chat or message identifiers.
+func (b *Bridge) logWebhookWithheld(chat types.JID, fromMe bool, receiver *runtimeWebhookGeneration) {
+	origin := func(filter string, cfg *runtimeWebhookConfig) string {
+		if filter == "namespace" {
+			return fmt.Sprintf("namespace %q", chat.Server)
+		}
+		if cfg != nil && (filter == "forward_self" && cfg.ForwardSelf != nil || filter == "forward_channels" && cfg.ForwardChannels != nil || filter == "forward_broadcasts" && cfg.ForwardBroadcasts != nil) {
+			return "receiver filter " + filter + "=false"
+		}
+		return "deployment " + webhookFilterEnv[filter] + "=false"
 	}
-	b.Log.Debugf("Message %s in %s not forwarded: %s feed (%s=%t); WEBHOOK_ENABLED=%t FORWARD_SELF=%t", id, chat, family, gate, on, b.Webhook.Enabled(), b.ForwardSelf)
+	legacy, runtime := "WEBHOOK_ENABLED=false", "no receiver for message.received"
+	if b.Webhook.Enabled() {
+		legacy = origin(b.webhookFilters().withheldBy(chat, fromMe), nil)
+	}
+	if receiver != nil {
+		runtime = origin(receiver.filters.withheldBy(chat, fromMe), &receiver.config)
+	}
+	b.Log.Debugf("Message not forwarded: legacy webhook: %s; runtime webhook: %s", legacy, runtime)
 }
 
 // WebhookPayload represents the data sent to the webhook
