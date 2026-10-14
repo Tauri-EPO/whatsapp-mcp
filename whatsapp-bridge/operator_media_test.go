@@ -22,6 +22,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// blockedGuardWait bounds the checks below that wait for something an unrelated
+// transfer or lease must not hold back. The wrong behaviour there is to stay
+// blocked (until the test releases it, or for good), so the bound is generous:
+// the earlier 0.5 s and 1 s were only scheduling allowances and one of them
+// failed on a loaded runner (issue #702). A check that measures a budget keeps
+// a bound of its own.
+const blockedGuardWait = 5 * time.Second
+
 func mediaOperatorServer(t *testing.T, b *Bridge) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(newOperatorHandler(operatorConfig{Bind: "127.0.0.1", Port: 8090, Token: fakeOperatorToken, AllowedHosts: "127.0.0.1"}, operatorRoutes{mediaUsage: b.handleOperatorMediaUsage, mediaPurge: b.handleOperatorMediaPurge, settings: b.handleRuntimeSettings}, b.Log))
@@ -518,7 +526,7 @@ func TestLocalQuotaLeaseWaitHonorsContext(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(blockedGuardWait):
 		once.Do(release)
 		<-done
 		t.Fatal("quota waiter retained lease after its deadline")
@@ -579,7 +587,7 @@ func TestLocalQuotaExpiredAutomaticTransferReleasesClientGate(t *testing.T) {
 			t.Fatal("completed transfer retained its client reader gate")
 		}
 		b.clientGate.Unlock()
-	case <-time.After(time.Second):
+	case <-time.After(blockedGuardWait):
 		t.Fatal("expired automatic transfer stayed behind an unrelated quota lease")
 	}
 }
@@ -743,7 +751,7 @@ func TestLocalQuotaSlowNetworkDoesNotBlockInboundImage(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(blockedGuardWait):
 		t.Fatal("no real transfer admission")
 	}
 	msg := buildImageMessage(phonePN, phonePN, false, "caption")
@@ -757,7 +765,7 @@ func TestLocalQuotaSlowNetworkDoesNotBlockInboundImage(t *testing.T) {
 	go func() { b.handleMessage(msg); close(handled) }()
 	select {
 	case <-handled:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(blockedGuardWait):
 		once.Do(func() { close(finish) })
 		<-handled
 		t.Fatal("unrelated transfer blocked inbound processing")
@@ -831,7 +839,7 @@ func TestLocalQuotaCompletedTransferDoesNotWaitForAccounting(t *testing.T) {
 			go func() { b.mediaTransfers.wait(); close(drained) }()
 			select {
 			case <-drained:
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(blockedGuardWait):
 				unlockOnce.Do(unlock)
 				<-drained
 				t.Fatal("finished transfer retained client gate behind unrelated accounting")
@@ -886,7 +894,7 @@ func TestLocalQuotaConcurrentNetworkReservations(t *testing.T) {
 	for range 2 {
 		select {
 		case <-entered:
-		case <-time.After(time.Second):
+		case <-time.After(blockedGuardWait):
 			t.Fatal("network transfer retained accounting lease")
 		}
 	}
@@ -1046,7 +1054,7 @@ func TestLocalQuotaSynchronousAccountingContentionFallsBack(t *testing.T) {
 	go func() { b.handleMessage(msg); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(blockedGuardWait):
 		once.Do(release)
 		<-done
 		t.Fatal("synchronous image waited on accounting")
@@ -1057,7 +1065,7 @@ func TestLocalQuotaSynchronousAccountingContentionFallsBack(t *testing.T) {
 	once.Do(release)
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(blockedGuardWait):
 		t.Fatal("background fallback not consumed")
 	}
 	b.mediaTransfers.wait()
@@ -1116,7 +1124,10 @@ func TestLocalQuotaSynchronousRuntimeAccountingHasShortBudget(t *testing.T) {
 		if !errors.Is(err, errMediaQuotaBusy) {
 			t.Fatal("sync accounting reached network or returned the wrong refusal", err)
 		}
-	case <-time.After(500 * time.Millisecond):
+	// One second, not blockedGuardWait: this guard measures the short try
+	// budget and has to stay well inside the 3 s context above, or a budget
+	// of seconds would pass as an ordinary context-bounded wait.
+	case <-time.After(time.Second):
 		connectionOnce.Do(func() { _ = conn.Close() })
 		<-result
 		t.Fatal("sync media path waited indefinitely for runtime accounting")
