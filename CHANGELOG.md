@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.9.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.8.0...v2.9.0) (2026-10-15)
+
+
+### Features
+
+* add Unix MCP and operator listeners alongside TCP ([#739](https://github.com/Tauri-EPO/whatsapp-mcp/issues/739)) ([e88abd8](https://github.com/Tauri-EPO/whatsapp-mcp/commit/e88abd8712ae02663d07655bb253531f3742ffe8)), closes [#705](https://github.com/Tauri-EPO/whatsapp-mcp/issues/705)
+* measure MCP memory and add WhatsApp egress proxy ([#738](https://github.com/Tauri-EPO/whatsapp-mcp/issues/738)) ([f3853fd](https://github.com/Tauri-EPO/whatsapp-mcp/commit/f3853fd0031485537bd3d8b4cda534514b415d4c)), closes [#704](https://github.com/Tauri-EPO/whatsapp-mcp/issues/704) [#706](https://github.com/Tauri-EPO/whatsapp-mcp/issues/706)
+* persist group settings and send WebP stickers ([#737](https://github.com/Tauri-EPO/whatsapp-mcp/issues/737)) ([097a96c](https://github.com/Tauri-EPO/whatsapp-mcp/commit/097a96c86a4658843353b7b80262a9c4e7c63351)), closes [#714](https://github.com/Tauri-EPO/whatsapp-mcp/issues/714) [#715](https://github.com/Tauri-EPO/whatsapp-mcp/issues/715)
+* transcribe sent audio and search original document filenames ([#731](https://github.com/Tauri-EPO/whatsapp-mcp/issues/731)) ([71897b9](https://github.com/Tauri-EPO/whatsapp-mcp/commit/71897b98ebef183dc9a8bd72feaed8539e8ae503)), closes [#711](https://github.com/Tauri-EPO/whatsapp-mcp/issues/711) [#712](https://github.com/Tauri-EPO/whatsapp-mcp/issues/712)
+
+
+### Bug fixes
+
+* diagnose connect failures and deliver runtime storage warnings ([#732](https://github.com/Tauri-EPO/whatsapp-mcp/issues/732)) ([27815a0](https://github.com/Tauri-EPO/whatsapp-mcp/commit/27815a01d96964c0b048a8965ffe7b6ea5b192d4)), closes [#718](https://github.com/Tauri-EPO/whatsapp-mcp/issues/718) [#716](https://github.com/Tauri-EPO/whatsapp-mcp/issues/716) [#726](https://github.com/Tauri-EPO/whatsapp-mcp/issues/726)
+
+
+### Refactoring
+
+* separate chat policy snapshots and local contact names ([#733](https://github.com/Tauri-EPO/whatsapp-mcp/issues/733)) ([8cbc04d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/8cbc04de04e36fb0ba58b0f9e426ff226596c73e)), closes [#723](https://github.com/Tauri-EPO/whatsapp-mcp/issues/723) [#730](https://github.com/Tauri-EPO/whatsapp-mcp/issues/730)
+
 ## [2.8.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.7.0...v2.8.0) (2026-10-14)
 
 
