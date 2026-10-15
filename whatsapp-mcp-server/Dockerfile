@@ -77,6 +77,6 @@ EXPOSE 8000
 # server is up; only a connection failure marks the container unhealthy.
 # Probe the actual bind address directly: a proxy cannot mask a dead server.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "import os,urllib.request,urllib.error;from mcp_config import resolve_host,resolve_port;\nh=resolve_host(os.environ.get('WHATSAPP_MCP_HOST'));h={'0.0.0.0':'127.0.0.1','::':'::1'}.get(h,h);h='[%s]'%h if ':' in h else h;u='http://%s:%s/mcp'%(h,resolve_port(os.environ.get('WHATSAPP_MCP_PORT')))\ntry:\n    urllib.request.build_opener(urllib.request.ProxyHandler({})).open(u,timeout=4)\nexcept urllib.error.HTTPError:\n    pass"]
+    CMD ["python", "-c", "from mcp_config import probe_http_health; probe_http_health()"]
 
 CMD ["python", "main.py"]

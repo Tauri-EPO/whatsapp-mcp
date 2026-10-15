@@ -68,7 +68,7 @@ func resolveSplitBridgeBind(bind, hosts string, port int, operatorBind string,
 			return "", errors.New("WHATSAPP_BRIDGE_BIND requires bridge-agent.<project>_agent, never the bare alias")
 		}
 		if operatorBind != "" && !isLoopbackBind(bind) {
-			return "", errors.New("WHATSAPP_BRIDGE_BIND must remain loopback or use bridge-agent.<project>_agent when WHATSAPP_OPERATOR_BIND is enabled")
+			return "", errors.New("WHATSAPP_BRIDGE_BIND must remain loopback or use bridge-agent.<project>_agent when WHATSAPP_OPERATOR_BIND or WHATSAPP_OPERATOR_SOCKET is enabled")
 		}
 		return bind, nil
 	}

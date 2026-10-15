@@ -68,6 +68,8 @@ whatsapp-mcp/
 │   ├── snapshot_space_windows.go # snapshot free space and publication on Windows
 │   ├── operator_session_read.go  # bounded archive-reader cancellation before operator logout
 │   ├── operator_config.go      # bounded operator configuration, token-file checks and single-interface bind
+│   ├── operator_socket_unix.go # additive Unix listener, stale-socket ownership and path validation
+│   ├── operator_socket_windows.go # refuse Unix listener configuration on Windows
 │   ├── proxy.go                # optional WhatsApp-only egress proxy, private URL and log redaction
 │   ├── operator_probe.go        # credential-free argv/output for the operator smoke probe
 │   ├── operator_pairing.go     # HTTP pairing state, QR/code, explicit restart and passkey actions
@@ -212,6 +214,7 @@ whatsapp-mcp/
 ├── docker-compose.yml          # bridge + mcp — docs/DOCKER.md (no whisper: WHISPER_URL points at a server you run)
 ├── docker-compose.operator.yml # optional private operator network; no operator host port
 ├── docker-compose.split.yml    # optional MCP namespace separation; apply last after other overrides
+├── docker-compose.socket.yml   # optional per-instance Unix sockets alongside TCP
 ├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), operator-logout.sh (private unlink/cleanup), upstream-harvest.sh, merge-when-green.sh (update / wait for CI / squash-merge a PR)
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
@@ -360,6 +363,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 |----------|---------|---------|
 | `WHATSAPP_PROXY_URL` | empty (SDK defaults) | Explicit socks5:// (port required), http:// or https:// egress proxy for WhatsApp pre/post-login websocket and media upload/download only. Never REST/operator/admin, webhook, S3 or transcription clients. Health reports only proxy_enabled. |
 | `WHATSAPP_PROXY_URL_FILE` | empty | Alternative owner-only regular proxy URL file, at most 4096 bytes; symlinks refused. Set URL or file, never both. Credentials are never logged. Mount separately into the bridge. |
+| `WHATSAPP_MCP_SOCKET` | empty (off) | Additional HTTP/SSE Unix listener; TCP stays. Absolute path outside store/outbox/media roots; existing parent, no symlinks, mode 0660, process uid (1000 in images). Remove only our stale socket; live sockets and other files refused. Same Host policy; bearer/OAuth required even with loopback TCP, bridge-token fallback and default rate limit enabled. |
+| `WHATSAPP_OPERATOR_SOCKET` | empty (off) | Additional private operator Unix listener with the same filesystem rules and streaming export. Enables loopback TCP operator when BIND is unset; operator bearer remains required. |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable private operator webhook configuration; independent of the legacy WEBHOOK_ENABLED/WEBHOOK_URL sender. Process-local configuration, HMAC signatures and no media bytes. |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; address restrictions still apply. |
 | `WHATSAPP_WEBHOOK_RUNTIME_FAILURE_LIMIT` | `50` | Disable the runtime receiver after 1-100 consecutive failed subscribed message, connection or storage events; expiry after a destination failure still counts. Pure local cancellation/expiry and synthetic tests do not count. PUT re-enables it. |
@@ -436,7 +441,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only | Extra `Host` header values accepted by the `http`/`sse` transports (comma-separated; bare hostnames match any port; `*` disables the check). Unset + non-loopback bind disables the check with a warning |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per socket peer (or verified forwarding chain) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; OAuth uses subject identity, with a separate failed-credential peer budget checked before remote verification; `0`/`off` disables |
-| `WHATSAPP_MCP_TRUSTED_PROXIES` | *(unset = trust none)* | MCP-only comma-separated CIDRs, `loopback` (`127.0.0.0/8` and `::1/128`), or `gateway` (one default-route gateway resolved from `/proc/net/route`; unavailable/ambiguous stops startup). Use gateway only with a loopback-bound published MCP port. Only a trusted socket peer may supply `X-Forwarded-For`; the rightmost untrusted hop keys the limiter. Invalid chains fall back to the socket peer; invalid configuration stops startup. Uvicorn forwarding is disabled so the middleware sees the real socket peer |
+| `WHATSAPP_MCP_TRUSTED_PROXIES` | *(unset = trust none)* | MCP-only comma-separated CIDRs, `loopback`, `gateway` (one default-route gateway; unavailable/ambiguous stops startup), or `unix` (explicitly trust the additional Unix socket). Unix peers share a fixed bucket unless trusted; only trusted peers may supply X-Forwarded-For/Proto. Use gateway only with a loopback-bound published port. The rightmost untrusted hop keys the limiter; invalid chains fall back to the socket peer. Uvicorn forwarding is disabled. |
 | `WHATSAPP_MCP_MAX_BODY_BYTES` | `4194304` | Max request body for `http`/`sse` (passed to the SDK app) |
 | `WHATSAPP_MCP_UPLOAD_MAX_BYTES` | `67108864` (64 MiB) | Maximum raw file bytes streamed into `POST /upload` on `http`/`sse` (positive integer, at most 268435456 / 256 MiB); independent of the JSON-RPC body limit. Uploads expire after one hour and are swept at startup, on new uploads and every minute; a fixed 256 MiB shared outbox budget also bounds upload writes. Sent files are removed after success; failures preserve IDs until expiry |
 | `WHATSAPP_MCP_OAUTH_ISSUER` | `empty (off)` | OAuth resource-server issuer; HTTPS, or HTTP on loopback for tests. JWT/JWKS by default; no built-in login or authorization server. |

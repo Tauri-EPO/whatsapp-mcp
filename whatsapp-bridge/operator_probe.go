@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,11 @@ func operatorStatusProbe(getenv func(string) string, out io.Writer) int {
 	// wildcard Host exception when the configured bind was a Docker alias.
 	request.Host = net.JoinHostPort("localhost", strconv.Itoa(cfg.Port))
 	transport := &http.Transport{Proxy: nil}
+	if cfg.Socket != "" {
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", cfg.Socket)
+		}
+	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)

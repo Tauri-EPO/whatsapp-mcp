@@ -3,6 +3,7 @@
 #
 #   scripts/smoke.sh                 # check the stack described by ./.env
 #   scripts/smoke.sh --wait 90       # poll up to 90 s for the bridge to come up first
+#   scripts/smoke.sh --mcp-socket /absolute/instance/mcp.sock --url http://localhost
 #   scripts/smoke.sh --url https://box.tailnet.ts.net   # MCP endpoint as clients see it
 #   scripts/smoke.sh --project whatsapp-mcp             # stack owned by a manager (Komodo,
 #                                    #   Portainer): reach the containers by compose label
@@ -36,6 +37,7 @@ WAIT=0
 URL=""
 PROJECT=""
 MCP_TOKEN_ARG=""
+MCP_SOCKET=""
 # `shift 2` on a flag given without its value shifts nothing and returns 1, which
 # would spin this loop forever: ask for the value explicitly.
 need_value() { [ "$2" -ge 2 ] || { echo "$1 needs a value" >&2; exit 1; }; }
@@ -45,10 +47,13 @@ while [ $# -gt 0 ]; do
     --url) need_value "$1" $#; URL="$2"; shift 2 ;;
     --project) need_value "$1" $#; PROJECT="$2"; shift 2 ;;
     --mcp-token) need_value "$1" $#; MCP_TOKEN_ARG="$2"; shift 2 ;;
+    --mcp-socket) need_value "$1" $#; MCP_SOCKET="$2"; shift 2 ;;
     -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+curl_socket=()
+[ -z "$MCP_SOCKET" ] || curl_socket=(--unix-socket "$MCP_SOCKET")
 
 # .env is KEY=VALUE lines (see .env.example); export them for the defaults below.
 # A stack deployed by Komodo/Portainer keeps it root-owned: skip it there and read
@@ -253,7 +258,7 @@ else
     [ -n "${WHATSAPP_MCP_METRICS_TOKEN:-}" ] && metrics_auth=(-H "Authorization: Bearer ${WHATSAPP_MCP_METRICS_TOKEN}")
     # curl already prints 000 as %{http_code} when it cannot connect; assign, do
     # not append, or the status becomes "000000" and no branch below matches it.
-    code=$(curl -sS -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null) || code="${code:-000}"
+    code=$(curl -sS "${curl_socket[@]}" -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null) || code="${code:-000}"
     # 404: the endpoint answers but does not route /metrics, so waiting is pointless.
     if [ "$code" = "200" ] || [ "$code" = "404" ] || [ "$(date +%s)" -ge "$deadline" ]; then break; fi
     sleep 3 # the mcp container starts after the bridge is healthy
@@ -276,7 +281,7 @@ MCP_TOKEN="${MCP_TOKEN:-$TOKEN}"
 hdrs=/tmp/wamcp-init-h.$$
 body=/tmp/wamcp-init-b.$$
 while :; do
-  code=$(curl -sS -o "$body" -D "$hdrs" -w '%{http_code}' \
+  code=$(curl -sS "${curl_socket[@]}" -o "$body" -D "$hdrs" -w '%{http_code}' \
     -H "Authorization: Bearer ${MCP_TOKEN}" \
     -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \

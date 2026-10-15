@@ -180,7 +180,8 @@ def start_admin(bridge_token: str, mcp_token: str | None, *, port: int = 8091):
 
 
 def install_admin(transport: str, port: int):
-    if transport == "stdio" or not os.getenv("WHATSAPP_OPERATOR_BIND", "").strip():
+    operator_enabled = any(os.getenv(key, "").strip() for key in ("WHATSAPP_OPERATOR_BIND", "WHATSAPP_OPERATOR_SOCKET"))
+    if transport == "stdio" or not operator_enabled:
         return None
     if port == 8091:
         raise ValueError("WHATSAPP_MCP_PORT: 8091 is reserved for the operator admin listener")
@@ -189,7 +190,9 @@ def install_admin(transport: str, port: int):
 
     bridge_token = _read_bridge_token() or ""
     token, _ = resolve_http_token(
-        os.getenv("WHATSAPP_MCP_TOKEN"), os.getenv("WHATSAPP_MCP_HOST", "127.0.0.1"), _read_bridge_token
+        os.getenv("WHATSAPP_MCP_TOKEN"),
+        "unix" if os.getenv("WHATSAPP_MCP_SOCKET", "").strip() else os.getenv("WHATSAPP_MCP_HOST", "127.0.0.1"),
+        _read_bridge_token,
     )
     try:
         return start_admin(bridge_token, token)
