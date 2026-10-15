@@ -141,7 +141,6 @@ func purgeStatusCLI(args []string, out, diagnostics io.Writer) int {
 		defer func() { _ = store.Close() }()
 	}
 	b := &Bridge{ctx: ctx, Store: store, StoreRoot: root, Log: newTextWriter("Bridge", "INFO", diagnostics, false), ReadOnly: readOnly, Tools: tools, RuntimeDefaults: defaults, storeStats: newStoreStats(root)}
-	b.Policy = b.runtimeChatPolicy(parseChatPolicy(strings.Join(defaults["chats.allowed"].Value.([]string), ",")))
 	if backend.Backend == "s3" {
 		b.MediaStorage, err = newS3MediaStorage(ctx, backend, store, root)
 		if err != nil {
