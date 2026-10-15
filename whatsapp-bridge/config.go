@@ -116,6 +116,7 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 	collect(validateBridgeToken(getenv("WHATSAPP_BRIDGE_TOKEN")))
 	cfg.Operator, err = parseOperatorConfig(getenv, lookup)
 	collect(err)
+	collect(validateOperatorSocket(cfg.Operator.Socket, store, cfg.MediaRoots))
 	cfg.RuntimeWebhook, err = parseRuntimeWebhookOptions(getenv, cfg.Switches)
 	collect(err)
 	cfg.SplitREST = isSplitBridgeBind(cfg.Bind)
@@ -142,7 +143,8 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 	case "off", "none", "disabled":
 	case "":
 		host := strings.TrimSpace(getenv("WHATSAPP_MCP_HOST"))
-		cfg.MCPFallbackBridge = host != "" && host != "localhost" && host != "127.0.0.1" && host != "::1"
+		cfg.MCPFallbackBridge = strings.TrimSpace(getenv("WHATSAPP_MCP_SOCKET")) != "" ||
+			(host != "" && host != "localhost" && host != "127.0.0.1" && host != "::1")
 	default:
 		if len(mcpToken) < 16 {
 			collect(errors.New("WHATSAPP_MCP_TOKEN must have at least 16 characters"))

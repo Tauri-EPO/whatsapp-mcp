@@ -189,3 +189,19 @@ def test_actual_stdio_does_not_start_admin_or_validate_http_port(tmp_path):
         )
     assert result.returncode == 0 and '"protocolVersion"' in result.stdout
     assert "MCP admin disabled:" not in result.stderr and "Traceback" not in result.stderr
+
+
+def test_operator_socket_alone_enables_admin_and_reserves_port(monkeypatch):
+    import operator_admin
+    import whatsapp
+
+    monkeypatch.setenv("WHATSAPP_OPERATOR_BIND", "")
+    monkeypatch.setenv("WHATSAPP_OPERATOR_SOCKET", "/synthetic/operator.sock")
+    monkeypatch.setenv("WHATSAPP_MCP_TOKEN", MCP_TOKEN)
+    monkeypatch.setattr(whatsapp, "_read_bridge_token", lambda: BRIDGE_TOKEN)
+    calls = []
+    monkeypatch.setattr(operator_admin, "start_admin", lambda bridge, mcp: calls.append((bridge, mcp)) or "started")
+    assert operator_admin.install_admin("http", 8000) == "started"
+    assert calls == [(BRIDGE_TOKEN, MCP_TOKEN)]
+    with pytest.raises(ValueError, match="reserved"):
+        operator_admin.install_admin("http", 8091)

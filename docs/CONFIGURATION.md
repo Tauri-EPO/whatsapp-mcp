@@ -2,18 +2,38 @@
 
 Every environment variable and CLI flag, plus the transport, authentication and allow-list semantics behind them. Compose users set these in `.env` (see [DOCKER.md](DOCKER.md)); laptop users export them before launching (see [LAPTOP.md](LAPTOP.md)). `AGENTS.md` section 7 is the agent-facing copy of the same table; keep both in sync when adding a variable.
 
-## WhatsApp egress proxy
+## WhatsApp egress proxy and additional Unix listeners
 
 | Variable | Default | Behavior |
 |---|---|---|
 | `WHATSAPP_PROXY_URL` | empty | Explicit `socks5://host:port`, `http://host[:port]` or `https://host[:port]`, optionally with percent-encoded credentials. WhatsApp pre/post-login websocket and media download/upload only. |
 | `WHATSAPP_PROXY_URL_FILE` | empty | Private owner-only regular file, at most 4096 bytes; no symlink. Set URL or file, never both. Mount into bridge separately. |
+| `WHATSAPP_MCP_SOCKET` | empty | Add a Unix HTTP/SSE listener to the MCP TCP listener. Same Host policy, bearer/OAuth and shared app/session manager. |
+| `WHATSAPP_OPERATOR_SOCKET` | empty | Add a Unix operator listener, including streaming export, to operator TCP. If BIND is empty, TCP binds loopback. A distinct operator bearer is still required. |
 
 The egress proxy never changes REST, operator or MCP-admin listeners, MCP-to-bridge
 requests, webhook destinations, S3, transcription or OAuth clients. Empty keeps
 the pinned SDK's existing behavior (including its standard environment proxy
 defaults). Malformed URLs/schemes stop startup in the single configuration
 diagnostic. Health exposes only `proxy_enabled`, never an address or credential.
+
+Both socket paths must be absolute, at most 100 bytes, outside the store, outbox
+and media roots, with an existing parent that is not world-writable. Symlinks in
+the path are refused. Sockets have mode 0660 and the process owner uid (uid/gid 1000 in
+the images); other users need membership in that trusted local group. Live sockets,
+foreign-owned sockets and regular files are preserved and refused. Only a
+process-owned socket whose connection returns ECONNREFUSED is removed on startup.
+TCP remains enabled; closing TCP would require a separate setting.
+MCP sockets require authentication even with a loopback TCP bind: an unset MCP
+token reuses the bridge bearer, and its default rate limiter is enabled.
+
+Unix MCP peers share one limiter bucket. `WHATSAPP_MCP_TRUSTED_PROXIES=unix`
+explicitly admits forwarding headers from that socket; `loopback`/CIDRs alone
+do not. The rightmost untrusted X-Forwarded-For hop is used and malformed chains
+fall back to the socket bucket. X-Forwarded-Proto follows the same trust boundary.
+Operator peers share one Unix bucket and never trust forwarding headers.
+Use an allowed Host (for operator, `localhost:8090` with defaults), and send
+the usual bearer. See [Docker socket setup](DOCKER.md#additional-unix-listeners).
 
 ## Runtime message webhook
 

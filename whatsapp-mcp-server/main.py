@@ -4,12 +4,14 @@ import os
 import signal
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp_types import ContentBlock
 from starlette.middleware import Middleware
 
+import whatsapp
 from errors import ToolError, tool_errors
 from export import export_dir
 from export import export_messages as export_messages_to_disk
@@ -32,7 +34,14 @@ from http_oauth import (
     load_oauth_config,
 )
 from http_upload import UploadApp
-from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
+from mcp_config import (
+    build_transport_security,
+    resolve_host,
+    resolve_port,
+    resolve_socket,
+    resolve_transport,
+    run_http_listeners,
+)
 from media_image import DEFAULT_MAX_EDGE, DEFAULT_QUALITY
 from media_inventory import list_media_page, media_stats
 from media_notes import TRANSCRIPT_BACKEND_KEY, TRANSCRIPT_KEY, TRANSCRIPT_LANG_KEY, notes_db_path
@@ -3073,7 +3082,14 @@ if __name__ == "__main__":
     # The localhost default keeps a remote server unreachable until explicitly opened up.
     try:
         transport = resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT"))
+        socket_path = resolve_socket(
+            os.getenv("WHATSAPP_MCP_SOCKET"),
+            str(Path(whatsapp.MESSAGES_DB_PATH).parent),
+            os.pathsep.join((whatsapp._DEFAULT_BRIDGE_STORE_DIR, os.getenv("WHATSAPP_MEDIA_ROOTS") or "")),
+        )
         if transport == "stdio":
+            if socket_path:
+                raise ValueError("WHATSAPP_MCP_SOCKET requires http or sse transport")
             install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
             mcp.run(transport="stdio")
             raise SystemExit(0)
@@ -3082,8 +3098,12 @@ if __name__ == "__main__":
         port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
         # Explicit WHATSAPP_MCP_TOKEN wins; a non-loopback bind without one reuses
         # the bridge token so the deployment has a single secret to manage.
-        token, token_source = resolve_http_token(os.getenv("WHATSAPP_MCP_TOKEN"), host, whatsapp_read_bridge_token)
+        token, token_source = resolve_http_token(
+            os.getenv("WHATSAPP_MCP_TOKEN"), "unix" if socket_path else host, whatsapp_read_bridge_token
+        )
         oauth_config = load_oauth_config()
+        if socket_path and token is None and oauth_config is None:
+            raise ValueError("WHATSAPP_MCP_SOCKET requires MCP or bridge bearer authentication")
         if oauth_config:
             OAuthTokenVerifier.validate_static_token(token)
         rate_limit = resolve_rate_limit(
@@ -3120,33 +3140,29 @@ if __name__ == "__main__":
         from operator_admin import install_admin
 
         install_admin(transport, port)
+        # stdout is reserved for the protocol on stdio; log startup to stderr.
+        auth_state = f"bearer token required, from {token_source}" if token else f"no auth ({token_source})"
+        if oauth_config:
+            auth_state = "OAuth resource server" + (f"; static bearer from {token_source}" if token else "")
+        limit_state = f"{rate_limit} req/min per client" if rate_limit else "no rate limit"
+        print(
+            f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state}; {limit_state})",
+            file=sys.stderr,
+        )
+
+        run_http_listeners(
+            build_http_app(
+                mcp,
+                transport,
+                token,
+                rate_limit_per_minute=rate_limit if (os.getenv("WHATSAPP_MCP_RATE_LIMIT") or "").strip() else None,
+                upload_max_bytes=upload_max_bytes,
+                trusted_proxies=trusted_proxies,
+                **app_kwargs,
+            ),
+            host=host,
+            port=port,
+            socket_path=socket_path,
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-
-    # stdout is reserved for the protocol on stdio; log startup to stderr.
-    auth_state = f"bearer token required, from {token_source}" if token else f"no auth ({token_source})"
-    if oauth_config:
-        auth_state = "OAuth resource server" + (f"; static bearer from {token_source}" if token else "")
-    limit_state = f"{rate_limit} req/min per client" if rate_limit else "no rate limit"
-    print(
-        f"WhatsApp MCP server listening on {host}:{port} via {transport} ({auth_state}; {limit_state})",
-        file=sys.stderr,
-    )
-
-    import uvicorn
-
-    uvicorn.run(
-        build_http_app(
-            mcp,
-            transport,
-            token,
-            rate_limit_per_minute=rate_limit if (os.getenv("WHATSAPP_MCP_RATE_LIMIT") or "").strip() else None,
-            upload_max_bytes=upload_max_bytes,
-            trusted_proxies=trusted_proxies,
-            **app_kwargs,
-        ),
-        host=host,
-        port=port,
-        log_level="info",
-        proxy_headers=False,  # Preserve the socket peer for our explicit forwarding trust boundary.
-    )

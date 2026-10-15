@@ -1,0 +1,18 @@
+# Add per-instance filesystem reachability while keeping both TCP listeners.
+# Pre-create ./sockets/mcp and ./sockets/operator owned by 1000:1000,
+# mode 0770 (or 0700). Mount only the required directory into each local client.
+services:
+  bridge:
+    environment:
+      WHATSAPP_MCP_SOCKET: /app/sockets/mcp.sock
+      WHATSAPP_OPERATOR_SOCKET: /app/sockets/operator.sock
+      WHATSAPP_OPERATOR_BIND: ${WHATSAPP_OPERATOR_BIND:-127.0.0.1}
+      WHATSAPP_PAIRING_STDOUT: "false"
+    volumes:
+      - ./sockets/operator:/app/sockets
+  mcp:
+    environment:
+      WHATSAPP_MCP_SOCKET: /app/sockets/mcp.sock
+      WHATSAPP_OPERATOR_SOCKET: /app/operator-sockets/operator.sock
+    volumes:
+      - ./sockets/mcp:/app/sockets

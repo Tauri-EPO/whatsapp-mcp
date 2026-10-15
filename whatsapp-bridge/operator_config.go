@@ -27,6 +27,7 @@ const (
 )
 
 type operatorConfig struct {
+	Socket       string
 	Bind         string
 	Port         int
 	Token        string
@@ -36,7 +37,7 @@ type operatorConfig struct {
 // Configuration remains opt-in. Resolve a hostname once and bind the actual
 // single address, so Docker aliases cannot accidentally widen this listener.
 func parseOperatorConfig(getenv func(string) string, lookup func(context.Context, string) ([]net.IPAddr, error)) (operatorConfig, error) {
-	cfg := operatorConfig{Port: 8090, AllowedHosts: getenv(operatorAllowedHostsEnv)}
+	cfg := operatorConfig{Port: 8090, AllowedHosts: getenv(operatorAllowedHostsEnv), Socket: strings.TrimSpace(getenv("WHATSAPP_OPERATOR_SOCKET"))}
 	if value := getenv(operatorPortEnv); value != "" {
 		port, err := strconv.Atoi(value)
 		if err != nil || port < 1 || port > 65535 {
@@ -46,7 +47,10 @@ func parseOperatorConfig(getenv func(string) string, lookup func(context.Context
 	}
 	bind := strings.TrimSpace(getenv(operatorBindEnv))
 	if bind == "" {
-		return cfg, nil
+		if cfg.Socket == "" {
+			return cfg, nil
+		}
+		bind = "127.0.0.1" // A socket enables operator service; TCP remains available locally.
 	}
 	bind = strings.TrimSuffix(strings.TrimPrefix(bind, "["), "]")
 	if ip := net.ParseIP(bind); ip != nil {

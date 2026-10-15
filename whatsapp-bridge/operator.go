@@ -226,6 +226,9 @@ func newOperatorHandler(cfg operatorConfig, routes operatorRoutes, logger waLog.
 		peer, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			peer = "unknown"
+			if r.RemoteAddr == "@" || r.RemoteAddr == "" {
+				peer = "unix" // All clients of this one Unix listener share one bucket.
+			}
 		}
 		// Only fixed known route names are logged, never a URL/query or payload.
 		if ((r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodDelete || r.Method == http.MethodPut) && mutations[r.URL.Path]) || (r.Method == http.MethodGet && (r.URL.Path == "/operator/v1/export" || r.URL.Path == operatorChatsPath)) {
@@ -275,11 +278,22 @@ func startOperatorServer(cfg operatorConfig, routes operatorRoutes, logger waLog
 		return nil, fmt.Errorf("operator listener: %w", err)
 	}
 	server := &http.Server{Handler: newOperatorHandler(cfg, routes, logger), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			logger.Errorf("Operator listener stopped: %v", err)
+	listeners := []net.Listener{listener}
+	if cfg.Socket != "" {
+		unix, err := listenOperatorSocket(cfg.Socket)
+		if err != nil {
+			_ = listener.Close()
+			return nil, err
 		}
-	}()
-	logger.Infof("Operator listener enabled on %s", listener.Addr())
+		listeners = append(listeners, unix)
+	}
+	for _, listener := range listeners {
+		go func() {
+			if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+				logger.Errorf("Operator listener stopped: %v", err)
+			}
+		}()
+		logger.Infof("Operator listener enabled on %s", listener.Addr())
+	}
 	return server, nil
 }
