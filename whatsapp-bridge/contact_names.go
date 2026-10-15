@@ -52,11 +52,24 @@ func (store *MessageStore) resolveLocalContactNames(ctx context.Context, identit
 	}
 	for start := 0; start < len(unique); start += contactNameBatchSize {
 		batch := unique[start:min(start+contactNameBatchSize, len(unique))]
+		sdkContacts := map[string]types.ContactInfo{}
+		if client != nil && client.Store != nil && client.Store.Contacts != nil {
+			for _, identity := range batch {
+				if contact, err := client.Store.Contacts.GetContact(ctx, identity.jid); err == nil {
+					sdkContacts[identity.original] = contact
+				}
+			}
+		}
 		store.readLocalContactNames(ctx, batch, account, logger)
 		for _, identity := range batch {
-			if identity.needsName && !identity.resolved && client != nil && client.Store != nil && client.Store.Contacts != nil {
-				if contact, err := client.Store.Contacts.GetContact(ctx, identity.jid); err == nil {
-					for _, field := range contactNameFields(contact.FullName, contact.PushName, contact.FirstName, contact.BusinessName) {
+			if identity.needsName {
+				if contact, ok := sdkContacts[identity.original]; ok {
+					// SDK FullName wins; other SDK fields only fill a SQL miss.
+					fields := []string{contact.FullName}
+					if !identity.resolved {
+						fields = contactNameFields(contact.FullName, contact.PushName, contact.FirstName, contact.BusinessName)
+					}
+					for _, field := range fields {
 						if value := strings.TrimSpace(field); value != "" && !isPlaceholderName(value, identity.jid, identity.twin) {
 							identity.Name, identity.resolved = value, true
 							break

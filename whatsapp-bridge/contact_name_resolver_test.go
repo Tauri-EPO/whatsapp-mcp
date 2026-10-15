@@ -385,3 +385,26 @@ func TestUnknownContactQueriesAreCachedBriefly(t *testing.T) {
 		t.Fatal("contact event invalidation retained a negative answer")
 	}
 }
+
+func TestSDKFullNamePrecedesLocalContactSQL(t *testing.T) {
+	store := newTestMessageStore(t)
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "contacts.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store.waDB = db
+	if _, err := db.Exec(`CREATE TABLE whatsmeow_contacts(our_jid TEXT,their_jid TEXT,full_name TEXT,push_name TEXT,first_name TEXT,business_name TEXT);
+	CREATE TABLE whatsmeow_lid_map(lid TEXT,pn TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO whatsmeow_contacts VALUES(?,?,'SQL Bob','','','')`, selfPhone.String(), phonePN.String()); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(nil)
+	client.Store.ID = &selfPhone
+	client.Store.Contacts = &recordingContactStore{}
+	if got := GetChatName(client, store, phonePN, phonePN.String(), nil, "", false, testLogger()); got != "Alice" {
+		t.Fatalf("name=%q, want SDK FullName Alice before SQL Bob", got)
+	}
+}
