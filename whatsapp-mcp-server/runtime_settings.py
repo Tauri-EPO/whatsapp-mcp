@@ -174,21 +174,30 @@ def _effective_chat_setting(raw_setting, deploy):
 class RuntimeSnapshot(dict[str, Any]):
     """One observation, with immutable chat policies cached by captured deploy."""
 
-    def __init__(self, values: dict[str, Any], deploy: ChatPolicy, raw_chats: dict[str, Any]):
+    def __init__(
+        self,
+        values: dict[str, Any],
+        deploy: ChatPolicy,
+        raw_chats: dict[str, Any],
+        *,
+        root: RuntimeSnapshot | None = None,
+    ):
         super().__init__(values)
         self._raw_chats = raw_chats
-        self._views: dict[ChatPolicy, RuntimeSnapshot] = {}
         setting, self.chat_policy = _effective_chat_setting(raw_chats, deploy)
         self["settings"] = {key: dict(value) for key, value in values["settings"].items()}
         self["settings"]["chats.allowed"] = setting
-        self._views[deploy] = self
+        self._root = self if root is None else root
+        self._views_lock = threading.Lock() if root is None else root._views_lock
+        self._views: dict[ChatPolicy, RuntimeSnapshot] = {deploy: self} if root is None else root._views
 
     def for_deploy(self, deploy: ChatPolicy | None) -> RuntimeSnapshot:
         if deploy is None:
             return self
-        if deploy not in self._views:
-            self._views[deploy] = RuntimeSnapshot(dict(self), deploy, self._raw_chats)
-        return self._views[deploy]
+        with self._views_lock:
+            if deploy not in self._views:
+                self._views[deploy] = RuntimeSnapshot(dict(self._root), deploy, self._raw_chats, root=self._root)
+            return self._views[deploy]
 
 
 def snapshot(

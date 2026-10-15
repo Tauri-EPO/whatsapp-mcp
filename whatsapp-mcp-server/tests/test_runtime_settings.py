@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -777,3 +778,55 @@ def test_env_default_chat_reporting_keeps_its_original_value(runtime_archive, co
         "source": "default" if configured is None else "env",
     }
     assert report.chat_policy is deploy
+
+
+def test_snapshot_child_views_reuse_the_root_cache(runtime_archive):
+    report = runtime_settings.snapshot(env={})
+    alice = chat_policy.ChatPolicy.from_entries([ALICE])
+    bob = chat_policy.ChatPolicy.from_entries([BOB])
+    alice_view = report.for_deploy(alice)
+    bob_view = report.for_deploy(bob)
+    assert alice_view.for_deploy(bob) is bob_view
+    assert bob_view.for_deploy(alice) is alice_view
+
+
+def test_snapshot_concurrent_views_share_one_instance(runtime_archive, monkeypatch):
+    report = runtime_settings.snapshot(env={})
+    child = report.for_deploy(chat_policy.ChatPolicy.from_entries([ALICE]))
+    target = chat_policy.ChatPolicy.from_entries([BOB])
+    start = threading.Barrier(8)
+    entered = threading.Event()
+    contended = threading.Event()
+    release = threading.Event()
+    calls_lock = threading.Lock()
+    builds = 0
+    original = runtime_settings._effective_chat_setting
+
+    def paused_build(*args):
+        nonlocal builds
+        with calls_lock:
+            builds += 1
+            if builds > 1:
+                contended.set()
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(*args)
+
+    monkeypatch.setattr(runtime_settings, "_effective_chat_setting", paused_build)
+
+    def resolve(index):
+        start.wait(timeout=5)
+        source = report if index % 2 else child
+        return source.for_deploy(target)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(resolve, index) for index in range(8)]
+        try:
+            assert entered.wait(timeout=5)
+            contended.wait(timeout=0.1)
+        finally:
+            release.set()
+        views = [future.result(timeout=5) for future in futures]
+    assert builds == 1
+    assert all(view is report.for_deploy(target) for view in views)
+    assert child.for_deploy(target) is views[0]
