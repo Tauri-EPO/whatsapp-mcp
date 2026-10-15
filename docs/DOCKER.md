@@ -1,5 +1,34 @@
 # Running WhatsApp MCP with Docker Compose
 
+## MCP memory budget
+
+For text/search workloads, start with a service override `mcp: {mem_limit: 256m}`.
+The [repeatable measurement and raw evidence](evidence/mcp-memory.md) used the
+local PR image, a synthetic 1000-message SQLite store and 100 real tool calls:
+about 69-75 MiB anonymous memory and 2 idle / 4 active threads. Cgroup v1 was
+used locally; the script detects v2 and reads memory.current / anon there.
+The 256 MiB limit leaves room above this observed floor and reclaimable file
+cache. It is a starting point for text workloads, not a bound for document/image
+decoding or transcription; use 512 MiB or more for those workloads and measure
+their actual files/concurrency before tightening. MALLOC_ARENA_MAX=2 and lazy
+Pillow were measured and did not justify changing the runtime.
+
+```sh
+python scripts/measure-mcp-memory.py --image YOUR_LOCAL_MCP_IMAGE \
+  --output docs/evidence/mcp-memory-local.json
+```
+
+## Optional WhatsApp egress proxy
+
+Set `WHATSAPP_PROXY_URL` to `socks5://proxy.example.test:1080` (port required),
+`http://proxy.example.test:8080` or `https://proxy.example.test:8443`. A private
+URL containing credentials should instead be mounted as an owner-only file and
+selected with `WHATSAPP_PROXY_URL_FILE`; compose passes the setting but does not
+mount secrets automatically. Choose one setting. The proxy covers WhatsApp
+websocket and media uploads/downloads only, across pairing restarts too; REST,
+operator/admin, MCP, webhooks, transcription, OAuth and S3 retain their own
+transport rules. No address/credential is reported; health has `proxy_enabled`.
+
 ## Optional runtime message receiver
 
 Enable the private operator listener as described below and set

@@ -10,6 +10,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -709,8 +710,16 @@ class MessageContext:
 # whatsapp.db for the LID map and again for contacts). Names change rarely, so
 # results are cached per process for NAME_CACHE_TTL_S; tests reset the cache.
 NAME_CACHE_TTL_S = 300.0
-_name_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+NAME_CACHE_MAX_ENTRIES = 4096  # Per identity kind; database-wide results are exempt.
+_name_cache: OrderedDict[tuple[str, str], tuple[Any, float]] = OrderedDict()
+_name_cache_kinds: dict[str, OrderedDict[str, None]] = {}
+_database_cache_kinds = {"lid_chats", "phone_chats", "twin_cap"}
 _name_cache_lock = threading.Lock()
+
+
+def _cache_remove(entry: tuple[str, str]) -> None:
+    del _name_cache[entry]
+    _name_cache_kinds[entry[0]].pop(entry[1])
 
 
 def _cache_get(kind: str, key: str) -> tuple[bool, Any]:
@@ -720,14 +729,31 @@ def _cache_get(kind: str, key: str) -> tuple[bool, Any]:
             return False, None
         value, expires = hit
         if expires < time.monotonic():
-            del _name_cache[(kind, key)]
+            _cache_remove((kind, key))
             return False, None
         return True, value
 
 
 def _cache_put(kind: str, key: str, value: Any) -> Any:
     with _name_cache_lock:
-        _name_cache[(kind, key)] = (value, time.monotonic() + NAME_CACHE_TTL_S)
+        now = time.monotonic()
+        # Constant TTL plus admission order means only the expired head needs
+        # visiting. OrderedDict keeps both expiry and FIFO eviction amortized O(1).
+        while _name_cache:
+            oldest = next(iter(_name_cache))
+            if _name_cache[oldest][1] > now:
+                break
+            _cache_remove(oldest)
+        # Updating a key makes it the newest admission; bound even workloads
+        # that never look up an old key again.
+        if (kind, key) in _name_cache:
+            _cache_remove((kind, key))
+        admissions = _name_cache_kinds.setdefault(kind, OrderedDict())
+        if kind not in _database_cache_kinds:
+            while len(admissions) >= NAME_CACHE_MAX_ENTRIES:
+                _cache_remove((kind, next(iter(admissions))))
+        _name_cache[(kind, key)] = (value, now + NAME_CACHE_TTL_S)
+        admissions[key] = None
     return value
 
 
@@ -735,6 +761,7 @@ def _reset_name_cache() -> None:
     """Drop cached sender names and aliases (tests, or after a contact sync)."""
     with _name_cache_lock:
         _name_cache.clear()
+        _name_cache_kinds.clear()
 
 
 class SenderIdentity(NamedTuple):
