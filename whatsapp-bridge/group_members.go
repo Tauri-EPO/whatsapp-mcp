@@ -217,7 +217,7 @@ func storeContactName(client *whatsmeow.Client) contactNameResolver {
 
 // rosterRecorder caches a roster we just fetched (group_members_store.go).
 // nil = do not cache, which is what the tests that only check the JSON use.
-type rosterRecorder func(groupJID string, members []GroupMember, now time.Time)
+type rosterRecorder func(groupJID string, members []GroupMember, now time.Time, info *types.GroupInfo)
 
 // handleGroupMembers serves /api/group/members. The group JID comes from the
 // `jid` query parameter (GET) or a JSON body {"group_jid": ...} (POST).
@@ -269,7 +269,7 @@ func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altO
 		if record != nil {
 			// ToNonAD: ParseJID accepts a device suffix, and a roster cached
 			// under "…:1@g.us" would never match chats.jid again.
-			record(jid.ToNonAD().String(), resp.Members, at)
+			record(jid.ToNonAD().String(), resp.Members, at, info)
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	}

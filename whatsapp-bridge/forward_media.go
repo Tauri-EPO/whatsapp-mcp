@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"mime"
 	"strings"
@@ -79,6 +80,10 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 }
 
 func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentType, path string, data []byte, upload whatsmeow.UploadResponse, caption string, quote outboundQuote, mentions []string) (*waE2E.Message, string, error) {
+	if asSticker, _ := ctx.Value(stickerSendKey{}).(bool); asSticker {
+		sticker := &waE2E.StickerMessage{Mimetype: proto.String("image/webp"), URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileSHA256: upload.FileSHA256, FileEncSHA256: upload.FileEncSHA256, FileLength: &upload.FileLength, IsAnimated: proto.Bool(webPAnimated(data)), ContextInfo: outboundContextInfo(quote, mentions)}
+		return &waE2E.Message{StickerMessage: sticker}, "", nil
+	}
 	source, ok := ctx.Value(forwardSourceKey{}).(*forwardSource)
 	if !ok {
 		return buildOutboundMedia(kind, contentType, path, data, upload, caption, quote, mentions)
@@ -156,6 +161,25 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 
 func isWebP(data []byte) bool {
 	return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
+}
+
+// webPAnimated reads the extended WebP header flag, never arbitrary payload text.
+func webPAnimated(data []byte) bool {
+	if !isWebP(data) {
+		return false
+	}
+	for pos := uint64(12); pos+8 <= uint64(len(data)); {
+		size := uint64(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
+		end := pos + 8 + size
+		if end > uint64(len(data)) {
+			return false
+		}
+		if string(data[pos:pos+4]) == "VP8X" {
+			return size == 10 && data[pos+8]&0x02 != 0
+		}
+		pos = end + (size & 1)
+	}
+	return false
 }
 
 func isOggOpus(data []byte) bool {

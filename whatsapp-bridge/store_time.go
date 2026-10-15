@@ -103,7 +103,7 @@ func anchorTime(v any) time.Time {
 
 // Change this marker name when adding a timestamp column to the rewrite.
 // It is independent of other data migrations and of legacy user_version.
-const canonicalTimestampsMigration = "canonical_timestamps_v4_media_cache"
+const canonicalTimestampsMigration = "canonical_timestamps_v5_group_settings"
 
 // canonicalTimeGlob matches exactly what dbTime produces, so rows already in
 // the canonical spelling are skipped by the migration without being parsed.
@@ -121,6 +121,10 @@ var canonicalTimeColumns = []struct{ table, column string }{
 	{"messages", "deleted_at"},
 	{"chats", "last_message_time"},
 	{"chats", "last_read_time"},
+	{"chats", "group_announce_updated_at"},
+	{"chats", "group_locked_updated_at"},
+	{"chats", "group_join_approval_required_updated_at"},
+	{"chats", "group_topic_updated_at"},
 	{"calls", "timestamp"},
 	{"calls", "ended_at"},
 	{"polls", "created_at"},

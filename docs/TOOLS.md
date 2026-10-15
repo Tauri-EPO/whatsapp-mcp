@@ -135,6 +135,7 @@ the page's items, preserving its pagination envelope.
 | --- | --- | --- |
 | `not_found` | The chat, message, contact or file is not in the archive; or a send went to a number that has no WhatsApp account | Check the JID/ID (both come from `list_messages` / `list_chats` rows), or the number |
 | `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
+| `group_admin_required` | The group only permits admins to send, and this account is not an admin | Ask a group admin to change the setting or the account's role |
 | `invalid_argument` | Missing or malformed input | Fix the call |
 | `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
 | `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit`, or `pixels` and `limit` for an image too big to decode | Read a smaller file, or `download_media` when the client shares the filesystem |
@@ -1382,6 +1383,24 @@ When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOO
 
 ### `send_file`
 
+`as_sticker=True` sends RIFF/WEBP bytes as a real sticker, static or animated,
+from `media_path`, `media_base64` or `upload_id`. Non-WebP bytes (including a JPEG
+renamed to `.webp`) and any caption return `invalid_argument` before WhatsApp
+upload. Stickers are limited to 1 MiB; WhatsApp typically renders up to about
+100 KB for static stickers and 500 KB for animated stickers. Animation comes
+from the VP8X animation flag. With the default false,
+WebP keeps its existing photo behavior. Stickers are archived and forwarded as
+stickers with no caption. All send policies and budgets still apply. The bridge
+checks path-based sticker bytes only after media-root confinement, including
+`dry_run`; inline bytes are validated in the MCP process without writing a file.
+A sticker preview may fetch cached media and resolve the recipient, but never
+uploads to WhatsApp, sends a message or reserves send budget.
+
+Text, files and forwards use WhatsApp's permission check. An announce-only
+group where this account is not an admin returns `group_admin_required` with
+an explanation that the group is restricted to admins. Reactions and poll
+votes are exempt in the SDK.
+
 Send a media file (image, video, document).
 
 **Parameters:**
@@ -1391,6 +1410,7 @@ Send a media file (image, video, document).
 - `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` / `upload_id` is required
 - `upload_id`: Opaque ID returned by `POST /upload` on the HTTP/SSE server; avoids putting file bytes in the tool call. Unavailable on stdio
 - `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories and invisible controls are removed using the name sanitizer's glyph rules. Windows device basenames receive a safe prefix; the extension survives the 200-byte UTF-8 limit. Upload receipts and dry runs return the sanitized name
+- `as_sticker` (optional, default `false`): Send real WebP bytes as a sticker; captions are refused
 - `caption` (optional): Caption for the media
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
 
@@ -2705,6 +2725,23 @@ with their last message run to tens of kilobytes — so it takes the full set of
 
 ### `get_chat`
 
+For groups, `group_settings` contains the last observed `announce`, `locked`,
+`join_approval_required` and `topic`, each with its own `_updated_at` local bridge
+observation time in canonical UTC. The last observation wins, including observations
+within the same stored second; the server timestamp is not used for ordering. Values and times are null until observed; false and an empty
+topic are known values. Topic uses the same sanitation/untrusted wrapping as
+`list_group_members`. Only current state is stored, with no change history. Join-approval notifications
+trigger a bounded metadata refresh because the SDK event decoder cannot distinguish
+on from off. Refresh runs on a bounded background queue, keeping event dispatch
+responsive; if it fails, the last observed value stays unchanged. Live and scheduled
+roster refreshes also populate all four settings when the response is observed, so
+no change notification is required. Settings update only existing archived chats,
+and a settings write failure does not block roster caching. The refresh worker
+runs while connected, coalesces repeated groups and does not affect scheduled
+roster failure backoff. An unavailable archive leaves live
+`list_group_members` results available with null settings.
+`group_settings` is available through `fields` projection.
+
 Get specific chat metadata by JID.
 
 **Parameters:**
@@ -2797,6 +2834,10 @@ Get the last message exchanged with a contact.
 - `contact_jid` (required): The contact's JID or phone number ([either spelling](#one-number-two-spellings) of a Brazilian mobile). The contact's own chat is searched under every spelling, so the answer can be a message this account sent
 
 ### `list_group_members`
+
+Also returns archived `group_settings` with the same keys and null semantics
+as `get_chat`; these event observations are independent of the live roster's
+`topic` and `fetched_at`.
 
 List the participants of a group, one page at a time (live query through the bridge).
 
