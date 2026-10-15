@@ -152,8 +152,8 @@ func TestProxyShortCredentialsPreserveJIDs(t *testing.T) {
 	u, _ := url.Parse("http://whatsapp:1@proxy:8080")
 	rec := &recordingLogger{}
 	l := proxySafeLogger{Logger: rec, redactor: newProxyRedactor(u)}
-	l.Infof("10000000001@s.whatsapp.net %s whatsapp:1@proxy:8080", u)
-	if !strings.Contains(rec.String(), "10000000001@s.whatsapp.net") || strings.Contains(rec.String(), "whatsapp:1@") || strings.Contains(rec.String(), "proxy:8080") {
+	l.Infof("15551234567@s.whatsapp.net %s whatsapp:1@proxy:8080", u)
+	if !strings.Contains(rec.String(), "15551234567@s.whatsapp.net") || strings.Contains(rec.String(), "whatsapp:1@") || strings.Contains(rec.String(), "proxy:8080") {
 		t.Fatal(rec.String())
 	}
 }
