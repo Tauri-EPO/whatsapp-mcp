@@ -1792,8 +1792,14 @@ consuming budget. Denied requests consume no budget. Typing, history sync,
 archive/labels and other group management stay outside the budget.
 
 Reservations and first-contact identities persist in bridge-owned `messages.db`.
-They are committed before network effects; failed or uncertain deliveries also
-consume budget, avoiding duplicate sends after an archive failure or crash.
+They are committed before network effects. Invalid stickers are rejected before
+reservation, including dry runs. Proven non-delivery (local preparation failures
+and the pinned SDK's explicit pre-send refusal errors, including
+`group_admin_required`) releases the daily charge. Minute tokens, first-contact
+and interval state are restored only when no later reservation has been made;
+otherwise those charges remain conservative to protect concurrent sends.
+Unknown SDK errors, uncertain delivery, archive failure and process crashes keep
+their reservations; never retry merely because a response timed out.
 First contact means no message in either direction for the canonical chat or its
 PN/LID twin, and no prior send reservation. It counts once, even if several sends
 follow or the archive could not be written. Daily counts reset at midnight UTC,

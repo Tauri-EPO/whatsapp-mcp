@@ -103,6 +103,85 @@ func (b *Bridge) readSendState(ctx context.Context, tx *sql.Tx, now time.Time) (
 	return s, nil
 }
 
+type sendReservationKey struct{}
+type sendReleaseKey struct{}
+
+func releaseRefusedSend(ctx context.Context) {
+	if release, ok := ctx.Value(sendReleaseKey{}).(func(context.Context)); ok {
+		release(ctx)
+	}
+}
+
+// A receipt is request-local; unconfirmed delivery keeps its durable charge.
+// No refund survives a crash or guesses whether an SDK timeout delivered.
+type sendReservation struct {
+	active                           bool
+	day                              string
+	count, fresh, last, previousLast int64
+	contacts                         []string
+}
+
+func withSendReservation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sendReservationKey{}, &sendReservation{})
+}
+
+// releaseSend refunds a proven non-delivery. An independent deadline permits
+// cleanup even when the sending request has already been cancelled.
+func (b *Bridge) releaseSend(ctx context.Context) {
+	receipt, _ := ctx.Value(sendReservationKey{}).(*sendReservation)
+	if receipt == nil || b.Store == nil {
+		return
+	}
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
+	if !receipt.active {
+		return
+	}
+	cleanup, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	defer cancel()
+	if err := b.releaseSendReservation(cleanup, receipt); err != nil {
+		b.Log.Warnf("Could not release refused send reservation: %v", err)
+	}
+}
+
+func (b *Bridge) releaseSendReservation(ctx context.Context, receipt *sendReservation) error {
+	tx, err := b.Store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	s, err := b.readSendState(ctx, tx, b.sendClock())
+	if err != nil {
+		return err
+	}
+	if s.Day == receipt.day {
+		s.Today = max(0, s.Today-receipt.count)
+	}
+	// Only roll back bucket/identity/interval state when no later reservation
+	// could depend on it. Refunded old tokens might already have refilled and
+	// been spent by a later send. Keep those concurrent charges conservative.
+	if s.last == receipt.last {
+		s.tokens = math.Min(float64(s.MinuteLimit), s.tokens+float64(receipt.count))
+		s.last = receipt.previousLast
+		if s.Day == receipt.day {
+			s.NewChatsToday = max(0, s.NewChatsToday-receipt.fresh)
+		}
+		for _, target := range receipt.contacts {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM send_contacts WHERE chat_jid=?", target); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE send_usage SET day=?,today=?,new_chats=?,refusals=?,tokens=?,rate=?,refill_ns=?,last_send_ns=? WHERE id=1`, s.Day, s.Today, s.NewChatsToday, s.RefusalsToday, s.tokens, s.rate, s.refill, s.last); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	receipt.active = false
+	return nil
+}
+
 // Reserve before the network call. Uncertain delivery and archive failure must
 // never refund a send: restarting cannot turn an ambiguous send into free budget.
 func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason string, delay int, err error) {
@@ -159,6 +238,7 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason stri
 		}
 	}
 	count := int64(len(targets))
+	receipt := sendReservation{day: s.Day, count: count, fresh: fresh, previousLast: s.last}
 	refuse := func(name string, seconds float64) {
 		if reason == "" {
 			reason, delay = name, max(1, int(math.Ceil(seconds)))
@@ -191,10 +271,19 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason stri
 		s.Today += count
 		s.NewChatsToday += fresh
 		s.tokens -= float64(count)
-		s.last = now.UnixNano()
+		s.last = max(now.UnixNano(), s.last+1)
+		receipt.last = s.last
 		for target := range unique {
-			if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO send_contacts(chat_jid) VALUES (?)", target); err != nil {
+			result, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO send_contacts(chat_jid) VALUES (?)", target)
+			if err != nil {
 				return "", 0, err
+			}
+			inserted, err := result.RowsAffected()
+			if err != nil {
+				return "", 0, err
+			}
+			if inserted > 0 {
+				receipt.contacts = append(receipt.contacts, target)
 			}
 		}
 	}
@@ -202,7 +291,16 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason stri
 	if err != nil {
 		return "", 0, err
 	}
-	return reason, delay, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return "", 0, err
+	}
+	if reason == "" {
+		if dest, ok := ctx.Value(sendReservationKey{}).(*sendReservation); ok {
+			receipt.active = true
+			*dest = receipt
+		}
+	}
+	return reason, delay, nil
 }
 
 func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...string) bool {

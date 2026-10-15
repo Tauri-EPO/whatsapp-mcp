@@ -233,6 +233,7 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 			sendCtx = context.WithValue(sendCtx, forwardSourceKey{}, &source)
 		}
 		defer cancelSend()
+		sendCtx = withSendReservation(sendCtx)
 		to, ok = deps.resolveRecipient(sendCtx, w, to)
 		if !ok {
 			return
@@ -271,6 +272,10 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc 
 		}
 		success, msg, sent := deps.send(sendCtx, to, content, mediaPath, "", "", "", nil)
 		if !success {
+			if sent.ErrorCode != "" {
+				writeErrorCode(w, sendErrorStatus(sent.ErrorCode), sent.ErrorCode, msg)
+				return
+			}
 			writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: "Forward failed: " + msg})
 			return
 		}

@@ -97,7 +97,15 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			last_message_time TIMESTAMP,
 			last_read_time TIMESTAMP,
 			ephemeral_expiration INTEGER NOT NULL DEFAULT 0,
-			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0
+			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0,
+            group_announce BOOLEAN,
+            group_announce_updated_at TIMESTAMP,
+            group_locked BOOLEAN,
+            group_locked_updated_at TIMESTAMP,
+            group_join_approval_required BOOLEAN,
+            group_join_approval_required_updated_at TIMESTAMP,
+            group_topic TEXT,
+            group_topic_updated_at TIMESTAMP
 		);
 		CREATE TABLE messages (
 			id TEXT,

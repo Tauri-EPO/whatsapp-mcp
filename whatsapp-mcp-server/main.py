@@ -1423,6 +1423,8 @@ def get_chat(
 
     Returns:
         Chat dictionary — same shape as list_chats, including last_read_time and unread.
+        Groups also have group_settings: announce, locked, join_approval_required,
+        topic and each field's _updated_at event time (null until observed).
         Either spelling of a chat WhatsApp keeps under both a phone JID and a `@lid`
         returns the same merged row, reported under the phone JID with both in `aliases`.
     """
@@ -1430,7 +1432,7 @@ def get_chat(
     if chat is None:
         raise ToolError("not_found", f"No chat {chat_jid} in the archive")
     attach_notes([chat], "chat", lambda row: row["jid"])
-    return _shape_chats([chat], fields, omit_nulls, max_content_chars)[0]
+    return _shape_chats([chat], fields, omit_nulls, max_content_chars, known=(*CHAT_FIELDS, "group_settings"))[0]
 
 
 @mcp.tool()
@@ -1671,6 +1673,10 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
     participant_count (the whole group, not the page) and fetched_at, when this
     roster came off the network. The call also refreshes the bridge's cached copy
     of that roster, so use it to make one group current right now.
+
+    group_settings contains the last observed announce, locked, join_approval_required
+    and topic, each with its _updated_at event time; unseen values are null.
+    Its topic is sanitized like the live topic.
 
     The topic is somebody else's text: it is cleaned of invisible characters, and
     with WHATSAPP_WRAP_UNTRUSTED it comes back inside <untrusted>…</untrusted>
@@ -2035,6 +2041,7 @@ def send_file(
     media_base64: str = "",
     filename: str = "",
     upload_id: str = "",
+    as_sticker: bool = False,
 ) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
@@ -2055,9 +2062,14 @@ def send_file(
     attachment-with-caption message (one bubble in the WA UI), instead of
     needing a separate follow-up send_message call. For group chats use the JID.
 
-    Use dry_run=true to check the recipient and the file before anything leaves
-    the machine: it resolves the recipient, verifies the file exists and returns
-    the request that would be sent, without contacting WhatsApp.
+    Use dry_run=true to check the recipient and the file and return the request
+    that would be sent, without uploading media or sending a message. Sticker
+    previews may resolve the recipient through WhatsApp or read cached media.
+
+    Set `as_sticker=True` to send real WebP bytes as a sticker (static or animated, at most 1 MiB).
+    Stickers cannot have a caption; without this option WebP stays a photo.
+    Path-based sticker previews ask the bridge to confine the path and verify
+    RIFF/WEBP bytes without upload, send or budget reservation.
 
     Args:
         chat_jid: Phone number with country code (leading + and the separators
@@ -2065,6 +2077,7 @@ def send_file(
         media_path: Absolute path to the media file (image, video, document) on
                     the server, or a cached S3 media identifier. Leave empty
                     when sending `media_base64`.
+        as_sticker: Send RIFF/WEBP bytes as a sticker, without caption (default False).
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
         dry_run: True previews without sending (default False)
@@ -2103,6 +2116,7 @@ def send_file(
         media_base64=media_base64,
         filename=filename,
         upload_id=upload_id,
+        as_sticker=as_sticker,
     )
     return {"success": success, "message": status_message, **sent}
 

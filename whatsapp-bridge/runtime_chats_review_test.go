@@ -113,7 +113,7 @@ func TestRuntimeChatsPatchRefusesEntriesThatMatchNothing(t *testing.T) {
 	patchAllowedChats(t, server, " 5511999999999 ", "5511888888888:12@s.whatsapp.net", "*@G.US", "status@broadcast", phoneLID.String())
 }
 
-func TestBackgroundConsumersReadChatPolicyOncePerPassOrEvent(t *testing.T) {
+func TestBackgroundConsumersSharePolicySnapshotAndRecheckRosterWrites(t *testing.T) {
 	b := newSettingsBridge(t)
 	settingsChats(t, b, "")
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
@@ -130,7 +130,9 @@ func TestBackgroundConsumersReadChatPolicyOncePerPassOrEvent(t *testing.T) {
 	reads := 0
 	resolve := b.Policy.resolve
 	b.Policy.resolve = func() chatPolicy { reads++; return resolve() }
-	if n, _ := b.syncGroupRosters(context.Background(), time.Now(), 10, 0); n != 2 || reads != 1 {
+	// One read for the pass, plus one fresh authorization check after each
+	// of the two network fetches, before settings/participants are persisted.
+	if n, _ := b.syncGroupRosters(context.Background(), time.Now(), 10, 0); n != 2 || reads != 3 {
 		t.Fatalf("roster pass: refreshed=%d policy reads=%d", n, reads)
 	}
 	reads = 0

@@ -178,6 +178,19 @@ func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
 }
 
 func ensureMessageStoreSchema(db *sql.DB) error {
+	for _, setting := range []string{"announce", "locked", "join_approval_required", "topic"} {
+		spec := "BOOLEAN"
+		if setting == "topic" {
+			spec = "TEXT"
+		}
+		if err := ensureColumn(db, "chats", "group_"+setting, spec); err != nil {
+			return err
+		}
+		if err := ensureColumn(db, "chats", "group_"+setting+"_updated_at", "TIMESTAMP"); err != nil {
+			return err
+		}
+	}
+
 	if _, err := db.Exec(pendingEditsSchema); err != nil {
 		return fmt.Errorf("failed to ensure pending edits: %w", err)
 	}

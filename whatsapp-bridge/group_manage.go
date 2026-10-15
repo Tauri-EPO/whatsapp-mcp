@@ -301,7 +301,8 @@ func handleGroupSubject(ops groupOps, policy chatPolicy, record rosterRecorder) 
 				return
 			}
 			if record != nil {
-				record(jid.String(), buildGroupMembers(info, nil, nil).Members, at)
+				// Only cache participants: this topic predates SetGroupTopic.
+				record(jid.String(), buildGroupMembers(info, nil, nil).Members, at, nil)
 			}
 			topic := groupTopicUpdate{PreviousID: info.TopicID, Description: strings.TrimSpace(*req.Description)}
 			if err := ops.setTopic(r.Context(), jid, topic); err != nil {

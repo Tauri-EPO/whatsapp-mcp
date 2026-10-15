@@ -4,7 +4,8 @@ Success returns the payload the tool documents. Failure returns::
 
     {"error": {"code": "<code>", "message": "<human readable>"}}
 
-codes: ``not_found`` (the chat/message/contact does not exist in the archive),
+codes: ``group_admin_required`` (the group only permits admins to send),
+``not_found`` (the chat/message/contact does not exist in the archive),
 ``rate_limited`` (send budget exhausted; stop and report instead of retrying,
 with ``retry_after_s`` and the limit name),
 
@@ -40,6 +41,7 @@ from mcp_types import CallToolResult, TextContent
 MEDIA_REFUSED_CODE = "media_refused"
 
 ERROR_CODES = (
+    "group_admin_required",
     "rate_limited",
     "transcription_quota_exceeded",
     "not_found",
