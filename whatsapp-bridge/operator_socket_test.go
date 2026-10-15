@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -20,9 +21,6 @@ import (
 )
 
 func TestOperatorSocketRealHealthAndStreamingExport(t *testing.T) {
-	if os.Geteuid() != 0 && os.Geteuid() != 1000 {
-		t.Skip("uid 1000 socket contract is exercised by container smoke")
-	}
 	b, _ := archiveFixture(t, true)
 	path := filepath.Join(t.TempDir(), "operator.sock")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -38,7 +36,7 @@ func TestOperatorSocketRealHealthAndStreamingExport(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Close() })
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode().Perm() != 0660 || info.Sys().(*syscall.Stat_t).Uid != 1000 {
+	if err != nil || info.Mode().Perm() != 0660 || int(info.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
 		t.Fatalf("socket permissions: %v %v", info, err)
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -88,9 +86,6 @@ func TestOperatorSocketRealHealthAndStreamingExport(t *testing.T) {
 }
 
 func TestOperatorSocketRejectsUnsafePathsAndHandlesStale(t *testing.T) {
-	if os.Geteuid() != 0 && os.Geteuid() != 1000 {
-		t.Skip("uid 1000 socket contract is exercised by container smoke")
-	}
 	root := t.TempDir()
 	store := filepath.Join(root, "store")
 	if err := os.Mkdir(store, 0700); err != nil {
@@ -121,12 +116,10 @@ func TestOperatorSocketRejectsUnsafePathsAndHandlesStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale.SetUnlinkOnClose(false)
-	if os.Geteuid() == 0 {
-		if err := os.Chown(path, 1000, 1000); err != nil {
-			t.Fatal(err)
-		}
-	}
 	_ = stale.Close()
+	if _, err := listenOperatorSocketOwned(path, os.Geteuid()+1); err == nil {
+		t.Fatal("foreign-owned socket accepted")
+	}
 	l, err := listenOperatorSocket(path)
 	if err != nil {
 		t.Fatal(err)
@@ -134,5 +127,13 @@ func TestOperatorSocketRejectsUnsafePathsAndHandlesStale(t *testing.T) {
 	defer func() { _ = l.Close() }()
 	if _, err := listenOperatorSocket(path); err == nil {
 		t.Fatal("live socket replaced")
+	}
+}
+
+func TestOperatorSocketPreservesHomeResolutionError(t *testing.T) {
+	t.Setenv("HOME", "")
+	err := validateOperatorSocket(filepath.Join(t.TempDir(), "operator.sock"), t.TempDir(), t.TempDir())
+	if err == nil || strings.Contains(err.Error(), "outside") || !strings.Contains(err.Error(), "HOME") {
+		t.Fatalf("original HOME diagnostic lost: %v", err)
 	}
 }

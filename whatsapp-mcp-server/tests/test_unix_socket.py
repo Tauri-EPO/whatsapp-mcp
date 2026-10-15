@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from http_auth import client_key, resolve_trusted_proxies
-from mcp_config import bind_unix_socket, resolve_socket
+from mcp_config import bind_unix_socket, resolve_socket, unlink_owned_socket
 
 
 def test_unix_peer_forwarding_requires_explicit_trust():
@@ -28,10 +28,6 @@ def test_unix_peer_forwarding_requires_explicit_trust():
 
 
 UNIX = pytest.mark.skipif(os.name != "posix", reason="Unix listener needs POSIX")
-OWNER = pytest.mark.skipif(
-    os.name != "posix" or getattr(os, "geteuid", lambda: -1)() not in (0, 1000),
-    reason="Fixed uid 1000 is verified inside the image smoke",
-)
 
 
 @UNIX
@@ -51,19 +47,22 @@ def test_socket_paths_refuse_store_outbox_and_symlinks(tmp_path):
 
 
 @UNIX
-@OWNER
-def test_socket_mode_live_stale_foreign_file_and_symlink(tmp_path):
+def test_socket_mode_live_stale_foreign_file_and_symlink(tmp_path, monkeypatch):
     path = str(tmp_path / "mcp.sock")
-    listener = bind_unix_socket(path)
+    listener, owned = bind_unix_socket(path)
     listener.listen(1)
     info = os.lstat(path)
-    assert stat.S_IMODE(info.st_mode) == 0o660 and info.st_uid == 1000
+    assert stat.S_IMODE(info.st_mode) == 0o660 and info.st_uid == os.geteuid()
     with pytest.raises(ValueError, match="already listening"):
         bind_unix_socket(path)
     listener.close()  # Keep the inode to simulate a crash.
-    replacement = bind_unix_socket(path)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "geteuid", lambda: info.st_uid + 1)
+        with pytest.raises(ValueError, match="non-owned"):
+            bind_unix_socket(path)
+    replacement, owned = bind_unix_socket(path)
     replacement.close()
-    os.unlink(path)
+    unlink_owned_socket(path, owned)
     Path(path).write_text("preserve")
     with pytest.raises(ValueError, match="non-owned"):
         bind_unix_socket(path)
@@ -75,9 +74,8 @@ def test_socket_mode_live_stale_foreign_file_and_symlink(tmp_path):
 
 
 @UNIX
-@OWNER
-def test_real_mcp_tcp_unix_parity_and_host_bearer_denials(tmp_path, paired_store):
-    path = str(tmp_path / "mcp.sock")
+def test_real_mcp_tcp_unix_parity_and_host_bearer_denials(tmp_path, tmp_path_factory, paired_store):
+    path = str(tmp_path_factory.mktemp("mcp-socket") / "mcp.sock")
     token = "synthetic-socket-token-0123456789"
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
@@ -88,8 +86,9 @@ def test_real_mcp_tcp_unix_parity_and_host_bearer_denials(tmp_path, paired_store
         WHATSAPP_MCP_HOST="localhost",
         WHATSAPP_MCP_PORT=str(port),
         WHATSAPP_MCP_SOCKET=f" {path} ",
-        WHATSAPP_MCP_TOKEN=token,
-        WHATSAPP_MCP_RATE_LIMIT="off",
+        WHATSAPP_MCP_TOKEN="",
+        WHATSAPP_BRIDGE_TOKEN=token,
+        WHATSAPP_MCP_RATE_LIMIT="",
         WHATSAPP_MCP_ALLOWED_HOSTS="localhost",
         WHATSAPP_DB_PATH=str(paired_store.messages_db),
         WHATSAPP_STORE_DIR=str(tmp_path / "store"),
@@ -155,4 +154,139 @@ def test_real_mcp_tcp_unix_parity_and_host_bearer_denials(tmp_path, paired_store
         )
     finally:
         process.terminate()
-        process.communicate(timeout=10)
+        _, diagnostics = process.communicate(timeout=10)
+    from http_auth import DEFAULT_RATE_LIMIT_PER_MINUTE
+
+    assert f"{DEFAULT_RATE_LIMIT_PER_MINUTE} req/min per client" in diagnostics.decode()
+
+
+@UNIX
+def test_socket_parent_rechecked_after_validation(tmp_path):
+    path = resolve_socket(str(tmp_path / "mcp.sock"), str(tmp_path / "store"))
+    original = tmp_path.stat().st_mode
+    try:
+        tmp_path.chmod(0o777)
+        with pytest.raises(ValueError, match="world-writable"):
+            bind_unix_socket(path)
+    finally:
+        tmp_path.chmod(original)
+    assert not Path(path).exists()
+
+
+@UNIX
+def test_cleanup_preserves_replaced_inode(tmp_path):
+    path = str(tmp_path / "mcp.sock")
+    listener, owned = bind_unix_socket(path)
+    listener.close()
+    os.rename(path, path + ".old")
+    Path(path).write_text("preserve replacement")
+    unlink_owned_socket(path, owned)
+    assert Path(path).read_text() == "preserve replacement"
+
+
+@UNIX
+def test_db_path_override_protects_store_without_store_dir(tmp_path, paired_store):
+    path = str(paired_store.messages_db.parent / "mcp.sock")
+    env = {
+        **os.environ,
+        "WHATSAPP_DB_PATH": str(paired_store.messages_db),
+        "WHATSAPP_MCP_SOCKET": path,
+        "WHATSAPP_MCP_TRANSPORT": "http",
+        "TRANSCRIBE_ON_INGEST": "false",
+    }
+    env.pop("WHATSAPP_STORE_DIR", None)
+    result = subprocess.run(
+        [sys.executable, "main.py"], cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 1 and "outside store" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@UNIX
+def test_live_socket_startup_diagnostic_has_no_traceback(tmp_path):
+    path = str(tmp_path / "mcp.sock")
+    listener, owned = bind_unix_socket(path)
+    listener.listen(1)
+    try:
+        env = {
+            **os.environ,
+            "WHATSAPP_MCP_SOCKET": path,
+            "WHATSAPP_MCP_TRANSPORT": "http",
+            "WHATSAPP_MCP_TOKEN": "synthetic-token-0123456789",
+            "TRANSCRIBE_ON_INGEST": "false",
+        }
+        result = subprocess.run(
+            [sys.executable, "main.py"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 1 and "already listening" in result.stderr
+        assert "Traceback" not in result.stderr
+    finally:
+        listener.close()
+        unlink_owned_socket(path, owned)
+
+
+@UNIX
+@pytest.mark.parametrize("available", [True, False])
+def test_tcp_unavailable_family_is_skipped_only_when_another_address_binds(tmp_path, monkeypatch, available):
+    import errno
+
+    import uvicorn
+
+    import mcp_config
+
+    unix_listener, owned = bind_unix_socket(str(tmp_path / "mcp.sock"))
+    monkeypatch.setattr(mcp_config, "bind_unix_socket", lambda path: (unix_listener, owned))
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0)),
+        ],
+    )
+    real_socket = socket.socket
+
+    class TCPListener:
+        def __init__(self, family, *args):
+            self.family = family
+            self.socket = real_socket(family, *args)
+
+        def setsockopt(self, *args):
+            self.socket.setsockopt(*args)
+
+        def bind(self, address):
+            if self.family == socket.AF_INET6 or not available:
+                raise OSError(errno.EADDRNOTAVAIL, "synthetic unavailable family")
+            self.socket.bind(address)
+
+        def set_inheritable(self, value):
+            self.socket.set_inheritable(value)
+
+        def close(self):
+            self.socket.close()
+
+    monkeypatch.setattr(socket, "socket", TCPListener)
+    received = []
+
+    class Server:
+        started = True
+
+        def __init__(self, config):
+            pass
+
+        def run(self, sockets):
+            received.extend(sockets)
+
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    if available:
+        mcp_config.run_http_listeners(None, "localhost", 0, str(tmp_path / "mcp.sock"))
+        assert len(received) == 2  # Unix plus available IPv4; unavailable IPv6 closed.
+    else:
+        with pytest.raises(ValueError, match="no available address"):
+            mcp_config.run_http_listeners(None, "localhost", 0, str(tmp_path / "mcp.sock"))
+    assert not (tmp_path / "mcp.sock").exists()

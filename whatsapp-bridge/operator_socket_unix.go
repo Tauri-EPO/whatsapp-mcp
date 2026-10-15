@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -19,7 +20,7 @@ func validateOperatorSocket(path, store, media string) error {
 		return errors.New("WHATSAPP_OPERATOR_SOCKET requires an absolute path of at most 100 bytes")
 	}
 	if err := validateSnapshotLocation(path, store, media); err != nil {
-		return errors.New("WHATSAPP_OPERATOR_SOCKET must be outside store, outbox and media roots")
+		return errors.New(strings.ReplaceAll(err.Error(), "WHATSAPP_SNAPSHOT_DIR", "WHATSAPP_OPERATOR_SOCKET"))
 	}
 	return validateOperatorSocketPath(path)
 }
@@ -45,9 +46,10 @@ func validateOperatorSocketPath(path string) error {
 }
 
 func listenOperatorSocket(path string) (net.Listener, error) {
-	if os.Geteuid() != 0 && os.Geteuid() != 1000 {
-		return nil, errors.New("WHATSAPP_OPERATOR_SOCKET requires uid 1000")
-	}
+	return listenOperatorSocketOwned(path, os.Geteuid())
+}
+
+func listenOperatorSocketOwned(path string, uid int) (net.Listener, error) {
 	// Recheck immediately before binding; do not delete a live socket or a
 	// foreign inode. A group-shared directory is an explicit local trust boundary.
 	if err := validateOperatorSocketPath(path); err != nil {
@@ -55,7 +57,7 @@ func listenOperatorSocket(path string) (net.Listener, error) {
 	}
 	if info, err := os.Lstat(path); err == nil {
 		owner, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || owner.Uid != 1000 || info.Mode()&os.ModeSocket == 0 {
+		if !ok || int(owner.Uid) != uid || info.Mode()&os.ModeSocket == 0 {
 			return nil, errors.New("WHATSAPP_OPERATOR_SOCKET refuses an existing non-owned socket or file")
 		}
 		conn, dialErr := net.DialTimeout("unix", path, time.Second)
@@ -81,15 +83,6 @@ func listenOperatorSocket(path string) (net.Listener, error) {
 		return nil, errors.New("WHATSAPP_OPERATOR_SOCKET cannot bind")
 	}
 	if err := os.Chmod(path, 0660); err != nil { //nolint:gosec // Unix socket group access is the explicit local proxy boundary.
-		_ = listener.Close()
-		return nil, err
-	}
-	if os.Geteuid() == 0 {
-		err = os.Chown(path, 1000, 1000)
-	} else if os.Geteuid() != 1000 {
-		err = errors.New("WHATSAPP_OPERATOR_SOCKET requires uid 1000")
-	}
-	if err != nil {
 		_ = listener.Close()
 		return nil, err
 	}

@@ -180,18 +180,36 @@ def resolve_socket(value: str | None, store: str, media_roots: str | None = None
     return str(path)
 
 
-def bind_unix_socket(path: str) -> socket.socket:
-    """Bind uid 1000 / mode 0660; replace only our demonstrably stale socket."""
-    if getattr(os, "geteuid")() not in (0, 1000):
-        raise ValueError("WHATSAPP_MCP_SOCKET requires uid 1000")
+def _check_socket_parent(path: str) -> None:
     if any(part.is_symlink() for part in (Path(path), *Path(path).parents)):
         raise ValueError("WHATSAPP_MCP_SOCKET refuses symlinks")
+    try:
+        parent = Path(path).parent.stat()
+    except OSError:
+        raise ValueError("WHATSAPP_MCP_SOCKET parent must exist") from None
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o002:
+        raise ValueError("WHATSAPP_MCP_SOCKET parent must not be world-writable")
+
+
+def unlink_owned_socket(path: str, owned: os.stat_result) -> None:
+    """Remove only the inode this listener created or proved stale."""
+    try:
+        current = os.lstat(path)
+        if (owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino):
+            os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def bind_unix_socket(path: str) -> tuple[socket.socket, os.stat_result]:
+    """Bind the process uid / mode 0660; replace only our stale socket."""
+    _check_socket_parent(path)
     try:
         info = os.lstat(path)
     except FileNotFoundError:
         info = None
     if info is not None:
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 1000:
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != getattr(os, "geteuid")():
             raise ValueError("WHATSAPP_MCP_SOCKET refuses an existing non-owned socket or file")
         with socket.socket(getattr(socket, "AF_UNIX")) as probe:
             probe.settimeout(1)
@@ -204,28 +222,20 @@ def bind_unix_socket(path: str) -> socket.socket:
                 raise ValueError("WHATSAPP_MCP_SOCKET is already listening")
         if os.lstat(path) != info:
             raise ValueError("WHATSAPP_MCP_SOCKET changed before removing stale socket")
-        os.unlink(path)
+        unlink_owned_socket(path, info)
     listener = socket.socket(getattr(socket, "AF_UNIX"))
     owned = None
     try:
+        _check_socket_parent(path)
         listener.bind(path)
         owned = os.lstat(path)
         os.chmod(path, 0o660)  # nosec B103 - Unix socket group access is the explicit local proxy boundary.
-        if getattr(os, "geteuid")() == 0:
-            getattr(os, "chown")(path, 1000, 1000)
-        elif getattr(os, "geteuid")() != 1000:
-            raise ValueError("WHATSAPP_MCP_SOCKET requires uid 1000")
         listener.set_inheritable(True)
-        return listener
+        return listener, owned
     except BaseException:
         listener.close()
         if owned:
-            try:
-                current = os.lstat(path)
-                if (owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino):
-                    os.unlink(path)
-            except FileNotFoundError:
-                pass
+            unlink_owned_socket(path, owned)
         raise
 
 
@@ -241,9 +251,8 @@ def run_http_listeners(app, host: str, port: int, socket_path: str | None):
     sockets = []
     owned = None
     try:
-        if socket_path:
-            sockets.append(bind_unix_socket(socket_path))
-            owned = os.lstat(socket_path)
+        unix_listener, owned = bind_unix_socket(socket_path)
+        sockets.append(unix_listener)
         addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         seen = set()
         for family, socktype, protocol, _, address in addresses:
@@ -251,12 +260,20 @@ def run_http_listeners(app, host: str, port: int, socket_path: str | None):
                 continue
             seen.add((family, address))
             listener = socket.socket(family, socktype, protocol)
-            sockets.append(listener)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if family == socket.AF_INET6:
                 listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-            listener.bind(address)
+            try:
+                listener.bind(address)
+            except OSError as exc:
+                listener.close()
+                if exc.errno == errno.EADDRNOTAVAIL:
+                    continue
+                raise ValueError("MCP TCP listener cannot bind") from None
             listener.set_inheritable(True)
+            sockets.append(listener)
+        if len(sockets) == 1:
+            raise ValueError("MCP TCP listener has no available address")
         server = uvicorn.Server(config)
         server.run(sockets=sockets)
         if not server.started:
@@ -264,13 +281,8 @@ def run_http_listeners(app, host: str, port: int, socket_path: str | None):
     finally:
         for listener in sockets:
             listener.close()
-        if socket_path and owned:
-            try:
-                current = os.lstat(socket_path)
-                if (owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino):
-                    os.unlink(socket_path)
-            except FileNotFoundError:
-                pass
+        if owned:
+            unlink_owned_socket(socket_path, owned)
 
 
 def probe_http_health():

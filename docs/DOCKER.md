@@ -20,20 +20,22 @@ python scripts/measure-mcp-memory.py --image YOUR_LOCAL_MCP_IMAGE \
 
 ## Additional Unix listeners
 
-On Linux, pre-create a private per-instance socket directory and set a distinct
+On Linux, pre-create separate private per-instance socket directories and set a distinct
 operator token in `.env`, then add `docker-compose.socket.yml`:
 
 ```sh
-mkdir -p sockets
-sudo chown 1000:1000 sockets
-chmod 0770 sockets
+mkdir -p sockets/mcp sockets/operator
+sudo chown 1000:1000 sockets/mcp sockets/operator
+chmod 0770 sockets/mcp sockets/operator
 docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d
-curl --unix-socket sockets/operator.sock -H 'Host: localhost:8090' \
+curl --unix-socket sockets/operator/operator.sock -H 'Host: localhost:8090' \
   -H "Authorization: Bearer $WHATSAPP_OPERATOR_TOKEN" http://localhost/operator/v1/health
-scripts/smoke.sh --mcp-socket "$PWD/sockets/mcp.sock" --url http://localhost
+scripts/smoke.sh --mcp-socket "$PWD/sockets/mcp/mcp.sock" --url http://localhost
 ```
 
-Mount only this instance's directory into its proxy/operator client. A proxy
+Mount `sockets/mcp` only into the MCP/proxy client and `sockets/operator` only
+into the bridge/operator client. The MCP container cannot see the operator
+socket, including with the split override. A proxy
 uses its normal allowed Host and MCP bearer over `/app/sockets/mcp.sock`.
 Socket mode is 0660, uid/gid 1000 in the images. Keep the directory outside
 store/outbox; symlinks, foreign files and live sockets are refused. Both TCP
@@ -42,6 +44,8 @@ configured socket and the operator status probe uses its socket when configured.
 Unix clients share a limiter key; explicitly set
 `WHATSAPP_MCP_TRUSTED_PROXIES=unix` only when all clients with socket access are
 trusted forwarding proxies. Host, bearer and operator Origin rules are unchanged.
+The MCP socket requires bearer/OAuth even with loopback TCP: an unset MCP token
+uses the bridge token, and the default rate limiter remains enabled.
 This override can be used with the split override (apply split last).
 
 ## Optional WhatsApp egress proxy

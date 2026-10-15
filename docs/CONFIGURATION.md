@@ -19,11 +19,13 @@ diagnostic. Health exposes only `proxy_enabled`, never an address or credential.
 
 Both socket paths must be absolute, at most 100 bytes, outside the store, outbox
 and media roots, with an existing parent that is not world-writable. Symlinks in
-the path are refused. Sockets have mode 0660 and owner uid 1000 (gid 1000 in
+the path are refused. Sockets have mode 0660 and the process owner uid (uid/gid 1000 in
 the images); other users need membership in that trusted local group. Live sockets,
 foreign-owned sockets and regular files are preserved and refused. Only a
-uid-1000 socket whose connection returns ECONNREFUSED is removed on startup.
+process-owned socket whose connection returns ECONNREFUSED is removed on startup.
 TCP remains enabled; closing TCP would require a separate setting.
+MCP sockets require authentication even with a loopback TCP bind: an unset MCP
+token reuses the bridge bearer, and its default rate limiter is enabled.
 
 Unix MCP peers share one limiter bucket. `WHATSAPP_MCP_TRUSTED_PROXIES=unix`
 explicitly admits forwarding headers from that socket; `loopback`/CIDRs alone
