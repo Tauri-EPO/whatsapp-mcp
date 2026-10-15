@@ -5,6 +5,8 @@ from chat_policy import ChatPolicy
 from errors import ToolError
 from untrusted import clean_untrusted
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 GROUP = "120363000000000001@g.us"
 
 

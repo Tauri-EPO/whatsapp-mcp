@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -682,3 +683,150 @@ def test_unverified_missing_store_snapshot_cannot_authorize_chats(runtime_archiv
         assert runtime_settings.snapshot()["settings"]["chats.allowed"]["source"] == "default"
         with pytest.raises(ToolError, match="Runtime chat policy unavailable"):
             policy.allows(BOB)
+
+
+def test_permission_store_is_not_implicitly_created(tmp_path, monkeypatch, request):
+    assert "auth_runtime_store" not in request.fixturenames
+    missing = tmp_path / "missing-messages.db"
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(missing))
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.ChatPolicy.unrestricted())
+    with pytest.raises(ToolError, match="Runtime chat policy unavailable"):
+        policy.allows(ALICE)
+    assert not missing.exists()
+
+
+def test_snapshot_carries_the_single_policy_for_reporting_and_enforcement(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, FAMILY]})
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", "*@g.us")
+    calls = 0
+    original = chat_policy.intersect_policies
+
+    def counted(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(chat_policy, "intersect_policies", counted)
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy())
+    with chat_policy.policy_operation():
+        report = runtime_settings.snapshot(require_store=True)
+        assert policy.effective() is report.chat_policy
+        assert report["settings"]["chats.allowed"]["value"] == [FAMILY]
+        assert policy.allows(FAMILY) and not policy.allows(ALICE)
+        assert calls == 1
+
+
+def test_captured_deploy_source_survives_environment_changes(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, FAMILY]})
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", "*@g.us")
+    runtime_settings.capture_environment()
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy(runtime_settings._startup_env))
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", ALICE)
+    with chat_policy.policy_operation():
+        report = runtime_settings.snapshot(require_store=True)
+        assert report.chat_policy is policy.effective()
+        assert policy.allows(FAMILY) and not policy.allows(ALICE)
+
+
+def test_operation_keeps_distinct_deploy_policies_separate(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, BOB]})
+    a = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": ALICE}))
+    b = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": BOB}))
+    reads = 0
+    original = whatsapp._connect_messages_db
+
+    def counted():
+        nonlocal reads
+        reads += 1
+        return original()
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", counted)
+    with chat_policy.policy_operation():
+        a_value = a.effective()
+        assert a_value.allows(ALICE) and not a_value.allows(BOB)
+        b_value = b.effective()
+        assert b_value.allows(BOB) and not b_value.allows(ALICE)
+        assert a.effective() is a_value and b.effective() is b_value
+        assert reads == 1
+
+
+def test_snapshot_uses_the_captured_source_without_reading_global_policy(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, FAMILY]})
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", "*@g.us")
+    runtime_settings.capture_environment()
+    deploy = chat_policy.load_chat_policy(runtime_settings._startup_env)
+    policy = chat_policy.RuntimeChatPolicy(deploy)
+    monkeypatch.setattr(
+        whatsapp,
+        "CHAT_POLICY",
+        chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": ALICE})),
+    )
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", ALICE)
+    with chat_policy.policy_operation():
+        report = runtime_settings.snapshot(require_store=True)
+        assert report.chat_policy is policy.effective()
+        assert policy.allows(FAMILY) and not policy.allows(ALICE)
+
+
+@pytest.mark.parametrize("configured", [None, BOB])
+def test_env_default_chat_reporting_keeps_its_original_value(runtime_archive, configured):
+    env = {} if configured is None else {"WHATSAPP_ALLOWED_CHATS": configured}
+    deploy = chat_policy.ChatPolicy.from_entries([ALICE])
+    report = runtime_settings.snapshot(env=env, require_store=True, deploy_policy=deploy)
+    assert report["settings"]["chats.allowed"] == {
+        "value": [] if configured is None else [BOB],
+        "source": "default" if configured is None else "env",
+    }
+    assert report.chat_policy is deploy
+
+
+def test_snapshot_child_views_reuse_the_root_cache(runtime_archive):
+    report = runtime_settings.snapshot(env={})
+    alice = chat_policy.ChatPolicy.from_entries([ALICE])
+    bob = chat_policy.ChatPolicy.from_entries([BOB])
+    alice_view = report.for_deploy(alice)
+    bob_view = report.for_deploy(bob)
+    assert alice_view.for_deploy(bob) is bob_view
+    assert bob_view.for_deploy(alice) is alice_view
+
+
+def test_snapshot_concurrent_views_share_one_instance(runtime_archive, monkeypatch):
+    report = runtime_settings.snapshot(env={})
+    child = report.for_deploy(chat_policy.ChatPolicy.from_entries([ALICE]))
+    target = chat_policy.ChatPolicy.from_entries([BOB])
+    start = threading.Barrier(8)
+    entered = threading.Event()
+    contended = threading.Event()
+    release = threading.Event()
+    calls_lock = threading.Lock()
+    builds = 0
+    original = runtime_settings._effective_chat_setting
+
+    def paused_build(*args):
+        nonlocal builds
+        with calls_lock:
+            builds += 1
+            if builds > 1:
+                contended.set()
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(*args)
+
+    monkeypatch.setattr(runtime_settings, "_effective_chat_setting", paused_build)
+
+    def resolve(index):
+        start.wait(timeout=5)
+        source = report if index % 2 else child
+        return source.for_deploy(target)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(resolve, index) for index in range(8)]
+        try:
+            assert entered.wait(timeout=5)
+            contended.wait(timeout=0.1)
+        finally:
+            release.set()
+        views = [future.result(timeout=5) for future in futures]
+    assert builds == 1
+    assert all(view is report.for_deploy(target) for view in views)
+    assert child.for_deploy(target) is views[0]

@@ -110,7 +110,7 @@ func parseChatAndMessage(w http.ResponseWriter, policy chatPolicy, rawChat, rawI
 	return chat, rawID, true
 }
 
-func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicy, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
+func handleEditMessage(store *MessageStore, edit editFunc, policy chatPolicyResolver, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {
@@ -169,7 +169,7 @@ type forwardDeps struct {
 	allowSend        func(http.ResponseWriter, *http.Request, ...string) bool
 }
 
-func handleForwardMessage(deps forwardDeps, policy chatPolicy) http.HandlerFunc {
+func handleForwardMessage(deps forwardDeps, policy chatPolicyResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {

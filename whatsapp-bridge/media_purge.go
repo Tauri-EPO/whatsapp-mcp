@@ -170,7 +170,6 @@ func (store *MessageStore) EachMediaRowMatching(chatJID string, before time.Time
 }
 
 func (store *MessageStore) EachMediaRowMatchingContext(ctx context.Context, chatJID string, before time.Time, after purgeCursor, mediaType string, policy chatPolicy, maxScan int, fn func(mediaRow) bool) (scanCut bool, err error) {
-	policy = policy.effective() // One admitted snapshot for the bounded scan.
 	clauses := []string{"media_type IN ('image','video','audio','document','sticker')"}
 	var args []any
 	if chatJID != "" {

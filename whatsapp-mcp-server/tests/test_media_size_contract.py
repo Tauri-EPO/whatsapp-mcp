@@ -11,6 +11,8 @@ from errors import ToolError
 from tests.conftest import ALICE
 from tests.test_media_inventory import _insert
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 
 @pytest.mark.parametrize("sort", ["size", "date", "copies"])
 def test_min_bytes_uses_cached_size_and_declared_uncached_fallback(paired_dbs, sort):

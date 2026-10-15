@@ -38,7 +38,8 @@ const (
 	groupInfoRetryAfter = 10 * time.Minute
 	// chatNameTTL bounds how long an in-memory name is trusted before the
 	// chats table is consulted again.
-	chatNameTTL = 24 * time.Hour
+	chatNameTTL    = 24 * time.Hour
+	contactMissTTL = 30 * time.Second
 )
 
 // groupInfoLookup fetches group metadata; nil means "no network available"
@@ -47,10 +48,11 @@ type groupInfoLookup func(ctx context.Context, jid types.JID) (*types.GroupInfo,
 
 // chatNameCache remembers resolved names and failed group lookups.
 type chatNameCache struct {
-	mu       sync.Mutex
-	names    map[string]cachedName
-	groupErr map[string]time.Time
-	now      func() time.Time // injectable clock for tests
+	mu          sync.Mutex
+	names       map[string]cachedName
+	groupErr    map[string]time.Time
+	contactMiss map[string]time.Time
+	now         func() time.Time // injectable clock for tests
 }
 
 type cachedName struct {
@@ -59,7 +61,7 @@ type cachedName struct {
 }
 
 func newChatNameCache() *chatNameCache {
-	return &chatNameCache{names: map[string]cachedName{}, groupErr: map[string]time.Time{}, now: time.Now}
+	return &chatNameCache{names: map[string]cachedName{}, groupErr: map[string]time.Time{}, contactMiss: map[string]time.Time{}, now: time.Now}
 }
 
 func (c *chatNameCache) get(chatJID string) (string, bool) {
@@ -97,6 +99,7 @@ func (c *chatNameCache) invalidate(chatJID string) {
 	c.mu.Lock()
 	delete(c.names, chatJID)
 	delete(c.groupErr, chatJID)
+	delete(c.contactMiss, chatJID)
 	c.mu.Unlock()
 }
 
@@ -105,6 +108,38 @@ func (c *chatNameCache) size() (names, failures int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.names), len(c.groupErr)
+}
+
+// Contact misses are short-lived and bounded; contact events invalidate them.
+func (c *chatNameCache) contactLookupAllowed(chatJID string) bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	expires, ok := c.contactMiss[chatJID]
+	return !ok || !c.now().Before(expires)
+}
+
+func (c *chatNameCache) rememberContactMiss(chatJID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for jid, expires := range c.contactMiss {
+		if !now.Before(expires) {
+			delete(c.contactMiss, jid)
+		}
+	}
+	if len(c.contactMiss) >= contactNameBatchSize {
+		for jid := range c.contactMiss {
+			delete(c.contactMiss, jid)
+			break
+		}
+	}
+	c.contactMiss[chatJID] = now.Add(contactMissTTL)
 }
 
 func (c *chatNameCache) groupLookupAllowed(chatJID string, now time.Time) bool {
@@ -192,6 +227,10 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 		add(alt)
 	}
 	self := ownUsers(client)
+	twins := make([]types.JID, 0, len(targets))
+	for _, target := range targets {
+		twins = append(twins, target)
+	}
 	for chatJID, target := range targets {
 		b.storeLive("contact name", "", chatJID, func() error {
 			var existing string
@@ -201,15 +240,15 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 				}
 				return err
 			}
-			if strings.TrimSpace(existing) != "" && !isPlaceholderName(strings.TrimSpace(existing), target, self) {
+			if strings.TrimSpace(existing) != "" && !isChatFallbackName(strings.TrimSpace(existing), target, self, twins...) {
 				return nil
 			}
 			b.Store.names.invalidate(chatJID)
 			name := GetChatName(client, b.Store, target, chatJID, nil, "", false, b.Log)
-			if strings.TrimSpace(name) == "" || isPlaceholderName(name, target, self) {
+			if strings.TrimSpace(name) == "" || isChatFallbackName(name, target, self, twins...) {
 				name = strings.TrimSpace(eventName)
 			}
-			if name == "" || isPlaceholderName(name, target, self) {
+			if name == "" || isChatFallbackName(name, target, self, twins...) {
 				return nil
 			}
 			return b.Store.RenamePlaceholderChat(chatJID, existing, name)
@@ -278,12 +317,41 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 		self = ownUsers(client)
 	}
 
-	// Already resolved in a previous run.
+	var contact *localContactIdentity
+	lookupContact := func(archived string, forceName bool) localContactIdentity {
+		if store != nil && !store.names.contactLookupAllowed(chatJID) {
+			return localContactIdentity{Name: archived, needsName: true}
+		}
+		account := ""
+		if client != nil && client.Store != nil && client.Store.ID != nil {
+			account = client.Store.ID.String()
+		}
+		value := store.resolveLocalContactNames(ctx, []localContactIdentity{{JID: chatJID, Name: archived, forceName: forceName}}, account, client, logger)[chatJID]
+		if store != nil && !value.resolved && ctx.Err() == nil {
+			store.names.rememberContactMiss(chatJID)
+		}
+		return value
+	}
+	// Main's historical chat fallbacks also heal groups and misplaced self
+	// labels. The shared contact-placeholder rule is strictly direct-only.
 	if store != nil && store.db != nil {
 		var existing string
 		if err := store.db.QueryRowContext(ctx, "SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existing); err == nil {
 			existing = strings.TrimSpace(existing)
-			if existing != "" && !isPlaceholderName(existing, jid, self) {
+			direct := jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer
+			if existing != "" && direct && localPhoneDigits(existing) != "" {
+				value := lookupContact(existing, isChatFallbackName(existing, jid, self))
+				contact = &value
+				if !value.needsName || value.resolved {
+					store.names.put(chatJID, value.Name)
+					return value.Name
+				}
+				// A formatted archived number is still more readable than a
+				// sender/LID fallback. Only replace it with a resolved name.
+				if existing != jid.User && existing != placeholderGroupName(jid) && !self.has(existing) {
+					return existing
+				}
+			} else if existing != "" && !isChatFallbackName(existing, jid, self) {
 				store.names.put(chatJID, existing)
 				return existing
 			}
@@ -309,13 +377,12 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 			return placeholderGroupName(jid)
 		}
 	} else {
-		if client != nil && client.Store != nil && client.Store.Contacts != nil {
-			if contact, err := client.Store.Contacts.GetContact(context.Background(), jid); err == nil && strings.TrimSpace(contact.FullName) != "" {
-				name = strings.TrimSpace(contact.FullName)
-			}
+		if contact == nil {
+			value := lookupContact("", true)
+			contact = &value
 		}
-		if name == "" {
-			name = lookupLocalContactName(client, store, chatJID, logger)
+		if contact.resolved {
+			name = contact.Name
 		}
 		if name == "" {
 			// Sender/user fallbacks are placeholders too: do not cache them.
@@ -336,12 +403,11 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 	return name
 }
 
-// isPlaceholderName reports whether a stored name is one of our fallbacks
-// (group placeholder or the bare user part), i.e. worth trying to improve. A
-// chat named after our own number or LID is one too, unless it is a group or
-// the chat with ourselves, the only one legitimately called that (issue #448).
-func isPlaceholderName(name string, jid types.JID, self selfUsers) bool {
-	if name == placeholderGroupName(jid) || name == jid.User {
+// Chat history has additional fallbacks that main has always healed (#448).
+// They are not contact placeholders: groups and misplaced self labels keep
+// this rule, while contact lookup uses the single direct phone/LID predicate.
+func isChatFallbackName(name string, jid types.JID, self selfUsers, twins ...types.JID) bool {
+	if isPlaceholderName(name, jid, twins...) || name == placeholderGroupName(jid) || name == jid.User {
 		return true
 	}
 	return jid.Server != types.GroupServer && self.has(name) && !self.has(jid.User)

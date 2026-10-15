@@ -125,7 +125,7 @@ func (s *MessageStore) listLabels(chats []string, includeDeleted bool) ([]labelR
 	return labels, rows.Err()
 }
 
-func handleLabels(s *MessageStore, policy chatPolicy, twin func(context.Context, types.JID) (types.JID, error)) http.HandlerFunc {
+func handleLabels(s *MessageStore, policy chatPolicyResolver, twin func(context.Context, types.JID) (types.JID, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		chat, hasChat := r.URL.Query()["chat_jid"]
@@ -158,7 +158,7 @@ func handleLabels(s *MessageStore, policy chatPolicy, twin func(context.Context,
 
 type labelDeps struct {
 	store     *MessageStore
-	policy    chatPolicy
+	policy    chatPolicyResolver
 	connected func() bool
 	resolve   func(context.Context, string) (types.JID, error)
 	send      appStateSendFunc
@@ -166,8 +166,7 @@ type labelDeps struct {
 
 func handleLabelChat(deps labelDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		deps := deps
-		deps.policy = deps.policy.effective(r.Context())
+		policy := deps.policy.effective(r.Context())
 		ctx, cancel := requestContext(r, archiveDeadline)
 		defer cancel()
 		var req struct {
@@ -184,7 +183,7 @@ func handleLabelChat(deps labelDeps) http.HandlerFunc {
 			writeError(w, 400, "Valid chat_jid, label_id and labeled boolean are required")
 			return
 		}
-		chat, ok := authorizeChat(w, deps.policy, req.ChatJID, false)
+		chat, ok := authorizeChat(w, policy, req.ChatJID, false)
 		if !ok {
 			return
 		}

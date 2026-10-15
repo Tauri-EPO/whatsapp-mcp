@@ -49,7 +49,7 @@ func TestForwardRegisteredRecipientAndPolicy(t *testing.T) {
 			}
 			b, _, sent := sendRecipientBridge(t, lids, ask)
 			b.Store = seedEditStore(t)
-			b.Policy = parseChatPolicy(tc.policy)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.policy))
 			b.Connected = func() bool { return !tc.offline }
 			downloads := 0
 			b.DownloadMedia = func(_ context.Context, id, chat string) (bool, string, string, string, error) {
@@ -146,7 +146,7 @@ func TestRecipientFailureCountsOnlySendEndpoint(t *testing.T) {
 				}
 				b, _, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
 				b.Store = seedEditStore(t)
-				b.Policy = parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber)
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber))
 				b.Connected = func() bool { return failure != "offline" }
 				b.DownloadMedia = func(context.Context, string, string) (bool, string, string, string, error) {
 					t.Fatal("recipient refusal must precede downloading")

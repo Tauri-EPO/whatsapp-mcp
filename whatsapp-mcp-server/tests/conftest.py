@@ -77,7 +77,7 @@ def _no_cached_owner():
     whatsapp._reset_owner_cache()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def auth_runtime_store(tmp_path_factory, monkeypatch):
     """Permission checks require a readable store, including HTTP-only unit tests.
 

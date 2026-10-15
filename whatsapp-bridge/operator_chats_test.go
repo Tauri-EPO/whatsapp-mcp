@@ -75,7 +75,7 @@ func TestOperatorChatsIgnoresRuntimeAllowListWithinDeployList(t *testing.T) {
 				}
 			}
 			const outside = "5511999999999@s.whatsapp.net"
-			if b.Policy.Allows(outside) != !runtime {
+			if b.Policy.once().effective(t.Context()).Allows(outside) != !runtime {
 				t.Fatal("fixture did not enforce the runtime allow-list")
 			}
 			stamp := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
@@ -576,5 +576,20 @@ func TestOperatorChatsOwnRateLimitAndAggregatedAudit(t *testing.T) {
 			t.Fatal("no aggregated INFO audit", logs.String())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestOperatorChatsReadsDeployFromThePolicyHandle(t *testing.T) {
+	b := newSettingsBridge(t)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(phonePN.String()))
+	for _, row := range []struct{ jid, name string }{{phonePN.String(), "Alice"}, {phoneLID.String(), "Bob"}} {
+		if err := b.Store.StoreChat(row.jid, row.name, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := operatorChatsServer(t, b)
+	status, _, chats := operatorChatsRequest(t, server, "")
+	if status != 200 || len(chats) != 1 || chats[0].JID != phonePN.String() {
+		t.Fatalf("operator used a different deploy from its handle: status=%d chats=%+v", status, chats)
 	}
 }

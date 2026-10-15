@@ -87,13 +87,13 @@ func (b *Bridge) forwardsToWebhook(chat types.JID, fromMe bool, original ...type
 // Admit arrivals eligible for either sender, including arrivals while the
 // configured runtime receiver is disabled (which must count as delivery loss).
 // runtime is the receiver generation whose filters admitted the message.
-func (b *Bridge) messageWebhookAllowed(policy chatPolicy, chat types.JID, fromMe bool, original ...types.JID) (legacy bool, runtime *runtimeWebhookGeneration) {
+func (b *Bridge) messageWebhookAllowed(policy chatPolicyResolver, chat types.JID, fromMe bool, original ...types.JID) (legacy bool, runtime *runtimeWebhookGeneration) {
 	legacy = b.Webhook.Enabled() && b.webhookFilters().allows(chat, fromMe)
 	receiver := b.RuntimeWebhook.subscriber("message.received")
 	if receiver != nil && receiver.filters.allows(chat, fromMe) {
 		runtime = receiver
 	}
-	if (legacy || runtime != nil) && !b.webhookIdentityAllowed(policy, chat, original...) {
+	if (legacy || runtime != nil) && !b.webhookIdentityAllowed(policy.effective(b.ctx), chat, original...) {
 		b.Log.Debugf("Message not forwarded: chat allow-list")
 		return false, nil
 	}
@@ -103,8 +103,8 @@ func (b *Bridge) messageWebhookAllowed(policy chatPolicy, chat types.JID, fromMe
 	return legacy, runtime
 }
 
-func (b *Bridge) webhookChatAllowed(policy chatPolicy, chat types.JID, fromMe bool, original ...types.JID) bool {
-	return b.webhookFilters().allows(chat, fromMe) && b.webhookIdentityAllowed(policy, chat, original...)
+func (b *Bridge) webhookChatAllowed(policy chatPolicyResolver, chat types.JID, fromMe bool, original ...types.JID) bool {
+	return b.webhookFilters().allows(chat, fromMe) && b.webhookIdentityAllowed(policy.effective(b.ctx), chat, original...)
 }
 
 func (b *Bridge) webhookFilters() runtimeWebhookFilters {
@@ -115,7 +115,6 @@ func (b *Bridge) webhookIdentityAllowed(policy chatPolicy, chat types.JID, origi
 	lookup := func(ctx context.Context, j types.JID) (types.JID, error) {
 		return lookupAltJID(ctx, b.currentClient(), j)
 	}
-	policy = policy.effective() // One settings read for every identity of the event.
 	allowed := policy.allowsIdentity(b.ctx, chat, lookup)
 	for _, j := range original {
 		allowed = allowed || policy.allowsIdentity(b.ctx, j, lookup)

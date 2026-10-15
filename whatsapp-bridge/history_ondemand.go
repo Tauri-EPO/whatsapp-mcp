@@ -151,7 +151,7 @@ func repairHistoryAnchor(ctx context.Context, store *MessageStore, chat, twin, t
 }
 
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
-func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy) {
+func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicyResolver) {
 	registerHistoryEndpointWithSender(mux, auth, client, connected, messageStore, policy,
 		func(ctx context.Context, msg *waE2E.Message) error {
 			_, err := client.SendPeerMessage(ctx, msg)
@@ -160,7 +160,7 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 }
 
 // Only the network send is replaced in tests; the pinned SDK builds the request.
-func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicy, send func(context.Context, *waE2E.Message) error) {
+func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, client *whatsmeow.Client, connected func() bool, messageStore *MessageStore, policy chatPolicyResolver, send func(context.Context, *waE2E.Message) error) {
 	mux.HandleFunc("/api/history", auth(func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {

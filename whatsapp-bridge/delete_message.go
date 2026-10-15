@@ -61,7 +61,7 @@ func writeDeleteResponse(w http.ResponseWriter, status int, resp DeleteMessageRe
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicy, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
+func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPolicyResolver, storeWrite storeWriteFunc, guards ...func(http.ResponseWriter, *http.Request, string) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		if r.Method != http.MethodPost {

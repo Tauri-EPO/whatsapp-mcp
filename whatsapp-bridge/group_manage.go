@@ -174,13 +174,13 @@ func parseParticipants(raw []string, policies ...chatPolicy) ([]types.JID, error
 		}
 		normalized, err := normalizePhoneRecipient(item)
 		if err != nil {
-			if len(policies) == 0 || !policies[0].effective().restricted {
+			if len(policies) == 0 || !policies[0].restricted {
 				return nil, errors.New("invalid participant " + item + " (use a phone number or a user JID)")
 			}
 			return nil, err
 		}
 		jid, err := normalizedUserJID(normalized)
-		if err == nil && len(policies) > 0 && policies[0].effective().restricted {
+		if err == nil && len(policies) > 0 && policies[0].restricted {
 			// Restricted operations validate the complete envelope before
 			// checking identity; unrestricted calls retain their old parsing.
 			jid, err = canonicalChatJID(normalized, true)
@@ -197,7 +197,7 @@ func parseParticipants(raw []string, policies ...chatPolicy) ([]types.JID, error
 	return out, nil
 }
 
-func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
+func handleGroupParticipants(ops groupOps, policy chatPolicyResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		req, jid, ok := parseGroupRequest(w, r, policy)
@@ -256,7 +256,7 @@ func handleGroupParticipants(ops groupOps, policy chatPolicy) http.HandlerFunc {
 	}
 }
 
-func handleGroupSubject(ops groupOps, policy chatPolicy, record rosterRecorder) http.HandlerFunc {
+func handleGroupSubject(ops groupOps, policy chatPolicyResolver, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		req, jid, ok := parseGroupRequest(w, r, policy)
@@ -315,7 +315,7 @@ func handleGroupSubject(ops groupOps, policy chatPolicy, record rosterRecorder) 
 	}
 }
 
-func handleGroupInvite(ops groupOps, policy chatPolicy) http.HandlerFunc {
+func handleGroupInvite(ops groupOps, policy chatPolicyResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		req, jid, ok := parseGroupRequest(w, r, policy)
@@ -335,7 +335,7 @@ func handleGroupInvite(ops groupOps, policy chatPolicy) http.HandlerFunc {
 	}
 }
 
-func handleGroupLeave(ops groupOps, policy chatPolicy) http.HandlerFunc {
+func handleGroupLeave(ops groupOps, policy chatPolicyResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		_, jid, ok := parseGroupRequest(w, r, policy)
@@ -351,7 +351,7 @@ func handleGroupLeave(ops groupOps, policy chatPolicy) http.HandlerFunc {
 }
 
 // registerGroupManagement wires the four endpoints.
-func registerGroupManagement(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, ops groupOps, policy chatPolicy, record rosterRecorder) {
+func registerGroupManagement(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc, ops groupOps, policy chatPolicyResolver, record rosterRecorder) {
 	mux.HandleFunc("/api/group/participants", auth(handleGroupParticipants(ops, policy)))
 	mux.HandleFunc("/api/group/subject", auth(handleGroupSubject(ops, policy, record)))
 	mux.HandleFunc("/api/group/invite", auth(handleGroupInvite(ops, policy)))

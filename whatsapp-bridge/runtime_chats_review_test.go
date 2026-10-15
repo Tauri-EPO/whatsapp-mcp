@@ -54,7 +54,7 @@ func TestRuntimeChatPolicyReadFailureIsLoggedAndCounted(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied := func() {
-		if b.Policy.Allows(phonePN.String()) {
+		if b.Policy.once().effective(t.Context()).Allows(phonePN.String()) {
 			t.Fatal("unreadable policy allowed a chat")
 		}
 	}
@@ -78,7 +78,7 @@ func TestChatRefusalAndSummaryNameTheirOrigin(t *testing.T) {
 		b := newSettingsBridge(t)
 		settingsChats(t, b, deploy)
 		b.Connected = func() bool { return true }
-		before, summary := reviewRequest(b, "POST", "/api/typing", typing), b.Policy.effective().Summary()
+		before, summary := reviewRequest(b, "POST", "/api/typing", typing), b.Policy.once().effective(t.Context()).Summary()
 		if deploy == "" && (before.Code == 403 || summary != chatPolicyEnv+" unset: all chats allowed") {
 			t.Fatalf("unset policy changed: %d %q", before.Code, summary)
 		}
@@ -86,7 +86,7 @@ func TestChatRefusalAndSummaryNameTheirOrigin(t *testing.T) {
 			t.Fatalf("deploy-only wording changed: %s %q", before.Body.String(), summary)
 		}
 		limitPatch(t, b, `{"chats.allowed":["`+mgGroup+`","*@g.us"]}`)
-		rec, summary := reviewRequest(b, "POST", "/api/typing", typing), b.Policy.effective().Summary()
+		rec, summary := reviewRequest(b, "POST", "/api/typing", typing), b.Policy.once().effective(t.Context()).Summary()
 		if rec.Code != 403 || !strings.Contains(rec.Body.String(), "is not in "+want+" (") {
 			t.Fatalf("refusal blames the wrong list: %d %s", rec.Code, rec.Body.String())
 		}
@@ -107,7 +107,7 @@ func TestRuntimeChatsPatchRefusesEntriesThatMatchNothing(t *testing.T) {
 		}
 	}
 	saved, err := b.settingsSnapshot(context.Background())
-	if err != nil || saved.Version != 0 || saved.Settings["chats.allowed"].Source != "default" || !b.Policy.Allows("5511888888888") {
+	if err != nil || saved.Version != 0 || saved.Settings["chats.allowed"].Source != "default" || !b.Policy.once().effective(t.Context()).Allows("5511888888888") {
 		t.Fatalf("refused PATCH wrote something: %+v %v", saved.Settings["chats.allowed"], err)
 	}
 	patchAllowedChats(t, server, " 5511999999999 ", "5511888888888:12@s.whatsapp.net", "*@G.US", "status@broadcast", phoneLID.String())
@@ -163,5 +163,23 @@ func TestPolicyPinExemptionsLiveInTheRouteTable(t *testing.T) {
 	}
 	if rec := reviewRequest(b, "GET", "/api/poll?chat_jid="+mgGroup+"&message_id=B1", ""); rec.Code != 503 {
 		t.Fatalf("pinned route answered without the settings table: %d", rec.Code)
+	}
+}
+
+func TestDirectMessageWithoutWebhooksDoesNotResolveChatPolicy(t *testing.T) {
+	b := newSettingsBridge(t)
+	settingsChats(t, b, "")
+	b.Webhook.enabled = false
+	b.RuntimeWebhook = nil
+	reads := 0
+	original := b.Policy.resolve
+	b.Policy.resolve = func() chatPolicy { reads++; return original() }
+	b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "fake text"))
+	if reads != 0 {
+		t.Fatalf("DM without webhooks read its chat policy %d times", reads)
+	}
+	var messages int
+	if err := b.Store.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&messages); err != nil || messages != 1 {
+		t.Fatalf("DM was not persisted: messages=%d err=%v", messages, err)
 	}
 }

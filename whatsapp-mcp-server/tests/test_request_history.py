@@ -10,6 +10,8 @@ import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 CHAT = "5511888888888@s.whatsapp.net"
 
 

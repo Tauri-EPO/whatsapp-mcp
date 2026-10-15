@@ -7,6 +7,8 @@ from chat_policy import ChatPolicy
 from errors import ToolError
 from whatsapp import Message, msg_to_dict
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 CHAT = "120363000000000001@g.us"
 
 

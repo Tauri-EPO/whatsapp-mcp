@@ -140,7 +140,7 @@ func TestRESTUsesCanonicalAuthorizedChat(t *testing.T) {
 			t.Run(endpoint+"/"+raw, func(t *testing.T) {
 				b, _, _ := sendRecipientBridge(t, &mockLIDStore{lidByPN: map[types.JID]types.JID{phone: registeredLID}}, &fakeIsOnWhatsApp{})
 				b.Store = seedEditStore(t)
-				b.Policy = parseChatPolicy(efChat)
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat))
 				calls := 0
 				assertChat := func(chat string) {
 					calls++
@@ -205,7 +205,7 @@ func TestRESTUsesCanonicalAuthorizedChat(t *testing.T) {
 func TestPurgeUsesCanonicalAuthorizedChat(t *testing.T) {
 	for _, criteria := range []bool{false, true} {
 		b, files := purgeFixture(t)
-		b.Policy = parseChatPolicy(purgeChat)
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy(purgeChat))
 		raw := " \t" + strings.ToUpper(purgeChat) + "\n"
 		payload := map[string]any{"items": []PurgeItem{{MessageID: "OLDVID", ChatJID: raw}}, "dry_run": true}
 		if criteria {
@@ -234,7 +234,7 @@ func TestCanonicalChatBeforeRegistration(t *testing.T) {
 				if allowed {
 					policy += "," + registeredNumber
 				}
-				b.Policy = parseChatPolicy(policy)
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(policy))
 				payload := map[string]any{"recipient": raw, "message": "hello"}
 				if endpoint == "forward" {
 					payload = map[string]any{"chat_jid": efChat, "message_id": "THEIRS", "to_chat_jid": raw}

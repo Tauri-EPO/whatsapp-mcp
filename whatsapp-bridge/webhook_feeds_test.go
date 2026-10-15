@@ -55,7 +55,7 @@ func TestFeedWebhookSwitchesAreIndependentAndStrict(t *testing.T) {
 func TestFeedWebhookPolicyAllGates(t *testing.T) {
 	chats := []types.JID{phonePN, types.NewJID("120363000000000001", types.GroupServer), types.StatusBroadcastJID, types.NewJID("example", types.NewsletterServer), types.NewJID("example", types.BroadcastServer), phoneLID, types.NewJID("example", "example.invalid"), types.EmptyJID, types.NewJID("example", types.HostedServer), types.NewJID("example", types.HostedLIDServer), types.NewJID("example", types.BotServer)}
 	for flags := 0; flags < 32; flags++ {
-		b := &Bridge{Webhook: newWebhookSender("", flags&1 != 0), ForwardSelf: flags&2 != 0, ForwardStatus: flags&4 != 0, ForwardChannels: flags&8 != 0, ForwardBroadcasts: flags&16 != 0}
+		b := &Bridge{ctx: t.Context(), Webhook: newWebhookSender("", flags&1 != 0), ForwardSelf: flags&2 != 0, ForwardStatus: flags&4 != 0, ForwardChannels: flags&8 != 0, ForwardBroadcasts: flags&16 != 0}
 		for index, chat := range chats {
 			for _, fromMe := range []bool{false, true} {
 				feedAllowed := true

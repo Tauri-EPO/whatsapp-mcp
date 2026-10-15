@@ -119,7 +119,7 @@ func TestGroupSettingsEventState(t *testing.T) {
 func TestGroupSettingsExcludedStoresNothing(t *testing.T) {
 	store := newTestMessageStore(t)
 	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
-	b.Policy = parseChatPolicy("120363000000000002@g.us")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("120363000000000002@g.us"))
 	jid := types.NewJID("120363000000000001", types.GroupServer)
 	b.handleEvent(&events.GroupInfo{JID: jid, Timestamp: time.Now(), Announce: &types.GroupAnnounce{IsAnnounce: true}, Join: []types.JID{types.NewJID("100000000001", types.DefaultUserServer)}}, nil)
 	var count int
@@ -276,7 +276,7 @@ func TestRESTStickerPoliciesBeforeUpload(t *testing.T) {
 			status := 403
 			switch policy {
 			case "allow_list":
-				b.Policy = parseChatPolicy("120363000000000002@g.us")
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy("120363000000000002@g.us"))
 			case "read_only":
 				b.ReadOnly, _ = parseReadOnly("true")
 			case "tools":

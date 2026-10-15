@@ -228,14 +228,14 @@ func TestReplayedLeaveDoesNotDropAConfirmedMember(t *testing.T) {
 func TestGroupMembershipFeedsRespectTheAllowList(t *testing.T) {
 	store := newTestMessageStore(t)
 	b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
-	b.Policy = parseChatPolicy("120363000000000009@g.us")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("120363000000000009@g.us"))
 
 	b.applyGroupParticipantChanges(&events.GroupInfo{
 		JID:       types.JID{User: "120363000000000001", Server: types.GroupServer},
 		Timestamp: time.Now(),
 		Join:      []types.JID{{User: "5511888888888", Server: types.DefaultUserServer}},
 	})
-	b.noteGroupSender(b.Policy, testGroupJID, types.JID{User: "5511777777777", Server: types.DefaultUserServer}, time.Now())
+	b.noteGroupSender(b.Policy.once().effective(t.Context()), testGroupJID, types.JID{User: "5511777777777", Server: types.DefaultUserServer}, time.Now())
 
 	if got := len(readMembers(t, store, testGroupJID)); got != 0 {
 		t.Fatalf("an excluded group gained %d cached member(s)", got)
@@ -588,7 +588,7 @@ func TestSyncGroupRostersRespectsPolicyAndConnection(t *testing.T) {
 	b.Connected = func() bool { return true }
 
 	// A group outside WHATSAPP_ALLOWED_CHATS is never fetched.
-	b.Policy = parseChatPolicy("5511999999999")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("5511999999999"))
 	if n, _ := b.syncGroupRosters(context.Background(), time.Now(), 10, 0); n != 0 || fetches != 0 {
 		t.Fatalf("policy ignored: refreshed=%d fetches=%d", n, fetches)
 	}
@@ -600,14 +600,14 @@ func TestSyncGroupRostersRespectsPolicyAndConnection(t *testing.T) {
 		"120363000000000002@g.us", "Allowed", dbTime(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatalf("seed allowed chat: %v", err)
 	}
-	b.Policy = parseChatPolicy("120363000000000002@g.us")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("120363000000000002@g.us"))
 	if n, _ := b.syncGroupRosters(context.Background(), time.Now(), 1, 0); n != 1 || fetches != 1 {
 		t.Fatalf("excluded group ate the batch: refreshed=%d fetches=%d", n, fetches)
 	}
 	fetches = 0
 
 	// Neither is anything while the WhatsApp socket is down.
-	b.Policy = parseChatPolicy("")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(""))
 	b.Connected = func() bool { return false }
 	if n, _ := b.syncGroupRosters(context.Background(), time.Now(), 10, 0); n != 0 || fetches != 0 {
 		t.Fatalf("disconnected sync ran: refreshed=%d fetches=%d", n, fetches)
@@ -831,7 +831,7 @@ func TestMessagesAfterOurDepartureDoNotResurrectTheRoster(t *testing.T) {
 		Timestamp: at,
 		Leave:     []types.JID{self},
 	})
-	b.noteGroupSender(b.Policy, testGroupJID, types.JID{User: "5511888888888", Server: types.DefaultUserServer}, at.Add(time.Second))
+	b.noteGroupSender(b.Policy.once().effective(t.Context()), testGroupJID, types.JID{User: "5511888888888", Server: types.DefaultUserServer}, at.Add(time.Second))
 
 	if got := len(readMembers(t, store, testGroupJID)); got != 0 {
 		t.Fatalf("a late message resurrected %d row(s) of a group we left", got)

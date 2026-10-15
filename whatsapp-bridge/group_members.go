@@ -228,7 +228,7 @@ type rosterRecorder func(groupJID string, members []GroupMember, now time.Time, 
 // without a live round trip per group (issue #288). The write is a local cache
 // with no WhatsApp side effect, so the route stays a read for read-only mode —
 // like /api/download, which caches media the same way.
-func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altOf altJIDResolver, policy chatPolicy, record rosterRecorder) http.HandlerFunc {
+func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altOf altJIDResolver, policy chatPolicyResolver, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
 		w.Header().Set("Content-Type", "application/json")

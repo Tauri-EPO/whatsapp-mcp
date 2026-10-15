@@ -87,7 +87,7 @@ func TestForwardTrimsDestinationBeforePolicy(t *testing.T) {
 func TestInvalidLongRecipientBeforeEffects(t *testing.T) {
 	ask := &fakeIsOnWhatsApp{}
 	b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
-	b.Policy = parseChatPolicy("")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(""))
 	if rec := postSend(mux, "12025551234-1612345678"); rec.Code != http.StatusBadRequest || len(*sent) != 0 || len(ask.calls) != 0 {
 		t.Fatalf("long send: status=%d sent=%v lookup=%v", rec.Code, *sent, ask.calls)
 	}
@@ -101,7 +101,7 @@ func TestInvalidLongRecipientBeforeEffects(t *testing.T) {
 func TestFormattedAllowListEntryDoesNotGainAnAlias(t *testing.T) {
 	ask := &fakeIsOnWhatsApp{}
 	b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
-	b.Policy = parseChatPolicy("+55 11 99999-9999")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("+55 11 99999-9999"))
 	if rec := postSend(mux, "+55 11 99999-9999"); rec.Code != http.StatusForbidden || len(*sent) != 0 || len(ask.calls) != 0 {
 		t.Fatalf("literal configuration: status=%d sent=%v lookup=%v", rec.Code, *sent, ask.calls)
 	}
@@ -116,9 +116,9 @@ func TestFormattedSendPolicyBeforeLookup(t *testing.T) {
 				"+" + number: {JID: jid, IsIn: true},
 			}}
 			b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
-			b.Policy = parseChatPolicy("5511888888888")
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy("5511888888888"))
 			if allowed {
-				b.Policy = parseChatPolicy(number)
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(number))
 			}
 			rec := postSend(mux, spelling)
 			if allowed {

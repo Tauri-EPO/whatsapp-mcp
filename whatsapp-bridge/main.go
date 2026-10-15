@@ -362,7 +362,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 		logger.Errorf("Failed to start REST API: %v", err)
 		return 1
 	}
-	logger.Infof("%s", bridge.Policy.effective().Summary())
+	logger.Infof("%s", bridge.Policy.effective(context.Background()).Summary())
 	logger.Infof("%s", bridge.ReadOnly.Summary())
 	logger.Infof("%s", bridge.Tools.Summary())
 	logger.Infof("Media auto-download: %v (status updates: %v); retention: %s", bridge.MediaAutoDownload,

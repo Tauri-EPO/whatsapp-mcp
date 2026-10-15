@@ -44,7 +44,7 @@ func TestInvalidEntryWarningDoesNotExposeValue(t *testing.T) {
 func TestHistoryAndDownloadRefuseWellFormedDisallowedChat(t *testing.T) {
 	for _, path := range []string{"/api/history", "/api/download"} {
 		b, _, _ := sendRecipientBridge(t, &mockLIDStore{}, &fakeIsOnWhatsApp{})
-		b.Policy = parseChatPolicy("*@g.us")
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy("*@g.us"))
 		b.Connected = func() bool { t.Fatal("connection before policy denial"); return false }
 		b.DownloadMedia = func(context.Context, string, string) (bool, string, string, string, error) {
 			t.Fatal("download before policy denial")
@@ -64,7 +64,7 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 		t.Run(allow, func(t *testing.T) {
 			ask := &fakeIsOnWhatsApp{}
 			b, _, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
-			b.Policy = parseChatPolicy(allow)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(allow))
 			b.Connected = func() bool { t.Fatal("connection touched before denial"); return false }
 			b.DownloadMedia = func(context.Context, string, string) (bool, string, string, string, error) {
 				t.Fatal("download touched before denial")
@@ -86,7 +86,7 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 				}{raw, http.StatusBadRequest})
 			}
 			for _, outside := range []string{"5511888888888@s.whatsapp.net", "120363000000000002@g.us"} {
-				if allow != "" && !b.Policy.Allows(outside) {
+				if allow != "" && !b.Policy.once().effective(t.Context()).Allows(outside) {
 					targets = append(targets, struct {
 						raw    string
 						status int
@@ -163,17 +163,17 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 						}
 						controlMux := mux
 						if route.field == "group_jid" && allow == "*@s.whatsapp.net" {
-							b.Policy = parseChatPolicy("*@g.us,5511999999999")
+							b.Policy = b.runtimeChatPolicy(parseChatPolicy("*@g.us,5511999999999"))
 							controlMux = b.newRESTMux(8080, sendRecipientToken)
 						}
 						if route.path == "/api/group/participants" {
 							// A permitted group alone does not permit its participants.
-							b.Policy = parseChatPolicy("*@g.us,5511999999999")
+							b.Policy = b.runtimeChatPolicy(parseChatPolicy("*@g.us,5511999999999"))
 							controlMux = b.newRESTMux(8080, sendRecipientToken)
 						}
 						controlMux.ServeHTTP(positive, seamRequest(method, controlPath, control, sendRecipientToken))
 						b.Client.Store.ID = self
-						b.Policy = parseChatPolicy(allow)
+						b.Policy = b.runtimeChatPolicy(parseChatPolicy(allow))
 						if positive.Code == http.StatusForbidden || positive.Code == http.StatusBadRequest {
 							t.Fatalf("allowed control refused: %s/%s policy=%q body=%s", route.path, route.field, allow, positive.Body.String())
 						}
@@ -194,7 +194,7 @@ func TestForwardAmbiguousDestinationNeverReachesSend(t *testing.T) {
 		t.Run(allow, func(t *testing.T) {
 			known, _ := types.ParseJID(efChat)
 			b, _, _ := sendRecipientBridge(t, &mockLIDStore{lidByPN: map[types.JID]types.JID{known: registeredLID}}, &fakeIsOnWhatsApp{})
-			b.Policy = parseChatPolicy(allow)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(allow))
 			source, target := "120363000000000001@g.us", "5511888888888@s.whatsapp.net@g.us"
 			if allow == "*@s.whatsapp.net" {
 				source, target = efChat, "120363000000000002@g.us@s.whatsapp.net"
@@ -237,7 +237,7 @@ func TestForwardAmbiguousDestinationNeverReachesSend(t *testing.T) {
 func TestPurgeAmbiguousItemDeniedBeforeStoreLookup(t *testing.T) {
 	for _, allow := range []string{"", "*@g.us", "*@s.whatsapp.net"} {
 		b, _, _ := sendRecipientBridge(t, &mockLIDStore{}, &fakeIsOnWhatsApp{})
-		b.Policy = parseChatPolicy(allow)
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy(allow))
 		mux := b.newRESTMux(8080, sendRecipientToken)
 		// A policy rejection must not need the store or probe the file cache.
 		b.Store = nil
@@ -261,7 +261,7 @@ func TestTypingNormalizesBeforeAuthorization(t *testing.T) {
 		{"*@g.us", http.StatusForbidden},
 	} {
 		b, _, _ := sendRecipientBridge(t, &mockLIDStore{}, &fakeIsOnWhatsApp{})
-		b.Policy = parseChatPolicy(tc.policy)
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.policy))
 		rec := httptest.NewRecorder()
 		b.newRESTMux(8080, sendRecipientToken).ServeHTTP(rec, seamRequest(http.MethodPost, "/api/typing", `{"recipient":"+55 11 99999-9999","is_typing":true}`, sendRecipientToken))
 		if rec.Code != tc.status {
@@ -280,7 +280,7 @@ func TestSendRefusesDeviceIdentityBeforeEffects(t *testing.T) {
 			"+" + phone.User: {PhoneNumber: phone, JID: registeredLID, IsIn: true},
 		}}
 		b, _, sent := sendRecipientBridge(t, &mockLIDStore{lidByPN: map[types.JID]types.JID{phone: registeredLID}}, ask)
-		b.Policy = parseChatPolicy(phone.String())
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy(phone.String()))
 		rec := postSend(b.newRESTMux(8080, sendRecipientToken), raw)
 		if rec.Code != http.StatusBadRequest || len(*sent) != 0 || len(ask.calls) != 0 {
 			t.Fatalf("raw=%q status=%d body=%s sent=%v queries=%v", raw, rec.Code, rec.Body.String(), *sent, ask.calls)

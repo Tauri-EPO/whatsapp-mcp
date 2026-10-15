@@ -15,6 +15,8 @@ import media_upload
 import whatsapp
 from errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 ALICE = "12025551234@s.whatsapp.net"
 PDF = b"%PDF-1.4 inline"
 OGG = b"OggS" + bytes(64)

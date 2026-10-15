@@ -21,7 +21,7 @@ func TestRecipientCacheRESTAndCurrentPolicy(t *testing.T) {
 			ask := registeredWithoutNinthDigit()
 			b, _, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
 			b.Store = seedEditStore(t)
-			b.Policy = parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber))
 			post := func() *httptest.ResponseRecorder {
 				mux := b.newRESTMux(8080, sendRecipientToken)
 				if route == "/api/send" {
@@ -40,11 +40,11 @@ func TestRecipientCacheRESTAndCurrentPolicy(t *testing.T) {
 			if len(ask.calls) != 1 || len(*sent) != 2 || (*sent)[1] != registeredJID.String() {
 				t.Fatalf("queries=%v sent=%v", ask.calls, *sent)
 			}
-			b.Policy = parseChatPolicy(efChat + "," + dialledNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + dialledNumber))
 			if rec := post(); rec.Code != http.StatusForbidden || len(ask.calls) != 1 || len(*sent) != 2 {
 				t.Fatalf("registered deny status=%d queries=%v sent=%v", rec.Code, ask.calls, *sent)
 			}
-			b.Policy = parseChatPolicy(efChat + "," + registeredNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + registeredNumber))
 			if rec := post(); rec.Code != http.StatusForbidden || len(ask.calls) != 1 || len(*sent) != 2 {
 				t.Fatalf("typed deny status=%d queries=%v sent=%v", rec.Code, ask.calls, *sent)
 			}
@@ -55,7 +55,7 @@ func TestRecipientCacheRESTAndCurrentPolicy(t *testing.T) {
 func TestRecipientCacheExpiryAndBridgeIsolation(t *testing.T) {
 	ask := registeredWithoutNinthDigit()
 	b, mux, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
-	b.Policy = parseChatPolicy(dialledNumber + "," + registeredNumber)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(dialledNumber + "," + registeredNumber))
 	now := time.Unix(1000, 0)
 	b.recipientNumbers.now = func() time.Time { return now }
 	if rec := postSend(mux, dialledNumber); rec.Code != http.StatusOK {
