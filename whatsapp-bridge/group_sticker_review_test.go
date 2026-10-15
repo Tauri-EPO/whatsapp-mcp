@@ -121,7 +121,7 @@ func TestReviewApprovalDoesNotBlockEvents(t *testing.T) {
 func TestReviewGroupEventUsesOnePolicySnapshot(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	reads := 0
-	b.Policy = chatPolicy{resolve: func() chatPolicy { reads++; return chatPolicy{} }}
+	b.Policy = chatPolicyHandle{resolve: func() chatPolicy { reads++; return chatPolicy{} }}
 	b.handleEvent(&events.GroupInfo{JID: types.NewJID("120363000000000001", types.GroupServer), Announce: &types.GroupAnnounce{IsAnnounce: true}}, nil)
 	if reads != 1 {
 		t.Fatalf("policy read %d times", reads)
@@ -164,7 +164,7 @@ func TestReviewRosterRefreshSeedsSettings(t *testing.T) {
 func TestReviewRosterRechecksPolicyAfterFetch(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	var denied atomic.Bool
-	b.Policy = chatPolicy{resolve: func() chatPolicy {
+	b.Policy = chatPolicyHandle{resolve: func() chatPolicy {
 		if denied.Load() {
 			return parseChatPolicy("120363000000000002@g.us")
 		}
