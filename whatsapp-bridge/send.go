@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
+	"io"
 	"math"
 	"math/rand"
 	"mime"
@@ -397,6 +398,78 @@ const groupPermissionMessage = "This group is restricted to admins; this account
 type stickerSendKey struct{}
 type stickerBytesKey struct{}
 
+const maxStickerBytes = 1 << 20
+
+// readStickerMedia validates confined local media. Preview reads only the RIFF
+// header and the first VP8X chunk, never the potentially large image payload.
+func readStickerMedia(path string, preview bool) ([]byte, error) {
+	file, err := os.Open(path) //nolint:gosec // Confined media path or bridge-owned verified spool.
+	if err != nil {
+		return nil, fmt.Errorf("could not open sticker media: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("could not stat sticker media: %w", err)
+	}
+	if info.Size() > maxStickerBytes {
+		return nil, fmt.Errorf("as_sticker is limited to 1 MiB")
+	}
+	limit := int64(maxStickerBytes + 1)
+	if preview {
+		limit = 30
+	} // RIFF(12), VP8X header(8), VP8X payload(10).
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return nil, fmt.Errorf("could not read sticker media: %w", err)
+	}
+	if len(data) > maxStickerBytes {
+		return nil, fmt.Errorf("as_sticker is limited to 1 MiB")
+	}
+	if !isWebP(data) {
+		return nil, fmt.Errorf("as_sticker requires RIFF/WEBP bytes")
+	}
+	return data, nil
+}
+
+// resolveSendMedia owns cached spool cleanup and preserves a forward's original
+// presentation when its download resolves to a different cached reference.
+func (b *Bridge) resolveSendMedia(ctx context.Context, mediaPath string) (context.Context, string, func(), error) {
+	if !strings.HasPrefix(mediaPath, "whatsapp://") {
+		return ctx, mediaPath, func() {}, nil
+	}
+	local, source, cleanup, err := b.materializeCachedMedia(ctx, mediaPath)
+	if err != nil {
+		return ctx, "", cleanup, err
+	}
+	ctx = context.WithValue(ctx, cachedSendSourceKey{}, source)
+	ctx = context.WithValue(ctx, cachedForwardMIMEKey{}, true)
+	if _, exists := ctx.Value(forwardSourceKey{}).(*forwardSource); !exists {
+		ctx = context.WithValue(ctx, forwardSourceKey{}, source)
+	}
+	return ctx, local, cleanup, nil
+}
+
+func sendErrorStatus(code string) int {
+	switch code {
+	case groupPermissionCode:
+		return http.StatusForbidden
+	case "media_unavailable", "media_refused":
+		return http.StatusInternalServerError
+	case "bridge_unavailable":
+		return http.StatusBadGateway
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+func cachedSendErrorCode(err error) string {
+	if code := permanentMediaCode(err); code != "" {
+		return code
+	}
+	return "bridge_unavailable"
+}
+
 // These pinned-SDK sentinel errors are returned before any message node is sent.
 // In particular, do not refund generic transport errors or response timeouts.
 func definitiveSendRefusal(err error) bool {
@@ -426,20 +499,12 @@ func (b *Bridge) sendBackend() sendFunc {
 
 func (b *Bridge) sendWhatsAppMessage(ctx context.Context, persist outboundPersistence, recipient, message, mediaPath, quotedID, quotedSender, quotedContent string, mentions []string) (bool, string, sentMessage) {
 	ctx = context.WithValue(ctx, sendReleaseKey{}, b.releaseSend)
-	if strings.HasPrefix(mediaPath, "whatsapp://") {
-		local, source, cleanup, err := b.materializeCachedMedia(ctx, mediaPath)
-		if err != nil {
-			b.releaseSend(ctx)
-			return false, "Cached media read failed", sentMessage{}
-		}
-		defer cleanup()
-		mediaPath = local
-		ctx = context.WithValue(ctx, cachedSendSourceKey{}, source)
-		ctx = context.WithValue(ctx, cachedForwardMIMEKey{}, true)
-		if _, exists := ctx.Value(forwardSourceKey{}).(*forwardSource); !exists {
-			ctx = context.WithValue(ctx, forwardSourceKey{}, source)
-		}
+	ctx, mediaPath, cleanup, err := b.resolveSendMedia(ctx, mediaPath)
+	if err != nil {
+		b.releaseSend(ctx)
+		return false, "Cached media read failed", sentMessage{ErrorCode: cachedSendErrorCode(err)}
 	}
+	defer cleanup()
 	network := messageSendNetwork{connected: b.Connected, upload: b.uploadMedia, send: b.sendMessage}
 	network.cache = b.cacheOutboundMedia
 	if network.upload == nil {
@@ -529,7 +594,11 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		err = nil
 		mediaData, _ = ctx.Value(stickerBytesKey{}).([]byte)
 		if mediaData == nil {
-			mediaData, err = os.ReadFile(mediaPath) //nolint:gosec // mediaPath was canonicalised and confined to WHATSAPP_MEDIA_ROOTS by validateMediaPath
+			if asSticker, _ := ctx.Value(stickerSendKey{}).(bool); asSticker {
+				mediaData, err = readStickerMedia(mediaPath, false)
+			} else {
+				mediaData, err = os.ReadFile(mediaPath) //nolint:gosec // mediaPath was canonicalised and confined to WHATSAPP_MEDIA_ROOTS by validateMediaPath
+			}
 		}
 		if err != nil {
 			return false, fmt.Sprintf("Error reading media file: %v", err), sentMessage{}
@@ -538,9 +607,6 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		var mediaType whatsmeow.MediaType
 		var mimeType string
 		if asSticker, _ := ctx.Value(stickerSendKey{}).(bool); asSticker {
-			if !isWebP(mediaData) || message != "" {
-				return false, "as_sticker requires RIFF/WEBP bytes and no caption", sentMessage{ErrorCode: "invalid_argument"}
-			}
 			mediaType, mimeType = whatsmeow.MediaImage, "image/webp"
 		} else {
 			mediaType, mimeType, err = forwardMediaType(ctx, mediaPath, mediaData)
@@ -1202,27 +1268,18 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 
 		ctx = context.WithValue(ctx, stickerSendKey{}, req.AsSticker)
 		if req.AsSticker {
-			if strings.HasPrefix(resolvedMediaPath, "whatsapp://") {
-				local, source, cleanup, err := b.materializeCachedMedia(ctx, resolvedMediaPath)
-				if err != nil {
-					writeError(w, 400, "Cached media read failed")
-					return
-				}
-				defer cleanup()
-				resolvedMediaPath = local
-				ctx = context.WithValue(ctx, cachedSendSourceKey{}, source)
-				ctx = context.WithValue(ctx, cachedForwardMIMEKey{}, true)
-				ctx = context.WithValue(ctx, forwardSourceKey{}, source)
-			}
-			// Read only the confined canonical path (or verified cache spool).
-			// Retain the bytes so validation and upload see the same snapshot.
-			data, err := os.ReadFile(resolvedMediaPath)
+			var cleanup func()
+			var err error
+			ctx, resolvedMediaPath, cleanup, err = b.resolveSendMedia(ctx, resolvedMediaPath)
 			if err != nil {
-				writeError(w, 400, "Could not read sticker media")
+				code := cachedSendErrorCode(err)
+				writeErrorCode(w, sendErrorStatus(code), code, "Cached media read failed")
 				return
 			}
-			if !isWebP(data) {
-				writeError(w, 400, "as_sticker requires RIFF/WEBP bytes and no caption")
+			defer cleanup()
+			data, err := readStickerMedia(resolvedMediaPath, req.DryRun)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			ctx = context.WithValue(ctx, stickerBytesKey{}, data)
@@ -1245,11 +1302,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			b.metrics.sendFailures.Add(1)
 		}
 		if !success && sent.ErrorCode != "" {
-			status := http.StatusBadRequest
-			if sent.ErrorCode == groupPermissionCode {
-				status = http.StatusForbidden
-			}
-			writeErrorCode(w, status, sent.ErrorCode, message)
+			writeErrorCode(w, sendErrorStatus(sent.ErrorCode), sent.ErrorCode, message)
 			return
 		}
 		// Set response headers

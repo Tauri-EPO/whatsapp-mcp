@@ -1386,7 +1386,9 @@ When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOO
 `as_sticker=True` sends RIFF/WEBP bytes as a real sticker, static or animated,
 from `media_path`, `media_base64` or `upload_id`. Non-WebP bytes (including a JPEG
 renamed to `.webp`) and any caption return `invalid_argument` before WhatsApp
-upload. Animation comes from the VP8X animation flag. With the default false,
+upload. Stickers are limited to 1 MiB; WhatsApp typically renders up to about
+100 KB for static stickers and 500 KB for animated stickers. Animation comes
+from the VP8X animation flag. With the default false,
 WebP keeps its existing photo behavior. Stickers are archived and forwarded as
 stickers with no caption. All send policies and budgets still apply. The bridge
 checks path-based sticker bytes only after media-root confinement, including
@@ -2724,15 +2726,19 @@ with their last message run to tens of kilobytes — so it takes the full set of
 ### `get_chat`
 
 For groups, `group_settings` contains the last observed `announce`, `locked`,
-`join_approval_required` and `topic`, each with its own `_updated_at` event time
-in canonical UTC. Values and times are null until observed; false and an empty
+`join_approval_required` and `topic`, each with its own `_updated_at` local bridge
+observation time in canonical UTC. The last observation wins, including observations
+within the same stored second; the server timestamp is not used for ordering. Values and times are null until observed; false and an empty
 topic are known values. Topic uses the same sanitation/untrusted wrapping as
 `list_group_members`. Only current state is stored, with no change history. Join-approval notifications
 trigger a bounded metadata refresh because the SDK event decoder cannot distinguish
 on from off. Refresh runs on a bounded background queue, keeping event dispatch
 responsive; if it fails, the last observed value stays unchanged. Live and scheduled
-roster refreshes also populate all four settings, stamped before the fetch, so
-no change notification is required. An unavailable archive leaves live
+roster refreshes also populate all four settings when the response is observed, so
+no change notification is required. Settings update only existing archived chats,
+and a settings write failure does not block roster caching. The refresh worker
+runs while connected, coalesces repeated groups and does not affect scheduled
+roster failure backoff. An unavailable archive leaves live
 `list_group_members` results available with null settings.
 `group_settings` is available through `fields` projection.
 

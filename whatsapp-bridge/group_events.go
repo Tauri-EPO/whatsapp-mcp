@@ -138,6 +138,16 @@ func (b *Bridge) resolveRosterRows(rows []groupMemberRow) []groupMemberRow {
 // (rest.go): caching the roster must never change what the caller gets back,
 // so a failure is a log line and nothing more.
 func (b *Bridge) recordGroupRoster(groupJID string, members []GroupMember, at time.Time, info *types.GroupInfo) {
+	if info == nil {
+		// Subject updates fetched these participants before SetGroupTopic.
+		// That pre-update metadata must not replace the subsequent topic event.
+		if b.Store != nil && b.Policy.once().Allows(groupJID) {
+			if _, err := b.storeGroupRoster(groupJID, members, at); err != nil {
+				b.Log.Warnf("Failed to cache the roster of %s: %v", groupJID, err)
+			}
+		}
+		return
+	}
 	if _, err := b.storeFetchedGroupInfo(groupJID, info, at, members); err != nil {
 		b.Log.Warnf("Failed to cache the roster of %s: %v", groupJID, err)
 	}
@@ -155,8 +165,8 @@ func (b *Bridge) storeFetchedGroupInfo(group string, info *types.GroupInfo, at t
 	if err := b.storeGroupSettings(group, map[string]any{
 		"announce": info.IsAnnounce, "locked": info.IsLocked,
 		"join_approval_required": info.IsJoinApprovalRequired, "topic": info.Topic,
-	}, at, true); err != nil {
-		return 0, err
+	}, time.Now()); err != nil {
+		b.Log.Warnf("Failed to store group settings for %s: %v", group, err)
 	}
 	members := buildGroupMembers(info, nil, nil).Members
 	if len(resolved) > 0 {
@@ -382,30 +392,7 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 // no usable participant leaves the group with no source="roster" row, so it
 // stays stale forever and has to be backed off like any other failure.
 func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed types.JID, now time.Time) bool {
-	fetchCtx, cancel := context.WithTimeout(ctx, groupRosterFetchTimeout)
-	defer cancel()
-	// Read before the request: see storeGroupRoster on why the sweep stamp
-	// must predate anything the event feed can write while it is in flight.
-	at := time.Now()
-	b.clientGate.RLock()
-	if b.operatorLogout.Load() {
-		b.clientGate.RUnlock()
-		return false
-	}
-	info, err := b.Store.groupInfo(fetchCtx, parsed)
-	b.clientGate.RUnlock()
-	if err == nil && info == nil {
-		err = fmt.Errorf("group info response was nil")
-	}
-	if err != nil {
-		// Left groups and transient failures both land here; neither is worth
-		// an operator-visible line once every six hours. The failure is
-		// remembered so the group does not consume a slot of the next batch.
-		b.Log.Debugf("Group roster sync: %s: %v", jid, err)
-		b.rosterFailures.note(jid, now)
-		return false
-	}
-	written, err := b.storeFetchedGroupInfo(jid, info, at)
+	written, err := b.fetchGroupRoster(ctx, jid, parsed)
 	if err != nil {
 		b.Log.Warnf("Group roster sync: failed to store %s: %v", jid, err)
 		b.rosterFailures.note(jid, now)
@@ -418,6 +405,28 @@ func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed type
 	}
 	b.rosterFailures.forget(jid)
 	return true
+}
+
+// fetchGroupRoster does no backoff accounting: event-triggered refreshes
+// must not suppress the scheduled roster pass or message-derived membership.
+func (b *Bridge) fetchGroupRoster(ctx context.Context, jid string, parsed types.JID) (int, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, groupRosterFetchTimeout)
+	defer cancel()
+	at := time.Now() // Participant sweep must predate the request.
+	b.clientGate.RLock()
+	if b.operatorLogout.Load() {
+		b.clientGate.RUnlock()
+		return 0, fmt.Errorf("operator logout in progress")
+	}
+	info, err := b.Store.groupInfo(fetchCtx, parsed)
+	b.clientGate.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+	if info == nil {
+		return 0, fmt.Errorf("group info response was nil")
+	}
+	return b.storeFetchedGroupInfo(jid, info, at)
 }
 
 // runGroupRosterSync runs a pass groupRosterSyncStartDelay after startup and
@@ -458,8 +467,8 @@ func (b *Bridge) runGroupRosterSync() {
 	}
 }
 
-// applyGroupSettings retains only fields present in the event, with independent
-// event stamps so an older replay cannot replace a newer observed setting.
+// applyGroupSettings retains fields present in an event using the local
+// observation clock, shared with fetched snapshots; the last observation wins.
 func (b *Bridge) applyGroupSettings(policy chatPolicy, v *events.GroupInfo) {
 	if b.Store == nil || !policy.Allows(v.JID.String()) {
 		return
@@ -486,18 +495,18 @@ func (b *Bridge) applyGroupSettings(policy chatPolicy, v *events.GroupInfo) {
 	if len(values) == 0 {
 		return
 	}
-	at := v.Timestamp
-	if at.IsZero() {
-		at = time.Now()
-	}
-	if err := b.storeGroupSettings(v.JID.String(), values, at, false); err != nil {
+	if err := b.storeGroupSettings(v.JID.String(), values, time.Now()); err != nil {
 		b.Log.Warnf("Failed to store group settings for %s: %v", v.JID, err)
 	}
 }
 
 // requestGroupSettingsRefresh never waits on network I/O or a full queue.
 func (b *Bridge) requestGroupSettingsRefresh(jid types.JID) {
+	if b.Connected != nil && !b.Connected() {
+		return
+	}
 	b.groupSettingsRefreshOnce.Do(func() {
+		b.groupSettingsPending = make(map[types.JID]bool)
 		b.groupSettingsRefresh = make(chan types.JID, groupRosterSyncBatch)
 		go func() {
 			for {
@@ -505,8 +514,15 @@ func (b *Bridge) requestGroupSettingsRefresh(jid types.JID) {
 				case <-b.ctx.Done():
 					return
 				case group := <-b.groupSettingsRefresh:
-					if b.Policy.once().Allows(group.String()) {
-						b.refreshGroupRoster(b.ctx, group.String(), group, time.Now())
+					// Deduplicate queued requests only. A notification received
+					// during this fetch queues one follow-up observation.
+					b.groupSettingsPendingMu.Lock()
+					delete(b.groupSettingsPending, group)
+					b.groupSettingsPendingMu.Unlock()
+					if (b.Connected == nil || b.Connected()) && b.Policy.once().Allows(group.String()) {
+						if _, err := b.fetchGroupRoster(b.ctx, group.String(), group); err != nil {
+							b.Log.Warnf("Group settings refresh: %s: %v", group, err)
+						}
 					}
 					select {
 					case <-b.ctx.Done():
@@ -517,34 +533,32 @@ func (b *Bridge) requestGroupSettingsRefresh(jid types.JID) {
 			}
 		}()
 	})
+	b.groupSettingsPendingMu.Lock()
+	defer b.groupSettingsPendingMu.Unlock()
+	if b.groupSettingsPending[jid] {
+		return
+	}
 	select {
 	case b.groupSettingsRefresh <- jid:
+		b.groupSettingsPending[jid] = true
 	default:
 		b.Log.Warnf("Group settings refresh queue full; skipping %s", jid)
 	}
 }
 
-func (b *Bridge) storeGroupSettings(group string, values map[string]any, at time.Time, snapshot bool) error {
+func (b *Bridge) storeGroupSettings(group string, values map[string]any, at time.Time) error {
 	tx, err := b.Store.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	comparison := ">="
-	if snapshot {
-		// dbTime has second precision. A fetch stamped before network I/O
-		// cannot replace an event observed during that same second. On an
-		// equal stamp preserve the known value until a later snapshot/event.
-		comparison = ">"
-	}
 	for field, value := range values {
 		// field is one of the fixed internal keys above, never event text.
 		column := "group_" + field
-		//nolint:gosec // Column names and comparison are fixed internal keys/operators; event values are bound parameters.
-		query := fmt.Sprintf(`INSERT INTO chats (jid, %[1]s, %[1]s_updated_at) VALUES (?, ?, ?)
-   ON CONFLICT(jid) DO UPDATE SET %[1]s=excluded.%[1]s, %[1]s_updated_at=excluded.%[1]s_updated_at
-   WHERE chats.%[1]s_updated_at IS NULL OR excluded.%[1]s_updated_at %[2]s chats.%[1]s_updated_at`, column, comparison)
-		if _, err = tx.Exec(query, group, value, dbTime(at)); err != nil {
+		//nolint:gosec // Column names are fixed internal keys; all values are bound parameters.
+		query := fmt.Sprintf(`UPDATE chats SET %[1]s=?, %[1]s_updated_at=?
+            WHERE jid=? AND (%[1]s_updated_at IS NULL OR ? >= %[1]s_updated_at)`, column)
+		if _, err = tx.Exec(query, value, dbTime(at), group, dbTime(at)); err != nil {
 			break
 		}
 	}

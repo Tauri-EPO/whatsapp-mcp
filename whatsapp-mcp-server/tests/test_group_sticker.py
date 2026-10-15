@@ -214,3 +214,60 @@ def test_sticker_invalid_path_dry_run_is_validated_by_bridge(bridge, tmp_path):
     result = main.send_file(GROUP, str(path), as_sticker=True, dry_run=True)
     assert result["error"]["code"] == "invalid_argument"
     assert bridge[0][0]["dry_run"] is True
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_inline_sticker_size_limit_before_write(dry_run, bridge, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("oversized inline sticker written")
+
+    monkeypatch.setattr(media_upload, "write_inline", unexpected)
+    result = main.send_file(
+        GROUP,
+        media_base64=base64.b64encode(WEBP + bytes(1 << 20)).decode(),
+        filename="large.webp",
+        as_sticker=True,
+        dry_run=dry_run,
+    )
+    assert result["error"]["code"] == "invalid_argument"
+    assert "1 MiB" in result["error"]["message"]
+    assert not bridge
+
+
+def test_live_roster_reads_latest_same_second_observation(paired_dbs, monkeypatch):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([]))
+    stamp = "2026-10-14 12:00:00+00:00"
+    with sqlite3.connect(whatsapp.MESSAGES_DB_PATH) as db:
+        for key in whatsapp.GROUP_SETTING_KEYS:
+            db.execute(f"ALTER TABLE chats ADD COLUMN group_{key}")
+        db.execute("UPDATE chats SET group_topic='Event', group_topic_updated_at=? WHERE jid=?", (stamp, GROUP))
+    fetched = False
+
+    def live_fetch(*args, **kwargs):
+        nonlocal fetched
+        with sqlite3.connect(whatsapp.MESSAGES_DB_PATH) as db:
+            # Same-second observations follow the bridge's >= ordering.
+            db.execute(
+                "UPDATE chats SET group_topic='Fetched', group_topic_updated_at=? WHERE jid=? AND ? >= group_topic_updated_at",
+                (stamp, GROUP, stamp),
+            )
+        fetched = True
+        return Response()
+
+    connect = whatsapp._connect_messages_db
+    connections = []
+
+    def read_archive():
+        assert fetched, "archive read happened before the live fetch"
+        conn = connect()
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_bridge_request", live_fetch)
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", read_archive)
+    result = main.list_group_members(GROUP)
+    assert result["group_settings"]["topic"] == "Fetched"
+    assert result["group_settings"]["topic_updated_at"] == stamp
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")

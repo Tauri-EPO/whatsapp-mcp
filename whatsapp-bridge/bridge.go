@@ -246,6 +246,8 @@ type Bridge struct {
 	rosterFailures           *rosterFailures
 	groupSettingsRefreshOnce sync.Once
 	groupSettingsRefresh     chan types.JID
+	groupSettingsPendingMu   sync.Mutex
+	groupSettingsPending     map[types.JID]bool
 	// mediaTransfers keeps one transfer in flight per cached file, so callers
 	// that miss the cache together share it (see media_inflight.go).
 	mediaTransfers mediaTransferGroup

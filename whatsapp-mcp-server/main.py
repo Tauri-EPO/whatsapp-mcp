@@ -2057,7 +2057,7 @@ def send_file(
     that would be sent, without uploading media or sending a message. Sticker
     previews may resolve the recipient through WhatsApp or read cached media.
 
-    Set `as_sticker=True` to send real WebP bytes as a sticker (static or animated).
+    Set `as_sticker=True` to send real WebP bytes as a sticker (static or animated, at most 1 MiB).
     Stickers cannot have a caption; without this option WebP stays a photo.
     Path-based sticker previews ask the bridge to confine the path and verify
     RIFF/WEBP bytes without upload, send or budget reservation.

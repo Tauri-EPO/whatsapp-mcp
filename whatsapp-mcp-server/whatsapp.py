@@ -4710,6 +4710,9 @@ def _inline_name(filename: str, default_name: str | None) -> str:
 
 
 def _require_webp_sticker(data: bytes) -> None:
+    # Inline previews do not call the bridge; local paths are validated there.
+    if len(data) > 1 << 20:
+        raise ToolError("invalid_argument", "as_sticker is limited to 1 MiB")
     if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
         raise ToolError("invalid_argument", "as_sticker requires RIFF/WEBP bytes")
 

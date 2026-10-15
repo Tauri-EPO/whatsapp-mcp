@@ -29,6 +29,10 @@ func TestGroupSettingsEventState(t *testing.T) {
 			}
 			b := testBridge(t, newTestClient(&mockLIDStore{}), store, testLogger())
 			jid := types.NewJID("120363000000000001", types.GroupServer)
+			if err := store.StoreChat(jid.String(), "Fake group", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			observed := time.Now().Truncate(time.Second)
 			at := time.Date(2026, 10, 14, 12, 0, 0, 0, time.FixedZone("test", -3*3600))
 			event := &events.GroupInfo{JID: jid, Timestamp: at}
 			store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) {
@@ -57,10 +61,10 @@ func TestGroupSettingsEventState(t *testing.T) {
 			if err := store.db.QueryRow(query, jid.String()).Scan(&value, &stamp); err != nil {
 				t.Fatal(err)
 			}
-			if fmt.Sprint(value) != fmt.Sprint(expected) || stamp != dbTime(at) {
+			if fmt.Sprint(value) != fmt.Sprint(expected) || stamp < dbTime(observed) {
 				t.Fatalf("value=%v stamp=%s", value, stamp)
 			}
-			// Off/deleted is a known state, not NULL. Older replay must not undo it.
+			// Off/deleted is a known state, not NULL. Arrival order is authoritative.
 			event.Timestamp = at.Add(time.Hour)
 			if event.Announce != nil {
 				event.Announce.IsAnnounce = false
@@ -75,6 +79,16 @@ func TestGroupSettingsEventState(t *testing.T) {
 				event.Topic.TopicDeleted = true
 			}
 			b.handleEvent(event, nil)
+			if err := store.db.QueryRow(query, jid.String()).Scan(&value, &stamp); err != nil {
+				t.Fatal(err)
+			}
+			off := "0"
+			if setting == "topic" {
+				off = ""
+			}
+			if fmt.Sprint(value) != off {
+				t.Fatalf("off/deleted state = %v", value)
+			}
 			event.Timestamp = at
 			if event.Announce != nil {
 				event.Announce.IsAnnounce = true
@@ -92,11 +106,7 @@ func TestGroupSettingsEventState(t *testing.T) {
 			if err := store.db.QueryRow(query, jid.String()).Scan(&value, &stamp); err != nil {
 				t.Fatal(err)
 			}
-			expected = int64(0)
-			if setting == "topic" {
-				expected = ""
-			}
-			if fmt.Sprint(value) != fmt.Sprint(expected) || stamp != dbTime(at.Add(time.Hour)) {
+			if fmt.Sprint(value) != fmt.Sprint(expected) || stamp < dbTime(observed) {
 				t.Fatalf("replay value=%v stamp=%s", value, stamp)
 			}
 			if err := ensureMessageStoreSchema(store.db); err != nil {
@@ -331,8 +341,12 @@ func TestJoinApprovalSDKOffNotification(t *testing.T) {
 	if err := ensureMessageStoreSchema(store.db); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.StoreChat(testGroupJID, "Fake group", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	client := newTestClient(&mockLIDStore{})
 	b := testBridge(t, client, store, testLogger())
+	b.Connected = func() bool { return true }
 	jid := types.NewJID("120363000000000001", types.GroupServer)
 	node := &waBinary.Node{Tag: "notification", Attrs: waBinary.Attrs{"from": jid, "t": "1791988800"}, Content: []waBinary.Node{{Tag: "membership_approval_mode", Content: []waBinary.Node{{Tag: "group_join", Attrs: waBinary.Attrs{"state": "off"}}}}}}
 	event, _, err := client.DangerousInternals().ParseGroupChange(node) //nolint:staticcheck // Exercise the pinned SDK's real decoder for this regression; no production use.

@@ -94,6 +94,7 @@ func TestReviewRejectedSendsPreserveBudget(t *testing.T) {
 
 func TestReviewApprovalDoesNotBlockEvents(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+	b.Connected = func() bool { return true }
 	started, release, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	b.Store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) {
 		close(started)
@@ -131,6 +132,9 @@ func TestReviewRosterRefreshSeedsSettings(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		t.Run(fmt.Sprint(live), func(t *testing.T) {
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
+			if err := b.Store.StoreChat(testGroupJID, "Fake group", time.Now()); err != nil {
+				t.Fatal(err)
+			}
 			info := fakeGroup()
 			info.IsAnnounce, info.IsLocked, info.IsJoinApprovalRequired, info.Topic = true, true, true, "Snapshot topic"
 			b.Store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) { return info, nil }
@@ -239,35 +243,6 @@ func TestReviewForwardRefusalReleasesBudget(t *testing.T) {
 	u, err := b.sendUsageSnapshot(context.Background())
 	if err != nil || u.Today != 0 || u.NewChatsToday != 0 {
 		t.Fatalf("usage=%+v err=%v", u, err)
-	}
-}
-
-func TestReviewSnapshotPreservesSameSecondObservation(t *testing.T) {
-	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
-	at := time.Date(2026, 10, 14, 12, 0, 0, 100, time.UTC)
-	values := map[string]any{"announce": true, "locked": true, "join_approval_required": true, "topic": "New topic"}
-	if err := b.storeGroupSettings(testGroupJID, values, at.Add(500*time.Millisecond), false); err != nil {
-		t.Fatal(err)
-	}
-	info := fakeGroup()
-	info.Topic = "Old topic"
-	if _, err := b.storeFetchedGroupInfo(testGroupJID, info, at); err != nil {
-		t.Fatal(err)
-	}
-	var announce, locked, approval bool
-	var topic string
-	if err := b.Store.db.QueryRow(`SELECT group_announce,group_locked,group_join_approval_required,group_topic FROM chats WHERE jid=?`, testGroupJID).Scan(&announce, &locked, &approval, &topic); err != nil {
-		t.Fatal(err)
-	}
-	if !announce || !locked || !approval || topic != "New topic" {
-		t.Fatalf("stale snapshot replaced observation: %v/%v/%v/%q", announce, locked, approval, topic)
-	}
-	// A strictly later snapshot can still reconcile all current values.
-	if _, err := b.storeFetchedGroupInfo(testGroupJID, info, at.Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Store.db.QueryRow(`SELECT group_topic FROM chats WHERE jid=?`, testGroupJID).Scan(&topic); err != nil || topic != "Old topic" {
-		t.Fatalf("later snapshot: topic=%s err=%v", topic, err)
 	}
 }
 
