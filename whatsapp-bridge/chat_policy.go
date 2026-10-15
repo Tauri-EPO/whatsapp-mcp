@@ -29,7 +29,6 @@ const chatPolicyEnv = "WHATSAPP_ALLOWED_CHATS"
 
 // chatPolicy is the parsed allow-list. Restricted=false means "allow all".
 type chatPolicy struct {
-	resolve          func() chatPolicy
 	source           string // set when a runtime override decided this policy
 	restricted       bool
 	exact            map[string]struct{}
@@ -43,25 +42,45 @@ var chatEntryPattern = regexp.MustCompile(`^(?:[0-9]+|(?:\*|[0-9A-Za-z_:-]+)@[0-
 
 type runtimeSettingsSnapshotKey struct{}
 
-// effective preserves captured handlers and pins HTTP authorization to one snapshot.
-func (p chatPolicy) effective(contexts ...context.Context) chatPolicy {
-	if p.resolve != nil {
-		if len(contexts) > 0 {
-			if pinned, ok := contexts[0].Value(runtimeSettingsSnapshotKey{}).(runtimeSettingsSnapshot); ok {
-				return pinned.chats
-			}
-		}
-		return p.resolve()
-	}
-	return p
+// chatPolicyHandle exposes only resolution, never allow-list fields or checks.
+type chatPolicyHandle struct {
+	resolve func() chatPolicy
+	deploy  func() chatPolicy
 }
 
-// once resolves at most one time for a background pass or event.
-func (p chatPolicy) once() chatPolicy {
-	if p.resolve != nil {
-		p.resolve = sync.OnceValue(p.resolve)
+// deploymentChatPolicy resolves the private picker's static deploy boundary.
+// The handle stores it in a closure, never as exposed allow-list fields.
+func deploymentChatPolicy(h chatPolicyHandle) chatPolicy {
+	if h.deploy != nil {
+		return h.deploy()
 	}
-	return p
+	return chatPolicy{}
+}
+
+// chatPolicyResolver is accepted at handler construction; request bodies use values.
+type chatPolicyResolver interface {
+	effective(context.Context) chatPolicy
+}
+
+func (p chatPolicy) effective(_ context.Context) chatPolicy { return p }
+
+// effective pins HTTP authorization to the guard's committed snapshot.
+func (h chatPolicyHandle) effective(ctx context.Context) chatPolicy {
+	if pinned, ok := ctx.Value(runtimeSettingsSnapshotKey{}).(runtimeSettingsSnapshot); ok {
+		return pinned.chats
+	}
+	if h.resolve != nil {
+		return h.resolve()
+	}
+	return chatPolicy{}
+}
+
+// once pins a pass/event lazily; unused policies never read the store.
+func (h chatPolicyHandle) once() chatPolicyHandle {
+	if h.resolve != nil {
+		h.resolve = sync.OnceValue(h.resolve)
+	}
+	return h
 }
 
 // origin names the list behind a refusal, as tool refusals do.
@@ -159,7 +178,6 @@ func loadChatPolicy() chatPolicy {
 // Allows reports whether the policy permits acting on target (a JID or a bare
 // phone number as accepted by the REST API).
 func (p chatPolicy) Allows(target string) bool {
-	p = p.effective()
 	// whatsmeow parses the first two @-separated parts. A policy must never
 	// authorize a different server from the one the client will address.
 	if strings.Count(target, "@") > 1 {
@@ -183,7 +201,6 @@ func (p chatPolicy) Allows(target string) bool {
 // phone/LID twins and Brazilian mobile spellings denote the same user. Send
 // destinations retain their separate typed/registered-number checks.
 func (p chatPolicy) allowsIdentity(ctx context.Context, jid types.JID, twin lidForPNFunc) bool {
-	p = p.effective()
 	if !p.restricted {
 		return true
 	}
@@ -336,7 +353,6 @@ func (p chatPolicy) Summary() string {
 // rejectByChatPolicy writes the 403 the outbound handlers share when target is
 // outside the allow-list. Returns true when the request was rejected.
 func rejectByChatPolicy(w http.ResponseWriter, policy chatPolicy, target string) bool {
-	policy = policy.effective()
 	if policy.Allows(target) {
 		return false
 	}

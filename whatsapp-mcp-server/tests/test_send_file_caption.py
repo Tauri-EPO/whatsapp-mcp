@@ -3,6 +3,8 @@ import pytest
 import whatsapp
 from errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 
 class DummyResponse:
     def __init__(self, status_code=200, payload=None, text="OK"):

@@ -377,9 +377,8 @@ func (b *Bridge) chatPolicyUnreadable(err error) chatPolicy {
 	return chatPolicy{restricted: true, source: "runtime chat policy (unreadable)"}
 }
 
-func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicy {
-	policy := deploy
-	policy.resolve = func() chatPolicy {
+func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicyHandle {
+	return chatPolicyHandle{deploy: func() chatPolicy { return deploy }, resolve: func() chatPolicy {
 		if b.RuntimeDefaults == nil {
 			return deploy
 		}
@@ -388,8 +387,7 @@ func (b *Bridge) runtimeChatPolicy(deploy chatPolicy) chatPolicy {
 			return b.chatPolicyUnreadable(err) // Never drop a saved restriction on read failure.
 		}
 		return snapshot.chats
-	}
-	return policy
+	}}
 }
 
 // Tool and chat guards must authorize under the same committed settings.

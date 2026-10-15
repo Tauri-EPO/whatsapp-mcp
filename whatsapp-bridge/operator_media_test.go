@@ -92,7 +92,7 @@ func TestOperatorMediaHTTPUsagePurgeAndDenyMatrix(t *testing.T) {
 	video := seedOperatorMedia(t, b, "VIDEO", purgeChat, "video", 100*24*time.Hour, 30)
 	image := seedOperatorMedia(t, b, "IMAGE", purgeGroup, "image", time.Hour, 10)
 	status := seedOperatorMedia(t, b, "STATUS", "status@broadcast", "video", 100*24*time.Hour, 5)
-	b.Policy = parseChatPolicy(purgeGroup)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(purgeGroup))
 	b.ReadOnly.enabled = true // Operator has archive authority regardless of data-plane restrictions.
 	code, usage := mediaHTTPRequest(t, server, "GET", "/operator/v1/media/usage?limit=1", "", fakeOperatorToken)
 	if code != 200 || usage["bytes"] != float64(45) {
@@ -159,7 +159,7 @@ func TestOperatorMediaHTTPUsagePurgeAndDenyMatrix(t *testing.T) {
 
 func TestStatusPurgePagesOrphansPolicyCLIAndOnce(t *testing.T) {
 	b := newSettingsBridge(t)
-	b.Policy = parseChatPolicy(purgeChat)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(purgeChat))
 	b.RESTAllowedHosts = "127.0.0.1"
 	server := httptest.NewServer(b.newRESTMux(8080, purgeToken))
 	t.Cleanup(server.Close)

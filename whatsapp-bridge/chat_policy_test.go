@@ -70,7 +70,7 @@ func TestRejectByChatPolicy(t *testing.T) {
 func TestRESTSendRejectedByChatPolicy(t *testing.T) {
 	ms := newTestMessageStore(t)
 	b := testBridge(t, nil, ms, testLogger())
-	b.Policy = parseChatPolicy("5511999999999")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("5511999999999"))
 	b.MediaRoots = []string{t.TempDir()}
 	mux := b.newRESTMux(8080, "test-token-0123456789")
 

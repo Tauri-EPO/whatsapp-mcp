@@ -1,8 +1,12 @@
 """purge_media: request shape sent to the bridge, dry-run default, allow-list, error mapping."""
 
+import pytest
+
 import main
 import whatsapp
 from chat_policy import ChatPolicy
+
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
 
 CHAT = "5511888888888@s.whatsapp.net"
 OTHER = "120363000000000001@g.us"

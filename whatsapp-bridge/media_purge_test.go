@@ -206,7 +206,7 @@ func TestMediaPurge_RejectsBadRequests(t *testing.T) {
 
 func TestMediaPurge_AllowList(t *testing.T) {
 	b, files := purgeFixture(t)
-	b.Policy = parseChatPolicy(purgeChat)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(purgeChat))
 
 	// Criteria over all chats silently skips denied ones.
 	_, resp := purgeCall(t, b, `{"dry_run": false, "older_than_days": 30}`)
@@ -469,7 +469,7 @@ func TestMediaPurge_CriteriaCountsUnreachableRows(t *testing.T) {
 // them match.
 func TestMediaPurge_CriteriaRespectsAllowListInRemaining(t *testing.T) {
 	b := criteriaFixture(t)
-	b.Policy = parseChatPolicy(purgeChat)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(purgeChat))
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	seedPurgeRows(t, b, purgeChat, "OK", 520, base, true)
 	seedPurgeRows(t, b, purgeGroup, "NO", 600, base, true)
@@ -520,7 +520,7 @@ func TestMediaPurge_CriteriaFailedRemovalIsNotAnEndlessLoop(t *testing.T) {
 func TestMediaPurge_CriteriaDeniedRowsDoNotUseTheScanBudget(t *testing.T) {
 	b := criteriaFixture(t)
 	b.PurgeScanLimit = 50
-	b.Policy = parseChatPolicy(purgeChat)
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(purgeChat))
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	seedPurgeRows(t, b, purgeGroup, "NO", 200, base, true)
 	seedPurgeRows(t, b, purgeChat, "OK", 5, base.Add(time.Hour), true)

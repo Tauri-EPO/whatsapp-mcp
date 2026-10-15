@@ -12,7 +12,10 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from chat_policy import ChatPolicy
 
 INGEST_CHATS_ENV = "TRANSCRIBE_ON_INGEST_CHATS"
 CAP_ENV = "TRANSCRIBE_MONTHLY_MAX_MINUTES"
@@ -153,21 +156,62 @@ def capture_environment() -> None:
         definition.parse_env(_startup_env.get(definition.env))
 
 
+def _effective_chat_setting(raw_setting, deploy):
+    from dataclasses import replace
+
+    from chat_policy import ENV_VAR, ChatPolicy, intersect_policies, policy_entries
+
+    policy = deploy
+    if raw_setting["source"] == "runtime":
+        runtime = ChatPolicy.from_entries(raw_setting["value"])
+        policy = intersect_policies(ChatPolicy(runtime.exact, runtime.servers, True), deploy)
+        origin = "runtime chats.allowed" + (f" within {ENV_VAR} (deploy)" if deploy.restricted else "")
+        policy = replace(policy, origin=origin)
+    return {"value": policy_entries(policy), "source": raw_setting["source"]}, policy
+
+
+class RuntimeSnapshot(dict[str, Any]):
+    """One observation, with immutable chat policies cached by captured deploy."""
+
+    def __init__(self, values: dict[str, Any], deploy: ChatPolicy, raw_chats: dict[str, Any]):
+        super().__init__(values)
+        self._raw_chats = raw_chats
+        self._views: dict[ChatPolicy, RuntimeSnapshot] = {}
+        setting, self.chat_policy = _effective_chat_setting(raw_chats, deploy)
+        self["settings"] = {key: dict(value) for key, value in values["settings"].items()}
+        self["settings"]["chats.allowed"] = setting
+        self._views[deploy] = self
+
+    def for_deploy(self, deploy: ChatPolicy | None) -> RuntimeSnapshot:
+        if deploy is None:
+            return self
+        if deploy not in self._views:
+            self._views[deploy] = RuntimeSnapshot(dict(self), deploy, self._raw_chats)
+        return self._views[deploy]
+
+
 def snapshot(
-    env: Mapping[str, str] | None = None, *, require_store: bool = False, timeout_s: float | None = None
-) -> dict[str, Any]:
+    env: Mapping[str, str] | None = None,
+    *,
+    require_store: bool = False,
+    timeout_s: float | None = None,
+    deploy_policy: ChatPolicy | None = None,
+) -> RuntimeSnapshot:
     operation = _operation.get() if env is None else None
     if operation and (not require_store or operation["strict"]):
-        return operation["snapshot"]
+        return operation["snapshot"].for_deploy(deploy_policy)
     result, verified = _read_snapshot(env, require_store=require_store, timeout_s=timeout_s)
     if operation is not None:
         operation.update(snapshot=result, strict=verified)
-    return result
+    return result.for_deploy(deploy_policy)
 
 
 def _read_snapshot(
-    env: Mapping[str, str] | None = None, *, require_store: bool = False, timeout_s: float | None = None
-) -> tuple[dict[str, Any], bool]:
+    env: Mapping[str, str] | None = None,
+    *,
+    require_store: bool = False,
+    timeout_s: float | None = None,
+) -> tuple[RuntimeSnapshot, bool]:
     """One SQLite snapshot per observation: both tool lists change together.
 
     Null rows are tombstones, preserving max(version) after the last clear.
@@ -233,13 +277,10 @@ def _known_tools() -> set[str]:
 
 
 def _apply_floor(settings, defaults, version, closed_allow):
-    from chat_policy import ChatPolicy, intersect_policies, policy_entries
+    from chat_policy import ChatPolicy
 
-    chats = settings["chats.allowed"]
-    if chats["source"] == "runtime":
-        runtime = ChatPolicy.from_entries(chats["value"])
-        deploy = ChatPolicy.from_entries(defaults["chats.allowed"]["value"])
-        chats["value"] = policy_entries(intersect_policies(ChatPolicy(runtime.exact, runtime.servers, True), deploy))
+    deploy = ChatPolicy.from_entries(defaults["chats.allowed"]["value"])
+    raw_chats = dict(settings["chats.allowed"])
     cap_key, scope_key = "transcription.monthly_max_minutes", "transcription.cap_scope"
     ceiling = defaults[cap_key]["value"]
     cap = settings[cap_key]["value"]
@@ -273,7 +314,11 @@ def _apply_floor(settings, defaults, version, closed_allow):
     allow_source = "WHATSAPP_ALLOW_TOOLS (deploy)"
     if settings["tools.allow"]["source"] == "runtime":
         allow_source = "runtime tools.allow within WHATSAPP_ALLOW_TOOLS (deploy)"
-    return {"version": version, "settings": settings, "deny_origins": origins, "allow_source": allow_source}
+    return RuntimeSnapshot(
+        {"version": version, "settings": settings, "deny_origins": origins, "allow_source": allow_source},
+        deploy,
+        raw_chats,
+    )
 
 
 def ingest_setting() -> dict[str, Any]:

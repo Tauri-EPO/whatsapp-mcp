@@ -34,7 +34,7 @@ func TestWebhookChatBoundary(t *testing.T) {
 				lidByPN: map[types.JID]types.JID{phonePN: phoneLID},
 				pnByLID: map[types.JID]types.JID{phoneLID: phonePN},
 			}), newTestMessageStore(t), logger)
-			b.Policy = parseChatPolicy(tc.policy)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.policy))
 			root, err := os.OpenRoot(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
@@ -103,7 +103,7 @@ func TestWebhookMultipleKnownLIDs(t *testing.T) {
 			srv, payloads := captureWebhook(t)
 			t.Setenv("WEBHOOK_URL", srv.URL)
 			b := testBridge(t, client, newTestMessageStore(t), installRecordingLogger(t))
-			b.Policy = parseChatPolicy(allowed.String())
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(allowed.String()))
 			b.handleMessage(buildTextMessage(chat, chat, types.EmptyJID, types.EmptyJID, false, "allowed identity"))
 			select {
 			case payload := <-payloads:
@@ -113,7 +113,7 @@ func TestWebhookMultipleKnownLIDs(t *testing.T) {
 			default:
 				t.Fatal("known non-selected LID withheld its webhook")
 			}
-			b.Policy = parseChatPolicy("5511888888888")
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy("5511888888888"))
 			b.handleMessage(buildTextMessage(chat, chat, types.EmptyJID, types.EmptyJID, false, "outside identity"))
 			select {
 			case <-payloads:
@@ -129,7 +129,7 @@ func TestWebhookAllowListAndFeedGates(t *testing.T) {
 		for _, entry := range []string{chat.String(), mgGroup} {
 			for flags := 0; flags < 32; flags++ {
 				b := &Bridge{ctx: context.Background(), Webhook: newWebhookSender("", true)}
-				b.Policy = parseChatPolicy(entry)
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(entry))
 				b.Webhook.enabled, b.ForwardSelf = flags&1 != 0, flags&2 != 0
 				b.ForwardStatus, b.ForwardChannels, b.ForwardBroadcasts = flags&4 != 0, flags&8 != 0, flags&16 != 0
 				feedAllowed := chat == phonePN

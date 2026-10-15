@@ -53,7 +53,7 @@ func TestArchivePatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			calls := 0
-			deps := archiveDeps{store: store, connected: func() bool { return true },
+			deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true },
 				resolve: func(_ context.Context, raw string) (types.JID, error) {
 					if raw == archiveTestChat {
 						raw = "100000000000001@lid"
@@ -128,7 +128,7 @@ func TestArchiveFailures(t *testing.T) {
 				}
 			}
 			calls := 0
-			deps := archiveDeps{store: store, connected: func() bool { return tc.connected },
+			deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return tc.connected },
 				resolve: func(_ context.Context, raw string) (types.JID, error) {
 					if tc.resolveErr {
 						return types.EmptyJID, errors.New("lookup failed")
@@ -164,7 +164,7 @@ func TestArchiveMuxGuards(t *testing.T) {
 			b := testBridge(t, nil, newTestMessageStore(t), testLogger())
 			b.ReadOnly = readOnlyPolicy{enabled: tc.readOnly}
 			b.Tools = mustToolPolicy(t, tc.allow, tc.deny)
-			b.Policy = parseChatPolicy(tc.chats)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.chats))
 			b.Connected = func() bool { t.Fatal("connected called past guard"); return false }
 			req := httptest.NewRequest(tc.method, "http://127.0.0.1:8080/api/chat/archive", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","archived":true}`))
 			if tc.token {
@@ -195,7 +195,7 @@ func TestArchiveUnknownGroupAnchorRejected(t *testing.T) {
 				t.Fatal(err)
 			}
 			calls := 0
-			deps := archiveDeps{store: store, connected: func() bool { return true },
+			deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true },
 				resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
 				send:    func(context.Context, appstate.PatchInfo) error { calls++; return nil },
 			}
@@ -263,7 +263,7 @@ func TestArchiveTwinsAndPointerRows(t *testing.T) {
 func TestArchiveOutcomeAndTargetRefusals(t *testing.T) {
 	for _, chat := range []string{"status@broadcast", "120363000000000001@broadcast", "120363000000000001@newsletter"} {
 		rec := httptest.NewRecorder()
-		handleArchiveChat(archiveDeps{})(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+chat+`","archived":true}`)))
+		handleArchiveChat(archiveDeps{policy: chatPolicy{}})(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+chat+`","archived":true}`)))
 		if rec.Code != 400 {
 			t.Fatalf("status=%d", rec.Code)
 		}
@@ -279,7 +279,7 @@ func TestArchiveOutcomeAndTargetRefusals(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	deps := archiveDeps{store: store, connected: func() bool { return true }, resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
+	deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true }, resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
 		send: func(context.Context, appstate.PatchInfo) error {
 			return errors.New("failed to fetch app state after sending update: deadline exceeded")
 		},
@@ -308,7 +308,7 @@ func TestArchiveOutcomeAndTargetRefusals(t *testing.T) {
 func TestArchiveResolutionDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	deps := archiveDeps{connected: func() bool { return true }, resolve: func(ctx context.Context, _ string) (types.JID, error) {
+	deps := archiveDeps{policy: chatPolicy{}, connected: func() bool { return true }, resolve: func(ctx context.Context, _ string) (types.JID, error) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("resolution has no deadline")
 		}
@@ -337,7 +337,7 @@ func TestArchiveParticipantCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	deps := archiveDeps{store: store, connected: func() bool { return true },
+	deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true },
 		resolve: func(_ context.Context, raw string) (types.JID, error) {
 			if raw == archiveTestChat {
 				cancel()
@@ -368,7 +368,7 @@ func TestArchiveDefiniteRejections(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			deps := archiveDeps{store: store, connected: func() bool { return true },
+			deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true },
 				resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
 				send:    func(context.Context, appstate.PatchInfo) error { return failure },
 			}
@@ -393,7 +393,7 @@ func TestArchiveAcceptedPatchDisconnectedConfirmation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	deps := archiveDeps{store: store, connected: func() bool { return true },
+	deps := archiveDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true },
 		resolve: func(_ context.Context, raw string) (types.JID, error) { return types.ParseJID(raw) },
 		send: func(context.Context, appstate.PatchInfo) error {
 			return fmt.Errorf("failed to fetch app state after sending update: %w", whatsmeow.ErrNotConnected)

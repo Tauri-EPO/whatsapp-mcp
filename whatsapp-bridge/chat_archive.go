@@ -34,7 +34,7 @@ func (e archiveAnchorError) Error() string { return string(e) }
 
 type archiveDeps struct {
 	store     *MessageStore
-	policy    chatPolicy
+	policy    chatPolicyResolver
 	connected func() bool
 	resolve   func(context.Context, string) (types.JID, error)
 	twin      func(context.Context, types.JID) (types.JID, error)
@@ -87,8 +87,7 @@ func (store *MessageStore) archiveAnchor(ctx context.Context, chats []string) (*
 
 func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		deps := deps
-		deps.policy = deps.policy.effective(r.Context())
+		policy := deps.policy.effective(r.Context())
 		ctx, cancel := requestContext(r, archiveDeadline)
 		defer cancel()
 		var req struct {
@@ -104,7 +103,7 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Valid chat_jid and archived boolean are required")
 			return
 		}
-		chat, ok := authorizeChat(w, deps.policy, req.ChatJID, false)
+		chat, ok := authorizeChat(w, policy, req.ChatJID, false)
 		if !ok {
 			return
 		}
@@ -128,7 +127,7 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 		}
 		chats := []string{req.ChatJID}
 		addAlias := func(jid types.JID) {
-			if !jid.IsEmpty() && jid.String() != req.ChatJID && deps.policy.Allows(jid.String()) {
+			if !jid.IsEmpty() && jid.String() != req.ChatJID && policy.Allows(jid.String()) {
 				chats = append(chats, jid.String())
 			}
 		}

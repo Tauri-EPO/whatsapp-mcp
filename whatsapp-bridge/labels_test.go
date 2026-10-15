@@ -458,7 +458,7 @@ func TestLabelAssociationPreservesSourceNamespaceAndRemoval(t *testing.T) {
 	lid, _ := types.ParseJID("100000000000001@lid")
 	store := newTestMessageStore(t)
 	b := testBridge(t, newTestClient(&mockLIDStore{pnByLID: map[types.JID]types.JID{lid: pn}, lidByPN: map[types.JID]types.JID{pn: lid}}), store, testLogger())
-	b.Policy = parseChatPolicy(lid.String())
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy(lid.String()))
 	ts := time.Now()
 	if err := store.storeLabel(labelEvent("1", "Alice", ts, false)); err != nil {
 		t.Fatal(err)
@@ -646,7 +646,7 @@ func TestLabelProductionWiring(t *testing.T) {
 
 func TestLabelValidationAndCancellation(t *testing.T) {
 	store := newTestMessageStore(t)
-	deps := labelDeps{store: store, connected: func() bool { return true },
+	deps := labelDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true },
 		resolve: func(context.Context, string) (types.JID, error) {
 			t.Fatal("lookup after refusal")
 			return types.EmptyJID, nil
@@ -719,7 +719,7 @@ func TestLabelChatPatchAndFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		calls := 0
-		deps := labelDeps{store: store, connected: func() bool { return true }, resolve: func(context.Context, string) (types.JID, error) { return types.ParseJID("100000000000001@lid") }, send: func(ctx context.Context, p appstate.PatchInfo) error {
+		deps := labelDeps{policy: chatPolicy{}, store: store, connected: func() bool { return true }, resolve: func(context.Context, string) (types.JID, error) { return types.ParseJID("100000000000001@lid") }, send: func(ctx context.Context, p appstate.PatchInfo) error {
 			calls++
 			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 20*time.Second {
 				t.Error("unbounded request")
@@ -781,7 +781,7 @@ func TestLabelMuxGuardsAndCachedRead(t *testing.T) {
 			b := testBridge(t, nil, newTestMessageStore(t), testLogger())
 			b.ReadOnly = readOnlyPolicy{enabled: tc.readonly}
 			b.Tools = mustToolPolicy(t, tc.allow, tc.deny)
-			b.Policy = parseChatPolicy(tc.chats)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.chats))
 			b.Connected = func() bool { t.Fatal("past guard"); return false }
 			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/chat/label", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","label_id":"1","labeled":true}`))
 			if tc.token {
@@ -807,7 +807,7 @@ func TestLabelMuxGuardsAndCachedRead(t *testing.T) {
 			t.Fatal(rec.Code, rec.Body.String())
 		}
 	}
-	b.Policy = parseChatPolicy("5511888888888")
+	b.Policy = b.runtimeChatPolicy(parseChatPolicy("5511888888888"))
 	rec := httptest.NewRecorder()
 	handleLabels(store, b.Policy, nil)(rec, httptest.NewRequest(http.MethodGet, "/api/labels?chat_jid="+archiveTestChat, nil))
 	if rec.Code != 403 {

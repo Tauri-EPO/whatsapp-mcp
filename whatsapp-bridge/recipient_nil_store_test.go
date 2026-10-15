@@ -71,7 +71,7 @@ func TestRESTRegistrationWithoutLIDBackend(t *testing.T) {
 			b, _, sent := sendRecipientBridge(t, &mockLIDStore{}, ask)
 			b.Client.Store.LIDs = nil
 			b.Store = seedEditStore(t)
-			b.Policy = parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber))
 			payload := map[string]string{"recipient": dialledNumber, "message": "hello"}
 			if route == "/api/forward" {
 				payload = map[string]string{"chat_jid": efChat, "message_id": "THEIRS", "to_chat_jid": dialledNumber}

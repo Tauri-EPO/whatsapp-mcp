@@ -315,7 +315,7 @@ func TestSendRefusesANumberThatIsNotOnWhatsApp(t *testing.T) {
 	// Listed or not, a number WhatsApp says has no account gets the same answer.
 	for _, allowed := range []string{"", dialledNumber} {
 		b, mux, sentTo := sendRecipientBridge(t, &mockLIDStore{}, ask)
-		b.Policy = parseChatPolicy(allowed)
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy(allowed))
 		rec := postSend(mux, dialledNumber)
 		body := decodeAPIError(t, rec)
 		if rec.Code != http.StatusNotFound || body.Error.Code != "not_found" {
@@ -346,7 +346,7 @@ func TestSendWhenTheRegisteredNumberCannotBeChecked(t *testing.T) {
 		// would go to, so it refuses, even when both spellings are listed.
 		t.Run(name+", allow-list set: refused", func(t *testing.T) {
 			b, mux, sentTo := sendRecipientBridge(t, &mockLIDStore{}, newAsk())
-			b.Policy = parseChatPolicy(dialledNumber + "," + registeredNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(dialledNumber + "," + registeredNumber))
 			rec := postSend(mux, dialledNumber)
 			body := decodeAPIError(t, rec)
 			if rec.Code != http.StatusBadGateway || body.Error.Code != "bridge_unavailable" {
@@ -436,7 +436,7 @@ func TestSendAllowListCoversTheRegisteredNumber(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ask := registeredWithoutNinthDigit()
 			b, mux, sentTo := sendRecipientBridge(t, &mockLIDStore{}, ask)
-			b.Policy = parseChatPolicy(tc.allowed)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.allowed))
 
 			rec := postSend(mux, dialledNumber)
 			if rec.Code != tc.wantStatus {

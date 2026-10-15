@@ -85,7 +85,7 @@ type Bridge struct {
 	StoreRoot *os.Root
 
 	// Policy restricts which chats outbound endpoints may act on (WHATSAPP_ALLOWED_CHATS).
-	Policy chatPolicy
+	Policy chatPolicyHandle
 	// ReadOnly refuses every endpoint with a side effect (WHATSAPP_READ_ONLY,
 	// read_only.go). Zero value = disabled; main() parses it and refuses to
 	// start on a value it cannot read.
@@ -313,6 +313,7 @@ type Bridge struct {
 // storeRoot is the open store directory (main() owns opening and closing it).
 func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger, bridgeToken string, storeRoot *os.Root, switches bridgeSwitches) *Bridge {
 	client.EmitAppStateEventsOnFullSync = true
+	deploy := loadChatPolicy()
 	b := &Bridge{
 		Client:              client,
 		Disconnect:          client.Disconnect,
@@ -321,7 +322,6 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		Store:               store,
 		Log:                 logger,
 		StoreRoot:           storeRoot,
-		Policy:              loadChatPolicy(),
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
 		ForwardSelf:         switches.ForwardSelf,
 		ForwardStatus:       switches.ForwardStatus,
@@ -357,8 +357,8 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 	b.LabelResync = func(ctx context.Context) error {
 		return b.currentClient().FetchAppState(ctx, appstate.WAPatchRegular, true, false)
 	}
-	b.Policy.warnInvalidEntries(logger)
-	b.Policy = b.runtimeChatPolicy(b.Policy)
+	deploy.warnInvalidEntries(logger)
+	b.Policy = b.runtimeChatPolicy(deploy)
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	if b.Webhook != nil {
 		b.Webhook.failures = &b.metrics.webhookFailures

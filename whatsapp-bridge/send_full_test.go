@@ -36,7 +36,7 @@ func TestFullRESTSendPersistsWireContentAndUpload(t *testing.T) {
 			ask := registeredWithoutNinthDigit()
 			b, _, _ := sendRecipientBridge(t, lids, ask)
 			b.Send = b.sendBackend()
-			b.Policy = parseChatPolicy(dialledNumber + "," + registeredNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(dialledNumber + "," + registeredNumber))
 			ts := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 			if err := b.Store.StoreChat(registeredJID.String(), "Existing contact", ts.Add(-time.Hour)); err != nil {
 				t.Fatal(err)
@@ -281,9 +281,9 @@ func TestFullRESTForwardResolvesBeforeMediaAndPersists(t *testing.T) {
 			b, _, _ := sendRecipientBridge(t, &mockLIDStore{lidByPN: map[types.JID]types.JID{registeredJID: registeredLID}}, ask)
 			b.Store = seedEditStore(t)
 			b.Send = b.sendBackend()
-			b.Policy = parseChatPolicy(efChat + "," + dialledNumber)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + dialledNumber))
 			if !tc.denied {
-				b.Policy = parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber)
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(efChat + "," + dialledNumber + "," + registeredNumber))
 			}
 			mediaPath := filepath.Join(t.TempDir(), "sample.jpg")
 			if err := os.WriteFile(mediaPath, []byte("synthetic image"), 0o600); err != nil {

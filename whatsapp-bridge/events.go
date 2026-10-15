@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strings"
 	"sync"
@@ -217,7 +216,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// A group sender we have no roster row for is a member we know about
 	// (group_events.go); no-op for DMs and for members already recorded.
 	policy := b.Policy.once() // The roster note and the webhook gate share one read.
-	b.noteGroupSender(policy, chatJID, resolvedSender, msgTimestamp)
+	if b.Store != nil && isGroupJID(chatJID) {
+		b.noteGroupSender(policy.effective(b.ctx), chatJID, resolvedSender, msgTimestamp)
+	}
 
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
 	b.handleMessageRevoke(msg.Message, chatJID, msg.Info.Timestamp.Unix())
@@ -507,36 +508,6 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			b.Log.Debugf("[%s] %s %s: %s", timestamp, direction, sender, content)
 		}
 	}
-}
-
-// GetChatName determines the appropriate name for a chat based on JID and other info
-func lookupLocalContactName(client *whatsmeow.Client, messageStore *MessageStore, chatJID string, logger waLog.Logger) string {
-	if client == nil || client.Store == nil || client.Store.ID == nil || messageStore == nil || messageStore.waDB == nil {
-		return ""
-	}
-
-	var localName string
-	err := messageStore.waDB.QueryRow(
-		`SELECT COALESCE(
-			NULLIF(full_name, ''),
-			NULLIF(push_name, ''),
-			NULLIF(first_name, ''),
-			NULLIF(business_name, ''),
-			''
-		) FROM whatsmeow_contacts WHERE our_jid = ? AND their_jid = ?`,
-		client.Store.ID.String(),
-		chatJID,
-	).Scan(&localName)
-	if err == nil {
-		if localName != "" {
-			logger.Infof("Using local contact name for %s: %s", chatJID, localName)
-		}
-		return localName
-	}
-	if err != sql.ErrNoRows && !strings.Contains(err.Error(), "no such table: whatsmeow_contacts") {
-		logger.Warnf("Failed to query local contact name for %s: %v", chatJID, err)
-	}
-	return ""
 }
 
 // callChatJID resolves the chat JID that a call belongs to. For group calls

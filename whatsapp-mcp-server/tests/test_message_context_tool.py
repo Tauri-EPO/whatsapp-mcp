@@ -1,7 +1,11 @@
 from datetime import datetime
 
+import pytest
+
 import main
 from whatsapp import Message, MessageContext
+
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
 
 
 def test_get_message_context_serializes_dataclass(monkeypatch):

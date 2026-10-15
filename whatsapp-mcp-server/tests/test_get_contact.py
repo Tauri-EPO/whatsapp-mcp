@@ -1,6 +1,10 @@
+import pytest
+
 import main as mcp_main
 import whatsapp
 from tests.conftest import BOB_LID, BOB_PN
+
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
 
 
 def test_get_contact_normalizes_phone_number(monkeypatch):

@@ -134,6 +134,7 @@ whatsapp-mcp/
 │   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
 │   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text
 │   ├── sender_namespace.go     # messages.sender_server: which namespace a stored sender is in + its backfill
+│   ├── contact_names.go        # batched local-only contact names and phone/LID alternates
 │   ├── chat_names.go           # chat name resolution; history sync never calls the network for one
 │   ├── logging.go              # bridgeLog + WHATSAPP_LOG_LEVEL; text writer: marked multiline stacks, escaped controls and 8 KiB lines
 │   ├── sdk_log.go              # permanent SDK logger adapter redacts network-error URLs

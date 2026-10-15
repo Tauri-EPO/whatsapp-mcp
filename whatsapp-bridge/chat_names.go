@@ -201,15 +201,15 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 				}
 				return err
 			}
-			if strings.TrimSpace(existing) != "" && !isPlaceholderName(strings.TrimSpace(existing), target, self) {
+			if strings.TrimSpace(existing) != "" && !isChatFallbackName(strings.TrimSpace(existing), target, self) {
 				return nil
 			}
 			b.Store.names.invalidate(chatJID)
 			name := GetChatName(client, b.Store, target, chatJID, nil, "", false, b.Log)
-			if strings.TrimSpace(name) == "" || isPlaceholderName(name, target, self) {
+			if strings.TrimSpace(name) == "" || isChatFallbackName(name, target, self) {
 				name = strings.TrimSpace(eventName)
 			}
-			if name == "" || isPlaceholderName(name, target, self) {
+			if name == "" || isChatFallbackName(name, target, self) {
 				return nil
 			}
 			return b.Store.RenamePlaceholderChat(chatJID, existing, name)
@@ -278,12 +278,29 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 		self = ownUsers(client)
 	}
 
-	// Already resolved in a previous run.
+	var contact *localContactIdentity
+	lookupContact := func(archived string, forceName bool) localContactIdentity {
+		account := ""
+		if client != nil && client.Store != nil && client.Store.ID != nil {
+			account = client.Store.ID.String()
+		}
+		return store.resolveLocalContactNames(ctx, []localContactIdentity{{JID: chatJID, Name: archived, forceName: forceName}}, account, client, logger)[chatJID]
+	}
+	// Main's historical chat fallbacks also heal groups and misplaced self
+	// labels. The shared contact-placeholder rule is strictly direct-only.
 	if store != nil && store.db != nil {
 		var existing string
 		if err := store.db.QueryRowContext(ctx, "SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existing); err == nil {
 			existing = strings.TrimSpace(existing)
-			if existing != "" && !isPlaceholderName(existing, jid, self) {
+			direct := jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer
+			if existing != "" && direct && localPhoneDigits(existing) != "" {
+				value := lookupContact(existing, isChatFallbackName(existing, jid, self))
+				contact = &value
+				if !value.needsName || value.resolved {
+					store.names.put(chatJID, value.Name)
+					return value.Name
+				}
+			} else if existing != "" && !isChatFallbackName(existing, jid, self) {
 				store.names.put(chatJID, existing)
 				return existing
 			}
@@ -309,13 +326,12 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 			return placeholderGroupName(jid)
 		}
 	} else {
-		if client != nil && client.Store != nil && client.Store.Contacts != nil {
-			if contact, err := client.Store.Contacts.GetContact(context.Background(), jid); err == nil && strings.TrimSpace(contact.FullName) != "" {
-				name = strings.TrimSpace(contact.FullName)
-			}
+		if contact == nil {
+			value := lookupContact("", true)
+			contact = &value
 		}
-		if name == "" {
-			name = lookupLocalContactName(client, store, chatJID, logger)
+		if contact.resolved {
+			name = contact.Name
 		}
 		if name == "" {
 			// Sender/user fallbacks are placeholders too: do not cache them.
@@ -336,12 +352,11 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 	return name
 }
 
-// isPlaceholderName reports whether a stored name is one of our fallbacks
-// (group placeholder or the bare user part), i.e. worth trying to improve. A
-// chat named after our own number or LID is one too, unless it is a group or
-// the chat with ourselves, the only one legitimately called that (issue #448).
-func isPlaceholderName(name string, jid types.JID, self selfUsers) bool {
-	if name == placeholderGroupName(jid) || name == jid.User {
+// Chat history has additional fallbacks that main has always healed (#448).
+// They are not contact placeholders: groups and misplaced self labels keep
+// this rule, while contact lookup uses the single direct phone/LID predicate.
+func isChatFallbackName(name string, jid types.JID, self selfUsers) bool {
+	if isPlaceholderName(name, jid) || name == placeholderGroupName(jid) || name == jid.User {
 		return true
 	}
 	return jid.Server != types.GroupServer && self.has(name) && !self.has(jid.User)

@@ -682,3 +682,86 @@ def test_unverified_missing_store_snapshot_cannot_authorize_chats(runtime_archiv
         assert runtime_settings.snapshot()["settings"]["chats.allowed"]["source"] == "default"
         with pytest.raises(ToolError, match="Runtime chat policy unavailable"):
             policy.allows(BOB)
+
+
+def test_permission_store_is_not_implicitly_created(tmp_path, monkeypatch, request):
+    assert "auth_runtime_store" not in request.fixturenames
+    missing = tmp_path / "missing-messages.db"
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(missing))
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.ChatPolicy.unrestricted())
+    with pytest.raises(ToolError, match="Runtime chat policy unavailable"):
+        policy.allows(ALICE)
+    assert not missing.exists()
+
+
+def test_snapshot_carries_the_single_policy_for_reporting_and_enforcement(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, FAMILY]})
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", "*@g.us")
+    calls = 0
+    original = chat_policy.intersect_policies
+
+    def counted(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(chat_policy, "intersect_policies", counted)
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy())
+    with chat_policy.policy_operation():
+        report = runtime_settings.snapshot(require_store=True)
+        assert policy.effective() is report.chat_policy
+        assert report["settings"]["chats.allowed"]["value"] == [FAMILY]
+        assert policy.allows(FAMILY) and not policy.allows(ALICE)
+        assert calls == 1
+
+
+def test_captured_deploy_source_survives_environment_changes(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, FAMILY]})
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", "*@g.us")
+    runtime_settings.capture_environment()
+    policy = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy(runtime_settings._startup_env))
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", ALICE)
+    with chat_policy.policy_operation():
+        report = runtime_settings.snapshot(require_store=True)
+        assert report.chat_policy is policy.effective()
+        assert policy.allows(FAMILY) and not policy.allows(ALICE)
+
+
+def test_operation_keeps_distinct_deploy_policies_separate(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, BOB]})
+    a = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": ALICE}))
+    b = chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": BOB}))
+    reads = 0
+    original = whatsapp._connect_messages_db
+
+    def counted():
+        nonlocal reads
+        reads += 1
+        return original()
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", counted)
+    with chat_policy.policy_operation():
+        a_value = a.effective()
+        assert a_value.allows(ALICE) and not a_value.allows(BOB)
+        b_value = b.effective()
+        assert b_value.allows(BOB) and not b_value.allows(ALICE)
+        assert a.effective() is a_value and b.effective() is b_value
+        assert reads == 1
+
+
+def test_snapshot_uses_the_captured_source_without_reading_global_policy(runtime_archive, monkeypatch):
+    patch(runtime_archive, {"chats.allowed": [ALICE, FAMILY]})
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", "*@g.us")
+    runtime_settings.capture_environment()
+    deploy = chat_policy.load_chat_policy(runtime_settings._startup_env)
+    policy = chat_policy.RuntimeChatPolicy(deploy)
+    monkeypatch.setattr(
+        whatsapp,
+        "CHAT_POLICY",
+        chat_policy.RuntimeChatPolicy(chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": ALICE})),
+    )
+    monkeypatch.setenv("WHATSAPP_ALLOWED_CHATS", ALICE)
+    with chat_policy.policy_operation():
+        report = runtime_settings.snapshot(require_store=True)
+        assert report.chat_policy is policy.effective()
+        assert policy.allows(FAMILY) and not policy.allows(ALICE)

@@ -78,7 +78,7 @@ func TestRuntimeChatsHTTPFloorEmptyClearRestartAndPrivateAudit(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(snapshot.Settings["chats.allowed"], saved.Settings["chats.allowed"]) {
 				t.Fatal("restart lost override")
 			}
-			if len(tc.want) == 0 && (reopened.Policy.Allows(alice) || reopened.Policy.Allows(bob)) {
+			if len(tc.want) == 0 && (reopened.Policy.once().effective(t.Context()).Allows(alice) || reopened.Policy.once().effective(t.Context()).Allows(bob)) {
 				t.Fatal("empty intersection widened policy")
 			}
 			if status, cleared := settingsRequest(t, server, "PATCH", `{"chats.allowed":null}`); status != 200 || !reflect.DeepEqual(cleared.Settings["chats.allowed"], initial.Settings["chats.allowed"]) {
@@ -216,14 +216,14 @@ func TestRuntimeChatsCorruptRowAndReadFailureRefuse(t *testing.T) {
 		if _, err := b.Store.db.Exec("INSERT OR REPLACE INTO runtime_settings VALUES ('chats.allowed',?,'2026-10-09',1)", raw); err != nil {
 			t.Fatal(err)
 		}
-		if b.Policy.Allows(phonePN.String()) {
+		if b.Policy.once().effective(t.Context()).Allows(phonePN.String()) {
 			t.Fatal("corrupt override allowed chat")
 		}
 	}
 	if _, err := b.Store.db.Exec("DROP TABLE runtime_settings"); err != nil {
 		t.Fatal(err)
 	}
-	if b.Policy.Allows(phonePN.String()) {
+	if b.Policy.once().effective(t.Context()).Allows(phonePN.String()) {
 		t.Fatal("missing table lifted restriction")
 	}
 }

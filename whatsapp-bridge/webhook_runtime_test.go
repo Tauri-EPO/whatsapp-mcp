@@ -196,7 +196,7 @@ func TestRuntimeWebhookReceiverFiltersAndDeploymentFloor(t *testing.T) {
 						webhookBarrier(t, b, receipts)
 					}
 					// Receiver opt-in cannot widen the legacy sender's deployment filter.
-					if deploy != "true" && !filter.fromMe && b.webhookChatAllowed(b.Policy, filter.chat, filter.fromMe) {
+					if deploy != "true" && !filter.fromMe && b.webhookChatAllowed(b.Policy.once(), filter.chat, filter.fromMe) {
 						t.Fatal("legacy feed filter widened")
 					}
 				})
@@ -264,7 +264,7 @@ func TestRuntimeWebhookOptInStillHonorsChatAndStatusPolicy(t *testing.T) {
 		}
 		b.handleMessage(buildTextMessage(types.StatusBroadcastJID, phonePN, types.EmptyJID, types.EmptyJID, false, "deploy-only status"))
 		webhookBarrier(t, b, receipts)
-		b.Policy = parseChatPolicy(mgGroup)
+		b.Policy = b.runtimeChatPolicy(parseChatPolicy(mgGroup))
 		b.handleMessage(buildTextMessage(chat, phonePN, types.EmptyJID, types.EmptyJID, false, "denied chat"))
 		webhookBarrier(t, b, receipts)
 	}
@@ -733,7 +733,7 @@ func TestRuntimeWebhookSharedForwardFilters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
-			b.Policy = parseChatPolicy(tc.policy)
+			b.Policy = b.runtimeChatPolicy(parseChatPolicy(tc.policy))
 			b.ForwardSelf = tc.self
 			b.ForwardStatus, b.ForwardChannels, b.ForwardBroadcasts = tc.feed, tc.feed, tc.feed
 			configureWebhookHTTP(t, server, destination)
@@ -1190,7 +1190,7 @@ func TestRuntimeWebhookReviewSharedPolicyEvaluatedOnce(t *testing.T) {
 				b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
 				lids := &markerBudgetLIDs{mockLIDStore: mockLIDStore{pnByLID: map[types.JID]types.JID{phoneLID: phonePN}}}
 				b.Client = newTestClient(lids)
-				b.Policy = parseChatPolicy(phoneLID.String())
+				b.Policy = b.runtimeChatPolicy(parseChatPolicy(phoneLID.String()))
 				if mode != "unconfigured" {
 					configureWebhookHTTP(t, server, destination)
 				}
@@ -1653,7 +1653,7 @@ func TestRuntimeWebhookAdmissionBoundToGeneration(t *testing.T) {
 	b, server, destination, receipts, logger := runtimeWebhookFixture(t, nil)
 	channel := types.NewJID("fakechannelwithheld", types.NewsletterServer)
 	configureConnectionWebhook(t, server, destination, map[string]any{"forward_channels": true})
-	legacy, admitted := b.messageWebhookAllowed(b.Policy, channel, false)
+	legacy, admitted := b.messageWebhookAllowed(b.Policy.once(), channel, false)
 	configureConnectionWebhook(t, server, destination, map[string]any{"forward_channels": false})
 	dropped := b.RuntimeWebhook.dropped.Load()
 	b.queueRuntimeMessage(admitted, runtimeWebhookEvent{MessageID: "FAKE-ID", Chat: channel.String(), Text: "admitted by the replaced receiver"})

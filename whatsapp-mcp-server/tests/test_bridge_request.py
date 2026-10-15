@@ -11,6 +11,8 @@ import main
 import whatsapp
 from errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("auth_runtime_store")
+
 
 def test_bridge_requests_never_send_credentials_to_environment_proxy(monkeypatch):
     bridge_calls, proxy_calls = [], []

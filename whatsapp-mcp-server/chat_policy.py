@@ -22,8 +22,7 @@ import os
 import sqlite3
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from errors import ToolError
@@ -181,21 +180,13 @@ def intersect_policies(runtime: ChatPolicy, deploy: ChatPolicy) -> ChatPolicy:
     return ChatPolicy(frozenset(exact), runtime.servers & deploy.servers, True)
 
 
-_operation: ContextVar[dict[Any, ChatPolicy] | None] = ContextVar("chat_policy_operation", default=None)
-
-
 @contextmanager
 def policy_operation():
-    """One lazy immutable policy per tool invocation, including worker threads."""
+    """Share the runtime snapshot across tool admission and all consumers."""
     import runtime_settings
 
-    token = _operation.set({}) if _operation.get() is None else None
-    try:
-        with runtime_settings.settings_operation():
-            yield
-    finally:
-        if token is not None:
-            _operation.reset(token)
+    with runtime_settings.settings_operation():
+        yield
 
 
 class RuntimeChatPolicy:
@@ -207,22 +198,10 @@ class RuntimeChatPolicy:
     def effective(self) -> ChatPolicy:
         import runtime_settings
 
-        operation = _operation.get()
-        if operation is not None and self in operation:
-            return operation[self]
         try:
-            setting = runtime_settings.snapshot(require_store=True)["settings"]["chats.allowed"]
+            return runtime_settings.snapshot(require_store=True, deploy_policy=self.deploy).chat_policy
         except (OSError, ValueError, sqlite3.Error):
             raise ToolError("denied", "Runtime chat policy unavailable") from None
-        policy = self.deploy
-        if setting["source"] == "runtime":
-            entries = ChatPolicy.from_entries(setting["value"])
-            policy = intersect_policies(ChatPolicy(entries.exact, entries.servers, True), self.deploy)
-            origin = "runtime chats.allowed" + (f" within {ENV_VAR} (deploy)" if self.deploy.restricted else "")
-            policy = replace(policy, origin=origin)
-        if operation is not None:
-            operation[self] = policy
-        return policy
 
     def __getattr__(self, name: str) -> Any:
         if name == "warn_invalid_entries":

@@ -141,7 +141,7 @@ func (b *Bridge) recordGroupRoster(groupJID string, members []GroupMember, at ti
 	if info == nil {
 		// Subject updates fetched these participants before SetGroupTopic.
 		// That pre-update metadata must not replace the subsequent topic event.
-		if b.Store != nil && b.Policy.once().Allows(groupJID) {
+		if b.Store != nil && b.Policy.effective(b.ctx).Allows(groupJID) {
 			if _, err := b.storeGroupRoster(groupJID, members, at); err != nil {
 				b.Log.Warnf("Failed to cache the roster of %s: %v", groupJID, err)
 			}
@@ -156,7 +156,7 @@ func (b *Bridge) recordGroupRoster(groupJID string, members []GroupMember, at ti
 // storeFetchedGroupInfo applies a fresh policy after network I/O. Both scheduled
 // refreshes and live roster requests seed settings even without change events.
 func (b *Bridge) storeFetchedGroupInfo(group string, info *types.GroupInfo, at time.Time, resolved ...[]GroupMember) (int, error) {
-	if b.Store == nil || !b.Policy.once().Allows(group) {
+	if b.Store == nil || !b.Policy.effective(b.ctx).Allows(group) {
 		return 0, nil
 	}
 	if info == nil {
@@ -210,12 +210,12 @@ func (b *Bridge) applyGroupParticipantChanges(v *events.GroupInfo) {
 	b.applyGroupParticipantChangesWithPolicy(b.Policy.once(), v)
 }
 
-func (b *Bridge) applyGroupParticipantChangesWithPolicy(policy chatPolicy, v *events.GroupInfo) {
+func (b *Bridge) applyGroupParticipantChangesWithPolicy(policy chatPolicyResolver, v *events.GroupInfo) {
 	group := v.JID.String()
 	// A group the operator excluded gets no cached membership at all, on any
 	// feed: the allow-list is about which conversations this deployment may
 	// hold, not only which ones it may write to.
-	if b.Store == nil || !policy.Allows(group) {
+	if b.Store == nil || !policy.effective(b.ctx).Allows(group) {
 		return
 	}
 	// Stamped with the local clock, not v.Timestamp. last_seen means "we
@@ -354,7 +354,7 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 		return 0, false
 	}
 	attempted := 0
-	policy := b.Policy.effective() // One settings read for the pass, not one per group.
+	policy := b.Policy.once().effective(ctx) // One settings read for the pass, not one per group.
 	for _, jid := range stale {
 		if ctx.Err() != nil || (b.Connected != nil && !b.Connected()) {
 			return refreshed, true
@@ -469,8 +469,8 @@ func (b *Bridge) runGroupRosterSync() {
 
 // applyGroupSettings retains fields present in an event using the local
 // observation clock, shared with fetched snapshots; the last observation wins.
-func (b *Bridge) applyGroupSettings(policy chatPolicy, v *events.GroupInfo) {
-	if b.Store == nil || !policy.Allows(v.JID.String()) {
+func (b *Bridge) applyGroupSettings(policy chatPolicyResolver, v *events.GroupInfo) {
+	if b.Store == nil || !policy.effective(b.ctx).Allows(v.JID.String()) {
 		return
 	}
 	values := map[string]any{}
@@ -519,7 +519,7 @@ func (b *Bridge) requestGroupSettingsRefresh(jid types.JID) {
 					b.groupSettingsPendingMu.Lock()
 					delete(b.groupSettingsPending, group)
 					b.groupSettingsPendingMu.Unlock()
-					if (b.Connected == nil || b.Connected()) && b.Policy.once().Allows(group.String()) {
+					if (b.Connected == nil || b.Connected()) && b.Policy.effective(b.ctx).Allows(group.String()) {
 						if _, err := b.fetchGroupRoster(b.ctx, group.String(), group); err != nil {
 							b.Log.Warnf("Group settings refresh: %s: %v", group, err)
 						}

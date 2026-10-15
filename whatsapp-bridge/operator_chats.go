@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -20,102 +19,6 @@ type operatorChat struct {
 	IsGroup         bool       `json:"is_group"`
 	LastMessageTime *time.Time `json:"last_message_time"`
 	phone           string
-}
-
-func operatorPhoneDigits(value string) string {
-	var digits strings.Builder
-	for _, ch := range value {
-		if ch >= '0' && ch <= '9' {
-			digits.WriteRune(ch)
-		} else if !unicode.IsSpace(ch) && !strings.ContainsRune("+()-.", ch) {
-			return ""
-		}
-	}
-	return digits.String()
-}
-
-func operatorPlaceholderName(name string) bool {
-	return strings.TrimSpace(name) == "" || operatorPhoneDigits(name) != ""
-}
-
-// Optional local phone book only; never call WhatsApp, warm name caches or log
-// contact values. A missing/unavailable phone book leaves the archived name.
-func (store *MessageStore) operatorContacts(ctx context.Context, chats []operatorChat, account string, needPhone bool) {
-	var users []any
-	for i := range chats {
-		user, server, _ := strings.Cut(chats[i].JID, "@")
-		if server == "s.whatsapp.net" {
-			chats[i].phone = user
-		}
-		if (server == "s.whatsapp.net" || server == "lid") && (operatorPlaceholderName(chats[i].Name) || needPhone && server == "lid") {
-			users = append(users, user)
-		}
-	}
-	if store.waDB == nil || len(users) == 0 {
-		return
-	}
-	marks := strings.TrimSuffix(strings.Repeat("?,", len(users)), ",")
-	alternatives := map[string]string{}
-	args := append(append([]any{}, users...), users...)
-	lookupSQL := `SELECT lid,pn FROM whatsmeow_lid_map WHERE lid IN (` + marks + `) OR pn IN (` + marks + `)` //nolint:gosec // Only generated placeholders are concatenated; identities are bound.
-	rows, err := store.waDB.QueryContext(ctx, lookupSQL, args...)
-	if err == nil {
-		for rows.Next() {
-			var lid, phone string
-			if rows.Scan(&lid, &phone) == nil {
-				alternatives[lid+"@lid"] = phone + "@s.whatsapp.net"
-				alternatives[phone+"@s.whatsapp.net"] = lid + "@lid"
-			}
-		}
-		_ = rows.Close()
-	}
-	args = []any{account}
-	for i := range chats {
-		if alternative := alternatives[chats[i].JID]; strings.HasSuffix(alternative, "@s.whatsapp.net") {
-			chats[i].phone, _, _ = strings.Cut(alternative, "@")
-		}
-		if operatorPlaceholderName(chats[i].Name) && (strings.HasSuffix(chats[i].JID, "@lid") || strings.HasSuffix(chats[i].JID, "@s.whatsapp.net")) {
-			args = append(args, chats[i].JID)
-			if alternative := alternatives[chats[i].JID]; alternative != "" {
-				args = append(args, alternative)
-			}
-		}
-	}
-	if len(args) == 1 || account == "" {
-		return
-	}
-	marks = strings.TrimSuffix(strings.Repeat("?,", len(args)-1), ",")
-	lookupSQL = `SELECT their_jid,full_name,push_name,first_name,business_name
-		FROM whatsmeow_contacts WHERE our_jid = ? AND their_jid IN (` + marks + `)`
-	rows, err = store.waDB.QueryContext(ctx, lookupSQL, args...)
-	if err != nil {
-		return
-	}
-	names := map[string]string{}
-	for rows.Next() {
-		var jid string
-		var full, push, first, business sql.NullString
-		if rows.Scan(&jid, &full, &push, &first, &business) == nil {
-			for _, value := range []sql.NullString{full, push, first, business} {
-				if !operatorPlaceholderName(value.String) {
-					names[jid] = strings.TrimSpace(value.String)
-					break
-				}
-			}
-		}
-	}
-	_ = rows.Close()
-	for i := range chats {
-		if operatorPlaceholderName(chats[i].Name) {
-			name := names[chats[i].JID]
-			if name == "" {
-				name = names[alternatives[chats[i].JID]]
-			}
-			if name != "" {
-				chats[i].Name = name
-			}
-		}
-	}
 }
 
 // operatorFold is a case-insensitive, composition-insensitive comparison key:
@@ -222,10 +125,9 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 	// Ignore only the runtime chats.allowed layer: it can only narrow the
 	// deploy WHATSAPP_ALLOWED_CHATS, so a chat outside the deploy list could
 	// never be allowed and stays outside this search too.
-	deploy := b.Policy
-	deploy.resolve = nil
+	deploy := deploymentChatPolicy(b.Policy)
 	query := operatorFold(strings.TrimSpace(r.URL.Query().Get("query")))
-	digits := operatorPhoneDigits(query)
+	digits := localPhoneDigits(query)
 	// Without a query every row matches, so read and resolve only the page
 	// asked for. With one, resolve names in pages of 256 identities (at most
 	// 513 bound parameters, even with every alias).
@@ -241,7 +143,27 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 	chats := make([]operatorChat, 0, 50)
 	for start := 0; start < len(candidates) && len(chats) < limit; start += page {
 		batch := candidates[start:min(start+page, len(candidates))]
-		b.Store.operatorContacts(ctx, batch, account, digits != "")
+		identities := make([]localContactIdentity, 0, len(batch))
+		for _, chat := range batch {
+			if strings.TrimSpace(chat.Name) == "" || localPhoneDigits(chat.Name) != "" || digits != "" && strings.HasSuffix(chat.JID, "@lid") {
+				identities = append(identities, localContactIdentity{JID: chat.JID, Name: chat.Name})
+			}
+		}
+		names := b.Store.resolveLocalContactNames(ctx, identities, account, nil, b.Log)
+		for i := range batch {
+			jid := localContactJID(batch[i].JID)
+			if jid.Server == "s.whatsapp.net" {
+				batch[i].phone = jid.User
+			}
+			if contact, ok := names[batch[i].JID]; ok {
+				if contact.phone != "" {
+					batch[i].phone = contact.phone
+				}
+				if contact.resolved {
+					batch[i].Name = contact.Name
+				}
+			}
+		}
 		for _, chat := range batch {
 			if query != "" && !operatorChatMatches(chat, query, digits) {
 				continue

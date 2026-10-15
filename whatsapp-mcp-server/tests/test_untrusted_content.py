@@ -405,6 +405,7 @@ class TestProseFields:
         assert out["items"][0] == {"jid": "2@s.whatsapp.net", "name": "Eve"}
 
 
+@pytest.mark.usefixtures("auth_runtime_store")
 class TestProseThroughATool:
     """The two tools that return them, end to end with the bridge faked."""
 
