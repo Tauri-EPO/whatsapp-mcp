@@ -260,3 +260,38 @@ func TestContactBookQueryFailuresAreWarned(t *testing.T) {
 		t.Fatal("query warnings included an identity")
 	}
 }
+
+func TestFormattedArchivedChatNameSurvivesMissingContact(t *testing.T) {
+	phone := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000007", types.HiddenUserServer)
+	for _, jid := range []types.JID{phone, lid} {
+		t.Run(jid.Server, func(t *testing.T) {
+			store := newTestMessageStore(t)
+			store.names = newChatNameCache()
+			path := filepath.Join(t.TempDir(), "contacts.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			store.waDB = db
+			if _, err := db.Exec(`CREATE TABLE whatsmeow_lid_map(lid TEXT,pn TEXT);`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO whatsmeow_lid_map VALUES(?,?)`, lid.User, phone.User); err != nil {
+				t.Fatal(err)
+			}
+			formatted := "+55 11 99999-9999"
+			if err := store.StoreChat(jid.String(), formatted, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			got := GetChatName(newTestClient(nil), store, jid, jid.String(), nil, jid.User, false, testLogger())
+			if err := store.StoreChat(jid.String(), got, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if got := storedChatName(t, store, jid.String()); got != formatted {
+				t.Fatalf("persisted name = %q, want readable archived name %q", got, formatted)
+			}
+		})
+	}
+}

@@ -300,6 +300,11 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 					store.names.put(chatJID, value.Name)
 					return value.Name
 				}
+				// A formatted archived number is still more readable than a
+				// sender/LID fallback. Only replace it with a resolved name.
+				if existing != jid.User && existing != placeholderGroupName(jid) && !self.has(existing) {
+					return existing
+				}
 			} else if existing != "" && !isChatFallbackName(existing, jid, self) {
 				store.names.put(chatJID, existing)
 				return existing
