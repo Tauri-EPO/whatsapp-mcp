@@ -216,9 +216,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// A group sender we have no roster row for is a member we know about
 	// (group_events.go); no-op for DMs and for members already recorded.
 	policy := b.Policy.once() // The roster note and the webhook gate share one read.
-	if b.Store != nil && isGroupJID(chatJID) {
-		b.noteGroupSender(policy.effective(b.ctx), chatJID, resolvedSender, msgTimestamp)
-	}
+	b.noteGroupSender(policy, chatJID, resolvedSender, msgTimestamp)
 
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
 	b.handleMessageRevoke(msg.Message, chatJID, msg.Info.Timestamp.Unix())
