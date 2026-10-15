@@ -2,16 +2,14 @@
 """Measure a local MCP image with fake SQLite data and no external network.
 
 Run: python scripts/measure-mcp-memory.py --image IMAGE --output docs/evidence/NAME.json
-Requires Docker Desktop/Linux with cgroup v2. Never touches an existing store.
+Requires Docker Desktop/Linux with cgroup v1 or v2. Never touches an existing store.
 The probe clients exit before sampling: their anonymous memory is not counted.
 """
 
 import argparse
 import importlib
 import json
-import os
 import sqlite3
-import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -118,15 +116,10 @@ def imports():
     print(json.dumps(result))
 
 
-def docker(*args):
-    return subprocess.check_output(["docker", *args], text=True).strip()
-
-
 def measure(args):
-    context = docker("context", "inspect")
-    endpoint = os.environ.get("DOCKER_HOST") or json.loads(context)[0]["Endpoints"]["docker"]["Host"]
-    if not endpoint.startswith(("npipe://", "unix://")):
-        raise SystemExit("Refusing a remote Docker daemon")
+    from docker_local import LocalDocker
+
+    docker = LocalDocker()
     script = str(Path(__file__).resolve())
     name = "wamcp-memory-" + uuid.uuid4().hex[:12]
     cid = None
@@ -155,15 +148,12 @@ def measure(args):
             flags += ["-e", f"MALLOC_ARENA_MAX={args.arena}"]
         cid = docker(*flags, "--entrypoint", "sh", args.image, "-c", "python /measure.py --seed && exec python main.py")
         for _ in range(60):
-            probe = subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    cid,
-                    "python",
-                    "-c",
-                    'import socket;s=socket.create_connection(("127.0.0.1",8000),1);s.close()',
-                ],
+            probe = docker.run(
+                "exec",
+                cid,
+                "python",
+                "-c",
+                'import socket;s=socket.create_connection(("127.0.0.1",8000),1);s.close()',
                 capture_output=True,
             )
             if probe.returncode == 0:

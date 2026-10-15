@@ -1,7 +1,7 @@
 # MCP idle memory measurement (#704)
 
 Local Docker Desktop, Linux amd64, Python 3.13, MCP SDK 2.3.0. The daemon reports
-cgroup **v1**. The coordinator authorized v1 here: `memory.usage_in_bytes`,
+cgroup **v1**: `memory.usage_in_bytes`,
 `total_rss` (anonymous) and `total_cache`, kept separately. The versioned script
 also reads `memory.current`, `anon` and `file` on cgroup v2 without configuration
 changes. RSS includes shared/library pages and is not interchangeable with
@@ -29,6 +29,9 @@ Only its own registered container ID is removed, including on failure.
 | final memory/proxy PR | idle | 77.13 | 71.30 | 2 |
 | final memory/proxy PR | first call | 80.20 | 74.57 | 4 |
 | final memory/proxy PR | 100 calls | 80.50 | 74.75 | 4 |
+| review correction | idle | 129.55 | 69.48 | 2 |
+| review correction | first call | 131.64 | 70.76 | 4 |
+| review correction | 100 calls | 132.27 | 70.93 | 4 |
 
 Raw files: [baseline](mcp-memory-before.json), [allocator](mcp-memory-arena2.json),
 [lazy Pillow experiment](mcp-memory-lazy-pillow-experiment.json). The experiment
@@ -52,19 +55,25 @@ No extra workers were added. The optional admin listener/transcription worker
 are off in this workload; enabling them needs another measurement.
 
 Per-process caches: identity is one entry / 60 s; the name cache now has a 300 s TTL
-and 4096-entry bound (expired entries swept on insertion, oldest admission evicted); media directory
+and a 4096-entry bound per identity kind (expired heads removed on insertion,
+oldest admission evicted within its kind). Database-wide `lid_chats`, `phone_chats`
+and `twin_cap` are exempt from identity eviction; media directory
 names are capped at 16 chats / 5 s; OAuth
 introspection is capped at 1024 positive entries / 60 s (off here). These were
 inspected in the actual source; the 100-call growth includes schema/session,
 thread and name-cache allocations and is only about 1.9 MiB anonymous. The
 synthetic workload does not establish a worst-case cache/media workload.
-The coordinator authorized a minimal `whatsapp.py` cache correction in this PR.
 The repeated 10000-name workload retained 10000 names / 2.84 MiB RSS before,
 versus 4096 / 1.03 MiB after; one insertion after TTL retained 10001 names before
 and only one after. This reduces growth with many identities, while the idle
 floor remains 69-75 MiB anonymous across runs. Both cache regressions failed with the
 original `_cache_put` and passed with the correction (49 focused cache/contact
 tests green). [Final PR-image output](mcp-memory-final.json) includes this probe.
+The [review-correction image](mcp-memory-review.json) retained 4096 names /
+1.29 MiB RSS and one entry after expiry. Its larger current includes about
+54 MiB reclaimable file cache; anonymous memory stays within the prior range.
+The additional per-kind FIFO index preserves expensive database-wide entries
+when 5000 LID lookups arrive, including cached missing mappings.
 
 Recommend **256 MiB** for text/search deployments, leaving over 3x the measured
 anonymous floor and room for reclaimable file cache. This is not a safe upper

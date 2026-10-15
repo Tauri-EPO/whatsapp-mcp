@@ -3,6 +3,20 @@
 import whatsapp
 
 
+def test_lid_burst_preserves_database_caches_and_other_identity_kinds():
+    whatsapp._cache_put("lid_chats", whatsapp.MESSAGES_DB_PATH, {"synthetic@lid"})
+    whatsapp._cache_put("phone_chats", whatsapp.MESSAGES_DB_PATH, {"synthetic"})
+    whatsapp._cache_put("twin_cap", whatsapp.MESSAGES_DB_PATH, True)
+    whatsapp._cache_put("name", "synthetic", "Synthetic name")
+    for index in range(5000):
+        whatsapp._cache_put("lid_pair", f"fake-{index}", None)
+    assert whatsapp._cache_get("lid_chats", whatsapp.MESSAGES_DB_PATH) == (True, {"synthetic@lid"})
+    assert whatsapp._cache_get("phone_chats", whatsapp.MESSAGES_DB_PATH) == (True, {"synthetic"})
+    assert whatsapp._cache_get("twin_cap", whatsapp.MESSAGES_DB_PATH) == (True, True)
+    assert whatsapp._cache_get("name", "synthetic") == (True, "Synthetic name")
+    assert whatsapp._cache_get("lid_pair", "fake-4999") == (True, None)
+
+
 def test_ten_thousand_names_are_bounded_and_expired_put_sweeps(monkeypatch):
     whatsapp._reset_name_cache()
     clock = [1000.0]

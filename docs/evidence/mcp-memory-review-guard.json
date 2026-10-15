@@ -1,0 +1,98 @@
+{
+  "image": "local-lane-e/whatsapp-mcp-server:mem-proxy",
+  "image_id": "sha256:1903acdb1e44c6bb3c979540633eac45c10a34a7e9b2e15d8d02293071f73fa8",
+  "batch_calls": 3,
+  "synthetic_messages": 1000,
+  "arena_override": null,
+  "samples": [
+    {
+      "stage": "idle_after_start",
+      "cgroup_version": 1,
+      "current_bytes": 91111424,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 74747904,
+      "anon_source": "total_rss",
+      "file_bytes": 12492800,
+      "threads": 2,
+      "rss_bytes": 98189312
+    },
+    {
+      "stage": "after_first_tool",
+      "cgroup_version": 1,
+      "current_bytes": 92319744,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 76070912,
+      "anon_source": "total_rss",
+      "file_bytes": 12492800,
+      "threads": 4,
+      "rss_bytes": 99446784
+    },
+    {
+      "stage": "after_fixed_batch",
+      "cgroup_version": 1,
+      "current_bytes": 92684288,
+      "current_source": "memory.usage_in_bytes",
+      "anon_bytes": 76177408,
+      "anon_source": "total_rss",
+      "file_bytes": 12492800,
+      "threads": 4,
+      "rss_bytes": 99446784
+    }
+  ],
+  "import_profile": [
+    {
+      "module": "mcp.server",
+      "rss_bytes": 73015296,
+      "delta_bytes": 54337536
+    },
+    {
+      "module": "http_oauth",
+      "rss_bytes": 78049280,
+      "delta_bytes": 5033984
+    },
+    {
+      "module": "main",
+      "rss_bytes": 96800768,
+      "delta_bytes": 18751488
+    },
+    {
+      "optional_at_startup": [
+        "PIL.Image"
+      ]
+    },
+    {
+      "module": "PIL.Image",
+      "rss_bytes": 96800768,
+      "delta_bytes": 0
+    },
+    {
+      "module": "pypdfium2",
+      "rss_bytes": 100556800,
+      "delta_bytes": 3756032
+    },
+    {
+      "module": "openpyxl",
+      "rss_bytes": 108396544,
+      "delta_bytes": 7839744
+    },
+    {
+      "module": "docx",
+      "rss_bytes": 110829568,
+      "delta_bytes": 2433024
+    },
+    {
+      "loaded_optional": [
+        "PIL.Image",
+        "pypdfium2",
+        "openpyxl",
+        "docx"
+      ]
+    },
+    {
+      "name_cache_inputs": 10000,
+      "active_entries": 4096,
+      "active_rss_delta_bytes": 1351680,
+      "expired_entries_after_put": 1
+    }
+  ]
+}

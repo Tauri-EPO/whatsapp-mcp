@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -49,14 +52,19 @@ func parseWhatsAppProxy(getenv func(string) string) (*url.URL, error) {
 
 // Wrap the factory so operator restart/logout handoffs retain the same policy.
 func proxyClientFactory(base runtimeClientFactory, proxyURL *url.URL) runtimeClientFactory {
+	return proxyClientFactoryTransport(base, proxyURL, http.DefaultTransport.(*http.Transport))
+}
+
+func proxyClientFactoryTransport(base runtimeClientFactory, proxyURL *url.URL, transport *http.Transport) runtimeClientFactory {
 	if proxyURL == nil {
 		return base
 	}
 	if base == nil {
 		base = whatsmeow.NewClient
 	}
+	redactor := newProxyRedactor(proxyURL)
 	return func(device *store.Device, logger waLog.Logger) *whatsmeow.Client {
-		client := base(device, proxySafeLogger{Logger: logger, proxyURL: proxyURL})
+		client := base(device, proxySafeLogger{Logger: logger, redactor: redactor})
 		if client == nil {
 			return nil
 		}
@@ -65,38 +73,129 @@ func proxyClientFactory(base runtimeClientFactory, proxyURL *url.URL) runtimeCli
 		// net/http's explicit Proxy URL also supports socks5. This avoids the
 		// SDK SOCKS helper retaining ProxyFromEnvironment on its cloned transport.
 		client.SetProxy(http.ProxyURL(proxyURL))
+		// Sanitize at the HTTP boundary as well: bridge callers log returned
+		// websocket errors through their own logger, outside the SDK adapter.
+		h := proxyHTTPClient(proxyURL, transport)
+		client.SetPreLoginHTTPClient(h)
+		client.SetWebsocketHTTPClient(h)
+		client.SetMediaHTTPClient(h)
 		return client
 	}
 }
 
 type proxySafeLogger struct {
 	waLog.Logger
-	proxyURL *url.URL
+	redactor *strings.Replacer
 }
 
-func (l proxySafeLogger) clean(msg string, args ...any) string {
-	text := fmt.Sprintf(msg, sdkSafeArgs(args)...)
-	values := []string{l.proxyURL.String(), l.proxyURL.Host}
-	if l.proxyURL.User != nil {
-		password, _ := l.proxyURL.User.Password()
-		values = append(values, l.proxyURL.User.String(), l.proxyURL.User.Username(), password)
-	}
-	for _, value := range values {
-		if value != "" {
-			text = strings.ReplaceAll(text, value, "[proxy redacted]")
+func newProxyRedactor(u *url.URL) *strings.Replacer {
+	values := []string{u.String(), u.Redacted(), u.Host, u.Hostname()}
+	if u.User != nil {
+		password, _ := u.User.Password()
+		values = append(values, u.User.String()+"@", u.User.Username()+":"+password+"@")
+		if len(password) >= 8 {
+			values = append(values, password)
 		}
 	}
-	return text
+	pairs := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		if value != "" {
+			pairs = append(pairs, value, "[proxy]")
+		}
+	}
+	return strings.NewReplacer(pairs...)
 }
 
-func (l proxySafeLogger) Warnf(msg string, args ...any) { l.Logger.Warnf("%s", l.clean(msg, args...)) }
-func (l proxySafeLogger) Errorf(msg string, args ...any) {
-	l.Logger.Errorf("%s", l.clean(msg, args...))
+// Known production adapters expose their level without formatting a discarded
+// message. Unknown injected loggers retain their existing emission behavior.
+func proxyLogEnabled(logger waLog.Logger, level string) bool {
+	switch l := logger.(type) {
+	case *textLogger:
+		return levelRank[level] >= l.min
+	case *jsonLogger:
+		return levelRank[level] >= l.min
+	case sdkSafeLogger:
+		return proxyLogEnabled(l.Logger, level)
+	case privatePairingLogger:
+		return level != "DEBUG" && proxyLogEnabled(l.Logger, level)
+	default:
+		return logger != waLog.Noop
+	}
 }
-func (l proxySafeLogger) Infof(msg string, args ...any) { l.Logger.Infof("%s", l.clean(msg, args...)) }
-func (l proxySafeLogger) Debugf(msg string, args ...any) {
-	l.Logger.Debugf("%s", l.clean(msg, args...))
+
+func (l proxySafeLogger) emit(level, msg string, args ...any) {
+	if !proxyLogEnabled(l.Logger, level) {
+		return
+	}
+	text := l.redactor.Replace(fmt.Sprintf(msg, sdkSafeArgs(args)...))
+	switch level {
+	case "WARN":
+		l.Logger.Warnf("%s", text)
+	case "ERROR":
+		l.Logger.Errorf("%s", text)
+	case "INFO":
+		l.Logger.Infof("%s", text)
+	case "DEBUG":
+		l.Logger.Debugf("%s", text)
+	}
 }
+
+func (l proxySafeLogger) Warnf(msg string, args ...any)  { l.emit("WARN", msg, args...) }
+func (l proxySafeLogger) Errorf(msg string, args ...any) { l.emit("ERROR", msg, args...) }
+func (l proxySafeLogger) Infof(msg string, args ...any)  { l.emit("INFO", msg, args...) }
+func (l proxySafeLogger) Debugf(msg string, args ...any) { l.emit("DEBUG", msg, args...) }
 func (l proxySafeLogger) Sub(module string) waLog.Logger {
-	return proxySafeLogger{l.Logger.Sub(module), l.proxyURL}
+	return proxySafeLogger{l.Logger.Sub(module), l.redactor}
+}
+
+type proxySafeTransport struct{ http.RoundTripper }
+
+func proxyHTTPClient(u *url.URL, base *http.Transport) *http.Client {
+	transport := base.Clone()
+	transport.Proxy = http.ProxyURL(u)
+	dial := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return conn, proxyRequestError{err}
+		}
+		return proxySafeConn{conn}, nil
+	}
+	return &http.Client{Transport: proxySafeTransport{transport}}
+}
+
+// The SDK also logs websocket/media stream errors after RoundTrip succeeds.
+// Preserve net.Conn behavior while redacting peer addresses on reads/writes.
+type proxySafeConn struct{ net.Conn }
+
+func proxyStreamError(err error) error {
+	if err == nil || err == io.EOF {
+		return err
+	}
+	return proxyRequestError{err}
+}
+
+func (c proxySafeConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	return n, proxyStreamError(err)
+}
+
+func (c proxySafeConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	return n, proxyStreamError(err)
+}
+
+// No destination, proxy DNS/IP address, credentials or CONNECT response can
+// escape to callers. Unwrap preserves cancellation/timeout classification.
+type proxyRequestError struct{ cause error }
+
+func (e proxyRequestError) Error() string { return "WhatsApp proxy request failed: [proxy]" }
+func (e proxyRequestError) Unwrap() error { return e.cause }
+
+func (t proxySafeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.RoundTripper.RoundTrip(r)
+	if err != nil {
+		return response, proxyRequestError{err}
+	}
+	return response, nil
 }
