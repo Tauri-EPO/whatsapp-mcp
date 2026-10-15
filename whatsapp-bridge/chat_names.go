@@ -192,6 +192,10 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 		add(alt)
 	}
 	self := ownUsers(client)
+	twins := make([]types.JID, 0, len(targets))
+	for _, target := range targets {
+		twins = append(twins, target)
+	}
 	for chatJID, target := range targets {
 		b.storeLive("contact name", "", chatJID, func() error {
 			var existing string
@@ -201,15 +205,15 @@ func (b *Bridge) refreshContactChatName(jid, hint types.JID, eventName string) {
 				}
 				return err
 			}
-			if strings.TrimSpace(existing) != "" && !isChatFallbackName(strings.TrimSpace(existing), target, self) {
+			if strings.TrimSpace(existing) != "" && !isChatFallbackName(strings.TrimSpace(existing), target, self, twins...) {
 				return nil
 			}
 			b.Store.names.invalidate(chatJID)
 			name := GetChatName(client, b.Store, target, chatJID, nil, "", false, b.Log)
-			if strings.TrimSpace(name) == "" || isChatFallbackName(name, target, self) {
+			if strings.TrimSpace(name) == "" || isChatFallbackName(name, target, self, twins...) {
 				name = strings.TrimSpace(eventName)
 			}
-			if name == "" || isChatFallbackName(name, target, self) {
+			if name == "" || isChatFallbackName(name, target, self, twins...) {
 				return nil
 			}
 			return b.Store.RenamePlaceholderChat(chatJID, existing, name)
@@ -360,8 +364,8 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 // Chat history has additional fallbacks that main has always healed (#448).
 // They are not contact placeholders: groups and misplaced self labels keep
 // this rule, while contact lookup uses the single direct phone/LID predicate.
-func isChatFallbackName(name string, jid types.JID, self selfUsers) bool {
-	if isPlaceholderName(name, jid) || name == placeholderGroupName(jid) || name == jid.User {
+func isChatFallbackName(name string, jid types.JID, self selfUsers, twins ...types.JID) bool {
+	if isPlaceholderName(name, jid, twins...) || name == placeholderGroupName(jid) || name == jid.User {
 		return true
 	}
 	return jid.Server != types.GroupServer && self.has(name) && !self.has(jid.User)

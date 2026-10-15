@@ -295,3 +295,42 @@ func TestFormattedArchivedChatNameSurvivesMissingContact(t *testing.T) {
 		})
 	}
 }
+
+func TestContactEventAndMessageHealTheSameTwinName(t *testing.T) {
+	for _, viaEvent := range []bool{false, true} {
+		store := newTestMessageStore(t)
+		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "contacts.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		store.waDB = db
+		if _, err := db.Exec(`CREATE TABLE whatsmeow_contacts(our_jid TEXT,their_jid TEXT,full_name TEXT,push_name TEXT,first_name TEXT,business_name TEXT);
+		CREATE TABLE whatsmeow_lid_map(lid TEXT,pn TEXT);`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO whatsmeow_lid_map VALUES(?,?)`, phoneLID.User, phonePN.User); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO whatsmeow_contacts VALUES(?,?,'Alice','','','')`, selfPhone.String(), phonePN.String()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.StoreChat(phoneLID.String(), "+"+phonePN.User, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		client := newTestClient(&mockLIDStore{pnByLID: map[types.JID]types.JID{phoneLID: phonePN}})
+		client.Store.ID = &selfPhone
+		if viaEvent {
+			b := testBridge(t, client, store, testLogger())
+			b.refreshContactChatName(phoneLID, phonePN, "Alice")
+		} else {
+			name := GetChatName(client, store, phoneLID, phoneLID.String(), nil, "", false, testLogger())
+			if err := store.StoreChat(phoneLID.String(), name, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := storedChatName(t, store, phoneLID.String()); got != "Alice" {
+			t.Fatalf("event=%v: name=%q, want Alice", viaEvent, got)
+		}
+	}
+}
