@@ -203,6 +203,26 @@ def test_db_path_override_protects_store_without_store_dir(tmp_path, paired_stor
 
 
 @UNIX
+def test_db_override_also_protects_configured_store(tmp_path_factory, paired_store):
+    store = tmp_path_factory.mktemp("other-store")
+    path = str(store / "mcp.sock")
+    env = {
+        **os.environ,
+        "WHATSAPP_DB_PATH": str(paired_store.messages_db),
+        "WHATSAPP_STORE_DIR": str(store),
+        "WHATSAPP_MCP_SOCKET": path,
+        "WHATSAPP_MCP_TRANSPORT": "http",
+        "WHATSAPP_MCP_TOKEN": "synthetic-token-0123456789",
+        "TRANSCRIBE_ON_INGEST": "false",
+    }
+    result = subprocess.run(
+        [sys.executable, "main.py"], cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 1 and "outside store" in result.stderr
+    assert "Traceback" not in result.stderr and not Path(path).exists()
+
+
+@UNIX
 def test_live_socket_startup_diagnostic_has_no_traceback(tmp_path):
     path = str(tmp_path / "mcp.sock")
     listener, owned = bind_unix_socket(path)

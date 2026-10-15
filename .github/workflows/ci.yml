@@ -49,6 +49,11 @@ jobs:
         run: |
           cd whatsapp-mcp-server
           uv run pytest -q
+      - name: Unix socket denial cases (runner uid, no skips)
+        run: |
+          id -u
+          cd whatsapp-mcp-server
+          uv run pytest -v tests/test_unix_socket.py
 
   go:
     name: Go Build
@@ -68,6 +73,11 @@ jobs:
           # The compose file sets TZ; media file names and timestamps must not
           # depend on the process zone (media_tz_test.go and friends).
           TZ=America/Sao_Paulo go test ./...
+      - name: Operator socket denial cases (runner uid, no skips)
+        run: |
+          id -u
+          cd whatsapp-bridge
+          go test -v -run 'TestOperatorSocket' ./...
       - name: Race detector
         # Own step so its cost and its failures are legible. The shipped binary
         # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it

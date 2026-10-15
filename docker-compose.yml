@@ -55,6 +55,8 @@ services:
       WHATSAPP_BRIDGE_BIND: ${WHATSAPP_BRIDGE_BIND:-127.0.0.1}
       WHATSAPP_BRIDGE_ALLOWED_HOSTS: ${WHATSAPP_BRIDGE_ALLOWED_HOSTS:-}
       # Separate opt-in operator listener; never publish this port on the host.
+      # MCP socket activation preserves bridge-token fallback during rotation.
+      WHATSAPP_MCP_SOCKET: ${WHATSAPP_MCP_SOCKET:-}
       WHATSAPP_OPERATOR_BIND: ${WHATSAPP_OPERATOR_BIND:-}
       WHATSAPP_OPERATOR_PORT: ${WHATSAPP_OPERATOR_PORT:-8090}
       WHATSAPP_OPERATOR_TOKEN: ${WHATSAPP_OPERATOR_TOKEN:-}
@@ -197,6 +199,7 @@ services:
       WHATSAPP_TRANSCRIPTION_API_KEY: ${WHATSAPP_TRANSCRIPTION_API_KEY:-}
       # Enable the fixed loopback admin listener; operator secret stays bridge-only.
       WHATSAPP_OPERATOR_BIND: ${WHATSAPP_OPERATOR_BIND:-}
+      WHATSAPP_OPERATOR_SOCKET: ${WHATSAPP_OPERATOR_SOCKET:-}
       WHATSAPP_MCP_TOKEN: ${WHATSAPP_MCP_TOKEN:-}
       WHATSAPP_MCP_HOST: ${WHATSAPP_MCP_HOST:-0.0.0.0}
       WHATSAPP_MCP_RATE_LIMIT: ${WHATSAPP_MCP_RATE_LIMIT:-}

@@ -47,6 +47,7 @@ import io,os,stat,zipfile,httpx
 op_token=os.environ['WHATSAPP_OPERATOR_TOKEN']
 info=os.stat('/app/sockets/operator.sock')
 assert stat.S_ISSOCK(info.st_mode) and stat.S_IMODE(info.st_mode)==0o660 and info.st_uid==1000
+assert not os.path.exists('/app/sockets/mcp.sock')
 for uds in (None,'/app/sockets/operator.sock'):
     with httpx.Client(transport=httpx.HTTPTransport(uds=uds),base_url='http://localhost:8090') as c:
         headers={'Authorization':'Bearer '+op_token}
@@ -161,6 +162,32 @@ volumes:
         ]
         created = False
         try:
+            base = json.loads(
+                docker(
+                    "compose",
+                    "-p",
+                    project,
+                    "--env-file",
+                    str(empty),
+                    "-f",
+                    "docker-compose.yml",
+                    "config",
+                    "--format",
+                    "json",
+                    env={
+                        **env,
+                        "WHATSAPP_OPERATOR_BIND": "",
+                        "WHATSAPP_OPERATOR_SOCKET": "/run/synthetic/operator.sock",
+                    },
+                )
+            )
+            assert (
+                base["services"]["mcp"]["environment"]["WHATSAPP_OPERATOR_SOCKET"]
+                == "/run/synthetic/operator.sock"
+            )
+            print(
+                "PASS socket-only operator activation reaches MCP admin in base Compose"
+            )
             for extra in ([], ["-f", "docker-compose.split.yml"]):
                 topology = json.loads(
                     docker(
@@ -178,8 +205,12 @@ volumes:
                     )
                 )
                 mcp_mounts = topology["services"]["mcp"]["volumes"]
-                assert not any("operator-sockets" in mount["source"] for mount in mcp_mounts), mcp_mounts
-            print("PASS operator socket volume excluded from MCP in regular and split Compose configurations")
+                assert not any(
+                    "operator-sockets" in mount["source"] for mount in mcp_mounts
+                ), mcp_mounts
+            print(
+                "PASS operator socket volume excluded from MCP in regular and split Compose configurations"
+            )
             # Compose creates only this project's private resources. Initialize
             # its socket volume before uid-1000 listeners start.
             created = True
@@ -284,7 +315,9 @@ volumes:
                     check=False,
                 )
                 if smoke.returncode != 2:
-                    raise RuntimeError(f"smoke.sh over Unix exited {smoke.returncode}; expected 2 (unpaired)")
+                    raise RuntimeError(
+                        f"smoke.sh over Unix exited {smoke.returncode}; expected 2 (unpaired)"
+                    )
             print("Images:", image, f"{registry}/whatsapp-mcp-bridge:{tag}")
         finally:
             if created:

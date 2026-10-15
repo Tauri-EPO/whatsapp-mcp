@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -78,13 +79,38 @@ func listenOperatorSocketOwned(path string, uid int) (net.Listener, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("WHATSAPP_OPERATOR_SOCKET cannot inspect socket")
 	}
-	listener, err := net.Listen("unix", path)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		return nil, errors.New("WHATSAPP_OPERATOR_SOCKET cannot bind")
 	}
-	if err := os.Chmod(path, 0660); err != nil { //nolint:gosec // Unix socket group access is the explicit local proxy boundary.
+	listener.SetUnlinkOnClose(false)
+	owned, err := os.Lstat(path)
+	if err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
-	return listener, nil
+	guarded := &ownedOperatorSocket{UnixListener: listener, path: path, owned: owned}
+	if err := os.Chmod(path, 0660); err != nil { //nolint:gosec // Unix socket group access is the explicit local proxy boundary.
+		_ = guarded.Close()
+		return nil, err
+	}
+	return guarded, nil
+}
+
+type ownedOperatorSocket struct {
+	*net.UnixListener
+	path  string
+	owned os.FileInfo
+	once  sync.Once
+	err   error
+}
+
+func (l *ownedOperatorSocket) Close() error {
+	l.once.Do(func() {
+		l.err = l.UnixListener.Close()
+		if current, err := os.Lstat(l.path); err == nil && os.SameFile(l.owned, current) {
+			l.err = errors.Join(l.err, os.Remove(l.path))
+		}
+	})
+	return l.err
 }

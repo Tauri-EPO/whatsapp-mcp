@@ -137,3 +137,52 @@ func TestOperatorSocketPreservesHomeResolutionError(t *testing.T) {
 		t.Fatalf("original HOME diagnostic lost: %v", err)
 	}
 }
+
+func TestOperatorSocketCleanupPreservesReplacementInode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operator.sock")
+	l, err := listenOperatorSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("synthetic replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // Read the synthetic replacement in this test's private temporary directory.
+	if err != nil || string(data) != "synthetic replacement" {
+		t.Fatalf("replacement lost: %q %v", data, err)
+	}
+	l, err = listenOperatorSocket(filepath.Join(t.TempDir(), "owned.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(owned); !os.IsNotExist(err) {
+		t.Fatalf("owned socket retained: %v", err)
+	}
+}
+
+func TestOperatorSocketFallbackTokenRotation(t *testing.T) {
+	values := map[string]string{"WHATSAPP_MCP_HOST": "localhost", "WHATSAPP_MCP_SOCKET": " /run/synthetic/mcp.sock "}
+	cfg, err := parseBridgeConfig(func(key string) string { return values[key] })
+	if err != nil || !cfg.MCPFallbackBridge {
+		t.Fatalf("socket fallback lost: %v", err)
+	}
+	b := newSettingsBridge(t)
+	bridgeHash := tokenHash("synthetic-bridge-token-0123456789")
+	if cfg.MCPFallbackBridge {
+		b.MCPEnvHash = bridgeHash
+	}
+	response := tokenRequest(b, "POST", `{"sha256":"`+tokenHash("synthetic-new-mcp-token-0123456789")+`","previous_valid_until":"`+time.Now().UTC().Add(time.Hour).Format(time.RFC3339)+`"}`)
+	if response.Code != 200 || storedToken(t, b).Previous != bridgeHash {
+		t.Fatalf("rotation grace lost: %d %s", response.Code, response.Body)
+	}
+}

@@ -4,6 +4,7 @@
 services:
   bridge:
     environment:
+      WHATSAPP_MCP_SOCKET: /app/sockets/mcp.sock
       WHATSAPP_OPERATOR_SOCKET: /app/sockets/operator.sock
       WHATSAPP_OPERATOR_BIND: ${WHATSAPP_OPERATOR_BIND:-127.0.0.1}
       WHATSAPP_PAIRING_STDOUT: "false"

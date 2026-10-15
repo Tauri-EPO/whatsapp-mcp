@@ -3071,7 +3071,7 @@ if __name__ == "__main__":
         socket_path = resolve_socket(
             os.getenv("WHATSAPP_MCP_SOCKET"),
             str(Path(whatsapp.MESSAGES_DB_PATH).parent),
-            os.getenv("WHATSAPP_MEDIA_ROOTS"),
+            os.pathsep.join((whatsapp._DEFAULT_BRIDGE_STORE_DIR, os.getenv("WHATSAPP_MEDIA_ROOTS") or "")),
         )
         if transport == "stdio":
             if socket_path:
