@@ -167,7 +167,8 @@ def _effective_chat_setting(raw_setting, deploy):
         policy = intersect_policies(ChatPolicy(runtime.exact, runtime.servers, True), deploy)
         origin = "runtime chats.allowed" + (f" within {ENV_VAR} (deploy)" if deploy.restricted else "")
         policy = replace(policy, origin=origin)
-    return {"value": policy_entries(policy), "source": raw_setting["source"]}, policy
+        return {"value": policy_entries(policy), "source": raw_setting["source"]}, policy
+    return dict(raw_setting), policy
 
 
 class RuntimeSnapshot(dict[str, Any]):

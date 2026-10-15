@@ -765,3 +765,15 @@ def test_snapshot_uses_the_captured_source_without_reading_global_policy(runtime
         report = runtime_settings.snapshot(require_store=True)
         assert report.chat_policy is policy.effective()
         assert policy.allows(FAMILY) and not policy.allows(ALICE)
+
+
+@pytest.mark.parametrize("configured", [None, BOB])
+def test_env_default_chat_reporting_keeps_its_original_value(runtime_archive, configured):
+    env = {} if configured is None else {"WHATSAPP_ALLOWED_CHATS": configured}
+    deploy = chat_policy.ChatPolicy.from_entries([ALICE])
+    report = runtime_settings.snapshot(env=env, require_store=True, deploy_policy=deploy)
+    assert report["settings"]["chats.allowed"] == {
+        "value": [] if configured is None else [BOB],
+        "source": "default" if configured is None else "env",
+    }
+    assert report.chat_policy is deploy
