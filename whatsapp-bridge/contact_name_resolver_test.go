@@ -334,3 +334,54 @@ func TestContactEventAndMessageHealTheSameTwinName(t *testing.T) {
 		}
 	}
 }
+
+type missingContactStore struct {
+	wmStore.ContactStore
+	calls int
+}
+
+func (c *missingContactStore) GetContact(context.Context, types.JID) (types.ContactInfo, error) {
+	c.calls++
+	return types.ContactInfo{}, nil
+}
+
+func TestUnknownContactQueriesAreCachedBriefly(t *testing.T) {
+	store := newTestMessageStore(t)
+	store.names = newChatNameCache()
+	now := time.Now()
+	store.names.now = func() time.Time { return now }
+	trace := &contactQueryTrace{}
+	store.waDB = sql.OpenDB(contactTraceConnector{path: filepath.Join(t.TempDir(), "contacts.db"), trace: trace, base: &sqlite.Driver{}})
+	t.Cleanup(func() { _ = store.waDB.Close() })
+	if _, err := store.waDB.Exec(`CREATE TABLE whatsmeow_contacts(our_jid TEXT,their_jid TEXT,full_name TEXT,push_name TEXT,first_name TEXT,business_name TEXT);
+	CREATE TABLE whatsmeow_lid_map(lid TEXT,pn TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(nil)
+	client.Store.ID = &selfPhone
+	contacts := &missingContactStore{}
+	client.Store.Contacts = contacts
+	resolve := func() {
+		name := GetChatName(client, store, phoneLID, phoneLID.String(), nil, phoneLID.User, false, testLogger())
+		if err := store.StoreChat(phoneLID.String(), name, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 5 {
+		resolve()
+	}
+	if queries := len(trace.queries); queries != 2 || contacts.calls != 1 {
+		t.Fatalf("five messages: local SQL=%d, SDK=%d; want 2 and 1", queries, contacts.calls)
+	}
+	t.Logf("five messages: local SQL=%d, SDK=%d", len(trace.queries), contacts.calls)
+	now = now.Add(time.Minute)
+	resolve()
+	if len(trace.queries) != 4 || contacts.calls != 2 {
+		t.Fatal("negative contact cache did not expire")
+	}
+	store.names.invalidate(phoneLID.String())
+	resolve()
+	if len(trace.queries) != 6 || contacts.calls != 3 {
+		t.Fatal("contact event invalidation retained a negative answer")
+	}
+}

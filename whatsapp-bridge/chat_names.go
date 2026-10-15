@@ -38,7 +38,8 @@ const (
 	groupInfoRetryAfter = 10 * time.Minute
 	// chatNameTTL bounds how long an in-memory name is trusted before the
 	// chats table is consulted again.
-	chatNameTTL = 24 * time.Hour
+	chatNameTTL    = 24 * time.Hour
+	contactMissTTL = 30 * time.Second
 )
 
 // groupInfoLookup fetches group metadata; nil means "no network available"
@@ -47,10 +48,11 @@ type groupInfoLookup func(ctx context.Context, jid types.JID) (*types.GroupInfo,
 
 // chatNameCache remembers resolved names and failed group lookups.
 type chatNameCache struct {
-	mu       sync.Mutex
-	names    map[string]cachedName
-	groupErr map[string]time.Time
-	now      func() time.Time // injectable clock for tests
+	mu          sync.Mutex
+	names       map[string]cachedName
+	groupErr    map[string]time.Time
+	contactMiss map[string]time.Time
+	now         func() time.Time // injectable clock for tests
 }
 
 type cachedName struct {
@@ -59,7 +61,7 @@ type cachedName struct {
 }
 
 func newChatNameCache() *chatNameCache {
-	return &chatNameCache{names: map[string]cachedName{}, groupErr: map[string]time.Time{}, now: time.Now}
+	return &chatNameCache{names: map[string]cachedName{}, groupErr: map[string]time.Time{}, contactMiss: map[string]time.Time{}, now: time.Now}
 }
 
 func (c *chatNameCache) get(chatJID string) (string, bool) {
@@ -97,6 +99,7 @@ func (c *chatNameCache) invalidate(chatJID string) {
 	c.mu.Lock()
 	delete(c.names, chatJID)
 	delete(c.groupErr, chatJID)
+	delete(c.contactMiss, chatJID)
 	c.mu.Unlock()
 }
 
@@ -105,6 +108,38 @@ func (c *chatNameCache) size() (names, failures int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.names), len(c.groupErr)
+}
+
+// Contact misses are short-lived and bounded; contact events invalidate them.
+func (c *chatNameCache) contactLookupAllowed(chatJID string) bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	expires, ok := c.contactMiss[chatJID]
+	return !ok || !c.now().Before(expires)
+}
+
+func (c *chatNameCache) rememberContactMiss(chatJID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for jid, expires := range c.contactMiss {
+		if !now.Before(expires) {
+			delete(c.contactMiss, jid)
+		}
+	}
+	if len(c.contactMiss) >= contactNameBatchSize {
+		for jid := range c.contactMiss {
+			delete(c.contactMiss, jid)
+			break
+		}
+	}
+	c.contactMiss[chatJID] = now.Add(contactMissTTL)
 }
 
 func (c *chatNameCache) groupLookupAllowed(chatJID string, now time.Time) bool {
@@ -284,11 +319,18 @@ func getChatNameContext(ctx context.Context, client *whatsmeow.Client, store *Me
 
 	var contact *localContactIdentity
 	lookupContact := func(archived string, forceName bool) localContactIdentity {
+		if store != nil && !store.names.contactLookupAllowed(chatJID) {
+			return localContactIdentity{Name: archived, needsName: true}
+		}
 		account := ""
 		if client != nil && client.Store != nil && client.Store.ID != nil {
 			account = client.Store.ID.String()
 		}
-		return store.resolveLocalContactNames(ctx, []localContactIdentity{{JID: chatJID, Name: archived, forceName: forceName}}, account, client, logger)[chatJID]
+		value := store.resolveLocalContactNames(ctx, []localContactIdentity{{JID: chatJID, Name: archived, forceName: forceName}}, account, client, logger)[chatJID]
+		if store != nil && !value.resolved && ctx.Err() == nil {
+			store.names.rememberContactMiss(chatJID)
+		}
+		return value
 	}
 	// Main's historical chat fallbacks also heal groups and misplaced self
 	// labels. The shared contact-placeholder rule is strictly direct-only.
