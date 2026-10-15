@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"unicode"
 
@@ -84,7 +85,7 @@ func (store *MessageStore) resolveLocalContactNames(ctx context.Context, identit
 }
 
 func warnLocalContactQuery(logger waLog.Logger, table string, err error) {
-	if err != nil && logger != nil && !strings.Contains(err.Error(), "no such table: "+table) {
+	if err != nil && logger != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "no such table: "+table) {
 		logger.Warnf("Failed to query local contact names (%s): %v", table, err)
 	}
 }

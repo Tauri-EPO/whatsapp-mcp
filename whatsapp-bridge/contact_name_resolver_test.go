@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -406,5 +407,20 @@ func TestSDKFullNamePrecedesLocalContactSQL(t *testing.T) {
 	client.Store.Contacts = &recordingContactStore{}
 	if got := GetChatName(client, store, phonePN, phonePN.String(), nil, "", false, testLogger()); got != "Alice" {
 		t.Fatalf("name=%q, want SDK FullName Alice before SQL Bob", got)
+	}
+}
+
+func TestContactQueryCancellationIsSilent(t *testing.T) {
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded, fmt.Errorf("query: %w", context.Canceled), fmt.Errorf("query: %w", context.DeadlineExceeded)} {
+		var out bytes.Buffer
+		warnLocalContactQuery(newTextWriter("Bridge", "INFO", &out, false), "whatsmeow_contacts", err)
+		if out.Len() != 0 {
+			t.Fatalf("cancellation logged a warning: %s", out.String())
+		}
+	}
+	var out bytes.Buffer
+	warnLocalContactQuery(newTextWriter("Bridge", "INFO", &out, false), "whatsmeow_contacts", fmt.Errorf("disk unavailable"))
+	if !strings.Contains(out.String(), "disk unavailable") {
+		t.Fatal("real query failure was silenced")
 	}
 }
