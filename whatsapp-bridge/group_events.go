@@ -207,7 +207,7 @@ func groupMemberEventRows(client *whatsmeow.Client, jids []types.JID) []groupMem
 // an events.GroupInfo. Every failure is a warning: a missed delta costs
 // freshness until the next roster refresh, never a stored message.
 func (b *Bridge) applyGroupParticipantChanges(v *events.GroupInfo) {
-	b.applyGroupParticipantChangesWithPolicy(b.Policy.once(), v)
+	b.applyGroupParticipantChangesWithPolicy(b.Policy, v)
 }
 
 func (b *Bridge) applyGroupParticipantChangesWithPolicy(policy chatPolicyResolver, v *events.GroupInfo) {
@@ -354,7 +354,7 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 		return 0, false
 	}
 	attempted := 0
-	policy := b.Policy.once().effective(ctx) // One settings read for the pass, not one per group.
+	policy := b.Policy.effective(ctx) // One settings read for the pass, not one per group.
 	for _, jid := range stale {
 		if ctx.Err() != nil || (b.Connected != nil && !b.Connected()) {
 			return refreshed, true
