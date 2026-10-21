@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,16 +16,16 @@ import (
 
 // goneGroupBridge archives testGroupJID and answers every roster fetch with
 // answer, counting the fetches.
-func goneGroupBridge(t *testing.T, answer error) (*Bridge, *recordingLogger, *int) {
+func goneGroupBridge(t *testing.T, answer error) (*Bridge, *recordingLogger, *atomic.Int32) {
 	t.Helper()
 	store := newTestMessageStore(t)
 	if _, err := store.db.Exec(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`,
 		testGroupJID, "Obra", dbTime(time.Now())); err != nil {
 		t.Fatalf("seed chat: %v", err)
 	}
-	fetches := 0
+	var fetches atomic.Int32
 	store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) {
-		fetches++
+		fetches.Add(1)
 		return nil, answer
 	}
 	logger := installRecordingLogger(t)
@@ -54,12 +55,12 @@ func TestGroupsWeAreNotInAreAskedWeekly(t *testing.T) {
 			now := time.Now()
 			b.syncGroupRosters(context.Background(), now, 10, 0)
 			b.syncGroupRosters(context.Background(), now.Add(tc.retryAfter-time.Minute), 10, 0)
-			if *fetches != 1 {
-				t.Fatalf("asked %d times before the backoff ended, want once", *fetches)
+			if fetches.Load() != 1 {
+				t.Fatalf("asked %d times before the backoff ended, want once", fetches.Load())
 			}
 			b.syncGroupRosters(context.Background(), now.Add(tc.retryAfter+time.Minute), 10, 0)
-			if *fetches != 2 {
-				t.Fatalf("not asked again after the backoff: fetches=%d", *fetches)
+			if fetches.Load() != 2 {
+				t.Fatalf("not asked again after the backoff: fetches=%d", fetches.Load())
 			}
 			if warned := strings.Contains(logger.String(), "Group roster sync: failed"); warned != tc.warns {
 				t.Fatalf("warned=%v, want %v:\n%s", warned, tc.warns, logger.String())
@@ -73,7 +74,11 @@ func TestRejoiningAGroupEndsItsBackoff(t *testing.T) {
 	group := types.NewJID("120363000000000001", types.GroupServer)
 	rejoin := map[string]func(*Bridge){
 		"JoinedGroup": func(b *Bridge) {
+			// Offline for the event, so its immediate fetch (tested on its own
+			// below) does not race the count here.
+			b.Connected = func() bool { return false }
 			b.handleEvent(&events.JoinedGroup{GroupInfo: types.GroupInfo{JID: group}}, nil)
+			b.Connected = func() bool { return true }
 		},
 		"GroupInfo join of this account": func(b *Bridge) {
 			b.applyGroupParticipantChanges(&events.GroupInfo{JID: group, Join: []types.JID{selfPhone}})
@@ -86,8 +91,8 @@ func TestRejoiningAGroupEndsItsBackoff(t *testing.T) {
 			b.syncGroupRosters(context.Background(), now, 10, 0)
 			event(b)
 			b.syncGroupRosters(context.Background(), now.Add(time.Minute), 10, 0)
-			if *fetches != 2 {
-				t.Fatalf("the rejoined group was not asked again: fetches=%d", *fetches)
+			if fetches.Load() != 2 {
+				t.Fatalf("the rejoined group was not asked again: fetches=%d", fetches.Load())
 			}
 		})
 	}
@@ -98,8 +103,8 @@ func TestRejoiningAGroupEndsItsBackoff(t *testing.T) {
 		other := types.NewJID("5511999999999", types.DefaultUserServer)
 		b.applyGroupParticipantChanges(&events.GroupInfo{JID: group, Join: []types.JID{other}})
 		b.syncGroupRosters(context.Background(), now.Add(time.Minute), 10, 0)
-		if *fetches != 1 {
-			t.Fatalf("another member's join ended our backoff: fetches=%d", *fetches)
+		if fetches.Load() != 1 {
+			t.Fatalf("another member's join ended our backoff: fetches=%d", fetches.Load())
 		}
 	})
 }
@@ -130,8 +135,8 @@ func TestLeavingStartsTheLongWaitAndOwnMessagesEndIt(t *testing.T) {
 	left := time.Now()
 	b.applyGroupParticipantChanges(&events.GroupInfo{JID: group, Leave: []types.JID{selfPhone}})
 	b.syncGroupRosters(context.Background(), left.Add(groupRosterRetryAfter+time.Minute), 10, 0)
-	if *fetches != 0 {
-		t.Fatalf("a group we saw ourselves leave was asked about after six hours: fetches=%d", *fetches)
+	if fetches.Load() != 0 {
+		t.Fatalf("a group we saw ourselves leave was asked about after six hours: fetches=%d", fetches.Load())
 	}
 
 	// A message of ours queued before the departure does not reopen it...
