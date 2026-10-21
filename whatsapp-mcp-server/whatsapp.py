@@ -4416,8 +4416,21 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 # HTTP status can: media_unavailable means missing bytes or download fields;
 # media_refused means an unsafe cache identity. Both download and forward name
 # these permanent failures. group_admin_required distinguishes group send
-# permissions from deployment policy. Every other failure keeps the status map.
-_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", MEDIA_REFUSED_CODE, "group_admin_required"})
+# permissions from deployment policy. media_retry_backoff is a download whose
+# media retry failed recently: the bridge will not ask the phone again yet
+# (issue #743). Every other failure keeps the status map.
+_BRIDGE_NAMED_CODES = frozenset(
+    {"media_unavailable", MEDIA_REFUSED_CODE, "group_admin_required", "media_retry_backoff"}
+)
+
+
+def _retry_after(response: Any, payload: dict[str, Any] | None = None) -> int:
+    """Seconds to wait from retry_after_s or the Retry-After header, at least 1."""
+    retry = (payload or {}).get("retry_after_s") or getattr(response, "headers", {}).get("Retry-After", 1)
+    try:
+        return max(1, int(retry))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _bridge_error_code(status: int) -> str:
@@ -4473,11 +4486,7 @@ def _bridge_json(response) -> dict[str, Any]:
                     limit="limit_exceeds_batch",
                     retry_after_s=None,
                 )
-            retry = payload.get("retry_after_s") or getattr(response, "headers", {}).get("Retry-After", 1)
-            try:
-                retry = max(1, int(retry))
-            except (TypeError, ValueError):
-                retry = 1
+            retry = _retry_after(response, payload)
             raise ToolError(
                 "rate_limited",
                 f"Send limit reached; stop and report to the operator instead of retrying (retry after {retry}s)",
@@ -4486,6 +4495,8 @@ def _bridge_json(response) -> dict[str, Any]:
             )
         named = error_body.get("code")
         code = named if named in _BRIDGE_NAMED_CODES else _bridge_error_code(response.status_code)
+        if code == "media_retry_backoff":
+            raise ToolError(code, message or "media retry cooling down", retry_after_s=_retry_after(response, payload))
         raise ToolError(code, message or f"bridge answered HTTP {response.status_code}")
     if "success" in payload and not payload.get("success"):
         raise ToolError("internal", message or "bridge reported failure")

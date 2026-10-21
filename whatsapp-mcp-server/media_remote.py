@@ -101,6 +101,9 @@ def _read_error(response: httpx.Response) -> MediaReadError:
         return MediaReadError(code, "media exceeds the requested byte limit")
     if code == "spool_too_large":
         return MediaReadError("too_large", "media exceeds the bridge spool size limit")
+    if code == "media_retry_backoff":
+        # The sender's phone was asked recently and did not deliver (issue #743).
+        return MediaReadError(code, "media retry cooling down", retry_after_s=whatsapp._retry_after(response))
     return MediaReadError("bridge_unavailable", "bridge media read failed")
 
 

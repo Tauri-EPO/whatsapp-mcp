@@ -1956,6 +1956,8 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
     Media failures are media_refused (unsafe cache identity) or media_unavailable
     (missing bytes or download fields), which should not be retried;
     bridge_unavailable is a temporary bridge/CDN failure worth retrying later.
+    media_retry_backoff means the sender's phone was asked for the file recently
+    and did not deliver it: do not retry before retry_after_s seconds.
 
     Args:
         chat_jid: Chat containing the original message
@@ -2656,6 +2658,9 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     cache file: it is recorded per message, so other copies remain usable.
     list_media shows the dated refusal; clear_media_refusal allows another try
     after the bridge's path rule changes. Retry `bridge_unavailable` later.
+    `media_retry_backoff` means the sender's phone was asked for this file recently
+    and did not deliver it; the bridge will not ask again before `retry_after_s`
+    seconds, so do not retry sooner — each retry is a request to that phone.
     If `media_unavailable` names an expired legacy link on a row missing its direct
     path, call request_history(chat_jid, before_message_id=<id>) then download_media
     after the replay arrives. The phone decides whether it re-delivers the locator;
@@ -2783,6 +2788,8 @@ def read_media(
     not cached yet is fetched through the bridge first, unless the archive already
     knows it is over the limit — and where download_media is disabled that fetch is
     refused with `denied`, so only media already in the store can be read.
+    `media_retry_backoff` means the sender's phone was asked for the file recently
+    and did not deliver it: do not retry before `retry_after_s` seconds.
     If `media_unavailable` names an expired legacy link on a row missing its direct
     path, call request_history(chat_jid, before_message_id=<id>) then download_media
     after the replay arrives. The phone decides whether it re-delivers the locator;
@@ -2892,6 +2899,8 @@ def transcribe_audio(
     **bridge_status().whisper says whether this
     deployment has one**: when it reports configured=false (or reachable=false) every
     call here fails, so check once instead of failing per file.
+    A download failing with `media_retry_backoff` means the sender's phone was asked
+    for the file recently and did not deliver it: do not retry before `retry_after_s`.
 
     **The result is cached in notes.db**, keyed by the file's sha256, under the keys
     transcript / transcript_lang / transcript_backend. Asking again for the same

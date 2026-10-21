@@ -134,6 +134,7 @@ MAX_OUTAGE_SKIPS = 3
 # download needs (issue #392). Asking again cannot help either way, so the row
 # is noted and skipped instead of retried on every pass.
 MEDIA_UNAVAILABLE_CODE = "media_unavailable"
+MEDIA_RETRY_BACKOFF_CODE = "media_retry_backoff"
 # ``transcript_error`` values written before an outage was told apart from a file
 # whisper cannot read (#377): they name the backend, not the audio, so they are
 # cleared once per process at startup and those files queue up again. Matched
@@ -192,6 +193,9 @@ class Fetched:
     too_large: bool = False
     refused: str = ""  # unsafe row identity; other copies of the hash can still be fetched
     refusal_recorded: bool | None = None
+    # The bridge asked the phone for this file recently and will not ask again
+    # yet: not an outage and not final, so neither a strike nor a note.
+    backoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -403,6 +407,9 @@ def find_pending(
     fields — gets a ``media_unavailable`` note instead, which takes it off the
     work list for good, and costs no strike: an archive of expired media would
     otherwise end every round after three rows (issues #378, #392).
+    A file whose media retry failed recently (``media_retry_backoff``: the
+    bridge will not ask the phone again until its cooldown passes) is skipped
+    without a strike or a note and asked about on a later round (issue #743).
     An immutable unsafe identity (`media_refused`) is recorded per message,
     without a failure strike once recorded or a per-hash unavailability note,
     so another copy of the same audio remains fetchable.
@@ -458,6 +465,15 @@ def find_pending(
             budget -= 1
             fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
             path = fetched.path
+            if fetched.backoff:
+                # Not the bridge failing and not final: give the attempt back
+                # (a row in cooldown must not crowd out real downloads) and
+                # leave the strike count as it was.
+                budget += 1
+                if not traversing:
+                    head_budget += 1
+                resolved.add((message_id, chat_jid))
+                continue
             strike = path is None
             if fetched.refused:
                 strike = fetched.refusal_recorded is not True
@@ -550,6 +566,11 @@ def _fetch_bytes(
     except ToolError as exc:
         if exc.code == MEDIA_REFUSED_CODE:
             return Fetched(refused=exc.message, refusal_recorded=exc._media_refusal_recorded)
+        if exc.code == MEDIA_RETRY_BACKOFF_CODE:
+            # Before #743 this was a strike every round, and every round asked
+            # the phone again: the owner's phone, for audio the owner sent.
+            logger.debug("transcribe_on_ingest: %s waits for its media retry cooldown: %s", message_id, exc.message)
+            return Fetched(backoff=True)
         # too_large supports injected fetchers. The production /api/download
         # path cannot produce it; S3 blob refusals are handled while streaming.
         if exc.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
@@ -722,6 +743,8 @@ def _record_remote_media_miss(candidate: Candidate, failure: media_remote.MediaR
         if failure.code == MEDIA_REFUSED_CODE:
             media_notes.record_media_refusal(candidate.message_id, candidate.chat_jid, failure.message)
             return True
+        if failure.code == MEDIA_RETRY_BACKOFF_CODE:
+            return True  # skipped this round without a note; not an outage (issue #743)
         if failure.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
             if failure.code == MEDIA_UNAVAILABLE_CODE and _cached_copy_exists(
                 candidate.sha256, (candidate.message_id, candidate.chat_jid)
