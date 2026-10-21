@@ -103,3 +103,91 @@ func TestRejoiningAGroupEndsItsBackoff(t *testing.T) {
 		}
 	})
 }
+
+// The answer to a fetch sent before the account was seen back in the group
+// must not start the long wait, and expired entries are dropped.
+func TestRosterFailuresOrderAndPruning(t *testing.T) {
+	now := time.Now()
+	f := newRosterFailures()
+	asked := now
+	f.forget(testGroupJID, now.Add(time.Second)) // the rejoin lands while the fetch is in flight
+	f.noteGone(testGroupJID, asked, now.Add(2*time.Second))
+	if f.recent(testGroupJID, now.Add(time.Minute)) {
+		t.Fatal("a stale not-in-group answer put a rejoined group back in the long wait")
+	}
+	f.noteGone(testGroupJID, now.Add(time.Hour), now.Add(time.Hour))
+	if !f.recent(testGroupJID, now.Add(2*time.Hour)) {
+		t.Fatal("a later answer must still start the wait")
+	}
+	if f.recent(testGroupJID, now.Add(time.Hour+groupRosterGoneRetryAfter)) || len(f.waits) != 0 {
+		t.Fatalf("an expired wait was kept: %v", f.waits)
+	}
+}
+
+func TestLeavingStartsTheLongWaitAndOwnMessagesEndIt(t *testing.T) {
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	b, _, fetches := goneGroupBridge(t, whatsmeow.ErrNotInGroup)
+	left := time.Now()
+	b.applyGroupParticipantChanges(&events.GroupInfo{JID: group, Leave: []types.JID{selfPhone}})
+	b.syncGroupRosters(context.Background(), left.Add(groupRosterRetryAfter+time.Minute), 10, 0)
+	if *fetches != 0 {
+		t.Fatalf("a group we saw ourselves leave was asked about after six hours: fetches=%d", *fetches)
+	}
+
+	// A message of ours queued before the departure does not reopen it...
+	b.noteGroupSender(b.Policy, testGroupJID, selfPhone, left.Add(-time.Minute))
+	if !b.rosterFailures.recent(testGroupJID, left.Add(time.Hour)) {
+		t.Fatal("an older message of ours ended the wait")
+	}
+	// ...one written after it does: we are in the group again.
+	b.noteGroupSender(b.Policy, testGroupJID, selfPhone, left.Add(time.Hour))
+	if b.rosterFailures.recent(testGroupJID, left.Add(time.Hour)) {
+		t.Fatal("a newer message of ours left the group in the wait")
+	}
+}
+
+// Any roster WhatsApp hands back, list_group_members included, proves the
+// account is in the group.
+func TestAStoredRosterEndsTheWait(t *testing.T) {
+	b, _, _ := goneGroupBridge(t, whatsmeow.ErrNotInGroup)
+	now := time.Now()
+	b.syncGroupRosters(context.Background(), now, 10, 0)
+	if !b.rosterFailures.recent(testGroupJID, now.Add(time.Minute)) {
+		t.Fatal("setup: the group is not waiting")
+	}
+	b.recordGroupRoster(testGroupJID, []GroupMember{{JID: "5511999999999@s.whatsapp.net", PhoneNumber: "5511999999999"}}, time.Now(), nil)
+	if b.rosterFailures.recent(testGroupJID, now.Add(time.Minute)) {
+		t.Fatal("a stored roster left the group in the wait")
+	}
+}
+
+// A rejoin seen while the allow-list excludes the group still ends the wait,
+// so allowing it later does not inherit a week of silence.
+func TestRejoinWhileExcludedEndsTheWait(t *testing.T) {
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	b, _, _ := goneGroupBridge(t, whatsmeow.ErrNotInGroup)
+	now := time.Now()
+	b.syncGroupRosters(context.Background(), now, 10, 0)
+	excluded := parseChatPolicy("5511999999999@s.whatsapp.net")
+	b.applyGroupParticipantChangesWithPolicy(excluded, &events.GroupInfo{JID: group, Join: []types.JID{selfPhone}})
+	if b.rosterFailures.recent(testGroupJID, now.Add(time.Minute)) {
+		t.Fatal("an excluded group kept its wait after we were added back")
+	}
+}
+
+// JoinedGroup fetches the roster right away instead of at the next pass.
+func TestJoinedGroupFetchesTheRosterNow(t *testing.T) {
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	b, _, _ := goneGroupBridge(t, whatsmeow.ErrNotInGroup)
+	fetched := make(chan struct{}, 4)
+	b.Store.groupInfo = func(context.Context, types.JID) (*types.GroupInfo, error) {
+		fetched <- struct{}{}
+		return fakeGroup(), nil
+	}
+	b.handleEvent(&events.JoinedGroup{GroupInfo: types.GroupInfo{JID: group}}, nil)
+	select {
+	case <-fetched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the rejoined group's roster was not fetched")
+	}
+}

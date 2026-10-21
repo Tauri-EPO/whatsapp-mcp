@@ -638,8 +638,10 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.JoinedGroup:
-		// Added (back) to a group: a roster backoff from before no longer holds.
-		b.rosterFailures.forget(v.JID.String())
+		// Added (back) to a group: a roster backoff from before no longer
+		// holds, and the roster dropped on leaving is fetched now (#746).
+		b.rosterFailures.forget(v.JID.String(), time.Now())
+		b.requestGroupSettingsRefresh(v.JID)
 
 	case *events.GroupInfo:
 		policy := b.Policy.once()
