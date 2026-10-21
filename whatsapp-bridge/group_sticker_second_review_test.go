@@ -81,7 +81,7 @@ func TestSecondReviewSettingsFailureDoesNotBlockRoster(t *testing.T) {
 	if !b.refreshGroupRoster(context.Background(), testGroupJID, fakeGroup().JID, time.Now()) {
 		t.Fatal("settings failure blocked roster")
 	}
-	if len(readMembers(t, b.Store, testGroupJID)) == 0 || b.rosterFailures.recent(testGroupJID, time.Now(), time.Hour) {
+	if len(readMembers(t, b.Store, testGroupJID)) == 0 || b.rosterFailures.recent(testGroupJID, time.Now()) {
 		t.Fatal("settings failure poisoned roster backoff")
 	}
 	if log := logger.String(); !strings.Contains(log, testGroupJID) || !strings.Contains(log, "synthetic settings failure") {
@@ -161,7 +161,7 @@ func TestSecondReviewRefreshDeduplicatesWithoutBackoff(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("notifications during fetch were lost or duplicated: calls=%d", calls.Load())
 	}
-	if b.rosterFailures.recent(testGroupJID, time.Now(), time.Hour) {
+	if b.rosterFailures.recent(testGroupJID, time.Now()) {
 		t.Fatal("event refresh poisoned roster backoff")
 	}
 	b.cancel()

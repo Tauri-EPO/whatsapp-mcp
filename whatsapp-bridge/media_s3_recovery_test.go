@@ -541,8 +541,10 @@ print('three permanent quota-stream misses recorded; healthy audio transcribed; 
 	if err != nil {
 		t.Fatalf("permanent quota ingest: %v\n%s", err, output)
 	}
-	if retries.Load() != 4 {
-		t.Fatal("permanent notes were retried on the following round", retries.Load())
+	// The direct read asked about LOSTQUOTAA; the worker's first round asks
+	// about B and C and gets A's answer from the cooldown (#743).
+	if retries.Load() != 3 {
+		t.Fatal("the phone was asked again about a known answer, or notes were retried on the following round", retries.Load())
 	}
 	t.Log(string(output))
 }
