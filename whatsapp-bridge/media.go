@@ -15,7 +15,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -472,13 +471,18 @@ func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, down
 		}
 	}
 	written, err := retry(ctx, messageID, chatJID, downloader, root, relPath)
+	var notSent mediaRetryNotSent
 	switch {
 	case err == nil:
 		b.mediaRetryCooldown.forget(chatJID, messageID)
 		return written, nil
-	case ctx.Err() != nil:
-		return 0, err // the caller gave up; nothing was learnt about the phone
+	case errors.Is(ctx.Err(), context.Canceled):
+		return 0, err // the bridge is stopping; nothing was learnt about the phone
+	case errors.As(err, &notSent), errors.Is(err, errAutoMediaLimit), errors.Is(err, errMediaQuota):
+		return 0, err // the phone was not asked, or this caller's budget refused the bytes
 	default:
+		// The deadline expiring while the phone is awaited, or during the
+		// download after its answer, still asked it: that cools down too.
 		return 0, b.mediaRetryCooldown.note(chatJID, messageID, err, time.Now())
 	}
 }
@@ -717,10 +721,7 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			}
 			// A media retry that failed recently: retryable, but not before
 			// the cooldown, and asking sooner reaches the phone no more (#743).
-			var backoff *mediaRetryBackoffError
-			if code == errorCode(http.StatusInternalServerError) && errors.As(err, &backoff) {
-				w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(backoff.until).Seconds()))))
-				writeErrorCode(w, http.StatusServiceUnavailable, "media_retry_backoff", "Failed to download media: "+errMsg)
+			if writeMediaRetryBackoff(w, err, "Failed to download media: "+errMsg) {
 				return
 			}
 			writeErrorCode(w, http.StatusInternalServerError, code, "Failed to download media: "+errMsg)

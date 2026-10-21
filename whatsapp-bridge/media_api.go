@@ -158,6 +158,9 @@ func (b *Bridge) handleMediaBlob(w http.ResponseWriter, r *http.Request) {
 				writeErrorCode(w, 413, "too_large", "Media exceeds requested byte limit")
 				return
 			}
+			if writeMediaRetryBackoff(w, err, "Media retry cooling down; retry after Retry-After") {
+				return
+			}
 			code := permanentMediaCode(err)
 			if code == "" {
 				code = errorCode(http.StatusBadGateway)

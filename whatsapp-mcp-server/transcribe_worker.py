@@ -465,7 +465,16 @@ def find_pending(
             budget -= 1
             fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
             path = fetched.path
-            strike = path is None and not fetched.backoff
+            if fetched.backoff:
+                # Not the bridge failing and not final: give the attempt back
+                # (a row in cooldown must not crowd out real downloads) and
+                # leave the strike count as it was.
+                budget += 1
+                if not traversing:
+                    head_budget += 1
+                resolved.add((message_id, chat_jid))
+                continue
+            strike = path is None
             if fetched.refused:
                 strike = fetched.refusal_recorded is not True
                 if fetched.refusal_recorded is None:  # injected fetcher did not attempt to record
@@ -734,6 +743,8 @@ def _record_remote_media_miss(candidate: Candidate, failure: media_remote.MediaR
         if failure.code == MEDIA_REFUSED_CODE:
             media_notes.record_media_refusal(candidate.message_id, candidate.chat_jid, failure.message)
             return True
+        if failure.code == MEDIA_RETRY_BACKOFF_CODE:
+            return True  # skipped this round without a note; not an outage (issue #743)
         if failure.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
             if failure.code == MEDIA_UNAVAILABLE_CODE and _cached_copy_exists(
                 candidate.sha256, (candidate.message_id, candidate.chat_jid)

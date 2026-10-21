@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -22,8 +24,18 @@ const (
 	// download after a successful answer failing): worth another try sooner.
 	mediaRetryUnansweredCooldown = time.Hour
 	// Bounds the memory; an evicted message can be asked about once more.
+	// The map is not persisted either: after a restart each message may reach
+	// the phone once more before its cooldown starts again.
 	mediaRetryCooldownMax = 4096
 )
+
+// mediaRetryNotSent marks a retry that failed before its receipt went out
+// (no row, no hub, the send itself failing): the phone was not asked, so
+// nothing starts a cooldown.
+type mediaRetryNotSent struct{ err error }
+
+func (e mediaRetryNotSent) Error() string { return e.err.Error() }
+func (e mediaRetryNotSent) Unwrap() error { return e.err }
 
 // phoneRetryAnswer marks an error the phone itself sent back to a media retry,
 // as opposed to one that never reached it or never came back.
@@ -48,6 +60,19 @@ func (e *mediaRetryBackoffError) Error() string {
 }
 
 func (e *mediaRetryBackoffError) Unwrap() error { return e.err }
+
+// writeMediaRetryBackoff answers a cooled-down retry as 503
+// media_retry_backoff with Retry-After, and reports whether it did. A final
+// media_unavailable keeps its own code.
+func writeMediaRetryBackoff(w http.ResponseWriter, err error, message string) bool {
+	var backoff *mediaRetryBackoffError
+	if !errors.As(err, &backoff) || permanentMediaCode(err) != "" {
+		return false
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(backoff.until).Seconds()))))
+	writeErrorCode(w, http.StatusServiceUnavailable, "media_retry_backoff", message)
+	return true
+}
 
 type mediaRetryCooldownKey struct{ chat, id string }
 

@@ -4424,6 +4424,15 @@ _BRIDGE_NAMED_CODES = frozenset(
 )
 
 
+def _retry_after(response: Any, payload: dict[str, Any] | None = None) -> int:
+    """Seconds to wait from retry_after_s or the Retry-After header, at least 1."""
+    retry = (payload or {}).get("retry_after_s") or getattr(response, "headers", {}).get("Retry-After", 1)
+    try:
+        return max(1, int(retry))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _bridge_error_code(status: int) -> str:
     """Map a bridge HTTP status to an error code."""
     if status in (400, 422):
@@ -4477,11 +4486,7 @@ def _bridge_json(response) -> dict[str, Any]:
                     limit="limit_exceeds_batch",
                     retry_after_s=None,
                 )
-            retry = payload.get("retry_after_s") or getattr(response, "headers", {}).get("Retry-After", 1)
-            try:
-                retry = max(1, int(retry))
-            except (TypeError, ValueError):
-                retry = 1
+            retry = _retry_after(response, payload)
             raise ToolError(
                 "rate_limited",
                 f"Send limit reached; stop and report to the operator instead of retrying (retry after {retry}s)",
@@ -4491,12 +4496,7 @@ def _bridge_json(response) -> dict[str, Any]:
         named = error_body.get("code")
         code = named if named in _BRIDGE_NAMED_CODES else _bridge_error_code(response.status_code)
         if code == "media_retry_backoff":
-            retry_after = str(getattr(response, "headers", {}).get("Retry-After", ""))
-            raise ToolError(
-                code,
-                message or "media retry cooling down",
-                retry_after_s=int(retry_after) if retry_after.isdigit() else None,
-            )
+            raise ToolError(code, message or "media retry cooling down", retry_after_s=_retry_after(response, payload))
         raise ToolError(code, message or f"bridge answered HTTP {response.status_code}")
     if "success" in payload and not payload.get("success"):
         raise ToolError("internal", message or "bridge reported failure")

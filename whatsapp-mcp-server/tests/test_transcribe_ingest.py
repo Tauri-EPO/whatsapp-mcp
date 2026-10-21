@@ -835,6 +835,38 @@ def test_a_media_retry_backoff_is_neither_a_strike_nor_a_note(paired_dbs):
     assert media_notes.fetch_notes([SHA[m] for m in ("AUD2", "AUD3", "AUD4")]) == {}
 
 
+def test_backoffs_spend_no_fetch_budget(paired_dbs):
+    """Rows in cooldown do not crowd out a real download (issue #743)."""
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    calls = []
+
+    def fetch(message_id, chat_jid):
+        calls.append(message_id)
+        if message_id != "AUD1":
+            raise ToolError("media_retry_backoff", "cooling down")
+        return FakeBridge()(message_id, chat_jid)
+
+    result = transcribe_worker.run_once(1, transcribe=FakeBackend(), fetch=True, download=fetch)
+    assert calls == ["AUD4", "AUD3", "AUD2", "AUD1"] and result.transcribed == 1  # a batch of one reached it
+
+
+def test_backoffs_do_not_reset_the_strike_count(paired_dbs, monkeypatch):
+    """Failures with backoffs in between still end the round after three."""
+    for message_id in ("AUD5", "AUD6"):
+        monkeypatch.setitem(SHA, message_id, hashlib.sha256(message_id.encode()).hexdigest())
+    for message_id in ("AUD1", "AUD2", "AUD3", "AUD4", "AUD5", "AUD6"):
+        _add_audio(paired_dbs, message_id, ALICE, cached=False)
+    calls = []
+
+    def flaky(message_id, chat_jid):
+        calls.append(message_id)
+        raise ToolError("media_retry_backoff" if message_id in ("AUD5", "AUD3") else "bridge_unavailable", "no")
+
+    transcribe_worker.run_once(10, transcribe=FakeBackend(), fetch=True, download=flaky)
+    assert calls == ["AUD6", "AUD5", "AUD4", "AUD3", "AUD2"]  # AUD1 would be a fourth failure
+
+
 def test_the_bridge_media_retry_backoff_code_reaches_the_worker(paired_dbs, monkeypatch):
     """/api/download's named code survives the HTTP client instead of becoming bridge_unavailable."""
     body = {"success": False, "error": {"code": "media_retry_backoff", "message": "not before 2026-10-28"}}
@@ -846,6 +878,9 @@ def test_the_bridge_media_retry_backoff_code_reaches_the_worker(paired_dbs, monk
         whatsapp.download_media("AUD1", ALICE)
     assert caught.value.code == "media_retry_backoff"
     assert caught.value.extra["retry_after_s"] == 604800
+
+    streamed = media_remote._read_error(response)
+    assert (streamed.code, streamed.extra["retry_after_s"]) == ("media_retry_backoff", 604800)
 
 
 def test_a_transient_refusal_is_still_a_strike_and_writes_no_note(paired_dbs):

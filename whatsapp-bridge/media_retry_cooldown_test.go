@@ -121,6 +121,73 @@ func TestDownloadDoesNotAskThePhoneAgainDuringTheCooldown(t *testing.T) {
 	}
 }
 
+func TestOnlyARetryThatReachedThePhoneCoolsDown(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	cases := []struct {
+		name  string
+		ctx   context.Context
+		err   error
+		cools bool
+	}{
+		{"receipt not sent", context.Background(), mediaRetryNotSent{errors.New("send media retry receipt: not connected")}, false},
+		{"caller budget after the answer", context.Background(), fmt.Errorf("download after media retry: %w", errAutoMediaLimit), false},
+		{"quota after the answer", context.Background(), errMediaQuota, false},
+		{"deadline while the phone was awaited", expired, context.DeadlineExceeded, true},
+		{"no answer", context.Background(), errors.New("timed out waiting for the sender's phone"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(storeDirEnv, t.TempDir())
+			b := testBridge(t, nil, newTestMessageStore(t), installRecordingLogger(t))
+			b.mediaRetryDownload = func(context.Context, string, string, *MediaDownloader, *os.Root, string) (int64, error) {
+				return 0, tc.err
+			}
+			_, err := b.retryMedia(tc.ctx, "ID", mediaTestChat, &MediaDownloader{}, nil, "x")
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want it to wrap %v", err, tc.err)
+			}
+			if _, ok := b.mediaRetryCooldown.active(mediaTestChat, "ID", time.Now()); ok != tc.cools {
+				t.Fatalf("cooling down = %v, want %v", ok, tc.cools)
+			}
+		})
+	}
+}
+
+func TestForwardAndStreamNameTheBackoff(t *testing.T) {
+	backoff := &mediaRetryBackoffError{until: time.Now().Add(time.Hour), err: errors.New("timed out")}
+	rec := httptest.NewRecorder()
+	if !writeMediaRetryBackoff(rec, fmt.Errorf("failed to download media: %w", backoff), "cooling") {
+		t.Fatal("a wrapped backoff was not answered")
+	}
+	if rec.Code != http.StatusServiceUnavailable || downloadErrorCode(t, rec) != "media_retry_backoff" || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("answer = %d %s %q", rec.Code, rec.Body.String(), rec.Header().Get("Retry-After"))
+	}
+	final := &mediaRetryBackoffError{until: time.Now().Add(time.Hour), err: errMediaUnavailable}
+	if writeMediaRetryBackoff(httptest.NewRecorder(), final, "x") || writeMediaRetryBackoff(httptest.NewRecorder(), errors.New("other"), "x") {
+		t.Fatal("media_unavailable and unrelated errors must keep their own answers")
+	}
+
+	ms := seedEditStore(t)
+	deps := forwardDeps{
+		lookup:           ms.messageContentLookup,
+		resolveRecipient: forwardRecipientAsTyped,
+		download: func(context.Context, string, string) (bool, string, string, string, error) {
+			return false, "", "", "", fmt.Errorf("failed to download media: %w", backoff)
+		},
+		send: func(context.Context, string, string, string, string, string, string, []string) (bool, string, sentMessage) {
+			t.Fatal("nothing to send without the bytes")
+			return false, "", sentMessage{}
+		},
+	}
+	rec = httptest.NewRecorder()
+	handleForwardMessage(deps, chatPolicy{})(rec, httptest.NewRequest(http.MethodPost, "/api/forward",
+		strings.NewReader(`{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"PIC","to_chat_jid":"120363000000000001@g.us"}`)))
+	if rec.Code != http.StatusServiceUnavailable || downloadErrorCode(t, rec) != "media_retry_backoff" {
+		t.Fatalf("forward answer = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCancelledMediaRetryLeavesNoCooldown(t *testing.T) {
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms := newTestMessageStore(t)
