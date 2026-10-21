@@ -341,18 +341,18 @@ func storeRefreshedMedia(messageStore *MessageStore, messageID, chatJID string, 
 func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messageStore *MessageStore, hub *mediaRetryHub, messageID, chatJID string, downloader *MediaDownloader, root *os.Root, relPath string) (int64, error) {
 	info, err := messageStore.mediaRetryInfo(ctx, messageID, chatJID)
 	if err != nil {
-		return 0, err
+		return 0, mediaRetryNotSent{err}
 	}
 
 	// Register before sending so a fast phone can't answer into the void.
 	if hub == nil {
-		return 0, errors.New("media retry unavailable: no retry hub configured")
+		return 0, mediaRetryNotSent{errors.New("media retry unavailable: no retry hub configured")}
 	}
 	ch, cancel := hub.register(messageID)
 	defer cancel()
 
 	if err := client.SendMediaRetryReceipt(ctx, info, downloader.MediaKey); err != nil {
-		return 0, fmt.Errorf("send media retry receipt: %w", err)
+		return 0, mediaRetryNotSent{fmt.Errorf("send media retry receipt: %w", err)}
 	}
 
 	timer := time.NewTimer(mediaRetryTimeout)
@@ -361,7 +361,7 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 	case evt := <-ch:
 		directPath, err := mediaRetryDirectPath(evt, downloader.MediaKey)
 		if err != nil {
-			return 0, err
+			return 0, phoneRetryAnswer{err}
 		}
 		refreshed := *downloader
 		refreshed.DirectPath = directPath

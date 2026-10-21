@@ -242,6 +242,9 @@ type Bridge struct {
 	origTimes *originalTimestamps
 	// mediaRetry routes MediaRetry events to waiting downloads (see mediaRetryHub).
 	mediaRetry *mediaRetryHub
+	// mediaRetryCooldown keeps a failed media retry from being sent to the
+	// phone again for a while (see media_retry_cooldown.go).
+	mediaRetryCooldown *mediaRetryCooldown
 	// rosterFailures backs off groups whose roster refresh keeps failing (group_events.go).
 	rosterFailures           *rosterFailures
 	groupSettingsRefreshOnce sync.Once
@@ -353,6 +356,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		storeStats:     newStoreStats(storeRoot),
 		metrics:        newMetricsRegistry(),
 	}
+	b.mediaRetryCooldown = newMediaRetryCooldown()
 	b.LabelResyncTimeout = actionDeadline
 	b.LabelResync = func(ctx context.Context) error {
 		return b.currentClient().FetchAppState(ctx, appstate.WAPatchRegular, true, false)

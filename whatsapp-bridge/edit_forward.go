@@ -252,6 +252,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicyResolver) http.Hand
 					writeErrorCode(w, http.StatusInternalServerError, code, msg)
 					return
 				}
+				if writeMediaRetryBackoff(w, dlErr, msg) {
+					return
+				}
 				writeEditForward(w, http.StatusBadGateway, editForwardResponse{Message: msg})
 				return
 			}
