@@ -142,6 +142,7 @@ the page's items, preserving its pagination envelope.
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
 | `media_unavailable` | The bytes are not cached here and no request can bring them: the sender's phone answered that it no longer has them (WhatsApp media expires from its CDN after a few days), or the message was stored without the CDN fields a download needs (`incomplete media information`, typical of history-sync stubs) | Do not retry: that file is gone. Work from the message text, or ask the sender to send it again |
 | `media_refused` | The row's chat JID or message ID cannot safely name a cache file | Do not retry this row; another copy of the same file can still be downloaded |
+| `media_retry_backoff` | The file's CDN link expired and the sender's phone was asked for it recently without delivering it (it answered it has no file, or did not answer). The bridge does not ask the phone again for the same message until the cooldown passes: 7 days after an answer, 1 hour after no answer; `retry_after_s` says how long | Do not retry before `retry_after_s`; work from the message text meanwhile |
 | `internal` | Unexpected failure (database unreadable, bridge token rejected, ffmpeg failure…) | Details are in the server log |
 
 An unreadable database is reported as `internal`, never as an empty result, so an empty list really means "nothing matched".

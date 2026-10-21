@@ -361,7 +361,7 @@ func downloadViaMediaRetry(ctx context.Context, client *whatsmeow.Client, messag
 	case evt := <-ch:
 		directPath, err := mediaRetryDirectPath(evt, downloader.MediaKey)
 		if err != nil {
-			return 0, err
+			return 0, phoneRetryAnswer{err}
 		}
 		refreshed := *downloader
 		refreshed.DirectPath = directPath

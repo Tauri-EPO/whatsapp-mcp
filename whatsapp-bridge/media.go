@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -390,10 +391,17 @@ func (b *Bridge) downloadMediaAttempt(ctx context.Context, messageID, chatJID st
 				// that sat unread), or a link stamped as expired: ask the
 				// sender's phone to re-upload and download from the fresh
 				// path. See media_retry.go.
-				b.Log.Warnf("Requesting a media retry from the sender's phone for message %s...", messageID)
-				written, err = storage.Write(ctx, row, func(rel string) (int64, error) {
-					return b.retryMedia(ctx, messageID, chatJID, downloader, root, rel)
-				})
+				if backoff, cooling := b.mediaRetryCooldown.active(chatJID, messageID, time.Now()); cooling {
+					// A retry of this message failed a moment ago: the phone
+					// is not asked again until the cooldown passes (#743).
+					b.Log.Debugf("Media retry for message %s skipped: %v", messageID, backoff)
+					err = backoff
+				} else {
+					b.Log.Warnf("Requesting a media retry from the sender's phone for message %s...", messageID)
+					written, err = storage.Write(ctx, row, func(rel string) (int64, error) {
+						return b.retryMedia(ctx, messageID, chatJID, downloader, root, rel)
+					})
+				}
 				if expiry, ok := linkExpiry(directPath); pathSource == pathFromURL && ok && expiry.Before(time.Now()) && errors.Is(err, errMediaUnavailable) {
 					err = fmt.Errorf("this row has no direct path for the file; its legacy link expired on %s (UTC); "+
 						"call request_history(chat_jid, before_message_id=<id>) with this message's id, then download_media after the replay arrives; "+
@@ -457,10 +465,22 @@ func mediaComplete(chatJID, url, directPath string, mediaKey, fileSHA256, fileEn
 // from the fresh path. Tests override Bridge.mediaRetryDownload to record the
 // call instead.
 func (b *Bridge) retryMedia(ctx context.Context, messageID, chatJID string, downloader *MediaDownloader, root *os.Root, relPath string) (int64, error) {
-	if b.mediaRetryDownload != nil {
-		return b.mediaRetryDownload(ctx, messageID, chatJID, downloader, root, relPath)
+	retry := b.mediaRetryDownload
+	if retry == nil {
+		retry = func(ctx context.Context, messageID, chatJID string, downloader *MediaDownloader, root *os.Root, relPath string) (int64, error) {
+			return downloadViaMediaRetry(ctx, b.currentClient(), b.Store, b.mediaRetry, messageID, chatJID, downloader, root, relPath)
+		}
 	}
-	return downloadViaMediaRetry(ctx, b.currentClient(), b.Store, b.mediaRetry, messageID, chatJID, downloader, root, relPath)
+	written, err := retry(ctx, messageID, chatJID, downloader, root, relPath)
+	switch {
+	case err == nil:
+		b.mediaRetryCooldown.forget(chatJID, messageID)
+		return written, nil
+	case ctx.Err() != nil:
+		return 0, err // the caller gave up; nothing was learnt about the phone
+	default:
+		return 0, b.mediaRetryCooldown.note(chatJID, messageID, err, time.Now())
+	}
 }
 
 // checkMediaPathComponents refuses a chat directory or a media file name that
@@ -693,6 +713,14 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 			var refused *cdnRefusedError
 			if errors.As(err, &refused) {
 				writeError(w, http.StatusBadGateway, "Failed to download media: "+errMsg)
+				return
+			}
+			// A media retry that failed recently: retryable, but not before
+			// the cooldown, and asking sooner reaches the phone no more (#743).
+			var backoff *mediaRetryBackoffError
+			if code == errorCode(http.StatusInternalServerError) && errors.As(err, &backoff) {
+				w.Header().Set("Retry-After", strconv.Itoa(max(1, int(time.Until(backoff.until).Seconds()))))
+				writeErrorCode(w, http.StatusServiceUnavailable, "media_retry_backoff", "Failed to download media: "+errMsg)
 				return
 			}
 			writeErrorCode(w, http.StatusInternalServerError, code, "Failed to download media: "+errMsg)

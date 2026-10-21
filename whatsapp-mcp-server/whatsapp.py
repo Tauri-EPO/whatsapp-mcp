@@ -4416,8 +4416,12 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 # HTTP status can: media_unavailable means missing bytes or download fields;
 # media_refused means an unsafe cache identity. Both download and forward name
 # these permanent failures. group_admin_required distinguishes group send
-# permissions from deployment policy. Every other failure keeps the status map.
-_BRIDGE_NAMED_CODES = frozenset({"media_unavailable", MEDIA_REFUSED_CODE, "group_admin_required"})
+# permissions from deployment policy. media_retry_backoff is a download whose
+# media retry failed recently: the bridge will not ask the phone again yet
+# (issue #743). Every other failure keeps the status map.
+_BRIDGE_NAMED_CODES = frozenset(
+    {"media_unavailable", MEDIA_REFUSED_CODE, "group_admin_required", "media_retry_backoff"}
+)
 
 
 def _bridge_error_code(status: int) -> str:
@@ -4486,6 +4490,13 @@ def _bridge_json(response) -> dict[str, Any]:
             )
         named = error_body.get("code")
         code = named if named in _BRIDGE_NAMED_CODES else _bridge_error_code(response.status_code)
+        if code == "media_retry_backoff":
+            retry_after = str(getattr(response, "headers", {}).get("Retry-After", ""))
+            raise ToolError(
+                code,
+                message or "media retry cooling down",
+                retry_after_s=int(retry_after) if retry_after.isdigit() else None,
+            )
         raise ToolError(code, message or f"bridge answered HTTP {response.status_code}")
     if "success" in payload and not payload.get("success"):
         raise ToolError("internal", message or "bridge reported failure")
