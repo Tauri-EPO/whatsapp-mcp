@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -47,6 +48,11 @@ const (
 	// fetched (or was dropped because we left it) is left alone: it neither
 	// consumes a slot of the sync batch nor accepts message-derived rows.
 	groupRosterRetryAfter = 6 * time.Hour
+	// groupRosterGoneRetryAfter is the wait after WhatsApp answered that this
+	// account is not in the group, or that the group no longer exists. That
+	// answer does not change by itself: being added back clears it at once
+	// (handleEvent), and a weekly try covers a missed notification (#746).
+	groupRosterGoneRetryAfter = 7 * 24 * time.Hour
 )
 
 // resolveGroupRosterSync parses groupRosterSyncEnv. Zero disables the pass;
@@ -71,19 +77,38 @@ func groupRosterSyncSummary(interval time.Duration) string {
 type rosterFailures struct {
 	mu   sync.Mutex
 	last map[string]time.Time
+	// gone holds, per group WhatsApp says we are not in, when to try again.
+	gone map[string]time.Time
 }
 
-func newRosterFailures() *rosterFailures { return &rosterFailures{last: map[string]time.Time{}} }
+func newRosterFailures() *rosterFailures {
+	return &rosterFailures{last: map[string]time.Time{}, gone: map[string]time.Time{}}
+}
 
-// recent reports whether jid failed within the last `within`.
+// recent reports whether jid failed within the last `within`, or is a group
+// this account is not in until its longer wait passes.
 func (f *rosterFailures) recent(jid string, now time.Time, within time.Duration) bool {
 	if f == nil {
 		return false
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if until, ok := f.gone[jid]; ok && now.Before(until) {
+		return true
+	}
 	at, ok := f.last[jid]
 	return ok && now.Sub(at) < within
+}
+
+// noteGone records that WhatsApp answered jid is not ours to read.
+func (f *rosterFailures) noteGone(jid string, now time.Time) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.last[jid] = now
+	f.gone[jid] = now.Add(groupRosterGoneRetryAfter)
 }
 
 func (f *rosterFailures) note(jid string, now time.Time) {
@@ -102,6 +127,7 @@ func (f *rosterFailures) forget(jid string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.last, jid)
+	delete(f.gone, jid)
 }
 
 // storeGroupRoster caches one freshly fetched participant list and reports how
@@ -226,6 +252,9 @@ func (b *Bridge) applyGroupParticipantChangesWithPolicy(policy chatPolicyResolve
 	now := time.Now()
 
 	if len(v.Join) > 0 {
+		if b.leftGroup(v.Join) {
+			b.rosterFailures.forget(group) // added back: the roster is ours to read again
+		}
 		if err := b.Store.AddGroupMembers(group, groupMemberEventRows(b.currentClient(), v.Join), now); err != nil {
 			b.Log.Warnf("Failed to record joins in %s: %v", group, err)
 		}
@@ -393,6 +422,14 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 // stays stale forever and has to be backed off like any other failure.
 func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed types.JID, now time.Time) bool {
 	written, err := b.fetchGroupRoster(ctx, jid, parsed)
+	if errors.Is(err, whatsmeow.ErrNotInGroup) || errors.Is(err, whatsmeow.ErrGroupNotFound) {
+		// A group this account left, or one that was deleted: its chat stays
+		// in the archive, so it is stale forever. Expected, not a warning,
+		// and not worth asking WhatsApp again every six hours (#746).
+		b.Log.Debugf("Group roster sync: skipping %s for %s: %v", jid, groupRosterGoneRetryAfter, err)
+		b.rosterFailures.noteGone(jid, now)
+		return false
+	}
 	if err != nil {
 		b.Log.Warnf("Group roster sync: failed to store %s: %v", jid, err)
 		b.rosterFailures.note(jid, now)
