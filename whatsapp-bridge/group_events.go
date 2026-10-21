@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -47,6 +48,11 @@ const (
 	// fetched (or was dropped because we left it) is left alone: it neither
 	// consumes a slot of the sync batch nor accepts message-derived rows.
 	groupRosterRetryAfter = 6 * time.Hour
+	// groupRosterGoneRetryAfter is the wait after WhatsApp answered that this
+	// account is not in the group, or that the group no longer exists. That
+	// answer does not change by itself: being added back clears it at once
+	// (handleEvent), and a weekly try covers a missed notification (#746).
+	groupRosterGoneRetryAfter = 7 * 24 * time.Hour
 )
 
 // resolveGroupRosterSync parses groupRosterSyncEnv. Zero disables the pass;
@@ -69,39 +75,92 @@ func groupRosterSyncSummary(interval time.Duration) string {
 // roster was dropped, so it is permanently "stale" and sorts first — would
 // consume a slot of every batch forever and push real work past the cap.
 type rosterFailures struct {
-	mu   sync.Mutex
-	last map[string]time.Time
+	mu sync.Mutex
+	// waits holds, per group, when its backoff began and when it ends.
+	waits map[string]rosterWait
+	// back holds when the account was last seen in the group again, so an
+	// answer to a fetch sent before that cannot put it back in the long wait.
+	back map[string]time.Time
 }
 
-func newRosterFailures() *rosterFailures { return &rosterFailures{last: map[string]time.Time{}} }
+func newRosterFailures() *rosterFailures {
+	return &rosterFailures{waits: map[string]rosterWait{}, back: map[string]time.Time{}}
+}
 
-// recent reports whether jid failed within the last `within`.
-func (f *rosterFailures) recent(jid string, now time.Time, within time.Duration) bool {
+type rosterWait struct{ since, until time.Time }
+
+// recent reports whether jid is still backed off at now.
+func (f *rosterFailures) recent(jid string, now time.Time) bool {
 	if f == nil {
 		return false
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	at, ok := f.last[jid]
-	return ok && now.Sub(at) < within
+	wait, ok := f.waits[jid]
+	if ok && !now.Before(wait.until) {
+		delete(f.waits, jid)
+		return false
+	}
+	return ok
 }
 
+// note backs jid off after a failure that may pass on its own.
 func (f *rosterFailures) note(jid string, now time.Time) {
-	if f == nil {
-		return
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.last[jid] = now
+	f.wait(jid, now, now.Add(groupRosterRetryAfter))
 }
 
-func (f *rosterFailures) forget(jid string) {
+// noteGone backs jid off after WhatsApp answered that this account is not in
+// it, unless the account was seen back in the group after asked, the moment
+// the question went out.
+func (f *rosterFailures) noteGone(jid string, asked, now time.Time) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	back, ok := f.back[jid]
+	if ok && !back.Before(asked) {
+		f.mu.Unlock()
+		return
+	}
+	delete(f.back, jid)
+	f.mu.Unlock()
+	f.wait(jid, now, now.Add(groupRosterGoneRetryAfter))
+}
+
+func (f *rosterFailures) wait(jid string, since, until time.Time) {
 	if f == nil {
 		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.last, jid)
+	f.waits[jid] = rosterWait{since: since, until: until}
+}
+
+// forget ends jid's backoff after a fetch succeeded or the account was seen
+// in the group again at now.
+func (f *rosterFailures) forget(jid string, now time.Time) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.waits, jid)
+	f.back[jid] = now
+}
+
+// forgetIfAfter ends jid's backoff when evidence dated at, such as a message
+// this account sent there, is newer than the backoff: a message queued before
+// a departure and delivered after it must not reopen the group.
+func (f *rosterFailures) forgetIfAfter(jid string, at, now time.Time) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	wait, ok := f.waits[jid]
+	f.mu.Unlock()
+	if ok && at.After(wait.since) {
+		f.forget(jid, now)
+	}
 }
 
 // storeGroupRoster caches one freshly fetched participant list and reports how
@@ -113,7 +172,13 @@ func (b *Bridge) storeGroupRoster(groupJID string, members []GroupMember, at tim
 	if b.Store == nil {
 		return 0, nil
 	}
-	return b.Store.ReplaceGroupRoster(groupJID, b.resolveRosterRows(groupMemberRows(members)), at)
+	written, err := b.Store.ReplaceGroupRoster(groupJID, b.resolveRosterRows(groupMemberRows(members)), at)
+	if err == nil && written > 0 {
+		// WhatsApp just answered with this group's members: we are in it,
+		// whichever caller asked (#746).
+		b.rosterFailures.forget(groupJID, time.Now())
+	}
+	return written, err
 }
 
 // resolveRosterRows re-keys the members the group IQ addressed by LID only.
@@ -212,6 +277,11 @@ func (b *Bridge) applyGroupParticipantChanges(v *events.GroupInfo) {
 
 func (b *Bridge) applyGroupParticipantChangesWithPolicy(policy chatPolicyResolver, v *events.GroupInfo) {
 	group := v.JID.String()
+	if len(v.Join) > 0 && b.leftGroup(v.Join) {
+		// Added back: the roster is ours to read again, also for a group the
+		// allow-list excludes now and may include later (#746).
+		b.rosterFailures.forget(group, time.Now())
+	}
 	// A group the operator excluded gets no cached membership at all, on any
 	// feed: the allow-list is about which conversations this deployment may
 	// hold, not only which ones it may write to.
@@ -242,8 +312,8 @@ func (b *Bridge) applyGroupParticipantChangesWithPolicy(policy chatPolicyResolve
 			// delivered afterwards; without this the message feed would put
 			// rows straight back, and they could never be reconciled because
 			// GetGroupInfo now fails for the group. Recording the drop as a
-			// failure blocks both that feed and the next sync batch.
-			b.rosterFailures.note(group, now)
+			// departure blocks both that feed and the sync for a week (#746).
+			b.rosterFailures.noteGone(group, now, now)
 			return
 		}
 		// v.Timestamp, not `now`: WhatsApp re-delivers unacked notifications
@@ -315,7 +385,12 @@ func (b *Bridge) noteGroupSender(policy chatPolicyResolver, chatJID string, send
 	if b.Store == nil || !isGroupJID(chatJID) || !policy.effective(b.ctx).Allows(chatJID) {
 		return
 	}
-	if b.rosterFailures.recent(chatJID, now, groupRosterRetryAfter) {
+	if b.leftGroup([]types.JID{sender}) {
+		// This account wrote in the group after the backoff began, so it is
+		// a member again (#746).
+		b.rosterFailures.forgetIfAfter(chatJID, now, time.Now())
+	}
+	if b.rosterFailures.recent(chatJID, now) {
 		return
 	}
 	row, ok := groupMemberRowFromJID(b.currentClient(), sender)
@@ -359,7 +434,7 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 		if ctx.Err() != nil || (b.Connected != nil && !b.Connected()) {
 			return refreshed, true
 		}
-		if !policy.Allows(jid) || b.rosterFailures.recent(jid, now, groupRosterRetryAfter) {
+		if !policy.Allows(jid) || b.rosterFailures.recent(jid, now) {
 			continue
 		}
 		parsed, err := types.ParseJID(jid)
@@ -392,7 +467,16 @@ func (b *Bridge) syncGroupRosters(ctx context.Context, now time.Time, limit int,
 // no usable participant leaves the group with no source="roster" row, so it
 // stays stale forever and has to be backed off like any other failure.
 func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed types.JID, now time.Time) bool {
+	asked := time.Now()
 	written, err := b.fetchGroupRoster(ctx, jid, parsed)
+	if errors.Is(err, whatsmeow.ErrNotInGroup) || errors.Is(err, whatsmeow.ErrGroupNotFound) {
+		// A group this account left, or one that was deleted: its chat stays
+		// in the archive, so it is stale forever. Expected, not a warning,
+		// and not worth asking WhatsApp again every six hours (#746).
+		b.Log.Debugf("Group roster sync: skipping %s for %s: %v", jid, groupRosterGoneRetryAfter, err)
+		b.rosterFailures.noteGone(jid, asked, now)
+		return false
+	}
 	if err != nil {
 		b.Log.Warnf("Group roster sync: failed to store %s: %v", jid, err)
 		b.rosterFailures.note(jid, now)
@@ -403,8 +487,7 @@ func (b *Bridge) refreshGroupRoster(ctx context.Context, jid string, parsed type
 		b.rosterFailures.note(jid, now)
 		return false
 	}
-	b.rosterFailures.forget(jid)
-	return true
+	return true // storeGroupRoster ended the backoff
 }
 
 // fetchGroupRoster does no backoff accounting: event-triggered refreshes

@@ -501,8 +501,11 @@ func TestDownloadMediaUnavailableExplainsOnlyExpiredLinks(t *testing.T) {
 						t.Errorf("error %q lacks %q", err, want)
 					}
 				}
-			} else if want := "failed to download media: " + tc.retryErr.Error(); err.Error() != want {
+			} else if want := "failed to download media: " + tc.retryErr.Error(); errors.Is(tc.retryErr, errMediaUnavailable) && err.Error() != want {
 				t.Errorf("error = %q, want unchanged %q", err, want)
+			} else if !errors.Is(tc.retryErr, errMediaUnavailable) && !strings.HasPrefix(err.Error(), want+"; the sender's phone will not be asked again before ") {
+				// A transient failure gains when the phone is asked next (#743).
+				t.Errorf("error = %q, want %q plus the cooldown", err, want)
 			}
 			for _, secret := range []string{"SECRETTOKEN", "SECRETFILENAME", path, mediaCDNHost} {
 				if strings.Contains(err.Error(), secret) {

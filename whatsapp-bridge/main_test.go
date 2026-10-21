@@ -651,6 +651,7 @@ func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.Policy = b.runtimeChatPolicy(chatPolicy{})
 	b.DownloadMedia = b.downloadMedia
+	b.mediaRetryCooldown = newMediaRetryCooldown()
 	b.autoDownloads = newMediaJobQueue(b.ctx, autoDownloadWorkers, autoDownloadQueue, b.runAutoDownload)
 	b.LabelResyncTimeout = actionDeadline
 	b.LabelResync = func(context.Context) error { return nil }

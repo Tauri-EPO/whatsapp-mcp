@@ -81,6 +81,7 @@ def test_codes_are_documented():
         "bridge_unavailable",
         "media_unavailable",
         "media_refused",
+        "media_retry_backoff",
         "invalid_argument",
         "conflict",
         "too_large",
