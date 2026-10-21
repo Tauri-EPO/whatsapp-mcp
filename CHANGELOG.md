@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.9.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.0...v2.9.1) (2026-10-21)
+
+
+### Bug fixes
+
+* stop asking every six hours about groups this account left ([#747](https://github.com/Tauri-EPO/whatsapp-mcp/issues/747)) ([ae204a9](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ae204a907e3320626b69e0458e78f717a8028b13))
+* stop repeating failed media retries against the owner's phone ([#744](https://github.com/Tauri-EPO/whatsapp-mcp/issues/744)) ([38ba30c](https://github.com/Tauri-EPO/whatsapp-mcp/commit/38ba30cdde8a97804b093bc8b2cf0ffe00bdc95d))
+
+
+### Dependencies
+
+* bump pillow from 12.3.0 to 13.0.0 in /whatsapp-mcp-server in the pip-security-updates group across 1 directory ([#749](https://github.com/Tauri-EPO/whatsapp-mcp/issues/749)) ([3f3a6d6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3f3a6d66ca41feaed35701430ee8db495abbf0c8))
+* bump the gomod-version-updates group in /whatsapp-bridge with 3 updates ([#740](https://github.com/Tauri-EPO/whatsapp-mcp/issues/740)) ([1a511f6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1a511f67d50f81534efa3d6ed1a749452135576b))
+* bump the pip-version-updates group in /whatsapp-mcp-server with 2 updates ([#741](https://github.com/Tauri-EPO/whatsapp-mcp/issues/741)) ([f8fb806](https://github.com/Tauri-EPO/whatsapp-mcp/commit/f8fb8069f78fd1da8297a65a325411729e0e4a1f))
+
 ## [2.9.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.8.0...v2.9.0) (2026-10-15)
 
 
