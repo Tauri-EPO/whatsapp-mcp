@@ -97,6 +97,15 @@ ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
 BATCH_ENV = "TRANSCRIBE_ON_INGEST_BATCH"
 FETCH_ENV = "TRANSCRIBE_ON_INGEST_FETCH"
+# The instant sent voice notes started counting (issue #751). Turning sent audio
+# on, an upgrade where it defaults on included, must not send the stored history
+# of sent audio to the provider in one go: only sent audio at or after this
+# instant joins the work list. notes.db keeps it (notes_meta) from the first
+# start whose worker runs with sent audio on, so a restart or a recreated
+# container on the same store does not move it. A start with sent audio off, or
+# with the worker off, clears it, and the next start with it on records a new
+# one: it only moves forward, and the time it was off never joins the list.
+SENT_SINCE_KEY = "ingest_sent_since"
 
 # The tools this worker is: it transcribes like `transcribe_audio` and fetches
 # like `download_media` (DOWNLOAD_TOOL, shared with the tools that fetch
@@ -167,6 +176,8 @@ class IngestConfig:
     batch: int
     fetch: bool = False
     include_sent: bool = True
+    # The instant above, in the stored timestamp spelling; None counts no sent audio.
+    sent_since: str | None = None
 
 
 _ingest_config: IngestConfig | None = None
@@ -252,8 +263,50 @@ def ingest_config() -> IngestConfig:
     """The startup snapshot shared by coverage and every worker batch."""
     global _ingest_config
     if _ingest_config is None:
-        _ingest_config = load_ingest_config()
+        _ingest_config = replace(load_ingest_config(), sent_since=_stored_sent_since())
     return _ingest_config
+
+
+def _canonical_instant(stored: str) -> str:
+    """A stored instant in the timestamp spelling; ValueError when it is not one."""
+    return whatsapp.timestamp_bound(whatsapp.parse_db_time(stored))
+
+
+def _stored_sent_since() -> str | None:
+    """The recorded instant, read only: a process that did not start the worker records nothing."""
+    try:
+        stored = media_notes.read_meta(SENT_SINCE_KEY)
+        return None if stored is None else _canonical_instant(stored)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
+    """Keep, record or clear the instant sent audio counts from, and make it the startup snapshot."""
+    global _ingest_config
+    if running and config.include_sent:
+        now = whatsapp.timestamp_bound(datetime.now(UTC))
+        try:
+            since = media_notes.claim_meta(SENT_SINCE_KEY, now)
+            try:
+                since = _canonical_instant(since)
+            except ValueError:
+                since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
+        except (sqlite3.Error, OSError) as exc:
+            # Never the stored history: this process counts sent audio from its own start.
+            logger.warning("could not record when sent audio started counting (%s); counting from %s", exc, now)
+            since = now
+        config = replace(config, sent_since=since)
+    else:
+        try:
+            media_notes.forget_meta(SENT_SINCE_KEY)
+        except (sqlite3.Error, OSError) as exc:
+            # Every start without the worker gets here; a notes.db that cannot be
+            # opened is reported by its own warning, and holds no instant to read.
+            logger.info("could not clear when sent audio started counting: %s", exc)
+        config = replace(config, sent_since=None)
+    _ingest_config = config
+    return config
 
 
 def _parse_interval(raw: str | None) -> float:
@@ -963,6 +1016,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     config = load_ingest_config(env)
     _ingest_config = config
     if not config.enabled:
+        _settle_sent_since(config, running=False)
         return None
     policy = load_tool_policy(env)
     if not policy.allows(TRANSCRIBE_TOOL):
@@ -979,6 +1033,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
             TRANSCRIBE_TOOL,
         )
         if not runtime_policy_enabled():
+            _settle_sent_since(config, running=False)
             return None
     if config.fetch and not policy.allows(DOWNLOAD_TOOL):
         logger.warning(
@@ -996,7 +1051,9 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         logger.warning(
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV
         )
+        _settle_sent_since(config, running=False)
         return None
+    config = _settle_sent_since(config, running=True)
     clear_outage_failures()
     clear_oversized_failures()
     logger.info(
@@ -1006,7 +1063,6 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         config.interval_s,
         "configured HTTP provider" if backend_config.provider == "openai_compatible" else "whisper on this machine",
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
-        ", including sent audio" if config.include_sent else ", inbound audio only",
+        f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
     )
-    _ingest_config = config
     return start_worker(config)

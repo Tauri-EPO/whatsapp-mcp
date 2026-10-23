@@ -425,7 +425,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
 | `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe received and sent voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
-| `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` | `true` | On upgrade with `TRANSCRIBE_ON_INGEST=1`, also transcribe existing sent-audio history and linked-device sync. A remote provider receives that audio and consumes the configured monthly cap; `TRANSCRIBE_ON_INGEST_FETCH=1` downloads uncached sent audio too. Set false and restart to keep inbound-only transcription. Strict boolean parsing; empty uses the default. Worker and `coverage().audio` use the same startup snapshot and chat/status/quota restrictions. |
+| `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` | `true` | With `TRANSCRIBE_ON_INGEST=1`, also transcribe sent audio, linked-device sync included, from the instant the worker first started with this on. Sent audio stored before that instant is never queued (`transcribe_audio` still transcribes it on demand). The instant is kept in `notes.db` across restarts; a start with this off clears it, so turning it back on counts from that later start. A remote provider receives that audio and consumes the configured monthly cap; `TRANSCRIBE_ON_INGEST_FETCH=1` downloads uncached sent audio too. Set false and restart to keep inbound-only transcription. Strict boolean parsing; empty uses the default. Worker and `coverage().audio` use the same startup snapshot and chat/status/quota restrictions. |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` or `direct` (phone/LID one-to-one chats only). Set for both processes. Worker and `coverage().audio` share this scope; explicit group `transcribe_audio` remains available. Runtime key `transcription.ingest_chats` overrides it. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
@@ -1302,13 +1302,24 @@ keys `transcribe_audio` writes (`transcript`, `transcript_lang`,
 include_transcripts=true)`, `get_media_notes` and `search_media_notes` read them
 back for free.
 
-Sent audio is included by default. **Upgrading a deployment with
-`TRANSCRIBE_ON_INGEST=1` starts transcribing its existing sent-audio history,
-including audio sent from another linked device and received through sync.**
-With a remote provider, that audio is sent to the provider and consumes the
-configured monthly cap. With `TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio
-is also downloaded through the bridge. Existing sent rows without transcripts
-join the normal backlog automatically. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
+Sent audio is included by default, **from the moment the worker first runs
+with it on**. The first start of the worker with
+`TRANSCRIBE_ON_INGEST_INCLUDE_SENT` on (for an existing deployment, the upgrade
+that brings this rule) records that instant in `notes.db` (`notes_meta`, key
+`ingest_sent_since`); restarts and recreated containers that keep the store
+volume keep it. Sent voice notes stamped at or after it, including audio sent
+from another linked device and received through sync, join the backlog. **The
+sent-audio history stored before it never does**, so an upgrade does not upload
+months of your own voice notes to a remote provider or spend the monthly cap on
+them; rows a history sync brings in later keep their original timestamps and
+stay out the same way. `transcribe_audio` still transcribes any of them on
+demand. A start with the option off, with `TRANSCRIBE_ON_INGEST` off or with a
+worker that cannot start clears the instant, and the next start with it on
+records a new one: the time it was off never joins the backlog, and the instant
+never moves back (issue #751). With a remote provider, sent audio is sent to the
+provider and consumes the configured monthly cap. With
+`TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio after the instant is also
+downloaded through the bridge. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
 keeps only inbound audio after restart; empty uses the default, and invalid
 boolean values stop startup. The option is resolved once at startup for both
 the worker and coverage. The chat filter, status exclusion and monthly quota apply to both
