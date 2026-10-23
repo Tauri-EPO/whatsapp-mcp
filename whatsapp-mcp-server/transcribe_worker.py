@@ -301,7 +301,9 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
         try:
             media_notes.forget_meta(SENT_SINCE_KEY)
         except (sqlite3.Error, OSError) as exc:
-            logger.warning("could not clear when sent audio started counting: %s", exc)
+            # Every start without the worker gets here; a notes.db that cannot be
+            # opened is reported by its own warning, and holds no instant to read.
+            logger.info("could not clear when sent audio started counting: %s", exc)
         config = replace(config, sent_since=None)
     _ingest_config = config
     return config
