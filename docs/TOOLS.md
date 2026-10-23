@@ -463,7 +463,7 @@ allow-list as the numbers above:
 
 | Field | Meaning |
 | --- | --- |
-| `messages` | Received and sent voice notes stored in scope (`TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false` excludes sent rows). Deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it. So is the status feed (`status@broadcast`): the ingest worker does not walk it, and `transcribe_audio` on a status voice note still works |
+| `messages` | Received and sent voice notes stored in scope; sent ones only from the instant the ingest worker first ran with `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` on, and none when it is false or no running worker recorded that instant. Deleted and hashless rows are excluded — a row with no content hash cannot be keyed to a transcript, so no batch can ever drain it. So is the status feed (`status@broadcast`): the ingest worker does not walk it, and `transcribe_audio` on a status voice note still works |
 | `cached` | Of those, the ones whose bytes are on disk under the store directory |
 | `transcribed` | Rows whose content hash already carries a `transcript` note |
 | `errors` | Rows whose hash carries a `transcript_error` note: the backend read the file and could not transcribe it, and the worker will not retry until the note is cleared. A backend that was unreachable writes no note, so an outage does not show up here |

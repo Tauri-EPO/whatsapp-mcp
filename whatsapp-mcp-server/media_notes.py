@@ -510,6 +510,44 @@ def clear_dated_notes_with_prefix(key: str, prefix: str) -> int:
     return deleted
 
 
+def read_meta(key: str) -> str | None:
+    """A notes_meta value, or None when it (or notes.db itself) is not there."""
+    conn = _connect(create=False)
+    if conn is None:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else str(row[0])
+
+
+def claim_meta(key: str, value: str, *, replace: bool = False) -> str:
+    """The stored value of key, storing ``value`` first when there is none (or always, with replace)."""
+    conn = _connect(create=True)
+    assert conn is not None
+    try:
+        with conn:
+            conflict = "DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"
+            conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
+            row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
+    finally:
+        conn.close()
+    return str(row[0])
+
+
+def forget_meta(key: str) -> None:
+    """Delete a notes_meta value; no notes.db means there is nothing to forget."""
+    conn = _connect(create=False)
+    if conn is None:
+        return
+    try:
+        with conn:
+            conn.execute("DELETE FROM notes_meta WHERE key = ?", (key,))
+    finally:
+        conn.close()
+
+
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     """Set (or, with an empty value, delete) one note on a visible hash."""
     sha = normalize_sha256(sha256)

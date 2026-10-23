@@ -5544,11 +5544,17 @@ def ingest_include_sent(env: Mapping[str, str] | None = None) -> bool:
 
 
 def ingest_sent_clause(alias: str, include_sent: bool | None = None) -> str:
-    if include_sent is None:
-        from transcribe_worker import ingest_config
+    """Inbound audio, plus sent audio from the instant it started counting (issue #751)."""
+    inbound = f"{alias}.is_from_me = 0"
+    if include_sent is False:
+        return inbound
+    from transcribe_worker import ingest_config
 
-        include_sent = ingest_config().include_sent
-    return "1" if include_sent else f"{alias}.is_from_me = 0"
+    config = ingest_config()
+    if not (config.include_sent if include_sent is None else include_sent) or config.sent_since is None:
+        return inbound
+    # sent_since is a parsed instant rendered by timestamp_bound, never caller input.
+    return f"({inbound} OR {alias}.timestamp >= '{config.sent_since}')"
 
 
 def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any]) -> dict[str, int]:
