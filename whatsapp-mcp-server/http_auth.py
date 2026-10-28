@@ -217,7 +217,7 @@ async def authentication_unavailable_response(send: Send, cause: str) -> None:
             "type": "http.response.start",
             "status": 503,
             "headers": [
-                (b"content-type", b"application/json"),
+                (b"content-type", b"application/json; charset=utf-8"),
                 (b"content-length", str(len(body)).encode("ascii")),
                 (b"cache-control", b"no-store"),
             ],
@@ -270,7 +270,7 @@ class BearerTokenMiddleware:
                 "type": "http.response.start",
                 "status": 401,
                 "headers": [
-                    (b"content-type", b"application/json"),
+                    (b"content-type", b"application/json; charset=utf-8"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"www-authenticate", f'Bearer realm="{REALM}"'.encode("ascii")),
                     (b"cache-control", b"no-store"),
@@ -398,6 +398,40 @@ def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
     return peer
 
 
+_CHARSET_TYPES = (b"application/json", b"text/event-stream")
+
+
+class Utf8CharsetMiddleware:
+    """Declare `charset=utf-8` on JSON and SSE responses that omit it (issue #758).
+
+    The bodies are UTF-8, but the SDK transport and some of our own replies send a
+    bare `text/event-stream` / `application/json`; a client or proxy that falls back
+    to ISO-8859-1 for a missing charset turns `histórico` into `histÃ³rico`. Only the
+    `http.response.start` headers change; the body passes through untouched."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_charset(message: MutableMapping[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = []
+                for name, value in message.get("headers", []):
+                    if name.lower() == b"content-type":
+                        media_type = value.split(b";", 1)[0].strip().lower()
+                        if media_type in _CHARSET_TYPES and b"charset=" not in value.lower():
+                            value = value + b"; charset=utf-8"
+                    headers.append((name, value))
+                message = dict(message, headers=headers)
+            await send(message)
+
+        await self.app(scope, receive, send_with_charset)
+
+
 class ForwardedSchemeMiddleware:
     """Preserve a trusted proxy's scheme without replacing the socket peer."""
 
@@ -496,7 +530,7 @@ class RateLimitMiddleware:
                 "type": "http.response.start",
                 "status": 429,
                 "headers": [
-                    (b"content-type", b"application/json"),
+                    (b"content-type", b"application/json; charset=utf-8"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"retry-after", str(retry_after).encode("ascii")),
                     (b"cache-control", b"no-store"),
