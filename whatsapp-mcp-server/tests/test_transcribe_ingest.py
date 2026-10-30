@@ -596,7 +596,7 @@ def test_reset_marker_failure_warns_and_keeps_inbound_worker_alive(paired_dbs, m
         raise OSError("An MCP-owned file must not be a symlink")
 
     monkeypatch.setattr(media_notes, "forget_meta", busy)
-    monkeypatch.setattr(transcribe_worker, "_open_fd", refuse)
+    monkeypatch.setattr(transcribe_worker, "private_open", refuse)
     transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
     assert len(installed) == 1 and installed[0].sent_since is None
     assert _stored_since() == SENT_SINCE
@@ -609,7 +609,7 @@ def test_successful_or_absent_clear_never_writes_reset_marker(paired_dbs, monkey
         media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
     else:
         media_notes.claim_meta("unrelated", "value")
-    monkeypatch.setattr(transcribe_worker, "_open_fd", lambda *a, **kw: pytest.fail("unnecessary marker write"))
+    monkeypatch.setattr(transcribe_worker, "private_open", lambda *a, **kw: pytest.fail("unnecessary marker write"))
     config = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
     assert config is not None and config.sent_since is None
     assert _stored_since() is None

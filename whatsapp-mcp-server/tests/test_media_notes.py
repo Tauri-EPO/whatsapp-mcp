@@ -456,3 +456,15 @@ def test_reset_ack_failure_rolls_back_the_new_instant(tmp_path, monkeypatch):
         media_notes.claim_meta("instant", "new", reset_token="reset-token")
     assert media_notes.read_meta("instant") == "old"
     assert media_notes.read_meta("instant:reset") is None
+
+
+def test_metadata_delete_uses_escaped_existing_database_uri(tmp_path, monkeypatch):
+    path = tmp_path / "notes with # and ? mark.db" if os.name != "nt" else tmp_path / "notes with # mark.db"
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
+    media_notes.claim_meta("instant", "value")
+    media_notes.forget_meta("instant")
+    assert media_notes.read_meta("instant") is None
+    missing = str(tmp_path / "missing.db")
+    with pytest.raises(sqlite3.OperationalError):
+        sqlite3.connect(whatsapp._read_write_uri(missing), uri=True)
+    assert not os.path.exists(missing)

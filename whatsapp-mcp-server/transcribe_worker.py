@@ -77,7 +77,7 @@ import whatsapp
 from chat_policy import policy_operation
 from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
-from private_files import _open_fd
+from private_files import private_open
 from runtime_settings import INGEST_CHATS_ENV, ingest_chat_clause, parse_ingest_chats
 from tool_policy import (
     ALLOW_TOOLS_ENV,
@@ -182,6 +182,9 @@ class IngestConfig:
     backend_provider: str = "whisper_cpp"
     # The instant above, in the stored timestamp spelling; None counts no sent audio.
     sent_since: str | None = None
+    # Keep lifecycle flags in the same frozen value so publication/readers and
+    # deferred/retry transitions stay atomic; splitting requires a second state
+    # object across every installer, loop and coverage consumer.
     worker_running: bool = False
     sent_claim_pending: bool = False
     sent_reset_token: str | None = None
@@ -380,12 +383,10 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             # Only a failed clear needs durable recovery. An absent instant or
             # a successful DELETE must not create/fsync a marker at all.
             try:
-                fd = _open_fd(str(reset), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, "sent audio reset marker")
-                try:
-                    os.write(fd, uuid4().hex.encode("ascii"))
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
+                with private_open(str(reset), "w", encoding="ascii") as marker:
+                    marker.write(uuid4().hex)
+                    marker.flush()
+                    os.fsync(marker.fileno())
             except OSError:
                 logger.warning("could not persist the sent audio reset; continuing with inbound audio only")
         else:

@@ -167,6 +167,11 @@ def _read_only_uri(path: str) -> str:
     return pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=ro"
 
 
+def _read_write_uri(path: str) -> str:
+    """An escaped URI for an existing writable database; never create a missing file."""
+    return pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=rw"
+
+
 def _connect_read_only(path: str) -> sqlite3.Connection:
     """A connection that cannot write to the database at ``path`` and never creates it.
 

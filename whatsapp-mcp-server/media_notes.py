@@ -25,7 +25,6 @@ import re
 import sqlite3
 from collections.abc import Generator, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import whatsapp
@@ -573,7 +572,7 @@ def forget_meta(key: str) -> None:
         if not os.path.exists(path):
             return
         check_notes_paths(path)
-        conn = sqlite3.connect(Path(path).as_uri() + "?mode=rw", uri=True, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
+        conn = sqlite3.connect(whatsapp._read_write_uri(path), uri=True, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notes_meta'").fetchone():
             return
         if not conn.execute("SELECT 1 FROM notes_meta WHERE key=?", (key,)).fetchone():
