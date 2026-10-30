@@ -11,13 +11,15 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "bandit-summary.py"
 
 
-def test_only_redundant_b608_diagnostics_are_filtered(tmp_path):
+def test_only_redundant_ast_diagnostics_are_filtered(tmp_path):
     report = tmp_path / "bandit.json"
     report.write_text('{"results": [], "errors": []}', encoding="utf-8")
     log = tmp_path / "bandit.log"
     log.write_text(
         "[tester]\tWARNING\tnosec encountered (B608), but no failed test on file example.py:2\n"
         "[tester]\tWARNING\tnosec encountered (B104), but no failed test on file example.py:3\n"
+        "[tester]\tWARNING\tnosec encountered (B102), but no failed test on file example.py:4\n"
+        "[tester]\tWARNING\tnosec encountered (B103), but no failed test on file example.py:5\n"
         "[manager]\tWARNING\tTest in comment: reason is not a test name or id, ignoring\n"
         "[tester]\tERROR\tunexpected scanner error\n",
         encoding="utf-8",
@@ -30,7 +32,8 @@ def test_only_redundant_b608_diagnostics_are_filtered(tmp_path):
     )
     assert result.returncode == 0
     assert "B608" not in result.stderr
-    assert "B104" in result.stderr
+    assert "B104" not in result.stderr and "B102" not in result.stderr
+    assert "B103" in result.stderr
     assert "Test in comment" in result.stderr
     assert "unexpected scanner error" in result.stderr
 
