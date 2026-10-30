@@ -92,7 +92,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install bandit
-        run: pip install bandit==1.9.4
+        run: pip install --require-hashes -r .github/requirements/requirements.txt
 
       - name: Run bandit
         run: |
