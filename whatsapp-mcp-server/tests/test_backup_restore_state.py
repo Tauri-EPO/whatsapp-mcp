@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+from tests.bash_helpers import resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = resolve_bash()
-pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason=BASH_SKIP_REASON)
+pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason="backup restore harness needs POSIX bash")
 
 
 @pytest.mark.parametrize("session", ["replacement", "missing", "copy_failure"])

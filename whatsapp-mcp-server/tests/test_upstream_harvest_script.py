@@ -28,7 +28,7 @@ HARVEST = ROOT / "scripts" / "upstream-harvest.sh"
 
 BASH = resolve_bash()
 GIT = shutil.which("git")
-pytestmark = pytest.mark.skipif(BASH is None or GIT is None, reason=BASH_SKIP_REASON)
+pytestmark = pytest.mark.skipif(BASH is None or GIT is None, reason=BASH_SKIP_REASON + "; also needs git")
 
 # What the fake GitHub clock says, and the same instant as a mark spells it.
 GH_DATE = "Wed, 07 Oct 2026 18:45:38 GMT"
