@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_config import resolve_host, resolve_port
+from mcp_config import resolve_host, resolve_port, resolve_socket
 
 BASH = shutil.which("bash")
 if os.name == "nt":
@@ -124,6 +124,8 @@ def test_image_probe_requires_configured_socket_node(tmp_path, whitespace):
             "WHATSAPP_MCP_SOCKET": whitespace + str(path) + whitespace,
         }
 
+        assert resolve_socket(env["WHATSAPP_MCP_SOCKET"], str(tmp_path / "store")) == str(path)
+
         def probe():
             return subprocess.run(command, env=env, capture_output=True, timeout=10).returncode
 
@@ -135,3 +137,65 @@ def test_image_probe_requires_configured_socket_node(tmp_path, whitespace):
         assert probe() == 0
         path.unlink()
         assert probe() != 0  # removing the node must not leave TCP-only healthy
+
+
+@pytest.mark.parametrize(
+    "setting,spelling",
+    [
+        ("host", "\u00a0127.0.0.1\u00a0"),
+        ("host", "１２７.０.０.１"),
+        ("port", "\u00a0{port}\u00a0"),
+        ("port", "fullwidth"),
+        ("port", "_{port}"),
+    ],
+)
+def test_non_ascii_or_invalid_normalization_is_refused_by_resolver_and_probe(setting, spelling):
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    command = json.loads(
+        next(
+            line.strip()[4:]
+            for line in dockerfile.read_text().splitlines()
+            if line.strip().startswith('CMD ["bash", "-c",')
+        )
+    )
+    command[0] = BASH
+    with socket.socket() as tcp:
+        tcp.bind(("127.0.0.1", 0))
+        tcp.listen()
+        port = str(tcp.getsockname()[1])
+        value = "".join(chr(ord(c) + 0xFEE0) for c in port) if spelling == "fullwidth" else spelling.format(port=port)
+        env = {**os.environ, "WHATSAPP_MCP_HOST": "127.0.0.1", "WHATSAPP_MCP_PORT": port}
+        env.pop("WHATSAPP_MCP_SOCKET", None)
+        env["WHATSAPP_MCP_" + setting.upper()] = value
+        resolver = resolve_host if setting == "host" else resolve_port
+        with pytest.raises(ValueError, match="WHATSAPP_MCP_" + setting.upper()):
+            resolver(value)
+        assert subprocess.run(command, env=env, capture_output=True, timeout=10).returncode != 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Unix socket filesystem probe runs on Linux")
+@pytest.mark.parametrize("suffix", ["\u00a0", "８"])
+def test_unicode_socket_filename_is_preserved_by_resolver_and_probe(tmp_path, suffix):
+    path = str(tmp_path / "mcp.sock") + suffix
+    raw = "\r\v\f" + path + "\r\v\f"
+    assert resolve_socket(raw, str(tmp_path / "store")) == path
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    command = json.loads(
+        next(
+            line.strip()[4:]
+            for line in dockerfile.read_text().splitlines()
+            if line.strip().startswith('CMD ["bash", "-c",')
+        )
+    )
+    command[0] = BASH
+    with socket.socket() as tcp, socket.socket(socket.AF_UNIX) as unix:
+        tcp.bind(("127.0.0.1", 0))
+        tcp.listen()
+        unix.bind(path)
+        env = {
+            **os.environ,
+            "WHATSAPP_MCP_HOST": "127.0.0.1",
+            "WHATSAPP_MCP_PORT": str(tcp.getsockname()[1]),
+            "WHATSAPP_MCP_SOCKET": raw,
+        }
+        assert subprocess.run(command, env=env, capture_output=True, timeout=10).returncode == 0

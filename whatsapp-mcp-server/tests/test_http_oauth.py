@@ -1002,7 +1002,7 @@ def test_session_capacity_is_owner_aware(monkeypatch, issuer, foreign_age):
         first = request(client, signed(issuer))
         assert first.status_code == 200
         session = first.headers["mcp-session-id"]
-        activity = manager._server_instances[session]._whatsapp_session_activity
+        activity = manager._server_instances[session].handle_request.activity
         assert isinstance(activity.owner, bytes) and len(activity.owner) == 32
         assert b"Alice" not in activity.owner
         now = http_sessions.monotonic()
@@ -1022,7 +1022,7 @@ def test_static_bearer_owner_hash_distinguishes_tokens():
     from http_sessions import _owner
 
     def owner(token):
-        return _owner({"headers": [(b"authorization", ("Bearer " + token).encode())]})
+        return _owner({"headers": [(b"authorization", ("Bearer " + token).encode())]}, "test-client")
 
     assert owner("fake-token-one") != owner("fake-token-two")
     assert owner("fake-token-one") == owner("fake-token-one")
@@ -1040,8 +1040,23 @@ def test_capacity_prefers_own_session_before_older_foreign_session(monkeypatch, 
     with TestClient(application) as client:
         foreign = request(client, signed(issuer, sub="Bob")).headers["mcp-session-id"]
         own = request(client, signed(issuer)).headers["mcp-session-id"]
-        manager._server_instances[foreign]._whatsapp_session_activity.last_active = http_sessions.monotonic() - 2000
+        manager._server_instances[foreign].handle_request.activity.last_active = http_sessions.monotonic() - 2000
         response = request(client, signed(issuer))
         assert response.status_code == 200
         assert foreign in manager._server_instances
         assert own not in manager._server_instances
+
+
+def test_same_oauth_subject_with_distinct_client_ids_has_separate_slots(monkeypatch, issuer):
+    configure(monkeypatch, issuer)
+    server = StrictArgumentServer("fake")
+    application = build_http_app(server, "streamable-http", STATIC, host="0.0.0.0", json_response=True, max_sessions=1)
+    manager = server._lowlevel_server.session_manager
+    with TestClient(application) as client:
+        first = request(client, signed(issuer, client_id="fake-client-one"))
+        assert first.status_code == 200
+        session = first.headers["mcp-session-id"]
+        assert request(client, signed(issuer, client_id="fake-client-two")).status_code == 503
+        assert session in manager._server_instances
+        assert request(client, signed(issuer, client_id="fake-client-one")).status_code == 200
+        assert session not in manager._server_instances

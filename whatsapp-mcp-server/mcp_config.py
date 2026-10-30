@@ -2,6 +2,7 @@
 
 import errno
 import os
+import re
 import socket
 import stat
 from pathlib import Path
@@ -15,6 +16,7 @@ TRANSPORT_ALIASES = {
     "streamable_http": "streamable-http",
     "sse": "sse",
 }
+ASCII_WHITESPACE = " \t\n\r\v\f"
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8000
 DEFAULT_SESSION_IDLE_TIMEOUT_S = 86400
@@ -39,7 +41,10 @@ def resolve_transport(value: str | None) -> str:
 
 def resolve_host(value: str | None) -> str:
     """Parse WHATSAPP_MCP_HOST, defaulting to DEFAULT_MCP_HOST."""
-    return (value or "").strip() or DEFAULT_MCP_HOST
+    host = (value or "").strip(ASCII_WHITESPACE) or DEFAULT_MCP_HOST
+    if not host.isascii():
+        raise ValueError("Invalid WHATSAPP_MCP_HOST; use an ASCII bind address or hostname")
+    return host
 
 
 def resolve_port(value: str | None) -> int:
@@ -48,10 +53,12 @@ def resolve_port(value: str | None) -> int:
     Unset or whitespace-only values default to DEFAULT_MCP_PORT.
     Raises ValueError for non-integer or out-of-range values.
     """
-    value = (value or "").strip()
+    value = (value or "").strip(ASCII_WHITESPACE)
     if not value:
         return DEFAULT_MCP_PORT
     try:
+        if re.fullmatch(r"[+-]?[0-9]+(?:_[0-9]+)*", value) is None:
+            raise ValueError
         port = int(value)
     except ValueError:
         raise ValueError(f"Invalid WHATSAPP_MCP_PORT={value!r}; must be an integer") from None
@@ -175,9 +182,9 @@ def build_transport_security(host: str, allowed_hosts_env: str | None, allowed_o
 
 def resolve_socket(value: str | None, store: str, media_roots: str | None = None) -> str | None:
     """Validate an additional Unix listener without filesystem mutation."""
-    if not value or not value.strip():
+    if not value or not value.strip(ASCII_WHITESPACE):
         return None
-    path = Path(value.strip())
+    path = Path(value.strip(ASCII_WHITESPACE))
     if os.name != "posix" or not path.is_absolute() or len(os.fsencode(path)) > 100:
         raise ValueError("WHATSAPP_MCP_SOCKET requires a Unix absolute path of at most 100 bytes")
     roots = [Path(store), Path.home() / ".local/share/whatsapp-mcp/outbox"]
@@ -307,7 +314,7 @@ def probe_http_health():
     host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
     host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)  # nosec B104 - Outbound probe maps wildcard binds to loopback.
     connections = [http.client.HTTPConnection(host, resolve_port(os.getenv("WHATSAPP_MCP_PORT")), timeout=4)]
-    path = (os.getenv("WHATSAPP_MCP_SOCKET") or "").strip()
+    path = (os.getenv("WHATSAPP_MCP_SOCKET") or "").strip(ASCII_WHITESPACE)
     if path:
         connection = http.client.HTTPConnection("localhost", timeout=4)
 

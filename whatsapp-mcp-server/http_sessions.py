@@ -1,18 +1,18 @@
-"""Bound legacy HTTP sessions without evicting busy or recently foreign-owned ones."""
+"""Bound stateful HTTP sessions while leaving opening-request validation to the SDK."""
 
 import hashlib
 import json
 import logging
+import weakref
 from dataclasses import dataclass, field
 from time import monotonic
 
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser, authorization_context
 from mcp.server.streamable_http import MCP_SESSION_ID_HEADER, StreamableHTTPServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager, _error_response
-from mcp_types import INTERNAL_ERROR, InitializeRequest, JSONRPCRequest, jsonrpc_message_adapter
-from pydantic import ValidationError
+from mcp_types import INTERNAL_ERROR
 from starlette.requests import Request
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from http_auth import _bearer_from_headers
 
@@ -21,136 +21,164 @@ FOREIGN_IDLE_GRACE_S = 1800
 logger = logging.getLogger("whatsapp_mcp.sessions")
 
 
-def _owner(scope: Scope) -> bytes:
+def _owner(scope: Scope, client_name: str | None) -> bytes:
     user = scope.get("user")
     claims = (user.access_token.claims or {}) if isinstance(user, AuthenticatedUser) else {}
     if isinstance(user, AuthenticatedUser) and not claims.get("static"):
-        identity = ["oauth", claims.get("iss"), user.access_token.subject]
+        identity = ["oauth", claims.get("iss"), user.access_token.subject, user.access_token.client_id]
     else:
         identity = ["bearer", _bearer_from_headers(scope["headers"])]
-    return hashlib.sha256(json.dumps(identity).encode()).digest()
+    return hashlib.sha256(json.dumps([*identity, client_name]).encode()).digest()
+
+
+def _client_name(body: bytes) -> str | None:
+    # Identity hint only: the SDK still validates and handles the request.
+    try:
+        name = json.loads(body)["params"]["clientInfo"]["name"]
+        return name if isinstance(name, str) else None
+    except Exception:
+        return None
 
 
 @dataclass
 class _Activity:
     owner: bytes
-    # Reserve the session while the SDK starts its server task.
-    active: int = 1
+    active: int = 1  # Reserve the slot while opening/forwarding the SDK response.
     last_active: float = field(default_factory=lambda: monotonic())
+
+
+class _TrackedRequest:
+    def __init__(self, transport: StreamableHTTPServerTransport, owner: bytes):
+        self.transport = weakref.ref(transport)
+        self.original = type(transport).handle_request  # Unbound: no per-session reference cycle.
+        self.activity = _Activity(owner)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        transport = self.transport()
+        assert transport is not None
+        self.activity.active += 1
+        try:
+            await self.original(transport, scope, receive, send)
+        finally:
+            self.activity.active -= 1
+            self.activity.last_active = monotonic()
 
 
 class _IdleAdmission:
     def __init__(self, manager: StreamableHTTPSessionManager):
         self.manager = manager
         self.original = manager._handle_stateful_request
-        self.validator = StreamableHTTPServerTransport(
-            None, is_json_response_enabled=manager.json_response, security_settings=manager.security_settings
-        )
+        self.next_warning = 0.0
 
-    @staticmethod
-    def track(transport: StreamableHTTPServerTransport, owner: bytes) -> _Activity:
-        activity = _Activity(owner)
-        setattr(transport, "_whatsapp_session_activity", activity)
-        original = transport.handle_request
+    def victim(self, owner: bytes):
+        idle = []
+        now = monotonic()
+        for session, candidate in self.manager._server_instances.items():
+            handler = candidate.handle_request
+            if isinstance(handler, _TrackedRequest) and handler.activity.active == 0:
+                activity = handler.activity
+                same_owner = activity.owner == owner
+                if same_owner or now - activity.last_active > FOREIGN_IDLE_GRACE_S:
+                    idle.append((not same_owner, activity.last_active, session, candidate))
+        if not idle:
+            return None
+        _, _, session, candidate = min(idle, key=lambda item: item[:2])
+        return session, candidate
 
-        async def handle(scope: Scope, receive: Receive, send: Send) -> None:
-            # This also counts open GET streams when SDK expiry is disabled.
-            activity.active += 1
-            try:
-                await original(scope, receive, send)
-            finally:
-                activity.active -= 1
-                activity.last_active = monotonic()
+    async def refuse(self, scope: Scope, receive: Receive, send: Send) -> None:
+        now = monotonic()
+        if now >= self.next_warning:
+            self.next_warning = now + 60
+            logger.warning(
+                "Refusing to open a new session: %d sessions are already open", len(self.manager._server_instances)
+            )
+        await _error_response("Too many open sessions", 503, INTERNAL_ERROR)(scope, receive, send)
 
-        transport.handle_request = handle
-        return activity
-
-    async def validate_initialize(self, scope: Scope, receive: Receive, send: Send) -> Receive | None:
-        request = Request(scope, receive)
-        error = await self.validator._security.validate_request(request, is_post=request.method == "POST")
-        if error is not None:
-            await error(scope, receive, send)
-            return None
-        if request.method != "POST":
-            await _error_response("A new session requires an initialize POST", 400)(scope, receive, send)
-            return None
-        if not await self.validator._validate_accept_header(request, scope, send):
-            return None
-        if not self.validator._check_content_type(request):
-            await _error_response("Content-Type must be application/json", 415)(scope, receive, send)
-            return None
-        body = await request.body()  # Already bounded by the SDK body-limit middleware.
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if Request(scope, receive).headers.get(MCP_SESSION_ID_HEADER) is not None:
+            await self.original(scope, receive, send)
+            return
         try:
-            message = jsonrpc_message_adapter.validate_json(body, by_name=False)
-            if not isinstance(message, JSONRPCRequest) or message.method != "initialize":
-                raise ValueError("initialize request required")
-            InitializeRequest.model_validate(message.model_dump(by_alias=True), by_name=False)
-        except (ValidationError, ValueError):
-            await _error_response("A valid initialize request is required", 400)(scope, receive, send)
-            return None
+            body = await Request(scope, receive).body()  # The SDK already bounded/buffered this body.
+        except Exception:
+            return  # Disconnected/unreadable opening: no admission, eviction or traceback.
+        owner = _owner(scope, _client_name(body))
+        manager = self.manager
+        user = scope.get("user")
+        requestor = authorization_context(user) if isinstance(user, AuthenticatedUser) else None
+        async with manager._session_creation_lock:
+            cap = manager.max_sessions
+            count = len(manager._server_instances)
+            full = cap is not None and count >= cap
+            # At most one transient extra slot; other openings receive bounded backpressure.
+            refused = cap is not None and full and (count > cap or self.victim(owner) is None)
+            transport = None
+            handler = None
+            if not refused:
+                try:
+                    if full:
+                        manager.max_sessions = None
+                    transport = manager._admit_session(requestor)
+                finally:
+                    manager.max_sessions = cap
+                if transport is not None:
+                    handler = _TrackedRequest(transport, owner)
+                    transport.handle_request = handler
+        if transport is None:
+            await self.refuse(scope, receive, send)
+            return
+        assert handler is not None
+        session = transport.mcp_session_id
+        assert session is not None
         pending = True
+        messages: list[Message] = []
+        status = None
 
-        async def replay():
+        async def replay() -> Message:
             nonlocal pending
             if pending:
                 pending = False
                 return {"type": "http.request", "body": body, "more_body": False}
             return await receive()
 
-        return replay
+        async def capture(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            messages.append(message)
 
-    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if Request(scope, receive).headers.get(MCP_SESSION_ID_HEADER) is not None:
-            # Keep SDK owner checks, DELETE handling and JSON-RPC 404s intact.
-            await self.original(scope, receive, send)
-            return
-        replay = await self.validate_initialize(scope, receive, send)
-        if replay is None:
-            return
-        manager = self.manager
-        user = scope.get("user")
-        requestor = authorization_context(user) if isinstance(user, AuthenticatedUser) else None
-        owner = _owner(scope)
-        victim = None
-        async with manager._session_creation_lock:
-            if manager.max_sessions is not None and len(manager._server_instances) >= manager.max_sessions:
-                idle = []
-                now = monotonic()
-                for session, candidate in manager._server_instances.items():
-                    activity = getattr(candidate, "_whatsapp_session_activity", None)
-                    if activity is not None and activity.active == 0:
-                        same_owner = activity.owner == owner
-                        if same_owner or now - activity.last_active > FOREIGN_IDLE_GRACE_S:
-                            idle.append((not same_owner, activity.last_active, session, candidate))
-                if idle:
-                    _, _, session, candidate = min(idle, key=lambda item: item[:2])
-                    # Detach atomically; termination can await outside the creation lock.
-                    manager._server_instances.pop(session)
-                    manager._session_owners.pop(session, None)
-                    victim = (session, candidate)
-            transport = manager._admit_session(requestor)
-            activity = self.track(transport, owner) if transport is not None else None
-        if transport is None:
-            await _error_response("Too many open sessions", 503, INTERNAL_ERROR)(scope, receive, send)
-            return
-        opening_started = False
+        accepted = False
         try:
-            if victim is not None:
-                await manager._discard_session(*victim)
-                logger.info("Evicted idle MCP session %.8s at session capacity", victim[0])
-            opening_started = True
-            await manager._serve_opening_request(transport, scope, replay, send)
+            await manager._serve_opening_request(transport, scope, replay, capture)
+            created = status is not None and status < 400 and session in manager._server_instances
+            if created:
+                victim = None
+                async with manager._session_creation_lock:
+                    if full and cap is not None and len(manager._server_instances) > cap:
+                        # An old session may have become busy while the SDK initialized.
+                        victim = self.victim(owner)
+                        if victim is not None:
+                            manager._server_instances.pop(victim[0])
+                            manager._session_owners.pop(victim[0], None)
+                        else:
+                            refused = True
+                if refused:
+                    await self.refuse(scope, receive, send)
+                    return
+                if victim is not None:
+                    await manager._discard_session(*victim)
+                    logger.info("Evicted idle MCP session %.8s at session capacity", victim[0])
+            for message in messages:
+                await send(message)
+            accepted = created
         finally:
-            assert activity is not None
-            activity.active -= 1
-            activity.last_active = monotonic()
-            # Also clean up if cancellation happened before the SDK opening call.
-            if not opening_started:
-                assert transport.mcp_session_id is not None
-                await manager._discard_session(transport.mcp_session_id, transport)
+            handler.activity.active -= 1
+            handler.activity.last_active = monotonic()
+            if not accepted:
+                await manager._discard_session(session, transport)
 
 
 def install_idle_session_eviction(manager: StreamableHTTPSessionManager) -> None:
-    """Install once before serving; real SDK tests guard these private contracts."""
+    """Install once before serving; real SDK tests guard only the admission contracts."""
     if not manager.stateless:
         manager._handle_stateful_request = _IdleAdmission(manager).handle

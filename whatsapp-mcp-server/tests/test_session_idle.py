@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import anyio
 import pytest
@@ -17,6 +18,7 @@ import mcp_config
 from http_sessions import DEFAULT_MAX_SESSIONS
 from main import build_http_app
 
+SERVER_DIR = Path(__file__).resolve().parents[1]
 ENV = "WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S"
 TOKEN = "test-session-token-0123456789"
 HEADERS = {
@@ -70,6 +72,7 @@ runpy.run_path('main.py', run_name='__main__')
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
+        cwd=SERVER_DIR,
         env={**os.environ, ENV: value, "WHATSAPP_MCP_TRANSPORT": "http", "WHATSAPP_STORE_DIR": str(tmp_path)},
         capture_output=True,
         text=True,
@@ -92,6 +95,7 @@ runpy.run_path('main.py', run_name='__main__')
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
+        cwd=SERVER_DIR,
         env={**os.environ, ENV: "bad", "WHATSAPP_MCP_TRANSPORT": "sse", "WHATSAPP_STORE_DIR": str(tmp_path)},
         capture_output=True,
         text=True,
@@ -127,8 +131,9 @@ def test_unknown_session_then_reinitialize_without_restart(auth_runtime_store):
         assert response.json()["result"] == {}
 
 
-def initialize(client):
-    response = client.post("/mcp", json=INIT, headers=HEADERS)
+def initialize(client, name="t"):
+    payload = {**INIT, "params": {**INIT["params"], "clientInfo": {"name": name, "version": "0"}}}
+    response = client.post("/mcp", json=payload, headers=HEADERS)
     assert response.status_code == 200, response.text
     session = response.headers["Mcp-Session-Id"]
     response = client.post(
@@ -164,10 +169,11 @@ def test_real_idle_expiration_then_reinitialize(auth_runtime_store):
 
 
 @pytest.mark.parametrize("timeout", [None, 86400])
-def test_sdk_contract_and_least_recent_idle_eviction(auth_runtime_store, caplog, timeout):
+@pytest.mark.parametrize("json_response", [False, True])
+def test_sdk_contract_and_least_recent_idle_eviction(auth_runtime_store, caplog, timeout, json_response):
     server = MCPServer("test")
     app = build_http_app(
-        server, "streamable-http", TOKEN, json_response=True, max_sessions=2, session_idle_timeout=timeout
+        server, "streamable-http", TOKEN, json_response=json_response, max_sessions=2, session_idle_timeout=timeout
     )
     manager = server._lowlevel_server.session_manager
     for name in (
@@ -244,10 +250,10 @@ def test_inflight_session_is_not_evicted(auth_runtime_store, timeout, cap):
 @pytest.mark.parametrize(
     "method,payload,extra,status",
     [
-        ("GET", None, {}, 400),
-        ("DELETE", None, {}, 400),
-        ("POST", {"jsonrpc": "2.0", "id": 2, "method": "ping"}, {}, 400),
-        ("POST", {**INIT, "params": {}}, {}, 400),
+        ("GET", None, {}, 503),
+        ("DELETE", None, {}, 503),
+        ("POST", {"jsonrpc": "2.0", "id": 2, "method": "ping"}, {}, 503),
+        ("POST", {**INIT, "params": {}}, {}, 503),
         ("POST", {**INIT, "jsonrpc": "1.0"}, {}, 400),
         ("POST", {k: v for k, v in INIT.items() if k != "id"}, {}, 400),
         ("POST", INIT, {"Accept": "text/plain"}, 406),
@@ -282,3 +288,128 @@ def test_termination_does_not_hold_creation_lock(auth_runtime_store, monkeypatch
 
         monkeypatch.setattr(transport, "terminate", checked_terminate)
         assert initialize(client) != first
+
+
+def test_shared_token_client_names_and_capacity_warning(auth_runtime_store, caplog, monkeypatch):
+    import http_sessions
+
+    server = MCPServer("test")
+    app = build_http_app(server, "streamable-http", TOKEN, json_response=True, max_sessions=2)
+    with (
+        TestClient(app, base_url="http://127.0.0.1:8000") as client,
+        caplog.at_level(logging.WARNING, logger="whatsapp_mcp.sessions"),
+    ):
+        first = initialize(client, "IDE")
+        second = initialize(client, "IDE")
+        payload = {**INIT, "params": {**INIT["params"], "clientInfo": {"name": "bot", "version": "0"}}}
+        for _ in range(3):
+            assert client.post("/mcp", json=payload, headers=HEADERS).status_code == 503
+
+        def warnings():
+            return [r for r in caplog.records if r.name == "whatsapp_mcp.sessions" and r.levelno == logging.WARNING]
+
+        assert len(warnings()) == 1
+        assert ping(client, first).status_code == ping(client, second).status_code == 200
+        now = http_sessions.monotonic()
+        monkeypatch.setattr(http_sessions, "monotonic", lambda: now + 61)
+        assert client.post("/mcp", json=payload, headers=HEADERS).status_code == 503
+        assert len(warnings()) == 2
+        fresh = initialize(client, "IDE")
+        assert_missing(ping(client, first))
+        assert ping(client, second).status_code == ping(client, fresh).status_code == 200
+
+
+def test_disconnected_opening_does_not_evict(auth_runtime_store):
+    server = MCPServer("test")
+    app = build_http_app(server, "streamable-http", TOKEN, json_response=True, max_sessions=1)
+    manager = server._lowlevel_server.session_manager
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        session = initialize(client)
+        incoming = iter(
+            [{"type": "http.request", "body": b'{"params":', "more_body": True}, {"type": "http.disconnect"}]
+        )
+        sent = []
+
+        async def receive():
+            return next(incoming)
+
+        async def send(message):
+            sent.append(message)
+
+        assert client.portal is not None
+        client.portal.call(
+            manager.asgi_app, {"type": "http", "method": "POST", "path": "/mcp", "headers": []}, receive, send
+        )
+        assert sent == []
+        assert ping(client, session).status_code == 200
+
+
+def test_tracking_does_not_retain_discarded_transport_by_cycle():
+    import gc
+    import weakref
+
+    from http_sessions import _TrackedRequest
+
+    server = MCPServer("test")
+    build_http_app(server, "streamable-http", TOKEN)
+    manager = server._lowlevel_server.session_manager
+
+    async def exercise():
+        transport = manager._admit_session(None)
+        assert transport is not None and transport.mcp_session_id is not None
+        transport.handle_request = _TrackedRequest(transport, b"fake-owner")
+        reference = weakref.ref(transport)
+        await manager._discard_session(transport.mcp_session_id, transport)
+        del transport
+        assert reference() is None
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        anyio.run(exercise)
+    finally:
+        if enabled:
+            gc.enable()
+
+
+def test_victim_becoming_busy_during_opening_preserves_it(auth_runtime_store, monkeypatch):
+    server = MCPServer("test")
+    busy, release_tool = threading.Event(), threading.Event()
+    opened, release_open = threading.Event(), threading.Event()
+
+    @server.tool()
+    async def hold() -> str:
+        busy.set()
+        await anyio.to_thread.run_sync(lambda: release_tool.wait(10))
+        return "done"
+
+    app = build_http_app(server, "streamable-http", TOKEN, json_response=True, max_sessions=1)
+    manager = server._lowlevel_server.session_manager
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client, ThreadPoolExecutor(2) as pool:
+        session = initialize(client)
+        original = manager._serve_opening_request
+
+        async def delayed(*args):
+            await original(*args)
+            opened.set()
+            await anyio.to_thread.run_sync(lambda: release_open.wait(10))
+
+        monkeypatch.setattr(manager, "_serve_opening_request", delayed)
+        incoming = pool.submit(client.post, "/mcp", json=INIT, headers=HEADERS)
+        try:
+            assert opened.wait(5)
+            active = pool.submit(
+                client.post,
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "hold", "arguments": {}}},
+                headers={**HEADERS, "Mcp-Session-Id": session},
+            )
+            assert busy.wait(5)
+            release_open.set()
+            assert incoming.result(timeout=5).status_code == 503
+            assert list(manager._server_instances) == [session]
+        finally:
+            release_open.set()
+            release_tool.set()
+        assert active.result(timeout=5).status_code == 200
+        assert ping(client, session).status_code == 200
