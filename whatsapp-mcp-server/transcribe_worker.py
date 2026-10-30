@@ -56,6 +56,7 @@ and one that does not offer ``download_media`` gets no fetching.
 from __future__ import annotations
 
 import functools
+import hashlib
 import itertools
 import logging
 import os
@@ -63,6 +64,7 @@ import sqlite3
 import stat
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -97,6 +99,12 @@ logger = logging.getLogger("whatsapp_mcp")
 # One blocked head, not an unbounded duration cache. File identity is rechecked
 # each round so replacement/purge/new work cannot inherit an old pause.
 _blocked_quota: tuple[tuple[Any, ...], float] | None = None
+# Bounded process-local negative catalog answers, never authorization decisions.
+_cache_checks: OrderedDict[tuple[str, str, str], tuple[str, float, float]] = OrderedDict()
+_last_batch_state: tuple[int, int] | None = None
+CACHE_RETRY_INITIAL_S = 300.0
+CACHE_RETRY_MAX_S = 6 * 60 * 60.0
+CACHE_CHECK_LIMIT = 4096
 
 ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
@@ -468,7 +476,20 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
     )
 
 
-PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestamp
+PendingRow = tuple[str, str, str, str, str]  # id, chat, sha256, timestamp, media identity
+
+
+def _notes_identity() -> tuple[Any, ...]:
+    # Clearing a note/refusal must allow an immediate recheck, including writes
+    # by another MCP process. Read WAL identity too, without opening notes writable.
+    identity = []
+    for suffix in ("", "-wal"):
+        try:
+            info = os.stat(media_notes.notes_db_path() + suffix)
+            identity.append((info.st_ino, info.st_size, info.st_mtime_ns))
+        except FileNotFoundError:
+            identity.append(None)
+    return tuple(identity)
 
 
 def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str | None = None) -> list[PendingRow]:
@@ -482,6 +503,15 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
     """
     conn = whatsapp._connect_messages_db()
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        direct_path = "m.direct_path" if "direct_path" in columns else "NULL"
+        catalog = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'media_cache_refs'").fetchone()
+        cache_identity = (
+            "(SELECT hex(r.sha256) || ':' || c.stored_at FROM media_cache_refs r "
+            "JOIN media_cache c ON c.sha256 = r.sha256 WHERE r.id = m.id AND r.chat_jid = m.chat_jid)"
+            if catalog
+            else "NULL"
+        )
         handled_clause, handled_params = _already_handled_clause(conn)
         sent_clause, sent_params = whatsapp.ingest_sent_clause("m", sent_since)
         clauses = [
@@ -504,7 +534,8 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
         params.extend(clause_params)
         rows = conn.execute(
             f"""
-            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp
+            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp,
+                   m.url, m.media_key, m.file_enc_sha256, m.file_length, m.filename, {direct_path}, {cache_identity}
             FROM messages m
             WHERE {" AND ".join(clauses)}
             ORDER BY m.timestamp DESC, m.id, m.chat_jid
@@ -514,7 +545,11 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
         ).fetchall()
     finally:
         conn.close()
-    return [(str(r[0]), str(r[1]), str(r[2]), str(r[3])) for r in rows]
+    notes_identity = _notes_identity()
+    return [
+        (str(r[0]), str(r[1]), str(r[2]), str(r[3]), hashlib.sha256(repr((r[2:], notes_identity)).encode()).hexdigest())
+        for r in rows
+    ]
 
 
 def _walk(head: list[PendingRow], page: list[PendingRow]) -> Iterator[tuple[PendingRow, bool]]:
@@ -592,7 +627,7 @@ def find_pending(
     resolved: set[tuple[str, str]] = set()  # ... of which these are done with (the rest go to the walk)
     next_position = position
     full = False
-    for (message_id, chat_jid, sha256, timestamp), traversing in _walk(head, page):
+    for (message_id, chat_jid, sha256, timestamp, media_identity), traversing in _walk(head, page):
         if traversing and not walking:
             walking, failures = True, 0  # the walk gets its own three strikes
         if sha256 in seen or (message_id, chat_jid) in resolved:
@@ -604,10 +639,32 @@ def find_pending(
             caches[chat_jid] = {} if media_remote.enabled() else media_inventory.list_chat_names(chat_jid)
         if media_remote.enabled():
             identity = (chat_jid, message_id)
+            check_key = (whatsapp.MESSAGES_DB_PATH, message_id, chat_jid)
+            previous = _cache_checks.get(check_key)
+            if previous and previous[0] == media_identity and time.monotonic() < previous[1]:
+                _cache_checks.move_to_end(check_key)
+                resolved.add((message_id, chat_jid))
+                if traversing and not parked:
+                    next_position = Position(timestamp, message_id, chat_jid)
+                continue
             if identity not in remote_lookups:
                 remote_lookups[identity] = media_remote.lookup(chat_jid, message_id)
             if remote_lookups[identity]:
                 caches[chat_jid][message_id] = media_remote.uri(chat_jid, message_id)
+                if _cache_checks.pop(check_key, None):
+                    logger.info("transcribe_on_ingest: media became cached for %s", message_id)
+            else:
+                delay = (
+                    min(previous[2] * 2, CACHE_RETRY_MAX_S)
+                    if previous and previous[0] == media_identity
+                    else CACHE_RETRY_INITIAL_S
+                )
+                _cache_checks[check_key] = (media_identity, time.monotonic() + delay, delay)
+                _cache_checks.move_to_end(check_key)
+                if len(_cache_checks) > CACHE_CHECK_LIMIT:
+                    _cache_checks.popitem(last=False)
+                if not previous or previous[0] != media_identity:
+                    logger.info("transcribe_on_ingest: no cached media for %s; backing off", message_id)
         cached = caches[chat_jid].get(message_id)
         if cached is None and not traversing:
             if head_budget <= 0 or budget <= 0:
@@ -682,6 +739,8 @@ def find_pending(
         if path is None:
             continue  # not fetching, done fetching, or the bridge would not send it
         seen.add(sha256)
+        if media_remote.enabled():
+            _cache_checks.pop((whatsapp.MESSAGES_DB_PATH, message_id, chat_jid), None)
         out.append(Candidate(message_id=message_id, chat_jid=chat_jid, sha256=sha256, path=path))
         if len(out) >= batch:
             full = True
@@ -936,7 +995,7 @@ def run_once(
     still transcribed. Only an answer about *this* file writes
     ``transcript_error``.
     """
-    global _blocked_quota
+    global _blocked_quota, _last_batch_state
     transcribe = transcribe or _default_transcribe
     started = time.monotonic()
     try:
@@ -1042,7 +1101,8 @@ def run_once(
         # or one file the server chokes on would pin it here for ever.
         logger.warning("transcribe_on_ingest: %d transcribed before the backend stopped answering", transcribed)
         return BatchResult(len(pending), transcribed, failed, selection.examined, position, outage=True)
-    if pending:
+    state = (selection.examined, len(pending))
+    if pending and (transcribed or failed or state != _last_batch_state):
         logger.info(
             "transcribe_on_ingest: %d examined, %d pending, %d transcribed, %d failed in %.1fs",
             selection.examined,
@@ -1051,8 +1111,7 @@ def run_once(
             failed,
             time.monotonic() - started,
         )
-    else:
-        logger.debug("transcribe_on_ingest: nothing pending in %d rows examined", selection.examined)
+    _last_batch_state = state
     return BatchResult(len(pending), transcribed, failed, selection.examined, selection.position)
 
 
