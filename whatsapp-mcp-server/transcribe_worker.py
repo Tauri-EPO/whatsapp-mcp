@@ -377,16 +377,17 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
     conn = whatsapp._connect_messages_db()
     try:
         handled_clause, handled_params = _already_handled_clause(conn)
+        sent_clause, sent_params = whatsapp.ingest_sent_clause("m", sent_since)
         clauses = [
             "m.media_type = 'audio'",
-            whatsapp.ingest_sent_clause("m", sent_since),
+            sent_clause,
             "m.file_sha256 IS NOT NULL",
             "m.deleted_at IS NULL",
             f"m.chat_jid <> '{whatsapp.STATUS_BROADCAST_JID}'",  # a module constant, never user input
             handled_clause,
             ingest_chat_clause("m.chat_jid"),
         ]
-        params: list[Any] = list(handled_params)
+        params: list[Any] = [*sent_params, *handled_params]
         if after is not None:
             # Keyset, not OFFSET: rows transcribed since the last round leave the
             # result and would shift every offset under the walk.

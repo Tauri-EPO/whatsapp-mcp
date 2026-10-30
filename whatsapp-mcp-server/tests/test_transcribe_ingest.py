@@ -479,6 +479,17 @@ def test_owned_config_drives_every_selection_without_reading_the_global(paired_d
     assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
 
 
+def test_sent_clause_binds_the_instant_as_a_parameter(paired_dbs):
+    clause, params = whatsapp.ingest_sent_clause("m", SENT_SINCE)
+    assert SENT_SINCE not in clause
+    assert clause == "(m.is_from_me = 0 OR m.timestamp >= ?)"
+    assert params == [SENT_SINCE]
+    assert whatsapp.ingest_sent_clause("m", None) == ("m.is_from_me = 0", [])
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    assert transcribe_worker._pending_rows(10, sent_since="x' OR '1'='1") == []
+    assert len(transcribe_worker._pending_rows(10, sent_since=SENT_SINCE)) == 1
+
+
 def test_a_start_with_sent_audio_off_moves_the_instant_forward(paired_dbs, monkeypatch):
     media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
     _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)  # sent while it was off
