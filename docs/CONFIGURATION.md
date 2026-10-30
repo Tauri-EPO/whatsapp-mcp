@@ -1325,8 +1325,10 @@ audio does (issue #751). A failed clear logs a warning and leaves a private
 `notes.db.ingest-sent-reset` marker; the next sent-enabled start records now
 instead of trusting the stale instant. If that marker cannot be persisted, the
 inbound-only worker refuses to start. A stored instant more than five minutes in
-the future is replaced with now and a warning. With a remote provider, sent audio
-is sent to the provider and consumes the configured monthly cap. With
+the future is replaced with now and a warning. Preserve the reset marker when
+copying a whole store; database-only backup/snapshot recovery of pending resets
+is tracked in [#770](https://github.com/Tauri-EPO/whatsapp-mcp/issues/770).
+With a remote provider, sent audio is sent to the provider and consumes the configured monthly cap. With
 `TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio after the instant is also
 downloaded through the bridge. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
 keeps only inbound audio after restart; empty uses the default, and invalid
