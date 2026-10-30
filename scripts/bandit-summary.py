@@ -35,8 +35,9 @@ def main() -> int:
         findings = []
         malformed = True
 
+    scope = sys.argv[4] if len(sys.argv) > 4 else "production Python"
     summary = (
-        "## Bandit: production Python (medium/high)\n\n"
+        f"## Bandit: {scope} (medium/high)\n\n"
         f"- Scanner exit code: {scanner_exit}\n"
         f"- Remaining findings: {count}\n"
         f"- Scan errors: {error_count}\n"

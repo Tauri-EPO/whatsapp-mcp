@@ -230,7 +230,7 @@ def test_migration_shared_export_root_preserves_other_files_and_directories(tmp_
     unrelated = [shared / "messages.db", shared / "whatsapp.db", shared / "runner", shared / "archive.ndjson"]
     for path in unrelated:
         path.write_bytes(b"non-owned")
-        os.chmod(path, 0o755)
+        os.chmod(path, 0o755)  # nosec B103 # Fixture proves migration preserves unrelated shared files.
     (shared / "cached-media").mkdir(mode=0o755)
     custom = shared / "custom-name"
     custom.write_bytes(b"export")
@@ -484,7 +484,7 @@ def test_existing_export_root_and_nested_directories_keep_modes(tmp_path, monkey
     nested = root / "unrelated" / "deep"
     nested.mkdir(parents=True)
     for folder in (root, nested.parent, nested):
-        os.chmod(folder, 0o755)
+        os.chmod(folder, 0o755)  # nosec B103 # Fixture proves existing export directories keep their modes.
     archive = root / "messages-all-20261008T100000Z.ndjson"
     archive.write_text("synthetic")
     os.chmod(archive, 0o644)
@@ -600,7 +600,7 @@ def test_real_startup_survives_permission_and_manifest_failures(tmp_path, failur
     manifest.write_bytes(b"\xff" if failure == "manifest_utf8" else b'"custom.ndjson"\n')
     for path in (database, archive):
         os.chmod(path, 0o644)
-    os.chmod(uploads, 0o755)
+    os.chmod(uploads, 0o755)  # nosec B103 # Fixture exercises startup refusal when permission hardening fails.
     os.chmod(manifest, 0o600)
     target = {"notes": database, "archive": archive, "uploads": uploads}.get(failure, database)
     # Fault injection occurs in the real stdio entrypoint process. Files and

@@ -100,6 +100,12 @@ jobs:
           bandit --ini .bandit -r whatsapp-mcp-server/ -ll -f json -o bandit.json 2>bandit.log || status=$?
           python scripts/bandit-summary.py "$status" bandit.json bandit.log
 
+      - name: Run bandit on tests
+        run: |
+          status=0
+          bandit -r whatsapp-mcp-server/tests -s B104,B108,B310,B608 -ll -f json -o bandit-tests.json 2>bandit-tests.log || status=$?
+          python scripts/bandit-summary.py "$status" bandit-tests.json bandit-tests.log "test fixtures"
+
   govulncheck:
     name: Go Vulnerability Check
     runs-on: ubuntu-latest
