@@ -1323,7 +1323,8 @@ without the worker (`TRANSCRIBE_ON_INGEST` off, no backend, or a tool policy tha
 hides `transcribe_audio`) leaves it alone. This lets several stdio MCP processes
 share a store (see [LAPTOP.md](LAPTOP.md)). If the whole worker is off for a while,
 the stored instant is reused regardless of pause length: sent audio from that
-period joins the backlog when it returns, exactly as inbound audio does (issue #751). A failed clear logs a warning and attempts to persist a private
+period joins the backlog when it returns, exactly as inbound audio does (issue #751).
+A failed clear logs a warning and attempts to persist a private
 `notes.db.ingest-sent-reset` marker; the next sent-enabled start claims a fresh
 bound instead of trusting the stale instant. Successful or unnecessary clears
 write no marker. If the marker cannot be persisted, the worker continues with
@@ -1341,9 +1342,11 @@ configured monthly cap. With
 `TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio after the instant is also
 downloaded through the bridge. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
 keeps only inbound audio after restart; empty uses the default, and invalid
-boolean values stop startup. The INCLUDE_SENT flag is resolved once at startup. A running worker keeps its
+boolean values stop startup. The INCLUDE_SENT flag is resolved once at startup.
+A running worker keeps its
 settled bound; a process without the worker reads the shared stored bound per
-`coverage()` call, without writing it. The chat filter, status exclusion and monthly quota apply to both
+`coverage()` call, without writing it. The chat filter, status exclusion and monthly
+quota apply to both
 directions, and `coverage().audio` uses the same selection.
 
 What to know before turning it on:
