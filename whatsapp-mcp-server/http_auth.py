@@ -402,7 +402,13 @@ _CHARSET_TYPES = (b"application/json", b"text/event-stream")
 
 
 def _media_type_parts(value: bytes) -> list[bytes]:
-    """Split parameters at semicolons outside quoted values."""
+    """Split parameters outside quotes, refusing an unterminated quoted string.
+
+    email.message.Message.get_params folds RFC 2231 charset* into charset,
+    unlike HTTP's exact parameter names. Its set_param also requotes unrelated
+    values, so keep the original bytes and delimiters instead of round-tripping
+    this HTTP header through the MIME parser.
+    """
     parts = []
     start = 0
     quoted = escaped = False
