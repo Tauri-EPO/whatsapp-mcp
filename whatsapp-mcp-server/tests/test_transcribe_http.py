@@ -1,5 +1,6 @@
 """HTTP provider exercised through multipart, real ffmpeg, tools and notes.db."""
 
+import asyncio
 import json
 import subprocess
 import threading
@@ -10,6 +11,7 @@ from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,55 +45,116 @@ def _add_audio(store, message_id, chat_jid):
 
 
 @pytest.mark.parametrize("phase", ["headers", "body"])
-def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_path, phase):
+def test_http_request_deadline_covers_the_entire_stream(tmp_path, monkeypatch, phase):
+    # A virtual transport advances time at each receive, so the proof checks the
+    # scope and single budget of wait_for without relying on scheduler speed.
+    clock = SimpleNamespace(now=100.0, deadline=None)
+    timeouts = []
+
+    def receive():
+        clock.now += 0.6
+        if clock.deadline is not None and clock.now >= clock.deadline:
+            raise TimeoutError
+
+    async def wait_for(request, timeout):
+        timeouts.append(timeout)
+        clock.deadline = clock.now + timeout
+        try:
+            return await request
+        finally:
+            clock.deadline = None
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            if phase == "headers":
+                for _ in range(6):
+                    receive()
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def aiter_raw(self):
+            for chunk in [b'{"te', b'xt":', b'"do', b'ne"', b"}"]:
+                if phase == "body":
+                    receive()
+                yield chunk
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"].read == 1
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def stream(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(transcribe, "asyncio", SimpleNamespace(run=asyncio.run, wait_for=wait_for))
+    monkeypatch.setattr(transcribe.httpx, "AsyncClient", Client)
+    source = tmp_path / "note.ogg"
+    source.write_bytes(b"fake-audio")
+    config = replace(load_config({}), timeout_s=1, url="http://example.invalid/transcribe")
+    with pytest.raises(BackendUnavailableError, match="deadline"):
+        transcribe._transcribe_http(source, config, "auto")
+    assert timeouts == [1]
+    assert clock.now == pytest.approx(101.2)
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_http_wall_deadline_includes_trickling_headers_and_body(tmp_path, phase):
+    stop = threading.Event()
+    received = threading.Event()
+
     class SlowHandler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
-            # Six pieces 0.6 s apart: without the wall deadline the response takes
-            # over 3 s, and a read failure would not carry the "deadline" message.
+            received.set()
+            # Twelve pieces one second apart take at least 11 s without one
+            # request deadline. The 9 s bound gives the 3 s budget ample slack
+            # and still rejects a budget renewed for each chunk.
             pieces = (
-                [
-                    b"HTTP/1.1 200 OK\r\n",
-                    b"Content-Type: application/json\r\n",
-                    b"X-Pad-A: 1\r\n",
-                    b"X-Pad-B: 1\r\n",
-                    b"\r\n",
-                    b'{"text":"done"}',
-                ]
+                [b"HTTP/1.1 200 OK\r\n", b"Content-Type: application/json\r\n"]
+                + [b"X-Pad: 1\r\n"] * 8
+                + [b"\r\n", b'{"text":"done"}']
                 if phase == "headers"
-                else [
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
-                    b'{"te',
-                    b'xt":',
-                    b'"do',
-                    b'ne"',
-                    b"}",
-                ]
+                else [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"]
+                + [bytes([byte]) for byte in b'{"text":"done"}']
             )
             try:
                 for piece in pieces:
                     self.wfile.write(piece)
                     self.wfile.flush()
-                    time.sleep(0.6)
+                    if stop.wait(1):
+                        break
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
-    server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     source = tmp_path / "note.ogg"
-    _audio(source)
-    config = replace(load_config(), url=f"http://127.0.0.1:{server.server_port}/transcribe", timeout_s=1)
+    source.write_bytes(b"fake-audio")
+    config = replace(load_config({}), url=f"http://127.0.0.1:{server.server_port}/transcribe", timeout_s=3)
     started = time.monotonic()
     try:
         with pytest.raises(BackendUnavailableError, match="deadline"):
-            transcribe_file(str(source), config=config)
-        assert time.monotonic() - started < 2.4
+            transcribe._transcribe_http(source, config, "auto")
+        elapsed = time.monotonic() - started
+        print(f"{phase} trickle elapsed={elapsed:.3f}s (budget=3s, bound=9s)")
+        assert received.is_set(), "the HTTP provider was never reached"
+        assert elapsed < 9
     finally:
+        stop.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
