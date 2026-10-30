@@ -135,10 +135,13 @@ class Harvest:
 
     def run(self, *args: str, cwd: Path | None = None, **env: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
+        run_env = {**self.env, **env}
+        # Some cases deliberately restrict PATH (e.g. Git available, gh absent).
+        bin_dir = Path(run_env["PATH"].split(os.pathsep)[0])
         return subprocess.run(
-            bash_command(BASH, self.fork / "scripts" / "upstream-harvest.sh", *args, bin_dir=self.root / "bin"),
+            bash_command(BASH, self.fork / "scripts" / "upstream-harvest.sh", *args, bin_dir=bin_dir),
             cwd=cwd or self.fork,
-            env={**self.env, **env},
+            env=run_env,
             capture_output=True,
             text=True,
             encoding="utf-8",
