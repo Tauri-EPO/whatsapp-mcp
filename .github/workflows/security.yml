@@ -97,7 +97,7 @@ jobs:
       - name: Run bandit
         run: |
           status=0
-          bandit --ini .bandit -r whatsapp-mcp-server/ -ll -f json -o bandit.json 2>bandit.log || status=$?
+          bandit --ini .bandit whatsapp-mcp-server/*.py -ll -f json -o bandit.json 2>bandit.log || status=$?
           python scripts/bandit-summary.py "$status" bandit.json bandit.log
 
       - name: Run bandit on tests
