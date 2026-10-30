@@ -193,8 +193,14 @@
   },
   {
     "path": "whatsapp-mcp-server/transcribe_worker.py",
+    "function": "_forget_nonpending",
+    "fingerprint": "7822b6223ba658f60a8d5b0bafb9797bd772dea3c570aad2acbace6e8188aab2",
+    "reason": "VALUES holds only (?, ?) pairs and predicate is _pending_rows' fixed clauses; keys and params are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/transcribe_worker.py",
     "function": "_pending_rows",
-    "fingerprint": "ca866385f6e8ad4867be001737700733646d4bd34cc2ebeb16a65156eecd774e",
+    "fingerprint": "ea8f5d5e88296eed61230062ff579a60255440dc58b34042d46599988d5315d8",
     "reason": "fixed eligibility, ingest and policy clauses; keyset, keys, policy and limit are bound"
   },
   {

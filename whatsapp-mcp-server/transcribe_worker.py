@@ -517,7 +517,7 @@ def _forget_nonpending(conn: sqlite3.Connection, predicate: str, params: list[An
         chunk = keys[start : start + 250]
         values = ",".join("(?, ?)" for _ in chunk)
         gone = conn.execute(
-            f"WITH remembered(id, chat_jid) AS (VALUES {values}) "
+            f"WITH remembered(id, chat_jid) AS (VALUES {values}) "  # nosec B608 # VALUES holds only (?, ?) pairs and predicate is _pending_rows' fixed clauses; keys and params are bound
             "SELECT r.id, r.chat_jid FROM remembered r LEFT JOIN messages m "
             "ON m.id = r.id AND m.chat_jid = r.chat_jid "
             f"WHERE m.id IS NULL OR NOT ({predicate})",
