@@ -522,6 +522,29 @@ def test_start_without_worker_preserves_shared_instant(paired_dbs, monkeypatch, 
     assert again is not None and again.sent_since == SENT_SINCE
 
 
+@pytest.mark.parametrize(("stored", "existing"), [(False, False), (False, True), (True, True)])
+def test_workerless_coverage_uses_read_only_stored_instant(paired_dbs, monkeypatch, stored, existing):
+    path = Path(media_notes.notes_db_path())
+    if existing:
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE notes_meta (key TEXT PRIMARY KEY, value TEXT)")
+            if stored:
+                conn.execute("INSERT INTO notes_meta VALUES (?, ?)", (transcribe_worker.SENT_SINCE_KEY, SENT_SINCE))
+        conn.close()
+    before = path.read_bytes() if existing else None
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp="2026-09-05 08:59:59+00:00")
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
+    assert _start(monkeypatch, {}) is None
+    assert not Path(str(path) + "-wal").exists()
+    assert (path.read_bytes() if path.exists() else None) == before
+    audio = whatsapp.coverage()["audio"]
+    assert audio["messages"] == audio["backlog"] == (2 if stored else 1)
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert not Path(str(path) + "-wal").exists()
+
+
 def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_this_start(
     paired_dbs, monkeypatch, caplog
 ):
