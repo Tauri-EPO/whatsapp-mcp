@@ -69,6 +69,7 @@ def test_meta_read_is_read_only_and_delete_does_not_migrate(tmp_path, monkeypatc
         conn.execute("CREATE TABLE notes_meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT INTO notes_meta VALUES ('key', 'value')")
     conn.close()
+
     monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
     assert media_notes.read_meta("key") == "value"
     assert not path.with_name("notes.db-wal").exists()
@@ -429,3 +430,13 @@ def test_clear_notes_containing_matches_literally_and_spares_transcripts(notes_s
     # Transcripts carry an index entry only annotate_media keeps in step.
     with pytest.raises(ValueError):
         media_notes.clear_notes_containing(media_notes.TRANSCRIPT_KEY, ["anything"])
+
+
+
+def test_reset_claim_acknowledgement_is_atomic_and_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(tmp_path / "notes.db"))
+    assert media_notes.claim_meta("instant", "old") == "old"
+    assert media_notes.claim_meta("instant", "first", reset_token="reset-one") == "first"
+    assert media_notes.claim_meta("instant", "later", reset_token="reset-one") == "first"
+    assert media_notes.claim_meta("instant", "new", reset_token="reset-two") == "new"
+    assert media_notes.read_meta("instant:reset") == "reset-two"

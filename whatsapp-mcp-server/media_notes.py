@@ -30,7 +30,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
-from private_files import notes_connection
+from private_files import check_notes_paths, notes_connection
 from whatsapp import CHAT_POLICY, parse_db_time
 
 logger = logging.getLogger(__name__)
@@ -532,15 +532,25 @@ def read_meta(key: str) -> str | None:
     return None if row is None else str(row[0])
 
 
-def claim_meta(key: str, value: str, *, replace: bool = False) -> str:
+def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str | None = None) -> str:
     """The stored value of key, storing ``value`` first when there is none (or always, with replace)."""
     conn = None
     try:
         conn = _connect(create=True)
         assert conn is not None
         with conn:
+            if reset_token is not None:
+                acknowledged = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key + ":reset",)).fetchone()
+                # A marker that could not be unlinked must not reset the bound
+                # again: acknowledge its identity atomically with the claim.
+                replace = acknowledged is None or acknowledged[0] != reset_token
             conflict = "DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"
             conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
+            if reset_token is not None and replace:
+                conn.execute(
+                    "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key + ":reset", reset_token),
+                )
             row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
     finally:
         if conn is not None:
@@ -552,12 +562,15 @@ def forget_meta(key: str) -> None:
     """Delete a notes_meta value; no notes.db means there is nothing to forget."""
     conn = None
     try:
-        if read_meta(key) is None:
-            return
         path = notes_db_path()
-        if any(os.path.islink(path + suffix) for suffix in ("", "-wal", "-shm")):
-            raise OSError("An MCP-owned notes file must not be a symlink")
+        if not os.path.exists(path):
+            return
+        check_notes_paths(path)
         conn = sqlite3.connect(Path(path).as_uri() + "?mode=rw", uri=True, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notes_meta'").fetchone():
+            return
+        if not conn.execute("SELECT 1 FROM notes_meta WHERE key=?", (key,)).fetchone():
+            return
         with conn:
             conn.execute("DELETE FROM notes_meta WHERE key = ?", (key,))
     finally:
