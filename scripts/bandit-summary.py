@@ -25,14 +25,15 @@ def main() -> int:
         f"- Remaining findings: {count}\n"
         f"- Scan errors: {error_count}\n"
     )
-    print(summary)
-    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
-        handle.write(summary)
     for finding in findings:
-        print(
+        summary += (
             f"{finding['filename']}:{finding['line_number']}: "
-            f"{finding['test_id']} {finding['issue_severity']}: {finding['issue_text']}"
+            f"{finding['test_id']} {finding['issue_severity']}: {finding['issue_text']}\n"
         )
+    print(summary)
+    if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(summary_path).open("a", encoding="utf-8") as handle:
+            handle.write(summary)
     # A scanner crash, unreadable JSON or a skipped/unparseable source must not
     # look like a successful scan. Preserve its real exit code in the summary.
     return scanner_exit or (2 if error_count else 0) or (1 if count else 0)

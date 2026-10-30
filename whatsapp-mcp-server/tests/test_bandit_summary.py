@@ -45,6 +45,19 @@ def test_gate_reports_counts_and_preserves_failure(tmp_path, scanner_exit, findi
     assert f"Scan errors: {len(errors)}" in body
     if findings:
         assert "example.py:1: B104 MEDIUM: Test listener" in result.stdout
+        assert "example.py:1: B104 MEDIUM: Test listener" in body
+
+
+def test_local_run_without_actions_environment(tmp_path):
+    report = tmp_path / "bandit.json"
+    report.write_text('{"results": [], "errors": []}', encoding="utf-8")
+    env = dict(os.environ)
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "0", str(report)], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Remaining findings: 0" in result.stdout
 
 
 @pytest.mark.parametrize("contents", [None, "not JSON", "{}"])
