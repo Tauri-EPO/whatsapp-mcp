@@ -450,19 +450,11 @@ def test_first_start_records_the_instant_and_a_restart_keeps_it(paired_dbs, monk
     assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"OUT1", "AUD1"}
 
 
-@pytest.mark.parametrize(
-    "off",
-    [
-        {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"},
-        {"TRANSCRIBE_ON_INGEST": "false"},
-        {"WHISPER_URL": ""},  # no backend: the worker stays off
-    ],
-)
-def test_a_start_with_sent_audio_off_moves_the_instant_forward(paired_dbs, monkeypatch, off):
+def test_a_start_with_sent_audio_off_moves_the_instant_forward(paired_dbs, monkeypatch):
     media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
     _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)  # sent while it was off
     _add_audio(paired_dbs, "AUD1", ALICE)
-    _start(monkeypatch, ON_WITH_SENT | off)
+    _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
     assert _stored_since() is None
     assert transcribe_worker.ingest_config().sent_since is None
     assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"AUD1"}
@@ -471,6 +463,23 @@ def test_a_start_with_sent_audio_off_moves_the_instant_forward(paired_dbs, monke
     assert on_again is not None and on_again.sent_since is not None
     assert on_again.sent_since > SENT_SINCE
     assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"AUD1"}
+
+
+@pytest.mark.parametrize(
+    "off",
+    [
+        {"TRANSCRIBE_ON_INGEST": "false"},
+        {"WHISPER_URL": ""},
+        {"WHATSAPP_DENY_TOOLS": "transcribe_audio"},
+        {"TRANSCRIBE_ON_INGEST": "false", "TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"},
+    ],
+)
+def test_start_without_worker_preserves_shared_instant(paired_dbs, monkeypatch, off):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    assert _start(monkeypatch, ON_WITH_SENT | off) is None
+    assert _stored_since() == SENT_SINCE
+    again = _start(monkeypatch, ON_WITH_SENT)
+    assert again is not None and again.sent_since == SENT_SINCE
 
 
 def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_this_start(

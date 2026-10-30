@@ -102,9 +102,8 @@ FETCH_ENV = "TRANSCRIBE_ON_INGEST_FETCH"
 # of sent audio to the provider in one go: only sent audio at or after this
 # instant joins the work list. notes.db keeps it (notes_meta) from the first
 # start whose worker runs with sent audio on, so a restart or a recreated
-# container on the same store does not move it. A start with sent audio off, or
-# with the worker off, clears it, and the next start with it on records a new
-# one: it only moves forward, and the time it was off never joins the list.
+# container on the same store does not move it. Only a running worker with sent
+# audio off clears it; a process without the worker leaves this shared state alone.
 SENT_SINCE_KEY = "ingest_sent_since"
 
 # The tools this worker is: it transcribes like `transcribe_audio` and fetches
@@ -297,7 +296,7 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             logger.warning("could not record when sent audio started counting (%s); counting from %s", exc, now)
             since = now
         config = replace(config, sent_since=since)
-    else:
+    elif running:
         try:
             media_notes.forget_meta(SENT_SINCE_KEY)
         except (sqlite3.Error, OSError) as exc:
@@ -305,6 +304,8 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             # opened is reported by its own warning, and holds no instant to read.
             logger.info("could not clear when sent audio started counting: %s", exc)
         config = replace(config, sent_since=None)
+    else:
+        config = replace(config, sent_since=_stored_sent_since())
     _ingest_config = config
     return config
 
