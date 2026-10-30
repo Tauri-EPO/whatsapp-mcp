@@ -5,11 +5,13 @@ import subprocess
 import threading
 import time
 import wave
+from contextlib import contextmanager
 from dataclasses import replace
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -382,16 +384,51 @@ def test_unicode_audio_upload_with_non_utf8_default_encoding(provider, tmp_path,
     assert provider["calls"][0]["fields"]["file"].startswith(b"OggS")
 
 
-def test_whole_file_budget_includes_conversion_and_all_parts(provider, tmp_path):
+@pytest.mark.parametrize("part_count", [2, 4])
+def test_whole_file_budget_includes_conversion_and_all_parts(tmp_path, monkeypatch, part_count):
+    # This proves deadline propagation without ffmpeg/process scheduling. Other
+    # tests in this module exercise real conversion and HTTP wall deadlines.
+    import transcription_usage
+
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(transcribe, "time", SimpleNamespace(monotonic=lambda: clock.now))
     source = tmp_path / "long.wav"
-    _audio(source, seconds=810)
-    # Each part answers inside the 3 s timeout, but the two together cannot:
-    # a budget per part would take the conversion plus 5.6 s.
-    provider["delay"] = 2.8
-    started = time.monotonic()
-    with pytest.raises(BackendUnavailableError, match="deadline"):
-        transcribe_file(str(source), config=replace(load_config(), timeout_s=3))
-    assert time.monotonic() - started < 4.8
+    source.touch()
+    parts = [tmp_path / f"part-{n}.ogg" for n in range(part_count)]
+    seen = []
+
+    def conversion(audio_path, work_dir, deadline):
+        assert audio_path == str(source)
+        assert deadline == 103.0
+        clock.now += 1.0
+        return parts, 810.0
+
+    @contextmanager
+    def admission(*args, deadline):
+        assert deadline == 103.0  # Accounting gets the same absolute deadline.
+        yield
+
+    def upload(part, config, language):
+        seen.append((part, config.timeout_s))
+        clock.now += 0.75
+        return "part"
+
+    monkeypatch.setattr(transcribe, "_http_parts", conversion)
+    monkeypatch.setattr(transcribe, "_transcribe_http", upload)
+    monkeypatch.setattr(transcription_usage, "admission", admission)
+    config = replace(
+        load_config({}),
+        provider="openai_compatible",
+        url="http://example.invalid/transcribe",
+        model="fake-speech-model",
+        timeout_s=3,
+    )
+    if part_count == 4:
+        with pytest.raises(BackendUnavailableError, match="deadline"):
+            transcribe_file(str(source), config=config)
+    else:
+        assert transcribe_file(str(source), config=config)["text"] == "part part"
+    assert seen == list(zip(parts, [2.0, 1.25, 0.5]))
 
 
 def test_each_part_request_gets_only_the_remaining_budget(provider, tmp_path, monkeypatch):
