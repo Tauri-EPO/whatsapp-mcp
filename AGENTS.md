@@ -218,7 +218,7 @@ whatsapp-mcp/
 ├── docker-compose.operator.yml # optional private operator network; no operator host port
 ├── docker-compose.split.yml    # optional MCP namespace separation; apply last after other overrides
 ├── docker-compose.socket.yml   # optional per-instance Unix sockets alongside TCP
-├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), operator-logout.sh (private unlink/cleanup), upstream-harvest.sh, merge-when-green.sh (update / wait for CI / squash-merge a PR)
+├── scripts/                    # backup.sh (hot backup/restore of the store volume), smoke.sh (post-deploy check), operator-logout.sh (private unlink/cleanup), upstream-harvest.sh, merge-when-green.sh (update / wait for CI / squash-merge a PR), bandit-summary.py (fail-closed scanner report and job summary)
 ├── docs/                       # user docs: DOCKER.md (ops), CONFIGURATION.md (every env var), TOOLS.md (tool reference),
 │                               # LAPTOP.md (stdio setup), TROUBLESHOOTING.md, ARCHITECTURE.md (diagrams)
 ├── release-please-config.json  # release-please (simple, release-as for the first tag); .release-please-manifest.json holds the current version
@@ -271,7 +271,7 @@ Rules that stay true across all steps:
 # Python MCP server
 cd whatsapp-mcp-server
 uv sync --extra dev
-uv run ruff format . && uv run ruff check . && uv run pyright   # pyright: basic mode, tests excluded
+uv run ruff format . ../scripts/bandit-summary.py && uv run ruff check . ../scripts/bandit-summary.py && uv run pyright   # basic mode, tests excluded; includes the Bandit summary script
 uv run pytest -q
 uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT=http for HTTP
 
