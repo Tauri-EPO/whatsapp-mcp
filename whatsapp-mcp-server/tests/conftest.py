@@ -15,10 +15,7 @@ from pathlib import Path
 
 import pytest
 
-import main
 import media_inventory
-import runtime_settings
-import tool_policy
 import whatsapp
 
 # messages.db as written by a bridge from before the read-state migration
@@ -160,6 +157,10 @@ def paired_dbs(paired_store, monkeypatch) -> PairedStore:
 
 @pytest.fixture
 def runtime_archive(paired_dbs, monkeypatch):
+    import main
+    import runtime_settings
+    import tool_policy
+
     bridge = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "runtime_settings.go"
     schema = re.search(r"const runtimeSettingsSchema = `([^`]+)`", bridge.read_text()).group(1)
     with closing(paired_dbs.messages()) as conn, conn:
