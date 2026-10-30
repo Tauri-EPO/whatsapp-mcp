@@ -292,10 +292,12 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
     wget.write_text(
         '#!/bin/sh\ncase "$*" in *"-Y off"*) exit 0;; *) exit 77;; esac\n',
         encoding="utf-8",
+        newline="\n",
     )
     wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
+    assert BASH is not None
     result = subprocess.run(
-        [BASH, str(ROOT / "whatsapp-bridge" / "docker-healthcheck.sh")],
+        bash_command(BASH, ROOT / "whatsapp-bridge" / "docker-healthcheck.sh", bin_dir=tmp_path),
         env={
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
@@ -320,10 +322,11 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
 )
 def test_healthcheck_normalizes_accepted_bind(tmp_path: Path, bind: str, target: str) -> None:
     wget = tmp_path / "wget"
-    wget.write_text('#!/bin/sh\nfor arg in "$@"; do :; done\nprintf "%s" "$arg"\n', encoding="utf-8")
+    wget.write_text('#!/bin/sh\nfor arg in "$@"; do :; done\nprintf "%s" "$arg"\n', encoding="utf-8", newline="\n")
     wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
+    assert BASH is not None
     result = subprocess.run(
-        [BASH, str(ROOT / "whatsapp-bridge" / "docker-healthcheck.sh")],
+        bash_command(BASH, ROOT / "whatsapp-bridge" / "docker-healthcheck.sh", bin_dir=tmp_path),
         env={
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),

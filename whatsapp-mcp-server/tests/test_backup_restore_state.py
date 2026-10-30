@@ -10,11 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = resolve_bash()
-pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason="backup restore harness needs POSIX bash")
+pytestmark = pytest.mark.skipif(
+    BASH is None or os.name == "nt",
+    reason=(
+        BASH_SKIP_REASON
+        if BASH is None
+        else "restore tests DID NOT RUN: require POSIX 0600 modes; Windows stat reports 0666 after chmod 0600"
+    ),
+)
 
 
 @pytest.mark.parametrize("session", ["replacement", "missing", "copy_failure"])
@@ -65,7 +72,9 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
         "body = body.replace('/backup', os.environ['FAKE_BACKUP'])\n"
         "body = body.replace('chown -R 1000:1000', 'true')\n"
         "if os.environ['FAKE_COPY_FAILURE'] == 'yes': body = 'cp() { return 1; }; ' + body\n"
-        "sys.exit(subprocess.call(['sh', '-euc', body]))\n"
+        "sys.exit(subprocess.call(['sh', '-euc', body]))\n",
+        encoding="utf-8",
+        newline="\n",
     )
     docker.chmod(0o755)
     # Supply the CLI's real SQLite JSON evaluation in this local fake container.
@@ -76,7 +85,9 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
         "conn = sqlite3.connect(':memory:')\n"
         "conn.setconfig(sqlite3.SQLITE_DBCONFIG_DQS_DML, False)\n"
         "conn.create_function('readfile', 1, lambda p: pathlib.Path(p).read_bytes())\n"
-        "for row in conn.execute(sys.argv[-1]): print(row[0])\n"
+        "for row in conn.execute(sys.argv[-1]): print(row[0])\n",
+        encoding="utf-8",
+        newline="\n",
     )
     sqlite_cli.chmod(0o755)
     env = os.environ | {
@@ -86,8 +97,9 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
         "FAKE_BACKUP": str(backup),
         "FAKE_COPY_FAILURE": "yes" if session == "copy_failure" else "no",
     }
+    assert BASH is not None
     result = subprocess.run(
-        [BASH or "bash", str(ROOT / "scripts" / "backup.sh"), "restore", str(backup)],
+        [BASH, str(ROOT / "scripts" / "backup.sh"), "restore", str(backup)],
         env=env,
         capture_output=True,
         text=True,

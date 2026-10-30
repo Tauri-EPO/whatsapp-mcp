@@ -286,7 +286,7 @@ docker compose up -d --build
 docker compose logs -f bridge                    # QR code on first run
 ```
 
-The Python shell-script tests need Bash: on Windows, install Git for Windows (including Git Bash). The shared test resolver finds its native Bash via `git.exe` or the standard Program Files installation, ignores the System32 WSL shim, and skips with an actionable reason if no native shell is available. POSIX hosts use `bash` from PATH.
+The Python shell-script tests need Bash: on Windows, install Git for Windows (including Git Bash). The shared test resolver finds its native Bash via `git.exe`/`git --exec-path` (including shims), Program Files (64/32-bit), or the per-user LocalAppData installation, ignores the System32 WSL shim, and reports explicitly that script tests did not run if no native shell is available. POSIX hosts use `bash` from PATH.
 
 The MCP server is a real package (issue #409): `pyproject.toml` declares `[build-system]` with setuptools, so `uv sync` installs it into the local venv as an editable install and `uv build --wheel` ships exactly the `[tool.setuptools] py-modules` list (a local check; the release artifacts stay the container images, so `version` in `pyproject.toml` remains nominal) — the image is unaffected, its `uv sync --no-install-project` still skips the project and the Dockerfile copies `*.py` itself.
 

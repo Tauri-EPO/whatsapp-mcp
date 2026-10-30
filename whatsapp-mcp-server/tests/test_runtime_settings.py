@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -293,8 +292,8 @@ def test_operator_logout_script_sends_idle_to_private_http_only():
     bash = resolve_bash()
     if bash is None:
         pytest.skip(BASH_SKIP_REASON)
-    if shutil.which("curl") is None:
-        pytest.skip("needs curl")
+    if subprocess.run([bash, "-c", "command -v curl"], capture_output=True, timeout=10).returncode:
+        pytest.skip("script test DID NOT RUN: selected Bash needs curl")
     received = []
 
     class Handler(BaseHTTPRequestHandler):

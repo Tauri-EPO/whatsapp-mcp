@@ -102,7 +102,7 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_pa
 @pytest.fixture
 def provider(monkeypatch, tmp_path):
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "messages.db"))
-    state = {"calls": [], "heads": 0, "status": 200, "body": None, "delay": 0}
+    state = {"calls": [], "heads": 0, "status": 200, "body": None, "delay": 0, "release_delay": threading.Event()}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -133,7 +133,7 @@ def provider(monkeypatch, tmp_path):
                     "mime": file.get_content_type(),
                 }
             )
-            time.sleep(state["delay"])
+            state["release_delay"].wait(state["delay"])
             self.send_response(state["status"])
             if state["status"] == 302:
                 self.send_header("Location", "http://127.0.0.1:1/no-redirect")
@@ -164,6 +164,7 @@ def provider(monkeypatch, tmp_path):
     try:
         yield state
     finally:
+        state["release_delay"].set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
@@ -382,6 +383,20 @@ def test_unicode_audio_upload_with_non_utf8_default_encoding(provider, tmp_path,
     assert transcribe_file(str(source))["text"] == "part 1"
     assert len(provider["calls"]) == 1
     assert provider["calls"][0]["fields"]["file"].startswith(b"OggS")
+
+
+def test_whole_file_budget_with_real_conversion_and_slow_http(provider, tmp_path):
+    source = tmp_path / "long-real.wav"
+    _audio(source, seconds=810)
+    # Two real uploads need at least 24 s if each gets a fresh 15 s timeout.
+    # A shared 15 s deadline leaves 8 s of scheduler slack under the bound.
+    provider["delay"] = 12
+    started = time.monotonic()
+    with pytest.raises(BackendUnavailableError, match="deadline"):
+        transcribe_file(str(source), config=replace(load_config(), timeout_s=15))
+    assert time.monotonic() - started < 23
+    assert provider["calls"], "the real HTTP provider was never reached"
+    assert all(call["fields"]["file"].startswith(b"OggS") for call in provider["calls"])
 
 
 @pytest.mark.parametrize("part_count", [2, 4])
