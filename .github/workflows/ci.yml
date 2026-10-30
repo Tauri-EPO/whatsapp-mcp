@@ -58,27 +58,36 @@ jobs:
   go:
     name: Go Build
     runs-on: ubuntu-latest
+    # Step caps: 2 + 3 + 23 + 3 + 27 + 3 + 16 + 5 = 82 minutes.
+    # Eight extra minutes let the job retain diagnostics/cleanup at its edge;
+    # successful recent runs take 31-34 minutes.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 2
       - uses: actions/setup-go@v7
+        timeout-minutes: 3
         with:
           go-version: '1.27'
           cache-dependency-path: whatsapp-bridge/go.sum
       - name: Build, vet, test
+        timeout-minutes: 23
         run: |
           cd whatsapp-bridge
-          go build -v ./...
-          go vet ./...
-          go test ./...
+          timeout --kill-after=5s 120s go build -v ./...
+          timeout --kill-after=5s 120s go vet ./...
+          go test -timeout 8m ./...
           # The compose file sets TZ; media file names and timestamps must not
           # depend on the process zone (media_tz_test.go and friends).
-          TZ=America/Sao_Paulo go test ./...
+          TZ=America/Sao_Paulo go test -timeout 8m ./...
       - name: Operator socket denial cases (runner uid, no skips)
+        timeout-minutes: 3
         run: |
           id -u
           cd whatsapp-bridge
-          go test -v -run 'TestOperatorSocket' ./...
+          go test -timeout 2m -v -run 'TestOperatorSocket' ./...
       - name: Race detector
+        timeout-minutes: 27
         # Own step so its cost and its failures are legible. The shipped binary
         # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it
         # (issue #351). The suite is one package and takes about nine minutes
@@ -87,11 +96,17 @@ jobs:
           cd whatsapp-bridge
           go test -race -timeout 25m ./...
       - uses: astral-sh/setup-uv@v7
+        timeout-minutes: 3
       - name: Real MinIO and MCP media integration
+        # Script phase bounds including kill grace sum to 669 s; uv sync is
+        # capped at 125 s including grace. 16m leaves 166 s for overhead.
+        # Go's 6m dump precedes the script's 420s bound and this step's cap.
+        timeout-minutes: 16
         run: |
-          uv sync --frozen --extra dev --project whatsapp-mcp-server
+          timeout --kill-after=5s 120s uv sync --frozen --extra dev --project whatsapp-mcp-server
           bash scripts/test-s3-media.sh
       - name: golangci-lint
+        timeout-minutes: 5
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
