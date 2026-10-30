@@ -153,7 +153,7 @@ def media_refusal_clause(conn: sqlite3.Connection, alias: str) -> str:
         return "1"
     return (
         "NOT EXISTS (SELECT 1 FROM notesdb.media_refusals r "
-        f"WHERE r.chat_jid = {alias}.chat_jid AND r.message_id = {alias}.id)"
+        f"WHERE r.chat_jid = {alias}.chat_jid AND r.message_id = {alias}.id)"  # nosec B608 # alias is the internal literal m or messages; no external SQL is accepted
     )
 
 
@@ -186,8 +186,12 @@ def fetch_media_refusals(
         for start in range(0, len(identities), SEARCH_BATCH):
             batch = identities[start : start + SEARCH_BATCH]
             rows = conn.execute(
-                "SELECT chat_jid, message_id, reason, updated_at FROM media_refusals "
-                f"WHERE (chat_jid, message_id) IN (VALUES {','.join('(?, ?)' for _ in batch)})",
+                whatsapp._in_list_sql(
+                    "SELECT chat_jid, message_id, reason, updated_at FROM media_refusals "
+                    "WHERE (chat_jid, message_id) IN (VALUES {placeholders})",
+                    batch,
+                    row_width=2,
+                ),
                 [value for identity in batch for value in identity],
             )
             found.update(
@@ -244,15 +248,15 @@ def _rebuild_transcripts_fts(conn: sqlite3.Connection) -> None:
     _FTS_VERSION moves. The marker is written in the same transaction, so a
     rebuild that dies halfway is simply repeated on the next use.
     """
-    conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE}")
-    conn.execute(f"DELETE FROM {TRANSCRIPTS_MAP_TABLE}")
+    conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE}")  # nosec B608 # TRANSCRIPTS_FTS_TABLE is a module constant, not external input
+    conn.execute(f"DELETE FROM {TRANSCRIPTS_MAP_TABLE}")  # nosec B608 # TRANSCRIPTS_MAP_TABLE is a module constant, not external input
     conn.execute(
-        f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) SELECT sha256, value FROM media_notes WHERE key = ?",
+        f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) SELECT sha256, value FROM media_notes WHERE key = ?",  # nosec B608 # fixed transcript table identifier; TRANSCRIPT_KEY is bound
         (TRANSCRIPT_KEY,),
     )
     # media_notes is keyed by (sha256, key), so one row per hash lands here.
     conn.execute(
-        f"INSERT INTO {TRANSCRIPTS_MAP_TABLE} (sha256, fts_rowid) SELECT sha256, rowid FROM {TRANSCRIPTS_FTS_TABLE}"
+        f"INSERT INTO {TRANSCRIPTS_MAP_TABLE} (sha256, fts_rowid) SELECT sha256, rowid FROM {TRANSCRIPTS_FTS_TABLE}"  # nosec B608 # both transcript table identifiers are module constants
     )
     conn.execute(
         "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -305,27 +309,28 @@ def index_transcript(conn: sqlite3.Connection, sha256: str, value: str) -> None:
     if not _ensure_transcripts_fts(conn):
         conn.execute("DELETE FROM notes_meta WHERE key = ?", (_FTS_VERSION_KEY,))
         return
-    row = conn.execute(f"SELECT fts_rowid FROM {TRANSCRIPTS_MAP_TABLE} WHERE sha256 = ?", (sha256,)).fetchone()
+    row = conn.execute(f"SELECT fts_rowid FROM {TRANSCRIPTS_MAP_TABLE} WHERE sha256 = ?", (sha256,)).fetchone()  # nosec B608 # fixed map table identifier; sha256 is bound
     if row is not None:
-        conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE rowid = ?", (row[0],))
+        conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE rowid = ?", (row[0],))  # nosec B608 # fixed FTS table identifier; rowid is bound
     if not value:
         if row is not None:
-            conn.execute(f"DELETE FROM {TRANSCRIPTS_MAP_TABLE} WHERE sha256 = ?", (sha256,))
+            conn.execute(f"DELETE FROM {TRANSCRIPTS_MAP_TABLE} WHERE sha256 = ?", (sha256,))  # nosec B608 # fixed map table identifier; sha256 is bound
         else:
             # Nothing to point at: sweep by hash so a forgotten transcript can
             # never stay searchable, whatever left the two tables disagreeing.
             # Deleting a transcript is a rare, deliberate call — this is the one
             # place where reading the index whole is affordable.
-            conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE sha256 = ?", (sha256,))
+            conn.execute(f"DELETE FROM {TRANSCRIPTS_FTS_TABLE} WHERE sha256 = ?", (sha256,))  # nosec B608 # fixed FTS table identifier; sha256 is bound
         return
     if row is not None:
         # Same rowid as before: the map stays valid without a second write.
         conn.execute(
-            f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (rowid, sha256, text) VALUES (?, ?, ?)", (row[0], sha256, value)
+            f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (rowid, sha256, text) VALUES (?, ?, ?)",  # nosec B608 # fixed FTS table identifier; rowid, hash and text are bound
+            (row[0], sha256, value),
         )
         return
-    cur = conn.execute(f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) VALUES (?, ?)", (sha256, value))
-    conn.execute(f"INSERT INTO {TRANSCRIPTS_MAP_TABLE} (sha256, fts_rowid) VALUES (?, ?)", (sha256, cur.lastrowid))
+    cur = conn.execute(f"INSERT INTO {TRANSCRIPTS_FTS_TABLE} (sha256, text) VALUES (?, ?)", (sha256, value))  # nosec B608 # fixed FTS table identifier; hash and text are bound
+    conn.execute(f"INSERT INTO {TRANSCRIPTS_MAP_TABLE} (sha256, fts_rowid) VALUES (?, ?)", (sha256, cur.lastrowid))  # nosec B608 # fixed map table identifier; hash and rowid are bound
 
 
 def normalize_sha256(value: str) -> str:
@@ -350,7 +355,7 @@ def visible_hashes(hashes: list[str]) -> set[str]:
     if not wanted:
         return set()
     # Compare the blob, not lower(hex(...)): that is what idx_messages_file_sha256 indexes.
-    clauses = [f"file_sha256 IN ({','.join('?' * len(wanted))})"]
+    clauses = [whatsapp._in_list_sql("file_sha256 IN ({placeholders})", wanted)]
     params: list[Any] = [bytes.fromhex(h) for h in wanted]
     clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
     clauses.append(clause)
@@ -359,7 +364,8 @@ def visible_hashes(hashes: list[str]) -> set[str]:
         conn = whatsapp._connect_messages_db()
         try:
             rows = conn.execute(
-                f"SELECT DISTINCT lower(hex(file_sha256)) FROM messages WHERE {' AND '.join(clauses)}", params
+                f"SELECT DISTINCT lower(hex(file_sha256)) FROM messages WHERE {' AND '.join(clauses)}",  # nosec B608 # only hash placeholders and policy SQL; hashes and policy values are bound
+                params,
             ).fetchall()
         finally:
             conn.close()
@@ -383,7 +389,7 @@ def _messages_for_hash(sha256: str) -> list[dict[str, Any]]:
                 FROM messages m LEFT JOIN chats c ON c.jid = m.chat_jid
                 WHERE {" AND ".join(clauses)}
                 ORDER BY m.timestamp DESC, m.id
-                """,
+                """,  # nosec B608 # fixed hash and policy predicates; params bind hash and policy values
                 params,
             ).fetchall()
         finally:
@@ -434,7 +440,10 @@ def fetch_notes(hashes: list[str], *, conn: sqlite3.Connection | None = None) ->
         return {}
     try:
         rows = conn.execute(
-            f"SELECT sha256, key, value FROM media_notes WHERE sha256 IN ({','.join('?' * len(wanted))})", wanted
+            whatsapp._in_list_sql(
+                "SELECT sha256, key, value FROM media_notes WHERE sha256 IN ({placeholders})", wanted
+            ),
+            wanted,
         ).fetchall()
     finally:
         if owned:
@@ -483,7 +492,7 @@ def clear_notes_containing(key: str, needles: Sequence[str]) -> int:
     matches = " OR ".join("lower(value) LIKE ? ESCAPE '\\'" for _ in wanted)
     try:
         deleted = conn.execute(
-            f"DELETE FROM media_notes WHERE key = ? AND ({matches})",
+            f"DELETE FROM media_notes WHERE key = ? AND ({matches})",  # nosec B608 # matches repeats a fixed LIKE predicate; key and escaped patterns are bound
             [key, *(_like_literal(n.lower()) for n in wanted)],
         ).rowcount
         conn.commit()
@@ -527,7 +536,10 @@ def read_meta_values(keys: Sequence[str]) -> dict[str, str]:
         conn = whatsapp._connect_read_only(notes_db_path())
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_meta'").fetchone():
             return {}
-        rows = conn.execute(f"SELECT key, value FROM notes_meta WHERE key IN ({','.join('?' for _ in keys)})", keys)
+        rows = conn.execute(
+            whatsapp._in_list_sql("SELECT key, value FROM notes_meta WHERE key IN ({placeholders})", keys),
+            keys,
+        )
         return {str(key): str(value) for key, value in rows}
     finally:
         if conn is not None:
@@ -554,7 +566,10 @@ def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str 
                 # again: acknowledge its identity atomically with the claim.
                 new_reset = acknowledged is None or acknowledged[0] != reset_token
             conflict = "DO UPDATE SET value = excluded.value" if replace or new_reset else "DO NOTHING"
-            conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
+            conn.execute(
+                f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}",  # nosec B608 # conflict is one of two fixed clauses above; key and value are bound
+                (key, value),
+            )
             if reset_token is not None and new_reset:
                 conn.execute(
                     "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -678,7 +693,7 @@ def _match_transcripts(conn: sqlite3.Connection, needle: str) -> sqlite3.Cursor:
     """Every index hit for ``needle`` as (sha256, bm25 score), best match first."""
     sql = (
         f"SELECT sha256, bm25({TRANSCRIPTS_FTS_TABLE}) AS score FROM {TRANSCRIPTS_FTS_TABLE} "
-        f"WHERE {TRANSCRIPTS_FTS_TABLE} MATCH ? ORDER BY score"
+        f"WHERE {TRANSCRIPTS_FTS_TABLE} MATCH ? ORDER BY score"  # nosec B608 # fixed FTS table identifier; _match_transcripts binds the MATCH text
     )
     try:
         return conn.execute(sql, (needle,))
@@ -789,7 +804,7 @@ def search_media_notes(query: str, key: str | None = None, limit: int = 50) -> l
     verdict: dict[str, bool] = {}
     try:
         rows = conn.execute(
-            f"SELECT sha256, key, value, updated_at FROM media_notes WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC",
+            f"SELECT sha256, key, value, updated_at FROM media_notes WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC",  # nosec B608 # fixed search and optional key predicates; params bind needle and key
             params,
         )
         while len(hits) < limit:

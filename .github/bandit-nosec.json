@@ -1,0 +1,566 @@
+[
+  {
+    "path": "whatsapp-mcp-server/export.py",
+    "function": "export_messages",
+    "fingerprint": "ca8f5aded4aaa48152e4e55db07cd1c436a33529ae334482ccf03f1bbe8f0896",
+    "reason": "message_columns and MessageFilters emit fixed SQL; params bind all filter values"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_inventory.py",
+    "function": "_page_sql",
+    "fingerprint": "bef9a1f652e35f1f19ebf79e3f0f549dfca89dc2c8711dec57f6438613ab9093",
+    "reason": "fixed item columns, _media_filters clauses and ORDER_BY entry; caller binds values"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_inventory.py",
+    "function": "_page_sql",
+    "fingerprint": "20907fa9e4d5d0197eb8a43e1ca8f736a812dfa6d87dfbe96b38a17d6f06adcb",
+    "reason": "fixed columns, _media_filters clauses and ORDER_BY entry; caller binds both filter sets"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_inventory.py",
+    "function": "_copies_for_hashes",
+    "fingerprint": "5be0888549a39d91dcf4c547855bb5d1c97c986843c90aa79b4c3c535c2bc697",
+    "reason": "only hash placeholders and _media_filters clauses; hashes and copies_params are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_inventory.py",
+    "function": "media_stats",
+    "fingerprint": "f25bb0e1a4116ee556dbc70099ee20c12b856211311330306f7eff6c8a2dcff6",
+    "reason": "_media_filters emits fixed predicates; params bind every filter value"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_inventory.py",
+    "function": "media_stats",
+    "fingerprint": "22a4671702eda04ec2252e64e40e7ef3a075d1303d2da0e8b4098c2c0a68e5e4",
+    "reason": "_media_filters emits fixed predicates; params bind every filter value"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_inventory.py",
+    "function": "media_stats",
+    "fingerprint": "f6eaadfab82ae5e29bb5d763444b85b866c3388d899d3b15f05fc5ad342b3bed",
+    "reason": "_media_filters emits fixed predicates; params bind every filter value"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "media_refusal_clause",
+    "fingerprint": "6c56cff164a7cba5e478f20de1621b321748270104a0410811e75169be9bd326",
+    "reason": "alias is the internal literal m or messages; no external SQL is accepted"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "_rebuild_transcripts_fts",
+    "fingerprint": "6999b0d26d47f288c18c826a1169e2e62a27a4b4693b7aa00fb881b3214dc28a",
+    "reason": "TRANSCRIPTS_FTS_TABLE is a module constant, not external input"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "_rebuild_transcripts_fts",
+    "fingerprint": "386aa2bd7e464cfc1e3918a396815eec5d7d81a98873b88cac273e6b1bdb7018",
+    "reason": "TRANSCRIPTS_MAP_TABLE is a module constant, not external input"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "_rebuild_transcripts_fts",
+    "fingerprint": "0ff6728defbd46cdbfc77efbf49a679d400ccd55834c291510844f0d999ca0c0",
+    "reason": "fixed transcript table identifier; TRANSCRIPT_KEY is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "_rebuild_transcripts_fts",
+    "fingerprint": "5ec5dee2db6f9fac649663c377b0b3e75a5a1b710a145f5d136d13898dadd433",
+    "reason": "both transcript table identifiers are module constants"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "58a278457d56ba54276d3ab462a160d9bbc997dd95bfe02d97653fd44d7eb9ee",
+    "reason": "fixed map table identifier; sha256 is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "a05ccafd21f585a0fb2520a0a7ba2a6ef8d39c498bc0ca28e3f0717c444ebda4",
+    "reason": "fixed FTS table identifier; rowid is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "40988669ac474709c1c242b48f7084d025a94cf2ed4293411964b1a016793ba9",
+    "reason": "fixed map table identifier; sha256 is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "0f9fdf2c4d939729b2f0951b89ee43d574b17856865492396cc7a5312ae7051b",
+    "reason": "fixed FTS table identifier; sha256 is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "83ee7ab2d12c4f9bdea83aaacf738ee738f267e5e9a08be1c7a100b6a1b3951e",
+    "reason": "fixed FTS table identifier; rowid, hash and text are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "6a0fc58414ed89031d1b3f5928084e3336fffc21edae44800be6d2eb3f5cb9fc",
+    "reason": "fixed FTS table identifier; hash and text are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "index_transcript",
+    "fingerprint": "b1d04d5b6c6c600ea3d6cb519159a7800444f4a36cdb4c48a7390eef10feae9a",
+    "reason": "fixed map table identifier; hash and rowid are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "visible_hashes",
+    "fingerprint": "faed119179d768c936e48b849a0f4352828e33a578ae1950d72f7cd53b16c13b",
+    "reason": "only hash placeholders and policy SQL; hashes and policy values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "_messages_for_hash",
+    "fingerprint": "09b180ba7d2a701181beece4adea1f4d224ff80a17bda5eb71f92a1608e58bc9",
+    "reason": "fixed hash and policy predicates; params bind hash and policy values"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "clear_notes_containing",
+    "fingerprint": "7e79a164420864062c8376ffdd37c98ad8c968247c439050742a86b8758b40f8",
+    "reason": "matches repeats a fixed LIKE predicate; key and escaped patterns are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "claim_meta",
+    "fingerprint": "bf9fc1083be5fdf0d102690563214010b2df861ff294da2ec2b0d709f7e1bf0e",
+    "reason": "conflict is one of two fixed clauses above; key and value are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "_match_transcripts",
+    "fingerprint": "4412ebd418cac650af2642e25e858daf823ff783bf46f25c80a5b148110353c9",
+    "reason": "fixed FTS table identifier; _match_transcripts binds the MATCH text"
+  },
+  {
+    "path": "whatsapp-mcp-server/media_notes.py",
+    "function": "search_media_notes",
+    "fingerprint": "1b143b0437e5cad675ca898c7bba0e839260e74399b7f7ea8df69ee2b8d3aecc",
+    "reason": "fixed search and optional key predicates; params bind needle and key"
+  },
+  {
+    "path": "whatsapp-mcp-server/notes.py",
+    "function": "_versioned_current",
+    "fingerprint": "005b8a6682102403421f98ed2ee1a499f15c6fbc890a5929fa7bc214a211f08f",
+    "reason": "fixed _ORIGIN_SQL and ? placeholders; type, key and ids are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/notes.py",
+    "function": "annotate",
+    "fingerprint": "d5fdcb07abc45eb3fc39908ed63e67d45930c5b8ae34373da782326e145fa7ca",
+    "reason": "only repeated ? placeholders; type, key, ids and canonical id are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/notes.py",
+    "function": "_current_rows",
+    "fingerprint": "50dbabaea6cbe09445fe4d20b5817b3e65f0f924d6ac17de02f8cbaf2b4314c7",
+    "reason": "fixed _ORIGIN_SQL and ? placeholders; type and ids are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/notes.py",
+    "function": "fetch_notes_for",
+    "fingerprint": "0eaaf638ae3b7c53225d685bff66851c24dcc3525ad09a1bfa919add115d2705",
+    "reason": "fixed _ORIGIN_SQL and ? placeholders; type and chunk ids are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/notes.py",
+    "function": "get_notes",
+    "fingerprint": "025cba55ddc0cce28b0983e5d2cd04b71ef64e40e7482714094463fcb0fb7ef2",
+    "reason": "fixed _ORIGIN_SQL and ? placeholders; type and ids are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/notes.py",
+    "function": "_search_targets",
+    "fingerprint": "5c7e87e5725188e1fc9231f0d9d06e68eca115b642b357a9ee62317b5c24ba3d",
+    "reason": "fixed _ORIGIN_SQL and type/key predicates; params and both needles are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/transcribe_worker.py",
+    "function": "_already_handled_clause",
+    "fingerprint": "2557d4c112c33b56d4bc5f416261b9294ae6ea54f429750cad6c0b6c47e87de8",
+    "reason": "media_refusal_clause uses literal m alias; returned note keys are bound by caller"
+  },
+  {
+    "path": "whatsapp-mcp-server/transcribe_worker.py",
+    "function": "_forget_nonpending",
+    "fingerprint": "7822b6223ba658f60a8d5b0bafb9797bd772dea3c570aad2acbace6e8188aab2",
+    "reason": "VALUES holds only (?, ?) pairs and predicate is _pending_rows' fixed clauses; keys and params are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/transcribe_worker.py",
+    "function": "_pending_rows",
+    "fingerprint": "ea8f5d5e88296eed61230062ff579a60255440dc58b34042d46599988d5315d8",
+    "reason": "fixed eligibility, ingest and policy clauses; keyset, keys, policy and limit are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/transcribe_worker.py",
+    "function": "_cached_copy_paths",
+    "fingerprint": "0cca7bbf9e05ebb9fa4564449dce28ea607635adafceabb13082b70c4c782ef3",
+    "reason": "fixed hash and policy predicates; params bind hash and policy values"
+  },
+  {
+    "path": "whatsapp-mcp-server/transcription_usage.py",
+    "function": "_used",
+    "fingerprint": "e0d55cda3da3da848be9f75f9c33ef424258e9c760a391e9cb56b3bf5c470811",
+    "reason": "table comes from the literal tuple below; suffix is fixed and month is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/triage.py",
+    "function": "_current_triage_notes",
+    "fingerprint": "a0145393f616d69452f294a446ca22fb97ce0faf3f43e94cadb008997f7b35a0",
+    "reason": "fixed notes._ORIGIN_SQL and key placeholders; keys are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/triage.py",
+    "function": "install_filter",
+    "fingerprint": "3e2dcfc58faebd297d66295e514fce1724fd0d16fc4afd061010c8822187f9f6",
+    "reason": "_TABLE is a module constant identifying this connection-local temp table"
+  },
+  {
+    "path": "whatsapp-mcp-server/triage.py",
+    "function": "install_filter",
+    "fingerprint": "c911545c5c40e335c1fc41deb4a4fc0b20543f156333c379a1489cdd4d103a2c",
+    "reason": "fixed temp table identifier; executemany binds every row"
+  },
+  {
+    "path": "whatsapp-mcp-server/triage.py",
+    "function": "install_filter",
+    "fingerprint": "e973435ac2707f0f57d099921f2820523dc4983c7347d30f0d0b80368116a608",
+    "reason": "fixed temp table and internal anchor expressions; returned snooze time is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/triage.py",
+    "function": "set_anchor",
+    "fingerprint": "39dd1d139531c637077af0c71f5fd79abab4419b3e7b5753100774a095924ce6",
+    "reason": "internal unread query fragments and fixed temp table; params bind all values"
+  },
+  {
+    "path": "whatsapp-mcp-server/triage.py",
+    "function": "set_anchor",
+    "fingerprint": "05b2a31ad74cfaf4abe4342667eead6f239ffc1cac058dc670b72cb3255e9f6e",
+    "reason": "fixed temp table identifier; executemany binds timestamps and JIDs"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_fts_available_uncached",
+    "fingerprint": "7990541b6a047fdb7955a3cce2d1368ab829a0af0c561574e931dbe1616fea89",
+    "reason": "MESSAGES_FTS_TABLE is a module constant, not external input"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_sender_identities",
+    "fingerprint": "53a6a2fe87fd6c11a667288f0ea8a9633959992090629d21ce6f59028f900d3f",
+    "reason": "_placeholders emits only ? tokens; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_last_message_join.newest",
+    "fingerprint": "e6b8f4fc678c3f868b88c381679f828c928302c0c5fcea179488e59adbc094e0",
+    "reason": "column is literal id/chat_jid; match and spoken are internal SQL fragments"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_contact_names_uncached",
+    "fingerprint": "53a6a2fe87fd6c11a667288f0ea8a9633959992090629d21ce6f59028f900d3f",
+    "reason": "_placeholders emits only ? tokens; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_contact_names_uncached",
+    "fingerprint": "4cd84b30665b4904482fffbcfd73237dc57c4b1e45ad59a58a078954ef6d85f6",
+    "reason": "_placeholders emits only ? tokens; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "lid_map_counterparts",
+    "fingerprint": "8d303da75bff23a441022b0b9009f56a84f26d184cf63ae861c37f968eeb500c",
+    "reason": "marks contains only ? placeholders; both chunks are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_chat_twins",
+    "fingerprint": "eb5b4991a805fb11fc15465da93565f6e69b5f5b6db04f13df6232541d9466bc",
+    "reason": "fixed read-marker expression and ? placeholders; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_chat_twins",
+    "fingerprint": "51a03ded0d117e0e57bc594a41f2354dfed9847b5b806b3de3e1a9144d386a17",
+    "reason": "_placeholders emits only ? tokens; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_get_sender_name_uncached",
+    "fingerprint": "2002f3af928b8cf4b2c1bbded01513c78e1d9a9948bf5f383d793cb42a1ecd32",
+    "reason": "only ? placeholders; candidates and preferred sender JID are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_context_side_sql",
+    "fingerprint": "ecddbfa1b1c59eadd3643cd9922659725f14f6be57340c02266ad6104fd8a930",
+    "reason": "fixed columns, placeholder tuples and ASC/DESC operators; caller binds hits and limit"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "<module>",
+    "fingerprint": "f675452a4df3f3b9ee3f1f6ce0504672253a43e27c54763207be920ff737faea",
+    "reason": "both table names are module constants; QueryPredicate binds MATCH text"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_query_predicate",
+    "fingerprint": "eef0717adbc5cd2a5b4eb4bae7d48b042ad8bd227290fe08fdfd6f1cca888015",
+    "reason": "predicate and temp table are module constants; QueryPredicate binds search text"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "count_messages",
+    "fingerprint": "c8eaca75fad80e619db408222cc05b1464baa35afb5d8c9a7ecf87739642439c",
+    "reason": "MessageFilters and QueryPredicate emit internal SQL; _execute_message_sql binds params"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "list_messages_page",
+    "fingerprint": "dc22112180d7ae08375b24c00b09a2f0ec79fea32a3e9bbf95e494bf13a80ab4",
+    "reason": "message_columns selects fixed schema-compatible columns; query values are bound below"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_message_context",
+    "fingerprint": "dc61305573d67d27021198d23cf9fb98db9a71bf242e11e8719e5a27f4372fd4",
+    "reason": "message_columns selects fixed columns; both lookups below bind message and chat IDs"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_message_context",
+    "fingerprint": "1a585c36d14b2ac5314c3dc1e2e4878a995cd248a6589a1b432627beef398715",
+    "reason": "fixed columns and optional deleted predicate; chat, timestamp and limit are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_message_context",
+    "fingerprint": "ca71e0e9032c7b9f69d09719a19626c7d05dbe6d5c4e2d33f4a2b556ba2b290f",
+    "reason": "fixed columns and optional deleted predicate; chat, timestamp and limit are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_matching_contact_chat_names",
+    "fingerprint": "70e0c9067b16570ba5221c9c8fcf623a7b773b7fa594d4dbca516bdc1d222a8b",
+    "reason": "field names come from the literal tuple above; query is bound eight times"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_matching_contact_chat_names",
+    "fingerprint": "080dc13dc558ef84e99696e3c6433c598904943d3ae4e3e967db5c39f48fe680",
+    "reason": "fixed direct/policy predicates and ? placeholders; candidates and policy are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "count_chats",
+    "fingerprint": "f479bd8e2c93e9bc819a45b335ebce9c6a08a4fa885c135466601e8e7445890b",
+    "reason": "_chat_filter emits internal predicates; params bind search and policy values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "list_chats_page",
+    "fingerprint": "d9c16d01c0593888224a3f2fa4e04bd12f42430a1cb2e537e28773726e3b89ea",
+    "reason": "fixed projections and internal twin/name/join SQL; cursor and filters are bound below"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "canonical_note_jids",
+    "fingerprint": "6c15e057e2947f763abd42b13ba7c85fa109292e9e2bb55141c99285575af3f5",
+    "reason": "_placeholders emits only ? tokens; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "note_jid_spellings",
+    "fingerprint": "5ae5a945e9bfc413b091b9232c4a77f33774971f20e6de92b74dbbfa949cc9ef",
+    "reason": "_placeholders emits only ? tokens; chunk values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_lid_jids_of_number",
+    "fingerprint": "54f68f1b544e86c1e432bfcb6666ff33ae21e1e7607535ddc7acb4e8e523e47f",
+    "reason": "_placeholders emits only ? tokens; phone spellings are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "search_contacts",
+    "fingerprint": "8b941adbaf54790d6ca735e41dd6d81523b46814404c943e6f047a0417bb79d9",
+    "reason": "fixed columns/status constant and LIKE placeholders; query and patterns are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "search_contacts",
+    "fingerprint": "5c98fa6675c9bdbfd324005967dfc2823b317e5298cd6a79d30b1df7d9ce58bf",
+    "reason": "_like_any emits fixed column LIKE ? predicates; query and patterns are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_contact_chats_page",
+    "fingerprint": "2bf1756c75813874c45ad41b6fabc229996690c55f4dcfb792a009a1be97f5c1",
+    "reason": "only repeated ? placeholders; member_params binds aliases in the outer query"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_contact_chats_page",
+    "fingerprint": "c1f93a85725fb839d72088d310c1de041f3359e67c94eebd9e8fbf43a4d0db69",
+    "reason": "fixed membership/rank and internal twin/policy SQL; aliases, keyset and limits are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_last_interaction",
+    "fingerprint": "58b04d96b1794d75557dbe8f01b53c962d43d10874c0e92acec7da2bbf8aa2a6",
+    "reason": "fixed columns, policy SQL and ? placeholders; aliases and policy values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_chat",
+    "fingerprint": "3c7c0b8d7b50d2059bda255a975fa4b55e74b686ecbf51f8f09dd11ebaf0c924",
+    "reason": "fixed projections, join and policy SQL; execute below binds rows and policy values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_stored_group_settings",
+    "fingerprint": "666ccf533f99c8a71b0ad42ad2faee5b8dd1206a2c9ac6456c81d41eeec4fe91",
+    "reason": "column names derive from fixed GROUP_SETTING_KEYS; JID is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "get_direct_chat_by_contact",
+    "fingerprint": "034e8531c1c6d50dfdbe33d1732ac3b851864955cc8ff91343e98bd50ba66d4a",
+    "reason": "fixed projections, join and policy SQL; candidate and ranking JIDs are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_read_receipt_targets",
+    "fingerprint": "bdf57b1219efb621023fefbf3712b935ee132d77fcb07f9345e96414ebb842c5",
+    "reason": "_placeholders emits only ? tokens; message IDs and chat spellings are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_coverage_by_chat",
+    "fingerprint": "e70175ec3fb5464ba34e1f3afdac73bfeaf0f187044a0c7a567cf334fcabcb0c",
+    "reason": "coverage builds fixed scope/policy clauses; chat_params binds their values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_coverage_by_chat",
+    "fingerprint": "dbc7f172122f70aec1f78ce55d3398014655d6fd03dad72d6d03815adc8848b6",
+    "reason": "ChatTwins emits only internal column references; twin values are bound in outer query"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_coverage_by_chat",
+    "fingerprint": "28ca7d9b32a1cf28bf2954a3118722fafd459c93fdcefb7ea12c13b7d14b6490",
+    "reason": "ChatTwins emits only internal column references; twin values are bound in outer query"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_coverage_by_chat",
+    "fingerprint": "40341e2013440058ea34a0ceb37063a2b20b7372a422431f9627321872d9b073",
+    "reason": "internal twin/scope SQL and fixed aggregates; twin, time, chat and limit values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_coverage_audio",
+    "fingerprint": "70c8769a7fb35f2ff01343314757b12603f67ab1178c52281b9adc4889042c26",
+    "reason": "fixed note/ingest/refusal predicates and scope SQL; note keys and scope values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_coverage_audio",
+    "fingerprint": "c2219e5c6c743ebad463c8bd28c1fec8df45fefc1cdb37b121f40ef401a446d1",
+    "reason": "fixed handled predicates and scope SQL; note keys, scope and row limit are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "coverage",
+    "fingerprint": "15f0a7a73fecbbbfa1e6a035105228610a5a84febf7152b9a6695691e5f33434",
+    "reason": "fixed time/chat/policy clauses; msg_params binds all scope values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "coverage",
+    "fingerprint": "d5383b9cf873c5cfaebce604ec407d88c462960e8e5d0a5cf503cf9091b78de0",
+    "reason": "fixed chat/policy/hidden-twin clauses; chat_params binds their values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "coverage",
+    "fingerprint": "6287cd969a97203602e072dc286b7132e7539a83d73e0976658a43f6e0d56935",
+    "reason": "internal twin SQL and fixed scope clauses; twin, chat and time values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "coverage",
+    "fingerprint": "c450bfff7817105e73045741ba8351b075207274cc4ec721fc77898cf11a8635",
+    "reason": "fixed time/chat/policy clauses; msg_params binds all scope values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "coverage",
+    "fingerprint": "1050f4b6185bcb68e18bc11e0b66047b5452c114d459b18c217496e849143586",
+    "reason": "fixed scope SQL, UNION SELECT ? edges and timestamp expression; all values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "list_unread",
+    "fingerprint": "ffc651a76e634378cb195d31d59196b321c40d34903c8fb69cfaaa12fcb98cb3",
+    "reason": "fixed columns/spoken SQL and internal filters; JIDs, marker and filter values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_min_messages_clause",
+    "fingerprint": "e2a89b69193f98f52603ace600ca53f91613efd6e9cb5a738d1091ef11546720",
+    "reason": "match is internal twin SQL and spoken is fixed; caller binds both threshold values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_pending_mention_where",
+    "fingerprint": "a2edbc6f9c8a10bc8d879f1078208961c747cb0f6f0bc8ecf13fdc5906204d4d",
+    "reason": "aliases and own_scope are internal SQL; caller binds returned mention parameters"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "newest_pending_mentions",
+    "fingerprint": "d6766742c42134945c06702df55e4a85f633e655e7c1150c9967ccf968813f23",
+    "reason": "internal twin/mention SQL, literal comparison operators and ? tokens; all values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_mention_only_rows",
+    "fingerprint": "dd13334f36a8b498023c32e5e7946c055c36791a82a1872b864e3ca7a44d060c",
+    "reason": "internal projection/filter/triage SQL; all policy, time, keyset and limit values are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_participant_twins",
+    "fingerprint": "2a050ae6848dfe677620a40127dd43e530977a1ba422e8ca01a8c20e5c60c63b",
+    "reason": "_placeholders emits only ? tokens; user spellings are bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_label_chat_aliases",
+    "fingerprint": "cd43e03bfdbc6a97589a4e6a83ead7c36b46e801186c521cf828f2817315cf29",
+    "reason": "column and key come from the literal lookup dictionary; user is bound"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "list_labels",
+    "fingerprint": "e8f9e012d4b71b11dcf610b3499b6be88637c96d452f1509c9eb0237d6740843",
+    "reason": "_placeholders emits only ? tokens; aliases are added to bound args below"
+  }
+]

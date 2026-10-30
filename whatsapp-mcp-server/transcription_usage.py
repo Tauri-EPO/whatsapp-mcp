@@ -101,7 +101,7 @@ def _exceeds_quota(seconds: float, cap: float) -> bool:
 def _used(conn, month, scope):
     suffix = " AND source='ingest'" if scope == "ingest" else ""
     return sum(
-        conn.execute(f"SELECT COALESCE(SUM(seconds),0) FROM {table} WHERE month=?{suffix}", (month,)).fetchone()[0]
+        conn.execute(f"SELECT COALESCE(SUM(seconds),0) FROM {table} WHERE month=?{suffix}", (month,)).fetchone()[0]  # nosec B608 # table comes from the literal tuple below; suffix is fixed and month is bound
         for table in ("transcription_usage", "transcription_reservations")
     )
 

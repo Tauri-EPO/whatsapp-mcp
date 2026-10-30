@@ -288,7 +288,7 @@ def _versioned_current(
     rows = conn.execute(
         f"SELECT target_id, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
         f" WHERE target_type = ? AND key = ? AND target_id IN ({','.join('?' * len(ids))})"
-        " GROUP BY target_id",
+        " GROUP BY target_id",  # nosec B608 # fixed _ORIGIN_SQL and ? placeholders; type, key and ids are bound
         [ttype, key, *ids],
     ).fetchall()
     if not rows:
@@ -361,7 +361,7 @@ def annotate(
             aliases = conn.execute(
                 "SELECT target_id, value, MAX(version) FROM notes"
                 f" WHERE target_type = ? AND key = ? AND target_id IN ({','.join('?' * len(ids))}) AND target_id <> ?"
-                " GROUP BY target_id HAVING value <> ''",
+                " GROUP BY target_id HAVING value <> ''",  # nosec B608 # only repeated ? placeholders; type, key, ids and canonical id are bound
                 [ttype, key, *ids, tid],
             ).fetchall()
             conn.executemany(
@@ -394,7 +394,7 @@ def _current_rows(conn: sqlite3.Connection, ttype: str, tid: str, ids: list[str]
     rows = conn.execute(
         f"SELECT target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
         f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(ids))})"
-        " GROUP BY target_id, key",
+        " GROUP BY target_id, key",  # nosec B608 # fixed _ORIGIN_SQL and ? placeholders; type and ids are bound
         [ttype, *ids],
     ).fetchall()
     best: dict[str, tuple[str, str, str]] = {}
@@ -485,7 +485,7 @@ def fetch_notes_for(target_type: str, target_ids: Sequence[str]) -> dict[str, di
                 conn.execute(
                     f"SELECT target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} FROM notes"
                     f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(chunk))})"
-                    " GROUP BY target_id, key",
+                    " GROUP BY target_id, key",  # nosec B608 # fixed _ORIGIN_SQL and ? placeholders; type and chunk ids are bound
                     [target_type, *chunk],
                 ).fetchall()
             )
@@ -555,7 +555,7 @@ def get_notes(target_type: str, target_id: str, include_history: bool = False) -
                 for key, value, updated_at, source, version, origin in conn.execute(
                     f"SELECT key, value, updated_at, source, version, {_ORIGIN_SQL} FROM notes"
                     f" WHERE target_type = ? AND target_id IN ({','.join('?' * len(ids))})"
-                    " ORDER BY updated_at DESC, version DESC",
+                    " ORDER BY updated_at DESC, version DESC",  # nosec B608 # fixed _ORIGIN_SQL and ? placeholders; type and ids are bound
                     [ttype, *ids],
                 )
                 if _visible(ttype, origin)
@@ -620,7 +620,7 @@ def _search_targets(needle: str, key: str | None, target_type: str, limit: int) 
             f"  SELECT target_type, target_id, key, value, updated_at, MAX(version), {_ORIGIN_SQL} AS origin"
             f"  FROM notes WHERE {' AND '.join(inner)} GROUP BY target_type, target_id, key"
             ") WHERE value <> '' AND (instr(lower(value), lower(?)) > 0 OR instr(value, ?) > 0)"
-            " ORDER BY updated_at DESC",
+            " ORDER BY updated_at DESC",  # nosec B608 # fixed _ORIGIN_SQL and type/key predicates; params and both needles are bound
             [*params, needle, needle],
         )
         # One hit per identity: a row left under an older spelling of the same

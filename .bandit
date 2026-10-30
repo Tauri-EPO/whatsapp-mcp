@@ -1,0 +1,4 @@
+[bandit]
+# Test listeners, temporary paths and subprocess fakes are intentional fixtures.
+# Scan all production modules, not the local environment's third-party packages.
+exclude = .svn,CVS,.bzr,.hg,.git,__pycache__,.tox,.eggs,*.egg,.venv,venv,build,whatsapp-mcp-server/tests

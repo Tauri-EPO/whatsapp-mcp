@@ -1,0 +1,2 @@
+# CI-only scanner; never installed into runtime images.
+bandit==1.9.4

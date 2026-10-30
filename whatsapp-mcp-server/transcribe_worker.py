@@ -475,7 +475,7 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
         return refusal_clause, []
     return (
         "NOT EXISTS (SELECT 1 FROM notesdb.media_notes n "
-        "WHERE n.sha256 = lower(hex(m.file_sha256)) AND n.key IN (?, ?, ?)) AND " + refusal_clause,
+        "WHERE n.sha256 = lower(hex(m.file_sha256)) AND n.key IN (?, ?, ?)) AND " + refusal_clause,  # nosec B608 # media_refusal_clause uses literal m alias; returned note keys are bound by caller
         [TRANSCRIPT_KEY, TRANSCRIPT_ERROR_KEY, MEDIA_UNAVAILABLE_KEY],
     )
 
@@ -517,7 +517,7 @@ def _forget_nonpending(conn: sqlite3.Connection, predicate: str, params: list[An
         chunk = keys[start : start + 250]
         values = ",".join("(?, ?)" for _ in chunk)
         gone = conn.execute(
-            f"WITH remembered(id, chat_jid) AS (VALUES {values}) "
+            f"WITH remembered(id, chat_jid) AS (VALUES {values}) "  # nosec B608 # VALUES holds only (?, ?) pairs and predicate is _pending_rows' fixed clauses; keys and params are bound
             "SELECT r.id, r.chat_jid FROM remembered r LEFT JOIN messages m "
             "ON m.id = r.id AND m.chat_jid = r.chat_jid "
             f"WHERE m.id IS NULL OR NOT ({predicate})",
@@ -569,7 +569,7 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
             WHERE {" AND ".join(clauses)}
             ORDER BY m.timestamp DESC, m.id, m.chat_jid
             LIMIT ?
-            """,
+            """,  # nosec B608 # fixed eligibility, ingest and policy clauses; keyset, keys, policy and limit are bound
             (*params, limit),
         ).fetchall()
     finally:
@@ -901,7 +901,7 @@ def _cached_copy_paths(sha256: str, exclude: tuple[str, str]) -> Iterator[str]:
     try:
         conn = whatsapp._connect_messages_db()
         try:
-            rows = conn.execute(f"SELECT id, chat_jid FROM messages WHERE {' AND '.join(clauses)}", params).fetchall()
+            rows = conn.execute(f"SELECT id, chat_jid FROM messages WHERE {' AND '.join(clauses)}", params).fetchall()  # nosec B608 # fixed hash and policy predicates; params bind hash and policy values
         finally:
             conn.close()
     except (sqlite3.Error, ValueError) as exc:  # unreadable archive, or a hash that is not hex

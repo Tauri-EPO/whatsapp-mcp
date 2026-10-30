@@ -152,7 +152,7 @@ asyncio_mode = "auto"
 [tool.pyright]
 # Basic mode: catches Optional misuse, wrong call shapes and missing attributes
 # without demanding annotations everywhere. Tests are checked too.
-include = ["."]
+include = [".", "../scripts/bandit-summary.py"]
 # tests/ use duck-typed fakes (Resp classes, FakeServer, monkeypatched modules)
 # on purpose; checking them in basic mode reports the fakes, not bugs.
 exclude = [".venv", "**/__pycache__", "tests"]
