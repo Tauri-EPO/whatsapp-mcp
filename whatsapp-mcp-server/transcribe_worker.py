@@ -985,6 +985,7 @@ def run_forever(
     stop: threading.Event,
     sleep: Callable[[float], None] = time.sleep,
     run: Callable[..., BatchResult] | None = None,
+    settle_on_run: bool = False,
 ) -> None:
     """Poll until ``stop`` is set. ``sleep`` and ``run`` are injected by the tests.
 
@@ -993,11 +994,24 @@ def run_forever(
     the same newest page every interval. It lives in this loop only — a restart
     starts at the newest rows again, which is where the new work is.
     """
-    run_batch = run or functools.partial(
-        run_once, fetch=config.fetch, sent_since=config.sent_since if config.include_sent else None
-    )
+    global _ingest_config
     position: Position | None = None
     while not stop.is_set():
+        if settle_on_run:
+            try:
+                with policy_operation():
+                    if active_policy().allows(TRANSCRIBE_TOOL):
+                        config = _settle_sent_since(config, running=True)
+                        _ingest_config = config
+                        settle_on_run = False
+            except (sqlite3.Error, OSError):
+                logger.warning("transcribe_on_ingest: could not initialize the sent audio instant; waiting")
+            if settle_on_run:
+                sleep(config.interval_s)
+                continue
+        run_batch = run or functools.partial(
+            run_once, fetch=config.fetch, sent_since=config.sent_since if config.include_sent else None
+        )
         position = run_batch(config.batch, position=position).position
         if stop.is_set():
             return
@@ -1010,13 +1024,14 @@ def start_worker(
     stop: threading.Event | None = None,
     sleep: Callable[[float], None] = time.sleep,
     run: Callable[..., BatchResult] | None = None,
+    settle_on_run: bool = False,
 ) -> threading.Thread:
     """Start the poll loop on a daemon thread (so it never holds up shutdown)."""
     event = stop or threading.Event()
     thread = threading.Thread(
         target=run_forever,
         args=(config,),
-        kwargs={"stop": event, "sleep": sleep, "run": run},
+        kwargs={"stop": event, "sleep": sleep, "run": run, "settle_on_run": settle_on_run},
         name="transcribe-on-ingest",
         daemon=True,
     )
@@ -1044,7 +1059,8 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     if not config.enabled:
         _ingest_config = _settle_sent_since(config, running=False)
         return None
-    policy = load_tool_policy(env)
+    policy = active_policy() if runtime_policy_enabled() else load_tool_policy(env)
+    settle_on_run = not policy.allows(TRANSCRIBE_TOOL)
     if not policy.allows(TRANSCRIBE_TOOL):
         behavior = (
             "the worker waits for a runtime policy change" if runtime_policy_enabled() else "the worker stays off"
@@ -1079,7 +1095,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         )
         _ingest_config = _settle_sent_since(config, running=False)
         return None
-    config = _settle_sent_since(config, running=True)
+    config = _settle_sent_since(config, running=not settle_on_run)
     _ingest_config = config
     clear_outage_failures()
     clear_oversized_failures()
@@ -1092,4 +1108,4 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
         f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
     )
-    return start_worker(config)
+    return start_worker(config, settle_on_run=True) if settle_on_run else start_worker(config)

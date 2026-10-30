@@ -584,6 +584,40 @@ def test_reset_marker_refuses_symlinks_and_does_not_start_worker(paired_dbs, mon
     assert "refusing to start" in caplog.text
 
 
+@pytest.mark.parametrize("include_sent", [True, False])
+def test_runtime_hidden_worker_does_not_settle_until_policy_allows(paired_dbs, monkeypatch, include_sent):
+    from tool_policy import ToolPolicy
+
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    hidden = ToolPolicy(deny=frozenset({"transcribe_audio"}))
+    allowed = ToolPolicy()
+    monkeypatch.setattr(transcribe_worker, "runtime_policy_enabled", lambda: True)
+    monkeypatch.setattr(transcribe_worker, "active_policy", lambda: hidden)
+    starts = []
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
+    transcribe_worker.install_ingest_worker(
+        ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": str(include_sent)}
+    )
+    assert _stored_since() == SENT_SINCE
+    config, kwargs = starts[0]
+    assert kwargs == {"settle_on_run": True}
+    stop = threading.Event()
+    batches = []
+
+    def unhide(_):
+        assert _stored_since() == SENT_SINCE
+        monkeypatch.setattr(transcribe_worker, "active_policy", lambda: allowed)
+
+    def run(batch, **kwargs):
+        batches.append(batch)
+        assert _stored_since() == (SENT_SINCE if include_sent else None)
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, sleep=unhide, run=run, **kwargs)
+    assert batches == [config.batch]
+
+
 def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_this_start(
     paired_dbs, monkeypatch, caplog
 ):
