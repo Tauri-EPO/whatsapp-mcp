@@ -378,6 +378,8 @@ bridge is down:
 | `configured` | A backend is set. `false` means every [`transcribe_audio`](#transcribe_audio) call fails here — voice notes stay unreadable until the operator enables one |
 | `backend` | Which variable configures it: `"url"` (`WHISPER_URL`, the whisper.cpp server) or `"bin"` (`WHISPER_BIN` + `WHISPER_MODEL`, the CLI), `null` when neither is set. The same two backends appear as `server` / `cli` in a `transcribe_audio` result |
 | `reachable` | Live check: one `HEAD` on the configured URL (no body either way, 2 s timeout — whisper-server answers `404` there and that counts) for `url`, "binary and model file are both on disk" for `bin`, `null` when nothing is configured |
+| `probe` | For `openai_compatible`: `http_response`, `unauthorized` (401/403), `unreachable` or `timeout`. Authenticated HEAD uses `WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S` (default 5 s) per attempt, with one retry on transport failure. Timeouts report `reachable: null`; other failures also report null after an actual success within 15 minutes, except 401/403 which always report false. No audio is sent by the probe. |
+| `last_success_at`, `last_failure_at` | For `openai_compatible`: UTC timestamps of actual transcription outcomes for this provider, endpoint and model in this MCP process, or null before an outcome. Probes never change these timestamps; restart clears them. |
 | `model` | `WHISPER_MODEL` when set (the CLI backend needs it; the server backend loads its own) |
 | `on_ingest` | `true` when the [background worker](CONFIGURATION.md#transcribing-voice-notes-as-they-arrive) is walking the backlog, so a transcript may appear on its own. It needs a backend too, so it is never `true` while `configured` is `false` |
 
