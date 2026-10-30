@@ -60,6 +60,7 @@ import itertools
 import logging
 import os
 import sqlite3
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -270,7 +271,7 @@ def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
 
 
 def ingest_config() -> IngestConfig:
-    """The startup snapshot shared by coverage and every worker batch."""
+    """The local worker snapshot; workerless coverage reads the stored bound per call."""
     global _ingest_config
     if _ingest_config is None:
         _ingest_config = load_ingest_config()
@@ -294,9 +295,9 @@ def _sent_reset_path() -> Path:
 def _sent_reset_token() -> str | None:
     path = _sent_reset_path()
     try:
-        if path.is_symlink():
-            raise OSError("A sent audio reset marker must not be a symlink")
-        info = path.stat()
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("A sent audio reset marker must be a regular file, never a symlink")
         if info.st_size > 128:
             raise OSError("A sent audio reset marker exceeds limits")
         try:
@@ -311,12 +312,25 @@ def _stored_sent_since() -> str | None:
     """Read shared state without writing; a pending, unacknowledged reset counts no sent audio."""
     try:
         token = _sent_reset_token()
-        if token is not None and media_notes.read_meta(SENT_SINCE_KEY + ":reset") != token:
+        keys = (SENT_SINCE_KEY,) if token is None else (SENT_SINCE_KEY, SENT_SINCE_KEY + ":reset")
+        values = media_notes.read_meta_values(keys)
+        if token is not None and values.get(SENT_SINCE_KEY + ":reset") != token:
             return None
-        stored = media_notes.read_meta(SENT_SINCE_KEY)
-        return None if stored is None else _canonical_instant(stored)
+        stored = values.get(SENT_SINCE_KEY)
+        if stored is None:
+            return None
+        since = _canonical_instant(stored)
+        if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
+            _warn_future_sent_read()
+            return None
+        return since
     except (sqlite3.Error, OSError, ValueError):
         return None
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_future_sent_read() -> None:
+    logger.warning("stored sent audio instant is in the future; ignoring it in workerless reads")
 
 
 def _persist_sent_since(config: IngestConfig) -> IngestConfig:

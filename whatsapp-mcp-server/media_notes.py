@@ -516,19 +516,29 @@ def clear_dated_notes_with_prefix(key: str, prefix: str) -> int:
 
 def read_meta(key: str) -> str | None:
     """A notes_meta value, or None when it (or notes.db itself) is not there."""
+    if not os.path.exists(notes_db_path()):
+        return None
+    return read_meta_values((key,)).get(key)
+
+
+def read_meta_values(keys: Sequence[str]) -> dict[str, str]:
+    """Read existing metadata on one read-only handle, with no stat, DDL or creation.
+
+    A missing/unreadable database raises sqlite3.Error; callers that tolerate
+    unavailable metadata can handle it without a separate filesystem probe.
+    """
+    if not keys:
+        return {}
     conn = None
     try:
-        path = notes_db_path()
-        if not os.path.exists(path):
-            return None
-        conn = whatsapp._connect_read_only(path)
+        conn = whatsapp._connect_read_only(notes_db_path())
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_meta'").fetchone():
-            return None
-        row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
+            return {}
+        rows = conn.execute(f"SELECT key, value FROM notes_meta WHERE key IN ({','.join('?' for _ in keys)})", keys)
+        return {str(key): str(value) for key, value in rows}
     finally:
         if conn is not None:
             conn.close()
-    return None if row is None else str(row[0])
 
 
 def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str | None = None) -> str:

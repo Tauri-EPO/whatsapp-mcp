@@ -2142,3 +2142,42 @@ def test_pending_claim_overrides_an_acknowledged_marker_left_on_disk(paired_dbs,
     transcribe_worker.run_forever(config, stop=stop, run=run)
     assert _stored_since() == chosen
     assert media_notes.read_meta(transcribe_worker.SENT_SINCE_KEY + ":reset") == "acknowledged-token"
+
+
+@pytest.mark.parametrize("with_marker", [False, True])
+def test_workerless_bound_uses_one_stat_and_one_read_only_connection(paired_dbs, monkeypatch, with_marker):
+    token = "read-token" if with_marker else None
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE, reset_token=token)
+    marker = transcribe_worker._sent_reset_path()
+    if with_marker:
+        marker.write_text(token, encoding="ascii")
+    lstat, connect = Path.lstat, whatsapp._connect_read_only
+    probes, opens = [], []
+
+    def probe(path):
+        probes.append(path)
+        return lstat(path)
+
+    def reader(path):
+        opens.append(path)
+        return connect(path)
+
+    monkeypatch.setattr(Path, "lstat", probe)
+    monkeypatch.setattr(whatsapp, "_connect_read_only", reader)
+    assert transcribe_worker._stored_sent_since() == SENT_SINCE
+    assert probes == [marker]
+    assert opens == [media_notes.notes_db_path()]
+
+
+@pytest.mark.parametrize("minutes", [4, 6])
+def test_workerless_future_bound_is_absent_with_one_warning_without_repair(paired_dbs, monkeypatch, caplog, minutes):
+    transcribe_worker._warn_future_sent_read.cache_clear()
+    future = whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(minutes=minutes))
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, future)
+    assert _start(monkeypatch, {}) is None
+    for _ in range(3):
+        assert transcribe_worker.ingest_config().sent_since == (None if minutes > 5 else future)
+        whatsapp.coverage()
+    warnings = [record for record in caplog.records if "ignoring it in workerless reads" in record.message]
+    assert len(warnings) == (1 if minutes > 5 else 0)
+    assert _stored_since() == future
