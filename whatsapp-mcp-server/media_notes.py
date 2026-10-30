@@ -530,7 +530,10 @@ def read_meta_values(keys: Sequence[str]) -> dict[str, str]:
         conn = whatsapp._connect_read_only(notes_db_path())
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_meta'").fetchone():
             return {}
-        rows = conn.execute(f"SELECT key, value FROM notes_meta WHERE key IN ({','.join('?' for _ in keys)})", keys)
+        rows = conn.execute(
+            f"SELECT key, value FROM notes_meta WHERE key IN ({','.join('?' for _ in keys)})",  # nosec B608 # only repeated ? placeholders; metadata keys are bound
+            keys,
+        )
         return {str(key): str(value) for key, value in rows}
     finally:
         if conn is not None:
@@ -557,7 +560,10 @@ def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str 
                 # again: acknowledge its identity atomically with the claim.
                 new_reset = acknowledged is None or acknowledged[0] != reset_token
             conflict = "DO UPDATE SET value = excluded.value" if replace or new_reset else "DO NOTHING"
-            conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
+            conn.execute(
+                f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}",  # nosec B608 # conflict is one of two fixed clauses above; key and value are bound
+                (key, value),
+            )
             if reset_token is not None and new_reset:
                 conn.execute(
                     "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
