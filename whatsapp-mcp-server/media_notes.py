@@ -25,6 +25,7 @@ import re
 import sqlite3
 from collections.abc import Generator, Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import whatsapp
@@ -518,8 +519,11 @@ def read_meta(key: str) -> str | None:
     """A notes_meta value, or None when it (or notes.db itself) is not there."""
     conn = None
     try:
-        conn = _connect(create=False)
-        if conn is None:
+        path = notes_db_path()
+        if not os.path.exists(path):
+            return None
+        conn = whatsapp._connect_read_only(path)
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_meta'").fetchone():
             return None
         row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
     finally:
@@ -548,9 +552,12 @@ def forget_meta(key: str) -> None:
     """Delete a notes_meta value; no notes.db means there is nothing to forget."""
     conn = None
     try:
-        conn = _connect(create=False)
-        if conn is None:
+        if read_meta(key) is None:
             return
+        path = notes_db_path()
+        if os.path.islink(path):
+            raise OSError("An MCP-owned notes file must not be a symlink")
+        conn = sqlite3.connect(Path(path).as_uri() + "?mode=rw", uri=True, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
         with conn:
             conn.execute("DELETE FROM notes_meta WHERE key = ?", (key,))
     finally:

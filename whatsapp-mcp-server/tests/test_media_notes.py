@@ -30,13 +30,54 @@ def test_connect_closes_handle_when_schema_fails(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("operation", ["read_meta", "claim_meta", "forget_meta"])
 def test_meta_closes_handle_when_statement_fails(monkeypatch, tmp_path, operation):
-    conn = sqlite3.connect(tmp_path / "notes.db")
+    path = tmp_path / "notes.db"
+    conn = sqlite3.connect(path)
+    conn.set_authorizer(lambda *args: sqlite3.SQLITE_DENY)
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
     monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: conn)
+    monkeypatch.setattr(whatsapp, "_connect_read_only", lambda path: conn)
+    if operation == "forget_meta":
+        monkeypatch.setattr(media_notes, "read_meta", lambda key: "value")
+        monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: conn)
     args = ("test_key", "value") if operation == "claim_meta" else ("test_key",)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(sqlite3.DatabaseError):
         getattr(media_notes, operation)(*args)
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_meta_reads_and_absent_deletes_do_not_create_or_migrate(tmp_path, monkeypatch, existing):
+    path = tmp_path / "notes.db"
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
+    if existing:
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE unrelated (value TEXT)")
+        conn.close()
+    before = path.read_bytes() if existing else None
+    monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
+    assert media_notes.read_meta("absent") is None
+    media_notes.forget_meta("absent")
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == (["notes.db"] if existing else [])
+
+
+def test_meta_read_is_read_only_and_delete_does_not_migrate(tmp_path, monkeypatch):
+    path = tmp_path / "notes.db"
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE notes_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO notes_meta VALUES ('key', 'value')")
+    conn.close()
+    monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
+    assert media_notes.read_meta("key") == "value"
+    assert not path.with_name("notes.db-wal").exists()
+    media_notes.forget_meta("key")
+    assert media_notes.read_meta("key") is None
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("notes_meta",)]
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    conn.close()
 
 
 @pytest.fixture
