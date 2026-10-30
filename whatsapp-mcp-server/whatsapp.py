@@ -5543,18 +5543,13 @@ def ingest_include_sent(env: Mapping[str, str] | None = None) -> bool:
     return parse_bool_env((source.get(INCLUDE_SENT_ENV) or "").strip() or "true", INCLUDE_SENT_ENV)
 
 
-def ingest_sent_clause(alias: str, include_sent: bool | None = None) -> str:
+def ingest_sent_clause(alias: str, sent_since: str | None) -> str:
     """Inbound audio, plus sent audio from the instant it started counting (issue #751)."""
     inbound = f"{alias}.is_from_me = 0"
-    if include_sent is False:
-        return inbound
-    from transcribe_worker import ingest_config
-
-    config = ingest_config()
-    if not (config.include_sent if include_sent is None else include_sent) or config.sent_since is None:
+    if sent_since is None:
         return inbound
     # sent_since is a parsed instant rendered by timestamp_bound, never caller input.
-    return f"({inbound} OR {alias}.timestamp >= '{config.sent_since}')"
+    return f"({inbound} OR {alias}.timestamp >= '{sent_since}')"
 
 
 def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any]) -> dict[str, int]:
@@ -5586,7 +5581,11 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     import media_notes
     import media_remote
 
-    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE} AND {ingest_sent_clause('messages')}"
+    from transcribe_worker import ingest_config
+
+    config = ingest_config()
+    sent_since = config.sent_since if config.include_sent else None
+    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE} AND {ingest_sent_clause('messages', sent_since)}"
     from runtime_settings import ingest_chat_clause
 
     clause += f" AND {ingest_chat_clause('messages.chat_jid')}"

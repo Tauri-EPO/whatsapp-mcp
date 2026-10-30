@@ -319,7 +319,7 @@ def test_sent_backlog_transcribed_and_coverage_agrees(paired_dbs, monkeypatch, i
     expected = 1 if include_sent == "false" else 2
     assert whatsapp.coverage()["audio"]["backlog"] == expected
     backend = FakeBackend(text="historical sent words")
-    result = transcribe_worker.run_once(10, transcribe=backend)
+    result = transcribe_worker.run_once(10, transcribe=backend, sent_since=SENT_SINCE if include_sent != "false" else None)
     assert (result.pending, result.transcribed, result.failed) == (expected, expected, 0)
     audio = whatsapp.coverage()["audio"]
     assert (audio["messages"], audio["transcribed"], audio["backlog"]) == (expected, expected, 0)
@@ -347,7 +347,7 @@ def test_sent_audio_respects_direct_scope_allow_list_and_monthly_cap(paired_dbs,
     policy = chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": f"{ALICE},{FAMILY}"})
     monkeypatch.setattr(transcribe_worker, "CHAT_POLICY", policy)
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
-    assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"OUT1"}
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=SENT_SINCE)} == {"OUT1"}
     assert whatsapp.coverage()["audio"]["backlog"] == 1
     with usage.admission(60, "whisper_cpp", "", "ingest"):
         pass
@@ -356,7 +356,7 @@ def test_sent_audio_respects_direct_scope_allow_list_and_monthly_cap(paired_dbs,
     assert backend.runs == []
     assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
     monkeypatch.setattr(usage, "month_now", lambda: "2026-11")
-    assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 1
+    assert transcribe_worker.run_once(10, transcribe=backend, sent_since=SENT_SINCE).transcribed == 1
     assert whatsapp.coverage()["audio"]["backlog"] == 0
 
 
@@ -378,7 +378,7 @@ def test_startup_sent_snapshot_survives_environment_changes(paired_dbs, monkeypa
     monkeypatch.setattr(whatsapp, "ingest_include_sent", lambda env=None: pytest.fail("reparsed startup env"))
     expected = 2 if include_sent else 1
     assert whatsapp.coverage()["audio"]["backlog"] == expected
-    assert transcribe_worker.run_once(10, transcribe=FakeBackend()).transcribed == expected
+    assert transcribe_worker.run_once(10, transcribe=FakeBackend(), sent_since=installed[0].sent_since).transcribed == expected
     assert whatsapp.coverage()["audio"]["backlog"] == 0
     assert transcribe_worker.ingest_config() is installed[0]
 
@@ -423,11 +423,11 @@ def test_sent_audio_before_the_recorded_instant_never_joins_the_backlog(paired_d
     _add_audio(paired_dbs, "AUD1", ALICE, timestamp="2026-09-05 09:01:00+00:00")  # inbound: the v2.9.1 rule
     config = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_FETCH": "1"})
     assert config is not None and config.sent_since == "2026-09-05 09:03:00+00:00"
-    assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"OUT2", "AUD1"}
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=config.sent_since)} == {"OUT2", "AUD1"}
     assert whatsapp.coverage()["audio"]["backlog"] == 2
 
     backend = FakeBackend()
-    result = transcribe_worker.run_once(10, transcribe=backend, fetch=True, include_sent=True)
+    result = transcribe_worker.run_once(10, transcribe=backend, fetch=True, sent_since=config.sent_since)
     assert (result.pending, result.transcribed) == (2, 2)
     assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
     # The outage-note retry at startup requeues failed files through the same list.
@@ -461,7 +461,22 @@ def test_first_start_records_the_instant_and_a_restart_keeps_it(paired_dbs, monk
     media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE, replace=True)
     older = _start(monkeypatch, ON_WITH_SENT)
     assert older is not None and older.sent_since == SENT_SINCE
-    assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"OUT1", "AUD1"}
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=older.sent_since)} == {"OUT1", "AUD1"}
+
+
+def test_owned_config_drives_every_selection_without_reading_the_global(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1, timestamp="2026-09-05 09:02:59+00:00")
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp="2026-09-05 09:03:00+00:00")
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    config = transcribe_worker.IngestConfig(True, 5, 10, sent_since="2026-09-05 09:03:00+00:00")
+    monkeypatch.setattr(transcribe_worker, "ingest_config", lambda: pytest.fail("global config consulted"))
+    assert {r[0] for r in transcribe_worker._pending_rows(10, sent_since=config.sent_since)} == {"OUT2", "AUD1"}
+    backend = FakeBackend()
+    monkeypatch.setattr(transcribe_worker, "_default_transcribe", backend)
+    stop = threading.Event()
+    transcribe_worker.run_forever(config, stop=stop, sleep=lambda _: stop.set())
+    assert len(backend.runs) == 2
+    assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
 
 
 def test_a_start_with_sent_audio_off_moves_the_instant_forward(paired_dbs, monkeypatch):
@@ -1663,21 +1678,22 @@ def test_the_loop_sleeps_the_configured_interval_between_batches():
     assert slept == [42.0, 42.0, 42.0]
 
 
-def test_the_loop_carries_the_fetch_and_sent_flags_into_every_batch(monkeypatch):
-    config = transcribe_worker.IngestConfig(enabled=True, interval_s=1.0, batch=4, fetch=True, include_sent=False)
+@pytest.mark.parametrize("include_sent", [True, False])
+def test_the_loop_carries_the_fetch_and_sent_instant_into_every_batch(paired_dbs, monkeypatch, include_sent):
+    config = transcribe_worker.IngestConfig(enabled=True, interval_s=1.0, batch=4, fetch=True, include_sent=include_sent, sent_since=SENT_SINCE)
     stop = threading.Event()
-    seen: list[tuple[int, bool, bool]] = []
+    seen: list[tuple[int, bool, str | None]] = []
 
     def fake_run_once(
-        batch: int, *, fetch: bool = False, include_sent: bool = True, **kwargs
+        batch: int, *, fetch: bool = False, sent_since: str | None = None, **kwargs
     ) -> transcribe_worker.BatchResult:
-        seen.append((batch, fetch, include_sent))
+        seen.append((batch, fetch, sent_since))
         stop.set()
         return transcribe_worker.BatchResult(0, 0, 0)
 
     monkeypatch.setattr(transcribe_worker, "run_once", fake_run_once)
     transcribe_worker.run_forever(config, stop=stop, sleep=lambda _seconds: None)
-    assert seen == [(4, True, False)]
+    assert seen == [(4, True, SENT_SINCE if include_sent else None)]
 
 
 def test_start_worker_runs_on_a_daemon_thread_and_stops():

@@ -365,7 +365,7 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
 PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestamp
 
 
-def _pending_rows(limit: int, after: Position | None = None, *, include_sent: bool | None = None) -> list[PendingRow]:
+def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str | None = None) -> list[PendingRow]:
     """Eligible audio with no transcript, newest first, resuming just past ``after``.
 
     The status feed is left out, the way ``coverage`` counts the backlog
@@ -379,7 +379,7 @@ def _pending_rows(limit: int, after: Position | None = None, *, include_sent: bo
         handled_clause, handled_params = _already_handled_clause(conn)
         clauses = [
             "m.media_type = 'audio'",
-            whatsapp.ingest_sent_clause("m", include_sent),
+            whatsapp.ingest_sent_clause("m", sent_since),
             "m.file_sha256 IS NOT NULL",
             "m.deleted_at IS NULL",
             f"m.chat_jid <> '{whatsapp.STATUS_BROADCAST_JID}'",  # a module constant, never user input
@@ -421,7 +421,7 @@ def find_pending(
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
-    include_sent: bool | None = None,
+    sent_since: str | None = None,
 ) -> Selection:
     """Up to ``batch`` voice notes to transcribe, one per distinct hash, and where to resume.
 
@@ -468,8 +468,8 @@ def find_pending(
     """
     batch = max(1, batch)
     page_limit = batch * CANDIDATE_FACTOR
-    head = _pending_rows(batch, include_sent=include_sent) if position is not None else []
-    page = _pending_rows(page_limit, after=position, include_sent=include_sent)
+    head = _pending_rows(batch, sent_since=sent_since) if position is not None else []
+    page = _pending_rows(page_limit, after=position, sent_since=sent_since)
     fetcher = download or whatsapp.download_media
     budget = batch if fetch else 0  # fetch attempts left this round
     head_budget = min(batch - 1, HEAD_FETCHES) if fetch else 0  # ... of which the newest rows may spend these
@@ -816,7 +816,7 @@ def run_once(
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
-    include_sent: bool | None = None,
+    sent_since: str | None = None,
 ) -> BatchResult:
     """Transcribe one batch from ``position``. Never raises: a broken batch is a logged batch.
 
@@ -843,7 +843,7 @@ def run_once(
                 return BatchResult(0, 0, 0, position=position)
             fetch = fetch and policy.allows(DOWNLOAD_TOOL)
             selection = find_pending(
-                batch, fetch=fetch, download=download, position=position, include_sent=include_sent
+                batch, fetch=fetch, download=download, position=position, sent_since=sent_since
             )
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
@@ -965,7 +965,9 @@ def run_forever(
     the same newest page every interval. It lives in this loop only — a restart
     starts at the newest rows again, which is where the new work is.
     """
-    run_batch = run or functools.partial(run_once, fetch=config.fetch, include_sent=config.include_sent)
+    run_batch = run or functools.partial(
+        run_once, fetch=config.fetch, sent_since=config.sent_since if config.include_sent else None
+    )
     position: Position | None = None
     while not stop.is_set():
         position = run_batch(config.batch, position=position).position
