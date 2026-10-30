@@ -771,17 +771,38 @@ async def test_introspection_concurrency_is_bounded(monkeypatch, issuer):
         WHATSAPP_MCP_OAUTH_INTROSPECTION_SECRET="fake-secret",
     )
     verifier = http_oauth.OAuthTokenVerifier(config)
-    tasks = [asyncio.create_task(verifier.verify_token(f"slow-{i}")) for i in range(6)]
-    assert await asyncio.to_thread(issuer["slow_started"].wait, 2)
+    # Hold the provider at an explicit barrier. Socket startup and the issuer's
+    # own timeout must not decide whether the admission bound is observable.
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def provider_fetch(url, data=None):
+        assert url == config.introspection_url
+        calls.append(data["token"])
+        if len(calls) == http_oauth.MAX_INTROSPECTIONS:
+            started.set()
+        await release.wait()
+        return {"active": True, "aud": AUDIENCE, "sub": "Alice", "scope": "base"}
+
+    monkeypatch.setattr(verifier, "_fetch", provider_fetch)
+    tasks = [asyncio.create_task(verifier.verify_token(f"slow-{i}")) for i in range(http_oauth.MAX_INTROSPECTIONS)]
     try:
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(started.wait(), 30)
+        # All admitted requests are parked; only the two excess callers can
+        # finish. Removing the bound leaves no completed refusal and fails.
+        excess = [asyncio.create_task(verifier.verify_token(f"slow-excess-{i}")) for i in range(2)]
+        tasks.extend(excess)
+        refused = await asyncio.wait_for(asyncio.gather(*excess, return_exceptions=True), 30)
+        assert all(isinstance(result, http_oauth.AuthorizationUnavailableError) for result in refused)
         assert len(verifier._introspection_flights) == http_oauth.MAX_INTROSPECTIONS
-        assert len(issuer["calls"]) <= http_oauth.MAX_INTROSPECTIONS
+        assert len(calls) == http_oauth.MAX_INTROSPECTIONS
     finally:
-        issuer["slow_release"].set()
+        release.set()
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*verifier._introspection_flights.values(), return_exceptions=True)
     assert sum(isinstance(r, http_oauth.AuthorizationUnavailableError) for r in results) == 2
-    assert len(issuer["calls"]) == http_oauth.MAX_INTROSPECTIONS
+    assert sum(r is not None and not isinstance(r, Exception) for r in results) == http_oauth.MAX_INTROSPECTIONS
+    assert len(calls) == http_oauth.MAX_INTROSPECTIONS
 
 
 @pytest.mark.asyncio
