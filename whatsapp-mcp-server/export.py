@@ -156,7 +156,7 @@ def export_messages(
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             cur.execute(
                 f"SELECT {message_columns(cur)} FROM messages JOIN chats ON messages.chat_jid = chats.jid "
-                f"{where} ORDER BY messages.timestamp ASC, messages.id ASC",
+                f"{where} ORDER BY messages.timestamp ASC, messages.id ASC",  # nosec B608 # message_columns and MessageFilters emit fixed SQL; params bind all filter values
                 tuple(params),
             )
             # Batched, never fetchall(): a 100k-message export holds one batch

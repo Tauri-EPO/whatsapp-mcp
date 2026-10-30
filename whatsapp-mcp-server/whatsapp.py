@@ -294,7 +294,7 @@ def _fts_available_uncached(conn: sqlite3.Connection) -> bool:
         ).fetchone()
         if not row or row[0] == 0:
             return False
-        conn.execute(f"SELECT rowid FROM {MESSAGES_FTS_TABLE} LIMIT 0")
+        conn.execute(f"SELECT rowid FROM {MESSAGES_FTS_TABLE} LIMIT 0")  # nosec B608 # MESSAGES_FTS_TABLE is a module constant, not external input
         return True
     except sqlite3.Error:
         return False
@@ -851,7 +851,8 @@ def _sender_identities(
             try:
                 for chunk in _in_chunks(sorted(set(pending.values()))):
                     rows = conn.execute(
-                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})", chunk
+                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})",  # nosec B608 # _placeholders emits only ? tokens; chunk values are bound
+                        chunk,
                     ).fetchall()
                     for lid, pn in rows:
                         known_lids.add(lid)
@@ -1459,7 +1460,7 @@ def _last_message_join(chat_alias: str, msg_alias: str, spoken_only: bool = Fals
     def newest(column: str) -> str:
         return (
             f"SELECT m.{column} FROM messages m WHERE m.chat_jid {match} {spoken}"
-            " ORDER BY m.timestamp DESC, m.id DESC LIMIT 1"
+            " ORDER BY m.timestamp DESC, m.id DESC LIMIT 1"  # nosec B608 # column is literal id/chat_jid; match and spoken are internal SQL fragments
         )
 
     of_the_pair = f"AND {msg_alias}.chat_jid = ({newest('chat_jid')})" if chat_match else ""
@@ -1646,7 +1647,8 @@ def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[s
         pn_by_lid: dict[str, str] = {}
         for chunk in _in_chunks([jid.partition("@")[0] for jid in lid_jids]):
             rows = conn.execute(
-                f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})", chunk
+                f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})",  # nosec B608 # _placeholders emits only ? tokens; chunk values are bound
+                chunk,
             ).fetchall()
             pn_by_lid.update({lid: pn for lid, pn in rows if pn})
         for jid in lid_jids:
@@ -1662,7 +1664,7 @@ def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[s
     for chunk in _in_chunks(sorted(set(lookup.values()))):
         rows = conn.execute(
             "SELECT their_jid, full_name, push_name, first_name, business_name "
-            f"FROM whatsmeow_contacts WHERE their_jid IN ({_placeholders(chunk)})",
+            f"FROM whatsmeow_contacts WHERE their_jid IN ({_placeholders(chunk)})",  # nosec B608 # _placeholders emits only ? tokens; chunk values are bound
             chunk,
         ).fetchall()
         for their_jid, full_name, push_name, first_name, business_name in rows:
@@ -1715,7 +1717,7 @@ def lid_map_counterparts(users: Sequence[str]) -> dict[str, str]:
             for chunk in _in_chunks(wanted):
                 marks = _placeholders(chunk)
                 rows = conn.execute(
-                    f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({marks}) OR pn IN ({marks})",
+                    f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({marks}) OR pn IN ({marks})",  # nosec B608 # marks contains only ? placeholders; both chunks are bound
                     [*chunk, *chunk],
                 ).fetchall()
                 for lid, pn in rows:
@@ -2012,7 +2014,7 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None, *, phone
     rows: dict[str, tuple[str | None, str | None, str | None]] = {}
     for chunk in _in_chunks(members):
         for jid, name, last_time, last_read in cur.execute(
-            f"SELECT jid, name, last_message_time, {read_time} FROM chats WHERE jid IN ({_placeholders(chunk)})",
+            f"SELECT jid, name, last_message_time, {read_time} FROM chats WHERE jid IN ({_placeholders(chunk)})",  # nosec B608 # fixed read-marker expression and ? placeholders; chunk values are bound
             chunk,
         ).fetchall():
             rows[jid] = (name, last_time, last_read)
@@ -2020,7 +2022,7 @@ def _chat_twins(cur: sqlite3.Cursor, only: Sequence[str] | None = None, *, phone
     for chunk in _in_chunks([jid for jid in members if jid in rows]):
         for jid, stamp in cur.execute(
             f"SELECT chat_jid, MAX(timestamp) FROM messages WHERE chat_jid IN ({_placeholders(chunk)})"
-            " GROUP BY chat_jid",
+            " GROUP BY chat_jid",  # nosec B608 # _placeholders emits only ? tokens; chunk values are bound
             chunk,
         ).fetchall():
             newest[jid] = stamp
@@ -2162,7 +2164,7 @@ def _get_sender_name_uncached(sender_jid: str, restricted: bool) -> str:
               AND name IS NOT NULL AND name != ''
             ORDER BY CASE WHEN jid = ? THEN 0 ELSE 1 END
             LIMIT 1
-        """,
+        """,  # nosec B608 # only ? placeholders; candidates and preferred sender JID are bound
             (*candidates, sender_jid),
         )
         result = cursor.fetchone()
@@ -2226,7 +2228,7 @@ def _context_side_sql(values: str, newest_first: bool, include_deleted: bool, co
         )
         CROSS JOIN chats ON chats.jid = messages.chat_jid
         ORDER BY hits.hit_idx, messages.timestamp {direction}, messages.id {direction}
-    """
+    """  # nosec B608 # fixed columns, placeholder tuples and ASC/DESC operators; caller binds hits and limit
 
 
 def _fetch_context_windows(
@@ -2630,7 +2632,7 @@ _RANKED_UNION_JOIN = (
     f"WHERE {MESSAGES_FTS_TABLE} MATCH ? "
     "UNION ALL "
     f"SELECT m.rowid, t.score FROM messages m JOIN {_TRANSCRIPT_HITS_TABLE} t ON t.sha = m.file_sha256"
-    ") GROUP BY rid) hits ON hits.rid = messages.rowid"
+    ") GROUP BY rid) hits ON hits.rid = messages.rowid"  # nosec B608 # both table names are module constants; QueryPredicate binds MATCH text
 )
 
 # The store key (id, chat_jid) breaks the remaining ties so the offset a
@@ -2671,7 +2673,7 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
         return QueryPredicate(_SUBSTRING_PREDICATE, [query, query, query, query])
     # No index to rank with: the set is right, the order stays newest-first.
     return QueryPredicate(
-        f"({_SUBSTRING_PREDICATE} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))",
+        f"({_SUBSTRING_PREDICATE} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))",  # nosec B608 # predicate and temp table are module constants; QueryPredicate binds search text
         [query, query, query, query],
     )
 
@@ -2735,7 +2737,7 @@ def count_messages(
         params, match_param_index = predicate.bind(params)
         join = f" {predicate.join}" if predicate.join else ""
         where = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        sql = f"SELECT COUNT(*) FROM messages JOIN chats ON messages.chat_jid = chats.jid{join}{where}"
+        sql = f"SELECT COUNT(*) FROM messages JOIN chats ON messages.chat_jid = chats.jid{join}{where}"  # nosec B608 # MessageFilters and QueryPredicate emit internal SQL; _execute_message_sql binds params
         _execute_message_sql(cur, sql, params, match_param_index, query)
         row = cur.fetchone()
         return int(row[0]) if row else 0
@@ -2886,7 +2888,7 @@ def list_messages_page(
         ranked = predicate.relevance_order is not None
 
         # Build base query
-        query_parts = [f"SELECT {message_columns(cur)} FROM messages"]
+        query_parts = [f"SELECT {message_columns(cur)} FROM messages"]  # nosec B608 # message_columns selects fixed schema-compatible columns; query values are bound below
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         if predicate.join:
             query_parts.append(predicate.join)
@@ -3202,7 +3204,7 @@ def get_message_context(
         cursor = conn.cursor()
 
         # Get the target message first
-        select = f"SELECT {message_columns(cursor)} FROM messages JOIN chats ON messages.chat_jid = chats.jid"
+        select = f"SELECT {message_columns(cursor)} FROM messages JOIN chats ON messages.chat_jid = chats.jid"  # nosec B608 # message_columns selects fixed columns; both lookups below bind message and chat IDs
         if chat_jid:
             cursor.execute(select + " WHERE messages.id = ? AND messages.chat_jid = ?", (message_id, chat_jid))
         else:
@@ -3226,7 +3228,7 @@ def get_message_context(
             WHERE messages.chat_jid = ? AND messages.timestamp < ? {deleted_filter}
             ORDER BY messages.timestamp DESC
             LIMIT ?
-        """,
+        """,  # nosec B608 # fixed columns and optional deleted predicate; chat, timestamp and limit are bound
             (target_message.chat_jid, msg_data[0], before),
         )
 
@@ -3241,7 +3243,7 @@ def get_message_context(
             WHERE messages.chat_jid = ? AND messages.timestamp > ? {deleted_filter}
             ORDER BY messages.timestamp ASC
             LIMIT ?
-        """,
+        """,  # nosec B608 # fixed columns and optional deleted predicate; chat, timestamp and limit are bound
             (target_message.chat_jid, msg_data[0], after),
         )
 
@@ -3287,7 +3289,8 @@ def _matching_contact_chat_names(cur: sqlite3.Cursor, query: str) -> list[str]:
             fields = ("full_name", "push_name", "first_name", "business_name")
             match = " OR ".join(f"instr(LOWER({field}), LOWER(?)) > 0 OR instr({field}, ?) > 0" for field in fields)
             hits = {
-                row[0] for row in conn.execute(f"SELECT their_jid FROM whatsmeow_contacts WHERE {match}", [query] * 8)
+                row[0]
+                for row in conn.execute(f"SELECT their_jid FROM whatsmeow_contacts WHERE {match}", [query] * 8)  # nosec B608 # field names come from the literal tuple above; query is bound eight times
             }
             if not hits:
                 return []
@@ -3300,7 +3303,7 @@ def _matching_contact_chat_names(cur: sqlite3.Cursor, query: str) -> list[str]:
                 placeholders.extend(
                     jid
                     for jid, name in cur.execute(
-                        f"SELECT jid, name FROM chats WHERE jid IN ({_placeholders(chunk)}) AND ({policy}) AND {_direct_only_clause('jid')}",
+                        f"SELECT jid, name FROM chats WHERE jid IN ({_placeholders(chunk)}) AND ({policy}) AND {_direct_only_clause('jid')}",  # nosec B608 # fixed direct/policy predicates and ? placeholders; candidates and policy are bound
                         [*chunk, *policy_params],
                     )
                     if _is_placeholder_name(name)
@@ -3375,7 +3378,7 @@ def count_chats(query: str | None = None) -> int:
         cur = conn.cursor()
         clauses, params = _chat_filter(query, _chat_twins(cur), cur)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        cur.execute(f"SELECT COUNT(*) FROM chats{where}", tuple(params))
+        cur.execute(f"SELECT COUNT(*) FROM chats{where}", tuple(params))  # nosec B608 # _chat_filter emits internal predicates; params bind search and policy values
         row = cur.fetchone()
         return int(row[0]) if row else 0
     except sqlite3.Error as e:
@@ -3463,7 +3466,7 @@ def list_chats_page(
             FROM chats
             {twin_join}
             {_last_message_join("chats", "messages")}
-        """
+        """  # nosec B608 # fixed projections and internal twin/name/join SQL; cursor and filters are bound below
         ]
 
         where_clauses, filter_params = _chat_filter(query, twins, cur)
@@ -3624,7 +3627,8 @@ def canonical_note_jids(jids: Sequence[str]) -> dict[str, str]:
             try:
                 for chunk in _in_chunks(sorted(set(lids))):
                     for lid, pn in conn.execute(
-                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})", chunk
+                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE lid IN ({_placeholders(chunk)})",  # nosec B608 # _placeholders emits only ? tokens; chunk values are bound
+                        chunk,
                     ):
                         if pn and lid != pn:
                             counterparts[lid] = pn
@@ -3664,7 +3668,8 @@ def note_jid_spellings(jids: Sequence[str], canonical: dict[str, str] | None = N
             try:
                 for chunk in _in_chunks(sorted(phones)):
                     for lid, pn in conn.execute(
-                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(chunk)})", chunk
+                        f"SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(chunk)})",  # nosec B608 # _placeholders emits only ? tokens; chunk values are bound
+                        chunk,
                     ):
                         if lid and pn and lid != pn:
                             mapped.setdefault(pn, set()).add(f"{lid}@lid")
@@ -3743,7 +3748,8 @@ def _lid_jids_of_number(digits: str | None, alternate: str | None) -> list[str]:
         conn = _connect_whatsmeow_db()
         try:
             rows = conn.execute(
-                f"SELECT lid FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(numbers)}) ORDER BY lid", numbers
+                f"SELECT lid FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(numbers)}) ORDER BY lid",  # nosec B608 # _placeholders emits only ? tokens; phone spellings are bound
+                numbers,
             ).fetchall()
         finally:
             conn.close()
@@ -3794,7 +3800,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 AND jid <> '{STATUS_BROADCAST_JID}'
             ORDER BY name, jid
             LIMIT 50
-        """,
+        """,  # nosec B608 # fixed columns/status constant and LIKE placeholders; query and patterns are bound
             (query, query, *jid_patterns),
         )
         for jid, name in cursor.fetchall():
@@ -3826,7 +3832,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                     OR instr(LOWER(business_name), LOWER(?)) > 0 OR instr(business_name, ?) > 0
                     OR {_like_any("their_jid", jid_patterns)}
                 LIMIT 50
-            """,
+            """,  # nosec B608 # _like_any emits fixed column LIKE ? predicates; query and patterns are bound
                 (query, query, query, query, query, query, query, query, *jid_patterns),
             )
             for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
@@ -4041,7 +4047,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
                    OR (phone != '' AND phone IN ({placeholders}))
                    OR (lid != '' AND lid IN ({placeholders}))
                 GROUP BY group_jid
-            """
+            """  # nosec B608 # only repeated ? placeholders; member_params binds aliases in the outer query
             member_params = [*aliases, *aliases, *aliases]
         else:
             member_of = (
@@ -4092,7 +4098,7 @@ def get_contact_chats_page(jid: str, limit: int = 20, page: int = 0, cursor: str
             WHERE {policy_clause} {keyset_clause}
             ORDER BY {rank} ASC, {order_at} DESC, k.jid ASC
             LIMIT ? OFFSET ?
-        """,
+        """,  # nosec B608 # fixed membership/rank and internal twin/policy SQL; aliases, keyset and limits are bound
             (*twin_params, *aliases, *member_params, *aliases, *policy_params, *keyset_params, limit + 1, offset),
         )
 
@@ -4172,7 +4178,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
               AND {policy_clause}
             ORDER BY messages.timestamp DESC
             LIMIT 1
-        """,
+        """,  # nosec B608 # fixed columns, policy SQL and ? placeholders; aliases and policy values are bound
             (*aliases, *chats, *policy_params),
         )
 
@@ -4241,7 +4247,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True, both_spellings: b
             WHERE {_chat_jid_clause("c.jid", rows)} AND {policy_clause}
             ORDER BY CASE WHEN c.jid = ? THEN 0 ELSE 1 END
             LIMIT 1
-        """
+        """  # nosec B608 # fixed projections, join and policy SQL; execute below binds rows and policy values
 
         cursor.execute(query, (*rows, *policy_params, rows[0]))
         chat_data = cursor.fetchone()
@@ -4281,7 +4287,7 @@ GROUP_SETTING_KEYS = tuple(name for field in GROUP_SETTING_FIELDS for name in (f
 def _stored_group_settings(cursor, jid: str) -> dict[str, Any]:
     select = ", ".join(f"group_{name}" for name in GROUP_SETTING_KEYS)
     try:
-        row = cursor.execute(f"SELECT {select} FROM chats WHERE jid = ?", (jid,)).fetchone()
+        row = cursor.execute(f"SELECT {select} FROM chats WHERE jid = ?", (jid,)).fetchone()  # nosec B608 # column names derive from fixed GROUP_SETTING_KEYS; JID is bound
     except sqlite3.OperationalError as exc:
         if "no such column: group_" not in str(exc):
             raise
@@ -4360,7 +4366,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 ELSE 3
             END
             LIMIT 1
-        """,
+        """,  # nosec B608 # fixed projections, join and policy SQL; candidate and ranking JIDs are bound
             (*candidates, *policy_params, sender_phone_number, alternate_row),
         )
 
@@ -5178,7 +5184,7 @@ def _read_receipt_targets(chat_jid: str, message_ids: list[str] | None) -> list[
             owner.update(
                 cur.execute(
                     f"SELECT id, chat_jid FROM messages WHERE id IN ({_placeholders(chunk)})"
-                    f" AND chat_jid IN ({_placeholders(spellings)})",
+                    f" AND chat_jid IN ({_placeholders(spellings)})",  # nosec B608 # _placeholders emits only ? tokens; message IDs and chat spellings are bound
                     (*chunk, *spellings),
                 ).fetchall()
             )
@@ -5425,7 +5431,7 @@ def _coverage_by_chat(
             raise ToolError("invalid_argument", "cursor is not valid; pass next_cursor from the previous page")
         offset = raw_offset
 
-    cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_where}", tuple(chat_params))
+    cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_where}", tuple(chat_params))  # nosec B608 # coverage builds fixed scope/policy clauses; chat_params binds their values
     chats_total = int(cur.fetchone()[0] or 0)
 
     # The queue ranks on what each chat is missing *overall*, never on the
@@ -5440,8 +5446,8 @@ def _coverage_by_chat(
     # instead of counting the chat's whole history.
     prefix, twin_join, of_this_chat, twin_params = twins.both_rows()
     depth = f"""(SELECT COUNT(*) FROM (
-                    SELECT 1 FROM messages AS probe WHERE probe.chat_jid {of_this_chat} LIMIT 2))"""
-    overall_first = f"(SELECT MIN(timestamp) FROM messages AS whole WHERE whole.chat_jid {of_this_chat})"
+                    SELECT 1 FROM messages AS probe WHERE probe.chat_jid {of_this_chat} LIMIT 2))"""  # nosec B608 # ChatTwins emits only internal column references; twin values are bound in outer query
+    overall_first = f"(SELECT MIN(timestamp) FROM messages AS whole WHERE whole.chat_jid {of_this_chat})"  # nosec B608 # ChatTwins emits only internal column references; twin values are bound in outer query
     join_on = " AND ".join([f"messages.chat_jid {of_this_chat}", *window])
     cur.execute(
         f"""{prefix}SELECT chats.jid, chats.name,
@@ -5454,7 +5460,7 @@ def _coverage_by_chat(
              WHERE {chat_where}
              GROUP BY chats.jid, chats.name
              ORDER BY depth, overall_first DESC, chats.jid
-             LIMIT ? OFFSET ?""",
+             LIMIT ? OFFSET ?""",  # nosec B608 # internal twin/scope SQL and fixed aggregates; twin, time, chat and limit values are bound
         (*twin_params, *window_params, *chat_params, limit + 1, offset),
     )
     rows = cur.fetchall()
@@ -5617,7 +5623,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
                    COALESCE(SUM({unavailable_expr}), 0),
                    COALESCE(SUM({refused_expr}), 0),
                    COALESCE(SUM({handled_expr}), 0)
-              FROM messages WHERE {clause}""",
+              FROM messages WHERE {clause}""",  # nosec B608 # fixed note/ingest/refusal predicates and scope SQL; note keys and scope values are bound
         # Each EXISTS probe carries its own key placeholder, in the order the
         # expressions appear above (transcript, error, unavailable, then all
         # three again for `handled`), then the scope.
@@ -5635,7 +5641,7 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
         f"""SELECT chat_jid, id, handled FROM (
                 SELECT chat_jid, id, timestamp, {handled_expr} AS handled
                   FROM messages WHERE {clause}
-            ) ORDER BY handled, timestamp DESC LIMIT ?""",
+            ) ORDER BY handled, timestamp DESC LIMIT ?""",  # nosec B608 # fixed handled predicates and scope SQL; note keys, scope and row limit are bound
         (*note_params, *params, COVERAGE_AUDIO_MAX_ROWS),
     )
     by_chat: dict[str, list[tuple[str, bool]]] = {}
@@ -5770,12 +5776,12 @@ def coverage(
             )
 
         cur.execute(
-            f"SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM messages WHERE {msg_clause}",
+            f"SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM messages WHERE {msg_clause}",  # nosec B608 # fixed time/chat/policy clauses; msg_params binds all scope values
             tuple(msg_params),
         )
         total_messages, first_time, last_time = cur.fetchone()
 
-        cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_clause}", tuple(chat_params))
+        cur.execute(f"SELECT COUNT(*) FROM chats WHERE {chat_clause}", tuple(chat_params))  # nosec B608 # fixed chat/policy/hidden-twin clauses; chat_params binds their values
         chats_total = int(cur.fetchone()[0] or 0)
         # The probe reads both rows of a merged pair: the listing row holds the
         # newest message, but a window can name a period only the other one has.
@@ -5784,7 +5790,7 @@ def coverage(
             f"""{prefix}SELECT COUNT(*) FROM chats {twin_join}
                  WHERE {chat_clause}
                    AND NOT EXISTS (
-                       SELECT 1 FROM messages WHERE messages.chat_jid {of_this_chat}{window_where})""",
+                       SELECT 1 FROM messages WHERE messages.chat_jid {of_this_chat}{window_where})""",  # nosec B608 # internal twin SQL and fixed scope clauses; twin, chat and time values are bound
             (*twin_params, *chat_params, *window_params),
         )
         chats_without_messages = int(cur.fetchone()[0] or 0)
@@ -5792,7 +5798,7 @@ def coverage(
         cur.execute(
             f"""SELECT substr(timestamp, 1, 7) AS month, COUNT(*)
                   FROM messages WHERE {msg_clause}
-                 GROUP BY month ORDER BY month""",
+                 GROUP BY month ORDER BY month""",  # nosec B608 # fixed time/chat/policy clauses; msg_params binds all scope values
             tuple(msg_params),
         )
         messages_by_month = {month: int(count) for month, count in cur.fetchall() if month}
@@ -5831,7 +5837,7 @@ def coverage(
                     SELECT prev_ts, ts, {delta_hours} AS hours
                       FROM ordered
                      WHERE prev_ts IS NOT NULL AND {delta_hours} > ?
-                     ORDER BY hours DESC LIMIT ?""",
+                     ORDER BY hours DESC LIMIT ?""",  # nosec B608 # fixed scope SQL, UNION SELECT ? edges and timestamp expression; all values are bound
                 (*msg_params, *edge_params, gap_hours, max_gaps),
             )
             gaps = [{"from": start, "to": end, "hours": round(float(hours), 1)} for start, end, hours in cur.fetchall()]
@@ -6365,7 +6371,7 @@ def list_unread(
                   {filter_clause}
                 ORDER BY messages.timestamp DESC, messages.id DESC
                 LIMIT ?
-                """,
+                """,  # nosec B608 # fixed columns/spoken SQL and internal filters; JIDs, marker and filter values are bound
                 (*spellings, last_read, last_read, *filter_params, limit_per_chat),
             )
             rows = cursor.fetchall()
@@ -6475,7 +6481,7 @@ def _min_messages_clause(min_messages: int, chat_match: str = "") -> tuple[str, 
     match = chat_match or "= chats.jid"
     clause = (
         "AND (SELECT COUNT(*) FROM (SELECT 1 FROM messages stored"
-        f" WHERE stored.chat_jid {match} AND {_spoken_filter('stored')} LIMIT ?)) >= ?"
+        f" WHERE stored.chat_jid {match} AND {_spoken_filter('stored')} LIMIT ?)) >= ?"  # nosec B608 # match is internal twin SQL and spoken is fixed; caller binds both threshold values
     )
     return clause, [threshold, threshold]
 
@@ -6592,7 +6598,7 @@ def _pending_mention_where(
     sql = f"""{alias}.is_from_me = 0 AND {_spoken_filter(alias)} AND {mention_clause}
               AND {alias}.timestamp > COALESCE((SELECT MAX(own.timestamp) FROM messages own
                                                  WHERE own.chat_jid {own_scope}
-                                                   AND own.is_from_me = 1 AND {_spoken_filter("own")}), '')"""
+                                                   AND own.is_from_me = 1 AND {_spoken_filter("own")}), '')"""  # nosec B608 # aliases and own_scope are internal SQL; caller binds returned mention parameters
     return sql, mention_params
 
 
@@ -6652,7 +6658,7 @@ def newest_pending_mentions(
         f"""{prefix}SELECT messages.chat_jid, messages.id, MAX(messages.timestamp)
             FROM messages{twin_join}
             WHERE messages.chat_jid IN ({placeholders}) AND {where}{bound_sql}{closing_sql}
-            GROUP BY messages.chat_jid""",
+            GROUP BY messages.chat_jid""",  # nosec B608 # internal twin/mention SQL, literal comparison operators and ? tokens; all values are bound
         (*twin_params, *chat_jids, *params, *(value for _, value in bounds), *closing_params),
     )
     return {chat: (message_id, timestamp) for chat, message_id, timestamp in cur.fetchall()}
@@ -6793,7 +6799,7 @@ def _mention_only_rows(
         {keyset_clause}
         ORDER BY MAX(messages.timestamp) DESC, chats.jid ASC
         LIMIT ?
-        """,
+        """,  # nosec B608 # internal projection/filter/triage SQL; all policy, time, keyset and limit values are bound
         (
             *policy_params,
             *mention_params,
@@ -7118,7 +7124,7 @@ def _participant_twins(raw: str) -> list[str]:
         users = [user]
         if alternate := br_mobile_alternate(user):
             users.append(alternate)
-        rows = conn.execute(f"SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(users)})", users)
+        rows = conn.execute(f"SELECT lid, pn FROM whatsmeow_lid_map WHERE pn IN ({_placeholders(users)})", users)  # nosec B608 # _placeholders emits only ? tokens; user spellings are bound
         return [value for lid, pn in rows for value in (f"{lid}@lid", f"{pn}@{DEFAULT_USER_SERVER}")]
     except sqlite3.Error:
         return []
@@ -7234,7 +7240,7 @@ def _label_chat_aliases(target: str) -> list[str]:
     conn = None
     try:
         conn = _connect_whatsmeow_db()
-        row = conn.execute(f"SELECT {column} FROM whatsmeow_lid_map WHERE {key} = ?", (user,)).fetchone()
+        row = conn.execute(f"SELECT {column} FROM whatsmeow_lid_map WHERE {key} = ?", (user,)).fetchone()  # nosec B608 # column and key come from the literal lookup dictionary; user is bound
         if row and row[0]:
             twin = f"{row[0]}@{twin_server}"
             if CHAT_POLICY.allows(twin):
@@ -7263,7 +7269,7 @@ def list_labels(chat_jid: str | None = None, include_deleted: bool = False) -> d
         query += (
             " AND (SELECT c.labeled FROM chat_labels c WHERE c.label_id=l.id"
             f" AND c.chat_jid IN ({_placeholders(aliases)})"
-            " ORDER BY c.action_ms DESC, c.labeled ASC LIMIT 1)=1"
+            " ORDER BY c.action_ms DESC, c.labeled ASC LIMIT 1)=1"  # nosec B608 # _placeholders emits only ? tokens; aliases are added to bound args below
         )
         args.extend(aliases)
     conn = _connect_messages_db()
