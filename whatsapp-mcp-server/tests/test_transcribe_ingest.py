@@ -1909,6 +1909,23 @@ def test_remote_miss_is_keyed_by_chat_and_hash(paired_dbs, monkeypatch):
     assert calls[-1] == ("AUD1", BOB) and len(calls) == 3
 
 
+def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
+    for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, mid, ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    lookups, downloads = [], []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: lookups.append((mid, chat)))
+
+    def download(mid, chat):
+        downloads.append((mid, chat))
+
+    first = transcribe_worker.find_pending(2, fetch=True, download=download)
+    assert len(downloads) == 2 and len(lookups) == 4
+    transcribe_worker.find_pending(2, fetch=True, download=download, position=first.position)
+    assert len(set(downloads)) == 4  # untouched rows get the next round's budget
+    assert len(lookups) == 4  # known catalog misses need no further HTTP query
+
+
 # --- the loop ---------------------------------------------------------------
 
 

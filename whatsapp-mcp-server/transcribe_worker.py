@@ -100,7 +100,7 @@ logger = logging.getLogger("whatsapp_mcp")
 # each round so replacement/purge/new work cannot inherit an old pause.
 _blocked_quota: tuple[tuple[Any, ...], float] | None = None
 # Bounded process-local negative catalog answers, never authorization decisions.
-_cache_checks: OrderedDict[tuple[str, str, str], tuple[str, float, float]] = OrderedDict()
+_cache_checks: OrderedDict[tuple[str, str, str], tuple[str, float, float, bool]] = OrderedDict()
 _last_batch_state: tuple[int, int] | None = None
 CACHE_RETRY_INITIAL_S = 300.0
 CACHE_RETRY_MAX_S = 6 * 60 * 60.0
@@ -641,25 +641,26 @@ def find_pending(
             identity = (chat_jid, message_id)
             check_key = (whatsapp.MESSAGES_DB_PATH, message_id, chat_jid)
             previous = _cache_checks.get(check_key)
-            if previous and previous[0] == media_identity and time.monotonic() < previous[1]:
+            waiting = bool(previous and previous[0] == media_identity and time.monotonic() < previous[1])
+            if waiting and previous and (not fetch or previous[3]):
                 _cache_checks.move_to_end(check_key)
                 resolved.add((message_id, chat_jid))
                 if traversing and not parked:
                     next_position = Position(timestamp, message_id, chat_jid)
                 continue
-            if identity not in remote_lookups:
+            if not waiting and identity not in remote_lookups:
                 remote_lookups[identity] = media_remote.lookup(chat_jid, message_id)
-            if remote_lookups[identity]:
+            if remote_lookups.get(identity):
                 caches[chat_jid][message_id] = media_remote.uri(chat_jid, message_id)
                 if _cache_checks.pop(check_key, None):
                     logger.info("transcribe_on_ingest: media became cached for %s", message_id)
-            else:
+            elif not waiting:
                 delay = (
                     min(previous[2] * 2, CACHE_RETRY_MAX_S)
                     if previous and previous[0] == media_identity
                     else CACHE_RETRY_INITIAL_S
                 )
-                _cache_checks[check_key] = (media_identity, time.monotonic() + delay, delay)
+                _cache_checks[check_key] = (media_identity, time.monotonic() + delay, delay, False)
                 _cache_checks.move_to_end(check_key)
                 if len(_cache_checks) > CACHE_CHECK_LIMIT:
                     _cache_checks.popitem(last=False)
@@ -679,7 +680,11 @@ def find_pending(
             path = cached if media_remote.enabled() else os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
         elif budget > 0:
             budget -= 1
-            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
+            repeated = media_remote.enabled() and previous is not None and previous[0] == media_identity
+            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=None if repeated else failures > 0)
+            if media_remote.enabled() and check_key in _cache_checks:
+                remembered = _cache_checks[check_key]
+                _cache_checks[check_key] = (*remembered[:3], True)
             path = fetched.path
             if fetched.backoff:
                 # Not the bridge failing and not final: give the attempt back
@@ -761,7 +766,7 @@ def _fetch_bytes(
     download: Callable[[str, str], str | None],
     caches: dict[str, dict[str, str]],
     *,
-    quiet: bool,
+    quiet: bool | None,
 ) -> Fetched:
     """Ask the bridge to cache one message's media: the local path, or why there is none.
 
@@ -787,14 +792,16 @@ def _fetch_bytes(
         if exc.code == MEDIA_RETRY_BACKOFF_CODE:
             # Before #743 this was a strike every round, and every round asked
             # the phone again: the owner's phone, for audio the owner sent.
-            logger.debug("transcribe_on_ingest: %s waits for its media retry cooldown: %s", message_id, exc.message)
+            if quiet is not None:
+                logger.debug("transcribe_on_ingest: %s waits for its media retry cooldown: %s", message_id, exc.message)
             return Fetched(backoff=True)
         # too_large supports injected fetchers. The production /api/download
         # path cannot produce it; S3 blob refusals are handled while streaming.
         if exc.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
             # Expected on an old archive, and per file, so it stays at debug:
             # the round logs how many it recorded.
-            logger.debug("transcribe_on_ingest: %s is not fetchable: %s", message_id, exc.message)
+            if quiet is not None:
+                logger.debug("transcribe_on_ingest: %s is not fetchable: %s", message_id, exc.message)
             reason = f"too_large: {exc.message}" if exc.code == "too_large" else exc.message
             return Fetched(unavailable=reason, too_large=exc.code == "too_large")
         _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
@@ -904,7 +911,9 @@ def _ingest_local_file(candidate: Candidate, *, cache_only: bool) -> Iterator[st
         yield local
 
 
-def _log_fetch_problem(quiet: bool, message: str) -> None:
+def _log_fetch_problem(quiet: bool | None, message: str) -> None:
+    if quiet is None:
+        return  # unchanged per-message failure, already reported
     """One warning per round about a dependency (the bridge, the backend); the rest is debug."""
     log = logger.debug if quiet else logger.warning
     log("transcribe_on_ingest: %s", message)

@@ -186,6 +186,9 @@ def test_sent_reset_intent_round_trip_and_next_worker(tmp_path, monkeypatch, pen
     for name in ("messages.db", "whatsapp.db"):
         with sqlite3.connect(source / name) as conn:
             conn.execute("CREATE TABLE sample(value TEXT)")
+            if name == "messages.db":
+                conn.execute("CREATE TABLE messages(timestamp TEXT)")
+                conn.execute("INSERT INTO messages VALUES (?)", (whatsapp.timestamp_bound(datetime.now(UTC)),))
     monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(source / "notes.db"))
     stale = "2020-01-01 00:00:00+00:00"
     media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, stale)
