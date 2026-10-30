@@ -691,8 +691,10 @@ def test_unreadable_runtime_policy_waits_at_start_and_recovers_in_loop(paired_db
     monkeypatch.setattr(transcribe_worker, "active_policy", policy)
     starts = []
     monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
-    transcribe_worker.install_ingest_worker(ON_WITH_SENT)
-    assert "runtime tool policy unavailable" in caplog.text
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_FETCH": "1"})
+    assert "runtime tool policy unreadable, worker waits" in caplog.text
+    assert len(caplog.records) == 1
+    assert "WHATSAPP_ALLOW_TOOLS" not in caplog.text and "download_media" not in caplog.text
     assert not Path(media_notes.notes_db_path()).exists()
     stop = threading.Event()
     batches = []
@@ -2096,3 +2098,26 @@ def test_busy_clock_repair_retries_the_original_repair_bound(paired_dbs, monkeyp
 
     transcribe_worker.run_forever(config, stop=stop, run=run)
     assert calls[1:] == [chosen, chosen]
+
+
+@pytest.mark.parametrize("provider", ["whisper_cpp", "openai_compatible"])
+def test_normal_and_deferred_start_logs_name_the_backend(provider, paired_dbs, monkeypatch, caplog):
+    from dataclasses import replace
+    from tool_policy import ToolPolicy
+
+    config = transcribe_worker.IngestConfig(True, 5, 1, backend_provider=provider)
+    expected = "configured HTTP provider" if provider == "openai_compatible" else "whisper on this machine"
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        transcribe_worker._log_ingest_started(replace(config, sent_since=SENT_SINCE))
+    assert expected in caplog.text
+    caplog.clear()
+    monkeypatch.setattr(transcribe_worker, "active_policy", lambda: ToolPolicy())
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        transcribe_worker.run_forever(config, stop=stop, run=run, settle_on_run=True)
+    assert expected in caplog.text and "including sent audio from" in caplog.text

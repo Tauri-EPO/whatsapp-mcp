@@ -838,7 +838,7 @@ def test_ingest_startup_waits_with_unreadable_runtime_store(runtime_archive, mon
         )
         assert len(starts) == 1 and starts[0][1] == {"settle_on_run": True}
         assert not starts[0][0].worker_running
-        assert "runtime tool policy unavailable" in caplog.text
+        assert "runtime tool policy unreadable, worker waits" in caplog.text
     finally:
         if lock is not None:
             lock.rollback()

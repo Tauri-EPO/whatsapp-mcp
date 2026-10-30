@@ -179,6 +179,7 @@ class IngestConfig:
     batch: int
     fetch: bool = False
     include_sent: bool = True
+    backend_provider: str = "whisper_cpp"
     # The instant above, in the stored timestamp spelling; None counts no sent audio.
     sent_since: str | None = None
     worker_running: bool = False
@@ -1042,10 +1043,11 @@ def run_once(
 
 def _log_ingest_started(config: IngestConfig) -> None:
     logger.info(
-        "%s=1: transcribing up to %d voice notes every %.0fs%s%s",
+        "%s=1: transcribing up to %d voice notes every %.0fs (%s)%s%s",
         ENABLED_ENV,
         config.batch,
         config.interval_s,
+        "configured HTTP provider" if config.backend_provider == "openai_compatible" else "whisper on this machine",
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
         f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
     )
@@ -1145,14 +1147,17 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         _ingest_config = _settle_sent_since(config, running=False)
         return None
     policy = load_tool_policy(env)
+    policy_unreadable = False
     if runtime_policy_enabled():
         try:
-            policy = active_policy()
+            with policy_operation():
+                policy = active_policy()
         except Exception:  # noqa: BLE001 - an unreadable runtime policy means wait, never crash startup
-            logger.warning("transcribe_on_ingest: runtime tool policy unavailable; the worker waits")
+            logger.warning("transcribe_on_ingest: runtime tool policy unreadable, worker waits")
+            policy_unreadable = True
             policy = ToolPolicy(deny=frozenset({TRANSCRIBE_TOOL, DOWNLOAD_TOOL}))
     settle_on_run = not policy.allows(TRANSCRIBE_TOOL)
-    if not policy.allows(TRANSCRIBE_TOOL):
+    if not policy.allows(TRANSCRIBE_TOOL) and not policy_unreadable:
         behavior = (
             "the worker waits for a runtime policy change" if runtime_policy_enabled() else "the worker stays off"
         )
@@ -1168,7 +1173,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         if not runtime_policy_enabled():
             _ingest_config = _settle_sent_since(config, running=False)
             return None
-    if config.fetch and not policy.allows(DOWNLOAD_TOOL):
+    if config.fetch and not policy.allows(DOWNLOAD_TOOL) and not policy_unreadable:
         logger.warning(
             "%s=1 but %s / %s do not offer %s; the worker transcribes cached audio only (list %s to fetch)",
             FETCH_ENV,
@@ -1186,6 +1191,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         )
         _ingest_config = _settle_sent_since(config, running=False)
         return None
+    config = replace(config, backend_provider=backend_config.provider)
     config = _settle_sent_since(config, running=not settle_on_run)
     _ingest_config = config
     if settle_on_run:
