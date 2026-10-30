@@ -446,8 +446,10 @@ def test_reset_ack_failure_rolls_back_the_new_instant(tmp_path, monkeypatch):
     monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
     media_notes.claim_meta("instant", "old")
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TRIGGER refuse_ack BEFORE INSERT ON notes_meta WHEN NEW.key='instant:reset' "
-                     "BEGIN SELECT RAISE(ABORT, 'ack refused'); END")
+        conn.execute(
+            "CREATE TRIGGER refuse_ack BEFORE INSERT ON notes_meta WHEN NEW.key='instant:reset' "
+            "BEGIN SELECT RAISE(ABORT, 'ack refused'); END"
+        )
     conn.close()
     with pytest.raises(sqlite3.IntegrityError, match="ack refused"):
         media_notes.claim_meta("instant", "new", reset_token="reset-token")

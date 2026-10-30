@@ -540,6 +540,7 @@ def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str 
         assert conn is not None
         with conn:
             if reset_token is not None:
+                conn.execute("BEGIN IMMEDIATE")
                 acknowledged = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key + ":reset",)).fetchone()
                 # A marker that could not be unlinked must not reset the bound
                 # again: acknowledge its identity atomically with the claim.

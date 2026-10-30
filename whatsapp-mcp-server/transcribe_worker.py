@@ -327,7 +327,8 @@ def _persist_sent_since(config: IngestConfig) -> IngestConfig:
         try:
             since = _canonical_instant(since)
             if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
-                now = whatsapp.timestamp_bound(datetime.now(UTC))
+                now = config.sent_since if config.sent_claim_pending else whatsapp.timestamp_bound(datetime.now(UTC))
+                config = replace(config, sent_since=now)
                 logger.warning("stored sent audio instant is in the future; replacing it with %s", now)
                 since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
         except ValueError:
