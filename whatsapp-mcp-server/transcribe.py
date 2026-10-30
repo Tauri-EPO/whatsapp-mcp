@@ -84,6 +84,7 @@ class WhisperConfig:
     timeout_s: int
     provider: str = "whisper_cpp"
     probe_timeout_s: float = 5.0
+    probe_error: str | None = None
 
     @property
     def backend(self) -> str | None:
@@ -122,14 +123,15 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
         raise TranscriptionError(f"Invalid WHISPER_TIMEOUT_S={timeout_raw!r}; must be an integer") from None
     if timeout_s <= 0:
         raise TranscriptionError(f"Invalid WHISPER_TIMEOUT_S={timeout_raw!r}; must be positive")
-    try:
-        probe_timeout_s = float(get("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S") or "5")
-        if not math.isfinite(probe_timeout_s) or probe_timeout_s <= 0:
-            raise ValueError
-    except ValueError:
-        raise TranscriptionError("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S must be finite and positive") from None
-
     if provider == "openai_compatible":
+        probe_timeout_s, probe_error = 5.0, None
+        try:
+            probe_timeout_s = float(get("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S") or "5")
+            if not math.isfinite(probe_timeout_s) or probe_timeout_s <= 0:
+                raise ValueError
+        except ValueError:
+            probe_timeout_s = 5.0
+            probe_error = "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S must be finite and positive"
         url, model = get("WHATSAPP_TRANSCRIPTION_URL"), get("WHATSAPP_TRANSCRIPTION_MODEL")
         if not url or not model:
             raise BackendUnavailableError(
@@ -152,7 +154,14 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
                 "WHATSAPP_TRANSCRIPTION_URL must be a full HTTP(S) endpoint without credentials"
             )
         return WhisperConfig(
-            url, None, model, get("WHATSAPP_TRANSCRIPTION_LANGUAGE") or "auto", timeout_s, provider, probe_timeout_s
+            url,
+            None,
+            model,
+            get("WHATSAPP_TRANSCRIPTION_LANGUAGE") or "auto",
+            timeout_s,
+            provider,
+            probe_timeout_s,
+            probe_error,
         )
     return WhisperConfig(
         url=get("WHISPER_URL"),
@@ -160,7 +169,6 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
         model=get("WHISPER_MODEL"),
         language=get("WHISPER_LANGUAGE") or DEFAULT_LANGUAGE,
         timeout_s=timeout_s,
-        probe_timeout_s=probe_timeout_s,
     )
 
 
@@ -242,7 +250,10 @@ def describe_status(
                 "model": None,
                 "on_ingest": False,
             }
-        reachable, probe_result = probe_http_provider(config, get("WHATSAPP_TRANSCRIPTION_API_KEY"))
+        if config.probe_error:
+            reachable, probe_result = None, "invalid_config"
+        else:
+            reachable, probe_result = probe_http_provider(config, get("WHATSAPP_TRANSCRIPTION_API_KEY"))
         activity = _transcription_activity(config)
         success = activity.get("last_success_at")
         if (
@@ -259,6 +270,7 @@ def describe_status(
             "endpoint_host": urlsplit(config.url or "").hostname,
             "reachable": reachable,
             "probe": probe_result,
+            **({"probe_error": config.probe_error} if config.probe_error else {}),
             "last_success_at": success.isoformat() if success else None,
             "last_failure_at": activity["last_failure_at"].isoformat() if "last_failure_at" in activity else None,
             "model": config.model,

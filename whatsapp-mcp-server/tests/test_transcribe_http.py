@@ -421,10 +421,23 @@ def test_old_success_and_other_endpoint_do_not_mask_failure(provider, tmp_path, 
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "bad"])
-def test_invalid_probe_timeout_is_rejected(provider, monkeypatch, value):
+def test_invalid_probe_timeout_is_reported_without_breaking_transcription(provider, tmp_path, monkeypatch, value):
     monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", value)
-    with pytest.raises(TranscriptionError, match="PROBE_TIMEOUT"):
-        load_config()
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    assert transcribe_file(str(source))["text"] == "part 1"
+    status = transcribe.describe_status()
+    assert status["reachable"] is None and status["probe"] == "invalid_config"
+    assert "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S" in status["probe_error"]
+    assert provider["heads"] == 0
+
+
+def test_whisper_cpp_ignores_http_probe_configuration(monkeypatch, tmp_path):
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", "bad")
+    config = load_config({"WHISPER_URL": "http://fake-whisper/inference", "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S": "bad"})
+    assert config.provider == "whisper_cpp" and config.probe_error is None
+    monkeypatch.setattr(transcribe, "_metered_transcribe_file", lambda *a, **kw: {"text": "fake transcript"})
+    assert transcribe_file(str(tmp_path / "voice.wav"), config=config)["text"] == "fake transcript"
 
 
 def test_auto_language_omitted(provider, tmp_path, monkeypatch):
