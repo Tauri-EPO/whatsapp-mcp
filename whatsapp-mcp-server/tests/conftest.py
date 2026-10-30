@@ -7,7 +7,9 @@ specific schema variant (missing columns, no FTS) keep their own DDL on purpose.
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,7 +112,7 @@ class PairedStore:
 def make_paired_store(tmp_path: Path) -> PairedStore:
     mdb = tmp_path / "messages.db"
     wdb = tmp_path / "whatsapp.db"
-    with sqlite3.connect(mdb) as c:
+    with closing(sqlite3.connect(mdb)) as c, c:
         c.executescript(MESSAGES_SCHEMA)
         c.execute("ALTER TABLE chats ADD COLUMN last_read_time TIMESTAMP")
         c.executemany(
@@ -122,7 +124,7 @@ def make_paired_store(tmp_path: Path) -> PairedStore:
                 (DECOY, "Not Alice", "2026-09-04 10:00:00"),
             ],
         )
-    with sqlite3.connect(wdb) as c:
+    with closing(sqlite3.connect(wdb)) as c, c:
         c.executescript(WHATSMEOW_SCHEMA)
         c.execute("INSERT INTO whatsmeow_lid_map VALUES (?, ?)", (BOB_LID, BOB_PN))
         c.executemany(
@@ -151,3 +153,21 @@ def paired_dbs(paired_store, monkeypatch) -> PairedStore:
     yield paired_store
     whatsapp._reset_name_cache()
     whatsapp._reset_schema_cache()
+
+
+@pytest.fixture
+def runtime_archive(paired_dbs, monkeypatch):
+    import main
+    import runtime_settings
+    import tool_policy
+
+    bridge = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "runtime_settings.go"
+    schema = re.search(r"const runtimeSettingsSchema = `([^`]+)`", bridge.read_text()).group(1)
+    with closing(paired_dbs.messages()) as conn, conn:
+        conn.executescript(schema)
+        conn.execute("PRAGMA journal_mode=WAL")
+    monkeypatch.setattr(runtime_settings, "_startup_env", None)
+    monkeypatch.setattr(runtime_settings, "_warned", {})
+    yield paired_dbs
+    tool_policy.set_active_policy(None)
+    main.mcp.runtime_tool_policy = False

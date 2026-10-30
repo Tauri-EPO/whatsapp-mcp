@@ -457,6 +457,9 @@ func TestRuntimeWebhookReceivedMessageSignatureAndReferences(t *testing.T) {
 	msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "runtime text")
 	b.handleMessage(msg)
 	r := receiveWebhook(t, receipts)
+	if r.header.Get("Content-Type") != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", r.header.Get("Content-Type"))
+	}
 	if !verifyWebhookReceipt(r, time.Now()) || r.header.Get("X-Bridge-Token") != "" {
 		t.Fatal("signature failed or bridge token escaped")
 	}

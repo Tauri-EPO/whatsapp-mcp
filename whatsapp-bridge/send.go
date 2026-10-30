@@ -1242,7 +1242,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			} else {
 				canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
 				if mpErr != nil {
-					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Content-Type", jsonContentType)
 					w.WriteHeader(http.StatusForbidden)
 					_ = json.NewEncoder(w).Encode(SendMessageResponse{
 						Success: false,
@@ -1306,7 +1306,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			return
 		}
 		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 
 		// Set appropriate status code
 		if !success {

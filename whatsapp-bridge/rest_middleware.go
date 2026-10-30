@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const jsonContentType = "application/json; charset=utf-8"
+
 // apiError is the failure body every endpoint answers with. `message` is kept
 // at the top level for callers that only read that field.
 type apiError struct {
@@ -54,7 +56,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // is worth remembering (media_unavailable, issue #378). The MCP server reads
 // error.code when it knows it and falls back to the status otherwise.
 func writeErrorCode(w http.ResponseWriter, status int, code, message string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(apiError{Message: message, Error: apiErrorBody{Code: code, Message: message}})
 }

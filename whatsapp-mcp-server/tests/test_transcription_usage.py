@@ -33,12 +33,10 @@ from errors import ToolError
 from strict_args import StrictArgumentServer
 from tests.conftest import ALICE
 from tests.test_runtime_settings import patch
-from tests.test_runtime_settings import runtime_archive as archive_fixture
 from tests.test_transcribe_http import _add_audio, _audio
 from tests.test_transcribe_http import provider as provider_fixture
 from tests.test_transcribe_ingest import SHA, _media_filename
 
-runtime_archive = archive_fixture
 provider = provider_fixture
 
 

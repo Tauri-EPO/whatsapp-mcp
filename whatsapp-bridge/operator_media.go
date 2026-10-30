@@ -157,7 +157,7 @@ func (b *Bridge) streamMediaPurge(w http.ResponseWriter, r *http.Request, req op
 	controller := http.NewResponseController(w)
 	stop := context.AfterFunc(ctx, func() { _ = controller.SetWriteDeadline(time.Now()) })
 	defer stop()
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	write := func(value []byte) bool {
 		if err := controller.SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			return false

@@ -324,7 +324,7 @@ func (b *Bridge) healthStatus() map[string]interface{} {
 }
 
 func writeJSON(w http.ResponseWriter, code int, body interface{}) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
 }
