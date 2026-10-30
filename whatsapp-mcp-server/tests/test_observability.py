@@ -180,21 +180,15 @@ def test_metrics_token_gates_the_endpoint_only():
 
 
 def test_metrics_toggle_and_app_wiring(monkeypatch):
+    from mcp.server.mcpserver import MCPServer
+
     assert metrics_enabled(None) and metrics_enabled("1") and not metrics_enabled("off") and not metrics_enabled("0")
-
-    class FakeServer:
-        def streamable_http_app(self, **kw):
-            async def app(scope, receive, send):
-                await send({"type": "http.response.start", "status": 200, "headers": []})
-                await send({"type": "http.response.body", "body": b""})
-
-            return app
 
     monkeypatch.delenv("WHATSAPP_MCP_METRICS", raising=False)
     monkeypatch.delenv("WHATSAPP_MCP_METRICS_TOKEN", raising=False)
-    app = main.build_http_app(FakeServer(), "http", None)
+    app = main.build_http_app(MCPServer("metrics"), "http", None)
     assert isinstance(app, MetricsMiddleware) and app.token is None
     monkeypatch.setenv("WHATSAPP_MCP_METRICS_TOKEN", "scrape-me")
-    assert main.build_http_app(FakeServer(), "http", None).token == "scrape-me"
+    assert main.build_http_app(MCPServer("metrics"), "http", None).token == "scrape-me"
     monkeypatch.setenv("WHATSAPP_MCP_METRICS", "off")
-    assert not isinstance(main.build_http_app(FakeServer(), "http", None), MetricsMiddleware)
+    assert not isinstance(main.build_http_app(MCPServer("metrics"), "http", None), MetricsMiddleware)

@@ -7,7 +7,7 @@ Symptoms and fixes for pairing, auth, sync and app-state problems. For container
 The container healthcheck uses a Bash TCP connect every 120 seconds (every
 5 seconds during the 15-second startup period). It sends no HTTP request and
 cannot produce `/mcp` 401 log lines; investigate clients or separate HTTP
-probes if those persist. `healthy` confirms the TCP listener only: run
+probes if those persist. `healthy` confirms TCP availability and configured Unix socket existence: run
 `scripts/smoke.sh` for authenticated MCP initialization and use `--mcp-socket`
 when checking the optional Unix listener. If `WHATSAPP_MCP_SOCKET` is set,
 the healthcheck also requires that path to be a Unix socket; removing it
