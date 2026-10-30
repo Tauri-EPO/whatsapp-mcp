@@ -297,7 +297,8 @@ def coverage(
     audio is the voice-note side of the same scope: {messages, cached,
     transcribed, errors, unavailable, refused, backlog, backlog_cached, cached_examined} —
     received and sent voice notes stored (sent audio counts only from the instant
-    the ingest worker first ran with TRANSCRIBE_ON_INGEST_INCLUDE_SENT on, and not at
+    the ingest worker first ran with TRANSCRIBE_ON_INGEST_INCLUDE_SENT on, including
+    late phone delivery from up to a day before that start, and not at
     all when it is false. A process without the worker reads the stored instant;
     without one it counts inbound audio only. The status feed "status@broadcast" is not
     counted: no batch walks it), how many have their bytes cached, how many
