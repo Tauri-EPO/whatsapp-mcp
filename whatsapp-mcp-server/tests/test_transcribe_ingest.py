@@ -1909,6 +1909,26 @@ def test_remote_miss_is_keyed_by_chat_and_hash(paired_dbs, monkeypatch):
     assert calls[-1] == ("AUD1", BOB) and len(calls) == 3
 
 
+def test_another_rows_transcript_does_not_reset_remote_backoff(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    calls = []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append((mid, chat)))
+    transcribe_worker.find_pending(10)
+    remembered = list(transcribe_worker._cache_checks.items())
+    _add_audio(paired_dbs, "AUD2", ALICE, cached=False)
+    media_notes.annotate_media(SHA["AUD2"], "transcript", "another row's transcript")
+    transcribe_worker.find_pending(10)
+    assert calls == [("AUD1", ALICE)]
+    assert list(transcribe_worker._cache_checks.items()) == remembered
+    media_notes.annotate_media(SHA["AUD1"], "transcript_error", "fake decode failure")
+    assert transcribe_worker.find_pending(10).examined == 0
+    assert not transcribe_worker._cache_checks
+    media_notes.annotate_media(SHA["AUD1"], "transcript_error", "")
+    transcribe_worker.find_pending(10)
+    assert calls == [("AUD1", ALICE)] * 2
+
+
 def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
     for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
         _add_audio(paired_dbs, mid, ALICE, cached=False)

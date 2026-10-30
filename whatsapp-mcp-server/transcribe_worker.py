@@ -479,17 +479,25 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
 PendingRow = tuple[str, str, str, str, str]  # id, chat, sha256, timestamp, media identity
 
 
-def _notes_identity() -> tuple[Any, ...]:
-    # Clearing a note/refusal must allow an immediate recheck, including writes
-    # by another MCP process. Read WAL identity too, without opening notes writable.
-    identity = []
-    for suffix in ("", "-wal"):
-        try:
-            info = os.stat(media_notes.notes_db_path() + suffix)
-            identity.append((info.st_ino, info.st_size, info.st_mtime_ns))
-        except FileNotFoundError:
-            identity.append(None)
-    return tuple(identity)
+def _forget_nonpending(conn: sqlite3.Connection, predicate: str, params: list[Any]) -> None:
+    """Invalidate only rows that left the pending set, including another process's notes.
+
+    Check remembered primary keys in bounded batches. A later cleared note can
+    then requeue its own row without unrelated notes writes resetting backoff.
+    """
+    keys = [key for key in _cache_checks if key[0] == whatsapp.MESSAGES_DB_PATH]
+    for start in range(0, len(keys), 250):
+        chunk = keys[start : start + 250]
+        values = ",".join("(?, ?)" for _ in chunk)
+        gone = conn.execute(
+            f"WITH remembered(id, chat_jid) AS (VALUES {values}) "
+            "SELECT r.id, r.chat_jid FROM remembered r LEFT JOIN messages m "
+            "ON m.id = r.id AND m.chat_jid = r.chat_jid "
+            f"WHERE m.id IS NULL OR NOT ({predicate})",
+            [*(part for key in chunk for part in key[1:]), *params],
+        ).fetchall()
+        for mid, chat in gone:
+            _cache_checks.pop((whatsapp.MESSAGES_DB_PATH, mid, chat), None)
 
 
 def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str | None = None) -> list[PendingRow]:
@@ -524,14 +532,16 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
             ingest_chat_clause("m.chat_jid"),
         ]
         params: list[Any] = [*sent_params, *handled_params]
+        clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
+        clauses.append(clause)
+        params.extend(clause_params)
+        if media_remote.enabled() and after is None:
+            _forget_nonpending(conn, " AND ".join(clauses), params)
         if after is not None:
             # Keyset, not OFFSET: rows transcribed since the last round leave the
             # result and would shift every offset under the walk.
             clauses.append("(m.timestamp < ? OR (m.timestamp = ? AND (m.id > ? OR (m.id = ? AND m.chat_jid > ?))))")
             params.extend([after.timestamp, after.timestamp, after.message_id, after.message_id, after.chat_jid])
-        clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
-        clauses.append(clause)
-        params.extend(clause_params)
         rows = conn.execute(
             f"""
             SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp,
@@ -545,10 +555,8 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
         ).fetchall()
     finally:
         conn.close()
-    notes_identity = _notes_identity()
     return [
-        (str(r[0]), str(r[1]), str(r[2]), str(r[3]), hashlib.sha256(repr((r[2:], notes_identity)).encode()).hexdigest())
-        for r in rows
+        (str(r[0]), str(r[1]), str(r[2]), str(r[3]), hashlib.sha256(repr(r[2:]).encode()).hexdigest()) for r in rows
     ]
 
 
