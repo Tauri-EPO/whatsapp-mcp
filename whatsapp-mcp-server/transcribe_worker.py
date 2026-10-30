@@ -68,6 +68,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import media_inventory
 import media_notes
@@ -317,24 +318,26 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
         config = replace(config, sent_since=since, worker_running=True)
     elif running:
         reset = _sent_reset_path()
-        # Persist intent before DELETE: a locked DB or a crash must not let the
-        # next sent-enabled worker reuse the old instant. Refuse this start if
-        # even the intent cannot be stored; otherwise we cannot promise a reset.
-        if os.path.exists(media_notes.notes_db_path()):
+        try:
+            media_notes.forget_meta(SENT_SINCE_KEY)
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("could not clear when sent audio started counting: %s; reset pending", exc)
+            # Only a failed clear needs durable recovery. An absent instant or
+            # a successful DELETE must not create/fsync a marker at all.
             try:
-                fd = _open_fd(str(reset), os.O_CREAT | os.O_WRONLY, "sent audio reset marker")
+                fd = _open_fd(str(reset), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, "sent audio reset marker")
                 try:
+                    os.write(fd, uuid4().hex.encode("ascii"))
                     os.fsync(fd)
                 finally:
                     os.close(fd)
             except OSError:
-                logger.warning("could not persist the sent audio reset; refusing to start the ingest worker")
-                raise
-        try:
-            media_notes.forget_meta(SENT_SINCE_KEY)
-            reset.unlink(missing_ok=True)
-        except (sqlite3.Error, OSError) as exc:
-            logger.warning("could not clear when sent audio started counting: %s; reset pending", exc)
+                logger.warning("could not persist the sent audio reset; continuing with inbound audio only")
+        else:
+            try:
+                reset.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove the sent audio reset marker after clearing the instant")
         config = replace(config, sent_since=None, worker_running=True)
     else:
         config = replace(config, sent_since=None, worker_running=False)

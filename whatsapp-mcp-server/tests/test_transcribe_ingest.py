@@ -586,18 +586,34 @@ def test_workerless_coverage_observes_another_process_claim_and_clear(paired_dbs
     assert whatsapp.coverage()["audio"]["messages"] == 1
 
 
-def test_reset_marker_refuses_symlinks_and_does_not_start_worker(paired_dbs, monkeypatch, installed, caplog):
+def test_reset_marker_failure_warns_and_keeps_inbound_worker_alive(paired_dbs, monkeypatch, installed, caplog):
     media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
 
     def refuse(*args, **kwargs):
         raise OSError("An MCP-owned file must not be a symlink")
 
+    monkeypatch.setattr(media_notes, "forget_meta", busy)
     monkeypatch.setattr(transcribe_worker, "_open_fd", refuse)
-    with pytest.raises(OSError, match="symlink"):
-        transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
-    assert installed == []
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+    assert len(installed) == 1 and installed[0].sent_since is None
     assert _stored_since() == SENT_SINCE
-    assert "refusing to start" in caplog.text
+    assert "continuing with inbound audio only" in caplog.text
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_successful_or_absent_clear_never_writes_reset_marker(paired_dbs, monkeypatch, stored):
+    if stored:
+        media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    else:
+        media_notes.claim_meta("unrelated", "value")
+    monkeypatch.setattr(transcribe_worker, "_open_fd", lambda *a, **kw: pytest.fail("unnecessary marker write"))
+    config = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+    assert config is not None and config.sent_since is None
+    assert _stored_since() is None
+    assert not transcribe_worker._sent_reset_path().exists()
 
 
 @pytest.mark.parametrize("include_sent", [True, False])
