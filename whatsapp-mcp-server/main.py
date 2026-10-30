@@ -33,9 +33,10 @@ from http_oauth import (
     OAuthTokenVerifier,
     load_oauth_config,
 )
-from http_sessions import install_idle_session_eviction
+from http_sessions import DEFAULT_MAX_SESSIONS, install_idle_session_eviction
 from http_upload import UploadApp
 from mcp_config import (
+    DEFAULT_SESSION_IDLE_TIMEOUT_S,
     build_transport_security,
     resolve_host,
     resolve_port,
@@ -2980,7 +2981,7 @@ def build_http_app(
     rate_limit_per_minute: int | None = None,
     upload_max_bytes: int = 64 * 1024 * 1024,
     trusted_proxies: ProxyNetworks = (),
-    session_idle_timeout: float | None = 86400,
+    session_idle_timeout: float | None = DEFAULT_SESSION_IDLE_TIMEOUT_S,
     **app_kwargs: Any,
 ):
     """Build the ASGI app for the http/sse transports.
@@ -3003,6 +3004,7 @@ def build_http_app(
         app = server.sse_app(**app_kwargs)
     else:
         app_kwargs["session_idle_timeout"] = session_idle_timeout
+        app_kwargs.setdefault("max_sessions", DEFAULT_MAX_SESSIONS)
         app = server.streamable_http_app(**app_kwargs)
         install_idle_session_eviction(server._lowlevel_server.session_manager)
     sdk_app = app

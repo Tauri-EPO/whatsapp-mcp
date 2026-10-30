@@ -77,7 +77,7 @@ EXPOSE 8000
 # authentication noise. A configured Unix socket must exist; smoke probes
 # exercise its HTTP response. An open port with a wedged event loop still passes.
 # Bash is included in python:3.13-slim. Startup checks remain frequent (Docker 25+).
-HEALTHCHECK --interval=120s --timeout=5s --start-period=15s --start-interval=5s --retries=3 \
-    CMD ["bash", "-c", "read -r h <<< \"${WHATSAPP_MCP_HOST:-127.0.0.1}\"; h=${h:-127.0.0.1}; case $h in 0.0.0.0) h=127.0.0.1;; ::) h=::1;; esac; read -r p <<< \"${WHATSAPP_MCP_PORT:-8000}\"; p=${p:-8000}; p=${p//_/}; p=${p#+}; [[ $p =~ ^[0-9]+$ ]] || exit 1; p=$((10#$p)); ((p>=1 && p<=65535)) || exit 1; read -r s <<< \"${WHATSAPP_MCP_SOCKET:-}\"; [ -z \"$s\" ] || [ -S \"$s\" ] || exit 1; exec 3<>/dev/tcp/$h/$p"]
+HEALTHCHECK --interval=120s --timeout=5s --start-period=15s --start-interval=5s --retries=2 \
+    CMD ["bash", "-c", "trim() { local v=$1; v=\"${v#\"${v%%[![:space:]]*}\"}\"; v=\"${v%\"${v##*[![:space:]]}\"}\"; printf -v \"$2\" '%s' \"$v\"; }; trim \"${WHATSAPP_MCP_HOST:-}\" h; h=${h:-127.0.0.1}; case $h in 0.0.0.0) h=127.0.0.1;; ::) h=::1;; esac; trim \"${WHATSAPP_MCP_PORT:-}\" p; p=${p:-8000}; p=${p//_/}; p=${p#+}; [[ $p =~ ^[0-9]+$ ]] || exit 1; p=$((10#$p)); ((p>=1 && p<=65535)) || exit 1; trim \"${WHATSAPP_MCP_SOCKET:-}\" s; [ -z \"$s\" ] || [ -S \"$s\" ] || exit 1; exec 3<>/dev/tcp/$h/$p"]
 
 CMD ["python", "main.py"]

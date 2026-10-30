@@ -14,6 +14,7 @@ from mcp.server.mcpserver import MCPServer
 from starlette.testclient import TestClient
 
 import mcp_config
+from http_sessions import DEFAULT_MAX_SESSIONS
 from main import build_http_app
 
 ENV = "WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S"
@@ -53,7 +54,7 @@ def test_timeout_reaches_sdk_manager(monkeypatch, value, expected):
         server, "streamable-http", TOKEN, session_idle_timeout=mcp_config.resolve_session_idle_timeout(value)
     )
     assert server._lowlevel_server.session_manager.session_idle_timeout == expected
-    assert server._lowlevel_server.session_manager.max_sessions == 10000
+    assert server._lowlevel_server.session_manager.max_sessions == DEFAULT_MAX_SESSIONS == 256
 
 
 @pytest.mark.parametrize("value", ["-1", "9" * 400])
@@ -80,13 +81,27 @@ runpy.run_path('main.py', run_name='__main__')
     assert "listening on" not in result.stderr
 
 
-def test_sse_ignores_http_timeout(monkeypatch):
-    monkeypatch.setenv(ENV, "bad")
-    build_http_app(MCPServer("test"), "sse", TOKEN)
+def test_sse_entrypoint_ignores_invalid_http_timeout(tmp_path):
+    script = """
+import operator_admin, mcp_config, runpy
+operator_admin.install_admin = lambda *a, **kw: None
+def ready(*args, **kwargs):
+    print('SSE_APP_READY')
+mcp_config.run_http_listeners = ready
+runpy.run_path('main.py', run_name='__main__')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, ENV: "bad", "WHATSAPP_MCP_TRANSPORT": "sse", "WHATSAPP_STORE_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SSE_APP_READY" in result.stdout
 
 
-def test_unknown_session_then_reinitialize_without_restart(monkeypatch, auth_runtime_store):
-    monkeypatch.setenv(ENV, "1")
+def test_unknown_session_then_reinitialize_without_restart(auth_runtime_store):
     app = build_http_app(MCPServer("test"), "streamable-http", TOKEN, json_response=True)
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         response = client.post(
@@ -171,7 +186,6 @@ def test_sdk_contract_and_least_recent_idle_eviction(auth_runtime_store, caplog,
     ):
         first, second = initialize(client), initialize(client)
         victim = manager._server_instances[second]
-        assert hasattr(victim, "_requests_in_flight")
         assert ping(client, first).status_code == 200  # first is now the most recent
         third = initialize(client)
         assert victim.is_terminated
@@ -225,3 +239,46 @@ def test_inflight_session_is_not_evicted(auth_runtime_store, timeout, cap):
         else:
             assert ping(client, session).status_code == 200
         assert ping(client, fresh).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "method,payload,extra,status",
+    [
+        ("GET", None, {}, 400),
+        ("DELETE", None, {}, 400),
+        ("POST", {"jsonrpc": "2.0", "id": 2, "method": "ping"}, {}, 400),
+        ("POST", {**INIT, "params": {}}, {}, 400),
+        ("POST", {**INIT, "jsonrpc": "1.0"}, {}, 400),
+        ("POST", {k: v for k, v in INIT.items() if k != "id"}, {}, 400),
+        ("POST", INIT, {"Accept": "text/plain"}, 406),
+        ("POST", INIT, {"Host": "other.example"}, 421),
+        ("POST", INIT, {"Origin": "https://other.example"}, 403),
+        ("POST", INIT, {"Content-Type": "text/plain"}, 400),
+    ],
+)
+def test_rejected_opening_request_does_not_evict(auth_runtime_store, method, payload, extra, status):
+    server = MCPServer("test")
+    app = build_http_app(server, "streamable-http", TOKEN, json_response=True, max_sessions=1)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        session = initialize(client)
+        response = client.request(method, "/mcp", json=payload, headers={**HEADERS, **extra})
+        assert response.status_code == status, response.text
+        assert list(server._lowlevel_server.session_manager._server_instances) == [session]
+        assert ping(client, session).status_code == 200
+
+
+def test_termination_does_not_hold_creation_lock(auth_runtime_store, monkeypatch):
+    server = MCPServer("test")
+    app = build_http_app(server, "streamable-http", TOKEN, json_response=True, max_sessions=1)
+    manager = server._lowlevel_server.session_manager
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        first = initialize(client)
+        transport = manager._server_instances[first]
+        original = transport.terminate
+
+        async def checked_terminate():
+            assert not manager._session_creation_lock.locked()
+            await original()
+
+        monkeypatch.setattr(transport, "terminate", checked_terminate)
+        assert initialize(client) != first

@@ -5,7 +5,7 @@ Symptoms and fixes for pairing, auth, sync and app-state problems. For container
 ### MCP container health
 
 The container healthcheck uses a Bash TCP connect every 120 seconds (every
-5 seconds during the 15-second startup period). It sends no HTTP request and
+5 seconds during the 15-second startup period). Two consecutive failures mark it unhealthy within about four minutes. It sends no HTTP request and
 cannot produce `/mcp` 401 log lines; investigate clients or separate HTTP
 probes if those persist. `healthy` confirms TCP availability and configured Unix socket existence: run
 `scripts/smoke.sh` for authenticated MCP initialization and use `--mcp-socket`

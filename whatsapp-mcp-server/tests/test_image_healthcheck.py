@@ -22,7 +22,20 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="needs native bash TCP redi
 
 @pytest.mark.parametrize("backend_alive", [False, True])
 @pytest.mark.parametrize(
-    "bind_host", [None, "0.0.0.0", "127.0.0.1", "127.0.0.2", "", " 127.0.0.1 ", "::", "::1", " ::1 "]
+    "bind_host",
+    [
+        None,
+        "0.0.0.0",
+        "127.0.0.1",
+        "127.0.0.2",
+        "",
+        " 127.0.0.1 ",
+        "::",
+        "::1",
+        " ::1 ",
+        "\r\v\f127.0.0.1\r\v\f",
+        "\r::1\r",
+    ],
 )
 def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_alive, bind_host):
     normalized = resolve_host(bind_host)
@@ -65,7 +78,7 @@ def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_a
     command[0] = BASH
     # Exercise accepted whitespace and decimal spellings against the same
     # resolver used at startup, then connect to that actual listener.
-    port_env = f" +0{port:_} "
+    port_env = f"\r\v\f +0{port:_} \r\v\f"
     assert resolve_port(port_env) == port
     env = dict(os.environ, WHATSAPP_MCP_PORT=port_env, NO_PROXY="", no_proxy="")
     env.pop("WHATSAPP_MCP_SOCKET", None)
@@ -89,7 +102,8 @@ def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_a
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Unix socket filesystem probe runs on Linux")
-def test_image_probe_requires_configured_socket_node(tmp_path):
+@pytest.mark.parametrize("whitespace", ["", "\r", "\v\f"])
+def test_image_probe_requires_configured_socket_node(tmp_path, whitespace):
     path = tmp_path / "mcp.sock"
     dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
     command = json.loads(
@@ -107,7 +121,7 @@ def test_image_probe_requires_configured_socket_node(tmp_path):
             **os.environ,
             "WHATSAPP_MCP_HOST": "127.0.0.1",
             "WHATSAPP_MCP_PORT": str(tcp.getsockname()[1]),
-            "WHATSAPP_MCP_SOCKET": str(path),
+            "WHATSAPP_MCP_SOCKET": whitespace + str(path) + whitespace,
         }
 
         def probe():

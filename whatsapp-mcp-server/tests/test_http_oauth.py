@@ -955,3 +955,68 @@ def test_oauth_intersects_live_runtime_policy_and_deploy_floor(monkeypatch, issu
         restored = request(client, full_token, sending).json()["result"]
         assert bool(restored.get("isError")) == deploy_denied
     assert calls == ([] if deploy_denied else ["send", "send"])
+
+
+@pytest.mark.parametrize("foreign_age", [0, 1801])
+def test_session_capacity_is_owner_aware(monkeypatch, issuer, foreign_age):
+    import http_sessions
+
+    configure(monkeypatch, issuer)
+    server = StrictArgumentServer("fake")
+    application = build_http_app(
+        server,
+        "streamable-http",
+        STATIC,
+        host="0.0.0.0",
+        json_response=True,
+        max_sessions=1,
+        session_idle_timeout=None,
+    )
+    manager = server._lowlevel_server.session_manager
+    with TestClient(application) as client:
+        first = request(client, signed(issuer))
+        assert first.status_code == 200
+        session = first.headers["mcp-session-id"]
+        activity = manager._server_instances[session]._whatsapp_session_activity
+        assert isinstance(activity.owner, bytes) and len(activity.owner) == 32
+        assert b"Alice" not in activity.owner
+        now = http_sessions.monotonic()
+        monkeypatch.setattr(http_sessions, "monotonic", lambda: now + foreign_age)
+        foreign = request(client, signed(issuer, sub="Bob"))
+        assert foreign.status_code == (200 if foreign_age else 503)
+        if foreign_age:
+            assert session not in manager._server_instances
+        else:
+            assert session in manager._server_instances
+            renewed = request(client, signed(issuer, exp=time.time() + 900))
+            assert renewed.status_code == 200
+            assert renewed.headers["mcp-session-id"] != session
+
+
+def test_static_bearer_owner_hash_distinguishes_tokens():
+    from http_sessions import _owner
+
+    def owner(token):
+        return _owner({"headers": [(b"authorization", ("Bearer " + token).encode())]})
+
+    assert owner("fake-token-one") != owner("fake-token-two")
+    assert owner("fake-token-one") == owner("fake-token-one")
+
+
+def test_capacity_prefers_own_session_before_older_foreign_session(monkeypatch, issuer):
+    import http_sessions
+
+    configure(monkeypatch, issuer)
+    server = StrictArgumentServer("fake")
+    application = build_http_app(
+        server, "streamable-http", STATIC, host="0.0.0.0", json_response=True, max_sessions=2, session_idle_timeout=None
+    )
+    manager = server._lowlevel_server.session_manager
+    with TestClient(application) as client:
+        foreign = request(client, signed(issuer, sub="Bob")).headers["mcp-session-id"]
+        own = request(client, signed(issuer)).headers["mcp-session-id"]
+        manager._server_instances[foreign]._whatsapp_session_activity.last_active = http_sessions.monotonic() - 2000
+        response = request(client, signed(issuer))
+        assert response.status_code == 200
+        assert foreign in manager._server_instances
+        assert own not in manager._server_instances

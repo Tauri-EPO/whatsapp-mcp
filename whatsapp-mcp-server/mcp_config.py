@@ -17,6 +17,7 @@ TRANSPORT_ALIASES = {
 }
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8000
+DEFAULT_SESSION_IDLE_TIMEOUT_S = 86400
 
 
 def resolve_transport(value: str | None) -> str:
@@ -63,7 +64,7 @@ def resolve_session_idle_timeout(value: str | None) -> int | None:
     """Parse HTTP idle seconds (0-10 years); 24 hours by default, zero disables expiry."""
     value = (value or "").strip()
     if not value:
-        return 86400
+        return DEFAULT_SESSION_IDLE_TIMEOUT_S
     try:
         seconds = int(value)
     except ValueError:

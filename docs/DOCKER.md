@@ -967,6 +967,7 @@ authentication on that endpoint, so keep it inside a network you trust.
   loopback), every 120 seconds; no Python process or HTTP request is made, so
   the check produces no authentication failures. During the 15-second startup
   period it runs every 5 seconds, allowing healthy status within seconds.
+  Two consecutive failures mark it unhealthy within about four minutes.
   A configured `WHATSAPP_MCP_SOCKET` must also exist as a Unix socket. This
   tests TCP availability and socket existence, not event-loop responsiveness:
   a wedged loop with an open port/socket still appears healthy (accepted
