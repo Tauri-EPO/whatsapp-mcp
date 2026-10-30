@@ -65,7 +65,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -298,6 +298,9 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=reset.exists())
             try:
                 since = _canonical_instant(since)
+                if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
+                    logger.warning("stored sent audio instant is in the future; replacing it with %s", now)
+                    since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
             except ValueError:
                 since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
             reset.unlink(missing_ok=True)

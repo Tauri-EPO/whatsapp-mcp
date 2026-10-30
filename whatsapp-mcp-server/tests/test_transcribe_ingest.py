@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -604,6 +604,21 @@ def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_t
     assert fallback.sent_since >= config.sent_since
     assert "could not record when sent audio started counting" in caplog.text
     assert transcribe_worker._pending_rows(10) == []
+
+
+@pytest.mark.parametrize("ahead_minutes", [4, 6, 1440])
+def test_future_instant_is_repaired_beyond_small_clock_skew(paired_dbs, monkeypatch, caplog, ahead_minutes):
+    future = whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(minutes=ahead_minutes))
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, future)
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since == _stored_since()
+    if ahead_minutes <= 5:
+        assert config.sent_since == future
+        assert "in the future" not in caplog.text
+    else:
+        assert config.sent_since is not None and before <= config.sent_since < future
+        assert "in the future" in caplog.text
 
 
 def test_uncached_audio_is_fetched_from_the_bridge_only_with_the_flag_on(paired_dbs):
