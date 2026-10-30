@@ -58,6 +58,7 @@ jobs:
   go:
     name: Go Build
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -88,6 +89,7 @@ jobs:
           go test -race -timeout 25m ./...
       - uses: astral-sh/setup-uv@v7
       - name: Real MinIO and MCP media integration
+        timeout-minutes: 10
         run: |
           uv sync --frozen --extra dev --project whatsapp-mcp-server
           bash scripts/test-s3-media.sh
