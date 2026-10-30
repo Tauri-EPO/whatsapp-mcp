@@ -266,11 +266,11 @@ def ingest_config() -> IngestConfig:
     """The startup snapshot shared by coverage and every worker batch."""
     global _ingest_config
     if _ingest_config is None:
-        _ingest_config = replace(load_ingest_config(), sent_since=_stored_sent_since())
-    elif not _ingest_config.worker_running:
+        _ingest_config = load_ingest_config()
+    if not _ingest_config.worker_running:
         # Another stdio process can claim/reset the shared instant after this
         # process started. Only a local worker needs a fixed startup snapshot.
-        return replace(_ingest_config, sent_since=_stored_sent_since())
+        return replace(_ingest_config, sent_since=_stored_sent_since() if _ingest_config.include_sent else None)
     return _ingest_config
 
 
@@ -337,7 +337,7 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             logger.warning("could not clear when sent audio started counting: %s; reset pending", exc)
         config = replace(config, sent_since=None, worker_running=True)
     else:
-        config = replace(config, sent_since=_stored_sent_since(), worker_running=False)
+        config = replace(config, sent_since=None, worker_running=False)
     return config
 
 

@@ -1923,3 +1923,19 @@ def test_ten_fetches_do_not_read_the_chat_directory_ten_more_times(paired_dbs, m
     assert result.transcribed == 10 and len(bridge.calls) == 10
     assert listings == [ALICE]  # one directory read for the chat, not one per download
     assert len(lookups) == 10  # one targeted lookup per fetched file
+
+
+def test_workerless_start_defers_metadata_read_until_each_coverage_config(monkeypatch):
+    reads = []
+
+    def read():
+        reads.append(1)
+        return SENT_SINCE
+
+    monkeypatch.setattr(transcribe_worker, "_stored_sent_since", read)
+    assert _start(monkeypatch, {}) is None
+    assert reads == []
+    assert transcribe_worker.ingest_config().sent_since == SENT_SINCE
+    assert reads == [1]
+    assert transcribe_worker.ingest_config().sent_since == SENT_SINCE
+    assert reads == [1, 1]
