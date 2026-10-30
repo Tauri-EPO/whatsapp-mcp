@@ -22,10 +22,16 @@ def test_bridge_requests_never_send_credentials_to_environment_proxy(monkeypatch
             def do_GET(self):
                 calls.append((self.command, self.path, self.headers.get("Authorization")))
                 self.send_response(200)
+                self.send_header("Content-Length", "2")
                 self.end_headers()
                 self.wfile.write(b"{}")
 
             def do_POST(self):
+                # Closing a Windows socket with unread request bytes can abort
+                # the response. Consume the complete synthetic request first.
+                self.connection.settimeout(5)
+                length = int(self.headers.get("Content-Length", "0"))
+                assert len(self.rfile.read(length)) == length
                 self.do_GET()
 
             def log_message(self, *_args):
@@ -35,6 +41,7 @@ def test_bridge_requests_never_send_credentials_to_environment_proxy(monkeypatch
 
     bridge = ThreadingHTTPServer(("127.0.0.1", 0), handler(bridge_calls))
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), handler(proxy_calls))
+    bridge.daemon_threads = proxy.daemon_threads = True
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (bridge, proxy)]
     for thread in threads:
         thread.start()
@@ -61,6 +68,7 @@ def test_bridge_requests_never_send_credentials_to_environment_proxy(monkeypatch
             server.server_close()
         for thread in threads:
             thread.join(timeout=5)
+            assert not thread.is_alive()
 
 
 class _Resp:

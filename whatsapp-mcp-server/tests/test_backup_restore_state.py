@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tarfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import media_notes
+import transcribe_worker
+import whatsapp
 from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -129,3 +134,111 @@ def test_restore_connection_marker_follows_session_replacement(tmp_path: Path, s
             }
         else:
             assert saved == original
+
+
+def _run_backup_command(tmp_path: Path, store: Path, backup: Path, command: str):
+    """Run the real container body with local mounts and real SQLite backups."""
+    binaries = tmp_path / "bin-reset"
+    binaries.mkdir(exist_ok=True)
+    docker = binaries / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, subprocess, sys\n"
+        "if sys.argv[1] == 'ps': sys.exit(0)\n"
+        "body = sys.argv[-1].replace('apk add --no-cache sqlite >/dev/null;', '')\n"
+        "body = body.replace('/store', os.environ['FAKE_STORE'])\n"
+        "body = body.replace('/backup', os.environ['FAKE_BACKUP'])\n"
+        "body = body.replace('chown -R 1000:1000', 'true')\n"
+        "sys.exit(subprocess.call(['sh', '-euc', body]))\n"
+    )
+    docker.chmod(0o755)
+    sqlite_cli = binaries / "sqlite3"
+    sqlite_cli.write_text(
+        "#!/usr/bin/env python3\n"
+        "import shlex, sqlite3, sys\n"
+        "with sqlite3.connect(sys.argv[1]) as conn:\n"
+        "    if sys.argv[2].startswith('.backup '):\n"
+        "        with sqlite3.connect(shlex.split(sys.argv[2])[1]) as dest: conn.backup(dest)\n"
+        "    else:\n"
+        "        for row in conn.execute(sys.argv[2]): print(row[0])\n"
+    )
+    sqlite_cli.chmod(0o755)
+    return subprocess.run(
+        [BASH or "bash", str(ROOT / "scripts" / "backup.sh"), command, str(backup)],
+        env=os.environ
+        | {
+            "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+            "WHATSAPP_STORE_VOLUME": "fake-reset-store",
+            "FAKE_STORE": str(store),
+            "FAKE_BACKUP": str(backup),
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_sent_reset_intent_round_trip_and_next_worker(tmp_path, monkeypatch, pending):
+    source, backup, destination = (tmp_path / name for name in ("source", "backup", "destination"))
+    for directory in (source, backup, destination):
+        directory.mkdir()
+    for name in ("messages.db", "whatsapp.db"):
+        with sqlite3.connect(source / name) as conn:
+            conn.execute("CREATE TABLE sample(value TEXT)")
+            if name == "messages.db":
+                conn.execute("CREATE TABLE messages(timestamp TEXT)")
+                conn.execute("INSERT INTO messages VALUES (?)", (whatsapp.timestamp_bound(datetime.now(UTC)),))
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(source / "notes.db"))
+    stale = "2020-01-01 00:00:00+00:00"
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, stale)
+    marker = "notes.db.ingest-sent-reset"
+    if pending:
+        (source / marker).write_text("fake-pending-reset")
+    result = _run_backup_command(tmp_path, source, backup, "backup")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (backup / marker).exists() is pending
+    if pending:
+        assert (backup / marker).read_text() == "fake-pending-reset"
+        assert (backup / marker).stat().st_mode & 0o777 == 0o600
+    else:
+        (destination / marker).write_text("fake-unrelated-old-reset")
+    result = _run_backup_command(tmp_path, destination, backup, "restore")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (destination / marker).exists() is pending
+    if pending:
+        assert (destination / marker).stat().st_mode & 0o777 == 0o600
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(destination / "notes.db"))
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(destination / "messages.db"))
+    config = transcribe_worker._settle_sent_since(transcribe_worker.IngestConfig(True, 300, 10), running=True)
+    if pending:
+        assert abs(datetime.now(UTC) - whatsapp.parse_db_time(config.sent_since)) < timedelta(seconds=5)
+        assert not (destination / marker).exists()
+    else:
+        assert config.sent_since == stale
+    # Snapshotting did not edit source notes or acknowledge its pending reset.
+    with sqlite3.connect(source / "notes.db") as conn:
+        assert conn.execute("SELECT value FROM notes_meta WHERE key='ingest_sent_since'").fetchone()[0] == stale
+    assert (source / marker).exists() is pending
+
+
+@pytest.mark.parametrize("command", ["backup", "restore"])
+@pytest.mark.parametrize("location", ["store", "artifact"])
+@pytest.mark.parametrize("unsafe", ["symlink", "directory", "oversized", "non_ascii"])
+def test_reset_marker_unsafe_paths_are_rejected(tmp_path, command, location, unsafe):
+    store, backup = tmp_path / "store", tmp_path / "backup"
+    store.mkdir()
+    backup.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("fake-private-outside")
+    marker = (store if location == "store" else backup) / "notes.db.ingest-sent-reset"
+    if unsafe == "symlink":
+        marker.symlink_to(outside)
+    elif unsafe == "directory":
+        marker.mkdir()
+    else:
+        marker.write_bytes(b"x" * 129 if unsafe == "oversized" else b"\xff")
+    result = _run_backup_command(tmp_path, store, backup, command)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "unsafe sent audio reset marker" in result.stderr
+    assert outside.read_text() == "fake-private-outside"

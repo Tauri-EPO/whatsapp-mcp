@@ -336,7 +336,8 @@ Keep downloads and backups private: they contain message and contact data.
 Export streams an uncompressed ZIP64 directly into the response, with no
 server-side staging. It contains `chats.json`, `contacts.json`,
 `messages.jsonl`, `notes.jsonl` (versioned notes), `media_notes.jsonl`,
-`transcriptions.jsonl` and `manifest.json` (version, UTC creation time, per-file
+`transcriptions.jsonl`, `notes_meta.jsonl` (the sent-audio ingestion instant only)
+and `manifest.json` (version, UTC creation time, per-file
 row/file counts, sizes, SHA256 and `media_skipped` (malformed media rows skipped). Contacts are selected explicitly from the
 session store's contact table; session/device keys, database files, media keys,
 CDN URLs and tokens are excluded. Missing lazy `notes.db` produces empty note
@@ -344,6 +345,26 @@ files. Add `?media=true` for referenced cached media; default is false and each
 exported message has a `media_ref` when its file is included. A malformed ID,
 chat or timestamp leaves that reference null and increments `media_skipped`;
 a missing cache file leaves it null without being classified as malformed.
+
+When notes exist, the export also preserves a pending
+`notes.db.ingest-sent-reset` marker, if present. The fixed source path is read
+without modifying it; symlinks, non-regular, non-ASCII, oversized and non-private
+POSIX markers are refused. The ZIP entry is owner-only (`0600`). Intent observed
+before or after pinning the notes read transaction is retained, so a concurrent
+reset can conservatively reset the restored instant again.
+
+Restore an export through a schema-aware JSON importer with the bridge and MCP
+stopped, after verifying every file against `manifest.json`; there is no bundled
+JSON importer. Import `notes_meta.jsonl` into the MCP-owned notes metadata along
+with its notes/transcriptions, and place the verified reset marker beside the
+restored `notes.db` as `notes.db.ingest-sent-reset`, owned by the container user,
+mode `0600`, with no symlink. The next sent-enabled worker consumes that intent
+and records a fresh instant. When replacing notes from an export with no marker
+(including older exports), remove an unrelated destination reset marker; when
+not replacing notes, leave that marker alone. Older exports also lack the
+sent-audio instant: do not retain an unrelated destination instant; let the next
+worker initialize it. Export contains portable rows, not SQLite database files
+or session keys; use snapshots or `backup.sh` for direct database recovery.
 
 The export holds one read transaction per store while live writes continue;
 stores are independently consistent, not one cross-process transaction.
@@ -413,6 +434,15 @@ until verification finishes. Restore cached media separately, then start both
 processes and run the normal smoke check. A data-only snapshot retains the
 current live session if left in place; a clean store without a session needs
 pairing. A missing notes copy is expected for an account without agent notes.
+
+When a set includes `*-notes.db.ingest-sent-reset`, restore that verified file
+beside its notes copy as `notes.db.ingest-sent-reset`, with mode `0600` and the
+same owner. It preserves a pending sent-audio reset: the next sent-enabled MCP
+worker replaces a stale ingestion instant. If the chosen notes copy has no
+marker (including older snapshot sets), remove any existing reset marker in the
+destination; the restored database instant is authoritative. Leave the marker
+alone when not replacing notes.db. Never follow marker symlinks. The bridge
+only reads source notes metadata and the marker; it never acknowledges a reset.
 
 ### Private operator network
 
@@ -987,6 +1017,10 @@ authentication on that endpoint, so keep it inside a network you trust.
   `--wait 90` polls while the containers start; `--url https://box.tailnet.ts.net`
   tests the endpoint the way a remote client reaches it. CI runs it against
   the compose stack on every PR (unpaired path).
+  On Windows, run it from Git Bash. Container paths are kept literal only for
+  Docker calls; native curl receives host paths to a private temporary directory
+  that is cleaned on exit, including authentication failures. No global
+  `MSYS_NO_PATHCONV` setting is needed.
   On a host where the stack belongs to a manager (Komodo, Portainer) the compose
   directory and its `.env` are root-owned, so `docker compose` refuses to read
   them: `scripts/smoke.sh --project whatsapp-mcp --url https://box.tailnet.ts.net`
@@ -1416,7 +1450,7 @@ can ship it off-box and no other account on the host can read it. A snapshot is
 a plain directory:
 
 ```
-messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
+messages.db  whatsapp.db  [notes.db + notes.db.ingest-sent-reset]  media.tar  bridge-token  MANIFEST
 ```
 
 The script resolves the volume from the compose project labels; outside the
@@ -1448,6 +1482,15 @@ docker compose logs -f bridge             # expect "connected", no QR
 
 Restore removes stale `-wal`/`-shm` files and the instance lock, copies the
 databases, media and token back, and resets ownership to the container user.
+The optional private `notes.db.ingest-sent-reset` marker travels with notes.db;
+the next sent-enabled worker honors its pending reset. Replacing notes.db from
+an artifact without a marker clears an unrelated destination marker and uses
+the restored instant, including with older backups. If notes.db is absent from
+the artifact, the existing notes database and marker are left together.
+Marker symlinks, non-regular files, non-ASCII contents, files over 128 bytes and
+markers without a corresponding notes database are refused. Hot copies capture
+intent before and after the notes snapshot; a concurrent reset can conservatively
+advance the restored instant on the next worker start. Source metadata stays MCP-owned.
 To move to a new server, restore the snapshot into the fresh volume before the
 first `docker compose up`, and keep the same `WHATSAPP_BRIDGE_TOKEN` in `.env`
 if you had set one (otherwise the restored `.bridge-token` is used).

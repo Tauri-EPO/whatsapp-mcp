@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import main
@@ -245,7 +246,16 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(tmp_path, phase)
 @pytest.fixture
 def provider(monkeypatch, tmp_path):
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "messages.db"))
-    state = {"calls": [], "heads": 0, "status": 200, "body": None, "delay": 0, "release_delay": threading.Event()}
+    monkeypatch.setattr(transcribe, "_activity", transcribe.OrderedDict())
+    state = {
+        "calls": [],
+        "heads": 0,
+        "status": 200,
+        "body": None,
+        "delay": 0,
+        "head_delay": 0,
+        "release_delay": threading.Event(),
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -254,6 +264,7 @@ def provider(monkeypatch, tmp_path):
         def do_HEAD(self):
             state["heads"] += 1
             state["head_auth"] = self.headers.get("Authorization")
+            time.sleep(state["head_delay"])
             self.send_response(state["status"])
             self.end_headers()
 
@@ -285,6 +296,7 @@ def provider(monkeypatch, tmp_path):
             self.wfile.write(state["body"] or json.dumps({"text": f"part {len(state['calls'])}"}).encode())
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
     state["url"] = f"http://127.0.0.1:{server.server_port}/v1/audio/transcriptions"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -348,6 +360,137 @@ def test_transcoded_audio_model_language_auth_and_status(provider, tmp_path, cap
     assert transcribe_file(str(source))["text"] == "part 2"
     assert provider["calls"][1]["fields"]["file"].startswith(b"OggS")
     assert KEY not in json.dumps(status) + caplog.text
+
+
+def test_probe_has_independent_five_second_default(provider, monkeypatch):
+    monkeypatch.setenv("WHISPER_TIMEOUT_S", "1")
+    provider["head_delay"] = 2.2
+    assert load_config().probe_timeout_s == 5
+    assert transcribe.describe_status()["reachable"] is True
+    assert provider["heads"] == 1
+
+
+def test_probe_timeouts_do_not_retry_and_preserve_real_activity(provider, tmp_path, monkeypatch):
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    transcribe_file(str(source))
+    success = transcribe.describe_status()["last_success_at"]
+    assert success and transcribe.describe_status()["last_failure_at"] is None
+    before = provider["heads"]
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", "1")
+    provider["head_delay"] = 1.5
+    status = transcribe.describe_status()
+    assert provider["heads"] == before + 1
+    assert status["reachable"] is None and status["probe"] == "timeout"
+    assert status["last_success_at"] == success and status["last_failure_at"] is None
+    provider["head_delay"], provider["status"] = 0, 503
+    assert transcribe.describe_status()["reachable"] is None  # recent actual success
+    provider["status"] = 500
+    with pytest.raises(BackendUnavailableError):
+        transcribe_file(str(source))
+    failed = transcribe.describe_status()
+    assert failed["last_success_at"] == success and failed["last_failure_at"]
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_probe_auth_failure_is_false_even_after_success(provider, tmp_path, status_code):
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    transcribe_file(str(source))
+    provider["status"] = status_code
+    status = transcribe.describe_status()
+    assert status["reachable"] is False and status["probe"] == "unauthorized"
+    assert status["last_success_at"] and status["last_failure_at"] is None
+    assert provider["heads"] == 1
+
+
+def test_old_success_and_other_endpoint_do_not_mask_failure(provider, tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    transcribe_file(str(source))
+    config = load_config()
+    transcribe._activity[(config.provider, config.url, config.model)]["last_success_at"] = datetime.now(
+        UTC
+    ) - timedelta(minutes=16)
+    provider["status"] = 503
+    assert transcribe.describe_status()["reachable"] is False
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_URL", provider["url"] + "-other")
+    status = transcribe.describe_status()
+    assert status["reachable"] is False and status["last_success_at"] is None
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "bad"])
+def test_invalid_probe_timeout_is_reported_without_breaking_transcription(provider, tmp_path, monkeypatch, value):
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", value)
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    assert transcribe_file(str(source))["text"] == "part 1"
+    status = transcribe.describe_status()
+    assert status["reachable"] is None and status["probe"] == "invalid_config"
+    assert "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S" in status["probe_error"]
+    assert transcribe.probe_http_provider(load_config()) == (None, "invalid_config")
+    assert provider["heads"] == 0
+
+
+def test_whisper_cpp_ignores_http_probe_configuration(provider, monkeypatch, tmp_path):
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", "bad")
+    monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", "whisper_cpp")
+    monkeypatch.setenv("WHISPER_URL", provider["url"])
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.delenv("NETRC")
+    config = load_config()
+    assert config.provider == "whisper_cpp" and config.probe_error is None
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    assert transcribe_file(str(source), config=config)["text"] == "part 1"
+    assert provider["calls"][0]["fields"]["file"].startswith(b"RIFF")
+
+
+@pytest.mark.parametrize(
+    ("failure", "attempts", "expected"),
+    [
+        (httpx.ConnectError("fake refused"), 2, (False, "unreachable")),
+        (httpx.ReadError("fake reset"), 2, (False, "unreachable")),
+        (httpx.RemoteProtocolError("fake disconnected"), 2, (False, "unreachable")),
+        (httpx.ConnectTimeout("fake slow connect"), 1, (None, "timeout")),
+        (httpx.ReadTimeout("fake slow read"), 1, (None, "timeout")),
+        (httpx.InvalidURL("fake invalid URL"), 1, (False, "unreachable")),
+        (ValueError("fake invalid config"), 1, (False, "unreachable")),
+    ],
+)
+def test_probe_retries_only_connection_transport_errors(provider, monkeypatch, failure, attempts, expected):
+    calls = []
+
+    def stream(*args, **kwargs):
+        calls.append(1)
+        raise failure
+
+    monkeypatch.setattr(httpx.AsyncClient, "stream", stream)
+    assert transcribe.probe_http_provider(load_config()) == expected
+    assert len(calls) == attempts
+
+
+def test_unsupported_input_does_not_stamp_provider_failure(provider, tmp_path):
+    source = tmp_path / "unsupported.ogg"
+    source.write_bytes(b"fake non-audio bytes")
+    with pytest.raises(TranscriptionError):
+        transcribe_file(str(source))
+    assert provider["calls"] == []
+    status = transcribe.describe_status()
+    assert status["last_failure_at"] is None and status["last_success_at"] is None
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_provider_response_failure_stamps_activity(provider, tmp_path, status):
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    provider["status"] = status
+    with pytest.raises(TranscriptionError):
+        transcribe_file(str(source))
+    assert len(provider["calls"]) == 1
+    assert transcribe.describe_status()["last_failure_at"]
 
 
 def test_auto_language_omitted(provider, tmp_path, monkeypatch):

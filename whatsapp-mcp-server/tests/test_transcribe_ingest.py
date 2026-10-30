@@ -45,6 +45,8 @@ SENT_SINCE = "2026-09-05 09:00:00+00:00"
 @pytest.fixture(autouse=True)
 def _fresh_ingest_snapshot(monkeypatch):
     monkeypatch.setattr(transcribe_worker, "_ingest_config", None, raising=False)
+    monkeypatch.setattr(transcribe_worker, "_cache_checks", transcribe_worker.OrderedDict())
+    monkeypatch.setattr(transcribe_worker, "_last_batch_state", None)
 
 
 def _media_filename(message_id: str) -> str:
@@ -1844,6 +1846,254 @@ def test_a_new_arrival_is_not_queued_behind_the_walk(starved_archive):
     # in the very next one — together with the older row the walk had reached.
     assert second.transcribed == 2
     assert [os.path.basename(p) for p in backend.runs] == [_numbered_filename(60), _numbered_filename(0)]
+
+
+def test_remote_cache_misses_back_off_without_repeated_logs(paired_dbs, monkeypatch, caplog):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    clock, calls = [0.0], []
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append((mid, chat)))
+    with caplog.at_level("DEBUG", logger="whatsapp_mcp"):
+        for instant in (0, 299, 300, 600, 899, 900, 1200):
+            clock[0] = instant
+            assert transcribe_worker.run_once(10).pending == 0
+    assert calls == [("AUD1", ALICE)] * 3  # 0, 300, 900; next is 2100
+    assert len(caplog.records) == 1
+    # The exponential retry remains bounded at six hours.
+    for _ in range(20):
+        clock[0] += transcribe_worker.CACHE_RETRY_MAX_S
+        transcribe_worker.find_pending(10)
+    assert next(iter(transcribe_worker._cache_checks.values()))[2] == 21600
+
+
+@pytest.mark.parametrize("change", ["credentials", "download", "cleared_note"])
+def test_remote_cache_miss_is_invalidated_by_progress(paired_dbs, monkeypatch, change):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    calls = []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append((mid, chat)))
+    transcribe_worker.find_pending(10)
+    transcribe_worker.find_pending(10)
+    assert len(calls) == 1
+    if change == "credentials":
+        with paired_dbs.messages() as conn:
+            conn.execute("UPDATE messages SET media_key = ? WHERE id = ?", (b"new-fake-key", "AUD1"))
+    elif change == "download":
+        with paired_dbs.messages() as conn:
+            conn.executescript(
+                "CREATE TABLE media_cache (sha256 BLOB, stored_at TEXT);"
+                "CREATE TABLE media_cache_refs (id TEXT, chat_jid TEXT, sha256 BLOB);"
+            )
+            conn.execute("INSERT INTO media_cache VALUES (?, ?)", (bytes.fromhex(SHA["AUD1"]), "2026-10-30"))
+            conn.execute("INSERT INTO media_cache_refs VALUES (?, ?, ?)", ("AUD1", ALICE, bytes.fromhex(SHA["AUD1"])))
+    else:
+        media_notes.annotate_media(SHA["AUD1"], "transcript_error", "fake decode failure")
+        assert transcribe_worker.find_pending(10).examined == 0
+        media_notes.annotate_media(SHA["AUD1"], "transcript_error", "")
+    transcribe_worker.find_pending(10)
+    assert len(calls) == 2
+
+
+def test_remote_miss_is_keyed_by_chat_and_hash(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    _add_audio(paired_dbs, "AUD1", BOB, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    calls = []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append((mid, chat)))
+    transcribe_worker.find_pending(10)
+    assert set(calls) == {("AUD1", ALICE), ("AUD1", BOB)}
+    with paired_dbs.messages() as conn:
+        conn.execute("UPDATE messages SET file_sha256 = ? WHERE chat_jid = ?", (bytes.fromhex(SHA["AUD2"]), BOB))
+    transcribe_worker.find_pending(10)
+    assert calls[-1] == ("AUD1", BOB) and len(calls) == 3
+
+
+def test_another_rows_transcript_does_not_reset_remote_backoff(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    calls = []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append((mid, chat)))
+    transcribe_worker.find_pending(10)
+    remembered = list(transcribe_worker._cache_checks.items())
+    _add_audio(paired_dbs, "AUD2", ALICE, cached=False)
+    media_notes.annotate_media(SHA["AUD2"], "transcript", "another row's transcript")
+    transcribe_worker.find_pending(10)
+    assert calls == [("AUD1", ALICE)]
+    assert list(transcribe_worker._cache_checks.items()) == remembered
+    media_notes.annotate_media(SHA["AUD1"], "transcript_error", "fake decode failure")
+    assert transcribe_worker.find_pending(10).examined == 0
+    assert not transcribe_worker._cache_checks
+    media_notes.annotate_media(SHA["AUD1"], "transcript_error", "")
+    transcribe_worker.find_pending(10)
+    assert calls == [("AUD1", ALICE)] * 2
+
+
+def test_remote_backoff_survives_a_walk_larger_than_old_lru(paired_dbs, monkeypatch):
+    count = 4200
+    with paired_dbs.messages() as conn:
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, timestamp, is_from_me, media_type, file_sha256) "
+            "VALUES (?, ?, ?, '2026-09-05 09:00:00+00:00', 0, 'audio', ?)",
+            [(f"FAKE{i:05d}", ALICE, ALICE, i.to_bytes(32)) for i in range(count)],
+        )
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: 0)
+    calls = []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append(mid))
+    for _ in range(2):
+        position = None
+        while True:
+            result = transcribe_worker.find_pending(200, position=position)
+            position = result.position
+            if position is None:
+                break
+    assert len(calls) == count and len(set(calls)) == count
+    assert len(transcribe_worker._cache_checks) == count
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_pending_identity_work_is_remote_only_and_schema_is_cached(paired_dbs, monkeypatch, remote):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3" if remote else "local")
+    monkeypatch.setattr(transcribe_worker, "_media_schema_cache", transcribe_worker.OrderedDict())
+    connect = whatsapp._connect_messages_db
+    statements = []
+
+    def traced():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", traced)
+    if not remote:
+
+        def unexpected_hash(*args):
+            raise AssertionError("local pending rows must not hash a remote identity")
+
+        monkeypatch.setattr(transcribe_worker.hashlib, "sha256", unexpected_hash)
+    for _ in range(2):
+        row = transcribe_worker._pending_rows(10)[0]
+        assert bool(row[4]) is remote
+    probes = [s for s in statements if "table_info(messages)" in s]
+    assert len(probes) == int(remote)
+    if not remote:
+        assert not any("media_cache_refs" in s or "schema_version" in s or "m.media_key" in s for s in statements)
+
+
+def test_remote_backoff_capacity_preserves_pending_entries(paired_dbs, monkeypatch):
+    for mid in ("AUD1", "AUD2"):
+        _add_audio(paired_dbs, mid, ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    monkeypatch.setattr(transcribe_worker, "CACHE_CHECK_LIMIT", 1)
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+    transcribe_worker.find_pending(10)
+    key = next(iter(transcribe_worker._cache_checks))
+    transcribe_worker.find_pending(10)
+    assert list(transcribe_worker._cache_checks) == [key]
+    media_notes.annotate_media(SHA[key[1]], "transcript", "fake transcript")
+    transcribe_worker.find_pending(10)
+    assert len(transcribe_worker._cache_checks) == 1 and key not in transcribe_worker._cache_checks
+
+
+@pytest.mark.parametrize("problem", ["bridge_unavailable", "http_500", "timeout", "unreadable"])
+def test_repeated_remote_fetch_problems_still_log(paired_dbs, monkeypatch, caplog, problem):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    clock = [0]
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+
+    def download(*args):
+        if problem == "http_500":
+            raise RuntimeError("fake bridge HTTP 500")
+        if problem == "timeout":
+            raise TimeoutError("fake timeout detail")
+        if problem != "unreadable":
+            raise ToolError(problem, "fake bridge detail")
+
+    with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+        for _ in range(2):
+            transcribe_worker.find_pending(10, fetch=True, download=download)
+            clock[0] += 21600
+    assert len(caplog.records) == 2
+    assert all("AUD1" in record.message for record in caplog.records)
+    assert ("fake" if problem != "unreadable" else "not readable") in caplog.text
+
+
+@pytest.mark.parametrize("problem", ["bridge_unavailable", "http_503", "timeout"])
+def test_remote_bridge_blip_retries_next_walk_without_backoff(paired_dbs, monkeypatch, problem):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    clock, calls = [0], []
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+
+    def download(mid, chat):
+        calls.append(mid)
+        if len(calls) == 3:
+            return media_remote.uri(chat, mid)
+        if problem == "timeout":
+            raise TimeoutError("fake timeout")
+        if problem == "http_503":
+            raise RuntimeError("fake HTTP 503")
+        raise ToolError(problem, "fake bridge outage")
+
+    transcribe_worker.find_pending(10, fetch=True, download=download)
+    remembered = list(transcribe_worker._cache_checks.values())[0]
+    clock[0] = 300  # expired catalog miss, but still no final download answer
+    transcribe_worker.find_pending(10, fetch=True, download=download)
+    assert list(transcribe_worker._cache_checks.values())[0] == remembered
+    assert remembered[3] is False
+    selected = transcribe_worker.find_pending(10, fetch=True, download=download)
+    assert calls == ["AUD1"] * 3 and selected.candidates[0].message_id == "AUD1"
+    assert not transcribe_worker._cache_checks
+
+
+def test_only_the_same_final_remote_answer_is_silenced(paired_dbs, monkeypatch, caplog):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+    clock, reason = [0], ["fake cooldown A"]
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+
+    def download(*args):
+        if reason[0] == "outage":
+            raise ToolError("bridge_unavailable", "fake bridge exception")
+        raise ToolError("media_retry_backoff", reason[0])
+
+    with caplog.at_level("DEBUG", logger="whatsapp_mcp"):
+        for instant, answer in [
+            (0, "fake cooldown A"),
+            (300, "fake cooldown A"),
+            (900, "fake cooldown B"),
+            (2100, "outage"),
+        ]:
+            clock[0], reason[0] = instant, answer
+            transcribe_worker.find_pending(10, fetch=True, download=download)
+    cooldowns = [r for r in caplog.records if "waits for its media retry cooldown" in r.message]
+    assert len(cooldowns) == 2
+    assert "cooldown A" in cooldowns[0].message and "cooldown B" in cooldowns[1].message
+    assert any(r.levelname == "WARNING" and "fake bridge exception" in r.message for r in caplog.records)
+
+
+def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
+    for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
+        _add_audio(paired_dbs, mid, ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    lookups, downloads = [], []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: lookups.append((mid, chat)))
+
+    def download(mid, chat):
+        downloads.append((mid, chat))
+
+    first = transcribe_worker.find_pending(2, fetch=True, download=download)
+    assert len(downloads) == 2 and len(lookups) == 4
+    second = transcribe_worker.find_pending(2, fetch=True, download=download, position=first.position)
+    assert downloads[2] == ("AUD4", ALICE)  # transient head failure is retried next round
+    transcribe_worker.find_pending(2, fetch=True, download=download, position=second.position)
+    assert len(set(downloads)) == 4  # the reserved walk budget still reaches untouched rows
+    assert len(lookups) == 4  # known catalog misses need no further HTTP query
 
 
 # --- the loop ---------------------------------------------------------------
