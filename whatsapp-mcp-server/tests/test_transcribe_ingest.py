@@ -2103,6 +2103,7 @@ def test_busy_clock_repair_retries_the_original_repair_bound(paired_dbs, monkeyp
 @pytest.mark.parametrize("provider", ["whisper_cpp", "openai_compatible"])
 def test_normal_and_deferred_start_logs_name_the_backend(provider, paired_dbs, monkeypatch, caplog):
     from dataclasses import replace
+
     from tool_policy import ToolPolicy
 
     config = transcribe_worker.IngestConfig(True, 5, 1, backend_provider=provider)

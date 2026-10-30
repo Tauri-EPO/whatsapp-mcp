@@ -180,7 +180,6 @@ class IngestConfig:
     batch: int
     fetch: bool = False
     include_sent: bool = True
-    backend_provider: str = "whisper_cpp"
     # The instant above, in the stored timestamp spelling; None counts no sent audio.
     sent_since: str | None = None
     # Keep lifecycle flags in the same frozen value so publication/readers and
@@ -189,6 +188,7 @@ class IngestConfig:
     worker_running: bool = False
     sent_claim_pending: bool = False
     sent_reset_token: str | None = None
+    backend_provider: str = "whisper_cpp"
 
 
 _ingest_config: IngestConfig | None = None
