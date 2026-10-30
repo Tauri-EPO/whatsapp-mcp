@@ -690,8 +690,7 @@ def find_pending(
             path = cached if media_remote.enabled() else os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
         elif budget > 0:
             budget -= 1
-            repeated = media_remote.enabled() and previous is not None and previous[0] == media_identity
-            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=None if repeated else failures > 0)
+            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
             if media_remote.enabled() and check_key in _cache_checks:
                 remembered = _cache_checks[check_key]
                 _cache_checks[check_key] = (*remembered[:3], True)
@@ -814,14 +813,15 @@ def _fetch_bytes(
                 logger.debug("transcribe_on_ingest: %s is not fetchable: %s", message_id, exc.message)
             reason = f"too_large: {exc.message}" if exc.code == "too_large" else exc.message
             return Fetched(unavailable=reason, too_large=exc.code == "too_large")
-        _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
+        _log_fetch_problem(bool(quiet), f"the bridge could not send {message_id}: {exc}")
         return Fetched()
     except Exception as exc:  # noqa: BLE001 - one message must not end the round
-        _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
+        _log_fetch_problem(bool(quiet), f"the bridge could not send {message_id}: {exc}")
         return Fetched()
     if media_remote.enabled():
         if path and media_remote.identity(path) == (chat_jid, message_id):
             return Fetched(path=path)
+        _log_fetch_problem(bool(quiet), f"the bytes of {message_id} are not readable here ({path or 'no path'})")
         return Fetched()
     name = media_inventory.lookup_cached_name(chat_jid, message_id)
     if name is not None:
@@ -829,7 +829,7 @@ def _fetch_bytes(
         return Fetched(path=os.path.join(media_inventory.chat_media_dir(chat_jid), name))
     if path and os.path.exists(path):
         return Fetched(path=path)
-    _log_fetch_problem(quiet, f"the bytes of {message_id} are not readable here ({path or 'no path'})")
+    _log_fetch_problem(bool(quiet), f"the bytes of {message_id} are not readable here ({path or 'no path'})")
     return Fetched()
 
 

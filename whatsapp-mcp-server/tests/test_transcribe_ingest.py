@@ -1967,6 +1967,31 @@ def test_remote_backoff_capacity_preserves_pending_entries(paired_dbs, monkeypat
     assert len(transcribe_worker._cache_checks) == 1 and key not in transcribe_worker._cache_checks
 
 
+@pytest.mark.parametrize("problem", ["bridge_unavailable", "http_500", "timeout", "unreadable"])
+def test_repeated_remote_fetch_problems_still_log(paired_dbs, monkeypatch, caplog, problem):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    clock = [0]
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+
+    def download(*args):
+        if problem == "http_500":
+            raise RuntimeError("fake bridge HTTP 500")
+        if problem == "timeout":
+            raise TimeoutError("fake timeout detail")
+        if problem != "unreadable":
+            raise ToolError(problem, "fake bridge detail")
+
+    with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+        for _ in range(2):
+            transcribe_worker.find_pending(10, fetch=True, download=download)
+            clock[0] += 21600
+    assert len(caplog.records) == 2
+    assert all("AUD1" in record.message for record in caplog.records)
+    assert ("fake" if problem != "unreadable" else "not readable") in caplog.text
+
+
 def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
     for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
         _add_audio(paired_dbs, mid, ALICE, cached=False)
