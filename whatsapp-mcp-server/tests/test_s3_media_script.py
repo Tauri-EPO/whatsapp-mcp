@@ -14,7 +14,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "test-s3-media.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="the S3 proof requires Linux and GNU timeout")
 
 
-@pytest.mark.parametrize("hang", ["none", "download", "startup", "integration", "term"])
+@pytest.mark.parametrize("hang", ["none", "download", "startup", "integration", "term", "empty-port"])
 def test_s3_proof_bounds_waits_and_cleans_up(tmp_path, hang):
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
@@ -50,7 +50,7 @@ if phase == os.environ['HANG'] or (phase == 'integration' and os.environ['HANG']
     time.sleep(60)
 if name == 'curl' and '--output' in args:
     pathlib.Path(args[args.index('--output') + 1]).touch()
-if name == 'docker' and args[0] == 'port':
+if name == 'docker' and args[0] == 'port' and os.environ['HANG'] != 'empty-port':
     print('127.0.0.1:9000')
 if name == 'docker' and args[0] == 'rm':
     container.unlink()
@@ -120,6 +120,10 @@ if name == 'docker' and args[0] == 'rm':
         assert process.returncode == 0, stdout + stderr
         assert "--connect-timeout 2 --max-time 3" in calls
         assert "timeout --kill-after=5s 420s go test -count=1 -timeout 6m" in calls
+    elif hang == "empty-port":
+        assert process.returncode == 1, stderr
+        assert "MinIO published no port" in stderr
+        assert "docker logs --tail 80" in calls
     elif hang == "term":
         assert process.returncode == 143, stderr
         assert "Interrupted waiting for S3 bridge/MCP integration and shutdown (TERM)" in stderr

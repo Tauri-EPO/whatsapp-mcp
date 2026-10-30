@@ -61,7 +61,8 @@ bounded 'MinIO container startup' 30 docker run -d --name "$container" -p 127.0.
   -e MINIO_ROOT_USER=wamcp-test-access -e MINIO_ROOT_PASSWORD=wamcp-test-secret-sentinel \
   -v "$scratch/minio:/minio:ro" golang:1.27-alpine /minio server /data >/dev/null
 bounded 'MinIO published port' 10 docker port "$container" 9000/tcp >"$scratch/port"
-IFS= read -r address <"$scratch/port"
+address=
+IFS= read -r address <"$scratch/port" || true
 [[ -n "$address" ]] || { echo 'MinIO published no port' >&2; exit 1; }
 export WAMCP_TEST_MINIO_ENDPOINT="http://$address"
 echo 'Waiting for MinIO readiness (limit 40s; each HTTP call at most 3s)' >&2
