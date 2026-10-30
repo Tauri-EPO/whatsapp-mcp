@@ -60,6 +60,26 @@ def test_local_run_without_actions_environment(tmp_path):
     assert "Remaining findings: 0" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "report", [{"results": [{}], "errors": []}, {"results": [None], "errors": []}, {"results": {}, "errors": []}, []]
+)
+def test_malformed_findings_fail_closed_without_traceback(tmp_path, report):
+    source = tmp_path / "bandit.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "0", str(source)],
+        env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Malformed or incomplete Bandit report" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "refusing to pass" in summary.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("contents", [None, "not JSON", "{}"])
 def test_missing_or_invalid_report_cannot_pass(tmp_path, contents):
     report = tmp_path / "bandit.json"
