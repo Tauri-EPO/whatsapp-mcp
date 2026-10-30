@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -23,6 +22,7 @@ import transcribe_worker
 import whatsapp
 from errors import ToolError
 from strict_args import StrictArgumentServer
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
 from tests.conftest import ALICE, BOB, FAMILY
 from tests.test_transcribe_ingest import FakeBackend, _add_audio
 
@@ -275,9 +275,11 @@ def test_bad_ingest_scope_startup_has_one_line_refusal(tmp_path):
 
 
 def test_operator_logout_script_sends_idle_to_private_http_only():
-    bash = shutil.which("bash")
-    if bash is None or shutil.which("curl") is None:
-        pytest.skip("needs bash and curl")
+    bash = resolve_bash()
+    if bash is None:
+        pytest.skip(BASH_SKIP_REASON)
+    if subprocess.run([bash, "-c", "command -v curl"], capture_output=True, timeout=10).returncode:
+        pytest.skip("script test DID NOT RUN: selected Bash needs curl")
     received = []
 
     class Handler(BaseHTTPRequestHandler):

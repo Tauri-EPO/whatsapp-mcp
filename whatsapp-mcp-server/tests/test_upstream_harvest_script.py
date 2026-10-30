@@ -21,14 +21,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 HARVEST = ROOT / "scripts" / "upstream-harvest.sh"
 
-BASH = shutil.which("bash")
+BASH = resolve_bash()
 GIT = shutil.which("git")
-pytestmark = pytest.mark.skipif(
-    BASH is None or GIT is None, reason="needs bash and git to run scripts/upstream-harvest.sh"
-)
+pytestmark = pytest.mark.skipif(BASH is None or GIT is None, reason=BASH_SKIP_REASON + "; also needs git")
 
 # What the fake GitHub clock says, and the same instant as a mark spells it.
 GH_DATE = "Wed, 07 Oct 2026 18:45:38 GMT"
@@ -133,20 +133,34 @@ class Harvest:
     def head(self, repo: Path) -> str:
         return self.git(repo, "rev-parse", "HEAD")
 
-    def run(self, *args: str, cwd: Path | None = None, **env: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        bin_dir: Path | None = None,
+        restricted_path: bool = False,
+        **env: str,
+    ) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
+        run_env = {**self.env, **env}
         return subprocess.run(
-            [BASH, str(self.fork / "scripts" / "upstream-harvest.sh"), *args],
+            bash_command(
+                BASH,
+                self.fork / "scripts" / "upstream-harvest.sh",
+                *args,
+                bin_dir=bin_dir or self.root / "bin",
+                inherit_path=not restricted_path,
+            ),
             cwd=cwd or self.fork,
-            env={**self.env, **env},
+            env=run_env,
             capture_output=True,
             text=True,
             encoding="utf-8",
             timeout=300,
         )
 
-    def listed(self, *args: str, **env: str) -> str:
-        done = self.run(*args, **env)
+    def listed(self, *args: str, bin_dir: Path | None = None, restricted_path: bool = False, **env: str) -> str:
+        done = self.run(*args, bin_dir=bin_dir, restricted_path=restricted_path, **env)
         assert done.returncode == 0, done.stdout + done.stderr
         return done.stdout
 
@@ -311,18 +325,9 @@ def test_without_gh_the_commits_are_listed_and_the_timestamp_stays(marked: Harve
     wrapper = only_git / "git"
     wrapper.write_text(f'#!/bin/sh\nexec "{Path(GIT).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    path = [str(only_git)]
-    if os.name == "nt":
-        # Git for Windows cannot run from an empty PATH (its fetch crashes), so
-        # there the rest of PATH stays, minus every directory that offers a gh.
-        path += [
-            d
-            for d in os.environ.get("PATH", "").split(os.pathsep)
-            if d and not any((Path(d) / gh).exists() for gh in ("gh", "gh.exe", "gh.cmd", "gh.bat"))
-        ]
     late = marked.commit(marked.up, "whatsapp-bridge/late.go", "up: later")
 
-    out = marked.listed(PATH=os.pathsep.join(path))
+    out = marked.listed(PATH=str(only_git), bin_dir=only_git, restricted_path=True)
     assert subjects(out, "upstream", COMPONENT_COMMITS) == ["up: later"]
     assert "PR/issue listing of verygoodplugins/whatsapp-mcp is INCOMPLETE (gh is not installed)" in out
     assert marked.gh_calls() == ""

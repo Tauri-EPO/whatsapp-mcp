@@ -12,18 +12,19 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "smoke.sh"
 
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash to run scripts/smoke.sh")
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
@@ -211,7 +212,7 @@ class Stack:
     def run(self, *args: str, **fakes: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
         return subprocess.run(
-            [BASH, str(self.script), *args],
+            bash_command(BASH, self.script, *args, bin_dir=self.dir / "bin"),
             cwd=self.dir,
             env={**self.env, **fakes},
             capture_output=True,
@@ -291,10 +292,12 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
     wget.write_text(
         '#!/bin/sh\ncase "$*" in *"-Y off"*) exit 0;; *) exit 77;; esac\n',
         encoding="utf-8",
+        newline="\n",
     )
     wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
+    assert BASH is not None
     result = subprocess.run(
-        [BASH, str(ROOT / "whatsapp-bridge" / "docker-healthcheck.sh")],
+        bash_command(BASH, ROOT / "whatsapp-bridge" / "docker-healthcheck.sh", bin_dir=tmp_path),
         env={
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
@@ -319,10 +322,11 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
 )
 def test_healthcheck_normalizes_accepted_bind(tmp_path: Path, bind: str, target: str) -> None:
     wget = tmp_path / "wget"
-    wget.write_text('#!/bin/sh\nfor arg in "$@"; do :; done\nprintf "%s" "$arg"\n', encoding="utf-8")
+    wget.write_text('#!/bin/sh\nfor arg in "$@"; do :; done\nprintf "%s" "$arg"\n', encoding="utf-8", newline="\n")
     wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
+    assert BASH is not None
     result = subprocess.run(
-        [BASH, str(ROOT / "whatsapp-bridge" / "docker-healthcheck.sh")],
+        bash_command(BASH, ROOT / "whatsapp-bridge" / "docker-healthcheck.sh", bin_dir=tmp_path),
         env={
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
