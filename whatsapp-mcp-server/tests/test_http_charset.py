@@ -9,6 +9,7 @@ import json
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 from mcp.server.mcpserver import MCPServer
 from starlette.testclient import TestClient
@@ -16,6 +17,7 @@ from starlette.testclient import TestClient
 import main
 import runtime_settings
 from http_auth import Utf8CharsetMiddleware
+from mcp_config import resolve_transport
 
 TOKEN = "fake-mcp-token-0123456789"
 ACCENTED = "histórico → você"
@@ -34,7 +36,7 @@ def runtime_archive(paired_dbs, monkeypatch):
     return paired_dbs
 
 
-def _app(json_response: bool):
+def _server():
     server = MCPServer("charset-test")
 
     @server.tool()
@@ -42,8 +44,12 @@ def _app(json_response: bool):
         """Return text with accents: histórico → você."""
         return ACCENTED
 
+    return server
+
+
+def _app(json_response: bool):
     return main.build_http_app(
-        server, "streamable-http", TOKEN, host="0.0.0.0", json_response=json_response, stateless_http=True
+        _server(), "streamable-http", TOKEN, host="0.0.0.0", json_response=json_response, stateless_http=True
     )
 
 
@@ -86,6 +92,91 @@ def test_middleware_covers_own_json_replies_without_literal_charset(rate_limit):
             response = client.post("/mcp", headers={"Accept": "application/json"}, json={})
     assert response.status_code == (429 if rate_limit else 401)
     assert response.headers["content-type"] == "application/json; charset=utf-8"
+
+
+@pytest.mark.asyncio
+async def test_legacy_sse_stream_and_message_posts_declare_utf8(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_MCP_TRANSPORT", "sse")
+    app = main.build_http_app(
+        _server(), resolve_transport(main.os.getenv("WHATSAPP_MCP_TRANSPORT")), TOKEN, host="0.0.0.0"
+    )
+    incoming, outgoing = asyncio.Queue(), asyncio.Queue()
+    await incoming.put({"type": "http.request", "body": b""})
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/sse",
+        "raw_path": b"/sse",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"authorization", f"Bearer {TOKEN}".encode()),
+            (b"accept", b"text/event-stream"),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+
+    async def event():
+        message = await outgoing.get()
+        assert message["type"] == "http.response.body", message
+        lines = message["body"].decode("utf-8").splitlines()
+        return next(line.removeprefix("data: ") for line in lines if line.startswith("data: "))
+
+    stream = asyncio.create_task(app(scope, incoming.get, outgoing.put))
+    try:
+        async with (
+            asyncio.timeout(10),
+            httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://testserver") as client,
+        ):
+            start = await outgoing.get()
+            assert start["status"] == 200
+            assert dict(start["headers"])[b"content-type"] == b"text/event-stream; charset=utf-8"
+            endpoint = await event()
+            denied = await client.post(endpoint, json={})
+            assert denied.status_code == 401
+            assert denied.headers["content-type"] == "application/json; charset=utf-8"
+
+            async def post(message):
+                response = await client.post(endpoint, headers=HEADERS, json=message)
+                assert response.status_code == 202, response.text
+                # The SDK's accepted POST has no media type; JSON/SSE replies must declare UTF-8.
+                content_type = response.headers.get("content-type", "")
+                if content_type.startswith(("application/json", "text/event-stream")):
+                    assert "charset=utf-8" in content_type, content_type
+
+            await post(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "charset-test", "version": "1"},
+                    },
+                }
+            )
+            assert "result" in json.loads(await event())
+            await post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            await post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            [tool] = json.loads(await event())["result"]["tools"]
+            assert tool["description"] == "Return text with accents: histórico → você."
+            await post(
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo_accents", "arguments": {}}}
+            )
+            assert json.loads(await event())["result"]["content"][0]["text"] == ACCENTED
+    finally:
+        await incoming.put({"type": "http.disconnect"})
+        try:
+            await asyncio.wait_for(stream, timeout=5)
+        finally:
+            if not stream.done():
+                stream.cancel()
 
 
 @pytest.mark.parametrize(
