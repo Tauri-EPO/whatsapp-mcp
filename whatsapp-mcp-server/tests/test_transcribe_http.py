@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import main
@@ -369,7 +370,7 @@ def test_probe_has_independent_five_second_default(provider, monkeypatch):
     assert provider["heads"] == 1
 
 
-def test_probe_timeouts_retry_and_preserve_real_activity(provider, tmp_path, monkeypatch):
+def test_probe_timeouts_do_not_retry_and_preserve_real_activity(provider, tmp_path, monkeypatch):
     source = tmp_path / "voice.wav"
     _audio(source)
     transcribe_file(str(source))
@@ -379,7 +380,7 @@ def test_probe_timeouts_retry_and_preserve_real_activity(provider, tmp_path, mon
     monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", "1")
     provider["head_delay"] = 1.5
     status = transcribe.describe_status()
-    assert provider["heads"] == before + 2
+    assert provider["heads"] == before + 1
     assert status["reachable"] is None and status["probe"] == "timeout"
     assert status["last_success_at"] == success and status["last_failure_at"] is None
     provider["head_delay"], provider["status"] = 0, 503
@@ -434,10 +435,36 @@ def test_invalid_probe_timeout_is_reported_without_breaking_transcription(provid
 
 def test_whisper_cpp_ignores_http_probe_configuration(monkeypatch, tmp_path):
     monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S", "bad")
-    config = load_config({"WHISPER_URL": "http://fake-whisper/inference", "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S": "bad"})
+    config = load_config(
+        {"WHISPER_URL": "http://fake-whisper/inference", "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S": "bad"}
+    )
     assert config.provider == "whisper_cpp" and config.probe_error is None
     monkeypatch.setattr(transcribe, "_metered_transcribe_file", lambda *a, **kw: {"text": "fake transcript"})
     assert transcribe_file(str(tmp_path / "voice.wav"), config=config)["text"] == "fake transcript"
+
+
+@pytest.mark.parametrize(
+    ("failure", "attempts", "expected"),
+    [
+        (httpx.ConnectError("fake refused"), 2, (False, "unreachable")),
+        (httpx.ReadError("fake reset"), 2, (False, "unreachable")),
+        (httpx.RemoteProtocolError("fake disconnected"), 2, (False, "unreachable")),
+        (httpx.ConnectTimeout("fake slow connect"), 1, (None, "timeout")),
+        (httpx.ReadTimeout("fake slow read"), 1, (None, "timeout")),
+        (httpx.InvalidURL("fake invalid URL"), 1, (False, "unreachable")),
+        (ValueError("fake invalid config"), 1, (False, "unreachable")),
+    ],
+)
+def test_probe_retries_only_connection_transport_errors(provider, monkeypatch, failure, attempts, expected):
+    calls = []
+
+    def stream(*args, **kwargs):
+        calls.append(1)
+        raise failure
+
+    monkeypatch.setattr(httpx.AsyncClient, "stream", stream)
+    assert transcribe.probe_http_provider(load_config()) == expected
+    assert len(calls) == attempts
 
 
 def test_auto_language_omitted(provider, tmp_path, monkeypatch):

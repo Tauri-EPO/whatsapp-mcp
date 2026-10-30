@@ -427,9 +427,11 @@ def probe_http_provider(config: WhisperConfig, key: str | None = None) -> tuple[
         try:
             return asyncio.run(asyncio.wait_for(probe(), timeout=config.probe_timeout_s))
         except (httpx.TimeoutException, TimeoutError):
-            result = (None, "timeout")
-        except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+            return None, "timeout"
+        except (httpx.NetworkError, httpx.RemoteProtocolError):
             result = (False, "unreachable")
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+            return False, "unreachable"
         if attempt:
             return result
     raise AssertionError("unreachable")
