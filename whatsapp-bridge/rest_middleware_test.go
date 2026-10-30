@@ -8,6 +8,29 @@ import (
 	"testing"
 )
 
+func TestJSONResponsesDeclareUTF8(t *testing.T) {
+	const accented = "histórico → você"
+	for name, reply := range map[string]func(http.ResponseWriter){
+		"success": func(w http.ResponseWriter) { writeJSON(w, http.StatusOK, map[string]string{"message": accented}) },
+		"error":   func(w http.ResponseWriter) { writeError(w, http.StatusBadRequest, accented) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			reply(rec)
+			if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+				t.Fatalf("Content-Type = %q, want application/json; charset=utf-8", got)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["message"] != accented || !strings.Contains(rec.Body.String(), accented) {
+				t.Fatalf("UTF-8 message changed: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestWriteErrorShape(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeError(rec, http.StatusForbidden, "nope")
@@ -67,7 +90,7 @@ func TestEveryEndpointRejectsWrongMethodAsJSON(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusMethodNotAllowed || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Content-Type") != "application/json; charset=utf-8" {
 			t.Errorf("GET %s → %d %q", path, rec.Code, rec.Header().Get("Content-Type"))
 		}
 	}

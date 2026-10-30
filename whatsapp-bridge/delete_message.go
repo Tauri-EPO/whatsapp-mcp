@@ -56,7 +56,7 @@ func (store *MessageStore) DeleteMessageRow(messageID, chatJID string) error {
 }
 
 func writeDeleteResponse(w http.ResponseWriter, status int, resp DeleteMessageResponse) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
 }
