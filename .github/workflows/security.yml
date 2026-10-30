@@ -95,7 +95,7 @@ jobs:
         run: pip install bandit==1.9.4
 
       - name: Run bandit
-        run: bandit -r whatsapp-mcp-server/ -ll
+        run: bandit --ini .bandit -r whatsapp-mcp-server/ -ll
         continue-on-error: true
 
   govulncheck:

@@ -1,0 +1,4 @@
+[bandit]
+# Test listeners, temporary paths and subprocess fakes are intentional fixtures.
+# Scan all production modules, not the local environment's third-party packages.
+exclude = whatsapp-mcp-server/tests,whatsapp-mcp-server/.venv,whatsapp-mcp-server/venv
