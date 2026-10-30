@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = resolve_bash()
@@ -57,8 +57,9 @@ esac
         newline="\n",
     )
     docker.chmod(0o755)
+    assert BASH is not None
     result = subprocess.run(
-        [BASH or "bash", str(scripts / "smoke-proxy.sh")],
+        bash_command(BASH, scripts / "smoke-proxy.sh", bin_dir=bindir),
         env={
             **os.environ,
             "PATH": str(bindir) + os.pathsep + os.environ["PATH"],

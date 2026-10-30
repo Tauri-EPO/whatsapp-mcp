@@ -23,3 +23,18 @@ def resolve_bash() -> str | None:
         if bash.is_file() and (root / "usr" / "bin" / "msys-2.0.dll").is_file():
             return str(bash)
     return None
+
+
+def bash_command(bash: str, script: Path, *args: str, bin_dir: Path) -> list[str]:
+    """Keep harness fakes ahead of the tools prepended by Git's Bash launcher."""
+    if sys.platform != "win32":
+        return [bash, str(script), *args]
+    return [
+        bash,
+        "-c",
+        'export PATH="$(cygpath -u "$1"):$PATH"; shift; exec "$BASH" "$@"',
+        "test-bash",
+        str(bin_dir),
+        str(script),
+        *args,
+    ]

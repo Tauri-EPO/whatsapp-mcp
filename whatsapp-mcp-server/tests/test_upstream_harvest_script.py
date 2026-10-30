@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 HARVEST = ROOT / "scripts" / "upstream-harvest.sh"
@@ -136,7 +136,7 @@ class Harvest:
     def run(self, *args: str, cwd: Path | None = None, **env: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
         return subprocess.run(
-            [BASH, str(self.fork / "scripts" / "upstream-harvest.sh"), *args],
+            bash_command(BASH, self.fork / "scripts" / "upstream-harvest.sh", *args, bin_dir=self.root / "bin"),
             cwd=cwd or self.fork,
             env={**self.env, **env},
             capture_output=True,

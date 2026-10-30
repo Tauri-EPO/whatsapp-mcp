@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "merge-when-green.sh"
@@ -96,7 +96,9 @@ def _run(tmp_path: Path, *args: str, **env: str) -> tuple[subprocess.CompletedPr
         **env,
     }
     assert BASH is not None
-    done = subprocess.run([BASH, str(SCRIPT), *args], capture_output=True, text=True, env=full_env, timeout=180)
+    done = subprocess.run(
+        bash_command(BASH, SCRIPT, *args, bin_dir=bin_dir), capture_output=True, text=True, env=full_env, timeout=180
+    )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     return done, calls
 

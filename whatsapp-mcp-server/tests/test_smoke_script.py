@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "smoke.sh"
@@ -212,7 +212,7 @@ class Stack:
     def run(self, *args: str, **fakes: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
         return subprocess.run(
-            [BASH, str(self.script), *args],
+            bash_command(BASH, self.script, *args, bin_dir=self.dir / "bin"),
             cwd=self.dir,
             env={**self.env, **fakes},
             capture_output=True,

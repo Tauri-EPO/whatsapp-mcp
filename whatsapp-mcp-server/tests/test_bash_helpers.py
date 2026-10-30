@@ -1,5 +1,6 @@
 """Native and POSIX shells, with Windows WSL shims excluded."""
 
+import os
 import subprocess
 
 import pytest
@@ -63,3 +64,25 @@ def test_native_script_path(tmp_path):
     done = subprocess.run([bash, str(script)], capture_output=True, text=True, timeout=20)
     assert done.returncode == 0, done.stderr
     assert done.stdout == "native shell works"
+
+
+def test_harness_fake_precedes_git_bash_bundled_curl(tmp_path):
+    bash = bash_helpers.resolve_bash()
+    if bash is None:
+        pytest.skip(bash_helpers.BASH_SKIP_REASON)
+    bindir = tmp_path / "fake tools"
+    bindir.mkdir()
+    curl = bindir / "curl"
+    curl.write_text('#!/usr/bin/env bash\nprintf "fake curl"\n', encoding="utf-8", newline="\n")
+    curl.chmod(0o755)
+    script = tmp_path / "probe.sh"
+    script.write_text("curl", encoding="utf-8")
+    done = subprocess.run(
+        bash_helpers.bash_command(bash, script, bin_dir=bindir),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "PATH": str(bindir) + os.pathsep + os.environ["PATH"]},
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == "fake curl"
