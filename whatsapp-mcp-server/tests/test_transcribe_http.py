@@ -119,7 +119,7 @@ def test_http_wall_deadline_includes_trickling_headers_and_body(tmp_path, phase)
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
             received.set()
-            # Twelve pieces one second apart take at least 11 s without one
+            # Pieces one second apart take at least 11 s without one
             # request deadline. The 9 s bound gives the 3 s budget ample slack
             # and still rejects a budget renewed for each chunk.
             pieces = (

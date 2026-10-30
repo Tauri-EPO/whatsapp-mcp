@@ -3,12 +3,13 @@
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "test-s3-media.sh"
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="the S3 proof requires Linux and GNU timeout")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="the S3 proof requires Linux and GNU timeout")
 
 
 @pytest.mark.parametrize("hang", ["none", "download", "startup", "integration"])
@@ -50,7 +51,9 @@ if name == 'docker' and args[0] == 'port':
     assert real_timeout
     timeout.write_text(
         f'#!/bin/bash\nprintf "timeout %s\\n" "$*" >>"$CALLS"\n'
-        f'shift 2\nexec "{real_timeout}" --kill-after=0.1s 0.3s "$@"\n'
+        "shift 2\nlimit=30s\n"
+        'case "$HANG:$1:${2:-}" in download:curl:*|startup:docker:run|integration:go:test) limit=0.5s ;; esac\n'
+        f'exec "{real_timeout}" --kill-after=0.1s "$limit" "$@"\n'
     )
     timeout.chmod(0o755)
     result = subprocess.run(
@@ -58,11 +61,13 @@ if name == 'docker' and args[0] == 'port':
         env={**os.environ, "PATH": str(commands) + os.pathsep + os.environ["PATH"], "CALLS": str(log), "HANG": hang},
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=120,
     )
     calls = log.read_text()
     assert "docker rm -f wamcp-minio-proof-" in calls
     assert "Waiting for scratch cleanup" in result.stderr
+    scratch_file = calls.split("--output ", 1)[1].splitlines()[0]
+    assert not Path(scratch_file).parent.exists()
     assert "--connect-timeout 10 --max-time 85" in calls
     if hang == "none":
         assert result.returncode == 0, result.stderr
