@@ -996,6 +996,10 @@ authentication on that endpoint, so keep it inside a network you trust.
   `--wait 90` polls while the containers start; `--url https://box.tailnet.ts.net`
   tests the endpoint the way a remote client reaches it. CI runs it against
   the compose stack on every PR (unpaired path).
+  On Windows, run it from Git Bash. Container paths are kept literal only for
+  Docker calls; native curl receives host paths to a private temporary directory
+  that is cleaned on exit, including authentication failures. No global
+  `MSYS_NO_PATHCONV` setting is needed.
   On a host where the stack belongs to a manager (Komodo, Portainer) the compose
   directory and its `.env` are root-owned, so `docker compose` refuses to read
   them: `scripts/smoke.sh --project whatsapp-mcp --url https://box.tailnet.ts.net`
