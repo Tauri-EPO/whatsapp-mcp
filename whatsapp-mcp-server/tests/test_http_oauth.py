@@ -27,7 +27,6 @@ import tool_policy
 from http_oauth import load_oauth_config
 from main import build_http_app
 from strict_args import StrictArgumentServer
-from tests.conftest import runtime_archive as runtime_archive
 from tests.test_runtime_settings import patch as write_runtime_settings
 from tests.test_transcribe_http import provider as provider
 from tool_policy import ToolPolicy, mutating_tool, set_active_policy
