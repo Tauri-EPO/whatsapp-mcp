@@ -6,8 +6,6 @@ without a charset, and a client that falls back to ISO-8859-1 showed `histórico
 
 import asyncio
 import json
-import re
-from pathlib import Path
 
 import httpx
 import pytest
@@ -15,7 +13,6 @@ from mcp.server.mcpserver import MCPServer
 from starlette.testclient import TestClient
 
 import main
-import runtime_settings
 from http_auth import Utf8CharsetMiddleware
 from mcp_config import resolve_transport
 
@@ -24,16 +21,7 @@ ACCENTED = "histórico → você"
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json, text/event-stream"}
 
 
-@pytest.fixture(autouse=True)
-def runtime_archive(paired_dbs, monkeypatch):
-    """The bearer check reads the runtime settings table (token rotation): same setup as test_runtime_settings."""
-    bridge = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "runtime_settings.go"
-    schema = re.search(r"const runtimeSettingsSchema = `([^`]+)`", bridge.read_text()).group(1)
-    with paired_dbs.messages() as conn:
-        conn.executescript(schema)
-    monkeypatch.setattr(runtime_settings, "_startup_env", None)
-    monkeypatch.setattr(runtime_settings, "_warned", {})
-    return paired_dbs
+pytestmark = pytest.mark.usefixtures("runtime_archive")
 
 
 def _server():

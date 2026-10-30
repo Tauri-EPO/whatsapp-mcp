@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import re
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -14,7 +13,6 @@ from starlette.testclient import TestClient
 import main
 import whatsapp
 from http_auth import AuthStateUnavailableError, BearerTokenMiddleware, RuntimeRateLimitMiddleware, verify_static_token
-from tests.conftest import PairedStore
 from tests.test_http_auth import TestBuildHttpApp as BuildProbe
 from tests.test_http_auth import _ok_app
 from tests.test_http_oauth import isolated_tool_registry as isolated_tool_registry
@@ -30,15 +28,8 @@ def digest(token):
 
 
 @pytest.fixture
-def auth_store(tmp_path, monkeypatch):
-    bridge = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "runtime_settings.go"
-    schema = re.search(r"const runtimeSettingsSchema = `([^`]+)`", bridge.read_text()).group(1)
-    path = tmp_path / "messages.db"
-    with closing(sqlite3.connect(path)) as conn:
-        conn.executescript(schema)
-        conn.execute("PRAGMA journal_mode=WAL")
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
-    return PairedStore(path, tmp_path / "whatsapp.db")
+def auth_store(runtime_archive):
+    return runtime_archive
 
 
 def rotate(store, current=NEW, previous=OLD, until=None):
