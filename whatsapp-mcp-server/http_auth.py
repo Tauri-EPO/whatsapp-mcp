@@ -401,6 +401,24 @@ def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
 _CHARSET_TYPES = (b"application/json", b"text/event-stream")
 
 
+def _media_type_parts(value: bytes) -> list[bytes]:
+    """Split parameters at semicolons outside quoted values."""
+    parts = []
+    start = 0
+    quoted = escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif quoted and char == ord("\\"):
+            escaped = True
+        elif char == ord('"'):
+            quoted = not quoted
+        elif char == ord(";") and not quoted:
+            parts.append(value[start:index])
+            start = index + 1
+    return [*parts, value[start:]]
+
+
 class Utf8CharsetMiddleware:
     """Declare `charset=utf-8` on JSON and SSE responses that omit it (issue #758).
 
@@ -422,7 +440,7 @@ class Utf8CharsetMiddleware:
                 headers = []
                 for name, value in message.get("headers", []):
                     if name.lower() == b"content-type":
-                        media_type, *parameters = value.split(b";")
+                        media_type, *parameters = _media_type_parts(value)
                         media_type = media_type.strip().lower()
                         has_charset = any(
                             parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parameters

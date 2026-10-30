@@ -6,6 +6,7 @@ without a charset, and a client that falls back to ISO-8859-1 showed `histórico
 
 import asyncio
 import json
+import os
 
 import httpx
 import pytest
@@ -95,9 +96,7 @@ def test_middleware_covers_own_json_replies_without_literal_charset(rate_limit):
 @pytest.mark.asyncio
 async def test_legacy_sse_stream_and_message_posts_declare_utf8(monkeypatch):
     monkeypatch.setenv("WHATSAPP_MCP_TRANSPORT", "sse")
-    app = main.build_http_app(
-        _server(), resolve_transport(main.os.getenv("WHATSAPP_MCP_TRANSPORT")), TOKEN, host="0.0.0.0"
-    )
+    app = main.build_http_app(_server(), resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT")), TOKEN, host="0.0.0.0")
     incoming, outgoing = asyncio.Queue(), asyncio.Queue()
     await incoming.put({"type": "http.request", "body": b""})
     scope = {
@@ -199,6 +198,15 @@ async def test_legacy_sse_stream_and_message_posts_declare_utf8(monkeypatch):
             b'application/json; profile="urn:charset=example"',
             b'application/json; profile="urn:charset=example"; charset=utf-8',
         ),
+        (
+            b'application/json; profile="urn:example;charset=legacy"',
+            b'application/json; profile="urn:example;charset=legacy"; charset=utf-8',
+        ),
+        (
+            b'application/json; profile="urn:example;\\"charset=legacy"',
+            b'application/json; profile="urn:example;\\"charset=legacy"; charset=utf-8',
+        ),
+        (b"application/json; charset*=utf-8", b"application/json; charset*=utf-8; charset=utf-8"),
         (b"application/json; CHARSET = utf-8", b"application/json; CHARSET = utf-8"),
         (b"application/json; charset=utf-8", b"application/json; charset=utf-8"),
         (b"application/json; charset=iso-8859-1", b"application/json; charset=iso-8859-1"),  # declared: left alone
