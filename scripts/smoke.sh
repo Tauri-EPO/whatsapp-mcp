@@ -73,7 +73,22 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 step()  { printf '\n== %s\n' "$*"; }
 fail()  { red "FAIL: $1"; [ -n "${2:-}" ] && echo "      $2"; exit 1; }
 
-compose() { docker compose "$@"; }
+# Git Bash must pass container paths literally. Keep this local to Docker so
+# native curl can still receive host paths through MSYS conversion.
+docker_cmd() { MSYS_NO_PATHCONV=1 docker "$@"; }
+compose() { docker_cmd compose "$@"; }
+
+# A private host directory, shared by Bash readers and native curl on Windows.
+umask 077
+scratch=$(mktemp -d) || fail "could not create smoke temporary directory"
+cleanup_smoke() {
+  rm -f -- "$scratch/metrics" "$scratch/init-headers" "$scratch/init-body"
+  rmdir -- "$scratch"
+}
+trap cleanup_smoke EXIT
+curl_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
 
 # MODE=compose: `docker compose` here reads ./.env and ./docker-compose.yml.
 # MODE=project: the stack belongs to a manager; reach the containers by label.
@@ -82,21 +97,21 @@ BRIDGE_CTR=""
 MCP_CTR=""
 
 container_of() { # $1 service, $2 project (default $PROJECT) -> container name, empty when not running
-  docker ps --filter "label=com.docker.compose.project=${2:-$PROJECT}" \
+  docker_cmd ps --filter "label=com.docker.compose.project=${2:-$PROJECT}" \
             --filter "label=com.docker.compose.service=$1" \
             --format '{{.Names}}' 2>/dev/null | head -n1
 }
 
 inspect_f() { # $1 container, $2 Go template -> the value, empty when it cannot be read
   [ -n "$1" ] || return 0
-  docker inspect -f "$2" "$1" 2>/dev/null </dev/null | tr -d '\r\n'
+  docker_cmd inspect -f "$2" "$1" 2>/dev/null </dev/null | tr -d '\r\n'
 }
 
 detect_project() { # names of the running compose projects that look like this stack
   # `docker compose ls --format json` prints one JSON array of flat objects:
   # one object per line (portably, no sed newline escapes), then keep the ones
   # whose name or config path mentions whatsapp-mcp.
-  docker compose ls --format json 2>/dev/null \
+  docker_cmd compose ls --format json 2>/dev/null \
     | grep -o '{[^{}]*}' \
     | grep -i 'whatsapp-mcp' \
     | sed -n 's/.*"Name":"\([^"]*\)".*/\1/p'
@@ -106,14 +121,14 @@ published_port() { # host port mapped to container port $1, empty when unmapped
   local ctr port
   for ctr in "$MCP_CTR" "$BRIDGE_CTR"; do   # compose puts the mcp in the bridge netns
     [ -n "$ctr" ] || continue
-    port=$(docker port "$ctr" "$1/tcp" 2>/dev/null | sed -n 's/.*:\([0-9]\{1,5\}\)$/\1/p' | head -n1)
+    port=$(docker_cmd port "$ctr" "$1/tcp" 2>/dev/null | sed -n 's/.*:\([0-9]\{1,5\}\)$/\1/p' | head -n1)
     [ -n "$port" ] && { printf '%s' "$port"; return 0; }
   done
 }
 
 bridge_exec() { # run a command inside the bridge container
   if [ "$MODE" = "project" ]; then
-    docker exec "$BRIDGE_CTR" "$@"
+    docker_cmd exec "$BRIDGE_CTR" "$@"
   else
     compose exec -T bridge "$@"
   fi
@@ -121,7 +136,7 @@ bridge_exec() { # run a command inside the bridge container
 
 mcp_exec() { # run a command inside the mcp container
   if [ "$MODE" = "project" ]; then
-    docker exec "$MCP_CTR" "$@"
+    docker_cmd exec "$MCP_CTR" "$@"
   else
     compose exec -T mcp "$@"
   fi
@@ -129,7 +144,7 @@ mcp_exec() { # run a command inside the mcp container
 
 mcp_env() { # $1 variable name -> its value inside the mcp container (project mode only)
   [ "$MODE" = "project" ] && [ -n "$MCP_CTR" ] || return 0
-  docker exec "$MCP_CTR" printenv "$1" 2>/dev/null </dev/null | tr -d '\r\n'
+  docker_cmd exec "$MCP_CTR" printenv "$1" 2>/dev/null </dev/null | tr -d '\r\n'
 }
 
 bridge_get() { # $1 path -> body in BRIDGE_BODY, HTTP status in BRIDGE_STATUS
@@ -184,7 +199,7 @@ if [ "$MODE" = "project" ]; then
   [ -n "$BRIDGE_CTR" ] || fail "no running bridge container in compose project '$PROJECT'" "docker ps --filter label=com.docker.compose.project=$PROJECT"
   MCP_CTR=$(container_of mcp)
   [ -n "$MCP_CTR" ] || echo "  warning: no running mcp container in project '$PROJECT' (steps 3 and 4 will only reach it if it runs elsewhere)"
-  docker ps --filter "label=com.docker.compose.project=$PROJECT" \
+  docker_cmd ps --filter "label=com.docker.compose.project=$PROJECT" \
     --format '  {{.Label "com.docker.compose.service"}}: {{.State}} ({{.Status}})'
 else
   printf '%s\n' "$ps_out"
@@ -258,30 +273,30 @@ else
     [ -n "${WHATSAPP_MCP_METRICS_TOKEN:-}" ] && metrics_auth=(-H "Authorization: Bearer ${WHATSAPP_MCP_METRICS_TOKEN}")
     # curl already prints 000 as %{http_code} when it cannot connect; assign, do
     # not append, or the status becomes "000000" and no branch below matches it.
-    code=$(curl -sS "${curl_socket[@]}" -o /tmp/wamcp-metrics.$$ -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null) || code="${code:-000}"
+    code=$(curl -sS "${curl_socket[@]}" -o "$(curl_path "$scratch/metrics")" -w '%{http_code}' "${metrics_auth[@]}" "$URL/metrics" 2>/dev/null) || code="${code:-000}"
     # 404: the endpoint answers but does not route /metrics, so waiting is pointless.
     if [ "$code" = "200" ] || [ "$code" = "404" ] || [ "$(date +%s)" -ge "$deadline" ]; then break; fi
     sleep 3 # the mcp container starts after the bridge is healthy
   done
-  if [ "$code" = "200" ] && grep -q '^whatsapp_mcp_uptime_seconds' /tmp/wamcp-metrics.$$; then
-    green "  ok ($(grep -c '^whatsapp_mcp_' /tmp/wamcp-metrics.$$) series)"
+  if [ "$code" = "200" ] && grep -q '^whatsapp_mcp_uptime_seconds' "$scratch/metrics"; then
+    green "  ok ($(grep -c '^whatsapp_mcp_' "$scratch/metrics") series)"
   elif [ "$code" = "404" ]; then
     echo "  warning: 404. Either this endpoint routes /mcp only (a Tailscale Serve mapping does that: scrape the MCP port itself) or the MCP server has metrics disabled."
   else
-    rm -f /tmp/wamcp-metrics.$$
+    rm -f "$scratch/metrics"
     fail "GET $URL/metrics -> $code" "is the MCP port published (WHATSAPP_MCP_BIND / WHATSAPP_MCP_PORT) and the mcp container healthy?"
   fi
-  rm -f /tmp/wamcp-metrics.$$
+  rm -f "$scratch/metrics"
 fi
 
 step "4. mcp initialize ($URL/mcp)"
 MCP_TOKEN="${MCP_TOKEN_ARG:-${WHATSAPP_MCP_TOKEN:-}}"
 [ -n "$MCP_TOKEN" ] || MCP_TOKEN=$(mcp_env WHATSAPP_MCP_TOKEN)
 MCP_TOKEN="${MCP_TOKEN:-$TOKEN}"
-hdrs=/tmp/wamcp-init-h.$$
-body=/tmp/wamcp-init-b.$$
+hdrs=$scratch/init-headers
+body=$scratch/init-body
 while :; do
-  code=$(curl -sS "${curl_socket[@]}" -o "$body" -D "$hdrs" -w '%{http_code}' \
+  code=$(curl -sS "${curl_socket[@]}" -o "$(curl_path "$body")" -D "$(curl_path "$hdrs")" -w '%{http_code}' \
     -H "Authorization: Bearer ${MCP_TOKEN}" \
     -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
@@ -318,7 +333,7 @@ if [ "$transcription_provider" = openai_compatible ]; then
   elif mcp_exec python -c 'from transcribe import load_config, probe_http_provider
 import os, sys
 try:
-    ok = probe_http_provider(load_config(), os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY"))
+    ok, _ = probe_http_provider(load_config(), os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY"))
 except Exception:
     ok = False
 sys.exit(0 if ok else 1)

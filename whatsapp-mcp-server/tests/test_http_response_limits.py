@@ -18,7 +18,7 @@ from tests.test_http_oauth import issuer as issuer
 
 @pytest.fixture
 def endpoint():
-    state = {"body": b"{}", "encoding": None, "slow_head": False, "accept_encoding": []}
+    state = {"body": b"{}", "encoding": None, "slow_head": False, "accept_encoding": [], "heads": 0}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -33,7 +33,7 @@ def endpoint():
             self.end_headers()
             try:
                 self.wfile.write(state["body"])
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
         def do_GET(self):
@@ -44,6 +44,7 @@ def endpoint():
             self.reply()
 
         def do_HEAD(self):
+            state["heads"] += 1
             if not state["slow_head"]:
                 self.reply()
                 return
@@ -53,7 +54,7 @@ def endpoint():
                     self.wfile.write(piece)
                     self.wfile.flush()
                     time.sleep(0.15)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -93,13 +94,15 @@ async def test_compressed_http_response_refused_before_expansion(endpoint, tmp_p
     assert endpoint["accept_encoding"] == ["identity"]
 
 
-def test_http_provider_probe_whole_request_deadline(endpoint, monkeypatch):
+def test_http_provider_probe_whole_request_deadline(endpoint):
     endpoint["slow_head"] = True
-    monkeypatch.setattr(transcribe, "STATUS_PROBE_TIMEOUT_S", 0.3)
-    config = transcribe.WhisperConfig(endpoint["url"], None, "fake-model", "auto", 2, "openai_compatible")
+    config = transcribe.WhisperConfig(
+        endpoint["url"], None, "fake-model", "auto", 2, "openai_compatible", probe_timeout_s=1
+    )
     started = time.monotonic()
-    assert transcribe.probe_http_provider(config) is False
-    assert time.monotonic() - started < 0.75
+    assert transcribe.probe_http_provider(config) == (None, "timeout")
+    assert time.monotonic() - started < 1.75  # one whole-request budget, including header trickling
+    assert endpoint["heads"] == 1
 
 
 @pytest.mark.asyncio

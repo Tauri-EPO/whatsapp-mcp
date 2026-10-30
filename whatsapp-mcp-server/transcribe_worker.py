@@ -56,6 +56,7 @@ and one that does not offer ``download_media`` gets no fetching.
 from __future__ import annotations
 
 import functools
+import hashlib
 import itertools
 import logging
 import os
@@ -63,6 +64,7 @@ import sqlite3
 import stat
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -97,6 +99,15 @@ logger = logging.getLogger("whatsapp_mcp")
 # One blocked head, not an unbounded duration cache. File identity is rechecked
 # each round so replacement/purge/new work cannot inherit an old pause.
 _blocked_quota: tuple[tuple[Any, ...], float] | None = None
+# Bounded process-local negative catalog answers, never authorization decisions.
+_cache_checks: OrderedDict[tuple[str, str, str], tuple[str, float, float, bool, str | None]] = OrderedDict()
+_last_batch_state: tuple[int, int] | None = None
+CACHE_RETRY_INITIAL_S = 300.0
+CACHE_RETRY_MAX_S = 6 * 60 * 60.0
+# Retain pending rows across large archive walks, up to 100,000 small entries
+# (roughly 100 MiB with ordinary IDs). At capacity, new misses stay unremembered
+# instead of evicting still-pending rows and churning the entire archive.
+CACHE_CHECK_LIMIT = 100_000
 
 ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
@@ -218,6 +229,7 @@ class Fetched:
     # The bridge asked the phone for this file recently and will not ask again
     # yet: not an outage and not final, so neither a strike nor a note.
     backoff: bool = False
+    answer: str | None = None  # fingerprint of the exact per-file bridge answer
 
 
 @dataclass(frozen=True)
@@ -468,7 +480,51 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
     )
 
 
-PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestamp
+PendingRow = tuple[str, str, str, str, str]  # id, chat, sha256, timestamp, media identity
+_media_schema_cache: OrderedDict[tuple[str, int], tuple[str, str]] = OrderedDict()
+
+
+def _remote_identity_columns(conn: sqlite3.Connection) -> str:
+    """Probe optional bridge columns once per schema, including WAL-only migrations."""
+    key = (whatsapp.MESSAGES_DB_PATH, conn.execute("PRAGMA main.schema_version").fetchone()[0])
+    cached = _media_schema_cache.get(key)
+    if cached is None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        direct_path = "m.direct_path" if "direct_path" in columns else "NULL"
+        catalog = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'media_cache_refs'").fetchone()
+        cache_identity = (
+            "(SELECT hex(r.sha256) || ':' || c.stored_at FROM media_cache_refs r "
+            "JOIN media_cache c ON c.sha256 = r.sha256 WHERE r.id = m.id AND r.chat_jid = m.chat_jid)"
+            if catalog
+            else "NULL"
+        )
+        cached = (direct_path, cache_identity)
+        _media_schema_cache[key] = cached
+        if len(_media_schema_cache) > 32:
+            _media_schema_cache.popitem(last=False)
+    _media_schema_cache.move_to_end(key)
+    return ", m.url, m.media_key, m.file_enc_sha256, m.file_length, m.filename, " + ", ".join(cached)
+
+
+def _forget_nonpending(conn: sqlite3.Connection, predicate: str, params: list[Any]) -> None:
+    """Invalidate only rows that left the pending set, including another process's notes.
+
+    Check remembered primary keys in bounded batches. A later cleared note can
+    then requeue its own row without unrelated notes writes resetting backoff.
+    """
+    keys = [key for key in _cache_checks if key[0] == whatsapp.MESSAGES_DB_PATH]
+    for start in range(0, len(keys), 250):
+        chunk = keys[start : start + 250]
+        values = ",".join("(?, ?)" for _ in chunk)
+        gone = conn.execute(
+            f"WITH remembered(id, chat_jid) AS (VALUES {values}) "
+            "SELECT r.id, r.chat_jid FROM remembered r LEFT JOIN messages m "
+            "ON m.id = r.id AND m.chat_jid = r.chat_jid "
+            f"WHERE m.id IS NULL OR NOT ({predicate})",
+            [*(part for key in chunk for part in key[1:]), *params],
+        ).fetchall()
+        for mid, chat in gone:
+            _cache_checks.pop((whatsapp.MESSAGES_DB_PATH, mid, chat), None)
 
 
 def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str | None = None) -> list[PendingRow]:
@@ -482,6 +538,8 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
     """
     conn = whatsapp._connect_messages_db()
     try:
+        remote = media_remote.enabled()
+        identity_columns = _remote_identity_columns(conn) if remote else ""
         handled_clause, handled_params = _already_handled_clause(conn)
         sent_clause, sent_params = whatsapp.ingest_sent_clause("m", sent_since)
         clauses = [
@@ -494,17 +552,19 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
             ingest_chat_clause("m.chat_jid"),
         ]
         params: list[Any] = [*sent_params, *handled_params]
+        clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
+        clauses.append(clause)
+        params.extend(clause_params)
+        if media_remote.enabled() and after is None:
+            _forget_nonpending(conn, " AND ".join(clauses), params)
         if after is not None:
             # Keyset, not OFFSET: rows transcribed since the last round leave the
             # result and would shift every offset under the walk.
             clauses.append("(m.timestamp < ? OR (m.timestamp = ? AND (m.id > ? OR (m.id = ? AND m.chat_jid > ?))))")
             params.extend([after.timestamp, after.timestamp, after.message_id, after.message_id, after.chat_jid])
-        clause, clause_params = CHAT_POLICY.sql_clause("m.chat_jid")
-        clauses.append(clause)
-        params.extend(clause_params)
         rows = conn.execute(
             f"""
-            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp
+            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp {identity_columns}
             FROM messages m
             WHERE {" AND ".join(clauses)}
             ORDER BY m.timestamp DESC, m.id, m.chat_jid
@@ -514,7 +574,10 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
         ).fetchall()
     finally:
         conn.close()
-    return [(str(r[0]), str(r[1]), str(r[2]), str(r[3])) for r in rows]
+    return [
+        (str(r[0]), str(r[1]), str(r[2]), str(r[3]), hashlib.sha256(repr(r[2:]).encode()).hexdigest() if remote else "")
+        for r in rows
+    ]
 
 
 def _walk(head: list[PendingRow], page: list[PendingRow]) -> Iterator[tuple[PendingRow, bool]]:
@@ -592,7 +655,7 @@ def find_pending(
     resolved: set[tuple[str, str]] = set()  # ... of which these are done with (the rest go to the walk)
     next_position = position
     full = False
-    for (message_id, chat_jid, sha256, timestamp), traversing in _walk(head, page):
+    for (message_id, chat_jid, sha256, timestamp, media_identity), traversing in _walk(head, page):
         if traversing and not walking:
             walking, failures = True, 0  # the walk gets its own three strikes
         if sha256 in seen or (message_id, chat_jid) in resolved:
@@ -604,10 +667,33 @@ def find_pending(
             caches[chat_jid] = {} if media_remote.enabled() else media_inventory.list_chat_names(chat_jid)
         if media_remote.enabled():
             identity = (chat_jid, message_id)
-            if identity not in remote_lookups:
+            check_key = (whatsapp.MESSAGES_DB_PATH, message_id, chat_jid)
+            previous = _cache_checks.get(check_key)
+            waiting = bool(previous and previous[0] == media_identity and time.monotonic() < previous[1])
+            if waiting and previous and (not fetch or previous[3]):
+                _cache_checks.move_to_end(check_key)
+                resolved.add((message_id, chat_jid))
+                if traversing and not parked:
+                    next_position = Position(timestamp, message_id, chat_jid)
+                continue
+            if not waiting and identity not in remote_lookups:
                 remote_lookups[identity] = media_remote.lookup(chat_jid, message_id)
-            if remote_lookups[identity]:
+            if remote_lookups.get(identity):
                 caches[chat_jid][message_id] = media_remote.uri(chat_jid, message_id)
+                if _cache_checks.pop(check_key, None):
+                    logger.info("transcribe_on_ingest: media became cached for %s", message_id)
+            elif not waiting:
+                delay = (
+                    min(previous[2] * 2, CACHE_RETRY_MAX_S)
+                    if previous and previous[0] == media_identity
+                    else CACHE_RETRY_INITIAL_S
+                )
+                if previous is not None or len(_cache_checks) < CACHE_CHECK_LIMIT:
+                    answer = previous[4] if previous and previous[0] == media_identity else None
+                    _cache_checks[check_key] = (media_identity, time.monotonic() + delay, delay, False, answer)
+                    _cache_checks.move_to_end(check_key)
+                if not previous or previous[0] != media_identity:
+                    logger.info("transcribe_on_ingest: no cached media for %s; backing off", message_id)
         cached = caches[chat_jid].get(message_id)
         if cached is None and not traversing:
             if head_budget <= 0 or budget <= 0:
@@ -622,7 +708,25 @@ def find_pending(
             path = cached if media_remote.enabled() else os.path.join(media_inventory.chat_media_dir(chat_jid), cached)
         elif budget > 0:
             budget -= 1
-            fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
+            fetched = _fetch_bytes(
+                message_id,
+                chat_jid,
+                fetcher,
+                caches,
+                quiet=failures > 0,
+                repeat_answer=previous[4]
+                if media_remote.enabled() and previous and previous[0] == media_identity
+                else None,
+            )
+            if media_remote.enabled() and check_key in _cache_checks:
+                remembered = _cache_checks[check_key]
+                final = bool(fetched.backoff or fetched.unavailable or fetched.refused)
+                if not fetched.path and not final:
+                    # A catalog miss is remembered, but a bridge outage has no
+                    # final answer about this file. Retry fetching next walk,
+                    # retaining the old delay rather than doubling it.
+                    remembered = previous if previous and previous[0] == media_identity else remembered
+                _cache_checks[check_key] = (*remembered[:3], final, fetched.answer if final else remembered[4])
             path = fetched.path
             if fetched.backoff:
                 # Not the bridge failing and not final: give the attempt back
@@ -682,6 +786,8 @@ def find_pending(
         if path is None:
             continue  # not fetching, done fetching, or the bridge would not send it
         seen.add(sha256)
+        if media_remote.enabled():
+            _cache_checks.pop((whatsapp.MESSAGES_DB_PATH, message_id, chat_jid), None)
         out.append(Candidate(message_id=message_id, chat_jid=chat_jid, sha256=sha256, path=path))
         if len(out) >= batch:
             full = True
@@ -702,7 +808,8 @@ def _fetch_bytes(
     download: Callable[[str, str], str | None],
     caches: dict[str, dict[str, str]],
     *,
-    quiet: bool,
+    quiet: bool | None,
+    repeat_answer: str | None = None,
 ) -> Fetched:
     """Ask the bridge to cache one message's media: the local path, or why there is none.
 
@@ -728,24 +835,29 @@ def _fetch_bytes(
         if exc.code == MEDIA_RETRY_BACKOFF_CODE:
             # Before #743 this was a strike every round, and every round asked
             # the phone again: the owner's phone, for audio the owner sent.
-            logger.debug("transcribe_on_ingest: %s waits for its media retry cooldown: %s", message_id, exc.message)
-            return Fetched(backoff=True)
+            answer = hashlib.sha256(f"{exc.code}:{exc.message}".encode()).hexdigest()
+            if answer != repeat_answer:
+                logger.debug("transcribe_on_ingest: %s waits for its media retry cooldown: %s", message_id, exc.message)
+            return Fetched(backoff=True, answer=answer)
         # too_large supports injected fetchers. The production /api/download
         # path cannot produce it; S3 blob refusals are handled while streaming.
         if exc.code in (MEDIA_UNAVAILABLE_CODE, "too_large"):
             # Expected on an old archive, and per file, so it stays at debug:
             # the round logs how many it recorded.
-            logger.debug("transcribe_on_ingest: %s is not fetchable: %s", message_id, exc.message)
+            answer = hashlib.sha256(f"{exc.code}:{exc.message}".encode()).hexdigest()
+            if answer != repeat_answer:
+                logger.debug("transcribe_on_ingest: %s is not fetchable: %s", message_id, exc.message)
             reason = f"too_large: {exc.message}" if exc.code == "too_large" else exc.message
-            return Fetched(unavailable=reason, too_large=exc.code == "too_large")
-        _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
+            return Fetched(unavailable=reason, too_large=exc.code == "too_large", answer=answer)
+        _log_fetch_problem(bool(quiet), f"the bridge could not send {message_id}: {exc}")
         return Fetched()
     except Exception as exc:  # noqa: BLE001 - one message must not end the round
-        _log_fetch_problem(quiet, f"the bridge could not send {message_id}: {exc}")
+        _log_fetch_problem(bool(quiet), f"the bridge could not send {message_id}: {exc}")
         return Fetched()
     if media_remote.enabled():
         if path and media_remote.identity(path) == (chat_jid, message_id):
             return Fetched(path=path)
+        _log_fetch_problem(bool(quiet), f"the bytes of {message_id} are not readable here ({path or 'no path'})")
         return Fetched()
     name = media_inventory.lookup_cached_name(chat_jid, message_id)
     if name is not None:
@@ -753,7 +865,7 @@ def _fetch_bytes(
         return Fetched(path=os.path.join(media_inventory.chat_media_dir(chat_jid), name))
     if path and os.path.exists(path):
         return Fetched(path=path)
-    _log_fetch_problem(quiet, f"the bytes of {message_id} are not readable here ({path or 'no path'})")
+    _log_fetch_problem(bool(quiet), f"the bytes of {message_id} are not readable here ({path or 'no path'})")
     return Fetched()
 
 
@@ -845,8 +957,10 @@ def _ingest_local_file(candidate: Candidate, *, cache_only: bool) -> Iterator[st
         yield local
 
 
-def _log_fetch_problem(quiet: bool, message: str) -> None:
+def _log_fetch_problem(quiet: bool | None, message: str) -> None:
     """One warning per round about a dependency (the bridge, the backend); the rest is debug."""
+    if quiet is None:
+        return  # unchanged per-message failure, already reported
     log = logger.debug if quiet else logger.warning
     log("transcribe_on_ingest: %s", message)
 
@@ -936,7 +1050,7 @@ def run_once(
     still transcribed. Only an answer about *this* file writes
     ``transcript_error``.
     """
-    global _blocked_quota
+    global _blocked_quota, _last_batch_state
     transcribe = transcribe or _default_transcribe
     started = time.monotonic()
     try:
@@ -1042,7 +1156,8 @@ def run_once(
         # or one file the server chokes on would pin it here for ever.
         logger.warning("transcribe_on_ingest: %d transcribed before the backend stopped answering", transcribed)
         return BatchResult(len(pending), transcribed, failed, selection.examined, position, outage=True)
-    if pending:
+    state = (selection.examined, len(pending))
+    if pending and (transcribed or failed or state != _last_batch_state):
         logger.info(
             "transcribe_on_ingest: %d examined, %d pending, %d transcribed, %d failed in %.1fs",
             selection.examined,
@@ -1051,8 +1166,7 @@ def run_once(
             failed,
             time.monotonic() - started,
         )
-    else:
-        logger.debug("transcribe_on_ingest: nothing pending in %d rows examined", selection.examined)
+    _last_batch_state = state
     return BatchResult(len(pending), transcribed, failed, selection.examined, selection.position)
 
 

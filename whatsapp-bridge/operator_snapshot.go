@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -156,6 +157,49 @@ func privateSnapshotDir(directory string) (*os.Root, *os.File, error) {
 var errSnapshotSpace = errors.New("insufficient snapshot filesystem space")
 var errSnapshotRetention = errors.New("snapshot retained; retention cleanup failed")
 
+const sentResetMarker = "notes.db.ingest-sent-reset"
+
+func readSentResetIntent(root *os.Root) ([]byte, error) {
+	info, err := root.Lstat(sentResetMarker)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 128 {
+		return nil, errors.New("unsafe sent audio reset marker")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("sent audio reset marker must be owner-only")
+	}
+	f, err := root.Open(sentResetMarker)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	after, err := f.Stat()
+	if err != nil || !os.SameFile(info, after) {
+		return nil, errors.New("sent audio reset marker changed while opening")
+	}
+	if runtime.GOOS != "windows" && after.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("sent audio reset marker must remain owner-only")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 129))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 128 {
+		return nil, errors.New("sent audio reset marker exceeds limits")
+	}
+	for _, value := range data {
+		if value > 127 {
+			return nil, errors.New("sent audio reset marker must be ASCII")
+		}
+	}
+	return data, nil
+}
+
 type snapshotOptions struct {
 	keep      int
 	freeBytes func(*os.File) (uint64, error)
@@ -221,6 +265,15 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 	required, err := snapshotRequiredBytes(source, session)
 	if err != nil {
 		return nil, err
+	}
+	intent, err := readSentResetIntent(source)
+	if err != nil {
+		return nil, err
+	}
+	if intent != nil {
+		if _, err := source.Lstat("notes.db"); err != nil {
+			return nil, errors.New("reset marker without notes.db")
+		}
 	}
 	available, err := opt.freeBytes(dir)
 	if err != nil {
@@ -302,6 +355,36 @@ func snapshotStores(ctx context.Context, source *os.Root, directory string, sess
 			return nil, copyErr
 		}
 		files = append(files, snapshotFile{Name: fileName, Size: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil))})
+		if name == "notes.db" {
+			latest, readErr := readSentResetIntent(source)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if latest != nil {
+				intent = latest
+			}
+			if intent != nil {
+				markerName := prefix + sentResetMarker
+				marker, createErr := root.OpenFile(markerName+".partial", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if createErr != nil {
+					return nil, createErr
+				}
+				created = append(created, markerName+".partial")
+				_, copyErr := opt.copy(ctx, marker, bytes.NewReader(intent))
+				if copyErr == nil {
+					copyErr = marker.Sync()
+				}
+				closeErr := marker.Close()
+				if copyErr != nil {
+					return nil, copyErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				hash := sha256.Sum256(intent)
+				files = append(files, snapshotFile{Name: markerName, Size: int64(len(intent)), SHA256: hex.EncodeToString(hash[:])})
+			}
+		}
 	}
 	// Publish only after every database has a flushed, verified .partial file.
 	for _, file := range files {
@@ -332,7 +415,7 @@ func snapshotSetPrefix(name string) string {
 		return ""
 	}
 	prefix, suffix := name[:prefixLength], name[prefixLength:]
-	if suffix != "messages.db" && suffix != "notes.db" && suffix != "whatsapp.db" {
+	if suffix != "messages.db" && suffix != "notes.db" && suffix != "whatsapp.db" && suffix != sentResetMarker {
 		return ""
 	}
 	if prefix[25] != '-' || prefix[len(prefix)-1] != '-' {
@@ -383,7 +466,7 @@ func pruneSnapshotSets(ctx context.Context, root *os.Root, dir *os.File, current
 		return sets[prefixes[i]].After(sets[prefixes[j]])
 	})
 	for _, prefix := range prefixes[min(keep-1, len(prefixes)):] {
-		for _, name := range []string{"messages.db", "notes.db", "whatsapp.db"} {
+		for _, name := range []string{"messages.db", "notes.db", "whatsapp.db", sentResetMarker} {
 			if err := ctx.Err(); err != nil {
 				return err
 			}

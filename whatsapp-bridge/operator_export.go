@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -116,7 +117,7 @@ func exportTableExists(ctx context.Context, tx *sql.Tx, name string) bool {
 
 type exportCounts struct{ skippedMedia int64 }
 
-func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.Tx, media bool, counts ...*exportCounts) archiveWalk {
+func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.Tx, media bool, intent []byte, counts ...*exportCounts) archiveWalk {
 	return func(emit func(archiveEntry) error) error {
 		if len(counts) > 0 {
 			counts[0].skippedMedia = 0
@@ -132,6 +133,7 @@ func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.
 			{"notes.jsonl", "SELECT target_type, target_id, key, value, updated_at, source, version FROM notes ORDER BY target_type, target_id, key, version", "notes", notes, false},
 			{"media_notes.jsonl", "SELECT sha256, key, value, updated_at FROM media_notes WHERE key <> 'transcript' ORDER BY sha256, key", "media_notes", notes, false},
 			{"transcriptions.jsonl", "SELECT sha256, value AS text, updated_at FROM media_notes WHERE key='transcript' ORDER BY sha256, key", "media_notes", notes, false},
+			{"notes_meta.jsonl", "SELECT key, value FROM notes_meta WHERE key='ingest_sent_since'", "notes_meta", notes, false},
 		} {
 			file := file
 			if !exportTableExists(ctx, file.tx, file.table) {
@@ -167,6 +169,14 @@ func (b *Bridge) exportWalk(ctx context.Context, messages, notes, contacts *sql.
 			}
 			if err := emit(archiveEntry{file.name, func(out io.Writer) (int64, error) {
 				return exportRows(ctx, file.tx, file.query, out, file.array, transform)
+			}}); err != nil {
+				return err
+			}
+		}
+		if intent != nil {
+			if err := emit(archiveEntry{sentResetMarker, func(out io.Writer) (int64, error) {
+				_, err := copyArchiveContext(ctx, out, bytes.NewReader(intent))
+				return 1, err
 			}}); err != nil {
 				return err
 			}
@@ -296,12 +306,25 @@ func (b *Bridge) handleExport() http.HandlerFunc {
 			return
 		}
 		defer messages.close()
+		intent, err := readSentResetIntent(b.StoreRoot)
+		if err != nil {
+			writeError(w, 503, "Export reset intent unavailable")
+			return
+		}
 		notes, err := openExportStore(ctx, b.StoreRoot, "notes.db", true)
 		if err != nil {
 			writeError(w, 503, "Export notes unavailable")
 			return
 		}
 		defer notes.close()
+		latest, err := readSentResetIntent(b.StoreRoot)
+		if err != nil || (notes.tx == nil && (intent != nil || latest != nil)) {
+			writeError(w, 503, "Export reset intent unavailable")
+			return
+		}
+		if latest != nil {
+			intent = latest
+		}
 		var contacts exportStore
 		if release, admitted := b.beginArchiveSessionRead(cancel); admitted {
 			defer release()
@@ -324,7 +347,7 @@ func (b *Bridge) handleExport() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", `attachment; filename="whatsapp-export.zip"`)
 		counts := &exportCounts{}
-		count, err := streamArchive(w, b.exportWalk(ctx, messages.tx, notes.tx, contacts.tx, media, counts), exportManifest(start, counts))
+		count, err := streamArchive(w, b.exportWalk(ctx, messages.tx, notes.tx, contacts.tx, media, intent, counts), exportManifest(start, counts))
 		if err != nil {
 			b.Log.Warnf("Operator export failed after streaming began")
 			panic(http.ErrAbortHandler)

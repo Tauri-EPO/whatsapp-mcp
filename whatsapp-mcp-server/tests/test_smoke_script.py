@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,9 @@ pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
+if [ "${FAKE_NATIVE_PATH_BOUNDARY:-}" = yes ] && [ "${MSYS_NO_PATHCONV:-}" != 1 ]; then
+  echo "container paths were not protected" >&2; exit 77
+fi
 
 if [ "$1" = "compose" ] && [ "$2" = "ps" ]; then
   case "$*" in
@@ -136,6 +140,9 @@ esac
 
 FAKE_CURL = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_CURL_LOG"
+if [ "${FAKE_NATIVE_PATH_BOUNDARY:-}" = yes ] && [ -n "${MSYS_NO_PATHCONV:-}" ]; then
+  echo "Docker path settings escaped into curl" >&2; exit 77
+fi
 out=/dev/null; hdr=/dev/null; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -656,3 +663,34 @@ def test_http_provider_unavailable_fails_smoke(stack: Stack) -> None:
     )
     assert result.returncode == 1
     assert "HTTP transcription provider does not answer" in result.stdout
+
+
+@pytest.mark.parametrize("reachable,expected", [(True, 0), (False, 1), (None, 1)])
+def test_http_provider_embedded_probe_obeys_reachability(tmp_path: Path, reachable: bool | None, expected: int) -> None:
+    # Execute the Python actually shipped in the shell, rather than teaching
+    # fake Docker to return a status without evaluating the probe result.
+    program = SMOKE.read_text().split("elif mcp_exec python -c '", 1)[1].split("\n' </dev/null", 1)[0]
+    (tmp_path / "transcribe.py").write_text(
+        f"def load_config(): return None\ndef probe_http_provider(config, key): return ({reachable!r}, 'fake-probe')\n"
+    )
+    result = subprocess.run([sys.executable, "-c", program], cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode == expected, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("status", ["200", "401"])
+def test_native_path_boundary_and_temporary_cleanup(stack: Stack, tmp_path: Path, status: str) -> None:
+    temporary = tmp_path / "smoke temporary files"
+    temporary.mkdir()
+    result = stack.run(
+        FAKE_NATIVE_PATH_BOUNDARY="yes",
+        MSYS_NO_PATHCONV="",
+        TMPDIR=temporary.as_posix(),
+        FAKE_INIT_CODE=status,
+        FAKE_COMPOSE_PS="  bridge: running healthy\n",
+        FAKE_ENV_BRIDGE_TOKEN="bridge-token-0123456789",
+    )
+    assert result.returncode == (0 if status == "200" else 1), result.stdout + result.stderr
+    assert "mcp initialize" in result.stdout
+    if status == "401":
+        assert "401 Unauthorized" in result.stdout
+    assert not list(temporary.iterdir())

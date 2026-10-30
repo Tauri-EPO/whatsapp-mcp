@@ -12,15 +12,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import wave
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,6 +52,8 @@ HTTP_UPLOAD_LIMIT = 25_000_000
 HTTP_RESPONSE_LIMIT = 1024 * 1024
 MAX_HTTP_AUDIO_BYTES = 256 * 1024 * 1024
 MAX_HTTP_AUDIO_SECONDS = 24 * 60 * 60
+_activity_lock = threading.Lock()
+_activity: OrderedDict[tuple[str, str | None, str | None], dict[str, datetime]] = OrderedDict()
 
 
 class TranscriptionError(RuntimeError):
@@ -77,6 +83,8 @@ class WhisperConfig:
     language: str
     timeout_s: int
     provider: str = "whisper_cpp"
+    probe_timeout_s: float = 5.0
+    probe_error: str | None = None
 
     @property
     def backend(self) -> str | None:
@@ -115,8 +123,15 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
         raise TranscriptionError(f"Invalid WHISPER_TIMEOUT_S={timeout_raw!r}; must be an integer") from None
     if timeout_s <= 0:
         raise TranscriptionError(f"Invalid WHISPER_TIMEOUT_S={timeout_raw!r}; must be positive")
-
     if provider == "openai_compatible":
+        probe_timeout_s, probe_error = 5.0, None
+        try:
+            probe_timeout_s = float(get("WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S") or "5")
+            if not math.isfinite(probe_timeout_s) or probe_timeout_s <= 0:
+                raise ValueError
+        except ValueError:
+            probe_timeout_s = 5.0
+            probe_error = "WHATSAPP_TRANSCRIPTION_PROBE_TIMEOUT_S must be finite and positive"
         url, model = get("WHATSAPP_TRANSCRIPTION_URL"), get("WHATSAPP_TRANSCRIPTION_MODEL")
         if not url or not model:
             raise BackendUnavailableError(
@@ -138,7 +153,16 @@ def load_config(env: Mapping[str, str] | None = None) -> WhisperConfig:
             raise BackendUnavailableError(
                 "WHATSAPP_TRANSCRIPTION_URL must be a full HTTP(S) endpoint without credentials"
             )
-        return WhisperConfig(url, None, model, get("WHATSAPP_TRANSCRIPTION_LANGUAGE") or "auto", timeout_s, provider)
+        return WhisperConfig(
+            url,
+            None,
+            model,
+            get("WHATSAPP_TRANSCRIPTION_LANGUAGE") or "auto",
+            timeout_s,
+            provider,
+            probe_timeout_s,
+            probe_error,
+        )
     return WhisperConfig(
         url=get("WHISPER_URL"),
         binary=get("WHISPER_BIN"),
@@ -226,12 +250,29 @@ def describe_status(
                 "model": None,
                 "on_ingest": False,
             }
+        if config.probe_error:
+            reachable, probe_result = None, "invalid_config"
+        else:
+            reachable, probe_result = probe_http_provider(config, get("WHATSAPP_TRANSCRIPTION_API_KEY"))
+        activity = _transcription_activity(config)
+        success = activity.get("last_success_at")
+        if (
+            reachable is False
+            and probe_result != "unauthorized"
+            and success
+            and datetime.now(UTC) - success < timedelta(minutes=15)
+        ):
+            reachable = None
         return {
             "configured": True,
             "backend": config.backend,
             "provider": config.provider,
             "endpoint_host": urlsplit(config.url or "").hostname,
-            "reachable": probe_http_provider(config, get("WHATSAPP_TRANSCRIPTION_API_KEY")),
+            "reachable": reachable,
+            "probe": probe_result,
+            **({"probe_error": config.probe_error} if config.probe_error else {}),
+            "last_success_at": success.isoformat() if success else None,
+            "last_failure_at": activity["last_failure_at"].isoformat() if "last_failure_at" in activity else None,
             "model": config.model,
             "on_ingest": _on_ingest_requested(get(ON_INGEST_ENV)),
         }
@@ -366,23 +407,48 @@ def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> 
             os.unlink(txt_path)
 
 
-def probe_http_provider(config: WhisperConfig, key: str | None = None) -> bool:
+def probe_http_provider(config: WhisperConfig, key: str | None = None) -> tuple[bool | None, str]:
     """Authenticated HEAD only; no audio or ambient credentials are sent."""
+    if config.probe_error:
+        return None, "invalid_config"
     headers = {"Authorization": f"Bearer {key}"} if key else {}
 
-    async def probe() -> bool:
-        async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=STATUS_PROBE_TIMEOUT_S) as client:
+    async def probe() -> tuple[bool, str]:
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=config.probe_timeout_s) as client:
             async with client.stream("HEAD", config.url or "", headers=headers) as response:
+                if response.status_code in (401, 403):
+                    return False, "unauthorized"
                 return (
                     response.status_code not in (401, 403, 408, 429)
                     and response.status_code < 500
-                    and not 300 <= response.status_code < 400
+                    and not 300 <= response.status_code < 400,
+                    "http_response",
                 )
 
-    try:
-        return asyncio.run(asyncio.wait_for(probe(), timeout=STATUS_PROBE_TIMEOUT_S))
-    except (httpx.HTTPError, httpx.InvalidURL, ValueError, TimeoutError):
-        return False
+    for attempt in range(2):
+        try:
+            return asyncio.run(asyncio.wait_for(probe(), timeout=config.probe_timeout_s))
+        except (httpx.TimeoutException, TimeoutError):
+            return None, "timeout"
+        except (httpx.NetworkError, httpx.RemoteProtocolError):
+            result = (False, "unreachable")
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+            return False, "unreachable"
+        if attempt:
+            return result
+    raise AssertionError("unreachable")
+
+
+def _transcription_activity(config: WhisperConfig, outcome: str | None = None) -> dict[str, datetime]:
+    """Process-local actual attempts, scoped to the configured provider/endpoint/model."""
+    identity = (config.provider, config.url or config.binary, config.model)
+    with _activity_lock:
+        if outcome:
+            _activity.setdefault(identity, {})[outcome] = datetime.now(UTC)
+            _activity.move_to_end(identity)
+            if len(_activity) > 32:
+                _activity.popitem(last=False)
+        return dict(_activity.get(identity, {}))
 
 
 def confine_audio_path(source: str) -> str:
@@ -530,6 +596,7 @@ def _transcribe_http(source: Path, config: WhisperConfig, language: str) -> str:
         try:
             return await asyncio.wait_for(_transcribe_http_request(source, config, language), config.timeout_s)
         except TimeoutError:
+            _transcription_activity(config, "last_failure_at")
             raise BackendUnavailableError("HTTP transcription backend exceeded request deadline") from None
 
     return asyncio.run(bounded())
@@ -570,17 +637,34 @@ async def _transcribe_http_request(source: Path, config: WhisperConfig, language
                             raise BackendUnavailableError("HTTP transcription backend response exceeds limits")
                         body.extend(chunk)
                     payload = json.loads(body)
-    except (httpx.HTTPError, httpx.InvalidURL):
+    except TranscriptionError:
+        _transcription_activity(config, "last_failure_at")
+        raise
+    except httpx.HTTPError:
+        _transcription_activity(config, "last_failure_at")
+        raise BackendUnavailableError("HTTP transcription backend request failed") from None
+    except httpx.InvalidURL:
         raise BackendUnavailableError("HTTP transcription backend request failed") from None
     except (ValueError, RecursionError):
+        _transcription_activity(config, "last_failure_at")
         raise TranscriptionError("HTTP transcription backend returned invalid JSON") from None
     text = payload.get("text") if isinstance(payload, dict) else None
     if not isinstance(text, str) or not text.strip():
+        _transcription_activity(config, "last_failure_at")
         raise TranscriptionError("HTTP transcription backend returned no non-empty text field")
     return text.strip()
 
 
 def transcribe_file(
+    audio_path: str, language: str | None = None, config: WhisperConfig | None = None, *, source: str = "tool"
+) -> dict:
+    config = config or load_config()
+    result = _metered_transcribe_file(audio_path, language, config, source=source)
+    _transcription_activity(config, "last_success_at")
+    return result
+
+
+def _metered_transcribe_file(
     audio_path: str, language: str | None = None, config: WhisperConfig | None = None, *, source: str = "tool"
 ) -> dict:
     from transcription_usage import admission
