@@ -5551,7 +5551,9 @@ def ingest_sent_clause(alias: str, sent_since: str | None) -> tuple[str, list[An
     return f"({inbound} OR {alias}.timestamp >= ?)", [sent_since]
 
 
-def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any]) -> dict[str, int]:
+def _coverage_audio(
+    cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any], sent_since: str | None
+) -> dict[str, int]:
     """The voice-note transcription backlog inside the same scope as the aggregates.
 
     `messages` is every eligible voice note in scope; `transcribed`, `errors` and
@@ -5580,10 +5582,6 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     import media_notes
     import media_remote
 
-    from transcribe_worker import ingest_config
-
-    config = ingest_config()
-    sent_since = config.sent_since if config.include_sent else None
     sent_clause, sent_params = ingest_sent_clause("messages", sent_since)
     clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE} AND {sent_clause}"
     from runtime_settings import ingest_chat_clause
@@ -5802,7 +5800,10 @@ def coverage(
         )
         messages_by_month = {month: int(count) for month, count in cur.fetchall() if month}
 
-        audio = _coverage_audio(cur, msg_clause, msg_params)
+        from transcribe_worker import ingest_config
+
+        config = ingest_config()
+        audio = _coverage_audio(cur, msg_clause, msg_params, config.sent_since if config.include_sent else None)
 
         # One ordered pass over the timestamp index: LAG gives every pair of
         # consecutive points, and only the pairs further apart than the

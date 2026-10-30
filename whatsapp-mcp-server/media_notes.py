@@ -555,7 +555,7 @@ def forget_meta(key: str) -> None:
         if read_meta(key) is None:
             return
         path = notes_db_path()
-        if os.path.islink(path):
+        if any(os.path.islink(path + suffix) for suffix in ("", "-wal", "-shm")):
             raise OSError("An MCP-owned notes file must not be a symlink")
         conn = sqlite3.connect(Path(path).as_uri() + "?mode=rw", uri=True, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
         with conn:

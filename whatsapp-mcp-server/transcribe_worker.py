@@ -179,6 +179,7 @@ class IngestConfig:
     include_sent: bool = True
     # The instant above, in the stored timestamp spelling; None counts no sent audio.
     sent_since: str | None = None
+    worker_running: bool = False
 
 
 _ingest_config: IngestConfig | None = None
@@ -265,6 +266,10 @@ def ingest_config() -> IngestConfig:
     global _ingest_config
     if _ingest_config is None:
         _ingest_config = replace(load_ingest_config(), sent_since=_stored_sent_since())
+    elif not _ingest_config.worker_running:
+        # Another stdio process can claim/reset the shared instant after this
+        # process started. Only a local worker needs a fixed startup snapshot.
+        return replace(_ingest_config, sent_since=_stored_sent_since())
     return _ingest_config
 
 
@@ -308,7 +313,7 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             # Never the stored history: this process counts sent audio from its own start.
             logger.warning("could not record when sent audio started counting (%s); counting from %s", exc, now)
             since = now
-        config = replace(config, sent_since=since)
+        config = replace(config, sent_since=since, worker_running=True)
     elif running:
         reset = _sent_reset_path()
         # Persist intent before DELETE: a locked DB or a crash must not let the
@@ -329,9 +334,9 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
             reset.unlink(missing_ok=True)
         except (sqlite3.Error, OSError) as exc:
             logger.warning("could not clear when sent audio started counting: %s; reset pending", exc)
-        config = replace(config, sent_since=None)
+        config = replace(config, sent_since=None, worker_running=True)
     else:
-        config = replace(config, sent_since=_stored_sent_since())
+        config = replace(config, sent_since=_stored_sent_since(), worker_running=False)
     return config
 
 
@@ -870,9 +875,7 @@ def run_once(
             if ingest_quota_exhausted():
                 return BatchResult(0, 0, 0, position=position)
             fetch = fetch and policy.allows(DOWNLOAD_TOOL)
-            selection = find_pending(
-                batch, fetch=fetch, download=download, position=position, sent_since=sent_since
-            )
+            selection = find_pending(batch, fetch=fetch, download=download, position=position, sent_since=sent_since)
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
         return BatchResult(0, 0, 0, position=position)  # the read failed, the walk did not move
@@ -1003,6 +1006,8 @@ def run_forever(
                     if active_policy().allows(TRANSCRIBE_TOOL):
                         config = _settle_sent_since(config, running=True)
                         _ingest_config = config
+                        clear_outage_failures()
+                        clear_oversized_failures()
                         settle_on_run = False
             except (sqlite3.Error, OSError):
                 logger.warning("transcribe_on_ingest: could not initialize the sent audio instant; waiting")
@@ -1097,6 +1102,8 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         return None
     config = _settle_sent_since(config, running=not settle_on_run)
     _ingest_config = config
+    if settle_on_run:
+        return start_worker(config, settle_on_run=True)
     clear_outage_failures()
     clear_oversized_failures()
     logger.info(
@@ -1108,4 +1115,4 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
         f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
     )
-    return start_worker(config, settle_on_run=True) if settle_on_run else start_worker(config)
+    return start_worker(config)
