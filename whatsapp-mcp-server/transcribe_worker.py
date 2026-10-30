@@ -281,8 +281,7 @@ def _stored_sent_since() -> str | None:
 
 
 def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
-    """Keep, record or clear the instant sent audio counts from, and make it the startup snapshot."""
-    global _ingest_config
+    """Keep, record or clear the instant sent audio counts from before publication."""
     if running and config.include_sent:
         now = whatsapp.timestamp_bound(datetime.now(UTC))
         try:
@@ -306,7 +305,6 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
         config = replace(config, sent_since=None)
     else:
         config = replace(config, sent_since=_stored_sent_since())
-    _ingest_config = config
     return config
 
 
@@ -984,8 +982,6 @@ def start_worker(
     run: Callable[..., BatchResult] | None = None,
 ) -> threading.Thread:
     """Start the poll loop on a daemon thread (so it never holds up shutdown)."""
-    global _ingest_config
-    _ingest_config = config
     event = stop or threading.Event()
     thread = threading.Thread(
         target=run_forever,
@@ -1015,9 +1011,8 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     """
     global _ingest_config
     config = load_ingest_config(env)
-    _ingest_config = config
     if not config.enabled:
-        _settle_sent_since(config, running=False)
+        _ingest_config = _settle_sent_since(config, running=False)
         return None
     policy = load_tool_policy(env)
     if not policy.allows(TRANSCRIBE_TOOL):
@@ -1034,7 +1029,7 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
             TRANSCRIBE_TOOL,
         )
         if not runtime_policy_enabled():
-            _settle_sent_since(config, running=False)
+            _ingest_config = _settle_sent_since(config, running=False)
             return None
     if config.fetch and not policy.allows(DOWNLOAD_TOOL):
         logger.warning(
@@ -1052,9 +1047,10 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         logger.warning(
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV
         )
-        _settle_sent_since(config, running=False)
+        _ingest_config = _settle_sent_since(config, running=False)
         return None
     config = _settle_sent_since(config, running=True)
+    _ingest_config = config
     clear_outage_failures()
     clear_oversized_failures()
     logger.info(

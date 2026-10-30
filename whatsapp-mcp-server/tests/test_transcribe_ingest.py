@@ -399,6 +399,20 @@ def _stored_since() -> str | None:
     return media_notes.read_meta(transcribe_worker.SENT_SINCE_KEY)
 
 
+def test_install_only_publishes_the_settled_config(paired_dbs, monkeypatch, installed):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    settle = transcribe_worker._settle_sent_since
+
+    def observe(config, *, running):
+        assert transcribe_worker._ingest_config is None
+        return settle(config, running=running)
+
+    monkeypatch.setattr(transcribe_worker, "_settle_sent_since", observe)
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT)
+    assert transcribe_worker._ingest_config is installed[0]
+    assert installed[0].sent_since == SENT_SINCE
+
+
 def test_sent_audio_before_the_recorded_instant_never_joins_the_backlog(paired_dbs, monkeypatch):
     """The upgrade case (issue #751): the stored history of sent audio stays out, new sent audio goes in."""
     import main
