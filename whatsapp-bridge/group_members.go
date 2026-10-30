@@ -231,7 +231,7 @@ type rosterRecorder func(groupJID string, members []GroupMember, now time.Time, 
 func handleGroupMembers(fetch groupInfoFetcher, nameOf contactNameResolver, altOf altJIDResolver, policy chatPolicyResolver, record rosterRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 		raw := strings.TrimSpace(r.URL.Query().Get("jid"))
 		if raw == "" && r.Method == http.MethodPost {
 			var body struct {

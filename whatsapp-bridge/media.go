@@ -690,7 +690,7 @@ func (b *Bridge) handleDownload() http.HandlerFunc {
 		success, mediaType, filename, path, err := b.DownloadMedia(ctx, req.MessageID, req.ChatJID)
 
 		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 
 		// Handle download result
 		if !success || err != nil {

@@ -20,6 +20,7 @@ from http_auth import (
     ForwardedSchemeMiddleware,
     ProxyNetworks,
     RuntimeRateLimitMiddleware,
+    Utf8CharsetMiddleware,
     resolve_http_token,
     resolve_max_body_bytes,
     resolve_rate_limit,
@@ -3028,6 +3029,8 @@ def build_http_app(
         app = BearerTokenMiddleware(app, token, runtime_rotation=True)
         app = RuntimeRateLimitMiddleware(app, rate_limit_per_minute, token, trusted_proxies=trusted_proxies)
     app = ForwardedSchemeMiddleware(app, trusted_proxies)
+    # Every JSON/SSE response below, including our own 401/429, declares UTF-8 (#758).
+    app = Utf8CharsetMiddleware(app)
     if metrics_enabled(os.getenv("WHATSAPP_MCP_METRICS")):
         # Outermost so /metrics answers without the MCP token and counts every
         # response, including 401/429 from the layers below. Its own optional

@@ -138,7 +138,7 @@ func writeGroupError(w http.ResponseWriter, code int, msg string) {
 
 // parseGroupRequest decodes the body and validates the group JID against the policy.
 func parseGroupRequest(w http.ResponseWriter, r *http.Request, policy chatPolicy) (groupRequest, types.JID, bool) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	if r.Method != http.MethodPost {
 		writeGroupError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return groupRequest{}, types.EmptyJID, false

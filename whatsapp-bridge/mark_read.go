@@ -460,7 +460,7 @@ func persistAcknowledgedReceiptPrefix(deps markReadDeps, chatJID string, upTo ti
 }
 
 func writeMarkRead(w http.ResponseWriter, status int, resp MarkReadResponse) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
 }
