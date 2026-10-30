@@ -327,8 +327,9 @@ def _persist_sent_since(config: IngestConfig) -> IngestConfig:
         try:
             since = _canonical_instant(since)
             if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
-                logger.warning("stored sent audio instant is in the future; replacing it with %s", config.sent_since)
-                since = media_notes.claim_meta(SENT_SINCE_KEY, config.sent_since, replace=True)
+                now = whatsapp.timestamp_bound(datetime.now(UTC))
+                logger.warning("stored sent audio instant is in the future; replacing it with %s", now)
+                since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
         except ValueError:
             since = media_notes.claim_meta(SENT_SINCE_KEY, config.sent_since, replace=True)
     except (sqlite3.Error, OSError) as exc:
@@ -346,10 +347,27 @@ def _persist_sent_since(config: IngestConfig) -> IngestConfig:
     return replace(config, sent_since=since, sent_claim_pending=False, sent_reset_token=token)
 
 
+def _first_sent_bound() -> str:
+    """Allow late phone delivery from the archive edge, capped to a day before startup."""
+    now = datetime.now(UTC)
+    conn = None
+    try:
+        conn = whatsapp._connect_messages_db()
+        latest = conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()[0]
+        if latest is not None:
+            return whatsapp.timestamp_bound(min(now, max(whatsapp.parse_db_time(latest), now - timedelta(days=1))))
+    except (sqlite3.Error, OSError, ValueError):
+        logger.warning("could not read the archive edge for sent audio; counting from this start")
+    finally:
+        if conn is not None:
+            conn.close()
+    return whatsapp.timestamp_bound(now)
+
+
 def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
     """Keep, record or clear the instant sent audio counts from before publication."""
     if running and config.include_sent:
-        chosen = config.sent_since or whatsapp.timestamp_bound(datetime.now(UTC))
+        chosen = config.sent_since or _first_sent_bound()
         config = _persist_sent_since(replace(config, sent_since=chosen, worker_running=True))
     elif running:
         reset = _sent_reset_path()

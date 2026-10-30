@@ -5548,6 +5548,7 @@ def ingest_sent_clause(alias: str, sent_since: str | None) -> tuple[str, list[An
     inbound = f"{alias}.is_from_me = 0"
     if sent_since is None:
         return inbound, []
+    # The bridge rewrites legacy timestamps to canonical UTC at startup (store_time.go; AGENTS section 8.16).
     return f"({inbound} OR {alias}.timestamp >= ?)", [sent_since]
 
 

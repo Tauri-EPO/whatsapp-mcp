@@ -455,7 +455,7 @@ def test_first_start_records_the_instant_and_a_restart_keeps_it(paired_dbs, monk
     before = whatsapp.timestamp_bound(datetime.now(UTC))
     first = _start(monkeypatch, ON_WITH_SENT)
     assert first is not None and first.sent_since is not None
-    assert before <= first.sent_since <= whatsapp.timestamp_bound(datetime.now(UTC))
+    assert whatsapp.timestamp_bound(whatsapp.parse_db_time(before) - timedelta(days=1)) <= first.sent_since <= before
     assert _stored_since() == first.sent_since
     assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=first.sent_since)} == {"AUD1"}
     assert whatsapp.coverage()["audio"]["backlog"] == 1
@@ -2021,3 +2021,34 @@ def test_acknowledged_reset_that_cannot_be_unlinked_does_not_advance_again(paire
     assert again is not None and again.sent_since == first.sent_since
     assert _stored_since() == first.sent_since
     assert "keeping the recorded instant" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("latest", "expected"),
+    [
+        (None, "2026-09-06 12:00:00+00:00"),
+        ("2026-09-06 10:00:00+00:00", "2026-09-06 10:00:00+00:00"),
+        ("2026-09-01 12:00:00+00:00", "2026-09-05 12:00:00+00:00"),
+        ("2026-09-06 13:00:00+00:00", "2026-09-06 12:00:00+00:00"),
+    ],
+)
+def test_first_claim_grace_uses_archive_edge_clamped_to_one_day(paired_dbs, monkeypatch, latest, expected):
+    now = datetime(2026, 9, 6, 12, tzinfo=UTC)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return now
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    if latest is not None:
+        _add_audio(paired_dbs, "AUD1", ALICE, timestamp=latest)
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since == expected
+    assert _stored_since() == expected
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1, timestamp=expected)
+    older = whatsapp.timestamp_bound(whatsapp.parse_db_time(expected) - timedelta(seconds=1))
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp=older)
+    ids = {row[0] for row in transcribe_worker._pending_rows(10, sent_since=config.sent_since)}
+    assert "OUT1" in ids and "OUT2" not in ids
+    assert whatsapp.coverage()["audio"]["messages"] == len(ids)
