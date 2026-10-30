@@ -538,7 +538,7 @@ class OAuthMiddleware:
                 "type": "http.response.start",
                 "status": 429,
                 "headers": [
-                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-type", b"application/json"),
                     (b"cache-control", b"no-store"),
                     (b"retry-after", str(max(1, math.ceil(wait))).encode()),
                 ],
@@ -564,7 +564,7 @@ class OAuthMiddleware:
                 "type": "http.response.start",
                 "status": status,
                 "headers": [
-                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-type", b"application/json"),
                     (b"cache-control", b"no-store"),
                     (b"www-authenticate", challenge.encode("ascii")),
                 ],
@@ -625,7 +625,7 @@ class OAuthMiddleware:
                             {
                                 "type": "http.response.start",
                                 "status": 413,
-                                "headers": [(b"content-type", b"application/json; charset=utf-8")],
+                                "headers": [(b"content-type", b"application/json")],
                             }
                         )
                         await send({"type": "http.response.body", "body": b'{"error":"body_too_large"}'})

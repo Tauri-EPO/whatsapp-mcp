@@ -73,10 +73,18 @@ def test_tools_list_and_call_declare_utf8_and_keep_accents(json_response, media_
         assert result["content"][0]["text"] == ACCENTED
 
 
-def test_own_json_replies_declare_utf8():
-    with TestClient(_app(True)) as client:
+@pytest.mark.parametrize("rate_limit", [False, True])
+def test_middleware_covers_own_json_replies_without_literal_charset(rate_limit):
+    app = main.build_http_app(
+        MCPServer("charset-test"), "streamable-http", TOKEN, rate_limit_per_minute=1 if rate_limit else 0
+    )
+    with TestClient(app) as client:
         response = client.post("/mcp", headers={"Accept": "application/json"}, json={})
-    assert response.status_code == 401
+        assert response.status_code == 401
+        assert response.headers["content-type"] == "application/json; charset=utf-8"
+        if rate_limit:
+            response = client.post("/mcp", headers={"Accept": "application/json"}, json={})
+    assert response.status_code == (429 if rate_limit else 401)
     assert response.headers["content-type"] == "application/json; charset=utf-8"
 
 

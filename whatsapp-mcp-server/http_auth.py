@@ -217,7 +217,7 @@ async def authentication_unavailable_response(send: Send, cause: str) -> None:
             "type": "http.response.start",
             "status": 503,
             "headers": [
-                (b"content-type", b"application/json; charset=utf-8"),
+                (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode("ascii")),
                 (b"cache-control", b"no-store"),
             ],
@@ -270,7 +270,7 @@ class BearerTokenMiddleware:
                 "type": "http.response.start",
                 "status": 401,
                 "headers": [
-                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-type", b"application/json"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"www-authenticate", f'Bearer realm="{REALM}"'.encode("ascii")),
                     (b"cache-control", b"no-store"),
@@ -535,7 +535,7 @@ class RateLimitMiddleware:
                 "type": "http.response.start",
                 "status": 429,
                 "headers": [
-                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-type", b"application/json"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"retry-after", str(retry_after).encode("ascii")),
                     (b"cache-control", b"no-store"),
