@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -201,8 +202,11 @@ class Stack:
         self.env = {
             **os.environ,
             "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
-            # tmp_path is not a repository; make sure the script does not find one above it.
-            "GIT_CEILING_DIRECTORIES": str(tmp_path),
+            # tmp_path is not a repository; make sure the script does not find one above it
+            # (pytest's --basetemp may sit inside this checkout). Git examines a ceiling
+            # directory itself but never moves up into it, so the ceiling is the parent:
+            # tmp_path alone still let discovery climb to the enclosing repository.
+            "GIT_CEILING_DIRECTORIES": str(tmp_path.parent),
             "FAKE_DOCKER_LOG": str(self.docker_log),
             "FAKE_CURL_LOG": str(self.curl_log),
             "FAKE_HEALTH_BODY": HEALTHY,
@@ -213,14 +217,24 @@ class Stack:
             "WHATSAPP_MCP_TOKEN",
             "WHATSAPP_MCP_METRICS",
             "WHISPER_URL",
+            # An inherited repository (pytest run from a git hook) bypasses discovery
+            # and the ceiling alike.
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
         ):
             self.env.pop(leaked, None)
+        # The caller's git configuration (templates, safe.directory) stays out too.
+        self.env["GIT_CONFIG_GLOBAL"] = os.devnull
+        self.env["GIT_CONFIG_NOSYSTEM"] = "1"
 
-    def run(self, *args: str, **fakes: str) -> subprocess.CompletedProcess[str]:
+    def run(self, *args: str, cwd: Path | None = None, **fakes: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
         return subprocess.run(
             bash_command(BASH, self.script, *args, bin_dir=self.dir / "bin"),
-            cwd=self.dir,
+            cwd=cwd or self.dir,
             env={**self.env, **fakes},
             capture_output=True,
             text=True,
@@ -253,6 +267,55 @@ def test_compose_mode_still_reads_dot_env(stack: Stack) -> None:
     assert "http://127.0.0.1:8443/mcp" in stack.curl_calls()  # port from .env
     assert "compose exec -T bridge wget" in stack.docker_calls()
     assert not re.search(r"^(exec|port) ", stack.docker_calls(), re.M)  # no container-name path
+
+
+def _decoy_checkout(path: Path, env: dict[str, str]) -> None:
+    """A git repository whose .env would pass every check, on another port."""
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True, env=env)
+    (path / ".env").write_text(
+        "WHATSAPP_BRIDGE_TOKEN=bridge-token-0123456789\nWHATSAPP_MCP_PORT=9999\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _own_dot_env(stack: Stack) -> None:
+    (stack.dir / ".env").write_text(
+        "WHATSAPP_BRIDGE_TOKEN=bridge-token-0123456789\nWHATSAPP_MCP_PORT=8443\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="needs git")
+def test_fixture_never_reads_an_enclosing_checkout(tmp_path: Path) -> None:
+    """A stack inside another repository still reads its own .env (issue #781)."""
+    outer = tmp_path / "checkout"
+    (outer / "basetemp").mkdir(parents=True)
+    stack = Stack(outer / "basetemp")
+    _decoy_checkout(outer, stack.env)
+    _own_dot_env(stack)
+    result = stack.run(FAKE_COMPOSE_PS="  bridge: running healthy\n  mcp: running healthy\n")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "http://127.0.0.1:8443/mcp" in stack.curl_calls()
+    assert "9999" not in stack.curl_calls()
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="needs git")
+def test_run_from_another_checkout_reads_the_script_directory(tmp_path: Path) -> None:
+    """The caller's working directory does not choose the stack."""
+    (tmp_path / "stack").mkdir()
+    stack = Stack(tmp_path / "stack")
+    _own_dot_env(stack)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _decoy_checkout(elsewhere, stack.env)
+    result = stack.run(cwd=elsewhere, FAKE_COMPOSE_PS="  bridge: running healthy\n  mcp: running healthy\n")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "http://127.0.0.1:8443/mcp" in stack.curl_calls()
+    assert "9999" not in stack.curl_calls()
 
 
 def test_compose_mode_unpaired_exits_2(stack: Stack) -> None:
