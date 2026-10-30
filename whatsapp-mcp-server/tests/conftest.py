@@ -171,3 +171,12 @@ def runtime_archive(paired_dbs, monkeypatch):
     yield paired_dbs
     tool_policy.set_active_policy(None)
     main.mcp.runtime_tool_policy = False
+
+
+def read_notes_meta(key: str) -> str | None:
+    """Test convenience for an optional single metadata value, without a writer."""
+    import media_notes
+
+    if not Path(media_notes.notes_db_path()).exists():
+        return None
+    return media_notes.read_meta_values((key,)).get(key)

@@ -15,18 +15,19 @@ lines itself.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "merge-when-green.sh"
 
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash to run scripts/merge-when-green.sh")
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
 # The fake pull request.
 #   FAKE_STATE     state answered (OPEN, CLOSED, MERGED); MERGED once a merge went through
@@ -95,7 +96,9 @@ def _run(tmp_path: Path, *args: str, **env: str) -> tuple[subprocess.CompletedPr
         **env,
     }
     assert BASH is not None
-    done = subprocess.run([BASH, str(SCRIPT), *args], capture_output=True, text=True, env=full_env, timeout=180)
+    done = subprocess.run(
+        bash_command(BASH, SCRIPT, *args, bin_dir=bin_dir), capture_output=True, text=True, env=full_env, timeout=180
+    )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     return done, calls
 

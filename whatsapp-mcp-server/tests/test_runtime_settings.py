@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -23,6 +22,7 @@ import transcribe_worker
 import whatsapp
 from errors import ToolError
 from strict_args import StrictArgumentServer
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
 from tests.conftest import ALICE, BOB, FAMILY
 from tests.test_transcribe_ingest import FakeBackend, _add_audio
 
@@ -275,9 +275,11 @@ def test_bad_ingest_scope_startup_has_one_line_refusal(tmp_path):
 
 
 def test_operator_logout_script_sends_idle_to_private_http_only():
-    bash = shutil.which("bash")
-    if bash is None or shutil.which("curl") is None:
-        pytest.skip("needs bash and curl")
+    bash = resolve_bash()
+    if bash is None:
+        pytest.skip(BASH_SKIP_REASON)
+    if subprocess.run([bash, "-c", "command -v curl"], capture_output=True, timeout=10).returncode:
+        pytest.skip("script test DID NOT RUN: selected Bash needs curl")
     received = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -816,3 +818,30 @@ def test_snapshot_concurrent_views_share_one_instance(runtime_archive, monkeypat
     assert builds == 1
     assert all(view is report.for_deploy(target) for view in views)
     assert child.for_deploy(target) is views[0]
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "locked"])
+def test_ingest_startup_waits_with_unreadable_runtime_store(runtime_archive, monkeypatch, caplog, unavailable):
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy())
+    monkeypatch.setattr(whatsapp, "SQLITE_BUSY_TIMEOUT_S", 0.01)
+    starts = []
+    monkeypatch.setattr(transcribe_worker, "_ingest_config", None)
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
+    lock = None
+    if unavailable == "missing":
+        monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(runtime_archive.messages_db) + ".missing")
+    else:
+        lock = sqlite3.connect(runtime_archive.messages_db)
+        assert lock.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+        lock.execute("BEGIN EXCLUSIVE")
+    try:
+        transcribe_worker.install_ingest_worker(
+            {"TRANSCRIBE_ON_INGEST": "1", "WHISPER_URL": "http://127.0.0.1:8178/inference"}
+        )
+        assert len(starts) == 1 and starts[0][1] == {"settle_on_run": True}
+        assert not starts[0][0].worker_running
+        assert "runtime tool policy unreadable, worker waits" in caplog.text
+    finally:
+        if lock is not None:
+            lock.rollback()
+            lock.close()

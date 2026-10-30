@@ -7,6 +7,7 @@ import pytest
 
 import media_inventory
 import media_notes
+import transcribe_worker
 import whatsapp
 from chat_policy import ChatPolicy
 from errors import ToolError
@@ -359,8 +360,11 @@ def _audio_filename(message_id: str) -> str:
 
 
 @pytest.fixture
-def audio_archive(archive):
+def audio_archive(archive, monkeypatch):
     """The text archive plus the voice notes, their bytes and two notes."""
+    # Sent audio counts from an instant the ingest worker recorded before every row here (issue #751).
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, "2026-06-01 00:00:00+00:00")
+    monkeypatch.setattr(transcribe_worker, "_ingest_config", None)
     with archive.messages() as conn:
         conn.executemany(
             "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, "
