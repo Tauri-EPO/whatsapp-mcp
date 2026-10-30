@@ -2,12 +2,22 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 
 def main() -> int:
     scanner_exit = int(sys.argv[1])
+    if len(sys.argv) > 3:
+        # Bandit visits non-SQL AST nodes on the same suppressed statement.
+        # Only this exact redundant B608 warning is hidden; findings come from
+        # JSON and every other diagnostic remains visible.
+        for line in Path(sys.argv[3]).read_text(encoding="utf-8").splitlines():
+            if not re.fullmatch(
+                r"\[tester\]\s+WARNING\s+nosec encountered \(B608\), but no failed test on file .+:\d+", line
+            ):
+                print(line, file=sys.stderr)
     malformed = False
     try:
         report = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
