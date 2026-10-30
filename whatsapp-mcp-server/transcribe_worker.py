@@ -104,7 +104,10 @@ _cache_checks: OrderedDict[tuple[str, str, str], tuple[str, float, float, bool]]
 _last_batch_state: tuple[int, int] | None = None
 CACHE_RETRY_INITIAL_S = 300.0
 CACHE_RETRY_MAX_S = 6 * 60 * 60.0
-CACHE_CHECK_LIMIT = 4096
+# Retain pending rows across large archive walks, up to 100,000 small entries
+# (roughly 100 MiB with ordinary IDs). At capacity, new misses stay unremembered
+# instead of evicting still-pending rows and churning the entire archive.
+CACHE_CHECK_LIMIT = 100_000
 
 ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
@@ -668,10 +671,9 @@ def find_pending(
                     if previous and previous[0] == media_identity
                     else CACHE_RETRY_INITIAL_S
                 )
-                _cache_checks[check_key] = (media_identity, time.monotonic() + delay, delay, False)
-                _cache_checks.move_to_end(check_key)
-                if len(_cache_checks) > CACHE_CHECK_LIMIT:
-                    _cache_checks.popitem(last=False)
+                if previous is not None or len(_cache_checks) < CACHE_CHECK_LIMIT:
+                    _cache_checks[check_key] = (media_identity, time.monotonic() + delay, delay, False)
+                    _cache_checks.move_to_end(check_key)
                 if not previous or previous[0] != media_identity:
                     logger.info("transcribe_on_ingest: no cached media for %s; backing off", message_id)
         cached = caches[chat_jid].get(message_id)

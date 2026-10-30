@@ -1929,6 +1929,44 @@ def test_another_rows_transcript_does_not_reset_remote_backoff(paired_dbs, monke
     assert calls == [("AUD1", ALICE)] * 2
 
 
+def test_remote_backoff_survives_a_walk_larger_than_old_lru(paired_dbs, monkeypatch):
+    count = 4200
+    with paired_dbs.messages() as conn:
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, timestamp, is_from_me, media_type, file_sha256) "
+            "VALUES (?, ?, ?, '2026-09-05 09:00:00+00:00', 0, 'audio', ?)",
+            [(f"FAKE{i:05d}", ALICE, ALICE, i.to_bytes(32)) for i in range(count)],
+        )
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: 0)
+    calls = []
+    monkeypatch.setattr(media_remote, "lookup", lambda chat, mid: calls.append(mid))
+    for _ in range(2):
+        position = None
+        while True:
+            result = transcribe_worker.find_pending(200, position=position)
+            position = result.position
+            if position is None:
+                break
+    assert len(calls) == count and len(set(calls)) == count
+    assert len(transcribe_worker._cache_checks) == count
+
+
+def test_remote_backoff_capacity_preserves_pending_entries(paired_dbs, monkeypatch):
+    for mid in ("AUD1", "AUD2"):
+        _add_audio(paired_dbs, mid, ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    monkeypatch.setattr(transcribe_worker, "CACHE_CHECK_LIMIT", 1)
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+    transcribe_worker.find_pending(10)
+    key = next(iter(transcribe_worker._cache_checks))
+    transcribe_worker.find_pending(10)
+    assert list(transcribe_worker._cache_checks) == [key]
+    media_notes.annotate_media(SHA[key[1]], "transcript", "fake transcript")
+    transcribe_worker.find_pending(10)
+    assert len(transcribe_worker._cache_checks) == 1 and key not in transcribe_worker._cache_checks
+
+
 def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
     for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
         _add_audio(paired_dbs, mid, ALICE, cached=False)
