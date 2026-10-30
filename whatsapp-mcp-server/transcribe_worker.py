@@ -928,9 +928,9 @@ def _ingest_local_file(candidate: Candidate, *, cache_only: bool) -> Iterator[st
 
 
 def _log_fetch_problem(quiet: bool | None, message: str) -> None:
+    """One warning per round about a dependency (the bridge, the backend); the rest is debug."""
     if quiet is None:
         return  # unchanged per-message failure, already reported
-    """One warning per round about a dependency (the bridge, the backend); the rest is debug."""
     log = logger.debug if quiet else logger.warning
     log("transcribe_on_ingest: %s", message)
 
