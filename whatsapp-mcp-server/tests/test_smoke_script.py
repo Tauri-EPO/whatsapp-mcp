@@ -12,18 +12,19 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "smoke.sh"
 
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash to run scripts/smoke.sh")
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"

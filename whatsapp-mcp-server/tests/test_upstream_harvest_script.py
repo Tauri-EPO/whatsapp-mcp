@@ -21,14 +21,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 HARVEST = ROOT / "scripts" / "upstream-harvest.sh"
 
-BASH = shutil.which("bash")
+BASH = resolve_bash()
 GIT = shutil.which("git")
-pytestmark = pytest.mark.skipif(
-    BASH is None or GIT is None, reason="needs bash and git to run scripts/upstream-harvest.sh"
-)
+pytestmark = pytest.mark.skipif(BASH is None or GIT is None, reason=BASH_SKIP_REASON)
 
 # What the fake GitHub clock says, and the same instant as a mark spells it.
 GH_DATE = "Wed, 07 Oct 2026 18:45:38 GMT"

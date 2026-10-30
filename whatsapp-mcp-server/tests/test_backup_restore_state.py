@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason="needs POSIX bash")
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(BASH is None or os.name == "nt", reason=BASH_SKIP_REASON)
 
 
 @pytest.mark.parametrize("session", ["replacement", "missing", "copy_failure"])

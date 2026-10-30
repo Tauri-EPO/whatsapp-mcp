@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash")
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
 
 @pytest.mark.parametrize("failure", ["", "up", "probe", "ports", "outbox", "operator"])
@@ -65,7 +67,7 @@ esac
         },
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=180,  # Git Bash launches many short-lived fake commands on Windows.
     )
     assert (result.returncode == 0) == (failure == ""), result.stdout + result.stderr
     assert ("proxy smoke -> PASS" in result.stdout) == (failure == "")
