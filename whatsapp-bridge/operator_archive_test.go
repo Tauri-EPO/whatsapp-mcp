@@ -114,7 +114,7 @@ func TestSnapshotPreservesSentResetIntentAndPrunesItWithNotes(t *testing.T) {
 					}
 					found = true
 					path := filepath.Join(b.SnapshotDir, file.Name)
-					data, err := os.ReadFile(path)
+					data, err := os.ReadFile(path) //nolint:gosec // Server-generated snapshot filename in the test's private directory.
 					if err != nil || string(data) != value {
 						t.Fatalf("marker bytes changed err=%v", err)
 					}
