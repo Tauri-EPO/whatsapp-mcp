@@ -60,7 +60,7 @@ def resolve_port(value: str | None) -> int:
 
 
 def resolve_session_idle_timeout(value: str | None) -> int | None:
-    """Parse HTTP session idle seconds; 24 hours by default, zero disables expiry."""
+    """Parse HTTP idle seconds (0-10 years); 24 hours by default, zero disables expiry."""
     value = (value or "").strip()
     if not value:
         return 86400
@@ -68,8 +68,8 @@ def resolve_session_idle_timeout(value: str | None) -> int | None:
         seconds = int(value)
     except ValueError:
         raise ValueError("Invalid WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S; must be a nonnegative integer") from None
-    if seconds < 0:
-        raise ValueError("Invalid WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S; must be a nonnegative integer")
+    if not 0 <= seconds <= 315360000:
+        raise ValueError("Invalid WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S; must be between 0 and 315360000 seconds")
     return seconds or None
 
 

@@ -33,6 +33,7 @@ from http_oauth import (
     OAuthTokenVerifier,
     load_oauth_config,
 )
+from http_sessions import install_idle_session_eviction
 from http_upload import UploadApp
 from mcp_config import (
     build_transport_security,
@@ -2979,6 +2980,7 @@ def build_http_app(
     rate_limit_per_minute: int | None = None,
     upload_max_bytes: int = 64 * 1024 * 1024,
     trusted_proxies: ProxyNetworks = (),
+    session_idle_timeout: float | None = 86400,
     **app_kwargs: Any,
 ):
     """Build the ASGI app for the http/sse transports.
@@ -3000,10 +3002,9 @@ def build_http_app(
     if transport == "sse":
         app = server.sse_app(**app_kwargs)
     else:
-        app_kwargs["session_idle_timeout"] = resolve_session_idle_timeout(
-            os.getenv("WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S")
-        )
+        app_kwargs["session_idle_timeout"] = session_idle_timeout
         app = server.streamable_http_app(**app_kwargs)
+        install_idle_session_eviction(server._lowlevel_server.session_manager)
     sdk_app = app
     if verifier:
         from operator_admin import AuthenticatedCalls
@@ -3109,6 +3110,11 @@ if __name__ == "__main__":
 
         host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
         port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
+        session_idle_timeout = (
+            resolve_session_idle_timeout(os.getenv("WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S"))
+            if transport == "streamable-http"
+            else None
+        )
         # Explicit WHATSAPP_MCP_TOKEN wins; a non-loopback bind without one reuses
         # the bridge token so the deployment has a single secret to manage.
         token, token_source = resolve_http_token(
@@ -3171,6 +3177,7 @@ if __name__ == "__main__":
                 rate_limit_per_minute=rate_limit if (os.getenv("WHATSAPP_MCP_RATE_LIMIT") or "").strip() else None,
                 upload_max_bytes=upload_max_bytes,
                 trusted_proxies=trusted_proxies,
+                session_idle_timeout=session_idle_timeout,
                 **app_kwargs,
             ),
             host=host,
