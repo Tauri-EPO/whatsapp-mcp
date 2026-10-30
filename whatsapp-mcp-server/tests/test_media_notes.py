@@ -437,6 +437,7 @@ def test_reset_claim_acknowledgement_is_atomic_and_idempotent(tmp_path, monkeypa
     assert media_notes.claim_meta("instant", "old") == "old"
     assert media_notes.claim_meta("instant", "first", reset_token="reset-one") == "first"
     assert media_notes.claim_meta("instant", "later", reset_token="reset-one") == "first"
+    assert media_notes.claim_meta("instant", "forced", replace=True, reset_token="reset-one") == "forced"
     assert media_notes.claim_meta("instant", "new", reset_token="reset-two") == "new"
     assert media_notes.read_meta("instant:reset") == "reset-two"
 

@@ -2121,3 +2121,24 @@ def test_normal_and_deferred_start_logs_name_the_backend(provider, paired_dbs, m
     with caplog.at_level("INFO", logger="whatsapp_mcp"):
         transcribe_worker.run_forever(config, stop=stop, run=run, settle_on_run=True)
     assert expected in caplog.text and "including sent audio from" in caplog.text
+
+
+def test_pending_claim_overrides_an_acknowledged_marker_left_on_disk(paired_dbs, monkeypatch):
+    from dataclasses import replace
+
+    reset = transcribe_worker._sent_reset_path()
+    reset.write_text("acknowledged-token", encoding="ascii")
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE, reset_token="acknowledged-token")
+    chosen = "2026-09-06 12:00:00+00:00"
+    config = transcribe_worker.IngestConfig(True, 5, 1, sent_since=chosen)
+    config = replace(config, worker_running=True, sent_claim_pending=True, sent_reset_token="acknowledged-token")
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        assert _stored_since() == chosen
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, run=run)
+    assert _stored_since() == chosen
+    assert media_notes.read_meta(transcribe_worker.SENT_SINCE_KEY + ":reset") == "acknowledged-token"

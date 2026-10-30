@@ -533,21 +533,27 @@ def read_meta(key: str) -> str | None:
 
 
 def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str | None = None) -> str:
-    """The stored value of key, storing ``value`` first when there is none (or always, with replace)."""
+    """Store if absent, or replace explicitly; reset tokens force replacement only once.
+
+    ``replace=True`` always takes precedence, including a pending in-memory
+    claim with an already acknowledged token. Otherwise each new reset_token
+    replaces once; a token's later appearances retain the recorded value.
+    """
     conn = None
     try:
         conn = _connect(create=True)
         assert conn is not None
         with conn:
+            new_reset = False
             if reset_token is not None:
                 conn.execute("BEGIN IMMEDIATE")
                 acknowledged = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key + ":reset",)).fetchone()
                 # A marker that could not be unlinked must not reset the bound
                 # again: acknowledge its identity atomically with the claim.
-                replace = acknowledged is None or acknowledged[0] != reset_token
-            conflict = "DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"
+                new_reset = acknowledged is None or acknowledged[0] != reset_token
+            conflict = "DO UPDATE SET value = excluded.value" if replace or new_reset else "DO NOTHING"
             conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
-            if reset_token is not None and replace:
+            if reset_token is not None and new_reset:
                 conn.execute(
                     "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (key + ":reset", reset_token),
