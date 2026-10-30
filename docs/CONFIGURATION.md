@@ -1328,11 +1328,12 @@ write no marker. If the marker cannot be persisted, the worker continues with
 inbound audio only and logs that reset recovery could not be recorded. Failed
 claims retry on later iterations using the first chosen in-memory bound. Reset
 identities are acknowledged in the same notes transaction as the bound, so a
-marker that cannot be removed never advances that bound again on restart. A stored instant more than five minutes in
-the future is replaced with now and a warning. Preserve the reset marker when
+marker that cannot be removed never advances that bound again on restart.
+A stored instant more than five minutes in the future is replaced with now and a warning. Preserve the reset marker when
 copying a whole store; database-only backup/snapshot recovery of pending resets
 is tracked in [#770](https://github.com/Tauri-EPO/whatsapp-mcp/issues/770).
-With a remote provider, sent audio is sent to the provider and consumes the configured monthly cap. With
+With a remote provider, sent audio is sent to the provider and consumes the
+configured monthly cap. With
 `TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio after the instant is also
 downloaded through the bridge. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
 keeps only inbound audio after restart; empty uses the default, and invalid

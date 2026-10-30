@@ -318,21 +318,20 @@ def _stored_sent_since() -> str | None:
 def _persist_sent_since(config: IngestConfig) -> IngestConfig:
     """Retry the chosen bound without moving it, acknowledging a reset in the same transaction."""
     assert config.sent_since is not None
+    chosen = config.sent_since
     token = config.sent_reset_token
     try:
         token = token or _sent_reset_token()
-        since = media_notes.claim_meta(
-            SENT_SINCE_KEY, config.sent_since, replace=config.sent_claim_pending, reset_token=token
-        )
+        since = media_notes.claim_meta(SENT_SINCE_KEY, chosen, replace=config.sent_claim_pending, reset_token=token)
         try:
             since = _canonical_instant(since)
             if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
-                now = config.sent_since if config.sent_claim_pending else whatsapp.timestamp_bound(datetime.now(UTC))
-                config = replace(config, sent_since=now)
-                logger.warning("stored sent audio instant is in the future; replacing it with %s", now)
-                since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
+                chosen = chosen if config.sent_claim_pending else whatsapp.timestamp_bound(datetime.now(UTC))
+                config = replace(config, sent_since=chosen)
+                logger.warning("stored sent audio instant is in the future; replacing it with %s", chosen)
+                since = media_notes.claim_meta(SENT_SINCE_KEY, chosen, replace=True)
         except ValueError:
-            since = media_notes.claim_meta(SENT_SINCE_KEY, config.sent_since, replace=True)
+            since = media_notes.claim_meta(SENT_SINCE_KEY, chosen, replace=True)
     except (sqlite3.Error, OSError) as exc:
         logger.warning(
             "could not record when sent audio started counting (%s); counting from %s and retrying",

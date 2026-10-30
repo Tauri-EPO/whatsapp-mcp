@@ -2060,3 +2060,39 @@ def test_first_claim_grace_uses_archive_edge_clamped_to_one_day(paired_dbs, monk
     ids = {row[0] for row in transcribe_worker._pending_rows(10, sent_since=config.sent_since)}
     assert "OUT1" in ids and "OUT2" not in ids
     assert whatsapp.coverage()["audio"]["messages"] == len(ids)
+
+
+def test_busy_clock_repair_retries_the_original_repair_bound(paired_dbs, monkeypatch):
+    media_notes.claim_meta(
+        transcribe_worker.SENT_SINCE_KEY, whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(days=1))
+    )
+    real_claim = media_notes.claim_meta
+    calls = []
+
+    def claim(*args, **kwargs):
+        calls.append(args[1])
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(media_notes, "claim_meta", claim)
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_claim_pending
+    chosen = config.sent_since
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return later
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        assert _stored_since() == chosen
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, run=run)
+    assert calls[1:] == [chosen, chosen]
