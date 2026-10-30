@@ -110,7 +110,11 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "Chat archive unavailable")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	withDeadline := b.operatorChatsDeadline
+	if withDeadline == nil {
+		withDeadline = context.WithTimeout
+	}
+	ctx, cancel := withDeadline(r.Context(), 5*time.Second)
 	defer cancel()
 	account := ""
 	// The SDK mutates client.Store.ID during pairing and logout; read the
@@ -149,7 +153,12 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 				identities = append(identities, localContactIdentity{JID: chat.JID, Name: chat.Name})
 			}
 		}
-		names := b.Store.resolveLocalContactNames(ctx, identities, account, nil, b.Log)
+		var names map[string]localContactIdentity
+		if b.operatorChatsResolveNames != nil {
+			names = b.operatorChatsResolveNames(ctx, identities, account)
+		} else {
+			names = b.Store.resolveLocalContactNames(ctx, identities, account, nil, b.Log)
+		}
 		for i := range batch {
 			jid := localContactJID(batch[i].JID)
 			if jid.Server == "s.whatsapp.net" {

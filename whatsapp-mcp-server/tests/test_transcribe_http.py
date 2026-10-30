@@ -45,56 +45,198 @@ def _add_audio(store, message_id, chat_jid):
     _audio(Path(media_inventory.chat_media_dir(chat_jid)) / _media_filename(message_id))
 
 
+def test_whole_file_budget_reaches_trickling_multipart_http(tmp_path, monkeypatch):
+    import transcription_usage
+
+    # Follow the public call through real request/cancellation code. Preparation
+    # consumes 1s; the first trickling response consumes 1.2s, leaving 0.8s for
+    # the second. Renewing the whole budget for either part must fail this proof.
+    clock = SimpleNamespace(now=100.0, deadline=None)
+    budgets, reads, closed = [], [], []
+    source = tmp_path / "source.wav"
+    source.touch()
+    parts = [tmp_path / f"part-{i}.ogg" for i in range(2)]
+    for part in parts:
+        part.write_bytes(b"fake-audio")
+
+    def conversion(audio_path, work_dir, deadline):
+        assert audio_path == str(source) and deadline == 103.0
+        clock.now += 1.0
+        return parts, 810.0
+
+    @contextmanager
+    def admission(*args, deadline):
+        assert deadline == 103.0
+        yield
+
+    async def wait_for(request, timeout):
+        budgets.append(timeout)
+        clock.deadline = clock.now + timeout
+        try:
+            return await request
+        finally:
+            clock.deadline = None
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            closed.append("response")
+
+        async def aiter_raw(self):
+            for chunk in [b'{"text":', b'"done"}']:
+                clock.now += 0.6
+                if clock.deadline is not None and clock.now >= clock.deadline:
+                    raise TimeoutError
+                yield chunk
+
+    class Client:
+        def __init__(self, **kwargs):
+            reads.append(kwargs["timeout"].read)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            closed.append("client")
+
+        def stream(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(transcribe, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(transcribe, "_http_parts", conversion)
+    monkeypatch.setattr(transcription_usage, "admission", admission)
+    monkeypatch.setattr(transcribe.asyncio, "wait_for", wait_for)
+    monkeypatch.setattr(transcribe.httpx, "AsyncClient", Client)
+    config = replace(
+        transcribe.load_config({}),
+        provider="openai_compatible",
+        url="http://example.invalid/transcribe",
+        model="fake-speech-model",
+        timeout_s=3,
+    )
+    with pytest.raises(transcribe.BackendUnavailableError, match="deadline"):
+        transcribe.transcribe_file(str(source), config=config)
+    assert budgets == pytest.approx([2.0, 0.8])
+    assert reads == pytest.approx([2.0, 0.8])
+    assert closed == ["response", "client"] * 2
+
+
 @pytest.mark.parametrize("phase", ["headers", "body"])
-def test_http_wall_deadline_includes_trickling_headers_and_body(provider, tmp_path, phase):
+def test_http_request_deadline_covers_the_entire_stream(tmp_path, monkeypatch, phase):
+    # A virtual transport advances time at each receive, so the proof checks the
+    # scope and single budget of wait_for without relying on scheduler speed.
+    clock = SimpleNamespace(now=100.0, deadline=None)
+    timeouts = []
+
+    def receive():
+        clock.now += 0.6
+        if clock.deadline is not None and clock.now >= clock.deadline:
+            raise TimeoutError
+
+    async def wait_for(request, timeout):
+        timeouts.append(timeout)
+        clock.deadline = clock.now + timeout
+        try:
+            return await request
+        finally:
+            clock.deadline = None
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            if phase == "headers":
+                for _ in range(6):
+                    receive()
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def aiter_raw(self):
+            for chunk in [b'{"te', b'xt":', b'"do', b'ne"', b"}"]:
+                if phase == "body":
+                    receive()
+                yield chunk
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"].read == 1
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def stream(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(transcribe.asyncio, "wait_for", wait_for)
+    monkeypatch.setattr(transcribe.httpx, "AsyncClient", Client)
+    source = tmp_path / "note.ogg"
+    source.write_bytes(b"fake-audio")
+    config = replace(load_config({}), timeout_s=1, url="http://example.invalid/transcribe")
+    with pytest.raises(BackendUnavailableError, match="deadline"):
+        transcribe._transcribe_http(source, config, "auto")
+    assert timeouts == [1]
+    assert clock.now == pytest.approx(101.2)
+
+
+@pytest.mark.parametrize("phase", ["headers", "body"])
+def test_http_wall_deadline_includes_trickling_headers_and_body(tmp_path, phase):
+    stop = threading.Event()
+    received = threading.Event()
+
     class SlowHandler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
-            # Six pieces 0.6 s apart: without the wall deadline the response takes
-            # over 3 s, and a read failure would not carry the "deadline" message.
+            received.set()
+            # Pieces one second apart take at least 11 s without one
+            # request deadline. The 9 s bound gives the 3 s budget ample slack
+            # and still rejects a budget renewed for each chunk.
             pieces = (
-                [
-                    b"HTTP/1.1 200 OK\r\n",
-                    b"Content-Type: application/json\r\n",
-                    b"X-Pad-A: 1\r\n",
-                    b"X-Pad-B: 1\r\n",
-                    b"\r\n",
-                    b'{"text":"done"}',
-                ]
+                [b"HTTP/1.1 200 OK\r\n", b"Content-Type: application/json\r\n"]
+                + [b"X-Pad: 1\r\n"] * 8
+                + [b"\r\n", b'{"text":"done"}']
                 if phase == "headers"
-                else [
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
-                    b'{"te',
-                    b'xt":',
-                    b'"do',
-                    b'ne"',
-                    b"}",
-                ]
+                else [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"]
+                + [bytes([byte]) for byte in b'{"text":"done"}']
             )
             try:
                 for piece in pieces:
                     self.wfile.write(piece)
                     self.wfile.flush()
-                    time.sleep(0.6)
+                    if stop.wait(1):
+                        break
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
-    server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     source = tmp_path / "note.ogg"
-    _audio(source)
-    config = replace(load_config(), url=f"http://127.0.0.1:{server.server_port}/transcribe", timeout_s=1)
+    source.write_bytes(b"fake-audio")
+    config = replace(load_config({}), url=f"http://127.0.0.1:{server.server_port}/transcribe", timeout_s=3)
     started = time.monotonic()
     try:
         with pytest.raises(BackendUnavailableError, match="deadline"):
-            transcribe_file(str(source), config=config)
-        assert time.monotonic() - started < 2.4
+            transcribe._transcribe_http(source, config, "auto")
+        elapsed = time.monotonic() - started
+        print(f"{phase} trickle elapsed={elapsed:.3f}s (budget=3s, bound=9s)")
+        assert received.is_set(), "the HTTP provider was never reached"
+        assert elapsed < 9
     finally:
+        stop.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
