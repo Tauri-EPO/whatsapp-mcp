@@ -217,7 +217,7 @@ async def authentication_unavailable_response(send: Send, cause: str) -> None:
             "type": "http.response.start",
             "status": 503,
             "headers": [
-                (b"content-type", b"application/json"),
+                (b"content-type", b"application/json; charset=utf-8"),
                 (b"content-length", str(len(body)).encode("ascii")),
                 (b"cache-control", b"no-store"),
             ],
@@ -270,7 +270,7 @@ class BearerTokenMiddleware:
                 "type": "http.response.start",
                 "status": 401,
                 "headers": [
-                    (b"content-type", b"application/json"),
+                    (b"content-type", b"application/json; charset=utf-8"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"www-authenticate", f'Bearer realm="{REALM}"'.encode("ascii")),
                     (b"cache-control", b"no-store"),
@@ -398,6 +398,80 @@ def client_key(scope: Scope, trusted_proxies: ProxyNetworks = ()) -> str:
     return peer
 
 
+_CHARSET_TYPES = (b"application/json", b"text/event-stream")
+
+
+def _media_type_parts(value: bytes) -> list[bytes]:
+    """Split parameters outside quotes, refusing an unterminated quoted string.
+
+    email.message.Message.get_params folds RFC 2231 charset* into charset,
+    unlike HTTP's exact parameter names. Its set_param also requotes unrelated
+    values, so keep the original bytes and delimiters instead of round-tripping
+    this HTTP header through the MIME parser.
+    """
+    parts = []
+    start = 0
+    quoted = escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif quoted and char == ord("\\"):
+            escaped = True
+        elif char == ord('"'):
+            quoted = not quoted
+        elif char == ord(";") and not quoted:
+            parts.append(value[start:index])
+            start = index + 1
+    return [] if quoted else [*parts, value[start:]]
+
+
+class Utf8CharsetMiddleware:
+    """Declare `charset=utf-8` on JSON and SSE responses that omit it (issue #758).
+
+    The bodies are UTF-8, but the SDK transport and some of our own replies send a
+    bare `text/event-stream` / `application/json`; a client or proxy that falls back
+    to ISO-8859-1 for a missing charset turns `histórico` into `histÃ³rico`. Only the
+    `http.response.start` headers change; the body passes through untouched."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_charset(message: MutableMapping[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = []
+                for name, value in message.get("headers", []):
+                    if name.lower() == b"content-type":
+                        parts = _media_type_parts(value)
+                        if not parts:  # Appending to an unterminated quote would hide the charset inside its value.
+                            headers.append((name, value))
+                            continue
+                        media_type = parts[0].strip().lower()
+                        is_json_suffix = media_type.startswith(b"application/") and media_type.endswith(b"+json")
+                        if media_type not in _CHARSET_TYPES and not is_json_suffix:
+                            headers.append((name, value))
+                            continue
+                        for index, parameter in enumerate(parts[1:], 1):
+                            key, _, declared = parameter.partition(b"=")
+                            if key.strip().lower() == b"charset" and not declared.strip().strip(b'"').strip():
+                                parts[index] = b" charset=utf-8"
+                        value = b";".join(parts)
+                        has_charset = any(
+                            parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parts[1:]
+                        )
+                        if not has_charset:
+                            value = value.rstrip(b"; \t\r\n") + b"; charset=utf-8"
+                    headers.append((name, value))
+                message = dict(message, headers=headers)
+            await send(message)
+
+        await self.app(scope, receive, send_with_charset)
+
+
 class ForwardedSchemeMiddleware:
     """Preserve a trusted proxy's scheme without replacing the socket peer."""
 
@@ -496,7 +570,7 @@ class RateLimitMiddleware:
                 "type": "http.response.start",
                 "status": 429,
                 "headers": [
-                    (b"content-type", b"application/json"),
+                    (b"content-type", b"application/json; charset=utf-8"),
                     (b"content-length", str(len(body)).encode("ascii")),
                     (b"retry-after", str(retry_after).encode("ascii")),
                     (b"cache-control", b"no-store"),

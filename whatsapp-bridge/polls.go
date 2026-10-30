@@ -595,7 +595,7 @@ func (store *MessageStore) PollResults(messageID, chatJID string) (*PollResultsR
 func handlePollResults(store *MessageStore, policy chatPolicyResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		policy := policy.effective(r.Context())
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 		messageID := strings.TrimSpace(r.URL.Query().Get("message_id"))
 		chatJID := strings.TrimSpace(r.URL.Query().Get("chat_jid"))
 		if messageID == "" || chatJID == "" {

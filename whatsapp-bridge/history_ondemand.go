@@ -185,7 +185,7 @@ func registerHistoryEndpointWithSender(mux *http.ServeMux, auth func(http.Handle
 		}
 		count := clampHistoryCount(req.Count)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 
 		writeErr := func(status int, msg string) {
 			w.WriteHeader(status)

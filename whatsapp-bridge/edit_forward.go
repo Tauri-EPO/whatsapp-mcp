@@ -92,7 +92,7 @@ func (b *messageBatch) ApplyMessageEdit(chat, sender string, fromMe bool, edit *
 }
 
 func writeEditForward(w http.ResponseWriter, status int, resp editForwardResponse) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
 }
