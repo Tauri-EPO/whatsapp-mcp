@@ -816,3 +816,30 @@ def test_snapshot_concurrent_views_share_one_instance(runtime_archive, monkeypat
     assert builds == 1
     assert all(view is report.for_deploy(target) for view in views)
     assert child.for_deploy(target) is views[0]
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "locked"])
+def test_ingest_startup_waits_with_unreadable_runtime_store(runtime_archive, monkeypatch, caplog, unavailable):
+    tool_policy.install_runtime_tool_policy(main.mcp, tool_policy.ToolPolicy())
+    monkeypatch.setattr(whatsapp, "SQLITE_BUSY_TIMEOUT_S", 0.01)
+    starts = []
+    monkeypatch.setattr(transcribe_worker, "_ingest_config", None)
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
+    lock = None
+    if unavailable == "missing":
+        monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(runtime_archive.messages_db) + ".missing")
+    else:
+        lock = sqlite3.connect(runtime_archive.messages_db)
+        assert lock.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+        lock.execute("BEGIN EXCLUSIVE")
+    try:
+        transcribe_worker.install_ingest_worker(
+            {"TRANSCRIBE_ON_INGEST": "1", "WHISPER_URL": "http://127.0.0.1:8178/inference"}
+        )
+        assert len(starts) == 1 and starts[0][1] == {"settle_on_run": True}
+        assert not starts[0][0].worker_running
+        assert "runtime tool policy unreadable, worker waits" in caplog.text
+    finally:
+        if lock is not None:
+            lock.rollback()
+            lock.close()

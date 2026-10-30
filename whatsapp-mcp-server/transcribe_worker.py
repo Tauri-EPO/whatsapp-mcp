@@ -60,13 +60,16 @@ import itertools
 import logging
 import os
 import sqlite3
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import media_inventory
 import media_notes
@@ -75,11 +78,13 @@ import whatsapp
 from chat_policy import policy_operation
 from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
+from private_files import private_open
 from runtime_settings import INGEST_CHATS_ENV, ingest_chat_clause, parse_ingest_chats
 from tool_policy import (
     ALLOW_TOOLS_ENV,
     DENY_TOOLS_ENV,
     DOWNLOAD_TOOL,
+    ToolPolicy,
     active_policy,
     load_tool_policy,
     parse_bool_env,
@@ -97,6 +102,14 @@ ENABLED_ENV = "TRANSCRIBE_ON_INGEST"
 INTERVAL_ENV = "TRANSCRIBE_ON_INGEST_INTERVAL_S"
 BATCH_ENV = "TRANSCRIBE_ON_INGEST_BATCH"
 FETCH_ENV = "TRANSCRIBE_ON_INGEST_FETCH"
+# The instant sent voice notes started counting (issue #751). Turning sent audio
+# on, an upgrade where it defaults on included, must not send the stored history
+# of sent audio to the provider in one go: only sent audio at or after this
+# instant joins the work list. notes.db keeps it (notes_meta) from the first
+# start whose worker runs with sent audio on, so a restart or a recreated
+# container on the same store does not move it. Only a running worker with sent
+# audio off clears it; a process without the worker leaves this shared state alone.
+SENT_SINCE_KEY = "ingest_sent_since"
 
 # The tools this worker is: it transcribes like `transcribe_audio` and fetches
 # like `download_media` (DOWNLOAD_TOOL, shared with the tools that fetch
@@ -167,6 +180,15 @@ class IngestConfig:
     batch: int
     fetch: bool = False
     include_sent: bool = True
+    # The instant above, in the stored timestamp spelling; None counts no sent audio.
+    sent_since: str | None = None
+    # Keep lifecycle flags in the same frozen value so publication/readers and
+    # deferred/retry transitions stay atomic; splitting requires a second state
+    # object across every installer, loop and coverage consumer.
+    worker_running: bool = False
+    sent_claim_pending: bool = False
+    sent_reset_token: str | None = None
+    backend_provider: str = "whisper_cpp"
 
 
 _ingest_config: IngestConfig | None = None
@@ -249,11 +271,147 @@ def load_ingest_config(env: Mapping[str, str] | None = None) -> IngestConfig:
 
 
 def ingest_config() -> IngestConfig:
-    """The startup snapshot shared by coverage and every worker batch."""
+    """The local worker snapshot; workerless coverage reads the stored bound per call."""
     global _ingest_config
     if _ingest_config is None:
         _ingest_config = load_ingest_config()
+    if not _ingest_config.worker_running:
+        # Another stdio process can claim/reset the shared instant after this
+        # process started. Only a local worker needs a fixed startup snapshot.
+        return replace(_ingest_config, sent_since=_stored_sent_since() if _ingest_config.include_sent else None)
     return _ingest_config
+
+
+def _canonical_instant(stored: str) -> str:
+    """A stored instant in the timestamp spelling; ValueError when it is not one."""
+    return whatsapp.timestamp_bound(whatsapp.parse_db_time(stored))
+
+
+def _sent_reset_path() -> Path:
+    """A durable reset intent outside SQLite, so SQLITE_BUSY cannot hide a failed clear."""
+    return Path(media_notes.notes_db_path() + ".ingest-sent-reset")
+
+
+def _sent_reset_token() -> str | None:
+    path = _sent_reset_path()
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("A sent audio reset marker must be a regular file, never a symlink")
+        if info.st_size > 128:
+            raise OSError("A sent audio reset marker exceeds limits")
+        try:
+            return path.read_text(encoding="ascii").strip() or f"legacy:{info.st_mtime_ns}"
+        except UnicodeError as exc:
+            raise OSError("A sent audio reset marker is unreadable") from exc
+    except FileNotFoundError:
+        return None
+
+
+def _stored_sent_since() -> str | None:
+    """Read shared state without writing; a pending, unacknowledged reset counts no sent audio."""
+    try:
+        token = _sent_reset_token()
+        keys = (SENT_SINCE_KEY,) if token is None else (SENT_SINCE_KEY, SENT_SINCE_KEY + ":reset")
+        values = media_notes.read_meta_values(keys)
+        if token is not None and values.get(SENT_SINCE_KEY + ":reset") != token:
+            return None
+        stored = values.get(SENT_SINCE_KEY)
+        if stored is None:
+            return None
+        since = _canonical_instant(stored)
+        if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
+            _warn_future_sent_read()
+            return None
+        return since
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_future_sent_read() -> None:
+    logger.warning("stored sent audio instant is in the future; ignoring it in workerless reads")
+
+
+def _persist_sent_since(config: IngestConfig) -> IngestConfig:
+    """Retry the chosen bound without moving it, acknowledging a reset in the same transaction."""
+    assert config.sent_since is not None
+    chosen = config.sent_since
+    token = config.sent_reset_token
+    try:
+        token = token or _sent_reset_token()
+        since = media_notes.claim_meta(SENT_SINCE_KEY, chosen, replace=config.sent_claim_pending, reset_token=token)
+        try:
+            since = _canonical_instant(since)
+            if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
+                chosen = chosen if config.sent_claim_pending else whatsapp.timestamp_bound(datetime.now(UTC))
+                config = replace(config, sent_since=chosen)
+                logger.warning("stored sent audio instant is in the future; replacing it with %s", chosen)
+                since = media_notes.claim_meta(SENT_SINCE_KEY, chosen, replace=True)
+        except ValueError:
+            since = media_notes.claim_meta(SENT_SINCE_KEY, chosen, replace=True)
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning(
+            "could not record when sent audio started counting (%s); counting from %s and retrying",
+            exc,
+            config.sent_since,
+        )
+        return replace(config, sent_claim_pending=True, sent_reset_token=token)
+    try:
+        _sent_reset_path().unlink(missing_ok=True)
+    except OSError:
+        # The reset identity was acknowledged atomically. Even if this file
+        # survives every restart, it cannot advance the stored instant again.
+        logger.warning("could not remove acknowledged sent audio reset marker; keeping the recorded instant")
+    return replace(config, sent_since=since, sent_claim_pending=False, sent_reset_token=token)
+
+
+def _first_sent_bound() -> str:
+    """Allow late phone delivery from the archive edge, capped to a day before startup."""
+    now = datetime.now(UTC)
+    conn = None
+    try:
+        conn = whatsapp._connect_messages_db()
+        latest = conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()[0]
+        if latest is not None:
+            return whatsapp.timestamp_bound(min(now, max(whatsapp.parse_db_time(latest), now - timedelta(days=1))))
+    except Exception:  # noqa: BLE001 - a malformed archive edge must never stop MCP startup
+        logger.warning("could not read the archive edge for sent audio; counting from this start")
+    finally:
+        if conn is not None:
+            conn.close()
+    return whatsapp.timestamp_bound(now)
+
+
+def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
+    """Keep, record or clear the instant sent audio counts from before publication."""
+    if running and config.include_sent:
+        chosen = config.sent_since or _stored_sent_since() or _first_sent_bound()
+        config = _persist_sent_since(replace(config, sent_since=chosen, worker_running=True))
+    elif running:
+        reset = _sent_reset_path()
+        try:
+            media_notes.forget_meta(SENT_SINCE_KEY)
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("could not clear when sent audio started counting: %s; reset pending", exc)
+            # Only a failed clear needs durable recovery. An absent instant or
+            # a successful DELETE must not create/fsync a marker at all.
+            try:
+                with private_open(str(reset), "w", encoding="ascii") as marker:
+                    marker.write(uuid4().hex)
+                    marker.flush()
+                    os.fsync(marker.fileno())
+            except OSError:
+                logger.warning("could not persist the sent audio reset; continuing with inbound audio only")
+        else:
+            try:
+                reset.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove the sent audio reset marker after clearing the instant")
+        config = replace(config, sent_since=None, worker_running=True)
+    else:
+        config = replace(config, sent_since=None, worker_running=False)
+    return config
 
 
 def _parse_interval(raw: str | None) -> float:
@@ -313,7 +471,7 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
 PendingRow = tuple[str, str, str, str]  # message_id, chat_jid, sha256, timestamp
 
 
-def _pending_rows(limit: int, after: Position | None = None, *, include_sent: bool | None = None) -> list[PendingRow]:
+def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str | None = None) -> list[PendingRow]:
     """Eligible audio with no transcript, newest first, resuming just past ``after``.
 
     The status feed is left out, the way ``coverage`` counts the backlog
@@ -325,16 +483,17 @@ def _pending_rows(limit: int, after: Position | None = None, *, include_sent: bo
     conn = whatsapp._connect_messages_db()
     try:
         handled_clause, handled_params = _already_handled_clause(conn)
+        sent_clause, sent_params = whatsapp.ingest_sent_clause("m", sent_since)
         clauses = [
             "m.media_type = 'audio'",
-            whatsapp.ingest_sent_clause("m", include_sent),
+            sent_clause,
             "m.file_sha256 IS NOT NULL",
             "m.deleted_at IS NULL",
             f"m.chat_jid <> '{whatsapp.STATUS_BROADCAST_JID}'",  # a module constant, never user input
             handled_clause,
             ingest_chat_clause("m.chat_jid"),
         ]
-        params: list[Any] = list(handled_params)
+        params: list[Any] = [*sent_params, *handled_params]
         if after is not None:
             # Keyset, not OFFSET: rows transcribed since the last round leave the
             # result and would shift every offset under the walk.
@@ -369,7 +528,7 @@ def find_pending(
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
-    include_sent: bool | None = None,
+    sent_since: str | None = None,
 ) -> Selection:
     """Up to ``batch`` voice notes to transcribe, one per distinct hash, and where to resume.
 
@@ -416,8 +575,8 @@ def find_pending(
     """
     batch = max(1, batch)
     page_limit = batch * CANDIDATE_FACTOR
-    head = _pending_rows(batch, include_sent=include_sent) if position is not None else []
-    page = _pending_rows(page_limit, after=position, include_sent=include_sent)
+    head = _pending_rows(batch, sent_since=sent_since) if position is not None else []
+    page = _pending_rows(page_limit, after=position, sent_since=sent_since)
     fetcher = download or whatsapp.download_media
     budget = batch if fetch else 0  # fetch attempts left this round
     head_budget = min(batch - 1, HEAD_FETCHES) if fetch else 0  # ... of which the newest rows may spend these
@@ -764,7 +923,7 @@ def run_once(
     fetch: bool = False,
     download: Callable[[str, str], str | None] | None = None,
     position: Position | None = None,
-    include_sent: bool | None = None,
+    sent_since: str | None = None,
 ) -> BatchResult:
     """Transcribe one batch from ``position``. Never raises: a broken batch is a logged batch.
 
@@ -790,9 +949,7 @@ def run_once(
             if ingest_quota_exhausted():
                 return BatchResult(0, 0, 0, position=position)
             fetch = fetch and policy.allows(DOWNLOAD_TOOL)
-            selection = find_pending(
-                batch, fetch=fetch, download=download, position=position, include_sent=include_sent
-            )
+            selection = find_pending(batch, fetch=fetch, download=download, position=position, sent_since=sent_since)
     except Exception as exc:  # noqa: BLE001 - the work list must not kill the thread
         logger.warning("transcribe_on_ingest: could not read the archive: %s", exc)
         return BatchResult(0, 0, 0, position=position)  # the read failed, the walk did not move
@@ -899,12 +1056,29 @@ def run_once(
     return BatchResult(len(pending), transcribed, failed, selection.examined, selection.position)
 
 
+def _log_ingest_started(config: IngestConfig) -> None:
+    logger.info(
+        "%s=1: transcribing up to %d voice notes every %.0fs (%s)%s%s",
+        ENABLED_ENV,
+        config.batch,
+        config.interval_s,
+        "configured HTTP provider" if config.backend_provider == "openai_compatible" else "whisper on this machine",
+        f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
+        f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
+    )
+
+
+def _batch_runner(config: IngestConfig) -> Callable[..., BatchResult]:
+    return functools.partial(run_once, fetch=config.fetch, sent_since=config.sent_since)
+
+
 def run_forever(
     config: IngestConfig,
     *,
     stop: threading.Event,
     sleep: Callable[[float], None] = time.sleep,
     run: Callable[..., BatchResult] | None = None,
+    settle_on_run: bool = False,
 ) -> None:
     """Poll until ``stop`` is set. ``sleep`` and ``run`` are injected by the tests.
 
@@ -913,9 +1087,33 @@ def run_forever(
     the same newest page every interval. It lives in this loop only — a restart
     starts at the newest rows again, which is where the new work is.
     """
-    run_batch = run or functools.partial(run_once, fetch=config.fetch, include_sent=config.include_sent)
+    global _ingest_config
+    run_batch = run or (_batch_runner(config) if not settle_on_run else None)
     position: Position | None = None
     while not stop.is_set():
+        if settle_on_run:
+            try:
+                with policy_operation():
+                    if active_policy().allows(TRANSCRIBE_TOOL):
+                        config = _settle_sent_since(config, running=True)
+                        _ingest_config = config
+                        clear_outage_failures()
+                        clear_oversized_failures()
+                        _log_ingest_started(config)
+                        run_batch = run or _batch_runner(config)
+                        settle_on_run = False
+            except Exception:  # noqa: BLE001 - a transient policy failure must not kill the daemon
+                logger.warning("transcribe_on_ingest: could not initialize the sent audio instant; waiting")
+            if settle_on_run:
+                sleep(config.interval_s)
+                continue
+        if config.sent_claim_pending:
+            previous_bound = config.sent_since
+            config = _persist_sent_since(config)
+            _ingest_config = config
+            if run is None and config.sent_since != previous_bound:
+                run_batch = _batch_runner(config)
+        assert run_batch is not None
         position = run_batch(config.batch, position=position).position
         if stop.is_set():
             return
@@ -928,15 +1126,14 @@ def start_worker(
     stop: threading.Event | None = None,
     sleep: Callable[[float], None] = time.sleep,
     run: Callable[..., BatchResult] | None = None,
+    settle_on_run: bool = False,
 ) -> threading.Thread:
     """Start the poll loop on a daemon thread (so it never holds up shutdown)."""
-    global _ingest_config
-    _ingest_config = config
     event = stop or threading.Event()
     thread = threading.Thread(
         target=run_forever,
         args=(config,),
-        kwargs={"stop": event, "sleep": sleep, "run": run},
+        kwargs={"stop": event, "sleep": sleep, "run": run, "settle_on_run": settle_on_run},
         name="transcribe-on-ingest",
         daemon=True,
     )
@@ -961,11 +1158,21 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     """
     global _ingest_config
     config = load_ingest_config(env)
-    _ingest_config = config
     if not config.enabled:
+        _ingest_config = _settle_sent_since(config, running=False)
         return None
     policy = load_tool_policy(env)
-    if not policy.allows(TRANSCRIBE_TOOL):
+    policy_unreadable = False
+    if runtime_policy_enabled():
+        try:
+            with policy_operation():
+                policy = active_policy()
+        except Exception:  # noqa: BLE001 - an unreadable runtime policy means wait, never crash startup
+            logger.warning("transcribe_on_ingest: runtime tool policy unreadable, worker waits")
+            policy_unreadable = True
+            policy = ToolPolicy(deny=frozenset({TRANSCRIBE_TOOL, DOWNLOAD_TOOL}))
+    settle_on_run = not policy.allows(TRANSCRIBE_TOOL)
+    if not policy.allows(TRANSCRIBE_TOOL) and not policy_unreadable:
         behavior = (
             "the worker waits for a runtime policy change" if runtime_policy_enabled() else "the worker stays off"
         )
@@ -979,8 +1186,9 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
             TRANSCRIBE_TOOL,
         )
         if not runtime_policy_enabled():
+            _ingest_config = _settle_sent_since(config, running=False)
             return None
-    if config.fetch and not policy.allows(DOWNLOAD_TOOL):
+    if config.fetch and not policy.allows(DOWNLOAD_TOOL) and not policy_unreadable:
         logger.warning(
             "%s=1 but %s / %s do not offer %s; the worker transcribes cached audio only (list %s to fetch)",
             FETCH_ENV,
@@ -996,17 +1204,14 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         logger.warning(
             "%s=1 but no whisper backend is configured; the worker stays off (WHISPER_URL / WHISPER_BIN)", ENABLED_ENV
         )
+        _ingest_config = _settle_sent_since(config, running=False)
         return None
+    config = replace(config, backend_provider=backend_config.provider)
+    config = _settle_sent_since(config, running=not settle_on_run)
+    _ingest_config = config
+    if settle_on_run:
+        return start_worker(config, settle_on_run=True)
     clear_outage_failures()
     clear_oversized_failures()
-    logger.info(
-        "%s=1: transcribing up to %d voice notes every %.0fs (%s)%s%s",
-        ENABLED_ENV,
-        config.batch,
-        config.interval_s,
-        "configured HTTP provider" if backend_config.provider == "openai_compatible" else "whisper on this machine",
-        f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
-        ", including sent audio" if config.include_sent else ", inbound audio only",
-    )
-    _ingest_config = config
+    _log_ingest_started(config)
     return start_worker(config)
