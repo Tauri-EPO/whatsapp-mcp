@@ -331,6 +331,9 @@ func TestOperatorChatsLargeContactArchiveSearchWithFixedDeadlineBudget(t *testin
 		t.Fatal(err)
 	}
 	server := operatorChatsServer(t, b)
+	// This guard detects large query regressions while allowing race/host
+	// scheduling slack; it is not the production five-second latency SLA.
+	server.Client().Timeout = 30 * time.Second
 	started := time.Now()
 	status, _, found := operatorChatsRequest(t, server, "?query=missing")
 	t.Logf("missing search elapsed=%s", time.Since(started))
@@ -360,12 +363,50 @@ func TestOperatorChatsExpiredDeadlineRefusesResults(t *testing.T) {
 	if err := b.Store.StoreChat("5511999999999@s.whatsapp.net", "Alice", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	b.operatorChatsDeadline = func(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	b.operatorChatsDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
 		return context.WithDeadline(parent, time.Unix(1, 0))
 	}
 	status, _, found := operatorChatsRequest(t, operatorChatsServer(t, b), "?query=alice")
 	if status != 503 || len(found) != 0 {
 		t.Fatalf("expired search returned results: status=%d chats=%+v", status, found)
+	}
+}
+
+func TestOperatorChatsDeadlineExpiresDuringNameResolution(t *testing.T) {
+	b := newSettingsBridge(t)
+	const jid = "5511999999999@s.whatsapp.net"
+	if err := b.Store.StoreChat(jid, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	budgets := make(chan time.Duration, 1)
+	b.operatorChatsDeadline = func(_ context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+		budgets <- budget
+		return ctx, cancel
+	}
+	var resolved atomic.Bool
+	b.operatorChatsResolveNames = func(got context.Context, identities []localContactIdentity, _ string) map[string]localContactIdentity {
+		if got != ctx || len(identities) != 1 || identities[0].JID != jid {
+			t.Errorf("unexpected resolver context/identities: %+v", identities)
+		}
+		resolved.Store(true)
+		// Simulate the deadline firing during a resolver that returns a usable
+		// name after cancellation; the post-loop guard must still refuse it.
+		cancel()
+		return map[string]localContactIdentity{jid: {Name: "Alice", resolved: true}}
+	}
+	status, _, found := operatorChatsRequest(t, operatorChatsServer(t, b), "?query=alice")
+	if !resolved.Load() || status != 503 || len(found) != 0 {
+		t.Fatalf("expired name resolution returned results: resolved=%v status=%d chats=%+v", resolved.Load(), status, found)
+	}
+	select {
+	case budget := <-budgets:
+		if budget != 5*time.Second {
+			t.Fatalf("operator deadline changed: %s", budget)
+		}
+	default:
+		t.Fatal("operator search did not request a deadline")
 	}
 }
 

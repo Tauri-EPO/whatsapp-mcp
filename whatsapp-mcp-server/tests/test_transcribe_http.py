@@ -1,6 +1,5 @@
 """HTTP provider exercised through multipart, real ffmpeg, tools and notes.db."""
 
-import asyncio
 import json
 import subprocess
 import threading
@@ -96,7 +95,7 @@ def test_http_request_deadline_covers_the_entire_stream(tmp_path, monkeypatch, p
         def stream(self, *args, **kwargs):
             return Response()
 
-    monkeypatch.setattr(transcribe, "asyncio", SimpleNamespace(run=asyncio.run, wait_for=wait_for))
+    monkeypatch.setattr(transcribe.asyncio, "wait_for", wait_for)
     monkeypatch.setattr(transcribe.httpx, "AsyncClient", Client)
     source = tmp_path / "note.ogg"
     source.write_bytes(b"fake-audio")

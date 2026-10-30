@@ -792,8 +792,12 @@ async def test_introspection_concurrency_is_bounded(monkeypatch, issuer):
         # finish. Removing the bound leaves no completed refusal and fails.
         excess = [asyncio.create_task(verifier.verify_token(f"slow-excess-{i}")) for i in range(2)]
         tasks.extend(excess)
-        refused = await asyncio.wait_for(asyncio.gather(*excess, return_exceptions=True), 30)
-        assert all(isinstance(result, http_oauth.AuthorizationUnavailableError) for result in refused)
+        done, pending = await asyncio.wait(excess, timeout=2)
+        assert not pending, f"MAX_INTROSPECTIONS={http_oauth.MAX_INTROSPECTIONS}: excess callers were not refused"
+        refused = [task.exception() for task in done]
+        assert all(isinstance(result, http_oauth.AuthorizationUnavailableError) for result in refused), (
+            f"MAX_INTROSPECTIONS={http_oauth.MAX_INTROSPECTIONS}: excess callers must receive an admission refusal"
+        )
         assert len(verifier._introspection_flights) == http_oauth.MAX_INTROSPECTIONS
         assert len(calls) == http_oauth.MAX_INTROSPECTIONS
     finally:
