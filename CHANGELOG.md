@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.9.2](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.1...v2.9.2) (2026-10-30)
+
+
+### Bug fixes
+
+* back off ingest checks, improve transcription probes and preserve reset intents ([#780](https://github.com/Tauri-EPO/whatsapp-mcp/issues/780)) ([69ff989](https://github.com/Tauri-EPO/whatsapp-mcp/commit/69ff989cc0f192290b4c72ee1262ddfb5188a723))
+* declare charset=utf-8 on HTTP JSON and SSE responses ([#759](https://github.com/Tauri-EPO/whatsapp-mcp/issues/759)) ([ea02295](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ea0229546a98b74c1fec999fd6980c1062502ecb))
+* keep MCP HTTP sessions for 24 h and use a TCP healthcheck ([#765](https://github.com/Tauri-EPO/whatsapp-mcp/issues/765)) ([42786b9](https://github.com/Tauri-EPO/whatsapp-mcp/commit/42786b9d47066f22c0674fcf71af76059d0158c8)), closes [#757](https://github.com/Tauri-EPO/whatsapp-mcp/issues/757) [#754](https://github.com/Tauri-EPO/whatsapp-mcp/issues/754)
+* smoke.sh checks its own checkout; confine its test fixtures' git discovery ([#782](https://github.com/Tauri-EPO/whatsapp-mcp/issues/782)) ([79228a3](https://github.com/Tauri-EPO/whatsapp-mcp/commit/79228a3f778a60045238761dbc6d122960e2ccd0))
+* transcribe sent voice notes only from the first start with them on ([#752](https://github.com/Tauri-EPO/whatsapp-mcp/issues/752)) ([ea3308e](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ea3308eeab7f1b7bc2ef98d3eaafdf8e359f9021)), closes [#751](https://github.com/Tauri-EPO/whatsapp-mcp/issues/751)
+
+
+### Dependencies
+
+* bump certifi and opentelemetry-api in the MCP server lock ([#766](https://github.com/Tauri-EPO/whatsapp-mcp/issues/766)) ([0f93b8d](https://github.com/Tauri-EPO/whatsapp-mcp/commit/0f93b8dbd4d69011d09333712ed77f62d5d01b88))
+* bump modernc.org/sqlite from 1.60.1 to 1.61.0 in /whatsapp-bridge in the gomod-version-updates group ([#760](https://github.com/Tauri-EPO/whatsapp-mcp/issues/760)) ([dfdd5b8](https://github.com/Tauri-EPO/whatsapp-mcp/commit/dfdd5b838bfe94367925ec0309b77e3f23057e6c))
+* bump pypdf from 6.21.2 to 6.21.3 in /whatsapp-mcp-server in the pip-version-updates group ([#783](https://github.com/Tauri-EPO/whatsapp-mcp/issues/783)) ([2a78244](https://github.com/Tauri-EPO/whatsapp-mcp/commit/2a7824402fd3ba688a7e73e2fe29435647bad5bc))
+
 ## [2.9.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.0...v2.9.1) (2026-10-21)
 
 
