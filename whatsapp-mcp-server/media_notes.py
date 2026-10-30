@@ -137,7 +137,11 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     conn = notes_connection(path, create=create, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
     if conn is None:
         return None
-    conn.executescript(SCHEMA)
+    try:
+        conn.executescript(SCHEMA)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -512,40 +516,46 @@ def clear_dated_notes_with_prefix(key: str, prefix: str) -> int:
 
 def read_meta(key: str) -> str | None:
     """A notes_meta value, or None when it (or notes.db itself) is not there."""
-    conn = _connect(create=False)
-    if conn is None:
-        return None
+    conn = None
     try:
+        conn = _connect(create=False)
+        if conn is None:
+            return None
         row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     return None if row is None else str(row[0])
 
 
 def claim_meta(key: str, value: str, *, replace: bool = False) -> str:
     """The stored value of key, storing ``value`` first when there is none (or always, with replace)."""
-    conn = _connect(create=True)
-    assert conn is not None
+    conn = None
     try:
+        conn = _connect(create=True)
+        assert conn is not None
         with conn:
             conflict = "DO UPDATE SET value = excluded.value" if replace else "DO NOTHING"
             conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
             row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     return str(row[0])
 
 
 def forget_meta(key: str) -> None:
     """Delete a notes_meta value; no notes.db means there is nothing to forget."""
-    conn = _connect(create=False)
-    if conn is None:
-        return
+    conn = None
     try:
+        conn = _connect(create=False)
+        if conn is None:
+            return
         with conn:
             conn.execute("DELETE FROM notes_meta WHERE key = ?", (key,))
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:

@@ -18,6 +18,27 @@ SHA_B = "bb" * 32  # video with Bob only
 SHA_X = "ee" * 32  # nobody has this file
 
 
+def test_connect_closes_handle_when_schema_fails(monkeypatch, tmp_path):
+    conn = sqlite3.connect(tmp_path / "notes.db")
+    monkeypatch.setattr(media_notes, "notes_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(media_notes, "SCHEMA", "invalid SQL")
+    with pytest.raises(sqlite3.OperationalError):
+        media_notes._connect(create=True)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("operation", ["read_meta", "claim_meta", "forget_meta"])
+def test_meta_closes_handle_when_statement_fails(monkeypatch, tmp_path, operation):
+    conn = sqlite3.connect(tmp_path / "notes.db")
+    monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: conn)
+    args = ("test_key", "value") if operation == "claim_meta" else ("test_key",)
+    with pytest.raises(sqlite3.OperationalError):
+        getattr(media_notes, operation)(*args)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+
+
 @pytest.fixture
 def notes_store(paired_dbs):
     with paired_dbs.messages() as c:
