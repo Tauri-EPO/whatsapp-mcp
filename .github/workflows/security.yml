@@ -92,7 +92,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install bandit
-        run: pip install bandit
+        run: pip install bandit==1.9.4
 
       - name: Run bandit
         run: bandit -r whatsapp-mcp-server/ -ll
