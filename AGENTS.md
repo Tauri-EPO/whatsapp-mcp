@@ -365,6 +365,8 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 
 `publish.yml` pushes the `main` and `sha-<7>` images to GHCR on every merge to `main` except the release commit (§4); `release.yml` (release-please) maintains the release PR and, when it merges, builds that commit once and tags it `vX.Y.Z` / `X.Y` / `latest` / `main` / `sha-<7>` through the reusable `build-push.yml`; `release-cut.yml` merges that PR once a day. Dependabot auto-merge was removed; merge its PRs through the normal routine.
 
+Bandit applies `nosec B608` to an entire multiline statement. `tests/test_bandit_nosec_inventory.py` fingerprints every such production statement with SHA-256 over `ast.unparse` (formatting/comments removed, literals and expressions retained), including its enclosing function and one-line reason in `.github/bandit-nosec.json`. New, changed or removed sites fail pytest: re-review the complete SQL construction and its bound parameters before updating the inventory. A comment on one line cannot silently approve new interpolation on another line.
+
 ## 7. Environment variables
 
 | Variable | Default | Purpose |
