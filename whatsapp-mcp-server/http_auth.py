@@ -427,7 +427,8 @@ class Utf8CharsetMiddleware:
                         has_charset = any(
                             parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parameters
                         )
-                        if media_type in _CHARSET_TYPES and not has_charset:
+                        is_json_suffix = media_type.startswith(b"application/") and media_type.endswith(b"+json")
+                        if (media_type in _CHARSET_TYPES or is_json_suffix) and not has_charset:
                             value = value.rstrip(b"; \t\r\n") + b"; charset=utf-8"
                     headers.append((name, value))
                 message = dict(message, headers=headers)
