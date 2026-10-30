@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -656,3 +657,16 @@ def test_http_provider_unavailable_fails_smoke(stack: Stack) -> None:
     )
     assert result.returncode == 1
     assert "HTTP transcription provider does not answer" in result.stdout
+
+
+@pytest.mark.parametrize("reachable,expected", [(True, 0), (False, 1), (None, 1)])
+def test_http_provider_embedded_probe_obeys_reachability(tmp_path: Path, reachable: bool | None, expected: int) -> None:
+    # Execute the Python actually shipped in the shell, rather than teaching
+    # fake Docker to return a status without evaluating the probe result.
+    program = SMOKE.read_text().split("elif mcp_exec python -c '", 1)[1].split("\n' </dev/null", 1)[0]
+    (tmp_path / "transcribe.py").write_text(
+        "def load_config(): return None\n"
+        f"def probe_http_provider(config, key): return ({reachable!r}, 'fake-probe')\n"
+    )
+    result = subprocess.run([sys.executable, "-c", program], cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode == expected, result.stdout + result.stderr

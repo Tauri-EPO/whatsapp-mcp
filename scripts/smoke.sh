@@ -318,7 +318,7 @@ if [ "$transcription_provider" = openai_compatible ]; then
   elif mcp_exec python -c 'from transcribe import load_config, probe_http_provider
 import os, sys
 try:
-    ok = probe_http_provider(load_config(), os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY"))
+    ok, _ = probe_http_provider(load_config(), os.getenv("WHATSAPP_TRANSCRIPTION_API_KEY"))
 except Exception:
     ok = False
 sys.exit(0 if ok else 1)
