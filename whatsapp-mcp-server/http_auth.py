@@ -428,7 +428,7 @@ class Utf8CharsetMiddleware:
                             parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parameters
                         )
                         if media_type in _CHARSET_TYPES and not has_charset:
-                            value = value + b"; charset=utf-8"
+                            value = value.rstrip(b"; \t\r\n") + b"; charset=utf-8"
                     headers.append((name, value))
                 message = dict(message, headers=headers)
             await send(message)

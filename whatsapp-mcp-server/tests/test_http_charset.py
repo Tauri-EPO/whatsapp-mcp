@@ -86,6 +86,9 @@ def test_own_json_replies_declare_utf8():
         (b"application/json", b"application/json; charset=utf-8"),
         (b"text/event-stream", b"text/event-stream; charset=utf-8"),
         (b"Application/JSON", b"Application/JSON; charset=utf-8"),
+        (b"application/json;", b"application/json; charset=utf-8"),
+        (b"application/json; \t; ", b"application/json; charset=utf-8"),
+        (b"text/event-stream \t", b"text/event-stream; charset=utf-8"),
         (b"application/json; xcharset=1", b"application/json; xcharset=1; charset=utf-8"),
         (
             b'application/json; profile="urn:charset=example"',
