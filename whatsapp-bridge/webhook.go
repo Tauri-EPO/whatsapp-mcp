@@ -238,7 +238,7 @@ func (w *webhookSender) sendJSON(ctx context.Context, payload any) {
 		bridgeLog.Errorf("building webhook request: %v", err)
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", jsonContentType)
 	// Authenticate to the hub's fail-closed inbound webhook route with the
 	// shared bridge token, via a dedicated header so it can never clobber a
 	// receiver's own Authorization-based auth (see the token field doc

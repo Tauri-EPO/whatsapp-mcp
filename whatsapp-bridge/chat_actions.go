@@ -56,7 +56,7 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 			senderJID = chatJID
 		}
 		msg := client.BuildReaction(chatJID, senderJID, req.MessageID, *req.Emoji)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
 		if !b.allowSendAction(w, r.WithContext(ctx), chatJID.String()) {
@@ -126,7 +126,7 @@ func (b *Bridge) handleTyping() http.HandlerFunc {
 		err = sendPresence(ctx, recipientJID, state, types.ChatPresenceMediaText)
 
 		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", jsonContentType)
 
 		// Send response
 		if err != nil {

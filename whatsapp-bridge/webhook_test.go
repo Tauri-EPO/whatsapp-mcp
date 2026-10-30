@@ -188,8 +188,8 @@ func TestSendWebhookAttachesBridgeTokenHeader(t *testing.T) {
 	if gotToken != token {
 		t.Fatalf("X-Bridge-Token header = %q, want %q", gotToken, token)
 	}
-	if gotContentType != "application/json" {
-		t.Fatalf("Content-Type header = %q, want application/json", gotContentType)
+	if gotContentType != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type header = %q, want application/json; charset=utf-8", gotContentType)
 	}
 }
 

@@ -27,20 +27,6 @@ from tests.conftest import ALICE, BOB, FAMILY
 from tests.test_transcribe_ingest import FakeBackend, _add_audio
 
 
-@pytest.fixture
-def runtime_archive(paired_dbs, monkeypatch):
-    bridge = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "runtime_settings.go"
-    schema = re.search(r"const runtimeSettingsSchema = `([^`]+)`", bridge.read_text()).group(1)
-    with paired_dbs.messages() as conn:
-        conn.executescript(schema)
-        conn.execute("PRAGMA journal_mode=WAL")
-    monkeypatch.setattr(runtime_settings, "_startup_env", None)
-    monkeypatch.setattr(runtime_settings, "_warned", {})
-    yield paired_dbs
-    tool_policy.set_active_policy(None)
-    main.mcp.runtime_tool_policy = False
-
-
 def patch(store, changes):
     """Simulate the bridge's committed transaction; Python production never writes."""
     with store.messages() as conn:

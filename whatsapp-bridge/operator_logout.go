@@ -156,7 +156,7 @@ func (p *operatorPairing) logout(w http.ResponseWriter, r *http.Request) {
 	p.b.Log.Infof("Operator logout removed session snapshots: count=%d", snapshotsRemoved)
 	response := fmt.Sprintf("{\"server_unlinked\":%t,\"local_session_wiped\":true,\"session_snapshots_removed\":%d}\n", serverUnlinked, snapshotsRemoved)
 	// Exit immediately after flushing: a fixed length avoids a truncated chunked body.
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.Header().Set("Content-Length", fmt.Sprint(len(response)))
 	w.WriteHeader(200)
 	_, _ = io.WriteString(w, response)

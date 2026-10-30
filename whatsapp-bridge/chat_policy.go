@@ -356,7 +356,7 @@ func rejectByChatPolicy(w http.ResponseWriter, policy chatPolicy, target string)
 	if policy.Allows(target) {
 		return false
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,

@@ -303,7 +303,7 @@ func purgeOneUsing(root *os.Root, row mediaRow, dryRun bool, finder *cachedMedia
 }
 
 func writePurgeResponse(w http.ResponseWriter, status int, resp MediaPurgeResponse) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", jsonContentType)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
 }
