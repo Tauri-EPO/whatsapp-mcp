@@ -594,6 +594,7 @@ def _transcribe_http(source: Path, config: WhisperConfig, language: str) -> str:
         try:
             return await asyncio.wait_for(_transcribe_http_request(source, config, language), config.timeout_s)
         except TimeoutError:
+            _transcription_activity(config, "last_failure_at")
             raise BackendUnavailableError("HTTP transcription backend exceeded request deadline") from None
 
     return asyncio.run(bounded())
@@ -634,12 +635,20 @@ async def _transcribe_http_request(source: Path, config: WhisperConfig, language
                             raise BackendUnavailableError("HTTP transcription backend response exceeds limits")
                         body.extend(chunk)
                     payload = json.loads(body)
-    except (httpx.HTTPError, httpx.InvalidURL):
+    except TranscriptionError:
+        _transcription_activity(config, "last_failure_at")
+        raise
+    except httpx.HTTPError:
+        _transcription_activity(config, "last_failure_at")
+        raise BackendUnavailableError("HTTP transcription backend request failed") from None
+    except httpx.InvalidURL:
         raise BackendUnavailableError("HTTP transcription backend request failed") from None
     except (ValueError, RecursionError):
+        _transcription_activity(config, "last_failure_at")
         raise TranscriptionError("HTTP transcription backend returned invalid JSON") from None
     text = payload.get("text") if isinstance(payload, dict) else None
     if not isinstance(text, str) or not text.strip():
+        _transcription_activity(config, "last_failure_at")
         raise TranscriptionError("HTTP transcription backend returned no non-empty text field")
     return text.strip()
 
@@ -648,11 +657,7 @@ def transcribe_file(
     audio_path: str, language: str | None = None, config: WhisperConfig | None = None, *, source: str = "tool"
 ) -> dict:
     config = config or load_config()
-    try:
-        result = _metered_transcribe_file(audio_path, language, config, source=source)
-    except TranscriptionError:
-        _transcription_activity(config, "last_failure_at")
-        raise
+    result = _metered_transcribe_file(audio_path, language, config, source=source)
     _transcription_activity(config, "last_success_at")
     return result
 

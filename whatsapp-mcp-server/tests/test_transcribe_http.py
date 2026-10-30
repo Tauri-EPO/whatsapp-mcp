@@ -467,6 +467,27 @@ def test_probe_retries_only_connection_transport_errors(provider, monkeypatch, f
     assert len(calls) == attempts
 
 
+def test_unsupported_input_does_not_stamp_provider_failure(provider, tmp_path):
+    source = tmp_path / "unsupported.ogg"
+    source.write_bytes(b"fake non-audio bytes")
+    with pytest.raises(TranscriptionError):
+        transcribe_file(str(source))
+    assert provider["calls"] == []
+    status = transcribe.describe_status()
+    assert status["last_failure_at"] is None and status["last_success_at"] is None
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_provider_response_failure_stamps_activity(provider, tmp_path, status):
+    source = tmp_path / "voice.wav"
+    _audio(source)
+    provider["status"] = status
+    with pytest.raises(TranscriptionError):
+        transcribe_file(str(source))
+    assert len(provider["calls"]) == 1
+    assert transcribe.describe_status()["last_failure_at"]
+
+
 def test_auto_language_omitted(provider, tmp_path, monkeypatch):
     monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_LANGUAGE", "auto")
     source = tmp_path / "note.ogg"
