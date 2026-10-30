@@ -422,8 +422,12 @@ class Utf8CharsetMiddleware:
                 headers = []
                 for name, value in message.get("headers", []):
                     if name.lower() == b"content-type":
-                        media_type = value.split(b";", 1)[0].strip().lower()
-                        if media_type in _CHARSET_TYPES and b"charset=" not in value.lower():
+                        media_type, *parameters = value.split(b";")
+                        media_type = media_type.strip().lower()
+                        has_charset = any(
+                            parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parameters
+                        )
+                        if media_type in _CHARSET_TYPES and not has_charset:
                             value = value + b"; charset=utf-8"
                     headers.append((name, value))
                 message = dict(message, headers=headers)
