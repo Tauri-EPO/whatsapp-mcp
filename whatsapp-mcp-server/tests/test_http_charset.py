@@ -47,11 +47,21 @@ def _rpc(client, method: str, params: dict | None = None):
     )
     assert response.status_code == 200, response.text
     content_type = response.headers["content-type"]
+    assert "charset=utf-8" in content_type, f"Missing UTF-8 charset in Content-Type: {content_type!r}"
     charset = content_type.split("charset=", 1)[1]
     text = response.content.decode(charset)  # read the bytes the way the header tells a client to
     if content_type.startswith("text/event-stream"):
         text = next(line[len("data: ") :] for line in text.splitlines() if line.startswith("data: "))
     return content_type, json.loads(text)["result"]
+
+
+def test_rpc_reports_missing_charset_clearly():
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={"content-type": "application/json"}, content=b'{"result": {}}')
+    )
+    with httpx.Client(transport=transport, base_url="http://testserver") as client:
+        with pytest.raises(AssertionError, match="Missing UTF-8 charset in Content-Type: 'application/json'"):
+            _rpc(client, "tools/list")
 
 
 @pytest.mark.parametrize(("json_response", "media_type"), [(True, "application/json"), (False, "text/event-stream")])
