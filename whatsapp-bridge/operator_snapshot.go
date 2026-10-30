@@ -170,6 +170,9 @@ func readSentResetIntent(root *os.Root) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Size() > 128 {
 		return nil, errors.New("unsafe sent audio reset marker")
 	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("sent audio reset marker must be owner-only")
+	}
 	f, err := root.Open(sentResetMarker)
 	if err != nil {
 		return nil, err
@@ -178,6 +181,9 @@ func readSentResetIntent(root *os.Root) ([]byte, error) {
 	after, err := f.Stat()
 	if err != nil || !os.SameFile(info, after) {
 		return nil, errors.New("sent audio reset marker changed while opening")
+	}
+	if runtime.GOOS != "windows" && after.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("sent audio reset marker must remain owner-only")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 129))
 	if err != nil {

@@ -56,6 +56,9 @@ func archiveFixture(t *testing.T, withNotes bool) (*Bridge, *httptest.Server) {
 		if _, err := db.Exec(`CREATE TABLE notes(target_type TEXT,target_id TEXT,key TEXT,value TEXT,updated_at TEXT,source TEXT,version INTEGER,PRIMARY KEY(target_type,target_id,key,version)); CREATE TABLE media_notes(sha256 TEXT,key TEXT,value TEXT,updated_at TEXT,PRIMARY KEY(sha256,key)); INSERT INTO notes VALUES('chat','111@s.whatsapp.net','summary','sample note','2026-10-01','','1'); INSERT INTO media_notes VALUES('fake-hash','transcript','sample transcription','2026-10-01')`); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := db.Exec(`CREATE TABLE notes_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO notes_meta VALUES('ingest_sent_since','2026-10-01 00:00:00+00:00')`); err != nil {
+			t.Fatal(err)
+		}
 	}
 	session, err := sql.Open("sqlite", sqliteURI(storePath("whatsapp.db"), sqliteWriterOptions))
 	if err != nil {
@@ -237,7 +240,7 @@ func TestOperatorExportArchiveHashesCountsNotesMediaAndSecrets(t *testing.T) {
 				t.Fatalf("messages count=%d", entry.Count)
 			}
 		}
-		for _, name := range []string{"chats.json", "contacts.json", "notes.jsonl", "transcriptions.jsonl"} {
+		for _, name := range []string{"chats.json", "contacts.json", "notes.jsonl", "transcriptions.jsonl", "notes_meta.jsonl"} {
 			if len(files[name]) < 3 {
 				t.Fatalf("missing %s", name)
 			}
@@ -256,9 +259,98 @@ func TestOperatorExportArchiveHashesCountsNotesMediaAndSecrets(t *testing.T) {
 			if !ok || string(files[ref]) != "cached sample bytes" {
 				t.Fatal("media reference missing or wrong")
 			}
-		} else if row["media_ref"] != nil || len(files) != 7 {
+		} else if row["media_ref"] != nil || len(files) != 8 {
 			t.Fatal("media included by default")
 		}
+	}
+}
+
+func TestOperatorExportSentResetIntent(t *testing.T) {
+	for _, kind := range []string{"present", "empty", "absent", "symlink", "directory", "oversized", "public", "non-ascii", "orphan"} {
+		t.Run(kind, func(t *testing.T) {
+			b, server := archiveFixture(t, kind != "orphan")
+			value := []byte("fake-pending-reset")
+			if kind == "empty" {
+				value = []byte{}
+			}
+			markerPath := storePath(sentResetMarker)
+			var err error
+			switch kind {
+			case "absent":
+			case "symlink":
+				err = os.Symlink("notes.db", markerPath)
+				if err != nil && runtime.GOOS == "windows" {
+					t.Skip("symlink creation unavailable")
+				}
+			case "directory":
+				err = os.Mkdir(markerPath, 0o700)
+			default:
+				if kind == "oversized" {
+					value = bytes.Repeat([]byte{'x'}, 129)
+				}
+				if kind == "non-ascii" {
+					value = []byte{255}
+				}
+				err = os.WriteFile(markerPath, value, 0o600)
+				if err == nil && kind == "public" {
+					if runtime.GOOS == "windows" {
+						t.Skip("POSIX permissions")
+					}
+					err = os.Chmod(markerPath, 0o644)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := archiveRequest(t, server, "GET", "/operator/v1/export")
+			defer func() { _ = response.Body.Close() }()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			valid := kind == "present" || kind == "empty" || kind == "absent"
+			if !valid {
+				if response.StatusCode != 503 {
+					t.Fatalf("unsafe export status=%d", response.StatusCode)
+				}
+				return
+			}
+			if response.StatusCode != 200 {
+				t.Fatalf("export status=%d", response.StatusCode)
+			}
+			archive, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, file := range archive.File {
+				if file.Name != sentResetMarker {
+					continue
+				}
+				found = true
+				if file.Mode().Perm() != 0o600 {
+					t.Fatal("export marker is not owner-only")
+				}
+				reader, err := file.Open()
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := io.ReadAll(reader)
+				_ = reader.Close()
+				if err != nil || !bytes.Equal(data, value) {
+					t.Fatalf("marker changed err=%v", err)
+				}
+			}
+			if found != (kind != "absent") {
+				t.Fatal("reset marker presence changed")
+			}
+			if kind != "absent" {
+				data, err := b.StoreRoot.ReadFile(sentResetMarker)
+				if err != nil || !bytes.Equal(data, value) {
+					t.Fatal("source marker changed")
+				}
+			}
+		})
 	}
 }
 
