@@ -211,6 +211,8 @@ async def test_legacy_sse_stream_and_message_posts_declare_utf8(monkeypatch):
         (b"application/json; charset=", b"application/json; charset=utf-8"),
         (b'application/json; charset=""', b"application/json; charset=utf-8"),
         (b'application/json; CHARSET = ""; foo=bar', b"application/json; charset=utf-8; foo=bar"),
+        (b'application/json; profile="unfinished; ', b'application/json; profile="unfinished; '),
+        (b'application/json; profile="unfinished\\"', b'application/json; profile="unfinished\\"'),
         (b"application/json; CHARSET = utf-8", b"application/json; CHARSET = utf-8"),
         (b"application/json; charset=utf-8", b"application/json; charset=utf-8"),
         (b"application/json; charset=iso-8859-1", b"application/json; charset=iso-8859-1"),  # declared: left alone

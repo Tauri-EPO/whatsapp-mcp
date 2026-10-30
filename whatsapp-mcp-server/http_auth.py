@@ -416,7 +416,7 @@ def _media_type_parts(value: bytes) -> list[bytes]:
         elif char == ord(";") and not quoted:
             parts.append(value[start:index])
             start = index + 1
-    return [*parts, value[start:]]
+    return [] if quoted else [*parts, value[start:]]
 
 
 class Utf8CharsetMiddleware:
@@ -441,6 +441,9 @@ class Utf8CharsetMiddleware:
                 for name, value in message.get("headers", []):
                     if name.lower() == b"content-type":
                         parts = _media_type_parts(value)
+                        if not parts:  # Appending to an unterminated quote would hide the charset inside its value.
+                            headers.append((name, value))
+                            continue
                         media_type = parts[0].strip().lower()
                         is_json_suffix = media_type.startswith(b"application/") and media_type.endswith(b"+json")
                         if media_type not in _CHARSET_TYPES and not is_json_suffix:
