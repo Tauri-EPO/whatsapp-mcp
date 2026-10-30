@@ -1,9 +1,10 @@
 """Native and POSIX shells, with Windows WSL shims excluded."""
 
 import os
+import shlex
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -79,7 +80,7 @@ def test_failed_git_probe_still_finds_standard_install(tmp_path):
         raise OSError("unavailable launcher")
 
     assert bash_helpers.resolve_bash(
-        platform="win32", which=lambda name: "missing-git", env={"ProgramFiles": str(tmp_path)}, run=run
+        platform="win32", which=lambda name: str(tmp_path / "missing-git"), env={"ProgramFiles": str(tmp_path)}, run=run
     ) == str(bash)
 
 
@@ -126,7 +127,13 @@ def test_harness_fake_precedes_git_bash_bundled_curl(tmp_path):
 def test_documented_scripts_are_executable_with_working_shebangs():
     root = Path(__file__).resolve().parents[2]
     git = shutil.which("git")
-    assert git is not None
+    if git is None:
+        pytest.skip("script mode check DID NOT RUN: needs git and a checkout")
+    checkout = subprocess.run(
+        [git, "rev-parse", "--is-inside-work-tree"], cwd=root, capture_output=True, text=True, timeout=20
+    )
+    if checkout.returncode or checkout.stdout.strip() != "true":
+        pytest.skip("script mode check DID NOT RUN: source tree is not a git checkout")
     done = subprocess.run(
         [git, "ls-files", "-s", "--", "scripts/*.sh"], cwd=root, capture_output=True, text=True, check=True, timeout=20
     )
@@ -134,9 +141,12 @@ def test_documented_scripts_are_executable_with_working_shebangs():
     for entry in done.stdout.splitlines():
         metadata, name = entry.split("\t", 1)
         assert metadata.split()[0] == "100755", name
-        assert (root / name).read_bytes().splitlines(keepends=True)[0] in (b"#!/usr/bin/env bash\n", b"#!/bin/sh\n"), (
-            name
-        )
+        line = (root / name).read_bytes().splitlines(keepends=True)[0]
+        assert line.startswith(b"#!") and line.endswith(b"\n") and b"\r" not in line, name
+        interpreter = shlex.split(line[2:].decode("utf-8").strip())
+        assert interpreter and PurePosixPath(interpreter[0]).is_absolute(), name
+        if interpreter[0] == "/usr/bin/env":
+            assert any(arg and not arg.startswith("-") for arg in interpreter[1:]), name
 
 
 def test_restricted_path_exposes_no_host_tools(tmp_path):
@@ -160,3 +170,45 @@ def test_restricted_path_exposes_no_host_tools(tmp_path):
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout == "restricted"
+
+
+@pytest.mark.parametrize("inherit,flag", [(True, "inherit"), (False, "")])
+def test_windows_command_argv_is_covered_on_every_platform(tmp_path, inherit, flag):
+    script = tmp_path / "script with spaces.sh"
+    bindir = tmp_path / "fake bin"
+    assert bash_helpers.bash_command(
+        "C:/Git/bin/bash.exe",
+        script,
+        "argument with spaces",
+        bin_dir=bindir,
+        inherit_path=inherit,
+        platform="win32",
+    ) == [
+        "C:/Git/bin/bash.exe",
+        "-c",
+        'export PATH="$(cygpath -u "$1")${2:+:$PATH}"; shift 2; exec "$BASH" "$@"',
+        "test-bash",
+        str(bindir),
+        flag,
+        str(script),
+        "argument with spaces",
+    ]
+
+
+def test_default_discovery_is_cached_but_injected_discovery_is_not(monkeypatch):
+    calls = []
+
+    def discover(**kwargs):
+        calls.append(kwargs)
+        return "native-bash"
+
+    bash_helpers._default_bash.cache_clear()
+    monkeypatch.setattr(bash_helpers, "_discover_bash", discover)
+    try:
+        assert bash_helpers.resolve_bash() == bash_helpers.resolve_bash() == "native-bash"
+        assert len(calls) == 1
+        bash_helpers.resolve_bash(platform="linux")
+        bash_helpers.resolve_bash(platform="linux")
+        assert len(calls) == 3
+    finally:
+        bash_helpers._default_bash.cache_clear()

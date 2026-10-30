@@ -1,6 +1,7 @@
 """HTTP provider exercised through multipart, real ffmpeg, tools and notes.db."""
 
 import json
+import math
 import subprocess
 import threading
 import time
@@ -31,12 +32,12 @@ from transcribe import BackendUnavailableError, TranscriptionError, load_config,
 KEY = "fake-provider-key-0123456789abcdef"
 
 
-def _audio(path, seconds=0.1):
+def _audio(path, seconds=0.1, sample_rate=16000):
     with wave.open(str(path), "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
-        audio.setframerate(16000)
-        audio.writeframes(b"\0\0" * int(16000 * seconds))
+        audio.setframerate(sample_rate)
+        audio.writeframes(b"\0\0" * int(sample_rate * seconds))
 
 
 def _add_audio(store, message_id, chat_jid):
@@ -385,16 +386,48 @@ def test_unicode_audio_upload_with_non_utf8_default_encoding(provider, tmp_path,
     assert provider["calls"][0]["fields"]["file"].startswith(b"OggS")
 
 
-def test_whole_file_budget_with_real_conversion_and_slow_http(provider, tmp_path):
+def test_whole_file_budget_with_real_conversion_and_slow_http(provider, tmp_path, monkeypatch):
     source = tmp_path / "long-real.wav"
-    _audio(source, seconds=810)
-    # Two real uploads need at least 24 s if each gets a fresh 15 s timeout.
-    # A shared 15 s deadline leaves 8 s of scheduler slack under the bound.
-    provider["delay"] = 12
+    # Scale only the chunk interval for this budget test: real ffmpeg and HTTP
+    # still run, but two tiny silence parts avoid encoding ten minutes of audio.
+    _audio(source, seconds=0.15, sample_rate=8000)
+
+    def short_segments(command, **kwargs):
+        command = list(command)
+        if "-segment_time" in command:
+            command[command.index("-segment_time") + 1] = "0.1"
+        return subprocess.run(command, **kwargs)
+
+    monkeypatch.setattr(
+        transcribe,
+        "subprocess",
+        SimpleNamespace(
+            run=short_segments,
+            DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired,
+            CalledProcessError=subprocess.CalledProcessError,
+        ),
+    )
+    probe_dir = tmp_path / "conversion-probe"
+    probe_dir.mkdir()
     started = time.monotonic()
+    parts, _ = transcribe._http_parts(str(source), str(probe_dir), started + 120)
+    preparation_s = time.monotonic() - started
+    assert len(parts) == 2
+    budget = math.ceil(2 * preparation_s) + 2
+    prepare = transcribe._http_parts
+
+    def measured_preparation(audio_path, work_dir, deadline):
+        parts, duration = prepare(audio_path, work_dir, deadline)
+        assert len(parts) == 2
+        # Size the real provider delay from what conversion actually left, so
+        # even a faster warmed conversion still requires one shared deadline.
+        provider["delay"] = (deadline - time.monotonic()) * 0.75
+        return parts, duration
+
+    monkeypatch.setattr(transcribe, "_http_parts", measured_preparation)
     with pytest.raises(BackendUnavailableError, match="deadline"):
-        transcribe_file(str(source), config=replace(load_config(), timeout_s=15))
-    assert time.monotonic() - started < 23
+        transcribe_file(str(source), config=replace(load_config(), timeout_s=budget))
     assert provider["calls"], "the real HTTP provider was never reached"
     assert all(call["fields"]["file"].startswith(b"OggS") for call in provider["calls"])
 

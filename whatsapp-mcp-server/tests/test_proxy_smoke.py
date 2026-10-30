@@ -68,7 +68,7 @@ esac
         },
         capture_output=True,
         text=True,
-        timeout=180,  # Git Bash launches many short-lived fake commands on Windows.
+        timeout=180 if os.name == "nt" else 30,  # Native process startup is slower on Windows.
     )
     assert (result.returncode == 0) == (failure == ""), result.stdout + result.stderr
     assert ("proxy smoke -> PASS" in result.stdout) == (failure == "")

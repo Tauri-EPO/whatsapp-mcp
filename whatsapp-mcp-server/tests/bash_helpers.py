@@ -4,15 +4,31 @@ import os
 import shutil
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 BASH_SKIP_REASON = "script tests DID NOT RUN: needs Bash; on Windows install Git for Windows with native Bash"
 
 
-def resolve_bash(*, platform=sys.platform, which=shutil.which, env=None, run=subprocess.run) -> str | None:
+def resolve_bash(*, platform=None, which=None, env=None, run=None) -> str | None:
+    if platform is None and which is None and env is None and run is None:
+        return _default_bash()
+    return _discover_bash(
+        platform=sys.platform if platform is None else platform,
+        which=shutil.which if which is None else which,
+        env=os.environ if env is None else env,
+        run=subprocess.run if run is None else run,
+    )
+
+
+@cache
+def _default_bash() -> str | None:
+    return _discover_bash(platform=sys.platform, which=shutil.which, env=os.environ, run=subprocess.run)
+
+
+def _discover_bash(*, platform, which, env, run) -> str | None:
     if platform != "win32":
         return which("bash")
-    env = os.environ if env is None else env
     roots = []
     git = which("git")
     if git:
@@ -33,15 +49,21 @@ def resolve_bash(*, platform=sys.platform, which=shutil.which, env=None, run=sub
             roots.append(Path(base) / suffix)
     # Never fall back to PATH's bash.exe: System32's executable launches WSL.
     for root in roots:
+        # Direct usr/bin/bash leaves PATH unchanged: on Windows this host's
+        # env-bash fake executables then select the System32 WSL shim (exit 127).
+        # The launcher installs native Bash/Git helper paths; bash_command puts
+        # the explicitly chosen fake directory ahead of those tools afterwards.
         bash = root / "bin" / "bash.exe"
         if bash.is_file() and (root / "usr" / "bin" / "msys-2.0.dll").is_file():
             return str(bash)
     return None
 
 
-def bash_command(bash: str, script: Path, *args: str, bin_dir: Path, inherit_path: bool = True) -> list[str]:
+def bash_command(
+    bash: str, script: Path, *args: str, bin_dir: Path, inherit_path: bool = True, platform=sys.platform
+) -> list[str]:
     """Restore the explicit fake directory, or restrict PATH to it for deny tests."""
-    if sys.platform != "win32":
+    if platform != "win32":
         return [bash, str(script), *args]
     return [
         bash,

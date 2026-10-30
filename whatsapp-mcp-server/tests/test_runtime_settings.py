@@ -299,7 +299,7 @@ def test_operator_logout_script_sends_idle_to_private_http_only():
     thread.start()
     try:
         root = Path(__file__).resolve().parents[2]
-        command = [bash, "scripts/operator-logout.sh"]
+        command = [bash, "scripts/operator-logout.sh"] if os.name == "nt" else ["./scripts/operator-logout.sh"]
         result = subprocess.run(
             [*command, f"http://127.0.0.1:{server.server_port}", "idle"],
             cwd=root,
