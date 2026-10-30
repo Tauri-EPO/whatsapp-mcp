@@ -2050,6 +2050,33 @@ def test_remote_bridge_blip_retries_next_walk_without_backoff(paired_dbs, monkey
     assert not transcribe_worker._cache_checks
 
 
+def test_only_the_same_final_remote_answer_is_silenced(paired_dbs, monkeypatch, caplog):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+    clock, reason = [0], ["fake cooldown A"]
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+
+    def download(*args):
+        if reason[0] == "outage":
+            raise ToolError("bridge_unavailable", "fake bridge exception")
+        raise ToolError("media_retry_backoff", reason[0])
+
+    with caplog.at_level("DEBUG", logger="whatsapp_mcp"):
+        for instant, answer in [
+            (0, "fake cooldown A"),
+            (300, "fake cooldown A"),
+            (900, "fake cooldown B"),
+            (2100, "outage"),
+        ]:
+            clock[0], reason[0] = instant, answer
+            transcribe_worker.find_pending(10, fetch=True, download=download)
+    cooldowns = [r for r in caplog.records if "waits for its media retry cooldown" in r.message]
+    assert len(cooldowns) == 2
+    assert "cooldown A" in cooldowns[0].message and "cooldown B" in cooldowns[1].message
+    assert any(r.levelname == "WARNING" and "fake bridge exception" in r.message for r in caplog.records)
+
+
 def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
     for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
         _add_audio(paired_dbs, mid, ALICE, cached=False)
