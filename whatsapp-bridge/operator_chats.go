@@ -110,7 +110,11 @@ func (b *Bridge) handleOperatorChats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "Chat archive unavailable")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	withDeadline := b.operatorChatsDeadline
+	if withDeadline == nil {
+		withDeadline = context.WithTimeout
+	}
+	ctx, cancel := withDeadline(r.Context(), 5*time.Second)
 	defer cancel()
 	account := ""
 	// The SDK mutates client.Store.ID during pairing and logout; read the

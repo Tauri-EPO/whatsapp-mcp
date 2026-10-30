@@ -276,8 +276,17 @@ func TestOperatorChatsLIDOnlyContactNames(t *testing.T) {
 	}
 }
 
-func TestOperatorChatsLargeContactArchiveSearchWithinDeadline(t *testing.T) {
+func TestOperatorChatsLargeContactArchiveSearchWithFixedDeadlineBudget(t *testing.T) {
 	b := newSettingsBridge(t)
+	// Race instrumentation and host scheduling are not a query-work budget.
+	// Freeze deadline expiry while exercising the real 20,000-row SQL/HTTP
+	// path, and verify that the handler asks for the unchanged five seconds.
+	// Expiry is exercised separately below, without waiting for wall time.
+	budgets := make(chan time.Duration, 2)
+	b.operatorChatsDeadline = func(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+		budgets <- budget
+		return context.WithCancel(parent)
+	}
 	path := filepath.Join(t.TempDir(), "contacts.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -322,13 +331,41 @@ func TestOperatorChatsLargeContactArchiveSearchWithinDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := operatorChatsServer(t, b)
+	started := time.Now()
 	status, _, found := operatorChatsRequest(t, server, "?query=missing")
+	t.Logf("missing search elapsed=%s", time.Since(started))
 	if status != 200 || len(found) != 0 {
 		t.Fatalf("bounded search failed on 20000 contacts: status=%d count=%d", status, len(found))
 	}
+	started = time.Now()
 	status, _, found = operatorChatsRequest(t, server, "?query=bob&limit=1")
+	t.Logf("late-match search elapsed=%s", time.Since(started))
 	if status != 200 || len(found) != 1 || found[0].JID != "20000@s.whatsapp.net" || found[0].Name != "Bob" {
 		t.Fatalf("contact match outside first page missing: status=%d chats=%+v", status, found)
+	}
+	for range 2 {
+		select {
+		case budget := <-budgets:
+			if budget != 5*time.Second {
+				t.Fatalf("operator deadline changed: %s", budget)
+			}
+		default:
+			t.Fatal("operator search did not request a deadline")
+		}
+	}
+}
+
+func TestOperatorChatsExpiredDeadlineRefusesResults(t *testing.T) {
+	b := newSettingsBridge(t)
+	if err := b.Store.StoreChat("5511999999999@s.whatsapp.net", "Alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.operatorChatsDeadline = func(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithDeadline(parent, time.Unix(1, 0))
+	}
+	status, _, found := operatorChatsRequest(t, operatorChatsServer(t, b), "?query=alice")
+	if status != 503 || len(found) != 0 {
+		t.Fatalf("expired search returned results: status=%d chats=%+v", status, found)
 	}
 }
 

@@ -61,6 +61,7 @@ type Bridge struct {
 	problemWrite               func(*os.Root, *ConnectionProblem) error
 	operatorPairing            *operatorPairing
 	operatorServer             *http.Server
+	operatorChatsDeadline      func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	sessionDB                  *sql.DB // Startup-owned session pool, observed without acquiring a connection.
 	Store                      *MessageStore
 	HistoryLimits              historyLimits
