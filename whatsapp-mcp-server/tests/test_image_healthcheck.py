@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_config import resolve_host
+from mcp_config import resolve_host, resolve_port
 
 BASH = shutil.which("bash")
 if os.name == "nt":
@@ -21,7 +21,9 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="needs native bash TCP redi
 
 
 @pytest.mark.parametrize("backend_alive", [False, True])
-@pytest.mark.parametrize("bind_host", ["0.0.0.0", "127.0.0.2", "", " 127.0.0.1 ", "::", " ::1 "])
+@pytest.mark.parametrize(
+    "bind_host", [None, "0.0.0.0", "127.0.0.1", "127.0.0.2", "", " 127.0.0.1 ", "::", "::1", " ::1 "]
+)
 def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_alive, bind_host):
     normalized = resolve_host(bind_host)
     address = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(normalized, normalized)
@@ -61,7 +63,15 @@ def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_a
     )
     command = json.loads(probe)
     command[0] = BASH
-    env = dict(os.environ, WHATSAPP_MCP_HOST=bind_host, WHATSAPP_MCP_PORT=str(port), NO_PROXY="", no_proxy="")
+    # Exercise accepted whitespace and decimal spellings against the same
+    # resolver used at startup, then connect to that actual listener.
+    port_env = f" +0{port:_} "
+    assert resolve_port(port_env) == port
+    env = dict(os.environ, WHATSAPP_MCP_PORT=port_env, NO_PROXY="", no_proxy="")
+    env.pop("WHATSAPP_MCP_SOCKET", None)
+    env.pop("WHATSAPP_MCP_HOST", None)
+    if bind_host is not None:
+        env["WHATSAPP_MCP_HOST"] = bind_host
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env[name] = f"http://127.0.0.1:{proxy.server_port}"
     try:
@@ -76,3 +86,38 @@ def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_a
             server.server_close()
         for thread in threads:
             thread.join(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Unix socket filesystem probe runs on Linux")
+def test_image_probe_requires_configured_socket_node(tmp_path):
+    path = tmp_path / "mcp.sock"
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    command = json.loads(
+        next(
+            line.strip()[4:]
+            for line in dockerfile.read_text().splitlines()
+            if line.strip().startswith('CMD ["bash", "-c",')
+        )
+    )
+    command[0] = BASH
+    with socket.socket() as tcp, socket.socket(socket.AF_UNIX) as unix:
+        tcp.bind(("127.0.0.1", 0))
+        tcp.listen()
+        env = {
+            **os.environ,
+            "WHATSAPP_MCP_HOST": "127.0.0.1",
+            "WHATSAPP_MCP_PORT": str(tcp.getsockname()[1]),
+            "WHATSAPP_MCP_SOCKET": str(path),
+        }
+
+        def probe():
+            return subprocess.run(command, env=env, capture_output=True, timeout=10).returncode
+
+        assert probe() != 0  # TCP alive, socket absent
+        path.write_text("not a socket")
+        assert probe() != 0
+        path.unlink()
+        unix.bind(str(path))
+        assert probe() == 0
+        path.unlink()
+        assert probe() != 0  # removing the node must not leave TCP-only healthy

@@ -9,8 +9,16 @@ The container healthcheck uses a Bash TCP connect every 120 seconds (every
 cannot produce `/mcp` 401 log lines; investigate clients or separate HTTP
 probes if those persist. `healthy` confirms the TCP listener only: run
 `scripts/smoke.sh` for authenticated MCP initialization and use `--mcp-socket`
-when checking the optional Unix listener. Docker Engine 25+ is required for
-the startup interval.
+when checking the optional Unix listener. If `WHATSAPP_MCP_SOCKET` is set,
+the healthcheck also requires that path to be a Unix socket; removing it
+fails the check even if TCP is still open. A wedged event loop with an open
+port/socket still reads healthy: this is the accepted trade-off for a light
+probe. Each check spawns one Bash process, so process/slab pressure is reduced,
+not eliminated; a 24-hour slab bound has not been measured.
+
+Docker Engine 25+ and BuildKit are required for the startup interval. Older
+engines ignore it and wait 120 seconds before their first probe; the legacy
+builder (`DOCKER_BUILDKIT=0`) rejects the flag.
 
 ### Account connection problems
 
