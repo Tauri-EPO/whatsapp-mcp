@@ -73,10 +73,11 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8000
 
-# Any HTTP answer on /mcp (even 4xx for a session-less GET) means the ASGI
-# server is up; only a connection failure marks the container unhealthy.
-# Probe the actual bind address directly: a proxy cannot mask a dead server.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "from mcp_config import probe_http_health; probe_http_health()"]
+# A TCP connect checks the always-on listener without Python imports or HTTP
+# authentication noise. A configured Unix socket must exist; smoke probes
+# exercise its HTTP response. An open port with a wedged event loop still passes.
+# Bash is included in python:3.13-slim. Startup checks remain frequent (Docker 25+).
+HEALTHCHECK --interval=120s --timeout=5s --start-period=15s --start-interval=5s --retries=2 \
+    CMD ["bash", "-c", "export LC_ALL=C; trim() { local v=$1; v=\"${v#\"${v%%[![:space:]]*}\"}\"; v=\"${v%\"${v##*[![:space:]]}\"}\"; printf -v \"$2\" '%s' \"$v\"; }; trim \"${WHATSAPP_MCP_HOST:-}\" h; h=${h:-127.0.0.1}; [[ $h =~ ^[[:print:]]+$ ]] || exit 1; case $h in 0.0.0.0) h=127.0.0.1;; ::) h=::1;; esac; trim \"${WHATSAPP_MCP_PORT:-}\" p; p=${p:-8000}; [[ $p =~ ^[+]?[0-9]+(_[0-9]+)*$ ]] || exit 1; p=${p//_/}; p=${p#+}; p=$((10#$p)); ((p>=1 && p<=65535)) || exit 1; trim \"${WHATSAPP_MCP_SOCKET:-}\" s; [ -z \"$s\" ] || [ -S \"$s\" ] || exit 1; exec 3<>/dev/tcp/$h/$p"]
 
 CMD ["python", "main.py"]

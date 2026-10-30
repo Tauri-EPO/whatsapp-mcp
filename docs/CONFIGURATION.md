@@ -8,7 +8,7 @@ Every environment variable and CLI flag, plus the transport, authentication and 
 |---|---|---|
 | `WHATSAPP_PROXY_URL` | empty | Explicit `socks5://host:port`, `http://host[:port]` or `https://host[:port]`, optionally with percent-encoded credentials. WhatsApp pre/post-login websocket and media download/upload only. |
 | `WHATSAPP_PROXY_URL_FILE` | empty | Private owner-only regular file, at most 4096 bytes; no symlink. Set URL or file, never both. Mount into bridge separately. |
-| `WHATSAPP_MCP_SOCKET` | empty | Add a Unix HTTP/SSE listener to the MCP TCP listener. Same Host policy, bearer/OAuth and shared app/session manager. |
+| `WHATSAPP_MCP_SOCKET` | empty | Add a Unix HTTP/SSE listener to the MCP TCP listener. Same Host policy, bearer/OAuth and shared app/session manager. Only ASCII whitespace is trimmed; Unicode filename characters are preserved. |
 | `WHATSAPP_OPERATOR_SOCKET` | empty | Add a Unix operator listener, including streaming export, to operator TCP. If BIND is empty, TCP binds loopback. A distinct operator bearer is still required. |
 
 The egress proxy never changes REST, operator or MCP-admin listeners, MCP-to-bridge
@@ -385,8 +385,9 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_MCP_METRICS` | `true`                                   | `GET /metrics` on the `http`/`sse` transports: tool calls, errors by code and seconds per tool, the per-tool latency histogram `whatsapp_mcp_tool_duration_seconds` (see [Health and operations](DOCKER.md#health-and-operations) for the tail-latency query), HTTP requests by status class; `false` disables it |
 | `WHATSAPP_MCP_METRICS_TOKEN` | *(unset = open)*                   | Bearer token required on the MCP `/metrics` (401 without it). Use it when the port is exposed beyond the tailnet, e.g. Tailscale Funnel; Prometheus reads it from `bearer_token_file` |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
-| `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
-| `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
+| `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | ASCII bind address for the `http`/`sse` transports; only ASCII whitespace is trimmed |
+| `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports; ASCII digits, trimming only ASCII whitespace |
+| `WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S` | `86400` (24 h) | Streamable-HTTP session idle timeout in whole seconds (0-315360000, up to 10 years); `0` disables expiry; a half-open stream then holds its slot until restart, so prefer a finite timeout behind flaky networks. Invalid/out-of-range values stop HTTP startup before listeners start. SSE/stdio ignore this variable, including invalid values. Expired sessions answer 404 with a JSON-RPC error; well-behaved clients re-initialize. At the fixed 256-session cap, a valid initialize request first evicts its owner's least recently active idle session (hash of credential identity plus clientInfo.name; OAuth also includes issuer, subject and client_id). Other owners' sessions are eligible only after over 30 minutes idle. Busy requests/open streams are protected; no eligible session means 503. |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` when a token is enforced, else `0`     | Requests per minute per client on the `http`/`sse` transports (token bucket, 429 + `Retry-After`); `0`/`off` disables |

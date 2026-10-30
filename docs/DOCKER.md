@@ -1,5 +1,14 @@
 # Running WhatsApp MCP with Docker Compose
 
+## Requirements
+
+Requires **Docker Engine 25.0 or newer** (BuildKit for image builds) for the MCP
+[healthcheck startup interval](https://docs.docker.com/reference/dockerfile/#healthcheck).
+The base stack still needs Compose v2.17+;
+optional overrides list their newer Compose requirements below. Older engines ignore
+the startup interval, delaying the first probe to 120 seconds; the legacy builder
+(`DOCKER_BUILDKIT=0`) rejects `--start-interval`. Use BuildKit and Engine 25+.
+
 ## MCP memory budget
 
 For text/search workloads, start with a service override `mcp: {mem_limit: 256m}`.
@@ -39,8 +48,10 @@ socket, including with the split override. A proxy
 uses its normal allowed Host and MCP bearer over `/app/sockets/mcp.sock`.
 Socket mode is 0660, uid/gid 1000 in the images. Keep the directory outside
 store/outbox; symlinks, foreign files and live sockets are refused. Both TCP
-listeners remain available, as do TCP healthchecks; MCP health also probes its
-configured socket and the operator status probe uses its socket when configured.
+listeners remain available, as do TCP healthchecks. The MCP container healthcheck
+also requires the configured MCP socket path to be a Unix socket (`-S`), so
+removing that node fails health even while TCP stays up. `scripts/smoke.sh --mcp-socket`
+and `scripts/smoke-socket.py` check its HTTP response. The operator status probe uses its socket when configured.
 Unix clients share a limiter key; explicitly set
 `WHATSAPP_MCP_TRUSTED_PROXIES=unix` only when all clients with socket access are
 trusted forwarding proxies. Host, bearer and operator Origin rules are unchanged.
@@ -951,7 +962,20 @@ authentication on that endpoint, so keep it inside a network you trust.
   `media_files`). The API starts before pairing, so
   a first run shows `healthy` while you scan the QR. To wait for WhatsApp
   itself, poll `GET /api/ready` (`200` only while connected, `503` otherwise).
-- `mcp` is healthy while the ASGI server answers on `/mcp`.
+- `mcp` is healthy when its TCP listener accepts a connection. Bash connects
+  directly to `WHATSAPP_MCP_HOST` / `WHATSAPP_MCP_PORT` (wildcard binds map to
+  loopback), every 120 seconds; no Python process or HTTP request is made, so
+  the check produces no authentication failures. During the 15-second startup
+  period it runs every 5 seconds, allowing healthy status within seconds.
+  Two consecutive failures mark it unhealthy within about four minutes.
+  A configured `WHATSAPP_MCP_SOCKET` must also exist as a Unix socket. This
+  tests TCP availability and socket existence, not event-loop responsiveness:
+  a wedged loop with an open port/socket still appears healthy (accepted
+  trade-off). Authenticated MCP initialization and Unix HTTP responses are
+  verified by the smoke scripts below. Each probe still spawns one Bash
+  process: 720/day at steady state instead of 2880 Python starts/day. This
+  reduces process/import overhead and expected slab growth; it does not
+  establish zero slab growth or satisfy a measured 24-hour memory bound.
 - `scripts/smoke.sh` runs the whole checklist from the host after a deploy:
   bridge `/api/health` and `/api/ready` (through the container, with the
   bridge token from `.env` or `store/.bridge-token`), MCP `/metrics`, an
