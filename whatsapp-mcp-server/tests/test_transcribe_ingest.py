@@ -1992,6 +1992,35 @@ def test_repeated_remote_fetch_problems_still_log(paired_dbs, monkeypatch, caplo
     assert ("fake" if problem != "unreadable" else "not readable") in caplog.text
 
 
+@pytest.mark.parametrize("problem", ["bridge_unavailable", "http_503", "timeout"])
+def test_remote_bridge_blip_retries_next_walk_without_backoff(paired_dbs, monkeypatch, problem):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3")
+    clock, calls = [0], []
+    monkeypatch.setattr(transcribe_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(media_remote, "lookup", lambda *args: None)
+
+    def download(mid, chat):
+        calls.append(mid)
+        if len(calls) == 3:
+            return media_remote.uri(chat, mid)
+        if problem == "timeout":
+            raise TimeoutError("fake timeout")
+        if problem == "http_503":
+            raise RuntimeError("fake HTTP 503")
+        raise ToolError(problem, "fake bridge outage")
+
+    transcribe_worker.find_pending(10, fetch=True, download=download)
+    remembered = list(transcribe_worker._cache_checks.values())[0]
+    clock[0] = 300  # expired catalog miss, but still no final download answer
+    transcribe_worker.find_pending(10, fetch=True, download=download)
+    assert list(transcribe_worker._cache_checks.values())[0] == remembered
+    assert remembered[3] is False
+    selected = transcribe_worker.find_pending(10, fetch=True, download=download)
+    assert calls == ["AUD1"] * 3 and selected.candidates[0].message_id == "AUD1"
+    assert not transcribe_worker._cache_checks
+
+
 def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_dbs, monkeypatch):
     for mid in ("AUD1", "AUD2", "AUD3", "AUD4"):
         _add_audio(paired_dbs, mid, ALICE, cached=False)
@@ -2004,8 +2033,10 @@ def test_remembered_catalog_miss_does_not_delay_an_unattempted_download(paired_d
 
     first = transcribe_worker.find_pending(2, fetch=True, download=download)
     assert len(downloads) == 2 and len(lookups) == 4
-    transcribe_worker.find_pending(2, fetch=True, download=download, position=first.position)
-    assert len(set(downloads)) == 4  # untouched rows get the next round's budget
+    second = transcribe_worker.find_pending(2, fetch=True, download=download, position=first.position)
+    assert downloads[2] == ("AUD4", ALICE)  # transient head failure is retried next round
+    transcribe_worker.find_pending(2, fetch=True, download=download, position=second.position)
+    assert len(set(downloads)) == 4  # the reserved walk budget still reaches untouched rows
     assert len(lookups) == 4  # known catalog misses need no further HTTP query
 
 

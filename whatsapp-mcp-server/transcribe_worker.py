@@ -693,7 +693,13 @@ def find_pending(
             fetched = _fetch_bytes(message_id, chat_jid, fetcher, caches, quiet=failures > 0)
             if media_remote.enabled() and check_key in _cache_checks:
                 remembered = _cache_checks[check_key]
-                _cache_checks[check_key] = (*remembered[:3], True)
+                final = bool(fetched.backoff or fetched.unavailable or fetched.refused)
+                if not fetched.path and not final:
+                    # A catalog miss is remembered, but a bridge outage has no
+                    # final answer about this file. Retry fetching next walk,
+                    # retaining the old delay rather than doubling it.
+                    remembered = previous if previous and previous[0] == media_identity else remembered
+                _cache_checks[check_key] = (*remembered[:3], final)
             path = fetched.path
             if fetched.backoff:
                 # Not the bridge failing and not final: give the attempt back
