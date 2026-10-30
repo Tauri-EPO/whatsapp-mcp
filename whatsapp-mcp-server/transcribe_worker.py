@@ -375,7 +375,7 @@ def _first_sent_bound() -> str:
         latest = conn.execute("SELECT MAX(timestamp) FROM messages").fetchone()[0]
         if latest is not None:
             return whatsapp.timestamp_bound(min(now, max(whatsapp.parse_db_time(latest), now - timedelta(days=1))))
-    except (sqlite3.Error, OSError, ValueError):
+    except Exception:  # noqa: BLE001 - a malformed archive edge must never stop MCP startup
         logger.warning("could not read the archive edge for sent audio; counting from this start")
     finally:
         if conn is not None:
@@ -386,7 +386,7 @@ def _first_sent_bound() -> str:
 def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
     """Keep, record or clear the instant sent audio counts from before publication."""
     if running and config.include_sent:
-        chosen = config.sent_since or _first_sent_bound()
+        chosen = config.sent_since or _stored_sent_since() or _first_sent_bound()
         config = _persist_sent_since(replace(config, sent_since=chosen, worker_running=True))
     elif running:
         reset = _sent_reset_path()

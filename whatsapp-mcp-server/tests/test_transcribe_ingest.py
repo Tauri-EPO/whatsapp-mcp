@@ -2181,3 +2181,44 @@ def test_workerless_future_bound_is_absent_with_one_warning_without_repair(paire
     warnings = [record for record in caplog.records if "ignoring it in workerless reads" in record.message]
     assert len(warnings) == (1 if minutes > 5 else 0)
     assert _stored_since() == future
+
+
+def test_existing_bound_skips_archive_edge_query_on_restart(paired_dbs, monkeypatch):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    monkeypatch.setattr(transcribe_worker, "_first_sent_bound", lambda: pytest.fail("recomputed existing bound"))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since == SENT_SINCE
+
+
+@pytest.mark.parametrize("value", [42, 1.25, b"not a timestamp"])
+def test_non_text_archive_edge_cannot_crash_startup(paired_dbs, monkeypatch, caplog, value):
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    with paired_dbs.messages() as conn:
+        conn.execute("UPDATE messages SET timestamp=?", (value,))
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since is not None and config.sent_since >= before
+    assert "could not read the archive edge" in caplog.text
+
+
+def test_archive_edge_read_exception_is_a_logged_startup_fallback(paired_dbs, monkeypatch, caplog):
+    connect = whatsapp._connect_messages_db
+    closed = []
+
+    class BrokenRead:
+        def __init__(self):
+            self.conn = connect()
+
+        def execute(self, *args):
+            raise RuntimeError("archive read failed")
+
+        def close(self):
+            self.conn.close()
+            closed.append(True)
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", BrokenRead)
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since is not None and config.sent_since >= before
+    assert closed == [True]
+    assert "could not read the archive edge" in caplog.text
