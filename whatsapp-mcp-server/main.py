@@ -38,6 +38,7 @@ from mcp_config import (
     build_transport_security,
     resolve_host,
     resolve_port,
+    resolve_session_idle_timeout,
     resolve_socket,
     resolve_transport,
     run_http_listeners,
@@ -2999,6 +3000,9 @@ def build_http_app(
     if transport == "sse":
         app = server.sse_app(**app_kwargs)
     else:
+        app_kwargs["session_idle_timeout"] = resolve_session_idle_timeout(
+            os.getenv("WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S")
+        )
         app = server.streamable_http_app(**app_kwargs)
     sdk_app = app
     if verifier:

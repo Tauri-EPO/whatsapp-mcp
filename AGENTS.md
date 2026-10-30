@@ -440,6 +440,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
+| `WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S` | `86400` (24 h) | Streamable-HTTP session idle timeout in whole seconds; `0` disables expiry. Invalid/negative values stop HTTP startup. SSE/stdio unaffected. Expired sessions answer 404 with a JSON-RPC error; well-behaved clients re-initialize. |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only | Extra `Host` header values accepted by the `http`/`sse` transports (comma-separated; bare hostnames match any port; `*` disables the check). Unset + non-loopback bind disables the check with a warning |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per socket peer (or verified forwarding chain) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; OAuth uses subject identity, with a separate failed-credential peer budget checked before remote verification; `0`/`off` disables |

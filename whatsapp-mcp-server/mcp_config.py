@@ -59,6 +59,20 @@ def resolve_port(value: str | None) -> int:
     return port
 
 
+def resolve_session_idle_timeout(value: str | None) -> int | None:
+    """Parse HTTP session idle seconds; 24 hours by default, zero disables expiry."""
+    value = (value or "").strip()
+    if not value:
+        return 86400
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise ValueError("Invalid WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S; must be a nonnegative integer") from None
+    if seconds < 0:
+        raise ValueError("Invalid WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S; must be a nonnegative integer")
+    return seconds or None
+
+
 # Host header values the MCP SDK accepts by default when bound to loopback.
 # Mirrors the SDK's own loopback allow-list so that enabling extra
 # hosts never locks out local clients.
