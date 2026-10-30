@@ -554,7 +554,7 @@ func (w *runtimeWebhook) deliver(ctx context.Context, g *runtimeWebhookGeneratio
 	mac := hmac.New(sha256.New, []byte(g.config.Secret))
 	_, _ = mac.Write([]byte(ts + "."))
 	_, _ = mac.Write(d.body)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", jsonContentType)
 	req.Header.Set(g.config.HeaderPrefix+"-Id", d.id)
 	req.Header.Set(g.config.HeaderPrefix+"-Timestamp", ts)
 	req.Header.Set(g.config.HeaderPrefix+"-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
