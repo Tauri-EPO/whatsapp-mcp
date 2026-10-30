@@ -414,6 +414,15 @@ processes and run the normal smoke check. A data-only snapshot retains the
 current live session if left in place; a clean store without a session needs
 pairing. A missing notes copy is expected for an account without agent notes.
 
+When a set includes `*-notes.db.ingest-sent-reset`, restore that verified file
+beside its notes copy as `notes.db.ingest-sent-reset`, with mode `0600` and the
+same owner. It preserves a pending sent-audio reset: the next sent-enabled MCP
+worker replaces a stale ingestion instant. If the chosen notes copy has no
+marker (including older snapshot sets), remove any existing reset marker in the
+destination; the restored database instant is authoritative. Leave the marker
+alone when not replacing notes.db. Never follow marker symlinks. The bridge
+only reads source notes metadata and the marker; it never acknowledges a reset.
+
 ### Private operator network
 
 For an operator in a container, create one private external Docker network
@@ -1416,7 +1425,7 @@ can ship it off-box and no other account on the host can read it. A snapshot is
 a plain directory:
 
 ```
-messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
+messages.db  whatsapp.db  [notes.db + notes.db.ingest-sent-reset]  media.tar  bridge-token  MANIFEST
 ```
 
 The script resolves the volume from the compose project labels; outside the
@@ -1448,6 +1457,15 @@ docker compose logs -f bridge             # expect "connected", no QR
 
 Restore removes stale `-wal`/`-shm` files and the instance lock, copies the
 databases, media and token back, and resets ownership to the container user.
+The optional private `notes.db.ingest-sent-reset` marker travels with notes.db;
+the next sent-enabled worker honors its pending reset. Replacing notes.db from
+an artifact without a marker clears an unrelated destination marker and uses
+the restored instant, including with older backups. If notes.db is absent from
+the artifact, the existing notes database and marker are left together.
+Marker symlinks, non-regular files, non-ASCII contents, files over 128 bytes and
+markers without a corresponding notes database are refused. Hot copies capture
+intent before and after the notes snapshot; a concurrent reset can conservatively
+advance the restored instant on the next worker start. Source metadata stays MCP-owned.
 To move to a new server, restore the snapshot into the fresh volume before the
 first `docker compose up`, and keep the same `WHATSAPP_BRIDGE_TOKEN` in `.env`
 if you had set one (otherwise the restored `.bridge-token` is used).

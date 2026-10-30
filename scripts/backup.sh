@@ -12,7 +12,7 @@
 # in WAL mode), the media tree is tarred, and .bridge-token is copied. The
 # result is a plain directory:
 #
-#   messages.db  whatsapp.db  [notes.db]  media.tar  bridge-token  MANIFEST
+#   messages.db  whatsapp.db  [notes.db + notes.db.ingest-sent-reset]  media.tar  bridge-token  MANIFEST
 #
 # The backup contains live credentials (whatsapp.db holds the WhatsApp session
 # keys, bridge-token the REST bearer). Its files are created 0600 and handed to
@@ -60,11 +60,26 @@ cmd_backup() {
   dest="$(abs "${1:-backups/$(date -u +%Y%m%dT%H%M%SZ)}")"
   echo "backing up volume $vol -> $dest"
   run_alpine "$vol" "$dest" '
+    marker=notes.db.ingest-sent-reset
+    check_marker() {
+      [ ! -L "$1" ] && { [ ! -e "$1" ] || { [ -f "$1" ] && [ "$(wc -c < "$1")" -le 128 ] && [ -z "$(LC_ALL=C tr -d "\000-\177" < "$1")" ]; }; } || {
+        echo "unsafe sent audio reset marker" >&2; exit 3;
+      }
+    }
+    check_marker /store/$marker
+    check_marker /backup/$marker
+    [ ! -e /store/$marker ] || [ -f /store/notes.db ] || { echo "reset marker without notes.db" >&2; exit 3; }
+    rm -f /backup/$marker
+    # Capture before and after SQLite: a concurrent clear must not lose intent
+    # that belonged to the database snapshot. Never edit source notes metadata.
+    if [ -f /store/$marker ]; then cp -P /store/$marker /backup/$marker; check_marker /backup/$marker; fi
     for db in messages whatsapp notes; do
       [ -f /store/$db.db ] || continue
       sqlite3 /store/$db.db ".backup /backup/$db.db"
       sqlite3 /backup/$db.db "PRAGMA integrity_check" | grep -qx ok || { echo "$db.db backup failed integrity_check" >&2; exit 3; }
     done
+    check_marker /store/$marker
+    if [ -f /store/$marker ]; then cp -P /store/$marker /backup/$marker; check_marker /backup/$marker; fi
     # Media lives in per-chat directories under the store root.
     cd /store && rm -f /backup/media.tar && find . -mindepth 1 -maxdepth 1 -type d -exec tar -cf /backup/media.tar {} +
     [ -f /store/.bridge-token ] && cp /store/.bridge-token /backup/bridge-token && chmod 600 /backup/bridge-token
@@ -80,7 +95,7 @@ cmd_backup() {
       chmod 600 "/backup/$1"
       chown "$owner" "/backup/$1" 2>/dev/null || echo "note: $1 could not be handed to the owner of the destination ($owner)" >&2
     }
-    for f in messages.db whatsapp.db notes.db media.tar bridge-token; do seal "$f"; done
+    for f in messages.db whatsapp.db notes.db notes.db.ingest-sent-reset media.tar bridge-token; do seal "$f"; done
     { echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "volume='"$vol"'"; ls -l /backup | tail -n +2; } > /backup/MANIFEST
     seal MANIFEST
     du -sh /backup | cut -f1 | sed "s/^/size: /"'
@@ -99,6 +114,15 @@ cmd_restore() {
   echo "restoring $src -> volume $vol"
   run_alpine "$vol" "$src" '
     cd /store
+    marker=notes.db.ingest-sent-reset
+    check_marker() {
+      [ ! -L "$1" ] && { [ ! -e "$1" ] || { [ -f "$1" ] && [ "$(wc -c < "$1")" -le 128 ] && [ -z "$(LC_ALL=C tr -d "\000-\177" < "$1")" ]; }; } || {
+        echo "unsafe sent audio reset marker" >&2; exit 3;
+      }
+    }
+    check_marker /backup/$marker
+    check_marker /store/$marker
+    [ ! -e /backup/$marker ] || [ -f /backup/notes.db ] || { echo "reset marker without notes.db" >&2; exit 3; }
     rm -f ./*.db-wal ./*.db-shm .bridge.lock .session-keepalive
     kind=
     if [ -f .connection-problem ]; then
@@ -112,6 +136,16 @@ cmd_restore() {
       if [ -f /backup/$db.db ]; then
         cp /backup/$db.db ./$db.db
         chmod 600 ./$db.db
+        if [ "$db" = notes ]; then
+          # Absence in an older artifact means no pending reset for this DB.
+          if [ -f /backup/$marker ]; then
+            cp -P /backup/$marker ./$marker
+            check_marker ./$marker
+            chmod 600 ./$marker
+          else
+            rm -f ./$marker
+          fi
+        fi
         if [ "$db" = whatsapp ] && [ -f .connection-problem ] && [ "$kind" != __unreadable__ ]; then
           if [ "$kind" = unlinked ]; then
             rm -f .connection-problem .connection-problem.part
