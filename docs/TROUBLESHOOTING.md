@@ -2,6 +2,24 @@
 
 Symptoms and fixes for pairing, auth, sync and app-state problems. For container-specific checks (`docker compose ps`, health endpoints, logs) see [DOCKER.md](DOCKER.md).
 
+### MCP container health
+
+The container healthcheck uses a Bash TCP connect every 120 seconds (every
+5 seconds during the 15-second startup period). Two consecutive failures mark it unhealthy within about four minutes. It sends no HTTP request and
+cannot produce `/mcp` 401 log lines; investigate clients or separate HTTP
+probes if those persist. `healthy` confirms TCP availability and configured Unix socket existence: run
+`scripts/smoke.sh` for authenticated MCP initialization and use `--mcp-socket`
+when checking the optional Unix listener. If `WHATSAPP_MCP_SOCKET` is set,
+the healthcheck also requires that path to be a Unix socket; removing it
+fails the check even if TCP is still open. A wedged event loop with an open
+port/socket still reads healthy: this is the accepted trade-off for a light
+probe. Each check spawns one Bash process, so process/slab pressure is reduced,
+not eliminated; a 24-hour slab bound has not been measured.
+
+Docker Engine 25+ and BuildKit are required for the startup interval. Older
+engines ignore it and wait 120 seconds before their first probe; the legacy
+builder (`DOCKER_BUILDKIT=0`) rejects the flag.
+
 ### Account connection problems
 
 `/api/health` stays alive and `bridge_status` reports `connection_problem`
