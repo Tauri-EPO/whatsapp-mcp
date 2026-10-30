@@ -514,13 +514,6 @@ def clear_dated_notes_with_prefix(key: str, prefix: str) -> int:
     return deleted
 
 
-def read_meta(key: str) -> str | None:
-    """A notes_meta value, or None when it (or notes.db itself) is not there."""
-    if not os.path.exists(notes_db_path()):
-        return None
-    return read_meta_values((key,)).get(key)
-
-
 def read_meta_values(keys: Sequence[str]) -> dict[str, str]:
     """Read existing metadata on one read-only handle, with no stat, DDL or creation.
 

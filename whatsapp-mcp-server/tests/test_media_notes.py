@@ -11,7 +11,7 @@ import media_inventory
 import media_notes
 import whatsapp
 from errors import ToolError
-from tests.conftest import ALICE, BOB, FAMILY
+from tests.conftest import ALICE, BOB, FAMILY, read_notes_meta
 
 SHA_A = "aa" * 32  # photo in Alice's chat and in Family
 SHA_B = "bb" * 32  # video with Bob only
@@ -28,7 +28,7 @@ def test_connect_closes_handle_when_schema_fails(monkeypatch, tmp_path):
         conn.execute("SELECT 1")
 
 
-@pytest.mark.parametrize("operation", ["read_meta", "claim_meta", "forget_meta"])
+@pytest.mark.parametrize("operation", ["read_meta_values", "claim_meta", "forget_meta"])
 def test_meta_closes_handle_when_statement_fails(monkeypatch, tmp_path, operation):
     path = tmp_path / "notes.db"
     conn = sqlite3.connect(path)
@@ -37,9 +37,13 @@ def test_meta_closes_handle_when_statement_fails(monkeypatch, tmp_path, operatio
     monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: conn)
     monkeypatch.setattr(whatsapp, "_connect_read_only", lambda path: conn)
     if operation == "forget_meta":
-        monkeypatch.setattr(media_notes, "read_meta", lambda key: "value")
         monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: conn)
-    args = ("test_key", "value") if operation == "claim_meta" else ("test_key",)
+    if operation == "claim_meta":
+        args = ("test_key", "value")
+    elif operation == "read_meta_values":
+        args = (("test_key",),)
+    else:
+        args = ("test_key",)
     with pytest.raises(sqlite3.DatabaseError):
         getattr(media_notes, operation)(*args)
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
@@ -56,7 +60,7 @@ def test_meta_reads_and_absent_deletes_do_not_create_or_migrate(tmp_path, monkey
         conn.close()
     before = path.read_bytes() if existing else None
     monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
-    assert media_notes.read_meta("absent") is None
+    assert read_notes_meta("absent") is None
     media_notes.forget_meta("absent")
     assert (path.read_bytes() if path.exists() else None) == before
     assert sorted(p.name for p in tmp_path.iterdir()) == (["notes.db"] if existing else [])
@@ -71,10 +75,10 @@ def test_meta_read_is_read_only_and_delete_does_not_migrate(tmp_path, monkeypatc
     conn.close()
 
     monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
-    assert media_notes.read_meta("key") == "value"
+    assert read_notes_meta("key") == "value"
     assert not path.with_name("notes.db-wal").exists()
     media_notes.forget_meta("key")
-    assert media_notes.read_meta("key") is None
+    assert read_notes_meta("key") is None
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("notes_meta",)]
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
@@ -439,7 +443,7 @@ def test_reset_claim_acknowledgement_is_atomic_and_idempotent(tmp_path, monkeypa
     assert media_notes.claim_meta("instant", "later", reset_token="reset-one") == "first"
     assert media_notes.claim_meta("instant", "forced", replace=True, reset_token="reset-one") == "forced"
     assert media_notes.claim_meta("instant", "new", reset_token="reset-two") == "new"
-    assert media_notes.read_meta("instant:reset") == "reset-two"
+    assert read_notes_meta("instant:reset") == "reset-two"
 
 
 def test_reset_ack_failure_rolls_back_the_new_instant(tmp_path, monkeypatch):
@@ -454,8 +458,8 @@ def test_reset_ack_failure_rolls_back_the_new_instant(tmp_path, monkeypatch):
     conn.close()
     with pytest.raises(sqlite3.IntegrityError, match="ack refused"):
         media_notes.claim_meta("instant", "new", reset_token="reset-token")
-    assert media_notes.read_meta("instant") == "old"
-    assert media_notes.read_meta("instant:reset") is None
+    assert read_notes_meta("instant") == "old"
+    assert read_notes_meta("instant:reset") is None
 
 
 def test_metadata_delete_uses_escaped_existing_database_uri(tmp_path, monkeypatch):
@@ -463,7 +467,7 @@ def test_metadata_delete_uses_escaped_existing_database_uri(tmp_path, monkeypatc
     monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
     media_notes.claim_meta("instant", "value")
     media_notes.forget_meta("instant")
-    assert media_notes.read_meta("instant") is None
+    assert read_notes_meta("instant") is None
     missing = str(tmp_path / "missing.db")
     with pytest.raises(sqlite3.OperationalError):
         sqlite3.connect(whatsapp._read_write_uri(missing), uri=True)

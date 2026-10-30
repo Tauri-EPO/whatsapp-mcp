@@ -26,7 +26,7 @@ import media_remote
 import transcribe_worker
 import whatsapp
 from errors import ToolError
-from tests.conftest import ALICE, BOB, FAMILY
+from tests.conftest import ALICE, BOB, FAMILY, read_notes_meta
 from transcribe import BackendUnavailableError
 
 SHA = {
@@ -401,7 +401,7 @@ def _start(monkeypatch, env: dict[str, str]) -> transcribe_worker.IngestConfig |
 
 
 def _stored_since() -> str | None:
-    return media_notes.read_meta(transcribe_worker.SENT_SINCE_KEY)
+    return read_notes_meta(transcribe_worker.SENT_SINCE_KEY)
 
 
 def test_install_only_publishes_the_settled_config(paired_dbs, monkeypatch, installed):
@@ -2142,7 +2142,7 @@ def test_pending_claim_overrides_an_acknowledged_marker_left_on_disk(paired_dbs,
 
     transcribe_worker.run_forever(config, stop=stop, run=run)
     assert _stored_since() == chosen
-    assert media_notes.read_meta(transcribe_worker.SENT_SINCE_KEY + ":reset") == "acknowledged-token"
+    assert read_notes_meta(transcribe_worker.SENT_SINCE_KEY + ":reset") == "acknowledged-token"
 
 
 @pytest.mark.parametrize("with_marker", [False, True])
