@@ -18,7 +18,10 @@ def sites(source: str, path: str) -> list[dict[str, str]]:
     nodes = list(ast.walk(tree))
     found = []
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if token.type != tokenize.COMMENT or not re.search(r"\bnosec\s+B608\b", token.string):
+        if token.type != tokenize.COMMENT:
+            continue
+        directive = re.search(r"\bnosec:?\s*([^#]+)(?:#(.*))?", token.string)
+        if not directive or not re.search(r"\bB608\b", directive[1]):
             continue
         line = token.start[0]
         # The smallest statement includes the entire call/assignment,
@@ -43,7 +46,7 @@ def sites(source: str, path: str) -> list[dict[str, str]]:
         # unparse drops comments/formatting but retains full literal contents
         # and expressions, so even an interpolation on another line changes it.
         canonical = ast.unparse(statement)
-        reason = re.split(r"\bnosec\s+B608\b", token.string, maxsplit=1)[1].lstrip(" #-").strip()
+        reason = (directive[2] or "").strip()
         assert reason, f"{path}:{line}: suppression needs a one-line reason"
         found.append(
             {
@@ -73,15 +76,17 @@ def test_reviewed_sql_inventory():
 def test_changed_multiline_sql_cannot_reuse_review():
     source = """def query(value):
     cursor.execute(
-        f"SELECT {columns} FROM messages "  # nosec B608 - fixed columns; values bound
+        f"SELECT {columns} FROM messages "  # nosec B608 # fixed columns; values bound
         "WHERE id = ?",
         (value,),
     )
 """
     reviewed = sites(source, "example.py")
+    for syntax in ("nosec: B608", "nosec B104,B608", "nosec: B104, B608"):
+        assert sites(source.replace("nosec B608", syntax), "example.py") == reviewed
     changed = source.replace('"WHERE id = ?"', 'f"WHERE id = {value}"')
     assert sites(changed, "example.py")[0]["fingerprint"] != reviewed[0]["fingerprint"]
     assert sites(source.replace("(value,)", "(other,)"), "example.py") != reviewed
     assert sites(source.replace("def query", "def renamed"), "example.py") != reviewed
     assert sites(source + "\n" + source.replace("query", "other_query"), "example.py") != reviewed
-    assert sites(source.replace("# nosec B608 - fixed columns; values bound", ""), "example.py") == []
+    assert sites(source.replace("# nosec B608 # fixed columns; values bound", ""), "example.py") == []
