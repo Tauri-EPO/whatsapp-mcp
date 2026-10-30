@@ -101,8 +101,8 @@ def test_http_provider_probe_whole_request_deadline(endpoint):
     )
     started = time.monotonic()
     assert transcribe.probe_http_provider(config) == (None, "timeout")
-    assert time.monotonic() - started < 2.75  # two whole-request budgets, including header trickling
-    assert endpoint["heads"] == 2
+    assert time.monotonic() - started < 1.75  # one whole-request budget, including header trickling
+    assert endpoint["heads"] == 1
 
 
 @pytest.mark.asyncio

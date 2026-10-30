@@ -409,6 +409,8 @@ def _transcribe_via_cli(wav_path: str, config: WhisperConfig, language: str) -> 
 
 def probe_http_provider(config: WhisperConfig, key: str | None = None) -> tuple[bool | None, str]:
     """Authenticated HEAD only; no audio or ambient credentials are sent."""
+    if config.probe_error:
+        return None, "invalid_config"
     headers = {"Authorization": f"Bearer {key}"} if key else {}
 
     async def probe() -> tuple[bool, str]:
