@@ -480,6 +480,29 @@ def _already_handled_clause(conn: sqlite3.Connection) -> tuple[str, list[Any]]:
 
 
 PendingRow = tuple[str, str, str, str, str]  # id, chat, sha256, timestamp, media identity
+_media_schema_cache: OrderedDict[tuple[str, int], tuple[str, str]] = OrderedDict()
+
+
+def _remote_identity_columns(conn: sqlite3.Connection) -> str:
+    """Probe optional bridge columns once per schema, including WAL-only migrations."""
+    key = (whatsapp.MESSAGES_DB_PATH, conn.execute("PRAGMA main.schema_version").fetchone()[0])
+    cached = _media_schema_cache.get(key)
+    if cached is None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        direct_path = "m.direct_path" if "direct_path" in columns else "NULL"
+        catalog = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'media_cache_refs'").fetchone()
+        cache_identity = (
+            "(SELECT hex(r.sha256) || ':' || c.stored_at FROM media_cache_refs r "
+            "JOIN media_cache c ON c.sha256 = r.sha256 WHERE r.id = m.id AND r.chat_jid = m.chat_jid)"
+            if catalog
+            else "NULL"
+        )
+        cached = (direct_path, cache_identity)
+        _media_schema_cache[key] = cached
+        if len(_media_schema_cache) > 32:
+            _media_schema_cache.popitem(last=False)
+    _media_schema_cache.move_to_end(key)
+    return ", m.url, m.media_key, m.file_enc_sha256, m.file_length, m.filename, " + ", ".join(cached)
 
 
 def _forget_nonpending(conn: sqlite3.Connection, predicate: str, params: list[Any]) -> None:
@@ -514,15 +537,8 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
     """
     conn = whatsapp._connect_messages_db()
     try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
-        direct_path = "m.direct_path" if "direct_path" in columns else "NULL"
-        catalog = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'media_cache_refs'").fetchone()
-        cache_identity = (
-            "(SELECT hex(r.sha256) || ':' || c.stored_at FROM media_cache_refs r "
-            "JOIN media_cache c ON c.sha256 = r.sha256 WHERE r.id = m.id AND r.chat_jid = m.chat_jid)"
-            if catalog
-            else "NULL"
-        )
+        remote = media_remote.enabled()
+        identity_columns = _remote_identity_columns(conn) if remote else ""
         handled_clause, handled_params = _already_handled_clause(conn)
         sent_clause, sent_params = whatsapp.ingest_sent_clause("m", sent_since)
         clauses = [
@@ -547,8 +563,7 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
             params.extend([after.timestamp, after.timestamp, after.message_id, after.message_id, after.chat_jid])
         rows = conn.execute(
             f"""
-            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp,
-                   m.url, m.media_key, m.file_enc_sha256, m.file_length, m.filename, {direct_path}, {cache_identity}
+            SELECT m.id, m.chat_jid, lower(hex(m.file_sha256)), m.timestamp {identity_columns}
             FROM messages m
             WHERE {" AND ".join(clauses)}
             ORDER BY m.timestamp DESC, m.id, m.chat_jid
@@ -559,7 +574,8 @@ def _pending_rows(limit: int, after: Position | None = None, *, sent_since: str 
     finally:
         conn.close()
     return [
-        (str(r[0]), str(r[1]), str(r[2]), str(r[3]), hashlib.sha256(repr(r[2:]).encode()).hexdigest()) for r in rows
+        (str(r[0]), str(r[1]), str(r[2]), str(r[3]), hashlib.sha256(repr(r[2:]).encode()).hexdigest() if remote else "")
+        for r in rows
     ]
 
 

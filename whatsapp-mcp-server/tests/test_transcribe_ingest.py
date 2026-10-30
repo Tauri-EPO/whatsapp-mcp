@@ -1952,6 +1952,35 @@ def test_remote_backoff_survives_a_walk_larger_than_old_lru(paired_dbs, monkeypa
     assert len(transcribe_worker._cache_checks) == count
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_pending_identity_work_is_remote_only_and_schema_is_cached(paired_dbs, monkeypatch, remote):
+    _add_audio(paired_dbs, "AUD1", ALICE, cached=False)
+    monkeypatch.setenv("WHATSAPP_MEDIA_BACKEND", "s3" if remote else "local")
+    monkeypatch.setattr(transcribe_worker, "_media_schema_cache", transcribe_worker.OrderedDict())
+    connect = whatsapp._connect_messages_db
+    statements = []
+
+    def traced():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", traced)
+    if not remote:
+
+        def unexpected_hash(*args):
+            raise AssertionError("local pending rows must not hash a remote identity")
+
+        monkeypatch.setattr(transcribe_worker.hashlib, "sha256", unexpected_hash)
+    for _ in range(2):
+        row = transcribe_worker._pending_rows(10)[0]
+        assert bool(row[4]) is remote
+    probes = [s for s in statements if "table_info(messages)" in s]
+    assert len(probes) == int(remote)
+    if not remote:
+        assert not any("media_cache_refs" in s or "schema_version" in s or "m.media_key" in s for s in statements)
+
+
 def test_remote_backoff_capacity_preserves_pending_entries(paired_dbs, monkeypatch):
     for mid in ("AUD1", "AUD2"):
         _add_audio(paired_dbs, mid, ALICE, cached=False)
