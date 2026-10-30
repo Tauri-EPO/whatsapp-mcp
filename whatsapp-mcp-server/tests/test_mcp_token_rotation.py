@@ -229,7 +229,9 @@ def test_auth_reader_does_not_block_event_loop(runtime_archive, monkeypatch):
 
 @pytest.mark.parametrize("oauth", [False, True])
 @pytest.mark.parametrize("initial", [OLD, None])
-def test_token_protected_exhausted_peer_never_reads_locked_runtime_archive(runtime_archive, monkeypatch, issuer, oauth, initial):
+def test_token_protected_exhausted_peer_never_reads_locked_runtime_archive(
+    runtime_archive, monkeypatch, issuer, oauth, initial
+):
     from concurrent.futures import ThreadPoolExecutor
 
     import http_auth
