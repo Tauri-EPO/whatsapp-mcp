@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -26,7 +26,7 @@ import media_remote
 import transcribe_worker
 import whatsapp
 from errors import ToolError
-from tests.conftest import ALICE, BOB, FAMILY
+from tests.conftest import ALICE, BOB, FAMILY, read_notes_meta
 from transcribe import BackendUnavailableError
 
 SHA = {
@@ -35,8 +35,11 @@ SHA = {
     "AUD3": "a3" * 32,
     "AUD4": "a4" * 32,
     "OUT1": "0f" * 32,
+    "OUT2": "0e" * 32,
     "BOB1": "b1" * 32,
 }
+# Before every row _add_audio writes by default: those rows count as sent after it.
+SENT_SINCE = "2026-09-05 09:00:00+00:00"
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +51,9 @@ def _media_filename(message_id: str) -> str:
     return f"audio_20260905_09000{message_id[-1]}_{message_id}.ogg"
 
 
-def _add_audio(store, message_id: str, chat_jid: str, *, from_me: int = 0, cached: bool = True) -> None:
+def _add_audio(
+    store, message_id: str, chat_jid: str, *, from_me: int = 0, cached: bool = True, timestamp: str | None = None
+) -> None:
     """One audio row the way the bridge writes it, optionally with its cached bytes."""
     filename = _media_filename(message_id)
     with store.messages() as conn:
@@ -59,7 +64,7 @@ def _add_audio(store, message_id: str, chat_jid: str, *, from_me: int = 0, cache
                 message_id,
                 chat_jid,
                 chat_jid,
-                f"2026-09-05 09:0{message_id[-1]}:00",
+                timestamp or f"2026-09-05 09:0{message_id[-1]}:00",
                 from_me,
                 bytes.fromhex(SHA[message_id]),
                 filename,
@@ -307,13 +312,16 @@ def test_sent_backlog_transcribed_and_coverage_agrees(paired_dbs, monkeypatch, i
         monkeypatch.delenv("TRANSCRIBE_ON_INGEST_INCLUDE_SENT", raising=False)
     else:
         monkeypatch.setenv("TRANSCRIBE_ON_INGEST_INCLUDE_SENT", include_sent)
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
     _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
     _add_audio(paired_dbs, "AUD1", ALICE)
     _add_audio(paired_dbs, "AUD2", whatsapp.STATUS_BROADCAST_JID, from_me=1)
     expected = 1 if include_sent == "false" else 2
     assert whatsapp.coverage()["audio"]["backlog"] == expected
     backend = FakeBackend(text="historical sent words")
-    result = transcribe_worker.run_once(10, transcribe=backend)
+    result = transcribe_worker.run_once(
+        10, transcribe=backend, sent_since=SENT_SINCE if include_sent != "false" else None
+    )
     assert (result.pending, result.transcribed, result.failed) == (expected, expected, 0)
     audio = whatsapp.coverage()["audio"]
     assert (audio["messages"], audio["transcribed"], audio["backlog"]) == (expected, expected, 0)
@@ -334,27 +342,29 @@ def test_sent_audio_respects_direct_scope_allow_list_and_monthly_cap(paired_dbs,
     monkeypatch.setenv("TRANSCRIBE_MONTHLY_MAX_MINUTES", "1")
     monkeypatch.setattr(usage, "month_now", lambda: "2026-10")
     monkeypatch.setattr(usage, "_paused", False)
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
     _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
     _add_audio(paired_dbs, "AUD1", FAMILY, from_me=1)
     _add_audio(paired_dbs, "BOB1", BOB, from_me=1)
     policy = chat_policy.load_chat_policy({"WHATSAPP_ALLOWED_CHATS": f"{ALICE},{FAMILY}"})
     monkeypatch.setattr(transcribe_worker, "CHAT_POLICY", policy)
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
-    assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"OUT1"}
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=SENT_SINCE)} == {"OUT1"}
     assert whatsapp.coverage()["audio"]["backlog"] == 1
     with usage.admission(60, "whisper_cpp", "", "ingest"):
         pass
     backend = FakeBackend()
-    assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 0
+    assert transcribe_worker.run_once(10, transcribe=backend, sent_since=SENT_SINCE).transcribed == 0
     assert backend.runs == []
     assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
     monkeypatch.setattr(usage, "month_now", lambda: "2026-11")
-    assert transcribe_worker.run_once(10, transcribe=backend).transcribed == 1
+    assert transcribe_worker.run_once(10, transcribe=backend, sent_since=SENT_SINCE).transcribed == 1
     assert whatsapp.coverage()["audio"]["backlog"] == 0
 
 
 @pytest.mark.parametrize("include_sent", [True, False])
 def test_startup_sent_snapshot_survives_environment_changes(paired_dbs, monkeypatch, include_sent):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
     _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
     _add_audio(paired_dbs, "AUD1", ALICE)
     installed = []
@@ -370,9 +380,349 @@ def test_startup_sent_snapshot_survives_environment_changes(paired_dbs, monkeypa
     monkeypatch.setattr(whatsapp, "ingest_include_sent", lambda env=None: pytest.fail("reparsed startup env"))
     expected = 2 if include_sent else 1
     assert whatsapp.coverage()["audio"]["backlog"] == expected
-    assert transcribe_worker.run_once(10, transcribe=FakeBackend()).transcribed == expected
+    assert (
+        transcribe_worker.run_once(10, transcribe=FakeBackend(), sent_since=installed[0].sent_since).transcribed
+        == expected
+    )
     assert whatsapp.coverage()["audio"]["backlog"] == 0
     assert transcribe_worker.ingest_config() is installed[0]
+
+
+ON_WITH_SENT = {"TRANSCRIBE_ON_INGEST": "true", "WHISPER_URL": "http://127.0.0.1:8178/inference"}
+
+
+def _start(monkeypatch, env: dict[str, str]) -> transcribe_worker.IngestConfig | None:
+    """One process start: install_ingest_worker without its thread, from a fresh snapshot."""
+    installed: list[transcribe_worker.IngestConfig] = []
+    monkeypatch.setattr(transcribe_worker, "_ingest_config", None)
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config: installed.append(config))
+    transcribe_worker.install_ingest_worker(env)
+    return installed[0] if installed else None
+
+
+def _stored_since() -> str | None:
+    return read_notes_meta(transcribe_worker.SENT_SINCE_KEY)
+
+
+def test_install_only_publishes_the_settled_config(paired_dbs, monkeypatch, installed):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    settle = transcribe_worker._settle_sent_since
+
+    def observe(config, *, running):
+        assert transcribe_worker._ingest_config is None
+        return settle(config, running=running)
+
+    monkeypatch.setattr(transcribe_worker, "_settle_sent_since", observe)
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT)
+    assert transcribe_worker._ingest_config is installed[0]
+    assert installed[0].sent_since == SENT_SINCE
+
+
+def test_sent_audio_before_the_recorded_instant_never_joins_the_backlog(paired_dbs, monkeypatch):
+    """The upgrade case (issue #751): the stored history of sent audio stays out, new sent audio goes in."""
+    import main
+
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, "2026-09-05 09:03:00+00:00")
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1, timestamp="2026-09-05 09:02:59+00:00")
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp="2026-09-05 09:03:00+00:00")
+    _add_audio(paired_dbs, "AUD1", ALICE, timestamp="2026-09-05 09:01:00+00:00")  # inbound: the v2.9.1 rule
+    config = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_FETCH": "1"})
+    assert config is not None and config.sent_since == "2026-09-05 09:03:00+00:00"
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=config.sent_since)} == {"OUT2", "AUD1"}
+    assert whatsapp.coverage()["audio"]["backlog"] == 2
+
+    backend = FakeBackend()
+    result = transcribe_worker.run_once(10, transcribe=backend, fetch=True, sent_since=config.sent_since)
+    assert (result.pending, result.transcribed) == (2, 2)
+    assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
+    # The outage-note retry at startup requeues failed files through the same list.
+    media_notes.annotate_media(SHA["OUT1"], "transcript_error", "whisper server request failed")
+    transcribe_worker.clear_outage_failures()
+    assert transcribe_worker.run_once(10, transcribe=backend, sent_since=config.sent_since).pending == 0
+    audio = whatsapp.coverage()["audio"]
+    assert (audio["messages"], audio["backlog"]) == (2, 0)
+
+    # Asking for it still works: only the background worker is bounded.
+    cached = os.path.join(media_inventory.chat_media_dir(ALICE), _media_filename("OUT1"))
+    monkeypatch.setattr(main, "_audio_to_transcribe", lambda chat, mid: cached)
+    monkeypatch.setattr(main, "transcribe_file", lambda path, **kw: {"text": "on demand", "backend": "server"})
+    assert main.transcribe_audio(chat_jid=ALICE, message_id="OUT1")["text"] == "on demand"
+
+
+def test_first_start_records_the_instant_and_a_restart_keeps_it(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)  # sent long before this start
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    first = _start(monkeypatch, ON_WITH_SENT)
+    assert first is not None and first.sent_since is not None
+    assert whatsapp.timestamp_bound(whatsapp.parse_db_time(before) - timedelta(days=1)) <= first.sent_since <= before
+    assert _stored_since() == first.sent_since
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=first.sent_since)} == {"AUD1"}
+    assert whatsapp.coverage()["audio"]["backlog"] == 1
+
+    # A restart, or a recreated container on the same store, keeps what is stored.
+    again = _start(monkeypatch, ON_WITH_SENT)
+    assert again is not None and again.sent_since == first.sent_since
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE, replace=True)
+    older = _start(monkeypatch, ON_WITH_SENT)
+    assert older is not None and older.sent_since == SENT_SINCE
+    assert {row[0] for row in transcribe_worker._pending_rows(10, sent_since=older.sent_since)} == {"OUT1", "AUD1"}
+
+
+def test_owned_config_drives_every_selection_without_reading_the_global(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1, timestamp="2026-09-05 09:02:59+00:00")
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp="2026-09-05 09:03:00+00:00")
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    config = transcribe_worker.IngestConfig(True, 5, 10, sent_since="2026-09-05 09:03:00+00:00")
+    monkeypatch.setattr(transcribe_worker, "ingest_config", lambda: pytest.fail("global config consulted"))
+    assert {r[0] for r in transcribe_worker._pending_rows(10, sent_since=config.sent_since)} == {"OUT2", "AUD1"}
+    backend = FakeBackend()
+    monkeypatch.setattr(transcribe_worker, "_default_transcribe", backend)
+    stop = threading.Event()
+    transcribe_worker.run_forever(config, stop=stop, sleep=lambda _: stop.set())
+    assert len(backend.runs) == 2
+    assert media_notes.fetch_notes([SHA["OUT1"]]) == {}
+
+
+def test_sent_clause_binds_the_instant_as_a_parameter(paired_dbs):
+    clause, params = whatsapp.ingest_sent_clause("m", SENT_SINCE)
+    assert SENT_SINCE not in clause
+    assert clause == "(m.is_from_me = 0 OR m.timestamp >= ?)"
+    assert params == [SENT_SINCE]
+    assert whatsapp.ingest_sent_clause("m", None) == ("m.is_from_me = 0", [])
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    assert transcribe_worker._pending_rows(10, sent_since="x' OR '1'='1") == []
+    assert len(transcribe_worker._pending_rows(10, sent_since=SENT_SINCE)) == 1
+
+
+def test_a_start_with_sent_audio_off_moves_the_instant_forward(paired_dbs, monkeypatch):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)  # sent while it was off
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+    assert _stored_since() is None
+    assert transcribe_worker.ingest_config().sent_since is None
+    assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"AUD1"}
+
+    on_again = _start(monkeypatch, ON_WITH_SENT)
+    assert on_again is not None and on_again.sent_since is not None
+    assert on_again.sent_since > SENT_SINCE
+    assert {row[0] for row in transcribe_worker._pending_rows(10)} == {"AUD1"}
+
+
+@pytest.mark.parametrize(
+    "off",
+    [
+        {"TRANSCRIBE_ON_INGEST": "false"},
+        {"WHISPER_URL": ""},
+        {"WHATSAPP_DENY_TOOLS": "transcribe_audio"},
+        {"TRANSCRIBE_ON_INGEST": "false", "TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"},
+    ],
+)
+def test_start_without_worker_preserves_shared_instant(paired_dbs, monkeypatch, off):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    assert _start(monkeypatch, ON_WITH_SENT | off) is None
+    assert _stored_since() == SENT_SINCE
+    again = _start(monkeypatch, ON_WITH_SENT)
+    assert again is not None and again.sent_since == SENT_SINCE
+
+
+@pytest.mark.parametrize(("stored", "existing"), [(False, False), (False, True), (True, True)])
+def test_workerless_coverage_uses_read_only_stored_instant(paired_dbs, monkeypatch, stored, existing):
+    path = Path(media_notes.notes_db_path())
+    if existing:
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE notes_meta (key TEXT PRIMARY KEY, value TEXT)")
+            if stored:
+                conn.execute("INSERT INTO notes_meta VALUES (?, ?)", (transcribe_worker.SENT_SINCE_KEY, SENT_SINCE))
+        conn.close()
+    before = path.read_bytes() if existing else None
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp="2026-09-05 08:59:59+00:00")
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    monkeypatch.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("schema writer called"))
+    assert _start(monkeypatch, {}) is None
+    assert not Path(str(path) + "-wal").exists()
+    assert (path.read_bytes() if path.exists() else None) == before
+    audio = whatsapp.coverage()["audio"]
+    assert audio["messages"] == audio["backlog"] == (2 if stored else 1)
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert not Path(str(path) + "-wal").exists()
+
+
+def test_failed_clear_is_warned_and_next_process_reclaims_now(paired_dbs, monkeypatch, caplog):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    lock = sqlite3.connect(media_notes.notes_db_path())
+    lock.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(whatsapp, "SQLITE_BUSY_TIMEOUT_S", 0.01)
+    try:
+        with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+            off = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+        assert off is not None and off.sent_since is None
+        assert "could not clear when sent audio started counting" in caplog.text
+        assert transcribe_worker._sent_reset_path().exists()
+        assert _stored_since() == SENT_SINCE  # the failed DELETE really left a stale value
+    finally:
+        lock.rollback()
+        lock.close()
+    assert _start(monkeypatch, {}) is None  # workerless starts keep the pending reset
+    assert transcribe_worker._sent_reset_path().exists()
+    assert transcribe_worker.ingest_config().sent_since is None
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    on = _start(monkeypatch, ON_WITH_SENT)
+    assert on is not None and on.sent_since is not None and on.sent_since >= before
+    assert _stored_since() == on.sent_since
+    assert not transcribe_worker._sent_reset_path().exists()
+
+
+def test_workerless_coverage_observes_another_process_claim_and_clear(paired_dbs, monkeypatch):
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    assert _start(monkeypatch, {}) is None
+    assert whatsapp.coverage()["audio"]["messages"] == 1
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    assert whatsapp.coverage()["audio"]["messages"] == 2
+    media_notes.forget_meta(transcribe_worker.SENT_SINCE_KEY)
+    assert whatsapp.coverage()["audio"]["messages"] == 1
+
+
+def test_reset_marker_failure_warns_and_keeps_inbound_worker_alive(paired_dbs, monkeypatch, installed, caplog):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    def refuse(*args, **kwargs):
+        raise OSError("An MCP-owned file must not be a symlink")
+
+    monkeypatch.setattr(media_notes, "forget_meta", busy)
+    monkeypatch.setattr(transcribe_worker, "private_open", refuse)
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+    assert len(installed) == 1 and installed[0].sent_since is None
+    assert _stored_since() == SENT_SINCE
+    assert "continuing with inbound audio only" in caplog.text
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_successful_or_absent_clear_never_writes_reset_marker(paired_dbs, monkeypatch, stored):
+    if stored:
+        media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    else:
+        media_notes.claim_meta("unrelated", "value")
+    monkeypatch.setattr(transcribe_worker, "private_open", lambda *a, **kw: pytest.fail("unnecessary marker write"))
+    config = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+    assert config is not None and config.sent_since is None
+    assert _stored_since() is None
+    assert not transcribe_worker._sent_reset_path().exists()
+
+
+@pytest.mark.parametrize("include_sent", [True, False])
+def test_runtime_hidden_worker_does_not_settle_until_policy_allows(paired_dbs, monkeypatch, caplog, include_sent):
+    from tool_policy import ToolPolicy
+
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    hidden = ToolPolicy(deny=frozenset({"transcribe_audio"}))
+    allowed = ToolPolicy()
+    monkeypatch.setattr(transcribe_worker, "runtime_policy_enabled", lambda: True)
+    monkeypatch.setattr(transcribe_worker, "active_policy", lambda: hidden)
+    starts = []
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
+    with monkeypatch.context() as startup:
+        startup.setattr(media_notes, "_connect", lambda **kwargs: pytest.fail("hidden worker wrote notes.db"))
+        transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": str(include_sent)})
+    assert _stored_since() == SENT_SINCE
+    config, kwargs = starts[0]
+    assert kwargs == {"settle_on_run": True}
+    stop = threading.Event()
+    batches = []
+
+    def unhide(_):
+        assert _stored_since() == SENT_SINCE
+        monkeypatch.setattr(transcribe_worker, "active_policy", lambda: allowed)
+
+    def run(batch, **kwargs):
+        batches.append(batch)
+        assert _stored_since() == (SENT_SINCE if include_sent else None)
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        transcribe_worker.run_forever(config, stop=stop, sleep=unhide, run=run, **kwargs)
+    assert batches == [config.batch]
+    expected = f"including sent audio from {SENT_SINCE}" if include_sent else "inbound audio only"
+    assert expected in caplog.text
+
+
+def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_this_start(
+    paired_dbs, monkeypatch, caplog
+):
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1)
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, "x' OR '1")
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since is not None
+    assert config.sent_since == _stored_since() and config.sent_since > SENT_SINCE
+    assert transcribe_worker._pending_rows(10, sent_since=config.sent_since) == []
+
+    def refuse(*args, **kwargs):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    monkeypatch.setattr(media_notes, "claim_meta", refuse)
+    with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+        fallback = _start(monkeypatch, ON_WITH_SENT)
+    assert fallback is not None and fallback.sent_since is not None
+    assert fallback.sent_since >= config.sent_since
+    assert "could not record when sent audio started counting" in caplog.text
+    assert transcribe_worker._pending_rows(10, sent_since=fallback.sent_since) == []
+
+
+@pytest.mark.parametrize("failure", [ToolError("denied", "Runtime tool policy unavailable"), RuntimeError("transient")])
+def test_unreadable_runtime_policy_waits_at_start_and_recovers_in_loop(paired_dbs, monkeypatch, caplog, failure):
+    from tool_policy import ToolPolicy
+
+    calls = []
+
+    def policy():
+        calls.append(1)
+        if len(calls) < 3:
+            raise failure
+        return ToolPolicy()
+
+    monkeypatch.setattr(transcribe_worker, "runtime_policy_enabled", lambda: True)
+    monkeypatch.setattr(transcribe_worker, "active_policy", policy)
+    starts = []
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_FETCH": "1"})
+    assert "runtime tool policy unreadable, worker waits" in caplog.text
+    assert len(caplog.records) == 1
+    assert "WHATSAPP_ALLOW_TOOLS" not in caplog.text and "download_media" not in caplog.text
+    assert not Path(media_notes.notes_db_path()).exists()
+    stop = threading.Event()
+    batches = []
+
+    def run(batch, **kwargs):
+        batches.append(batch)
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    config, kwargs = starts[0]
+    transcribe_worker.run_forever(config, stop=stop, sleep=lambda _: None, run=run, **kwargs)
+    assert batches == [config.batch]
+    assert len(calls) == 3 and _stored_since() is not None
+
+
+@pytest.mark.parametrize("ahead_minutes", [4, 6, 1440])
+def test_future_instant_is_repaired_beyond_small_clock_skew(paired_dbs, monkeypatch, caplog, ahead_minutes):
+    future = whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(minutes=ahead_minutes))
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, future)
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since == _stored_since()
+    if ahead_minutes <= 5:
+        assert config.sent_since == future
+        assert "in the future" not in caplog.text
+    else:
+        assert config.sent_since is not None and before <= config.sent_since < future
+        assert "in the future" in caplog.text
 
 
 def test_uncached_audio_is_fetched_from_the_bridge_only_with_the_flag_on(paired_dbs):
@@ -1520,21 +1870,29 @@ def test_the_loop_sleeps_the_configured_interval_between_batches():
     assert slept == [42.0, 42.0, 42.0]
 
 
-def test_the_loop_carries_the_fetch_and_sent_flags_into_every_batch(monkeypatch):
-    config = transcribe_worker.IngestConfig(enabled=True, interval_s=1.0, batch=4, fetch=True, include_sent=False)
+@pytest.mark.parametrize("include_sent", [True, False])
+def test_the_loop_carries_the_fetch_and_sent_instant_into_every_batch(paired_dbs, monkeypatch, include_sent):
+    config = transcribe_worker.IngestConfig(
+        enabled=True,
+        interval_s=1.0,
+        batch=4,
+        fetch=True,
+        include_sent=include_sent,
+        sent_since=SENT_SINCE if include_sent else None,
+    )
     stop = threading.Event()
-    seen: list[tuple[int, bool, bool]] = []
+    seen: list[tuple[int, bool, str | None]] = []
 
     def fake_run_once(
-        batch: int, *, fetch: bool = False, include_sent: bool = True, **kwargs
+        batch: int, *, fetch: bool = False, sent_since: str | None = None, **kwargs
     ) -> transcribe_worker.BatchResult:
-        seen.append((batch, fetch, include_sent))
+        seen.append((batch, fetch, sent_since))
         stop.set()
         return transcribe_worker.BatchResult(0, 0, 0)
 
     monkeypatch.setattr(transcribe_worker, "run_once", fake_run_once)
     transcribe_worker.run_forever(config, stop=stop, sleep=lambda _seconds: None)
-    assert seen == [(4, True, False)]
+    assert seen == [(4, True, SENT_SINCE if include_sent else None)]
 
 
 def test_start_worker_runs_on_a_daemon_thread_and_stops():
@@ -1591,3 +1949,277 @@ def test_ten_fetches_do_not_read_the_chat_directory_ten_more_times(paired_dbs, m
     assert result.transcribed == 10 and len(bridge.calls) == 10
     assert listings == [ALICE]  # one directory read for the chat, not one per download
     assert len(lookups) == 10  # one targeted lookup per fetched file
+
+
+def test_workerless_start_defers_metadata_read_until_each_coverage_config(monkeypatch):
+    reads = []
+
+    def read():
+        reads.append(1)
+        return SENT_SINCE
+
+    monkeypatch.setattr(transcribe_worker, "_stored_sent_since", read)
+    assert _start(monkeypatch, {}) is None
+    assert reads == []
+    assert transcribe_worker.ingest_config().sent_since == SENT_SINCE
+    assert reads == [1]
+    assert transcribe_worker.ingest_config().sent_since == SENT_SINCE
+    assert reads == [1, 1]
+
+
+def test_busy_initial_claim_is_retried_with_the_first_chosen_bound(paired_dbs, monkeypatch):
+    real_claim = media_notes.claim_meta
+    calls = []
+
+    def claim(*args, **kwargs):
+        calls.append(args[1])
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(media_notes, "claim_meta", claim)
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_claim_pending
+    chosen = config.sent_since
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return later
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        assert _stored_since() == chosen
+        assert transcribe_worker.ingest_config().sent_since == chosen
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, run=run)
+    assert calls == [chosen, chosen]
+    assert not transcribe_worker.ingest_config().sent_claim_pending
+
+
+def test_acknowledged_reset_that_cannot_be_unlinked_does_not_advance_again(paired_dbs, monkeypatch, caplog):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    reset = transcribe_worker._sent_reset_path()
+    reset.write_text("reset-token", encoding="ascii")
+    unlink = Path.unlink
+
+    def refuse(path, **kwargs):
+        if path == reset:
+            raise PermissionError("marker cannot be removed")
+        return unlink(path, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    first = _start(monkeypatch, ON_WITH_SENT)
+    assert first is not None and first.sent_since != SENT_SINCE
+    assert not first.sent_claim_pending
+    assert reset.exists()
+    assert transcribe_worker._stored_sent_since() == first.sent_since
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return later
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    again = _start(monkeypatch, ON_WITH_SENT)
+    assert again is not None and again.sent_since == first.sent_since
+    assert _stored_since() == first.sent_since
+    assert "keeping the recorded instant" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("latest", "expected"),
+    [
+        (None, "2026-09-06 12:00:00+00:00"),
+        ("2026-09-06 10:00:00+00:00", "2026-09-06 10:00:00+00:00"),
+        ("2026-09-01 12:00:00+00:00", "2026-09-05 12:00:00+00:00"),
+        ("2026-09-06 13:00:00+00:00", "2026-09-06 12:00:00+00:00"),
+    ],
+)
+def test_first_claim_grace_uses_archive_edge_clamped_to_one_day(paired_dbs, monkeypatch, latest, expected):
+    now = datetime(2026, 9, 6, 12, tzinfo=UTC)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return now
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    if latest is not None:
+        _add_audio(paired_dbs, "AUD1", ALICE, timestamp=latest)
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since == expected
+    assert _stored_since() == expected
+    _add_audio(paired_dbs, "OUT1", ALICE, from_me=1, timestamp=expected)
+    older = whatsapp.timestamp_bound(whatsapp.parse_db_time(expected) - timedelta(seconds=1))
+    _add_audio(paired_dbs, "OUT2", ALICE, from_me=1, timestamp=older)
+    ids = {row[0] for row in transcribe_worker._pending_rows(10, sent_since=config.sent_since)}
+    assert "OUT1" in ids and "OUT2" not in ids
+    assert whatsapp.coverage()["audio"]["messages"] == len(ids)
+
+
+def test_busy_clock_repair_retries_the_original_repair_bound(paired_dbs, monkeypatch):
+    media_notes.claim_meta(
+        transcribe_worker.SENT_SINCE_KEY, whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(days=1))
+    )
+    real_claim = media_notes.claim_meta
+    calls = []
+
+    def claim(*args, **kwargs):
+        calls.append(args[1])
+        if len(calls) == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(media_notes, "claim_meta", claim)
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_claim_pending
+    chosen = config.sent_since
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return later
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        assert _stored_since() == chosen
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, run=run)
+    assert calls[1:] == [chosen, chosen]
+
+
+@pytest.mark.parametrize("provider", ["whisper_cpp", "openai_compatible"])
+def test_normal_and_deferred_start_logs_name_the_backend(provider, paired_dbs, monkeypatch, caplog):
+    from dataclasses import replace
+
+    from tool_policy import ToolPolicy
+
+    config = transcribe_worker.IngestConfig(True, 5, 1, backend_provider=provider)
+    expected = "configured HTTP provider" if provider == "openai_compatible" else "whisper on this machine"
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        transcribe_worker._log_ingest_started(replace(config, sent_since=SENT_SINCE))
+    assert expected in caplog.text
+    caplog.clear()
+    monkeypatch.setattr(transcribe_worker, "active_policy", lambda: ToolPolicy())
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        transcribe_worker.run_forever(config, stop=stop, run=run, settle_on_run=True)
+    assert expected in caplog.text and "including sent audio from" in caplog.text
+
+
+def test_pending_claim_overrides_an_acknowledged_marker_left_on_disk(paired_dbs, monkeypatch):
+    from dataclasses import replace
+
+    reset = transcribe_worker._sent_reset_path()
+    reset.write_text("acknowledged-token", encoding="ascii")
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE, reset_token="acknowledged-token")
+    chosen = "2026-09-06 12:00:00+00:00"
+    config = transcribe_worker.IngestConfig(True, 5, 1, sent_since=chosen)
+    config = replace(config, worker_running=True, sent_claim_pending=True, sent_reset_token="acknowledged-token")
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        assert _stored_since() == chosen
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, run=run)
+    assert _stored_since() == chosen
+    assert read_notes_meta(transcribe_worker.SENT_SINCE_KEY + ":reset") == "acknowledged-token"
+
+
+@pytest.mark.parametrize("with_marker", [False, True])
+def test_workerless_bound_uses_one_stat_and_one_read_only_connection(paired_dbs, monkeypatch, with_marker):
+    token = "read-token" if with_marker else None
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE, reset_token=token)
+    marker = transcribe_worker._sent_reset_path()
+    if with_marker:
+        marker.write_text(token, encoding="ascii")
+    lstat, connect = Path.lstat, whatsapp._connect_read_only
+    probes, opens = [], []
+
+    def probe(path):
+        probes.append(path)
+        return lstat(path)
+
+    def reader(path):
+        opens.append(path)
+        return connect(path)
+
+    monkeypatch.setattr(Path, "lstat", probe)
+    monkeypatch.setattr(whatsapp, "_connect_read_only", reader)
+    assert transcribe_worker._stored_sent_since() == SENT_SINCE
+    assert probes == [marker]
+    assert opens == [media_notes.notes_db_path()]
+
+
+@pytest.mark.parametrize("minutes", [4, 6])
+def test_workerless_future_bound_is_absent_with_one_warning_without_repair(paired_dbs, monkeypatch, caplog, minutes):
+    transcribe_worker._warn_future_sent_read.cache_clear()
+    future = whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(minutes=minutes))
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, future)
+    assert _start(monkeypatch, {}) is None
+    for _ in range(3):
+        assert transcribe_worker.ingest_config().sent_since == (None if minutes > 5 else future)
+        whatsapp.coverage()
+    warnings = [record for record in caplog.records if "ignoring it in workerless reads" in record.message]
+    assert len(warnings) == (1 if minutes > 5 else 0)
+    assert _stored_since() == future
+
+
+def test_existing_bound_skips_archive_edge_query_on_restart(paired_dbs, monkeypatch):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    monkeypatch.setattr(transcribe_worker, "_first_sent_bound", lambda: pytest.fail("recomputed existing bound"))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since == SENT_SINCE
+
+
+@pytest.mark.parametrize("value", [42, 1.25, b"not a timestamp"])
+def test_non_text_archive_edge_cannot_crash_startup(paired_dbs, monkeypatch, caplog, value):
+    _add_audio(paired_dbs, "AUD1", ALICE)
+    with paired_dbs.messages() as conn:
+        conn.execute("UPDATE messages SET timestamp=?", (value,))
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since is not None and config.sent_since >= before
+    assert "could not read the archive edge" in caplog.text
+
+
+def test_archive_edge_read_exception_is_a_logged_startup_fallback(paired_dbs, monkeypatch, caplog):
+    connect = whatsapp._connect_messages_db
+    closed = []
+
+    class BrokenRead:
+        def __init__(self):
+            self.conn = connect()
+
+        def execute(self, *args):
+            raise RuntimeError("archive read failed")
+
+        def close(self):
+            self.conn.close()
+            closed.append(True)
+
+    monkeypatch.setattr(whatsapp, "_connect_messages_db", BrokenRead)
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_since is not None and config.sent_since >= before
+    assert closed == [True]
+    assert "could not read the archive edge" in caplog.text

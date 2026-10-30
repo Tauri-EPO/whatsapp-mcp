@@ -167,6 +167,11 @@ def _read_only_uri(path: str) -> str:
     return pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=ro"
 
 
+def _read_write_uri(path: str) -> str:
+    """An escaped URI for an existing writable database; never create a missing file."""
+    return pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=rw"
+
+
 def _connect_read_only(path: str) -> sqlite3.Connection:
     """A connection that cannot write to the database at ``path`` and never creates it.
 
@@ -5543,15 +5548,18 @@ def ingest_include_sent(env: Mapping[str, str] | None = None) -> bool:
     return parse_bool_env((source.get(INCLUDE_SENT_ENV) or "").strip() or "true", INCLUDE_SENT_ENV)
 
 
-def ingest_sent_clause(alias: str, include_sent: bool | None = None) -> str:
-    if include_sent is None:
-        from transcribe_worker import ingest_config
+def ingest_sent_clause(alias: str, sent_since: str | None) -> tuple[str, list[Any]]:
+    """Inbound audio, plus sent audio from the instant it started counting (issue #751)."""
+    inbound = f"{alias}.is_from_me = 0"
+    if sent_since is None:
+        return inbound, []
+    # The bridge rewrites legacy timestamps to canonical UTC at startup (store_time.go; AGENTS section 8.16).
+    return f"({inbound} OR {alias}.timestamp >= ?)", [sent_since]
 
-        include_sent = ingest_config().include_sent
-    return "1" if include_sent else f"{alias}.is_from_me = 0"
 
-
-def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any]) -> dict[str, int]:
+def _coverage_audio(
+    cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[Any], sent_since: str | None
+) -> dict[str, int]:
     """The voice-note transcription backlog inside the same scope as the aggregates.
 
     `messages` is every eligible voice note in scope; `transcribed`, `errors` and
@@ -5580,11 +5588,12 @@ def _coverage_audio(cur: sqlite3.Cursor, msg_clause: str, msg_params: Sequence[A
     import media_notes
     import media_remote
 
-    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE} AND {ingest_sent_clause('messages')}"
+    sent_clause, sent_params = ingest_sent_clause("messages", sent_since)
+    clause = f"{msg_clause} AND {_COVERAGE_AUDIO_WHERE} AND {sent_clause}"
     from runtime_settings import ingest_chat_clause
 
     clause += f" AND {ingest_chat_clause('messages.chat_jid')}"
-    params = tuple(msg_params)
+    params = (*msg_params, *sent_params)
 
     note_params: tuple[Any, ...] = ()
     transcribed_expr = error_expr = unavailable_expr = refused_expr = "0"
@@ -5797,7 +5806,10 @@ def coverage(
         )
         messages_by_month = {month: int(count) for month, count in cur.fetchall() if month}
 
-        audio = _coverage_audio(cur, msg_clause, msg_params)
+        from transcribe_worker import ingest_config
+
+        config = ingest_config()
+        audio = _coverage_audio(cur, msg_clause, msg_params, config.sent_since if config.include_sent else None)
 
         # One ordered pass over the timestamp index: LAG gives every pair of
         # consecutive points, and only the pairs further apart than the

@@ -426,7 +426,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `TRANSCRIBE_MONTHLY_MAX_MINUTES` | *(empty = unlimited)* | Monthly transcription ceiling in minutes, finite 0..525600 (0 pauses capped calls). Calendar month in UTC. Runtime can only lower the deploy ceiling. |
 | `TRANSCRIBE_CAP_SCOPE` | `ingest` | Cap background ingest only, or `all` for ingest plus transcribe_audio. Runtime may tighten ingest to all; deploy all cannot be relaxed. |
 | `TRANSCRIBE_ON_INGEST` | *(unset = off)*                          | Transcribe received and sent voice notes in the background instead of on demand. See [Transcribing voice notes as they arrive](#transcribing-voice-notes-as-they-arrive) |
-| `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` | `true` | On upgrade with `TRANSCRIBE_ON_INGEST=1`, also transcribe existing sent-audio history and linked-device sync. A remote provider receives that audio and consumes the configured monthly cap; `TRANSCRIBE_ON_INGEST_FETCH=1` downloads uncached sent audio too. Set false and restart to keep inbound-only transcription. Strict boolean parsing; empty uses the default. Worker and `coverage().audio` use the same startup snapshot and chat/status/quota restrictions. |
+| `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` | `true` | With `TRANSCRIBE_ON_INGEST=1`, also transcribe sent audio, linked-device sync included, from its first-start bound: newest stored message time clamped between now minus 24 hours and now (empty archive: now), including late phone delivery from up to a day before. Sent audio stored before that bound is never queued (`transcribe_audio` still transcribes it on demand). The instant is kept in `notes.db` across restarts; only a start whose worker runs with this false clears it, so turning it back on counts from that later start. A start without the worker leaves it alone; sent audio from that pause joins the backlog when the worker returns, as inbound audio does. Explicit true follows the default and does not queue old sent history. A remote provider receives that audio and consumes the configured monthly cap; `TRANSCRIBE_ON_INGEST_FETCH=1` downloads uncached sent audio too. Set false and restart to keep inbound-only transcription. Strict boolean parsing; empty uses the default. Running workers retain their settled startup bound; workerless processes read the shared bound on each `coverage()` call. An inbound-only worker clears that shared state even while another process transcribes sent audio. Chat/status/quota restrictions still apply. |
 | `TRANSCRIBE_ON_INGEST_INTERVAL_S` | `300`                         | Seconds between batches of the background worker (minimum 5) |
 | `TRANSCRIBE_ON_INGEST_CHATS` | `all` | `all` or `direct` (phone/LID one-to-one chats only). Set for both processes. Worker and `coverage().audio` share this scope; explicit group `transcribe_audio` remains available. Runtime key `transcription.ingest_chats` overrides it. |
 | `TRANSCRIBE_ON_INGEST_BATCH` | `10`                               | Voice notes the background worker transcribes per batch (maximum 200) |
@@ -1303,16 +1303,51 @@ keys `transcribe_audio` writes (`transcript`, `transcript_lang`,
 include_transcripts=true)`, `get_media_notes` and `search_media_notes` read them
 back for free.
 
-Sent audio is included by default. **Upgrading a deployment with
-`TRANSCRIBE_ON_INGEST=1` starts transcribing its existing sent-audio history,
-including audio sent from another linked device and received through sync.**
-With a remote provider, that audio is sent to the provider and consumes the
-configured monthly cap. With `TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio
-is also downloaded through the bridge. Existing sent rows without transcripts
-join the normal backlog automatically. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
+Sent audio is included by default, **from the first worker start, including
+messages the phone delivers late from up to a day before**. On its first start
+with `TRANSCRIBE_ON_INGEST_INCLUDE_SENT` on, the worker records a canonical UTC
+bound in `notes.db` (`notes_meta`, key `ingest_sent_since`):
+`min(now, max(newest stored message timestamp, now - 24 hours))`.
+An empty archive uses now. This bounded grace picks up audio queued offline
+during an upgrade without uploading months of sent history. Restarts and
+recreated containers that keep the store volume retain the bound. Sent voice
+notes at or after it, including linked-device and history sync delivered later,
+join the backlog; older timestamps stay out. `transcribe_audio` still transcribes
+any older voice note on demand, one by one. Explicit
+`TRANSCRIBE_ON_INGEST_INCLUDE_SENT=true` has the
+same behavior as the default; it does not opt into the older sent history.
+Only a start whose ingest worker runs with `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
+clears the shared instant even if another process on the same store is actively
+transcribing sent audio; that other worker retains its own settled startup bound.
+The next sent-enabled start without a shared bound records a new one. A start
+without the worker (`TRANSCRIBE_ON_INGEST` off, no backend, or a tool policy that
+hides `transcribe_audio`) leaves it alone. This lets several stdio MCP processes
+share a store (see [LAPTOP.md](LAPTOP.md)). If the whole worker is off for a while,
+the stored instant is reused regardless of pause length: sent audio from that
+period joins the backlog when it returns, exactly as inbound audio does (issue #751).
+A failed clear logs a warning and attempts to persist a private
+`notes.db.ingest-sent-reset` marker; the next sent-enabled start claims a fresh
+bound instead of trusting the stale instant. Successful or unnecessary clears
+write no marker. If the marker cannot be persisted, the worker continues with
+inbound audio only and logs that reset recovery could not be recorded. Failed
+claims retry on later iterations using the first chosen in-memory bound. Reset
+identities are acknowledged in the same notes transaction as the bound, so a
+marker that cannot be removed never advances that bound again on restart.
+A stored instant more than five minutes in the future is replaced with now by a
+running worker; workerless readers treat it as absent and warn once without
+changing the database. Preserve the reset marker when
+copying a whole store; database-only backup/snapshot recovery of pending resets
+is tracked in [#770](https://github.com/Tauri-EPO/whatsapp-mcp/issues/770).
+With a remote provider, sent audio is sent to the provider and consumes the
+configured monthly cap. With
+`TRANSCRIBE_ON_INGEST_FETCH=1`, uncached sent audio after the instant is also
+downloaded through the bridge. `TRANSCRIBE_ON_INGEST_INCLUDE_SENT=false`
 keeps only inbound audio after restart; empty uses the default, and invalid
-boolean values stop startup. The option is resolved once at startup for both
-the worker and coverage. The chat filter, status exclusion and monthly quota apply to both
+boolean values stop startup. The INCLUDE_SENT flag is resolved once at startup.
+A running worker keeps its
+settled bound; a process without the worker reads the shared stored bound per
+`coverage()` call, without writing it. The chat filter, status exclusion and monthly
+quota apply to both
 directions, and `coverage().audio` uses the same selection.
 
 What to know before turning it on:

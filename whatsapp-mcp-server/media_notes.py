@@ -29,7 +29,7 @@ from typing import Any
 
 import whatsapp
 from errors import ToolError
-from private_files import notes_connection
+from private_files import check_notes_paths, notes_connection
 from whatsapp import CHAT_POLICY, parse_db_time
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,11 @@ def _connect(create: bool) -> sqlite3.Connection | None:
     conn = notes_connection(path, create=create, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
     if conn is None:
         return None
-    conn.executescript(SCHEMA)
+    try:
+        conn.executescript(SCHEMA)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -508,6 +512,79 @@ def clear_dated_notes_with_prefix(key: str, prefix: str) -> int:
     finally:
         conn.close()
     return deleted
+
+
+def read_meta_values(keys: Sequence[str]) -> dict[str, str]:
+    """Read existing metadata on one read-only handle, with no stat, DDL or creation.
+
+    A missing/unreadable database raises sqlite3.Error; callers that tolerate
+    unavailable metadata can handle it without a separate filesystem probe.
+    """
+    if not keys:
+        return {}
+    conn = None
+    try:
+        conn = whatsapp._connect_read_only(notes_db_path())
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_meta'").fetchone():
+            return {}
+        rows = conn.execute(f"SELECT key, value FROM notes_meta WHERE key IN ({','.join('?' for _ in keys)})", keys)
+        return {str(key): str(value) for key, value in rows}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def claim_meta(key: str, value: str, *, replace: bool = False, reset_token: str | None = None) -> str:
+    """Store if absent, or replace explicitly; reset tokens force replacement only once.
+
+    ``replace=True`` always takes precedence, including a pending in-memory
+    claim with an already acknowledged token. Otherwise each new reset_token
+    replaces once; a token's later appearances retain the recorded value.
+    """
+    conn = None
+    try:
+        conn = _connect(create=True)
+        assert conn is not None
+        with conn:
+            new_reset = False
+            if reset_token is not None:
+                conn.execute("BEGIN IMMEDIATE")
+                acknowledged = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key + ":reset",)).fetchone()
+                # A marker that could not be unlinked must not reset the bound
+                # again: acknowledge its identity atomically with the claim.
+                new_reset = acknowledged is None or acknowledged[0] != reset_token
+            conflict = "DO UPDATE SET value = excluded.value" if replace or new_reset else "DO NOTHING"
+            conn.execute(f"INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) {conflict}", (key, value))
+            if reset_token is not None and new_reset:
+                conn.execute(
+                    "INSERT INTO notes_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key + ":reset", reset_token),
+                )
+            row = conn.execute("SELECT value FROM notes_meta WHERE key = ?", (key,)).fetchone()
+    finally:
+        if conn is not None:
+            conn.close()
+    return str(row[0])
+
+
+def forget_meta(key: str) -> None:
+    """Delete a notes_meta value; no notes.db means there is nothing to forget."""
+    conn = None
+    try:
+        path = notes_db_path()
+        if not os.path.exists(path):
+            return
+        check_notes_paths(path)
+        conn = sqlite3.connect(whatsapp._read_write_uri(path), uri=True, timeout=whatsapp.SQLITE_BUSY_TIMEOUT_S)
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notes_meta'").fetchone():
+            return
+        if not conn.execute("SELECT 1 FROM notes_meta WHERE key=?", (key,)).fetchone():
+            return
+        with conn:
+            conn.execute("DELETE FROM notes_meta WHERE key = ?", (key,))
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
