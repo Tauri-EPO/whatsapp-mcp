@@ -92,11 +92,19 @@ jobs:
           python-version: "3.13"
 
       - name: Install bandit
-        run: pip install bandit
+        run: pip install --require-hashes -r .github/requirements/requirements.txt
 
       - name: Run bandit
-        run: bandit -r whatsapp-mcp-server/ -ll
-        continue-on-error: true
+        run: |
+          status=0
+          bandit --ini .bandit whatsapp-mcp-server/*.py -ll -f json -o bandit.json 2>bandit.log || status=$?
+          python scripts/bandit-summary.py "$status" bandit.json bandit.log
+
+      - name: Run bandit on tests
+        run: |
+          status=0
+          bandit -r whatsapp-mcp-server/tests -s B104,B108,B310,B608 -ll -f json -o bandit-tests.json 2>bandit-tests.log || status=$?
+          python scripts/bandit-summary.py "$status" bandit-tests.json bandit-tests.log "test fixtures"
 
   govulncheck:
     name: Go Vulnerability Check

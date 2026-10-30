@@ -419,7 +419,7 @@ def _page_sql(clauses: list[str], order: str, copies_clauses: list[str] | None =
             WHERE {" AND ".join(clauses)}
             ORDER BY {order}, m.id, m.chat_jid
             LIMIT ? OFFSET ?
-        """
+        """  # nosec B608 # fixed item columns, _media_filters clauses and ORDER_BY entry; caller binds values
     return f"""
         WITH copies AS (
             SELECT file_sha256, COUNT(*) AS copies, COUNT(DISTINCT chat_jid) AS copies_in
@@ -434,7 +434,7 @@ def _page_sql(clauses: list[str], order: str, copies_clauses: list[str] | None =
         WHERE {" AND ".join(clauses)}
         ORDER BY {order}, m.id, m.chat_jid
         LIMIT ? OFFSET ?
-    """
+    """  # nosec B608 # fixed columns, _media_filters clauses and ORDER_BY entry; caller binds both filter sets
 
 
 def _copies_for_hashes(
@@ -456,7 +456,7 @@ def _copies_for_hashes(
         WHERE file_sha256 IS NOT NULL AND file_sha256 IN ({",".join("?" * len(hashes))})
           AND {" AND ".join(copies_clauses)}
         GROUP BY file_sha256
-    """
+    """  # nosec B608 # only hash placeholders and _media_filters clauses; hashes and copies_params are bound
     return {row[0]: (int(row[1]), int(row[2])) for row in conn.execute(sql, (*hashes, *copies_params))}
 
 
@@ -614,7 +614,7 @@ def media_stats(
                 FROM messages m LEFT JOIN chats c ON c.jid = m.chat_jid
                 WHERE {where}
                 GROUP BY m.chat_jid ORDER BY SUM(m.file_length) DESC
-                """,
+                """,  # nosec B608 # _media_filters emits fixed predicates; params bind every filter value
                 params,
             ).fetchall()
             by_type_rows = conn.execute(
@@ -622,7 +622,7 @@ def media_stats(
                 SELECT m.media_type, COUNT(*), COALESCE(SUM(m.file_length), 0)
                 FROM messages m WHERE {where}
                 GROUP BY m.media_type ORDER BY SUM(m.file_length) DESC
-                """,
+                """,  # nosec B608 # _media_filters emits fixed predicates; params bind every filter value
                 params,
             ).fetchall()
             duplicates = conn.execute(
@@ -632,7 +632,7 @@ def media_stats(
                     FROM messages m WHERE {where} AND m.file_sha256 IS NOT NULL
                     GROUP BY m.file_sha256 HAVING COUNT(*) > 1
                 )
-                """,
+                """,  # nosec B608 # _media_filters emits fixed predicates; params bind every filter value
                 params,
             ).fetchone()
         finally:

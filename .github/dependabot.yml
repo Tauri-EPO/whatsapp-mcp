@@ -1,5 +1,16 @@
 version: 2
 updates:
+  # CI-only scanner and pinned transitives; never shipped in runtime images.
+  - package-ecosystem: "pip"
+    directory: "/.github/requirements"
+    schedule:
+      interval: "weekly"
+    groups:
+      bandit-tooling:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+
   # "uv" updates uv.lock (and, without versioning-strategy below, the pyproject.toml
   # floors with it); "pip" only touched pyproject.toml and left the lockfile
   # (which CI and the image use) behind.

@@ -136,7 +136,7 @@ def _current_triage_notes(keys: tuple[str, ...]) -> list[tuple[str, str, str, st
         rows = conn.execute(
             f"SELECT target_id, key, value, updated_at, MAX(version), {notes._ORIGIN_SQL} FROM notes"
             f" WHERE target_type = 'chat' AND key IN ({','.join('?' * len(keys))})"
-            " GROUP BY target_id, key",
+            " GROUP BY target_id, key",  # nosec B608 # fixed notes._ORIGIN_SQL and key placeholders; keys are bound
             list(keys),
         ).fetchall()
     finally:
@@ -237,9 +237,10 @@ def install_filter(
         f"CREATE TEMP TABLE IF NOT EXISTS {_TABLE} (jid TEXT PRIMARY KEY, handled_at TEXT,"
         " snooze_until TEXT, snoozed_at TEXT, muted INTEGER NOT NULL DEFAULT 0, anchor TEXT)"
     )
-    conn.execute(f"DELETE FROM temp.{_TABLE}")
+    conn.execute(f"DELETE FROM temp.{_TABLE}")  # nosec B608 # _TABLE is a module constant identifying this connection-local temp table
     conn.executemany(
-        f"INSERT INTO temp.{_TABLE} (jid, handled_at, snooze_until, snoozed_at, muted) VALUES (?, ?, ?, ?, ?)", rows
+        f"INSERT INTO temp.{_TABLE} (jid, handled_at, snooze_until, snoozed_at, muted) VALUES (?, ?, ?, ?, ?)",  # nosec B608 # fixed temp table identifier; executemany binds every row
+        rows,
     )
 
     tests: list[str] = []
@@ -253,7 +254,7 @@ def install_filter(
         params.append(whatsapp.timestamp_bound(datetime.now(UTC)))
     if exclude_muted:
         tests.append("t.muted = 1")
-    clause = f"AND NOT EXISTS (SELECT 1 FROM temp.{_TABLE} t WHERE t.jid = chats.jid AND ({' OR '.join(tests)}))"
+    clause = f"AND NOT EXISTS (SELECT 1 FROM temp.{_TABLE} t WHERE t.jid = chats.jid AND ({' OR '.join(tests)}))"  # nosec B608 # fixed temp table and internal anchor expressions; returned snooze time is bound
     return clause, params
 
 
@@ -275,7 +276,7 @@ def set_anchor(conn: sqlite3.Connection, from_where: str, params: Sequence[Any],
     """
     rows = conn.execute(
         f"{prefix}SELECT chats.jid, MAX(messages.timestamp) {from_where}"
-        f" AND chats.jid IN (SELECT jid FROM temp.{_TABLE}) GROUP BY chats.jid",
+        f" AND chats.jid IN (SELECT jid FROM temp.{_TABLE}) GROUP BY chats.jid",  # nosec B608 # internal unread query fragments and fixed temp table; params bind all values
         tuple(params),
     ).fetchall()
-    conn.executemany(f"UPDATE temp.{_TABLE} SET anchor = ? WHERE jid = ?", [(newest, jid) for jid, newest in rows])
+    conn.executemany(f"UPDATE temp.{_TABLE} SET anchor = ? WHERE jid = ?", [(newest, jid) for jid, newest in rows])  # nosec B608 # fixed temp table identifier; executemany binds timestamps and JIDs

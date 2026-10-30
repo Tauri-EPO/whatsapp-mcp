@@ -30,11 +30,11 @@ jobs:
       - name: Run ruff check
         run: |
           cd whatsapp-mcp-server
-          uv run ruff check .
+          uv run ruff check . ../scripts/bandit-summary.py
       - name: Run ruff format check
         run: |
           cd whatsapp-mcp-server
-          uv run ruff format --check .
+          uv run ruff format --check . ../scripts/bandit-summary.py
       - name: Run pyright
         run: |
           cd whatsapp-mcp-server
