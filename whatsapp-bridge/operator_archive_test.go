@@ -296,7 +296,7 @@ func TestOperatorExportSentResetIntent(t *testing.T) {
 					if runtime.GOOS == "windows" {
 						t.Skip("POSIX permissions")
 					}
-					err = os.Chmod(markerPath, 0o644)
+					err = os.Chmod(markerPath, 0o644) //nolint:gosec // Deliberately public test marker must be refused by export.
 				}
 			}
 			if err != nil {
