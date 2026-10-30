@@ -31,7 +31,8 @@
 # says what to look at). Needs docker and curl on the host.
 set -uo pipefail
 
-cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$0")/." || exit 1
+# The checkout this script lives in, whatever the caller's working directory.
+cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || dirname "$0")/." || exit 1
 
 WAIT=0
 URL=""
