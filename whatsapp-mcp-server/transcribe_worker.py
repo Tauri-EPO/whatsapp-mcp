@@ -182,6 +182,8 @@ class IngestConfig:
     # The instant above, in the stored timestamp spelling; None counts no sent audio.
     sent_since: str | None = None
     worker_running: bool = False
+    sent_claim_pending: bool = False
+    sent_reset_token: str | None = None
 
 
 _ingest_config: IngestConfig | None = None
@@ -280,10 +282,32 @@ def _canonical_instant(stored: str) -> str:
     return whatsapp.timestamp_bound(whatsapp.parse_db_time(stored))
 
 
-def _stored_sent_since() -> str | None:
-    """The recorded instant, read only: a process that did not start the worker records nothing."""
+def _sent_reset_path() -> Path:
+    """A durable reset intent outside SQLite, so SQLITE_BUSY cannot hide a failed clear."""
+    return Path(media_notes.notes_db_path() + ".ingest-sent-reset")
+
+
+def _sent_reset_token() -> str | None:
+    path = _sent_reset_path()
     try:
-        if _sent_reset_path().exists():
+        if path.is_symlink():
+            raise OSError("A sent audio reset marker must not be a symlink")
+        info = path.stat()
+        if info.st_size > 128:
+            raise OSError("A sent audio reset marker exceeds limits")
+        try:
+            return path.read_text(encoding="ascii").strip() or f"legacy:{info.st_mtime_ns}"
+        except UnicodeError as exc:
+            raise OSError("A sent audio reset marker is unreadable") from exc
+    except FileNotFoundError:
+        return None
+
+
+def _stored_sent_since() -> str | None:
+    """Read shared state without writing; a pending, unacknowledged reset counts no sent audio."""
+    try:
+        token = _sent_reset_token()
+        if token is not None and media_notes.read_meta(SENT_SINCE_KEY + ":reset") != token:
             return None
         stored = media_notes.read_meta(SENT_SINCE_KEY)
         return None if stored is None else _canonical_instant(stored)
@@ -291,31 +315,42 @@ def _stored_sent_since() -> str | None:
         return None
 
 
-def _sent_reset_path() -> Path:
-    """A durable reset intent outside SQLite, so SQLITE_BUSY cannot hide a failed clear."""
-    return Path(media_notes.notes_db_path() + ".ingest-sent-reset")
+def _persist_sent_since(config: IngestConfig) -> IngestConfig:
+    """Retry the chosen bound without moving it, acknowledging a reset in the same transaction."""
+    assert config.sent_since is not None
+    token = config.sent_reset_token
+    try:
+        token = token or _sent_reset_token()
+        since = media_notes.claim_meta(
+            SENT_SINCE_KEY, config.sent_since, replace=config.sent_claim_pending, reset_token=token
+        )
+        try:
+            since = _canonical_instant(since)
+            if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
+                logger.warning("stored sent audio instant is in the future; replacing it with %s", config.sent_since)
+                since = media_notes.claim_meta(SENT_SINCE_KEY, config.sent_since, replace=True)
+        except ValueError:
+            since = media_notes.claim_meta(SENT_SINCE_KEY, config.sent_since, replace=True)
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning(
+            "could not record when sent audio started counting (%s); counting from %s and retrying",
+            exc, config.sent_since,
+        )
+        return replace(config, sent_claim_pending=True, sent_reset_token=token)
+    try:
+        _sent_reset_path().unlink(missing_ok=True)
+    except OSError:
+        # The reset identity was acknowledged atomically. Even if this file
+        # survives every restart, it cannot advance the stored instant again.
+        logger.warning("could not remove acknowledged sent audio reset marker; keeping the recorded instant")
+    return replace(config, sent_since=since, sent_claim_pending=False, sent_reset_token=token)
 
 
 def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
     """Keep, record or clear the instant sent audio counts from before publication."""
     if running and config.include_sent:
-        now = whatsapp.timestamp_bound(datetime.now(UTC))
-        try:
-            reset = _sent_reset_path()
-            since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=reset.exists())
-            try:
-                since = _canonical_instant(since)
-                if whatsapp.parse_db_time(since) > datetime.now(UTC) + timedelta(minutes=5):
-                    logger.warning("stored sent audio instant is in the future; replacing it with %s", now)
-                    since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
-            except ValueError:
-                since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
-            reset.unlink(missing_ok=True)
-        except (sqlite3.Error, OSError) as exc:
-            # Never the stored history: this process counts sent audio from its own start.
-            logger.warning("could not record when sent audio started counting (%s); counting from %s", exc, now)
-            since = now
-        config = replace(config, sent_since=since, worker_running=True)
+        chosen = config.sent_since or whatsapp.timestamp_bound(datetime.now(UTC))
+        config = _persist_sent_since(replace(config, sent_since=chosen, worker_running=True))
     elif running:
         reset = _sent_reset_path()
         try:
@@ -1021,6 +1056,9 @@ def run_forever(
         run_batch = run or functools.partial(
             run_once, fetch=config.fetch, sent_since=config.sent_since if config.include_sent else None
         )
+        if config.sent_claim_pending:
+            config = _persist_sent_since(config)
+            _ingest_config = config
         position = run_batch(config.batch, position=position).position
         if stop.is_set():
             return

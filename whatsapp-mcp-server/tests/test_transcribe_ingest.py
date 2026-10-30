@@ -1955,3 +1955,69 @@ def test_workerless_start_defers_metadata_read_until_each_coverage_config(monkey
     assert reads == [1]
     assert transcribe_worker.ingest_config().sent_since == SENT_SINCE
     assert reads == [1, 1]
+
+
+def test_busy_initial_claim_is_retried_with_the_first_chosen_bound(paired_dbs, monkeypatch):
+    real_claim = media_notes.claim_meta
+    calls = []
+
+    def claim(*args, **kwargs):
+        calls.append(args[1])
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(media_notes, "claim_meta", claim)
+    config = _start(monkeypatch, ON_WITH_SENT)
+    assert config is not None and config.sent_claim_pending
+    chosen = config.sent_since
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return later
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    stop = threading.Event()
+
+    def run(batch, **kwargs):
+        assert _stored_since() == chosen
+        assert transcribe_worker.ingest_config().sent_since == chosen
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    transcribe_worker.run_forever(config, stop=stop, run=run)
+    assert calls == [chosen, chosen]
+    assert not transcribe_worker.ingest_config().sent_claim_pending
+
+
+def test_acknowledged_reset_that_cannot_be_unlinked_does_not_advance_again(paired_dbs, monkeypatch, caplog):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    reset = transcribe_worker._sent_reset_path()
+    reset.write_text("reset-token", encoding="ascii")
+    unlink = Path.unlink
+
+    def refuse(path, **kwargs):
+        if path == reset:
+            raise PermissionError("marker cannot be removed")
+        return unlink(path, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    first = _start(monkeypatch, ON_WITH_SENT)
+    assert first is not None and first.sent_since != SENT_SINCE
+    assert not first.sent_claim_pending
+    assert reset.exists()
+    assert transcribe_worker._stored_sent_since() == first.sent_since
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return later
+
+    monkeypatch.setattr(transcribe_worker, "datetime", Clock)
+    again = _start(monkeypatch, ON_WITH_SENT)
+    assert again is not None and again.sent_since == first.sent_since
+    assert _stored_since() == first.sent_since
+    assert "keeping the recorded instant" in caplog.text
