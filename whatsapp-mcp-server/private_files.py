@@ -108,14 +108,19 @@ def private_open(path: str, mode: str, **kwargs):
         raise
 
 
+def check_notes_paths(path: str) -> None:
+    """Refuse database/journal symlinks without changing files or permissions."""
+    if any(os.path.islink(path + suffix) for suffix in ("", "-wal", "-shm")):
+        raise OSError("An MCP-owned notes file must not be a symlink")
+
+
 def notes_connection(path: str, *, create: bool, timeout: float, autocommit: bool = False) -> sqlite3.Connection | None:
     """One private-file factory shared by the two notes stores."""
     if not create and not os.path.exists(path):
         return None
     private_makedirs(os.path.dirname(os.path.abspath(path)))
+    check_notes_paths(path)
     for suffix in ("", "-wal", "-shm"):
-        if os.path.islink(path + suffix):
-            raise OSError("An MCP-owned notes file must not be a symlink")
         tighten(path + suffix, 0o600, "notes database")
     os.close(_open_fd(path, os.O_CREAT | os.O_RDWR, "notes database"))
     conn = (
