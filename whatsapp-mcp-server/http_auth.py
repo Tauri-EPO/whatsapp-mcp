@@ -440,13 +440,21 @@ class Utf8CharsetMiddleware:
                 headers = []
                 for name, value in message.get("headers", []):
                     if name.lower() == b"content-type":
-                        media_type, *parameters = _media_type_parts(value)
-                        media_type = media_type.strip().lower()
-                        has_charset = any(
-                            parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parameters
-                        )
+                        parts = _media_type_parts(value)
+                        media_type = parts[0].strip().lower()
                         is_json_suffix = media_type.startswith(b"application/") and media_type.endswith(b"+json")
-                        if (media_type in _CHARSET_TYPES or is_json_suffix) and not has_charset:
+                        if media_type not in _CHARSET_TYPES and not is_json_suffix:
+                            headers.append((name, value))
+                            continue
+                        for index, parameter in enumerate(parts[1:], 1):
+                            key, _, declared = parameter.partition(b"=")
+                            if key.strip().lower() == b"charset" and not declared.strip().strip(b'"').strip():
+                                parts[index] = b" charset=utf-8"
+                        value = b";".join(parts)
+                        has_charset = any(
+                            parameter.partition(b"=")[0].strip().lower() == b"charset" for parameter in parts[1:]
+                        )
+                        if not has_charset:
                             value = value.rstrip(b"; \t\r\n") + b"; charset=utf-8"
                     headers.append((name, value))
                 message = dict(message, headers=headers)
