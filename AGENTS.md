@@ -180,6 +180,7 @@ whatsapp-mcp/
 ├── whatsapp-mcp-server/        # Python — MCP tools; reads messages.db, calls bridge REST
 │   ├── main.py                 # MCPServer (SDK v2) tool definitions + transport startup
 │   ├── strict_args.py          # StrictArgumentServer: call_tool refuses arguments no tool declares
+│   ├── http_sessions.py        # bounded SDK session admission evicts the least recently active idle session
 │   ├── errors.py               # the one failure envelope: {"error": {"code", "message"}} and its codes
 │   ├── whatsapp.py             # SQL queries, bridge HTTP client, dict conversion
 │   ├── phone.py                # phone spellings for lookups (Brazilian ninth digit) and outbound recipient separators
@@ -365,7 +366,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 |----------|---------|---------|
 | `WHATSAPP_PROXY_URL` | empty (SDK defaults) | Explicit socks5:// (port required), http:// or https:// egress proxy for WhatsApp pre/post-login websocket and media upload/download only. Never REST/operator/admin, webhook, S3 or transcription clients. Health reports only proxy_enabled. |
 | `WHATSAPP_PROXY_URL_FILE` | empty | Alternative owner-only regular proxy URL file, at most 4096 bytes; symlinks refused. Set URL or file, never both. Credentials are never logged. Mount separately into the bridge. |
-| `WHATSAPP_MCP_SOCKET` | empty (off) | Additional HTTP/SSE Unix listener; TCP stays. Absolute path outside store/outbox/media roots; existing parent, no symlinks, mode 0660, process uid (1000 in images). Remove only our stale socket; live sockets and other files refused. Same Host policy; bearer/OAuth required even with loopback TCP, bridge-token fallback and default rate limit enabled. |
+| `WHATSAPP_MCP_SOCKET` | empty (off) | Additional HTTP/SSE Unix listener; TCP stays. Absolute path outside store/outbox/media roots; existing parent, no symlinks, mode 0660, process uid (1000 in images). Remove only our stale socket; live sockets and other files refused. Same Host policy; bearer/OAuth required even with loopback TCP, bridge-token fallback and default rate limit enabled. Only ASCII whitespace is trimmed; Unicode filename characters are preserved. |
 | `WHATSAPP_OPERATOR_SOCKET` | empty (off) | Additional private operator Unix listener with the same filesystem rules and streaming export. Enables loopback TCP operator when BIND is unset; operator bearer remains required. |
 | `WHATSAPP_WEBHOOK_RUNTIME` | `false` | Enable private operator webhook configuration; independent of the legacy WEBHOOK_ENABLED/WEBHOOK_URL sender. Process-local configuration, HMAC signatures and no media bytes. |
 | `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS` | `false` | Permit HTTPS receiver ports other than 443; address restrictions still apply. |
@@ -438,8 +439,9 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | `WHATSAPP_MCP_METRICS` | `true` | Serve `GET /metrics` on the `http`/`sse` transports (tool calls/errors/seconds per tool, the `whatsapp_mcp_tool_duration_seconds` histogram, HTTP requests by status class); `false` disables it |
 | `WHATSAPP_MCP_METRICS_TOKEN` | *(unset = open)* | Bearer token required on the MCP `/metrics` only (401 otherwise); set it when the MCP port is reachable beyond the tailnet (Funnel). Independent of `WHATSAPP_MCP_TOKEN` |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
-| `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
-| `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
+| `WHATSAPP_MCP_HOST` | `127.0.0.1` | ASCII bind address for the `http`/`sse` transports; only ASCII whitespace is trimmed |
+| `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports; ASCII digits, trimming only ASCII whitespace |
+| `WHATSAPP_MCP_SESSION_IDLE_TIMEOUT_S` | `86400` (24 h) | Streamable-HTTP session idle timeout in whole seconds (0-315360000, up to 10 years); `0` disables expiry; a half-open stream then holds its slot until restart, so prefer a finite timeout behind flaky networks. Invalid/out-of-range values stop HTTP startup before listeners start. SSE/stdio ignore this variable, including invalid values. Expired sessions answer 404 with a JSON-RPC error; well-behaved clients re-initialize. At the fixed 256-session cap, a valid initialize request first evicts its owner's least recently active idle session (hash of credential identity plus clientInfo.name; OAuth also includes issuer, subject and client_id). Other owners' sessions are eligible only after over 30 minutes idle. Busy requests/open streams are protected; no eligible session means 503. |
 | `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only | Extra `Host` header values accepted by the `http`/`sse` transports (comma-separated; bare hostnames match any port; `*` disables the check). Unset + non-loopback bind disables the check with a warning |
 | `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts | Extra `Origin` header values for browser-based MCP clients |
 | `WHATSAPP_MCP_RATE_LIMIT` | `120` with a token, `0` without | Requests/minute per socket peer (or verified forwarding chain) on `http`/`sse`; token bucket in `http_auth.RateLimitMiddleware`, 429 + Retry-After; OAuth uses subject identity, with a separate failed-credential peer budget checked before remote verification; `0`/`off` disables |

@@ -91,6 +91,7 @@ py-modules = [
     "http_auth",
     "http_oauth",
     "http_upload",
+    "http_sessions",
     "main",
     "mcp_config",
     "media_image",
