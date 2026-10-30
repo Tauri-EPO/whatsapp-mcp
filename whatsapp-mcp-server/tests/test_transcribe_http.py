@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import wave
+from contextlib import contextmanager
 from dataclasses import replace
 from email.parser import BytesParser
 from email.policy import default
@@ -41,6 +42,87 @@ def _audio(path, seconds=0.1):
 def _add_audio(store, message_id, chat_jid):
     _add_archive_audio(store, message_id, chat_jid)
     _audio(Path(media_inventory.chat_media_dir(chat_jid)) / _media_filename(message_id))
+
+
+def test_whole_file_budget_reaches_trickling_multipart_http(tmp_path, monkeypatch):
+    import transcription_usage
+
+    # Follow the public call through real request/cancellation code. Preparation
+    # consumes 1s; the first trickling response consumes 1.2s, leaving 0.8s for
+    # the second. Renewing the whole budget for either part must fail this proof.
+    clock = SimpleNamespace(now=100.0, deadline=None)
+    budgets, reads, closed = [], [], []
+    source = tmp_path / "source.wav"
+    source.touch()
+    parts = [tmp_path / f"part-{i}.ogg" for i in range(2)]
+    for part in parts:
+        part.write_bytes(b"fake-audio")
+
+    def conversion(audio_path, work_dir, deadline):
+        assert audio_path == str(source) and deadline == 103.0
+        clock.now += 1.0
+        return parts, 810.0
+
+    @contextmanager
+    def admission(*args, deadline):
+        assert deadline == 103.0
+        yield
+
+    async def wait_for(request, timeout):
+        budgets.append(timeout)
+        clock.deadline = clock.now + timeout
+        try:
+            return await request
+        finally:
+            clock.deadline = None
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            closed.append("response")
+
+        async def aiter_raw(self):
+            for chunk in [b'{"text":', b'"done"}']:
+                clock.now += 0.6
+                if clock.deadline is not None and clock.now >= clock.deadline:
+                    raise TimeoutError
+                yield chunk
+
+    class Client:
+        def __init__(self, **kwargs):
+            reads.append(kwargs["timeout"].read)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            closed.append("client")
+
+        def stream(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(transcribe, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(transcribe, "_http_parts", conversion)
+    monkeypatch.setattr(transcription_usage, "admission", admission)
+    monkeypatch.setattr(transcribe.asyncio, "wait_for", wait_for)
+    monkeypatch.setattr(transcribe.httpx, "AsyncClient", Client)
+    config = replace(
+        transcribe.load_config({}),
+        provider="openai_compatible",
+        url="http://example.invalid/transcribe",
+        model="fake-speech-model",
+        timeout_s=3,
+    )
+    with pytest.raises(transcribe.BackendUnavailableError, match="deadline"):
+        transcribe.transcribe_file(str(source), config=config)
+    assert budgets == pytest.approx([2.0, 0.8])
+    assert reads == pytest.approx([2.0, 0.8])
+    assert closed == ["response", "client"] * 2
 
 
 @pytest.mark.parametrize("phase", ["headers", "body"])
