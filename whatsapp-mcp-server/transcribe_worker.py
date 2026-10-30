@@ -82,6 +82,7 @@ from tool_policy import (
     ALLOW_TOOLS_ENV,
     DENY_TOOLS_ENV,
     DOWNLOAD_TOOL,
+    ToolPolicy,
     active_policy,
     load_tool_policy,
     parse_bool_env,
@@ -1009,7 +1010,7 @@ def run_forever(
                         clear_outage_failures()
                         clear_oversized_failures()
                         settle_on_run = False
-            except (sqlite3.Error, OSError):
+            except Exception:  # noqa: BLE001 - a transient policy failure must not kill the daemon
                 logger.warning("transcribe_on_ingest: could not initialize the sent audio instant; waiting")
             if settle_on_run:
                 sleep(config.interval_s)
@@ -1064,7 +1065,13 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
     if not config.enabled:
         _ingest_config = _settle_sent_since(config, running=False)
         return None
-    policy = active_policy() if runtime_policy_enabled() else load_tool_policy(env)
+    policy = load_tool_policy(env)
+    if runtime_policy_enabled():
+        try:
+            policy = active_policy()
+        except Exception:  # noqa: BLE001 - an unreadable runtime policy means wait, never crash startup
+            logger.warning("transcribe_on_ingest: runtime tool policy unavailable; the worker waits")
+            policy = ToolPolicy(deny=frozenset({TRANSCRIBE_TOOL, DOWNLOAD_TOOL}))
     settle_on_run = not policy.allows(TRANSCRIBE_TOOL)
     if not policy.allows(TRANSCRIBE_TOOL):
         behavior = (

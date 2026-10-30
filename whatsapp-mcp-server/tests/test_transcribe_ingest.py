@@ -656,6 +656,39 @@ def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_t
     assert transcribe_worker._pending_rows(10, sent_since=fallback.sent_since) == []
 
 
+@pytest.mark.parametrize("failure", [ToolError("denied", "Runtime tool policy unavailable"), RuntimeError("transient")])
+def test_unreadable_runtime_policy_waits_at_start_and_recovers_in_loop(paired_dbs, monkeypatch, caplog, failure):
+    from tool_policy import ToolPolicy
+
+    calls = []
+
+    def policy():
+        calls.append(1)
+        if len(calls) < 3:
+            raise failure
+        return ToolPolicy()
+
+    monkeypatch.setattr(transcribe_worker, "runtime_policy_enabled", lambda: True)
+    monkeypatch.setattr(transcribe_worker, "active_policy", policy)
+    starts = []
+    monkeypatch.setattr(transcribe_worker, "start_worker", lambda config, **kwargs: starts.append((config, kwargs)))
+    transcribe_worker.install_ingest_worker(ON_WITH_SENT)
+    assert "runtime tool policy unavailable" in caplog.text
+    assert not Path(media_notes.notes_db_path()).exists()
+    stop = threading.Event()
+    batches = []
+
+    def run(batch, **kwargs):
+        batches.append(batch)
+        stop.set()
+        return transcribe_worker.BatchResult(0, 0, 0)
+
+    config, kwargs = starts[0]
+    transcribe_worker.run_forever(config, stop=stop, sleep=lambda _: None, run=run, **kwargs)
+    assert batches == [config.batch]
+    assert len(calls) == 3 and _stored_since() is not None
+
+
 @pytest.mark.parametrize("ahead_minutes", [4, 6, 1440])
 def test_future_instant_is_repaired_beyond_small_clock_skew(paired_dbs, monkeypatch, caplog, ahead_minutes):
     future = whatsapp.timestamp_bound(datetime.now(UTC) + timedelta(minutes=ahead_minutes))
