@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
+
 ROOT = Path(__file__).resolve().parents[2]
-BASH = shutil.which("bash")
-pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash")
+BASH = resolve_bash()
+pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
 
 @pytest.mark.parametrize("failure", ["", "up", "probe", "ports", "outbox", "operator"])
@@ -55,8 +57,9 @@ esac
         newline="\n",
     )
     docker.chmod(0o755)
+    assert BASH is not None
     result = subprocess.run(
-        [BASH or "bash", str(scripts / "smoke-proxy.sh")],
+        bash_command(BASH, scripts / "smoke-proxy.sh", bin_dir=bindir),
         env={
             **os.environ,
             "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
@@ -65,7 +68,7 @@ esac
         },
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=180 if os.name == "nt" else 30,  # Native process startup is slower on Windows.
     )
     assert (result.returncode == 0) == (failure == ""), result.stdout + result.stderr
     assert ("proxy smoke -> PASS" in result.stdout) == (failure == "")
