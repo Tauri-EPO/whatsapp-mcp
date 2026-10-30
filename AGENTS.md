@@ -351,7 +351,7 @@ Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `
 
 ## 6. CI gates
 
-Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancels the run in flight). All of these must be green before merging (the informational ones too: investigate, do not ignore):
+Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancels the run in flight). All of these must be green before merging (the informational ones too: investigate, do not ignore). The "protect main" ruleset requires only `Python Lint`, `Go Build` and `Docker Build`, on a branch up to date with `main`. Bandit fails its own job on new production medium/high findings, but a red Bandit check does not block a merge through that ruleset. The merge routine (`scripts/merge-when-green.sh`, §4) waits for every check: never merge red. Adding Bandit as a required check is an owner decision; this PR does not change repository settings.
 
 | Job | What |
 |---|---|
