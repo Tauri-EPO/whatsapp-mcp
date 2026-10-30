@@ -2,9 +2,9 @@
 
 import json
 import os
+import shutil
 import socket
 import subprocess
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,6 +12,12 @@ from pathlib import Path
 import pytest
 
 from mcp_config import resolve_host
+
+BASH = shutil.which("bash")
+if os.name == "nt":
+    # Git Bash shares native loopback; the Windows bash shim starts WSL instead.
+    BASH = shutil.which("bash", path=r"C:\Program Files\Git\bin")
+pytestmark = pytest.mark.skipif(BASH is None, reason="needs native bash TCP redirections")
 
 
 @pytest.mark.parametrize("backend_alive", [False, True])
@@ -51,10 +57,10 @@ def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_a
     probe = next(
         line.strip()[4:]
         for line in dockerfile.read_text().splitlines()
-        if line.strip().startswith('CMD ["python", "-c",')
+        if line.strip().startswith('CMD ["bash", "-c",')
     )
     command = json.loads(probe)
-    command[0] = sys.executable
+    command[0] = BASH
     env = dict(os.environ, WHATSAPP_MCP_HOST=bind_host, WHATSAPP_MCP_PORT=str(port), NO_PROXY="", no_proxy="")
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env[name] = f"http://127.0.0.1:{proxy.server_port}"
@@ -62,7 +68,7 @@ def test_image_healthcheck_uses_bind_address_without_environment_proxy(backend_a
         result = subprocess.run(command, cwd=dockerfile.parent, env=env, capture_output=True, timeout=10)
         assert (result.returncode == 0) is backend_alive
         assert not proxy_calls, "image healthcheck reached the environment proxy"
-        assert backend_calls == (["/mcp"] if backend_alive else [])
+        assert not backend_calls, "TCP healthcheck sent an HTTP request"
     finally:
         dead_socket.close()
         for server in servers:

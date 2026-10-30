@@ -73,10 +73,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8000
 
-# Any HTTP answer on /mcp (even 4xx for a session-less GET) means the ASGI
-# server is up; only a connection failure marks the container unhealthy.
-# Probe the actual bind address directly: a proxy cannot mask a dead server.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "from mcp_config import probe_http_health; probe_http_health()"]
+# A TCP connect checks the always-on listener without Python imports or HTTP
+# authentication noise. Unix socket health is checked separately by smoke probes.
+# Bash is included in python:3.13-slim. Startup checks remain frequent (Docker 25+).
+HEALTHCHECK --interval=120s --timeout=5s --start-period=15s --start-interval=5s --retries=3 \
+    CMD ["bash", "-c", "read -r h <<< \"${WHATSAPP_MCP_HOST:-127.0.0.1}\"; h=${h:-127.0.0.1}; case $h in 0.0.0.0) h=127.0.0.1;; ::) h=::1;; esac; read -r p <<< \"${WHATSAPP_MCP_PORT:-8000}\"; exec 3<>/dev/tcp/$h/${p:-8000}"]
 
 CMD ["python", "main.py"]

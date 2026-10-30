@@ -2,6 +2,16 @@
 
 Symptoms and fixes for pairing, auth, sync and app-state problems. For container-specific checks (`docker compose ps`, health endpoints, logs) see [DOCKER.md](DOCKER.md).
 
+### MCP container health
+
+The container healthcheck uses a Bash TCP connect every 120 seconds (every
+5 seconds during the 15-second startup period). It sends no HTTP request and
+cannot produce `/mcp` 401 log lines; investigate clients or separate HTTP
+probes if those persist. `healthy` confirms the TCP listener only: run
+`scripts/smoke.sh` for authenticated MCP initialization and use `--mcp-socket`
+when checking the optional Unix listener. Docker Engine 25+ is required for
+the startup interval.
+
 ### Account connection problems
 
 `/api/health` stays alive and `bridge_status` reports `connection_problem`
