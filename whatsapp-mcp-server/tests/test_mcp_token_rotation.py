@@ -98,6 +98,7 @@ def test_auth_unavailable_is_503_warns_without_credentials(auth_store, caplog, m
         for _ in range(2):
             result = response(client, OLD)
             assert result.status_code == 503
+            assert result.headers["content-type"] == "application/json; charset=utf-8"
             assert result.json()["message"] == "authentication state unavailable"
         warnings = [r for r in caplog.records if "Authentication state unavailable" in r.message]
         assert len(warnings) == 1

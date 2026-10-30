@@ -17,6 +17,9 @@ from urllib.parse import parse_qs, urlsplit
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 import http_oauth
@@ -220,6 +223,29 @@ def app(rate=0, static=STATIC, stateless=True, max_body=4 * 1024 * 1024):
         stateless_http=stateless,
         max_request_body_size=max_body,
     ), calls
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 503])
+def test_oauth_errors_declare_charset_without_outer_middleware(monkeypatch, issuer, status):
+    config = configure(monkeypatch, issuer, WHATSAPP_MCP_OAUTH_JWKS_URL=issuer["url"] + "/jwks")
+    verifier = http_oauth.OAuthTokenVerifier(config)
+    downstream = Starlette(routes=[Route("/mcp", lambda request: Response("ok"), methods=["POST"])])
+    application = http_oauth.OAuthMiddleware(downstream, verifier, per_minute=1 if status == 429 else 0)
+    token = signed(issuer, scope="base whatsapp:read")
+    if status == 401:
+        token = signed(issuer, aud="https://wrong.example/mcp")
+    elif status == 503:
+        issuer["status"] = 503
+    with TestClient(application) as client:
+        if status == 429:
+            assert request(client, token).status_code == 200
+        response = (
+            client.post("/upload", headers={"Authorization": "Bearer " + token}, content=b"fake")
+            if status == 403
+            else request(client, token)
+        )
+    assert response.status_code == status
+    assert response.headers["content-type"] == "application/json; charset=utf-8"
 
 
 @pytest.mark.parametrize(
