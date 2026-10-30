@@ -1694,8 +1694,21 @@ def _contact_names_uncached(conn: sqlite3.Connection, jids: list[str]) -> dict[s
     return found
 
 
-def _placeholders(values: list[str]) -> str:
-    return ",".join("?" for _ in values)
+def _placeholders(values: Sequence[object], *, row_width: int = 1) -> str:
+    """Only SQL parameter tokens, never values; callers bind the values separately."""
+    if row_width < 1:
+        raise ValueError("row_width must be positive")
+    row = "?" if row_width == 1 else "(" + ", ".join("?" for _ in range(row_width)) + ")"
+    return ",".join(row for _ in values)
+
+
+def _in_list_sql(template: str, values: Sequence[object], *, row_width: int = 1) -> str:
+    """Expand only {placeholders} in an internal literal SQL template.
+
+    Values never enter SQL: the shared placeholder builder emits only question
+    marks, commas and parentheses. The caller must bind the values separately.
+    """
+    return template.replace("{placeholders}", _placeholders(values, row_width=row_width))
 
 
 def _in_chunks(values: list[str], size: int = _SQL_IN_CHUNK) -> list[list[str]]:

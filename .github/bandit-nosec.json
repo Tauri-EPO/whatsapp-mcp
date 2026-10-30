@@ -49,12 +49,6 @@
   },
   {
     "path": "whatsapp-mcp-server/media_notes.py",
-    "function": "fetch_media_refusals",
-    "fingerprint": "d7f3ebafa412528ba1df7d9052cfdcb1ac68d18e2be9e989c260e14d5c52a6be",
-    "reason": "only repeated (?, ?) placeholders; flattened identities are bound separately"
-  },
-  {
-    "path": "whatsapp-mcp-server/media_notes.py",
     "function": "_rebuild_transcripts_fts",
     "fingerprint": "6999b0d26d47f288c18c826a1169e2e62a27a4b4693b7aa00fb881b3214dc28a",
     "reason": "TRANSCRIPTS_FTS_TABLE is a module constant, not external input"
@@ -133,21 +127,9 @@
   },
   {
     "path": "whatsapp-mcp-server/media_notes.py",
-    "function": "fetch_notes",
-    "fingerprint": "0027b88fc59727fbe6542fbe01d6dc52f34e50541d61d49f7dea12bbd9d4ddb5",
-    "reason": "only repeated ? placeholders; wanted hashes are bound"
-  },
-  {
-    "path": "whatsapp-mcp-server/media_notes.py",
     "function": "clear_notes_containing",
     "fingerprint": "7e79a164420864062c8376ffdd37c98ad8c968247c439050742a86b8758b40f8",
     "reason": "matches repeats a fixed LIKE predicate; key and escaped patterns are bound"
-  },
-  {
-    "path": "whatsapp-mcp-server/media_notes.py",
-    "function": "read_meta_values",
-    "fingerprint": "3c22e96f7ada2fbf356d2493e64598751d4f30eff474c5ffe0a159fdab8c7bda",
-    "reason": "only repeated ? placeholders; metadata keys are bound"
   },
   {
     "path": "whatsapp-mcp-server/media_notes.py",

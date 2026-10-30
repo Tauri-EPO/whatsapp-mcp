@@ -186,8 +186,12 @@ def fetch_media_refusals(
         for start in range(0, len(identities), SEARCH_BATCH):
             batch = identities[start : start + SEARCH_BATCH]
             rows = conn.execute(
-                "SELECT chat_jid, message_id, reason, updated_at FROM media_refusals "
-                f"WHERE (chat_jid, message_id) IN (VALUES {','.join('(?, ?)' for _ in batch)})",  # nosec B608 # only repeated (?, ?) placeholders; flattened identities are bound separately
+                whatsapp._in_list_sql(
+                    "SELECT chat_jid, message_id, reason, updated_at FROM media_refusals "
+                    "WHERE (chat_jid, message_id) IN (VALUES {placeholders})",
+                    batch,
+                    row_width=2,
+                ),
                 [value for identity in batch for value in identity],
             )
             found.update(
@@ -351,7 +355,7 @@ def visible_hashes(hashes: list[str]) -> set[str]:
     if not wanted:
         return set()
     # Compare the blob, not lower(hex(...)): that is what idx_messages_file_sha256 indexes.
-    clauses = [f"file_sha256 IN ({','.join('?' * len(wanted))})"]
+    clauses = [whatsapp._in_list_sql("file_sha256 IN ({placeholders})", wanted)]
     params: list[Any] = [bytes.fromhex(h) for h in wanted]
     clause, clause_params = CHAT_POLICY.sql_clause("chat_jid")
     clauses.append(clause)
@@ -436,7 +440,9 @@ def fetch_notes(hashes: list[str], *, conn: sqlite3.Connection | None = None) ->
         return {}
     try:
         rows = conn.execute(
-            f"SELECT sha256, key, value FROM media_notes WHERE sha256 IN ({','.join('?' * len(wanted))})",  # nosec B608 # only repeated ? placeholders; wanted hashes are bound
+            whatsapp._in_list_sql(
+                "SELECT sha256, key, value FROM media_notes WHERE sha256 IN ({placeholders})", wanted
+            ),
             wanted,
         ).fetchall()
     finally:
@@ -531,7 +537,7 @@ def read_meta_values(keys: Sequence[str]) -> dict[str, str]:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notes_meta'").fetchone():
             return {}
         rows = conn.execute(
-            f"SELECT key, value FROM notes_meta WHERE key IN ({','.join('?' for _ in keys)})",  # nosec B608 # only repeated ? placeholders; metadata keys are bound
+            whatsapp._in_list_sql("SELECT key, value FROM notes_meta WHERE key IN ({placeholders})", keys),
             keys,
         )
         return {str(key): str(value) for key, value in rows}
