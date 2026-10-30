@@ -66,6 +66,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import media_inventory
@@ -75,6 +76,7 @@ import whatsapp
 from chat_policy import policy_operation
 from errors import MEDIA_REFUSED_CODE, ToolError
 from media_notes import MEDIA_UNAVAILABLE_KEY, TRANSCRIPT_ERROR_KEY, TRANSCRIPT_KEY, store_transcript
+from private_files import _open_fd
 from runtime_settings import INGEST_CHATS_ENV, ingest_chat_clause, parse_ingest_chats
 from tool_policy import (
     ALLOW_TOOLS_ENV,
@@ -274,10 +276,17 @@ def _canonical_instant(stored: str) -> str:
 def _stored_sent_since() -> str | None:
     """The recorded instant, read only: a process that did not start the worker records nothing."""
     try:
+        if _sent_reset_path().exists():
+            return None
         stored = media_notes.read_meta(SENT_SINCE_KEY)
         return None if stored is None else _canonical_instant(stored)
     except (sqlite3.Error, OSError, ValueError):
         return None
+
+
+def _sent_reset_path() -> Path:
+    """A durable reset intent outside SQLite, so SQLITE_BUSY cannot hide a failed clear."""
+    return Path(media_notes.notes_db_path() + ".ingest-sent-reset")
 
 
 def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
@@ -285,23 +294,38 @@ def _settle_sent_since(config: IngestConfig, *, running: bool) -> IngestConfig:
     if running and config.include_sent:
         now = whatsapp.timestamp_bound(datetime.now(UTC))
         try:
-            since = media_notes.claim_meta(SENT_SINCE_KEY, now)
+            reset = _sent_reset_path()
+            since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=reset.exists())
             try:
                 since = _canonical_instant(since)
             except ValueError:
                 since = media_notes.claim_meta(SENT_SINCE_KEY, now, replace=True)
+            reset.unlink(missing_ok=True)
         except (sqlite3.Error, OSError) as exc:
             # Never the stored history: this process counts sent audio from its own start.
             logger.warning("could not record when sent audio started counting (%s); counting from %s", exc, now)
             since = now
         config = replace(config, sent_since=since)
     elif running:
+        reset = _sent_reset_path()
+        # Persist intent before DELETE: a locked DB or a crash must not let the
+        # next sent-enabled worker reuse the old instant. Refuse this start if
+        # even the intent cannot be stored; otherwise we cannot promise a reset.
+        if os.path.exists(media_notes.notes_db_path()):
+            try:
+                fd = _open_fd(str(reset), os.O_CREAT | os.O_WRONLY, "sent audio reset marker")
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                logger.warning("could not persist the sent audio reset; refusing to start the ingest worker")
+                raise
         try:
             media_notes.forget_meta(SENT_SINCE_KEY)
+            reset.unlink(missing_ok=True)
         except (sqlite3.Error, OSError) as exc:
-            # Every start without the worker gets here; a notes.db that cannot be
-            # opened is reported by its own warning, and holds no instant to read.
-            logger.info("could not clear when sent audio started counting: %s", exc)
+            logger.warning("could not clear when sent audio started counting: %s; reset pending", exc)
         config = replace(config, sent_since=None)
     else:
         config = replace(config, sent_since=_stored_sent_since())

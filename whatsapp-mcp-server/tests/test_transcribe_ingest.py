@@ -545,6 +545,45 @@ def test_workerless_coverage_uses_read_only_stored_instant(paired_dbs, monkeypat
     assert not Path(str(path) + "-wal").exists()
 
 
+def test_failed_clear_is_warned_and_next_process_reclaims_now(paired_dbs, monkeypatch, caplog):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+    lock = sqlite3.connect(media_notes.notes_db_path())
+    lock.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(whatsapp, "SQLITE_BUSY_TIMEOUT_S", 0.01)
+    try:
+        with caplog.at_level("WARNING", logger="whatsapp_mcp"):
+            off = _start(monkeypatch, ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+        assert off is not None and off.sent_since is None
+        assert "could not clear when sent audio started counting" in caplog.text
+        assert transcribe_worker._sent_reset_path().exists()
+        assert _stored_since() == SENT_SINCE  # the failed DELETE really left a stale value
+    finally:
+        lock.rollback()
+        lock.close()
+    assert _start(monkeypatch, {}) is None  # workerless starts keep the pending reset
+    assert transcribe_worker._sent_reset_path().exists()
+    assert transcribe_worker.ingest_config().sent_since is None
+    before = whatsapp.timestamp_bound(datetime.now(UTC))
+    on = _start(monkeypatch, ON_WITH_SENT)
+    assert on is not None and on.sent_since is not None and on.sent_since >= before
+    assert _stored_since() == on.sent_since
+    assert not transcribe_worker._sent_reset_path().exists()
+
+
+def test_reset_marker_refuses_symlinks_and_does_not_start_worker(paired_dbs, monkeypatch, installed, caplog):
+    media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
+
+    def refuse(*args, **kwargs):
+        raise OSError("An MCP-owned file must not be a symlink")
+
+    monkeypatch.setattr(transcribe_worker, "_open_fd", refuse)
+    with pytest.raises(OSError, match="symlink"):
+        transcribe_worker.install_ingest_worker(ON_WITH_SENT | {"TRANSCRIBE_ON_INGEST_INCLUDE_SENT": "false"})
+    assert installed == []
+    assert _stored_since() == SENT_SINCE
+    assert "refusing to start" in caplog.text
+
+
 def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_this_start(
     paired_dbs, monkeypatch, caplog
 ):
