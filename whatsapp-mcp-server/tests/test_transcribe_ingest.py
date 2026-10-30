@@ -617,7 +617,7 @@ def test_successful_or_absent_clear_never_writes_reset_marker(paired_dbs, monkey
 
 
 @pytest.mark.parametrize("include_sent", [True, False])
-def test_runtime_hidden_worker_does_not_settle_until_policy_allows(paired_dbs, monkeypatch, include_sent):
+def test_runtime_hidden_worker_does_not_settle_until_policy_allows(paired_dbs, monkeypatch, caplog, include_sent):
     from tool_policy import ToolPolicy
 
     media_notes.claim_meta(transcribe_worker.SENT_SINCE_KEY, SENT_SINCE)
@@ -646,8 +646,11 @@ def test_runtime_hidden_worker_does_not_settle_until_policy_allows(paired_dbs, m
         stop.set()
         return transcribe_worker.BatchResult(0, 0, 0)
 
-    transcribe_worker.run_forever(config, stop=stop, sleep=unhide, run=run, **kwargs)
+    with caplog.at_level("INFO", logger="whatsapp_mcp"):
+        transcribe_worker.run_forever(config, stop=stop, sleep=unhide, run=run, **kwargs)
     assert batches == [config.batch]
+    expected = f"including sent audio from {SENT_SINCE}" if include_sent else "inbound audio only"
+    assert expected in caplog.text
 
 
 def test_an_unreadable_instant_is_replaced_and_an_unwritable_store_counts_from_this_start(
@@ -1868,7 +1871,12 @@ def test_the_loop_sleeps_the_configured_interval_between_batches():
 @pytest.mark.parametrize("include_sent", [True, False])
 def test_the_loop_carries_the_fetch_and_sent_instant_into_every_batch(paired_dbs, monkeypatch, include_sent):
     config = transcribe_worker.IngestConfig(
-        enabled=True, interval_s=1.0, batch=4, fetch=True, include_sent=include_sent, sent_since=SENT_SINCE
+        enabled=True,
+        interval_s=1.0,
+        batch=4,
+        fetch=True,
+        include_sent=include_sent,
+        sent_since=SENT_SINCE if include_sent else None,
     )
     stop = threading.Event()
     seen: list[tuple[int, bool, str | None]] = []

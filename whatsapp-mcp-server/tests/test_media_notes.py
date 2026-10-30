@@ -432,7 +432,6 @@ def test_clear_notes_containing_matches_literally_and_spares_transcripts(notes_s
         media_notes.clear_notes_containing(media_notes.TRANSCRIPT_KEY, ["anything"])
 
 
-
 def test_reset_claim_acknowledgement_is_atomic_and_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(tmp_path / "notes.db"))
     assert media_notes.claim_meta("instant", "old") == "old"
@@ -440,3 +439,17 @@ def test_reset_claim_acknowledgement_is_atomic_and_idempotent(tmp_path, monkeypa
     assert media_notes.claim_meta("instant", "later", reset_token="reset-one") == "first"
     assert media_notes.claim_meta("instant", "new", reset_token="reset-two") == "new"
     assert media_notes.read_meta("instant:reset") == "reset-two"
+
+
+def test_reset_ack_failure_rolls_back_the_new_instant(tmp_path, monkeypatch):
+    path = tmp_path / "notes.db"
+    monkeypatch.setattr(media_notes, "notes_db_path", lambda: str(path))
+    media_notes.claim_meta("instant", "old")
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TRIGGER refuse_ack BEFORE INSERT ON notes_meta WHEN NEW.key='instant:reset' "
+                     "BEGIN SELECT RAISE(ABORT, 'ack refused'); END")
+    conn.close()
+    with pytest.raises(sqlite3.IntegrityError, match="ack refused"):
+        media_notes.claim_meta("instant", "new", reset_token="reset-token")
+    assert media_notes.read_meta("instant") == "old"
+    assert media_notes.read_meta("instant:reset") is None

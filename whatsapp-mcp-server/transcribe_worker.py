@@ -335,7 +335,8 @@ def _persist_sent_since(config: IngestConfig) -> IngestConfig:
     except (sqlite3.Error, OSError) as exc:
         logger.warning(
             "could not record when sent audio started counting (%s); counting from %s and retrying",
-            exc, config.sent_since,
+            exc,
+            config.sent_since,
         )
         return replace(config, sent_claim_pending=True, sent_reset_token=token)
     try:
@@ -1039,6 +1040,21 @@ def run_once(
     return BatchResult(len(pending), transcribed, failed, selection.examined, selection.position)
 
 
+def _log_ingest_started(config: IngestConfig) -> None:
+    logger.info(
+        "%s=1: transcribing up to %d voice notes every %.0fs%s%s",
+        ENABLED_ENV,
+        config.batch,
+        config.interval_s,
+        f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
+        f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
+    )
+
+
+def _batch_runner(config: IngestConfig) -> Callable[..., BatchResult]:
+    return functools.partial(run_once, fetch=config.fetch, sent_since=config.sent_since)
+
+
 def run_forever(
     config: IngestConfig,
     *,
@@ -1055,6 +1071,7 @@ def run_forever(
     starts at the newest rows again, which is where the new work is.
     """
     global _ingest_config
+    run_batch = run or (_batch_runner(config) if not settle_on_run else None)
     position: Position | None = None
     while not stop.is_set():
         if settle_on_run:
@@ -1065,18 +1082,21 @@ def run_forever(
                         _ingest_config = config
                         clear_outage_failures()
                         clear_oversized_failures()
+                        _log_ingest_started(config)
+                        run_batch = run or _batch_runner(config)
                         settle_on_run = False
             except Exception:  # noqa: BLE001 - a transient policy failure must not kill the daemon
                 logger.warning("transcribe_on_ingest: could not initialize the sent audio instant; waiting")
             if settle_on_run:
                 sleep(config.interval_s)
                 continue
-        run_batch = run or functools.partial(
-            run_once, fetch=config.fetch, sent_since=config.sent_since if config.include_sent else None
-        )
         if config.sent_claim_pending:
+            previous_bound = config.sent_since
             config = _persist_sent_since(config)
             _ingest_config = config
+            if run is None and config.sent_since != previous_bound:
+                run_batch = _batch_runner(config)
+        assert run_batch is not None
         position = run_batch(config.batch, position=position).position
         if stop.is_set():
             return
@@ -1172,13 +1192,5 @@ def install_ingest_worker(env: Mapping[str, str] | None = None) -> threading.Thr
         return start_worker(config, settle_on_run=True)
     clear_outage_failures()
     clear_oversized_failures()
-    logger.info(
-        "%s=1: transcribing up to %d voice notes every %.0fs (%s)%s%s",
-        ENABLED_ENV,
-        config.batch,
-        config.interval_s,
-        "configured HTTP provider" if backend_config.provider == "openai_compatible" else "whisper on this machine",
-        f", fetching uncached audio from the bridge ({FETCH_ENV}=1)" if config.fetch else "",
-        f", including sent audio from {config.sent_since}" if config.include_sent else ", inbound audio only",
-    )
+    _log_ingest_started(config)
     return start_worker(config)
