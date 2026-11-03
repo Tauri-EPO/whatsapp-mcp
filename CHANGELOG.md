@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.4](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.3...v2.9.4) (2026-11-03)
+
+
+### Bug fixes
+
+* aceita authorization vazio no webhook de runtime ([#789](https://github.com/Tauri-EPO/whatsapp-mcp/issues/789)) ([224edf2](https://github.com/Tauri-EPO/whatsapp-mcp/commit/224edf2d2ae5930df44335d4f0d59667a225a6c9))
+
 ## [2.9.3](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.2...v2.9.3) (2026-11-03)
 
 
