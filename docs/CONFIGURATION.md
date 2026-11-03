@@ -75,11 +75,13 @@ Optional `authorization` is the complete `Authorization` header value the
 receiver expects, for example `"authorization": "Bearer <key>"`. When set,
 every attempt (retries and `webhook/test` included) sends exactly that value
 beside the unchanged HMAC headers; without it the request has no
-`Authorization` header, as before. The value must be nonblank, at most 2100
+`Authorization` header, as before. An empty string or `null` also removes the
+header, just like omitting the field. A nonempty value must be nonblank, at most 2100
 bytes and printable ASCII: CR, LF, tab and every other control byte (header
 injection) or non-ASCII byte returns 400 and keeps the previous receiver. Like
-the secret it lives only in memory, is replaced by every PUT (a PUT without it
-removes the previous value) and never appears in GET, logs, errors or metrics.
+the secret it lives only in memory, is replaced by every PUT (a PUT without it,
+or with `""` or `null`, removes the previous value) and never appears in GET, logs, errors
+or metrics.
 
 Optional JSON booleans `forward_self`, `forward_channels` and
 `forward_broadcasts` default to `FORWARD_SELF`, `WEBHOOK_FORWARD_CHANNELS` and

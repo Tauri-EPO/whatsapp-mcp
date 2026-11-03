@@ -678,6 +678,25 @@ func TestRuntimeWebhookRoutesOptInAuthAndValidation(t *testing.T) {
 
 const fakeWebhookAuthorization = "Bearer fake-receiver-key-0123456789abcdef"
 
+// assertSameWebhookHeaders compares two deliveries of one event: the same
+// header names, and the same values where those are not per-attempt.
+func assertSameWebhookHeaders(t *testing.T, want, got http.Header) {
+	t.Helper()
+	if len(want) != len(got) {
+		t.Fatalf("header count differs: %d vs %d", len(want), len(got))
+	}
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("header %s missing", name)
+		}
+	}
+	for _, name := range []string{"Content-Type", "X-Example-Id"} {
+		if want.Get(name) != got.Get(name) {
+			t.Fatalf("header %s changed", name)
+		}
+	}
+}
+
 func TestRuntimeWebhookAuthorizationHeader(t *testing.T) {
 	var status atomic.Int32
 	status.Store(503)
@@ -733,17 +752,34 @@ func TestRuntimeWebhookAuthorizationHeader(t *testing.T) {
 	}
 	withKeys := maps.Clone(with.header)
 	delete(withKeys, "Authorization")
-	if len(withKeys) != len(without.header) {
-		t.Fatalf("headers differ: %v vs %v", maps.Keys(withKeys), maps.Keys(without.header))
-	}
-	for name := range withKeys {
-		if _, ok := without.header[name]; !ok {
-			t.Fatalf("header %s only sent with authorization", name)
+	assertSameWebhookHeaders(t, withKeys, without.header)
+
+	// An explicitly empty value and null clear a configured key just like
+	// omitting the field, for direct and synthetic deliveries alike.
+	for _, value := range []any{"", nil} {
+		if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": fakeWebhookAuthorization}); code != 200 {
+			t.Fatalf("configure=%d %s", code, data)
 		}
-	}
-	for _, name := range []string{"Content-Type", "X-Example-Id"} {
-		if with.header.Get(name) != without.header.Get(name) {
-			t.Fatalf("header %s changed", name)
+		if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": value}); code != 200 || !bytes.Contains(data, []byte(`"authorization_set":false`)) {
+			t.Fatalf("authorization %v=%d %s", value, code, data)
+		}
+		_, get = webhookOperatorRequest(t, server, "GET", "/operator/v1/webhook", "")
+		if !bytes.Contains(get, []byte(`"authorization_set":false`)) {
+			t.Fatalf("authorization %v kept the previous value: %s", value, get)
+		}
+		cleared := send()
+		if _, present := cleared.header["Authorization"]; present {
+			t.Fatalf("authorization sent for %v", value)
+		}
+		if !bytes.Equal(cleared.body, without.body) || !verifyWebhookReceipt(cleared, time.Now()) {
+			t.Fatalf("authorization %v changed the body or signature", value)
+		}
+		assertSameWebhookHeaders(t, without.header, cleared.header)
+		if code, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", ""); code != 200 || !bytes.Contains(body, []byte(`"delivered":true`)) {
+			t.Fatalf("test=%d %s", code, body)
+		}
+		if _, present := receiveWebhook(t, receipts).header["Authorization"]; present {
+			t.Fatalf("synthetic test delivery sent authorization for %v", value)
 		}
 	}
 
@@ -751,7 +787,7 @@ func TestRuntimeWebhookAuthorizationHeader(t *testing.T) {
 	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": strings.Repeat("k", 2100)}); code != 200 {
 		t.Fatalf("2100 bytes refused=%d %s", code, data)
 	}
-	for _, value := range []any{"", "   ", fakeWebhookAuthorization + "\r\nX-Injected: 1", fakeWebhookAuthorization + "\n", fakeWebhookAuthorization + "\x00", "Bearer\tfake", fakeWebhookAuthorization + "\x7f", "Bearer chav\u00e9-fake", strings.Repeat("k", 2101), 5, true} {
+	for _, value := range []any{"   ", fakeWebhookAuthorization + "\r\nX-Injected: 1", fakeWebhookAuthorization + "\n", fakeWebhookAuthorization + "\x00", "Bearer\tfake", fakeWebhookAuthorization + "\x7f", "Bearer chav\u00e9-fake", strings.Repeat("k", 2101), 5, true} {
 		code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": value})
 		if code != 400 {
 			t.Fatalf("authorization %q accepted=%d", value, code)
