@@ -372,6 +372,9 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	if len(cfg.Secret) < 32 || len(cfg.Secret) > 256 {
 		return errors.New("secret must contain 32-256 bytes")
 	}
+	if cfg.Authorization != nil && *cfg.Authorization == "" {
+		cfg.Authorization = nil
+	}
 	if cfg.Authorization != nil && !validWebhookAuthorization(*cfg.Authorization) {
 		return errors.New("authorization must be a non-blank header value of at most 2100 printable ASCII bytes, without CR, LF or other control characters")
 	}

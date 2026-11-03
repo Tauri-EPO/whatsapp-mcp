@@ -747,11 +747,43 @@ func TestRuntimeWebhookAuthorizationHeader(t *testing.T) {
 		}
 	}
 
+	// An explicitly empty value also clears a previously configured key.
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": fakeWebhookAuthorization}); code != 200 {
+		t.Fatalf("configure=%d %s", code, data)
+	}
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": ""}); code != 200 || !bytes.Contains(data, []byte(`"authorization_set":false`)) {
+		t.Fatalf("empty authorization=%d %s", code, data)
+	}
+	_, get = webhookOperatorRequest(t, server, "GET", "/operator/v1/webhook", "")
+	if !bytes.Contains(get, []byte(`"authorization_set":false`)) {
+		t.Fatalf("empty authorization kept the previous value: %s", get)
+	}
+	empty := send()
+	if _, present := empty.header["Authorization"]; present {
+		t.Fatal("authorization sent for an empty value")
+	}
+	if !bytes.Equal(empty.body, without.body) || !verifyWebhookReceipt(empty, time.Now()) {
+		t.Fatal("empty authorization changed the body or signature")
+	}
+	if len(empty.header) != len(without.header) {
+		t.Fatal("empty authorization changed the header set")
+	}
+	for name := range without.header {
+		if _, present := empty.header[name]; !present {
+			t.Fatalf("empty authorization removed header %s", name)
+		}
+	}
+	for _, name := range []string{"Content-Type", "X-Example-Id"} {
+		if empty.header.Get(name) != without.header.Get(name) {
+			t.Fatalf("empty authorization changed header %s", name)
+		}
+	}
+
 	// Refused values return 400, keep the previous receiver and never echo it.
 	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": strings.Repeat("k", 2100)}); code != 200 {
 		t.Fatalf("2100 bytes refused=%d %s", code, data)
 	}
-	for _, value := range []any{"", "   ", fakeWebhookAuthorization + "\r\nX-Injected: 1", fakeWebhookAuthorization + "\n", fakeWebhookAuthorization + "\x00", "Bearer\tfake", fakeWebhookAuthorization + "\x7f", "Bearer chav\u00e9-fake", strings.Repeat("k", 2101), 5, true} {
+	for _, value := range []any{"   ", fakeWebhookAuthorization + "\r\nX-Injected: 1", fakeWebhookAuthorization + "\n", fakeWebhookAuthorization + "\x00", "Bearer\tfake", fakeWebhookAuthorization + "\x7f", "Bearer chav\u00e9-fake", strings.Repeat("k", 2101), 5, true} {
 		code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": value})
 		if code != 400 {
 			t.Fatalf("authorization %q accepted=%d", value, code)
