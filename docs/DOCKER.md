@@ -83,7 +83,9 @@ disablement. Keep the operator endpoint on its private network.
 Use the operator bearer and an allowed Host for `GET`, `PUT`, `DELETE
 /operator/v1/webhook` and `POST /operator/v1/webhook/test`. PUT supplies
 `url`, `events` selecting `message.received`, `connection.changed` or both, a
-dedicated random `secret` and optionally `header_prefix` (default `X-Webhook`).
+dedicated random `secret` and optionally `header_prefix` (default `X-Webhook`)
+and `authorization`, the full `Authorization` value (`Bearer <key>`) the
+receiver requires, sent on every attempt and never returned by GET.
 Optional booleans `forward_self`, `forward_channels` and `forward_broadcasts`
 default to the corresponding deployment variables. An explicitly false deploy
 variable is a ceiling (runtime true returns 400); an absent or empty variable
