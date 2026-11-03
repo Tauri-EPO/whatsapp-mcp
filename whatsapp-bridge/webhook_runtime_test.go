@@ -676,6 +676,109 @@ func TestRuntimeWebhookRoutesOptInAuthAndValidation(t *testing.T) {
 	}
 }
 
+const fakeWebhookAuthorization = "Bearer fake-receiver-key-0123456789abcdef"
+
+func TestRuntimeWebhookAuthorizationHeader(t *testing.T) {
+	var status atomic.Int32
+	status.Store(503)
+	b, server, destination, receipts, logger := runtimeWebhookFixture(t, &status)
+	b.RuntimeWebhook.options.FailureLimit = 100
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": fakeWebhookAuthorization}); code != 200 || !bytes.Contains(data, []byte(`"authorization_set":true`)) {
+		t.Fatalf("configure=%d %s", code, data)
+	}
+	// Every attempt of one event, the first and the four retries, carries the
+	// configured value verbatim beside the unchanged HMAC signature.
+	b.handleMessage(buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "authorized text"))
+	for attempt := range 5 {
+		r := receiveWebhook(t, receipts)
+		if got := r.header.Values("Authorization"); len(got) != 1 || got[0] != fakeWebhookAuthorization || !verifyWebhookReceipt(r, time.Now()) {
+			t.Fatalf("attempt %d: authorization or signature missing", attempt)
+		}
+	}
+	status.Store(204)
+	if code, body := webhookOperatorRequest(t, server, "POST", "/operator/v1/webhook/test", ""); code != 200 || !bytes.Contains(body, []byte(`"delivered":true`)) {
+		t.Fatalf("test=%d %s", code, body)
+	}
+	if r := receiveWebhook(t, receipts); r.header.Get("Authorization") != fakeWebhookAuthorization {
+		t.Fatal("synthetic test delivery lacks authorization")
+	}
+
+	// The same delivery with and without the field: only Authorization differs.
+	d, err := webhookDelivery(runtimeWebhookEvent{Event: "message.received", Type: "text", Text: "same event", Timestamp: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func() signedWebhookReceipt {
+		t.Helper()
+		b.RuntimeWebhook.mu.Lock()
+		g := b.RuntimeWebhook.generation
+		b.RuntimeWebhook.mu.Unlock()
+		if ok, reason := b.RuntimeWebhook.attempt(context.Background(), g, d); !ok {
+			t.Fatalf("attempt=%s", reason)
+		}
+		return receiveWebhook(t, receipts)
+	}
+	with := send()
+	configureWebhookHTTP(t, server, destination)
+	_, get := webhookOperatorRequest(t, server, "GET", "/operator/v1/webhook", "")
+	if !bytes.Contains(get, []byte(`"authorization_set":false`)) {
+		t.Fatalf("PUT without the field kept the previous value: %s", get)
+	}
+	without := send()
+	if _, present := without.header["Authorization"]; present {
+		t.Fatal("authorization sent without configuration")
+	}
+	if !bytes.Equal(with.body, without.body) || !verifyWebhookReceipt(without, time.Now()) {
+		t.Fatal("body or signature changed with authorization")
+	}
+	withKeys := maps.Clone(with.header)
+	delete(withKeys, "Authorization")
+	if len(withKeys) != len(without.header) {
+		t.Fatalf("headers differ: %v vs %v", maps.Keys(withKeys), maps.Keys(without.header))
+	}
+	for name := range withKeys {
+		if _, ok := without.header[name]; !ok {
+			t.Fatalf("header %s only sent with authorization", name)
+		}
+	}
+	for _, name := range []string{"Content-Type", "X-Example-Id"} {
+		if with.header.Get(name) != without.header.Get(name) {
+			t.Fatalf("header %s changed", name)
+		}
+	}
+
+	// Refused values return 400, keep the previous receiver and never echo it.
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": strings.Repeat("k", 2100)}); code != 200 {
+		t.Fatalf("2100 bytes refused=%d %s", code, data)
+	}
+	for _, value := range []any{"", "   ", fakeWebhookAuthorization + "\r\nX-Injected: 1", fakeWebhookAuthorization + "\n", fakeWebhookAuthorization + "\x00", "Bearer\tfake", fakeWebhookAuthorization + "\x7f", "Bearer chav\u00e9-fake", strings.Repeat("k", 2101), 5, true} {
+		code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": value})
+		if code != 400 {
+			t.Fatalf("authorization %q accepted=%d", value, code)
+		}
+		if s, ok := value.(string); ok && strings.TrimSpace(s) != "" && bytes.Contains(data, []byte(strings.TrimSpace(s))) {
+			t.Fatal("refusal echoed the value")
+		}
+	}
+	if s := b.RuntimeWebhook.snapshot(); !s.Enabled || !s.AuthSet {
+		t.Fatalf("refused PUT replaced the receiver: %+v", s)
+	}
+
+	_, get = webhookOperatorRequest(t, server, "GET", "/operator/v1/webhook", "")
+	_, health := webhookOperatorRequest(t, server, "GET", "/operator/v1/health", "")
+	metrics := httptest.NewRecorder()
+	b.handleMetrics()(metrics, httptest.NewRequest("GET", "/metrics", nil))
+	for _, data := range [][]byte{get, health, metrics.Body.Bytes(), []byte(logger.String())} {
+		if bytes.Contains(data, []byte("fake-receiver-key")) || bytes.Contains(data, []byte(strings.Repeat("k", 64))) {
+			t.Fatal("authorization leaked")
+		}
+	}
+	_, _ = webhookOperatorRequest(t, server, "DELETE", "/operator/v1/webhook", "")
+	if b.RuntimeWebhook.snapshot().AuthSet {
+		t.Fatal("delete kept authorization")
+	}
+}
+
 func TestRuntimeWebhookQueueBoundAndDeleteCancels(t *testing.T) {
 	b, server, destination, receipts, _ := runtimeWebhookFixture(t, nil)
 	configureWebhookHTTP(t, server, destination)

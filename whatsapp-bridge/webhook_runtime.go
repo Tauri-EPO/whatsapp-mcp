@@ -70,6 +70,7 @@ type runtimeWebhookConfig struct {
 	Events            []string `json:"events"`
 	Secret            string   `json:"secret"`
 	HeaderPrefix      string   `json:"header_prefix"`
+	Authorization     *string  `json:"authorization,omitempty"`
 	ForwardSelf       *bool    `json:"forward_self,omitempty"`
 	ForwardChannels   *bool    `json:"forward_channels,omitempty"`
 	ForwardBroadcasts *bool    `json:"forward_broadcasts,omitempty"`
@@ -82,6 +83,7 @@ type runtimeWebhookState struct {
 	Events       []string   `json:"events"`
 	HeaderPrefix string     `json:"header_prefix"`
 	Fingerprint  string     `json:"secret_fingerprint"`
+	AuthSet      bool       `json:"authorization_set"`
 	Failures     int        `json:"consecutive_failures"`
 	LastSuccess  *time.Time `json:"last_success"`
 	Reason       string     `json:"reason"`
@@ -351,9 +353,27 @@ func validWebhookPrefix(prefix string) bool {
 	return true
 }
 
+// validWebhookAuthorization accepts a complete Authorization header value:
+// nonblank, at most 2100 bytes and printable ASCII only, so CR/LF and every
+// other control byte (header injection) are refused before any request.
+func validWebhookAuthorization(value string) bool {
+	if len(value) > 2100 || strings.TrimSpace(value) == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig, filters runtimeWebhookFilters) error {
 	if len(cfg.Secret) < 32 || len(cfg.Secret) > 256 {
 		return errors.New("secret must contain 32-256 bytes")
+	}
+	if cfg.Authorization != nil && !validWebhookAuthorization(*cfg.Authorization) {
+		return errors.New("authorization must be a non-blank header value of at most 2100 printable ASCII bytes, without CR, LF or other control characters")
 	}
 	if len(cfg.Events) < 1 || len(cfg.Events) > 3 {
 		return errors.New("events must select message.received, connection.changed and/or storage.warning")
@@ -408,7 +428,7 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	g.client = w.client(g, u)
 	sum := sha256.Sum256([]byte(cfg.Secret))
 	u.RawQuery, u.ForceQuery = "", false
-	w.state = runtimeWebhookState{runtimeWebhookFilters: filters, URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8])}
+	w.state = runtimeWebhookState{runtimeWebhookFilters: filters, URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8]), AuthSet: cfg.Authorization != nil}
 	w.generation = g
 	if replay && w.lastConnection != nil {
 		w.enqueueLocked(g, runtimeWebhookEvent{Event: "connection.changed", connection: w.lastConnection})
@@ -558,6 +578,11 @@ func (w *runtimeWebhook) deliver(ctx context.Context, g *runtimeWebhookGeneratio
 	req.Header.Set(g.config.HeaderPrefix+"-Id", d.id)
 	req.Header.Set(g.config.HeaderPrefix+"-Timestamp", ts)
 	req.Header.Set(g.config.HeaderPrefix+"-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	// Optional complete receiver value (e.g. "Bearer <key>"), process-local like
+	// the secret; the snapshot exposes only AuthSet, never the value.
+	if g.config.Authorization != nil {
+		req.Header.Set("Authorization", *g.config.Authorization)
+	}
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return false, "delivery_failed"

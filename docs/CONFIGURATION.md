@@ -41,7 +41,8 @@ Set `WHATSAPP_WEBHOOK_RUNTIME=true` and enable the private operator listener to
 configure a separate message, connection-state and storage-warning receiver. The default is off: the routes are absent
 and the legacy `WEBHOOK_URL` sender, including `X-Bridge-Token`, is unchanged.
 Runtime delivery is independent of `WEBHOOK_ENABLED`; both receivers can operate
-at once. Runtime requests never include `X-Bridge-Token` or the operator bearer.
+at once. Runtime requests never include `X-Bridge-Token` or the operator bearer;
+they carry an `Authorization` header only when PUT configured `authorization`.
 Message delivery applies the receiver's self/channel/broadcast filters and the
 deployment's status and allowed-chat filters before creating an event. Select
 `message.received`, `connection.changed` and/or `storage.warning`; an unselected event is never delivered.
@@ -51,7 +52,7 @@ no-store responses and mutation audit. They are not MCP tools or data-plane rout
 
 | Method and path | Contract |
 |---|---|
-| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, effective `forward_self`, `forward_channels`, `forward_broadcasts` and `forward_status` filters, header prefix, SHA-256 secret fingerprint (first 16 hex characters), consecutive failed events, last success, reason, queued and dropped counts; never the secret. |
+| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, effective `forward_self`, `forward_channels`, `forward_broadcasts` and `forward_status` filters, header prefix, SHA-256 secret fingerprint (first 16 hex characters), `authorization_set` (whether an `authorization` value is configured), consecutive failed events, last success, reason, queued and dropped counts; never the secret or the `authorization` value. |
 | `PUT /operator/v1/webhook` | Replace configuration and re-enable delivery; JSON below, at most 4096 bytes, unknown fields refused. Cancels previous deliveries and resets delivery state. Returns the same safe snapshot as GET. |
 | `DELETE /operator/v1/webhook` | Remove configuration, cancel in-flight requests and discard the old queue; 204. An already accepted receiver request cannot be recalled. |
 | `POST /operator/v1/webhook/test` | One synchronous synthetic event (`event: webhook.test`, `type: test`), bounded to 12 seconds including admission; 200 with `delivered`, `reason`, `event_id`, or 409 without an enabled receiver. It does not change consecutive failures, last success or automatic disablement. |
@@ -69,6 +70,16 @@ Generate a fresh secret with `openssl rand -hex 32`; the literal UTF-8 bytes of
 the supplied string are the HMAC key (hex strings are not decoded). The secret
 must be 32-256 bytes. The prefix defaults to `X-Webhook`, must start with `X-`
 and contain only ASCII letters, digits and hyphens (3-48 characters).
+
+Optional `authorization` is the complete `Authorization` header value the
+receiver expects, for example `"authorization": "Bearer <key>"`. When set,
+every attempt (retries and `webhook/test` included) sends exactly that value
+beside the unchanged HMAC headers; without it the request has no
+`Authorization` header, as before. The value must be nonblank, at most 2100
+bytes and printable ASCII: CR, LF, tab and every other control byte (header
+injection) or non-ASCII byte returns 400 and keeps the previous receiver. Like
+the secret it lives only in memory, is replaced by every PUT (a PUT without it
+removes the previous value) and never appears in GET, logs, errors or metrics.
 
 Optional JSON booleans `forward_self`, `forward_channels` and
 `forward_broadcasts` default to `FORWARD_SELF`, `WEBHOOK_FORWARD_CHANNELS` and
