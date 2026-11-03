@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.3](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.2...v2.9.3) (2026-11-03)
+
+
+### Bug fixes
+
+* entrega do webhook de runtime envia Authorization quando há chave configurada ([#785](https://github.com/Tauri-EPO/whatsapp-mcp/issues/785)) ([d787aa7](https://github.com/Tauri-EPO/whatsapp-mcp/commit/d787aa7ed6848e2c99c44bf339f1135f9e052c40)), closes [#784](https://github.com/Tauri-EPO/whatsapp-mcp/issues/784)
+
 ## [2.9.2](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.1...v2.9.2) (2026-10-30)
 
 
