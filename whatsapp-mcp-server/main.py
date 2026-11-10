@@ -54,7 +54,7 @@ from media_notes import clear_media_refusal as notes_clear_media_refusal
 from media_notes import get_media_notes as notes_get_media_notes
 from media_notes import search_media_notes as notes_search_media_notes
 from media_notes import store_transcript as notes_store_transcript
-from media_read import DEFAULT_CHUNK_BYTES, content_tool
+from media_read import DEFAULT_CHUNK_BYTES, INLINE_ENV, content_tool, parse_inline_env
 from media_read import cached_only_path as media_cached_only_path
 from media_read import read_media as media_read_bytes
 from media_resource import MediaResourceServer, attach_resource_links
@@ -2745,7 +2745,11 @@ def read_media(
         transcribe_audio, which gives you text you can actually read;
       - anything else (PDF, DOCX, video, archives) as an embedded resource
         carrying the file's real MIME type, up to 2 MB, so a client that knows
-        that type can hand it to you as a document.
+        that type can hand it to you as a document. A text block before it
+        names the type, size and sha256: if the content after it is garbled
+        or does not hash to that sha256, read it again with as_text=True or
+        as_base64=True. The operator may have configured base64 chunks or
+        extracted text in place of the resource; the first block says which.
 
     **Images are prepared for you**: resized to fit `max_edge` (default 1568 px on
     the long edge, never upscaled), turned upright from the camera's EXIF tag,
@@ -2820,8 +2824,9 @@ def read_media(
         length: With as_base64, bytes requested (default 1048576, maximum 4194304)
 
     Returns:
-        A list of content blocks: the file (or its text, or its pages), then the JSON
-        metadata block, which carries `pages_total` and `truncated` with as_text (plus
+        A list of content blocks: for a document returned whole (PDF, DOCX, video,
+        archive) first a text block with its type, size and sha256, then the file
+        (or its text, or its pages), then the JSON metadata block, which carries `pages_total` and `truncated` with as_text (plus
         `pages_failed` for PDF pages whose text could not be extracted; read those
         with as_images, and `pages_missing` for unresolved page-tree references),
         and those plus `first_page`, `pages_rendered`, `image_bytes`
@@ -3069,6 +3074,7 @@ if __name__ == "__main__":
         # Read here only to reject a value we cannot parse before serving; the
         # tools themselves consult the environment per call (untrusted.py).
         _wrap_untrusted = parse_wrap_env(os.getenv(WRAP_ENV))
+        _media_inline = parse_inline_env(os.getenv(INLINE_ENV))
         import runtime_settings
 
         runtime_settings.capture_environment()
@@ -3083,6 +3089,7 @@ if __name__ == "__main__":
         "1" if _wrap_untrusted else "0",
         "wrapped in <untrusted> delimiters" if _wrap_untrusted else "returned as-is (tool descriptions warn)",
     )
+    logging.getLogger("whatsapp_mcp").info("%s=%s: shape of documents read_media returns", INLINE_ENV, _media_inline)
 
     # Opt-in background transcription (TRANSCRIBE_ON_INGEST). Started before any
     # transport so it runs on stdio and http alike; it is a daemon thread that

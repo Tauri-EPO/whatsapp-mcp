@@ -88,7 +88,7 @@ class TestRead:
         assert len(contents) == 1
         assert contents[0].content == PDF
         assert contents[0].mime_type == "application/pdf"
-        block = main.read_media(chat_jid=ALICE, message_id="DOC1")[0]
+        block = main.read_media(chat_jid=ALICE, message_id="DOC1")[1]
         assert block.resource.uri == _uri("DOC1")
 
     async def test_a_text_file_comes_back_as_text(self, store):
