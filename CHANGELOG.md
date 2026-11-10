@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.10.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.4...v2.10.0) (2026-11-10)
+
+
+### Features
+
+* read_media puts a document's identity first and WHATSAPP_MEDIA_INLINE pins its shape ([#797](https://github.com/Tauri-EPO/whatsapp-mcp/issues/797)) ([9f00d19](https://github.com/Tauri-EPO/whatsapp-mcp/commit/9f00d19c1bad87880fe87fc4d4feead456fec026))
+
+
+### Dependencies
+
+* bump modernc.org/sqlite from 1.61.0 to 1.61.1 in /whatsapp-bridge in the gomod-version-updates group ([#793](https://github.com/Tauri-EPO/whatsapp-mcp/issues/793)) ([c229052](https://github.com/Tauri-EPO/whatsapp-mcp/commit/c2290521255e5ba4b4fe4dd77c61822f4392120b))
+* bump pypdf from 6.21.3 to 6.21.4 in /whatsapp-mcp-server in the pip-security-updates group across 1 directory ([#792](https://github.com/Tauri-EPO/whatsapp-mcp/issues/792)) ([1e05db5](https://github.com/Tauri-EPO/whatsapp-mcp/commit/1e05db57587be4c7b9ba0da33bcc33f255633c1d))
+
 ## [2.9.4](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.3...v2.9.4) (2026-11-03)
 
 
