@@ -21,7 +21,9 @@ read its size and its notes, and never look at it.
   MIME type and a ``whatsapp://media/<chat_jid>/<message_id>`` URI, capped at
   2 MiB. That is what a client needs to hand a PDF to the model as a document
   (issue #367); the ``base64:<mime>:<bytes>`` text block it replaces was one
-  every client had to decode itself, and none did;
+  every client had to decode itself, and none did. A text block naming the
+  type, size and sha256 comes first (issue #791), and ``WHATSAPP_MEDIA_INLINE``
+  can replace the resource with the first base64 chunk or the extracted text;
 * with ``as_text=True``, a PDF, DOCX or XLSX **read on this side** and returned
   as text (media_text.py), which is what makes a 5 MiB clinical PDF affordable;
 * with ``as_images=True``, a PDF **rendered** here, one ``ImageContent`` per page
@@ -50,7 +52,7 @@ import logging
 import mimetypes
 import os
 import sqlite3
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 from mcp_types import (
@@ -109,11 +111,17 @@ def parse_inline_env(value: str | None) -> str:
 def inline_mode() -> str:
     """The configured shape; in-process, an unreadable value falls back to ``base64``,
     the shape with no blob a broken client could corrupt."""
+    raw = os.getenv(INLINE_ENV)
     try:
-        return parse_inline_env(os.getenv(INLINE_ENV))
+        return parse_inline_env(raw)
     except ValueError as exc:
-        logger.warning("%s; using base64", exc)
+        if raw not in _warned_inline:
+            _warned_inline.add(raw)
+            logger.warning("%s; using base64", exc)
         return "base64"
+
+
+_warned_inline: set[str | None] = set()
 
 
 # Text-ish types returned as text rather than base64. ``text/*`` covers plain,
@@ -549,6 +557,7 @@ def check_size(size: int, limit: int, mime: str, caller: str = "read_media") -> 
     raise ToolError(
         "too_large",
         f"the file is {size} bytes and {caller} returns at most {limit} for {mime}. "
+        "read_media(as_base64=true) returns any size in verifiable chunks; "
         "download_media still returns the server-side path, which only helps a client sharing this filesystem",
         bytes=size,
         limit=limit,
@@ -564,8 +573,8 @@ def read_capped(path: str, size: int) -> bytes:
         raise ToolError("internal", f"could not read the cached file: {exc}") from exc
 
 
-def identity_block(mime: str, size: int, sha256: str | None, shape: str) -> TextContent:
-    """The first block of a document answer: what the file is and how to get it another way.
+def identity_block(mime: str, size: int, sha256: str | None, follows: str) -> TextContent:
+    """The first block of a document answer: what the file is and what follows it.
 
     It comes before the payload, never after: a client that cannot open the
     payload, or one that glues every block into one string, must meet the
@@ -573,17 +582,23 @@ def identity_block(mime: str, size: int, sha256: str | None, shape: str) -> Text
     (issue #791). Written here, not by whoever sent the file, so it stays
     outside the untrusted envelope.
     """
-    ways = []
-    if mime in media_text.EXTRACTABLE_MIMES:
-        ways.append("read_media(as_text=true) for its text")
-    ways.append("read_media(as_base64=true) for the original bytes in verifiable chunks")
-    return TextContent(
-        type="text",
-        text=(
-            f"[{mime}, {size} bytes, sha256 {sha256 or 'unknown'}, {shape}. "
-            f"If what follows is unreadable or does not hash to that sha256, call {' or '.join(ways)}.]"
-        ),
-    )
+    return TextContent(type="text", text=f"[{mime}, {size} bytes, sha256 {sha256 or 'unknown'}. {follows}]")
+
+
+def _as_text_hint(mime: str) -> str:
+    return " read_media(as_text=true) returns its text instead." if mime in media_text.EXTRACTABLE_MIMES else ""
+
+
+def _file_sha256(path: str) -> str:
+    """The whole file's hash, streamed: for a legacy row the archive has none for."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while part := handle.read(DEFAULT_CHUNK_BYTES):
+                digest.update(part)
+    except OSError as exc:
+        raise ToolError("internal", f"could not read the cached file: {exc}") from exc
+    return digest.hexdigest()
 
 
 def text_block(text: str) -> TextContent:
@@ -713,7 +728,13 @@ def resolve_media(
     return ResolvedMedia(path, mime, size, sha256, filename)
 
 
-def _base64_blocks(found: ResolvedMedia, offset: int, length: int, local: bool = False) -> list[ContentBlock]:
+def _base64_blocks(found: ResolvedMedia, offset: int, length: int) -> list[ContentBlock]:
+    return _base64_chunk(found, offset, length)[0]
+
+
+def _base64_chunk(
+    found: ResolvedMedia, offset: int, length: int, local: bool = False
+) -> tuple[list[ContentBlock], str, int | None]:
     """Read only the requested range; use the archive's whole-file plaintext hash.
 
     Legacy rows without a SHA256 require a bounded streaming hash pass first.
@@ -748,8 +769,9 @@ def _base64_blocks(found: ResolvedMedia, offset: int, length: int, local: bool =
                     raise ToolError("conflict", "the cached file changed during the read; restart from offset 0")
         except OSError as exc:
             raise ToolError("internal", f"could not read the cached file: {exc}") from exc
-    next_offset = offset + len(data)
-    return [
+    end = offset + len(data)
+    next_offset = end if end < size else None
+    blocks: list[ContentBlock] = [
         TextContent(type="text", text=base64.b64encode(data).decode("ascii")),
         meta_block(
             sha256,
@@ -758,10 +780,11 @@ def _base64_blocks(found: ResolvedMedia, offset: int, length: int, local: bool =
             total_size=size,
             offset=offset,
             returned_length=len(data),
-            next_offset=next_offset if next_offset < size else None,
+            next_offset=next_offset,
             chunk_sha256=hashlib.sha256(data).hexdigest(),
         ),
     ]
+    return blocks, sha256, next_offset
 
 
 def _image_blocks(found: ResolvedMedia, max_edge: int, quality: int) -> tuple[list[ContentBlock], dict[str, Any]]:
@@ -913,8 +936,11 @@ def read_media(
 def _read_resolved_media(chat_jid, message_id, found, as_text, max_pages, edge, encode_quality, as_images, page_one):
     path, mime, size, sha256 = found.path, found.mime, found.size, found.sha256
 
-    blocks: list[ContentBlock]
+    blocks: list[ContentBlock] = []
     extra: dict[str, Any] = {}
+    # A shape pinned by WHATSAPP_MEDIA_INLINE leaves the resource out, and with
+    # it the resource_link that would lead the same client back to a blob.
+    pinned = False
     if as_images:
         # The type was proven a PDF in resolve_media; max_edge=0 still renders,
         # because "the stored bytes" is what as_images was asked *not* to give.
@@ -942,30 +968,56 @@ def _read_resolved_media(chat_jid, message_id, found, as_text, max_pages, edge, 
         blocks = [AudioContent(type="audio", data=data, mime_type=mime)]
     else:
         mode = inline_mode()
+        pinned = mode != "resource"
+        if not sha256 or len(sha256) != 64:
+            sha256 = _file_sha256(path)
         if mode == "text" and mime in media_text.EXTRACTABLE_MIMES:
             # The operator pinned a shape without a blob: the document is read
-            # here, as if as_text had been asked for.
-            blocks, extra = _extracted_blocks(path, mime, max_pages)
-            blocks = [identity_block(mime, size, sha256, "its text extracted below"), *blocks]
-        elif mode != "resource":
-            # base64, and text for a file with no text to extract: the first
-            # chunk as plain text, whose metadata says where the next one starts.
-            chunk = _base64_blocks(found, 0, DEFAULT_CHUNK_BYTES, local=True)
-            # The chunk's own metadata: the hash it computed for a legacy row
-            # without one, and whether the file goes on past this chunk.
-            meta = json.loads(cast(TextContent, chunk[-1]).text)
-            if meta.get("next_offset") is None:
-                shape = "the original bytes as base64 text below"
+            # here, as if as_text had been asked for. One that cannot be read
+            # still has its bytes, so it falls through to them rather than
+            # failing a call that never asked for text.
+            try:
+                blocks, extra = _extracted_blocks(path, mime, max_pages)
+                blocks = [
+                    identity_block(
+                        mime,
+                        size,
+                        sha256,
+                        "Its extracted text follows, not the file; read_media(as_base64=true) "
+                        "returns the original bytes, which hash to that sha256.",
+                    ),
+                    *blocks,
+                ]
+            except ToolError:
+                mode = "base64"
+        if mode == "base64" or (mode == "text" and not blocks):
+            # base64, and text for a file with no text to read: the first chunk
+            # as plain text, whose metadata says where the next one starts.
+            chunk, sha256, next_offset = _base64_chunk(
+                found._replace(sha256=sha256), 0, DEFAULT_CHUNK_BYTES, local=True
+            )
+            if next_offset is None:
+                follows = "The whole file follows as base64 text; decode it and verify that sha256."
             else:
-                shape = "the first chunk of the original bytes as base64 text below; continue at next_offset"
-            return [identity_block(mime, size, meta.get("sha256"), shape), *chunk]
-        else:
+                follows = (
+                    "Its first chunk follows as base64 text. Continue with read_media(as_base64=true, "
+                    "offset=next_offset) until next_offset is null, then verify the assembled file against that sha256."
+                )
+            return [identity_block(mime, size, sha256, follows + _as_text_hint(mime)), *chunk]
+        if mode == "resource":
             # A resource, not a text block: the bytes keep their real type, so a
             # client that knows what application/pdf is can hand it to the model
             # as a document instead of showing it a header line and 2 MiB of
             # base64. The identity goes first, for the client that cannot.
             blocks = [
-                identity_block(mime, size, sha256, "returned below as a resource"),
+                identity_block(
+                    mime,
+                    size,
+                    sha256,
+                    "The file follows as a resource. If you cannot read it, or its bytes do not hash to that "
+                    "sha256, call read_media(as_base64=true) for the original bytes in verifiable chunks."
+                    + _as_text_hint(mime),
+                ),
                 EmbeddedResource(
                     type="resource",
                     resource=BlobResourceContents(
@@ -982,7 +1034,7 @@ def _read_resolved_media(chat_jid, message_id, found, as_text, max_pages, edge, 
     # here and refused there (a resource is never extracted, so its ceiling is
     # the 2 MiB one), and a link to bytes the server would refuse is worse than
     # no link.
-    if size <= hard_limit(mime):
+    if size <= hard_limit(mime) and not pinned:
         extra["resource_link"] = resource_link(
             chat_jid, message_id, found.filename or os.path.basename(path), mime, size
         )

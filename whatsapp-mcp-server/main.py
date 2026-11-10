@@ -2824,8 +2824,9 @@ def read_media(
         length: With as_base64, bytes requested (default 1048576, maximum 4194304)
 
     Returns:
-        A list of content blocks: the file (or its text, or its pages), then the JSON
-        metadata block, which carries `pages_total` and `truncated` with as_text (plus
+        A list of content blocks: for a document returned whole (PDF, DOCX, video,
+        archive) first a text block with its type, size and sha256, then the file
+        (or its text, or its pages), then the JSON metadata block, which carries `pages_total` and `truncated` with as_text (plus
         `pages_failed` for PDF pages whose text could not be extracted; read those
         with as_images, and `pages_missing` for unresolved page-tree references),
         and those plus `first_page`, `pages_rendered`, `image_bytes`

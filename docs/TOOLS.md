@@ -1717,8 +1717,8 @@ joins every block into one string, meets the file's type, size and `sha256` and 
 (`as_text=true`, `as_base64=true`) before the payload, never after 2 MiB of garbled bytes.
 An operator whose client is known to corrupt resource blobs sets `WHATSAPP_MEDIA_INLINE`:
 `base64` replaces the resource with the first `as_base64` chunk (continue at `next_offset`),
-`text` with the extracted text for a PDF, DOCX or XLSX (and `base64` for any other type). Neither
-emits an `EmbeddedResource`; an explicit `as_text`, `as_images` or `as_base64` is unaffected.
+`text` with the extracted text for a PDF, DOCX or XLSX (and `base64` for any other type or a
+document it cannot read). Neither emits an `EmbeddedResource` or a `resource_link`; an explicit `as_text`, `as_images` or `as_base64` is unaffected.
 
 With the S3 backend, base64 chunks use the authenticated bridge byte-range API;
 the whole-file hash comes from the verified cache catalog. The bridge verifies

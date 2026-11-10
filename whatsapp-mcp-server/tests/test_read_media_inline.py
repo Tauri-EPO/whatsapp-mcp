@@ -164,3 +164,39 @@ class TestOverTheWire:
         blocks = call({"message_id": "PDF9", "as_text": True})
         assert any("Ola mundo" in block["text"] for block in blocks if block["type"] == "text")
         assert "resource" not in {block["type"] for block in blocks}
+
+
+class TestPinnedShapes:
+    def test_an_unreadable_document_in_text_mode_still_returns_its_bytes(self, documents, monkeypatch):
+        """The call never asked for text: a PDF that cannot be read falls back to base64."""
+        monkeypatch.setenv(media_read.INLINE_ENV, "text")
+        with documents.messages() as conn:
+            _insert(conn, "BAD9", ALICE, "document", None, "broken.pdf", 9)
+        _cache(ALICE, "document_20260904_100000_BAD9.pdf", b"not a pdf")
+        blocks = media_read.read_media(ALICE, "BAD9")
+        assert [block.type for block in blocks] == ["text", "text", "text"]
+        assert base64.b64decode(blocks[1].text) == b"not a pdf"
+
+    @pytest.mark.parametrize("mode", ["base64", "text"])
+    def test_a_pinned_shape_offers_no_resource_link_back_to_a_blob(self, documents, monkeypatch, mode):
+        monkeypatch.setenv(media_read.INLINE_ENV, mode)
+        assert "resource_link" not in json.loads(media_read.read_media(ALICE, "PDF9")[-1].text)
+
+    def test_the_default_shape_keeps_its_resource_link(self, documents):
+        assert "resource_link" in json.loads(media_read.read_media(ALICE, "PDF9")[-1].text)
+
+    def test_a_legacy_row_without_a_hash_gets_the_real_one(self, documents):
+        """A sentence that says to compare against 'unknown' cannot be followed."""
+        with documents.messages() as conn:
+            _insert(conn, "OLD9", ALICE, "document", None, "old.zip", 7)
+        _cache(ALICE, "document_20260904_100000_OLD9.zip", b"PK\x03\x04old")
+        blocks = media_read.read_media(ALICE, "OLD9")
+        expected = hashlib.sha256(b"PK\x03\x04old").hexdigest()
+        assert expected in blocks[0].text and "unknown" not in blocks[0].text
+        assert json.loads(blocks[-1].text)["sha256"] == expected
+
+    def test_an_unknown_value_warns_once(self, documents, monkeypatch, caplog):
+        monkeypatch.setenv(media_read.INLINE_ENV, "blob-once")
+        for _ in range(3):
+            media_read.inline_mode()
+        assert sum("blob-once" in record.getMessage() for record in caplog.records) == 1
