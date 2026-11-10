@@ -236,7 +236,7 @@ class TestConversion:
             _insert(conn, "CONV", media_type="document", filename="scan.tiff")
         _cache("document_20260904_100000_CONV.tiff", _photo(300, 200, fmt="TIFF"))
         blocks = media_read.read_media(ALICE, "CONV", max_edge=0)
-        assert blocks[0].type == "resource" and blocks[0].resource.mime_type == "image/tiff"
+        assert blocks[1].type == "resource" and blocks[1].resource.mime_type == "image/tiff"
 
     def test_a_heic_photo_is_decoded_and_converted(self, paired_dbs, monkeypatch):
         """The one format Pillow needs a plugin for; the plugin is registered on demand."""

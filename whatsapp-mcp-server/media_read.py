@@ -46,10 +46,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import sqlite3
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 from urllib.parse import quote
 
 from mcp_types import (
@@ -82,6 +83,38 @@ MAX_BASE64_BYTES = 2 * 1024 * 1024
 MAX_TEXT_BYTES = 1024 * 1024
 DEFAULT_CHUNK_BYTES = 1024 * 1024
 MAX_CHUNK_BYTES = 4 * 1024 * 1024
+
+logger = logging.getLogger("whatsapp_mcp")
+
+# How a document that would otherwise travel as an EmbeddedResource is shaped
+# (issue #791). Some clients materialise a BlobResourceContents as if it were
+# text and hand over a file that decodes to something that looks like a
+# document; this lets an operator who runs one of them pin a shape with no blob
+# in it. Read per call, like the untrusted envelope; __main__ refuses a value
+# it cannot parse before serving.
+INLINE_ENV = "WHATSAPP_MEDIA_INLINE"
+INLINE_MODES = ("resource", "base64", "text")
+
+
+def parse_inline_env(value: str | None) -> str:
+    """``resource`` (the default), ``base64`` or ``text``; anything else is an error."""
+    mode = (value or "").strip().lower()
+    if not mode:
+        return "resource"
+    if mode not in INLINE_MODES:
+        raise ValueError(f"{INLINE_ENV} must be one of {', '.join(INLINE_MODES)}, not {value!r}")
+    return mode
+
+
+def inline_mode() -> str:
+    """The configured shape; in-process, an unreadable value falls back to ``base64``,
+    the shape with no blob a broken client could corrupt."""
+    try:
+        return parse_inline_env(os.getenv(INLINE_ENV))
+    except ValueError as exc:
+        logger.warning("%s; using base64", exc)
+        return "base64"
+
 
 # Text-ish types returned as text rather than base64. ``text/*`` covers plain,
 # csv, html and markdown; the rest are the structured formats that arrive as
@@ -531,6 +564,28 @@ def read_capped(path: str, size: int) -> bytes:
         raise ToolError("internal", f"could not read the cached file: {exc}") from exc
 
 
+def identity_block(mime: str, size: int, sha256: str | None, shape: str) -> TextContent:
+    """The first block of a document answer: what the file is and how to get it another way.
+
+    It comes before the payload, never after: a client that cannot open the
+    payload, or one that glues every block into one string, must meet the
+    identity and the way out first rather than behind 2 MiB of garbled bytes
+    (issue #791). Written here, not by whoever sent the file, so it stays
+    outside the untrusted envelope.
+    """
+    ways = []
+    if mime in media_text.EXTRACTABLE_MIMES:
+        ways.append("read_media(as_text=true) for its text")
+    ways.append("read_media(as_base64=true) for the original bytes in verifiable chunks")
+    return TextContent(
+        type="text",
+        text=(
+            f"[{mime}, {size} bytes, sha256 {sha256 or 'unknown'}, {shape}. "
+            f"If what follows is unreadable or does not hash to that sha256, call {' or '.join(ways)}.]"
+        ),
+    )
+
+
 def text_block(text: str) -> TextContent:
     """A text block holding somebody else's words, delimited when the envelope is on."""
     return TextContent(type="text", text=wrap_text(text) if wrap_enabled() else text)
@@ -658,14 +713,16 @@ def resolve_media(
     return ResolvedMedia(path, mime, size, sha256, filename)
 
 
-def _base64_blocks(found: ResolvedMedia, offset: int, length: int) -> list[ContentBlock]:
+def _base64_blocks(found: ResolvedMedia, offset: int, length: int, local: bool = False) -> list[ContentBlock]:
     """Read only the requested range; use the archive's whole-file plaintext hash.
 
     Legacy rows without a SHA256 require a bounded streaming hash pass first.
     The client verifies the assembled file against this hash, catching a changed
     cache or chunks obtained from different versions of the same attachment.
+    ``local`` reads ``found.path`` as a local file even on the S3 backend: the
+    caller already holds a verified spool of it.
     """
-    if media_remote.enabled():
+    if media_remote.enabled() and not local:
         data, size, sha256 = media_remote.read_range(
             found.path, offset, length, found.sha256, cache_only=not offers_download()
         )
@@ -884,34 +941,40 @@ def _read_resolved_media(chat_jid, message_id, found, as_text, max_pages, edge, 
         data = base64.b64encode(read_capped(path, size)).decode("ascii")
         blocks = [AudioContent(type="audio", data=data, mime_type=mime)]
     else:
-        # A resource, not a text block: the bytes keep their real type, so a
-        # client that knows what application/pdf is can hand it to the model as
-        # a document instead of showing it a header line and 2 MiB of base64.
-        blocks = [
-            EmbeddedResource(
-                type="resource",
-                resource=BlobResourceContents(
-                    uri=media_uri(chat_jid, message_id),
-                    mime_type=mime,
-                    blob=base64.b64encode(read_capped(path, size)).decode("ascii"),
-                ),
-            )
-        ]
-        if mime in media_text.EXTRACTABLE_MIMES:
-            # A client that does not open resources shows the model the
-            # metadata block and nothing else, and an unread document reads
-            # exactly like an empty one. This line is written here, not by
-            # whoever sent the file, so it stays outside the untrusted
-            # envelope; it is the only thing that makes that case recoverable.
-            blocks.append(
-                TextContent(
-                    type="text",
-                    text=(
-                        f"[{mime}, {size} bytes, returned as a resource. If you cannot read its "
-                        f"contents, call read_media(as_text=true) and the text will be extracted here.]"
+        mode = inline_mode()
+        if mode == "text" and mime in media_text.EXTRACTABLE_MIMES:
+            # The operator pinned a shape without a blob: the document is read
+            # here, as if as_text had been asked for.
+            blocks, extra = _extracted_blocks(path, mime, max_pages)
+            blocks = [identity_block(mime, size, sha256, "its text extracted below"), *blocks]
+        elif mode != "resource":
+            # base64, and text for a file with no text to extract: the first
+            # chunk as plain text, whose metadata says where the next one starts.
+            chunk = _base64_blocks(found, 0, DEFAULT_CHUNK_BYTES, local=True)
+            # The chunk's own metadata: the hash it computed for a legacy row
+            # without one, and whether the file goes on past this chunk.
+            meta = json.loads(cast(TextContent, chunk[-1]).text)
+            if meta.get("next_offset") is None:
+                shape = "the original bytes as base64 text below"
+            else:
+                shape = "the first chunk of the original bytes as base64 text below; continue at next_offset"
+            return [identity_block(mime, size, meta.get("sha256"), shape), *chunk]
+        else:
+            # A resource, not a text block: the bytes keep their real type, so a
+            # client that knows what application/pdf is can hand it to the model
+            # as a document instead of showing it a header line and 2 MiB of
+            # base64. The identity goes first, for the client that cannot.
+            blocks = [
+                identity_block(mime, size, sha256, "returned below as a resource"),
+                EmbeddedResource(
+                    type="resource",
+                    resource=BlobResourceContents(
+                        uri=media_uri(chat_jid, message_id),
+                        mime_type=mime,
+                        blob=base64.b64encode(read_capped(path, size)).decode("ascii"),
                     ),
-                )
-            )
+                ),
+            ]
     # The link is redundant with the bytes above and cheap; it is what lets a
     # client (or the agent, on a second pass) come back for the same file
     # through resources/read instead of paying for another tool call. Only when

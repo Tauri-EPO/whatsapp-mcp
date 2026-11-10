@@ -231,6 +231,8 @@ services:
       # Wrap third-party text (content, last_message, transcripts, note values)
       # in <untrusted>...</untrusted> delimiters. Off by default.
       WHATSAPP_WRAP_UNTRUSTED: ${WHATSAPP_WRAP_UNTRUSTED:-}
+      # Shape of read_media documents: resource (default), base64 or text.
+      WHATSAPP_MEDIA_INLINE: ${WHATSAPP_MEDIA_INLINE:-}
       # Voice-note transcription (transcribe_audio tool): a whisper.cpp server you
       # run, reachable from this container (docs/DOCKER.md, "Voice-note transcription").
       WHATSAPP_STORE_DIR: /app/store

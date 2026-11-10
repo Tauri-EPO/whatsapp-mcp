@@ -1709,8 +1709,16 @@ Returns a list of MCP **content blocks**, not a JSON object:
 | an image: JPEG, PNG, GIF, WebP, and also TIFF, BMP, HEIC/HEIF | `ImageContent`: the model sees the picture, [downscaled](#images-are-downscaled-before-they-travel) | 16 MB **on disk** |
 | text-ish (`text/*`, JSON, CSV, NDJSON, YAML, SVG) | a text block with the decoded text | 1 MB |
 | audio a client can play (Ogg/Opus voice notes, MP3, M4A, WAV) | `AudioContent` | 2 MB |
-| anything else (PDF, DOCX, XLSX, video, archives) | `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
+| anything else (PDF, DOCX, XLSX, video, archives) | a text block with `mime`, `bytes`, `sha256` and the fallbacks, then `EmbeddedResource` carrying `BlobResourceContents`: the bytes, the file's real MIME type and a `whatsapp://media/<chat_jid>/<message_id>` URI | 2 MB |
 | any file with `as_base64=true` | plain base64 `TextContent`, then JSON `TextContent` | 1 MiB per chunk by default, 4 MiB maximum; S3 spool capacity below applies |
+
+**The identity comes first** (issue #791). A client that cannot open resources, or one that
+joins every block into one string, meets the file's type, size and `sha256` and the way out
+(`as_text=true`, `as_base64=true`) before the payload, never after 2 MiB of garbled bytes.
+An operator whose client is known to corrupt resource blobs sets `WHATSAPP_MEDIA_INLINE`:
+`base64` replaces the resource with the first `as_base64` chunk (continue at `next_offset`),
+`text` with the extracted text for a PDF, DOCX or XLSX (and `base64` for any other type). Neither
+emits an `EmbeddedResource`; an explicit `as_text`, `as_images` or `as_base64` is unaffected.
 
 With the S3 backend, base64 chunks use the authenticated bridge byte-range API;
 the whole-file hash comes from the verified cache catalog. The bridge verifies
