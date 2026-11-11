@@ -51,7 +51,7 @@ type editFunc func(ctx context.Context, chat types.JID, id types.MessageID, text
 
 // UpdateMessageContent rewrites the stored text after an edit.
 func (store *MessageStore) UpdateMessageContent(messageID, chatJID, content string, timestampMS int64) error {
-	_, err := store.db.Exec(`UPDATE messages SET content = ?, mentions = '', message_edit_timestamp = ?
+	_, err := store.db.Exec(`UPDATE messages SET original_content = COALESCE(original_content, content), content = ?, mentions = '', message_edit_timestamp = ?
 		WHERE id = ? AND chat_jid = ? AND message_edit_timestamp < ? AND deleted_at IS NULL`, content, timestampMS, messageID, chatJID, timestampMS)
 	return err
 }
@@ -69,7 +69,7 @@ func applyMessageEditWith(ex sqlExecer, chat, sender string, fromMe bool, edit *
 	}
 	user, server := splitSenderJID(sender)
 	replacement := extractMessage(edit.GetEditedMessage(), fallback, edit.GetKey().GetID())
-	_, err := ex.Exec(`UPDATE messages SET content = ?, mentions = ?, message_edit_timestamp = ?
+	_, err := ex.Exec(`UPDATE messages SET original_content = COALESCE(original_content, content), content = ?, mentions = ?, message_edit_timestamp = ?
 		WHERE id = ? AND chat_jid = ? AND sender = ? AND sender_server IS ?
 		AND is_from_me = ? AND message_edit_timestamp < ? AND deleted_at IS NULL`,
 		replacement.content, mentionsColumn(replacement.mentions), stamp, edit.GetKey().GetID(), chat, user, server, fromMe, stamp)

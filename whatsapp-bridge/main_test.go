@@ -132,6 +132,7 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			media_presentation TEXT,
 			location TEXT,
 			message_edit_timestamp INTEGER NOT NULL DEFAULT 0,
+			original_content TEXT,
 			media_retry_chat TEXT,
 			media_retry_sender TEXT,
 			PRIMARY KEY (id, chat_jid),
@@ -1304,8 +1305,15 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 		t.Fatalf("failed to seed message store: %v", err)
 	}
 
+	if _, err := ms.db.Exec("UPDATE messages SET original_content='oldword' WHERE id='only-lid'"); err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath, logger); err != nil {
 		t.Fatalf("migration failed: %v", err)
+	}
+	var originalContent string
+	if err := ms.db.QueryRow("SELECT original_content FROM messages WHERE id='only-lid'").Scan(&originalContent); err != nil || originalContent != "oldword" {
+		t.Fatalf("migration lost original text: %q (%v)", originalContent, err)
 	}
 
 	if lidCount := queryMessageCount(ms, lidJID); lidCount != 0 {

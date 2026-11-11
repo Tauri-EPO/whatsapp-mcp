@@ -267,6 +267,7 @@ func consumePendingEdits(ex locationWriter, message storedMessage, now time.Time
 	// All three fields select the same newest candidate. FTS triggers and the
 	// pending deletion participate in the original message's transaction.
 	_, err := ex.Exec(`UPDATE messages SET
+		original_content=COALESCE(original_content,content),
 		content=(`+fmt.Sprintf(candidate, "content")+`),
 		mentions=(`+fmt.Sprintf(candidate, "mentions")+`),
 		message_edit_timestamp=(`+fmt.Sprintf(candidate, "edit_timestamp")+`)

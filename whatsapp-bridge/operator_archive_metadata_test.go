@@ -23,7 +23,7 @@ import (
 func TestExportPreservesNoteHashRevocationAndCurrentLocation(t *testing.T) {
 	b, server := archiveFixture(t, true)
 	hash := bytes.Repeat([]byte{1}, 32)
-	if _, err := b.Store.db.Exec("UPDATE messages SET file_sha256=?,deleted_at='2026-10-02 00:00:00+00:00',view_once=1 WHERE id='A'", hash); err != nil {
+	if _, err := b.Store.db.Exec("UPDATE messages SET original_content='oldword',file_sha256=?,deleted_at='2026-10-02 00:00:00+00:00',view_once=1 WHERE id='A'", hash); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.Store.db.Exec(`INSERT INTO messages(id,chat_jid,timestamp,content,media_type,location) VALUES('LOCATION','111@s.whatsapp.net','2026-10-01 00:00:00+00:00','initial position','location','{"latitude":0.75,"longitude":0.5,"live":true}')`); err != nil {
@@ -57,6 +57,9 @@ func TestExportPreservesNoteHashRevocationAndCurrentLocation(t *testing.T) {
 			}
 			switch row["id"] {
 			case "A":
+				if row["original_content"] != "oldword" {
+					t.Fatal("original text lost from archive export")
+				}
 				if row["sha256"] != strings.Repeat("01", 32) || row["deleted_at"] != "2026-10-02 00:00:00+00:00" || row["view_once"] != float64(1) {
 					t.Fatalf("archive metadata lost: %v", row)
 				}

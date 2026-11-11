@@ -506,6 +506,8 @@ class Message:
     sha256: str | None = None
     # Native location fields; NULL on old text-only rows, never reconstructed.
     location: dict[str, Any] | None = None
+    edited_at: datetime | None = None
+    original_content: str | None = None
 
 
 # One column list and one mapper for every query that yields Message rows.
@@ -515,14 +517,15 @@ MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
     "messages.deleted_at, messages.view_once, messages.target_message_id, "
-    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location"
+    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location, "
+    "messages.message_edit_timestamp, messages.original_content"
 )
 
 
 def message_columns(cursor: sqlite3.Cursor) -> str:
     """MESSAGE_COLUMNS as this store can answer it.
 
-    Older bridges may lack sender_server or location. Select NULL for those
+    Older bridges may lack sender_server, location or edit metadata. Select NULL for those
     fields so all readers keep the same projection and old archives remain
     readable without the MCP server changing the bridge-owned schema.
     """
@@ -541,13 +544,26 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
         lambda: "location" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
         schema=cursor,
     )
-    return columns if has_location else columns.replace("messages.location", "NULL")
+    if not has_location:
+        columns = columns.replace("messages.location", "NULL")
+    for name in ("message_edit_timestamp", "original_content"):
+        has_edit_column = _schema_memo(
+            f"messages.{name}",
+            MESSAGES_DB_PATH,
+            lambda: name in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+            schema=cursor,
+        )
+        if not has_edit_column:
+            columns = columns.replace(f"messages.{name}", "NULL")
+    return columns
 
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
     if len(row) == 16:  # legacy callers that materialized the old projection
         row = (*row, None)
+    if len(row) == 17:
+        row = (*row, None, None)
     (
         timestamp,
         sender,
@@ -566,7 +582,16 @@ def _row_to_message(row: tuple) -> Message:
         sha256,
         sender_server,
         location,
+        edit_timestamp,
+        original_content,
     ) = row
+    try:
+        edited_at = (
+            datetime.fromtimestamp(edit_timestamp / 1000, UTC) if edit_timestamp and edit_timestamp > 0 else None
+        )
+    except (OSError, OverflowError, ValueError):
+        # An invalid remote edit timestamp must not hide an otherwise readable row.
+        edited_at = None
     return Message(
         timestamp=parse_db_time(timestamp),
         sender=sender,
@@ -587,6 +612,8 @@ def _row_to_message(row: tuple) -> Message:
         bytes=int(file_length) if file_length is not None else None,
         sha256=sha256 or None,
         location=_location_fields(location),
+        edited_at=edited_at,
+        original_content=original_content,
     )
 
 
@@ -1143,6 +1170,8 @@ def msg_to_dict(
         "poll_message_id": (_target_id(message) if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
+        "edited_at": message.edited_at.isoformat() if message.edited_at else None,
+        "original_content": message.original_content,
         "view_once": message.view_once,
         "bytes": message.bytes if is_media else None,
         "sha256": sha256,

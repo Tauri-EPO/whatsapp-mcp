@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, chatJID string, msg *waE2E.Message, eventTimestamp int64, logger waLog.Logger) {
@@ -138,10 +139,42 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// copy of the event with the envelope removed so every extractor below
 	// sees the real message and other handlers keep the original untouched.
 	original := msg.Message
+	if encrypted := msg.Message.GetSecretEncryptedMessage(); encrypted != nil {
+		if encrypted.GetSecretEncType() != waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
+			logger.Debugf("Unhandled secret-encrypted message type: %s", encrypted.GetSecretEncType())
+			return
+		}
+		if encrypted.GetTargetMessageKey().GetID() == "" || b.SecretEditDecrypt == nil {
+			return
+		}
+		decrypted, err := b.SecretEditDecrypt(lookupCtx, msg)
+		if err != nil {
+			// SDK errors may include remote data; retain only the delivery identity.
+			logger.Warnf("Failed to decrypt message edit %s in %s", msg.Info.ID, msg.Info.Chat)
+			return
+		}
+		// Zero lets the canonical path use the retry-corrected delivery time.
+		replacement, stamp := decrypted, int64(0)
+		if edit := extractMessage(decrypted, msg.Info.Timestamp, msg.Info.ID).edit; edit != nil {
+			replacement = edit.GetEditedMessage()
+			if edit.GetTimestampMS() > 0 {
+				stamp = edit.GetTimestampMS()
+			}
+		}
+		if replacement == nil {
+			return
+		}
+		// The encrypted target key and outer sender/chat remain authoritative.
+		// Reuse the ordinary edit path, including deferred originals and authorship.
+		original = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+			Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(), Key: encrypted.GetTargetMessageKey(),
+			EditedMessage: replacement, TimestampMS: proto.Int64(stamp),
+		}}
+	}
 	// ParseWebMessage unwraps an edit into its new text and target ID. Its
 	// RawMessage retains the protocol key/timestamp needed for ordered updates.
 	// A direct or ephemeral protocol edit may have IsEdit=false in the SDK.
-	if msg.RawMessage != nil && extractMessage(msg.RawMessage, msg.Info.Timestamp, msg.Info.ID).edit != nil {
+	if msg.Message.GetSecretEncryptedMessage() == nil && msg.RawMessage != nil && extractMessage(msg.RawMessage, msg.Info.Timestamp, msg.Info.ID).edit != nil {
 		original = msg.RawMessage
 	}
 	if inner, wrapped := unwrapViewOnce(msg.Message); wrapped {

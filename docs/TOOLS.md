@@ -753,6 +753,16 @@ person, and its user part would otherwise be reported as the phone number
 
 ### `list_messages`
 
+Message rows include `edited_at` (ISO-8601 UTC, from the latest edit's Unix
+millisecond timestamp) and `original_content` (the text before the first recorded
+edit). `get_message_context` returns the same fields, including on surrounding
+messages. They are `null` for unedited messages or archives without the relevant
+columns. Original text overwritten before this upgrade cannot be recovered;
+the next edit preserves the text then present in the archive. Later edits and
+history replays preserve that first saved text, including an empty caption.
+An edit timestamp outside the representable date range is returned as `null`;
+the message content and original text remain readable.
+
 Get messages with filters, date ranges, and sorting.
 
 **Parameters:**

@@ -749,6 +749,8 @@ def list_messages(
     Reach for those whenever you are reading to analyse rather than to display.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
+    Edited messages carry edited_at (UTC) and original_content (the text before
+    the first recorded edit); both are null when unavailable.
     Media messages carry media_type and filename (the sender's original document name,
     or the bridge's generated name for images/audio/video); pass id + chat_jid to
     download_media to fetch the file.
@@ -1541,8 +1543,8 @@ def get_message_context(
     """Get context around a specific WhatsApp message.
 
     Messages use the same shape as list_messages (including media_type, filename,
-    sha256 and the notes recorded for media messages), and the same compact-read
-    arguments shape them. There is no count_only here: this tool returns one
+    sha256, edited_at, original_content and the notes recorded for media messages).
+    The same compact-read arguments shape them. There is no count_only here: this tool returns one
     window, whose size you already gave as before/after.
 
     Args:

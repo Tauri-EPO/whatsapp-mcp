@@ -23,6 +23,7 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -115,6 +116,8 @@ type Bridge struct {
 	logoutDrainTimeout    time.Duration // Zero selects the production one-second bound.
 	// PollVoteDecrypt decodes PollUpdateMessage payloads; nil = votes are skipped.
 	PollVoteDecrypt pollVoteDecrypter
+	// SecretEditDecrypt opens secret-encrypted edits; injectable without a paired phone.
+	SecretEditDecrypt func(context.Context, *events.Message) (*waE2E.Message, error)
 	// DownloadMedia fetches media for a stored message (defaults to downloadMedia).
 	DownloadMedia mediaDownloader
 	// ForwardSelf forwards self-sent messages to the webhook (FORWARD_SELF).
@@ -328,6 +331,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		Log:                 logger,
 		StoreRoot:           storeRoot,
 		PollVoteDecrypt:     whatsmeowPollVoteDecrypter(client),
+		SecretEditDecrypt:   client.DecryptSecretEncryptedMessage,
 		ForwardSelf:         switches.ForwardSelf,
 		ForwardStatus:       switches.ForwardStatus,
 		ForwardChannels:     switches.ForwardChannels,
