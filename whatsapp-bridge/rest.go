@@ -14,6 +14,7 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -189,7 +190,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 
 	// Handler for explicitly sending read receipts for selected messages.
 	mux.HandleFunc("/api/mark-read", mutate(requireMethod(http.MethodPost, b.handleMarkRead())))
-	mux.HandleFunc("/api/chat/archive", mutate(requireMethod(http.MethodPost, handleArchiveChat(archiveDeps{
+	chatAppState := archiveDeps{
 		store: messageStore, policy: b.Policy, connected: func() bool { return b.Connected() },
 		resolve: func(ctx context.Context, raw string) (types.JID, error) {
 			return resolveRecipientJIDContext(ctx, client, raw)
@@ -201,7 +202,36 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 			return types.EmptyJID, nil
 		},
 		send: b.sendAppState,
+	}
+	mux.HandleFunc("/api/chat/archive", mutate(requireMethod(http.MethodPost, handleArchiveChat(chatAppState))))
+	// Delete a whole chat on the phone, then mirror it locally (chat_delete.go).
+	mux.HandleFunc("/api/chat/delete", mutate(requireMethod(http.MethodPost, handleDeleteChat(chatDeleteDeps{
+		archiveDeps: chatAppState, cleanup: b.deleteChatLocal,
 	}))))
+
+	// Block / unblock a contact and read the blocklist (block.go).
+	blocking := blockDeps{
+		policy: b.Policy, connected: func() bool { return b.Connected() },
+		resolveRecipient: func(ctx context.Context, w http.ResponseWriter, to string) (string, bool) {
+			return b.registeredRecipient(ctx, w, to, nil)
+		},
+		update: func(ctx context.Context, jid types.JID, action events.BlocklistChangeAction) ([]types.BlocklistItem, error) {
+			list, err := client.UpdateBlocklist(ctx, jid, action, "")
+			if err != nil || list == nil {
+				return nil, err
+			}
+			return list.Items, nil
+		},
+		list: func(ctx context.Context) ([]types.BlocklistItem, error) {
+			list, err := client.GetBlocklist(ctx, "")
+			if err != nil || list == nil {
+				return nil, err
+			}
+			return list.Items, nil
+		},
+	}
+	mux.HandleFunc("/api/block", mutate(requireMethod(http.MethodPost, handleBlock(blocking))))
+	mux.HandleFunc("/api/blocklist", auth(requireMethod(http.MethodGet, handleBlocklist(blocking))))
 
 	// Handler for sending (or removing) emoji reactions
 	mux.HandleFunc("/api/react", mutate(requireMethod(http.MethodPost, b.handleReact())))

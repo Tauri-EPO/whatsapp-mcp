@@ -113,6 +113,7 @@ func TestRESTAmbiguousChatDeniedBeforeEffects(t *testing.T) {
 					{"/api/group/members", "group_jid", ""},
 					{"/api/group/members?jid=", "group_jid", ""},
 					{"/api/chat/archive", "chat_jid", `,"archived":true`},
+					{"/api/chat/delete", "chat_jid", `,"confirm":true`},
 					{"/api/download", "chat_jid", `,"message_id":"MSG1"`},
 					{"/api/history", "chat_jid", `,"count":1`},
 					{"/api/media/purge", "chat_jid", `,"dry_run":false`},

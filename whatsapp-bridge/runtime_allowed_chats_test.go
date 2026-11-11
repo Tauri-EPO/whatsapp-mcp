@@ -118,6 +118,8 @@ func TestRuntimeChatsCapturedRESTHandlersAndParticipantOperations(t *testing.T) 
 		{"POST", "/api/download", `{"chat_jid":"` + bob + `","message_id":"B1"}`},
 		{"POST", "/api/media/purge", `{"chat_jid":"` + bob + `"}`},
 		{"POST", "/api/chat/archive", `{"chat_jid":"` + bob + `","archived":true}`},
+		{"POST", "/api/chat/delete", `{"chat_jid":"` + bob + `","confirm":true}`},
+		{"POST", "/api/block", `{"jid":"` + bob + `","blocked":true}`},
 		{"POST", "/api/chat/label", `{"chat_jid":"` + bob + `","label_id":"1","labeled":true}`},
 		{"GET", "/api/media/blob?chat_jid=" + bob + "&message_id=B1", ""},
 		{"GET", "/api/media/cache?chat_jid=" + bob + "&message_id=B1", ""},

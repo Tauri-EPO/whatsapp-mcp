@@ -30,6 +30,8 @@ EXPECTED_MUTATING = {
     "create_group",
     "label_chat",
     "archive_chat",
+    "delete_chat",
+    "block_contact",
     "send_message",
     "send_file",
     "send_audio_message",
@@ -49,6 +51,7 @@ EXPECTED_MUTATING = {
 
 # Reads (and local-only writes) that must survive read-only mode.
 EXPECTED_READABLE = {
+    "get_blocklist",
     "list_labels",
     "list_messages",
     "list_chats",
