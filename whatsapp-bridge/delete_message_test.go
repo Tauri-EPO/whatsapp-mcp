@@ -124,3 +124,38 @@ func TestHandleDeleteMessage(t *testing.T) {
 		}
 	})
 }
+
+// Issue #827: an uppercase server spelling passes authorization; every
+// archive lookup and the revoke must then use the canonical key.
+func TestHandleDeleteMessageUsesCanonicalChatKey(t *testing.T) {
+	for _, tc := range []struct{ stored, typed string }{
+		{"5511888888888@s.whatsapp.net", "5511888888888@S.WHATSAPP.NET"},
+		{"120363000000000001@g.us", "120363000000000001@G.US"},
+	} {
+		ms := newTestMessageStore(t)
+		seedMessage(t, ms, "theirs", tc.stored, false)
+		seedMessage(t, ms, "mine", tc.stored, true)
+		var revoked []string
+		revoke := func(_ context.Context, c types.JID, id types.MessageID) error {
+			revoked = append(revoked, c.String()+"/"+string(id))
+			return nil
+		}
+		h := handleDeleteMessage(ms, revoke, parseChatPolicy(""), storeWriteOwner(t, ms))
+		if rec, _ := postDelete(h, `{"chat_jid":"`+tc.typed+`","message_id":"theirs","for_everyone":false}`); rec.Code != http.StatusOK {
+			t.Fatalf("%s local delete status=%d", tc.typed, rec.Code)
+		}
+		if got, _ := ms.GetMessageIsFromMe("theirs", tc.stored); got != nil {
+			t.Fatalf("%s: row under the canonical key survived", tc.typed)
+		}
+		if rec, _ := postDelete(h, `{"chat_jid":"`+tc.typed+`","message_id":"mine","for_everyone":true}`); rec.Code != http.StatusOK {
+			t.Fatalf("%s revoke status=%d", tc.typed, rec.Code)
+		}
+		var deletedAt *string
+		if err := ms.db.QueryRow(`SELECT deleted_at FROM messages WHERE id = 'mine' AND chat_jid = ?`, tc.stored).Scan(&deletedAt); err != nil || deletedAt == nil {
+			t.Fatalf("%s: deleted_at not set on the canonical row (err=%v)", tc.typed, err)
+		}
+		if len(revoked) != 1 || revoked[0] != tc.stored+"/mine" {
+			t.Fatalf("%s: revoked=%v", tc.typed, revoked)
+		}
+	}
+}
