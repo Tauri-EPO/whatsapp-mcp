@@ -126,6 +126,12 @@ func (b *Bridge) writePeerReceipts(v *events.Receipt, client *whatsmeow.Client) 
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+	ex := &contextTransaction{Tx: tx, ctx: ctx}
+	now := b.Store.pendingEditNow()
+	if err := prunePendingReceipts(ex, now); err != nil {
+		b.Log.Errorf("Could not expire pending message receipts: %v", err)
+		return
+	}
 	// Bounded statements, one transaction for all IDs from this event.
 	for start := 0; start < len(v.MessageIDs); start += 256 {
 		ids, err := json.Marshal(v.MessageIDs[start:min(start+256, len(v.MessageIDs))])
@@ -139,10 +145,28 @@ func (b *Bridge) writePeerReceipts(v *events.Receipt, client *whatsmeow.Client) 
 			 DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`,
 				peer.User, peer.Server, kind, dbTime(v.Timestamp), string(ids), chat.String())
 		}
+		if err == nil {
+			// Absence is distinct from an inbound original. Never queue receipts
+			// for a known inbound message, and never insert one row at a time.
+			_, err = tx.ExecContext(ctx, `INSERT INTO pending_receipts
+			 (chat_jid,message_id,recipient,recipient_server,type,at,arrived_ms,expires_ms)
+			 SELECT ?,batch.value,?,?,?,?,?,? FROM json_each(?) batch
+			 WHERE batch.type='text' AND length(batch.value)>0
+			 AND length(CAST(batch.value AS BLOB))+?<=?
+			 AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.chat_jid=? AND m.id=batch.value)
+			 ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type)
+			 DO UPDATE SET at=MAX(pending_receipts.at,excluded.at)`,
+				chat.String(), peer.User, peer.Server, kind, dbTime(v.Timestamp), now.UnixMilli(), now.Add(pendingReceiptTTL).UnixMilli(),
+				string(ids), len(chat.String())+len(peer.User)+len(peer.Server)+len(kind), pendingReceiptKeyBytes, chat.String())
+		}
 		if err != nil {
 			b.Log.Errorf("Could not store message receipt batch: %v", err)
 			return
 		}
+	}
+	if err := capPendingReceipts(ex); err != nil {
+		b.Log.Errorf("Could not bound pending message receipts: %v", err)
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		b.Log.Errorf("Could not commit message receipt event: %v", err)

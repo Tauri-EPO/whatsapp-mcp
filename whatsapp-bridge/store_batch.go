@@ -159,6 +159,7 @@ type messageBatch struct {
 	failure        error // first failed write; never issue more SQL after a possible rollback
 	pendingChecked bool
 	pendingActive  bool
+	receiptsActive bool
 	editPrepared   map[pendingOriginalKey]bool
 	historyReplay  bool
 }
@@ -268,12 +269,23 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 			if err := b.tx.QueryRow("SELECT EXISTS(SELECT 1 FROM pending_edits)").Scan(&b.pendingActive); err != nil {
 				return err
 			}
+			if err := prunePendingReceipts(b.tx, now); err != nil {
+				return err
+			}
+			if err := b.tx.QueryRow("SELECT EXISTS(SELECT 1 FROM pending_receipts)").Scan(&b.receiptsActive); err != nil {
+				return err
+			}
 			b.pendingChecked = true
 		}
-		if !b.pendingActive {
-			return nil // a bulk import without pending edits does no per-row edit SQL
+		if b.pendingActive {
+			if err := consumePendingEdits(b.tx, message, now); err != nil {
+				return err
+			}
 		}
-		return consumePendingEdits(b.tx, message, now)
+		if b.receiptsActive {
+			return consumePendingReceipts(b.tx, message, now)
+		}
+		return nil // a bulk import without pending metadata does no per-row side-table SQL
 	})
 }
 

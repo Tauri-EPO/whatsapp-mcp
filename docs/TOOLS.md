@@ -1112,9 +1112,15 @@ allow-list applies. Older stores without this table return an empty list.
 Peer events are queued in a bounded bridge worker (64 events, at most 16384 IDs
 and 1 MiB of IDs per event); overflow is logged and dropped, so missing receipts
 remain inconclusive. Each accepted event is written atomically.
-Receipts that arrive before the own original is archived are currently lost;
-[#814](https://github.com/Tauri-EPO/whatsapp-mcp/issues/814) tracks bounded pending
-retention for that ordering edge. This also makes empty results inconclusive.
+Receipts preceding the original are retained locally for at most 24 hours from
+first arrival: up to 4096 rows globally, 1024 per chat and 256 per reader per
+chat (all receipt types combined), with a 1024-byte combined identity key limit.
+Oldest arrivals are evicted at the count limits; repeated receipts keep the
+latest timestamp without extending expiry. Pending rows create no archive chats
+or messages. The canonical original write atomically promotes them only for a
+message this account sent, or discards them for an inbound original. Expiry,
+eviction and unavailable identity mappings can still leave receipts missing;
+an empty result remains inconclusive.
 
 ### `check_business`
 

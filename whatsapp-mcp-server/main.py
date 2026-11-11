@@ -1731,8 +1731,10 @@ def get_message_receipts(chat_jid: str, message_id: str) -> dict[str, Any]:
     Collection starts at upgrade: an empty result means no observed receipts,
     not proof of unread status. Privacy settings can hide reads. Both the chat
     JID and message ID are required; group readers use known phone/LID twins.
-    A receipt arriving before its own original is archived is currently lost;
-    missing receipt data must remain unknown rather than being treated as unread.
+    Receipts arriving before the original are retained for up to 24 hours,
+    subject to bounded count and identity-size limits, and become visible only
+    when the canonical original is confirmed ours. Expired or evicted receipts
+    remain unknown; missing data must not be treated as unread.
     """
     return whatsapp.get_message_receipts(chat_jid, message_id)
 

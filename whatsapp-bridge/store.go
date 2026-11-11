@@ -37,7 +37,7 @@ type MessageStore struct {
 	names     *chatNameCache   // resolved chat names + failed group lookups (chat_names.go)
 	groupInfo groupInfoLookup  // live group metadata fetch; nil = no network
 	fts       bool             // messages_fts active (fts.go)
-	editNow   func() time.Time // per-store arrival clock for pending edit expiry
+	editNow   func() time.Time // shared per-store arrival clock for pending metadata expiry
 }
 
 type ChatEphemeralSettings struct {
@@ -291,6 +291,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}
 	if _, err := db.Exec(messageReceiptsSchema); err != nil {
 		return fmt.Errorf("failed to ensure message_receipts table: %w", err)
+	}
+	if _, err := db.Exec(pendingReceiptsSchema); err != nil {
+		return fmt.Errorf("failed to ensure pending_receipts table: %w", err)
 	}
 	if _, err := applyNamedMigration(db, "labels_schema_v1", func(tx *sql.Tx) error {
 		_, err := tx.Exec(labelsSchema)
