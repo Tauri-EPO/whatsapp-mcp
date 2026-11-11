@@ -386,6 +386,13 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			}
 			countCommitted := func() {
 				repairCommittedAliases()
+				var receiptIDs []string
+				for _, row := range chunk {
+					if row != nil && row.Message != nil && prepared[row].chatAlias == "" {
+						receiptIDs = append(receiptIDs, row.Message.GetKey().GetID())
+					}
+				}
+				b.reconcilePendingReceiptOriginals(ctx, chatJID, receiptIDs)
 				syncedCount += storedInBatch
 				storedInChat += storedInBatch
 				b.metrics.historyMessages.Add(int64(storedInBatch))

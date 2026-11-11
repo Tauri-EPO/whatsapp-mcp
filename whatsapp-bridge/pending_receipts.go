@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -211,4 +212,58 @@ func (b *Bridge) sendNonOriginalMessage(ctx context.Context, chat types.JID, mes
 		b.excludeNonOriginalReceipts(chat.String(), response.ID, true)
 	}
 	return response, err
+}
+
+// Same-chat receipts need no alternate, and group/channel IDs cannot be DM
+// twins. This boolean candidate probe is never a writer-side retry condition.
+const pendingReceiptCandidatesSQL = `SELECT EXISTS(SELECT 1 FROM pending_receipts
+ WHERE message_id IN (SELECT value FROM json_each(?)) AND expires_ms>?
+ AND ?<>'' AND chat_jid LIKE ?)`
+
+func pendingReceiptCandidateSuffix(chat string) string {
+	jid, ok := pendingMetadataUserJID(chat)
+	if !ok {
+		return ""
+	}
+	if jid.Server == types.DefaultUserServer {
+		return "%@lid"
+	}
+	return "%@s.whatsapp.net"
+}
+
+// A receipt may first appear after preparation. The original is already
+// committed: SDK stalls or receipt churn can never undo it. The same ownership
+// checks used for live receipts settle evidence in a separate atomic transaction.
+func (b *Bridge) reconcilePendingReceiptOriginals(parent context.Context, chat string, ids []string) {
+	suffix := pendingReceiptCandidateSuffix(chat)
+	if b.Store == nil || suffix == "" || len(ids) == 0 || parent.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return
+	}
+	var exists bool
+	err = b.Store.db.QueryRowContext(ctx, pendingReceiptCandidatesSQL, string(encoded), b.Store.pendingMetadataNow().UnixMilli(), suffix, suffix).Scan(&exists)
+	if err == nil && !exists {
+		return
+	}
+	alias := ""
+	if err == nil {
+		alias, err = b.pendingMetadataAlt(ctx, chat)
+	}
+	if err == nil && alias != "" {
+		err = b.Store.BatchContext(ctx, func(batch *messageBatch) error {
+			now := b.Store.pendingMetadataNow()
+			if err := prunePendingReceipts(batch.tx, now); err != nil {
+				return err
+			}
+			return reconcilePendingReceiptIDs(batch.tx, chat, alias, string(encoded), now)
+		})
+	}
+	if err != nil && parent.Err() == nil {
+		b.Log.Warnf("Could not reconcile late receipt metadata: %v", err)
+	}
 }

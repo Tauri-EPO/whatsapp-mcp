@@ -379,6 +379,9 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	if ex.edit != nil || rowConsumed || (!stored && ex.location != nil && ex.location.Live) {
 		return
 	}
+	if stored && ex.pendingChatAlias == "" {
+		b.reconcilePendingReceiptOriginals(b.ctx, chatJID, []string{msg.Info.ID})
+	}
 	if stored {
 		b.metrics.messagesStored.Add(1)
 	}

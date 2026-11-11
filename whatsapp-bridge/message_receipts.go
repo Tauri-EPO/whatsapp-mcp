@@ -207,8 +207,8 @@ func reconcilePendingReceiptIDs(ex sqlExecer, chat, alias, ids string, now time.
  SELECT m.chat_jid,p.message_id,p.recipient,p.recipient_server,p.type,p.at
  FROM pending_receipts p JOIN messages m ON m.id=p.message_id
  WHERE (p.chat_jid=:chat OR (:alias<>'' AND p.chat_jid=:alias))
- AND (m.chat_jid=p.chat_jid OR (:alias<>'' AND m.chat_jid IN (:chat,:alias) AND NOT EXISTS(
- SELECT 1 FROM messages exact WHERE exact.chat_jid=p.chat_jid AND exact.id=p.message_id)))
+ AND (m.chat_jid=:chat OR (:alias<>'' AND m.chat_jid=:alias AND NOT EXISTS(
+ SELECT 1 FROM messages exact WHERE exact.chat_jid=:chat AND exact.id=p.message_id)))
  AND p.message_id IN (SELECT value FROM json_each(:ids)) AND p.expires_ms>:now
  AND m.is_from_me=1 AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
  ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type) DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`,

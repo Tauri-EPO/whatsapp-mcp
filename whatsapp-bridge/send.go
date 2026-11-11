@@ -721,6 +721,7 @@ func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content
 	// must not clobber names from inbound handling or history sync.
 	// One budget for both upserts, after the remote send; shutdown cancels
 	// retry waits through the same Bridge policy as event/history writes.
+	needsReceiptReconcile := false
 	err := b.retryOutbound(
 		func() error { return messageStore.StoreChat(chatJID, "", sent.Timestamp) },
 		func() error {
@@ -738,12 +739,16 @@ func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content
 				}
 				row := media.snapshot(sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID)
 				row.EditAuthorAlias, row.PendingChatAlias, row.PendingPreparation = author, alias, prepared
+				needsReceiptReconcile = alias == ""
 				return messageStore.StoreMessage(row)
 			})
 		},
 	)
 	if err != nil {
 		b.noteStoreFailure("outbound message", sent.ID, chatJID, err)
+	}
+	if err == nil && needsReceiptReconcile {
+		b.reconcilePendingReceiptOriginals(b.ctx, chatJID, []string{sent.ID})
 	}
 	return chatJID, err
 }

@@ -335,7 +335,7 @@ func TestPendingReceiptsAliasDeniesUnrelatedChats(t *testing.T) {
 	}
 }
 
-func TestPendingReceiptsPreparedTwinDoesNotDependOnReceiptSnapshot(t *testing.T) {
+func TestPendingReceiptsLateTwinSettlesAfterOriginalCommit(t *testing.T) {
 	ms, b, dispatch := pendingReceiptBridgeFixture(t)
 	pn := types.NewJID("5511999999999", types.DefaultUserServer)
 	lid := types.NewJID("100000000000001", types.HiddenUserServer)
@@ -343,7 +343,7 @@ func TestPendingReceiptsPreparedTwinDoesNotDependOnReceiptSnapshot(t *testing.T)
 	mapping.lidByPN = map[types.JID]types.JID{pn: lid}
 	at := time.Now()
 	_, alias, prepared, err := b.preparePendingMetadata(b.ctx, "late", pn.String(), b.currentClient().Store.ID.String(), true)
-	if err != nil || alias != lid.String() {
+	if err != nil || alias != "" {
 		t.Fatal(alias, err)
 	}
 	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"late"}, Type: types.ReceiptTypeRead, Timestamp: at})
@@ -353,6 +353,10 @@ func TestPendingReceiptsPreparedTwinDoesNotDependOnReceiptSnapshot(t *testing.T)
 	if err := ms.StoreMessage(storedMessage{ID: "late", ChatJID: pn.String(), Content: "Alice", Timestamp: at, IsFromMe: true, PendingChatAlias: alias, PendingPreparation: prepared}); err != nil {
 		t.Fatal(err)
 	}
+	if pendingReceiptCount(t, ms) != 1 {
+		t.Fatal("late twin was not retained before reconciliation")
+	}
+	b.reconcilePendingReceiptOriginals(b.ctx, pn.String(), []string{"late"})
 	var durable int
 	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts WHERE chat_jid=? AND message_id='late'`, pn.String()).Scan(&durable); err != nil || durable != 1 || pendingReceiptCount(t, ms) != 0 {
 		t.Fatal(durable, err)
@@ -394,8 +398,10 @@ type receiptAliasGate struct {
 }
 
 func TestPendingReceiptsOutboundAliasCancellationKeepsOriginal(t *testing.T) {
-	ms, b, _ := pendingReceiptBridgeFixture(t)
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
 	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"cancelled-alias"}, Type: types.ReceiptTypeRead, Timestamp: time.Now()})
 	gate := &receiptAliasGate{mockLIDStore: &mockLIDStore{}, entered: make(chan struct{}, 1), release: make(chan struct{})}
 	b.currentClient().Store.LIDs = gate
 	done := make(chan error, 1)
@@ -453,7 +459,7 @@ func TestPendingReceiptsUnrelatedGroupNeedsNoSessionLookup(t *testing.T) {
 	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: group, Sender: pn}, MessageIDs: []string{"same"}, Type: types.ReceiptTypeRead, Timestamp: time.Now()})
 	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Second)
 	defer cancel()
-	_, alias, _, err := b.preparePendingMetadata(ctx, "same", group.String(), b.currentClient().Store.ID.String(), true)
+	_, alias, _, err := b.preparePendingMetadata(ctx, "same", pn.String(), b.currentClient().Store.ID.String(), true)
 	if err != nil || alias != "" || len(gate.entered) != 0 || pendingReceiptCount(t, ms) != 1 {
 		t.Fatal("unrelated group caused a session lookup", alias, err)
 	}
@@ -696,5 +702,89 @@ func TestPendingReceiptsStartupAfterOriginalChatMigration(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPendingReceiptsLateHistoryTwinSettlesWithoutRetry(t *testing.T) {
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+	writes := 0
+	b.historyBatchWriter = func(write func(*messageBatch) error) error {
+		writes++
+		if writes == 1 {
+			dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"H0"}, Type: types.ReceiptTypeRead, Timestamp: time.Now()})
+			mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+			mapping.pnByLID = map[types.JID]types.JID{lid: pn}
+		}
+		return ms.BatchContext(b.ctx, write)
+	}
+	h := largeHistoryFixture(1)
+	h.Data.Conversations[0].ID = proto.String(pn.String())
+	h.Data.Conversations[0].Messages[0].Message.Key.FromMe = proto.Bool(true)
+	b.handleHistorySync(h)
+	var originals, durable int
+	if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages WHERE id='H0' AND chat_jid=?),(SELECT COUNT(*) FROM message_receipts WHERE message_id='H0' AND chat_jid=?)`, pn.String(), pn.String()).Scan(&originals, &durable); err != nil || writes != 1 || originals != 1 || durable != 1 || pendingReceiptCount(t, ms) != 0 {
+		t.Fatal(writes, originals, durable, err)
+	}
+}
+
+func TestPendingReceiptsLateReconcileFailureKeepsOriginal(t *testing.T) {
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	at := time.Now()
+	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"committed"}, Type: types.ReceiptTypeRead, Timestamp: at})
+	if err := ms.StoreChat(pn.String(), "Alice", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.StoreMessage(storedMessage{ID: "committed", ChatJID: pn.String(), Content: "Alice", Timestamp: at, IsFromMe: true}); err != nil {
+		t.Fatal(err)
+	}
+	mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+	mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+	if _, err := ms.db.Exec(`CREATE TRIGGER refuse_late_receipt BEFORE INSERT ON message_receipts BEGIN SELECT RAISE(ROLLBACK,'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	b.reconcilePendingReceiptOriginals(b.ctx, pn.String(), []string{"committed"})
+	var originals, durable int
+	if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages WHERE id='committed'),(SELECT COUNT(*) FROM message_receipts)`).Scan(&originals, &durable); err != nil || originals != 1 || durable != 0 || pendingReceiptCount(t, ms) != 1 {
+		t.Fatal("late metadata lost original", originals, durable, err)
+	}
+	if _, err := ms.db.Exec(`DROP TRIGGER refuse_late_receipt`); err != nil {
+		t.Fatal(err)
+	}
+	b.reconcilePendingReceiptOriginals(b.ctx, pn.String(), []string{"committed"})
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts`).Scan(&durable); err != nil || durable != 1 || pendingReceiptCount(t, ms) != 0 {
+		t.Fatal(durable, err)
+	}
+}
+
+func TestPendingReceiptsCanonicalInboundDoesNotBorrowOwnTwin(t *testing.T) {
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	at := time.Now()
+	for _, chat := range []types.JID{pn, lid} {
+		if err := ms.StoreChat(chat.String(), "Alice", at); err != nil {
+			t.Fatal(err)
+		}
+		if err := ms.StoreMessage(storedMessage{ID: "collision", ChatJID: chat.String(), Content: "Alice", Timestamp: at, IsFromMe: chat == lid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A restored old pending alias must obey the canonical original's ownership.
+	if _, err := ms.db.Exec(`INSERT INTO pending_receipts VALUES(?,'collision','5511999999999','s.whatsapp.net','read',?,?,?)`, lid.String(), dbTime(at), at.UnixMilli(), at.Add(pendingReceiptTTL).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+	mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+	mapping.pnByLID = map[types.JID]types.JID{lid: pn}
+	b.reconcilePendingReceiptOriginals(b.ctx, pn.String(), []string{"collision"})
+	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: pn, Sender: pn}, MessageIDs: []string{"collision"}, Type: types.ReceiptTypeRead, Timestamp: at})
+	var durable int
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts`).Scan(&durable); err != nil || durable != 0 || pendingReceiptCount(t, ms) != 0 {
+		t.Fatal("inbound borrowed own twin", durable, err)
 	}
 }

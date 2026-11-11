@@ -31,26 +31,53 @@ func (e pendingMetadataPreparationError) Error() string { return string(e) }
 
 const errPendingMetadataPreparationChanged pendingMetadataPreparationError = "pending edit identities changed before original persistence"
 
-// Only edits require a writer-side identity recheck. A verified DM twin is
-// resolved once independently of receipt rows: receipt churn must never reject
-// an original, including when the first receipt arrives after preparation.
+// Only edits require a writer-side identity recheck. Resolve a DM twin once
+// when relevant metadata needs it; unrelated messages must not depend on SDK
+// availability. Late receipt candidates settle after commit, never by rejecting
+// or retrying the original.
 const pendingEditIdentitiesSQL = `SELECT json_group_array(json_array(chat_jid,sender,sender_server)) FROM (
  SELECT chat_jid,sender,sender_server FROM pending_edits
  WHERE target_id=? AND is_from_me=? AND expires_ms>? ORDER BY chat_jid,sender,sender_server)`
 
 func (b *Bridge) preparePendingMetadata(ctx context.Context, id, chat, sender string, own bool) (string, string, *pendingMetadataPreparation, error) {
-	chatAlias, err := b.pendingMetadataAlt(ctx, chat)
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", "", nil, ctx.Err()
-		}
-		chatAlias = "" // an unavailable session mapping must not block an original
-	}
 	prepared := &pendingMetadataPreparation{readAt: b.Store.pendingMetadataNow().UnixMilli()}
-	if err := b.Store.db.QueryRowContext(ctx, pendingEditIdentitiesSQL, id, own, prepared.readAt).Scan(&prepared.identities); err != nil {
+	ids, _ := json.Marshal([]string{id})
+	suffix := pendingReceiptCandidateSuffix(chat)
+	var receiptCandidate bool
+	if err := b.Store.db.QueryRowContext(ctx, `SELECT (`+pendingEditIdentitiesSQL+`), (`+pendingReceiptCandidatesSQL+`)`, id, own, prepared.readAt, string(ids), prepared.readAt, suffix, suffix).Scan(&prepared.identities, &receiptCandidate); err != nil {
 		return "", "", nil, err
 	}
-	authorAlias, err := b.pendingEditAuthorAlias(ctx, sender, chat, chatAlias, prepared.identities)
+	var candidates [][3]string
+	if err := json.Unmarshal([]byte(prepared.identities), &candidates); err != nil {
+		return "", "", nil, err
+	}
+	needsChat := receiptCandidate
+	current, chatOK := pendingMetadataUserJID(chat)
+	author, authorOK := pendingMetadataUserJID(sender)
+	for _, key := range candidates {
+		if !authorOK || (key[2] == author.Server && key[1] != author.User) {
+			continue
+		}
+		other, otherOK := pendingMetadataUserJID(key[0])
+		if chatOK && otherOK && current.Server != other.Server {
+			needsChat = true
+		}
+		if sender == chat && key[0] == chat && key[2] != author.Server {
+			needsChat = true
+		}
+	}
+	chatAlias := ""
+	if needsChat {
+		var err error
+		chatAlias, err = b.pendingMetadataAlt(ctx, chat)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", "", nil, ctx.Err()
+			}
+			chatAlias = "" // an unverified alternative cannot block the original
+		}
+	}
+	authorAlias, err := b.pendingEditAuthorAlias(ctx, sender, chat, chatAlias, candidates)
 	return authorAlias, chatAlias, prepared, err
 }
 
@@ -171,14 +198,10 @@ func capPendingEdits(ex sqlExecer, chat string) error {
 
 // The prepared, drained edit snapshot determines whether its author needs an
 // alternate. Chat identity was resolved once for both metadata kinds already.
-func (b *Bridge) pendingEditAuthorAlias(ctx context.Context, sender, chat, chatAlias, snapshot string) (string, error) {
+func (b *Bridge) pendingEditAuthorAlias(ctx context.Context, sender, chat, chatAlias string, candidates [][3]string) (string, error) {
 	author, ok := pendingMetadataUserJID(sender)
 	if !ok {
 		return "", nil
-	}
-	var candidates [][3]string
-	if err := json.Unmarshal([]byte(snapshot), &candidates); err != nil {
-		return "", err
 	}
 	for _, key := range candidates {
 		if key[0] != chat && (chatAlias == "" || key[0] != chatAlias) {
