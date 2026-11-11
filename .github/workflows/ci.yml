@@ -42,16 +42,9 @@ jobs:
       - name: Install audio test tooling
         # Exercise the provider's real oversized-audio chunking and existing
         # audio integration tests rather than depending on the runner image.
-        # #828: Azure mirror DNS stalled this step for 34m. Keep the official
-        # Ubuntu mirrors and fail promptly instead of using stale indexes.
-        timeout-minutes: 8
         run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf '%s\n' https://archive.ubuntu.com/ubuntu https://security.ubuntu.com/ubuntu | sudo tee /etc/apt/apt-mirrors.txt
-          fi
-          sudo timeout --kill-after=5s 120s apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
-          sudo timeout --kill-after=5s 240s apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install --no-install-recommends -y ffmpeg
-          ffmpeg -version
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
       - name: Run tests
         run: |
           cd whatsapp-mcp-server
@@ -65,10 +58,10 @@ jobs:
   go:
     name: Go Build
     runs-on: ubuntu-latest
-    # Step caps: 2 + 3 + 23 + 3 + 42 + 3 + 16 + 5 = 97 minutes.
+    # Step caps: 2 + 3 + 23 + 3 + 27 + 3 + 16 + 5 = 82 minutes.
     # Eight extra minutes let the job retain diagnostics/cleanup at its edge;
     # successful recent runs take 31-34 minutes.
-    timeout-minutes: 105
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 2
@@ -94,16 +87,14 @@ jobs:
           cd whatsapp-bridge
           go test -timeout 2m -v -run 'TestOperatorSocket' ./...
       - name: Race detector
-        timeout-minutes: 42
+        timeout-minutes: 27
         # Own step so its cost and its failures are legible. The shipped binary
         # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it
-        # (issue #351). Run 43002022523 exhausted 25m near the package's end
-        # while its active webhook test had run for only 4s (#825). This is
-        # an aggregate suite allowance: the merged local suite took 29m40s.
-        # Individual test deadlines stay intact.
+        # (issue #351). The suite is one package and takes about nine minutes
+        # under -race, so go test's default ten-minute timeout no longer fits.
         run: |
           cd whatsapp-bridge
-          go test -race -timeout 40m ./...
+          go test -race -timeout 25m ./...
       - uses: astral-sh/setup-uv@v7
         timeout-minutes: 3
       - name: Real MinIO and MCP media integration
