@@ -42,9 +42,16 @@ jobs:
       - name: Install audio test tooling
         # Exercise the provider's real oversized-audio chunking and existing
         # audio integration tests rather than depending on the runner image.
+        # #828: Azure mirror DNS stalled this step for 34m. Keep the official
+        # Ubuntu mirrors and fail promptly instead of using stale indexes.
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ffmpeg
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' https://archive.ubuntu.com/ubuntu https://security.ubuntu.com/ubuntu | sudo tee /etc/apt/apt-mirrors.txt
+          fi
+          sudo timeout --kill-after=5s 120s apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo timeout --kill-after=5s 240s apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install --no-install-recommends -y ffmpeg
+          ffmpeg -version
       - name: Run tests
         run: |
           cd whatsapp-mcp-server
