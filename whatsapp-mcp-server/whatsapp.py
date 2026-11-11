@@ -5072,6 +5072,59 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     return True, payload.get("message") or "Deleted"
 
 
+DELETE_FOR_ME_MAX_IDS = 200
+
+
+def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool = False) -> dict[str, Any]:
+    """WhatsApp "Delete for me" through the bridge; a dry run without confirm."""
+    target = (chat_jid or "").strip()
+    user, sep, server = target.rpartition("@")
+    if not sep or not user or server.lower() not in {"s.whatsapp.net", "lid"}:
+        raise ToolError(
+            "invalid_argument", "chat_jid must be a direct-chat JID (@s.whatsapp.net or @lid); groups are not supported"
+        )
+    if not isinstance(message_ids, list) or not message_ids:
+        raise ToolError("invalid_argument", "message_ids must be a non-empty list")
+    ids = [str(item).strip() for item in message_ids]
+    if any(not item for item in ids) or len(set(ids)) != len(ids):
+        raise ToolError("invalid_argument", "message_ids must be non-empty and unique")
+    if len(ids) > DELETE_FOR_ME_MAX_IDS:
+        raise ToolError("invalid_argument", f"message_ids takes at most {DELETE_FOR_ME_MAX_IDS} IDs per call")
+    _require_allowed(target)
+    if confirm is not True:
+        found: dict[str, dict[str, Any]] = {}
+        conn = _connect_messages_db()
+        try:
+            for item in ids:
+                row = conn.execute(
+                    "SELECT id, is_from_me, timestamp, media_type FROM messages WHERE chat_jid = ? AND id = ?",
+                    (target, item),
+                ).fetchone()
+                if row:
+                    found[item] = {
+                        "message_id": row[0],
+                        "is_from_me": bool(row[1]),
+                        "timestamp": row[2],
+                        "media_type": row[3],
+                    }
+        finally:
+            conn.close()
+        return {
+            "dry_run": True,
+            "would_delete": [found[item] for item in ids if item in found],
+            "not_found_in_this_chat_spelling": [item for item in ids if item not in found],
+            "note": "Nothing sent. Call again with confirm=true; the bridge also checks the chat's phone/LID twin.",
+        }
+    return _bridge_json(
+        _bridge_request(
+            "POST",
+            "/delete-for-me",
+            timeout=max(_bridge_timeout(), 60.0),
+            json={"chat_jid": target, "message_ids": ids, "confirm": True},
+        )
+    )
+
+
 PURGE_MEDIA_TYPES = MEDIA_TYPES
 
 

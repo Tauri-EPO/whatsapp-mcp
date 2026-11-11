@@ -106,13 +106,26 @@ func (b *Bridge) deleteChatLocal(ctx context.Context, chats []string, upTo time.
 			return result, err
 		}
 	}
-	var gone []mediaRow
-	var mediaErr error
+	gone, mediaRemoved, mediaFailed, mediaErr := b.removeCachedMedia(ctx, media)
+	result.MediaRemoved, result.MediaFailed = mediaRemoved, mediaFailed
+	removed, err := b.Store.deleteChatRows(ctx, chats, upTo, gone)
+	result.Messages = removed
+	if err != nil {
+		return result, err
+	}
+	return result, mediaErr
+}
+
+// removeCachedMedia deletes the cached files of rows that still exist (local or
+// S3) and returns the rows that may now be deleted: file removed or never
+// cached. A row whose file could not be removed is left out of gone, so it
+// keeps pointing at that file for a later purge.
+func (b *Bridge) removeCachedMedia(ctx context.Context, media []mediaRow) (gone []mediaRow, removed, failed int, err error) {
 	storage := b.mediaStorage()
 	const batch = 256
-	for start := 0; start < len(media) && mediaErr == nil; start += batch {
+	for start := 0; start < len(media) && err == nil; start += batch {
 		rows := media[start:min(start+batch, len(media))]
-		results, err := storage.Delete(ctx, rows, false)
+		results, deleteErr := storage.Delete(ctx, rows, false)
 		byKey := make(map[[2]string]PurgeResult, len(results))
 		for _, res := range results {
 			byKey[[2]string{res.MessageID, res.ChatJID}] = res
@@ -121,25 +134,20 @@ func (b *Bridge) deleteChatLocal(ctx context.Context, chats []string, upTo time.
 			res, ok := byKey[[2]string{row.ID, row.ChatJID}]
 			switch {
 			case ok && res.Purged:
-				result.MediaRemoved++
+				removed++
 				gone = append(gone, row)
 			case ok && res.Reason == purgeReasonNotCached:
 				gone = append(gone, row)
 			default:
-				result.MediaFailed++
+				failed++
 			}
 		}
-		if err != nil {
-			mediaErr = err
-			result.MediaFailed += len(media) - min(start+batch, len(media))
+		if deleteErr != nil {
+			err = deleteErr
+			failed += len(media) - min(start+batch, len(media))
 		}
 	}
-	removed, err := b.Store.deleteChatRows(ctx, chats, upTo, gone)
-	result.Messages = removed
-	if err != nil {
-		return result, err
-	}
-	return result, mediaErr
+	return gone, removed, failed, err
 }
 
 // cacheableMediaTypes are the kinds EachMediaRowMatching walks.

@@ -82,6 +82,7 @@ TOOL_CALLS = [
     ("forward_message", lambda target: (target, "MSG1", GROUP)),
     ("forward_message", lambda target: (GROUP, "MSG1", target)),
     ("delete_message", lambda target: (target, "MSG1")),
+    ("delete_messages_for_me", lambda target: (target, ["MSG1"], True)),
     ("get_poll_results", lambda target: ("MSG1", target)),
     ("get_group_members", lambda target: (target,)),
     ("manage_group_participants", lambda target: (target, "add", ["5511999999999"])),

@@ -132,6 +132,9 @@ from whatsapp import (
     delete_message as whatsapp_delete_message,
 )
 from whatsapp import (
+    delete_messages_for_me as whatsapp_delete_messages_for_me,
+)
+from whatsapp import (
     download_media as whatsapp_download_media,
 )
 from whatsapp import (
@@ -1986,6 +1989,33 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     """
     success, status_message = whatsapp_delete_message(chat_jid, message_id, for_everyone)
     return {"success": success, "message": status_message, "for_everyone": for_everyone}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+@tool_errors
+@mutating_tool
+def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool = False) -> dict[str, Any]:
+    """WhatsApp "Delete for me": remove messages from this account's phone and linked devices.
+
+    Works for any sender and any age; the other side keeps its copies (unlike
+    delete_message for_everyone=True, which needs your own recent message). It
+    is IRREVERSIBLE. Without confirm=true this is a dry run: nothing is sent, and
+    the answer lists which IDs are stored in this chat (would_delete) and which
+    are not. Then call again with confirm=true. Direct chats only for now; groups
+    return invalid_argument. Up to 200 IDs per call, all or nothing: an ID the
+    bridge does not have for this chat refuses the whole batch with not_found.
+    After WhatsApp accepts the patch, the local rows and their cached media go
+    too (local_messages_removed); local_cleanup_error means the phone deleted
+    them but the archive was not fully cleaned: do not resend. HTTP 408 means
+    nothing was sent; an unknown outcome means inspect the phone, never retry
+    automatically.
+
+    Args:
+        chat_jid: Direct-chat JID (@s.whatsapp.net or @lid) from list_chats
+        message_ids: IDs from list_messages in that chat (1-200, unique)
+        confirm: True to delete; False (default) only previews
+    """
+    return whatsapp_delete_messages_for_me(chat_jid, message_ids, confirm)
 
 
 @mcp.tool()

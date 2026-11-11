@@ -51,6 +51,7 @@ var endpointTools = map[string][]string{
 	"/api/chat/delete":        {"delete_chat"},
 	"/api/block":              {"block_contact"},
 	"/api/delete":             {"delete_message"},
+	"/api/delete-for-me":      {"delete_messages_for_me"},
 	"/api/edit":               {"edit_message"},
 	"/api/forward":            {"forward_message"},
 	"/api/group/participants": {"manage_group_participants"},
