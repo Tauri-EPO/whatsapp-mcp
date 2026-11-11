@@ -87,7 +87,7 @@ func (store *MessageStore) ApplyMessageEditContext(ctx context.Context, chat, se
 func (b *messageBatch) ApplyMessageEdit(chat, sender string, fromMe bool, edit *waE2E.ProtocolMessage, fallback time.Time) error {
 	b.pendingChecked = false // a later original in this batch must see newly deferred edits
 	return b.write(func() error {
-		return applyOrDeferMessageEdit(b.tx, chat, sender, fromMe, edit, fallback, b.store.pendingEditNow())
+		return applyOrDeferMessageEdit(b.tx, chat, sender, fromMe, edit, fallback, b.store.pendingMetadataNow())
 	})
 }
 

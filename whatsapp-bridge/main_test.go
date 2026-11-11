@@ -189,6 +189,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	if _, err := db.Exec(messageReceiptsSchema); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(pendingReceiptsSchema); err != nil {
+		t.Fatal(err)
+	}
 	return &MessageStore{db: db}
 }
 

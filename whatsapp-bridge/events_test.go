@@ -157,6 +157,13 @@ func TestHandleEvent_SelfReadReceiptMarksChatRead(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
+	// Model the peer receipt worker holding a pool slot while our read state
+	// uses another connection. Both must see the same archive schema and rows.
+	held, err := ms.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
 	t1 := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Minute)
 	if err := ms.StoreChat(peer.String(), "Peer", t2); err != nil {

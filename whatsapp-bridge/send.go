@@ -721,14 +721,34 @@ func (b *Bridge) persistOutbound(storageJID types.JID, sent sentMessage, content
 	// must not clobber names from inbound handling or history sync.
 	// One budget for both upserts, after the remote send; shutdown cancels
 	// retry waits through the same Bridge policy as event/history writes.
+	needsReceiptReconcile := false
 	err := b.retryOutbound(
 		func() error { return messageStore.StoreChat(chatJID, "", sent.Timestamp) },
 		func() error {
-			return media.store(messageStore, sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID)
+			return retryPendingMetadataPreparation(func() error {
+				ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+				defer cancel()
+				author, alias, prepared, err := b.preparePendingMetadata(ctx, sent.ID, chatJID, senderJID, true)
+				if err != nil {
+					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+						return err
+					}
+					// The remote send succeeded: an optional alias timeout cannot
+					// lose its original. Match the live-message fallback.
+					author, alias, prepared = "", "", nil
+				}
+				row := media.snapshot(sent.ID, chatJID, senderJID, content, sent.Timestamp, quotedMsgID)
+				row.EditAuthorAlias, row.PendingChatAlias, row.PendingPreparation = author, alias, prepared
+				needsReceiptReconcile = alias == ""
+				return messageStore.StoreMessage(row)
+			})
 		},
 	)
 	if err != nil {
 		b.noteStoreFailure("outbound message", sent.ID, chatJID, err)
+	}
+	if err == nil && needsReceiptReconcile {
+		b.reconcilePendingReceiptOriginals(b.ctx, chatJID, []string{sent.ID})
 	}
 	return chatJID, err
 }
@@ -791,26 +811,28 @@ func outboundMediaColumns(mediaPath string, upload whatsmeow.UploadResponse) out
 
 // store persists the outbound row with these media columns.
 func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) error {
-	return messageStore.StoreMessage(
-		storedMessage{
-			ID:              id,
-			ChatJID:         chatJID,
-			Sender:          senderJID,
-			Content:         content,
-			Timestamp:       timestamp,
-			IsFromMe:        true,
-			MediaType:       m.mediaType,
-			Filename:        m.filename,
-			URL:             m.url,
-			MediaKey:        m.mediaKey,
-			FileSHA256:      m.fileSHA256,
-			FileEncSHA256:   m.fileEncSHA256,
-			FileLength:      m.fileLength,
-			QuotedMessageID: quotedMsgID,
-			ForwardingScore: m.forwardingScore,
-			Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
-		},
-	)
+	return messageStore.StoreMessage(m.snapshot(id, chatJID, senderJID, content, timestamp, quotedMsgID))
+}
+
+func (m outboundMedia) snapshot(id, chatJID, senderJID, content string, timestamp time.Time, quotedMsgID string) storedMessage {
+	return storedMessage{
+		ID:              id,
+		ChatJID:         chatJID,
+		Sender:          senderJID,
+		Content:         content,
+		Timestamp:       timestamp,
+		IsFromMe:        true,
+		MediaType:       m.mediaType,
+		Filename:        m.filename,
+		URL:             m.url,
+		MediaKey:        m.mediaKey,
+		FileSHA256:      m.fileSHA256,
+		FileEncSHA256:   m.fileEncSHA256,
+		FileLength:      m.fileLength,
+		QuotedMessageID: quotedMsgID,
+		ForwardingScore: m.forwardingScore,
+		Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
+	}
 }
 
 // buildMediaMessage wraps an upload result in the waE2E message for its

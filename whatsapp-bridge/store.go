@@ -34,10 +34,10 @@ type MessageStore struct {
 	db   *sql.DB
 	waDB *sql.DB // whatsmeow's DB for contact name resolution fallback
 
-	names     *chatNameCache   // resolved chat names + failed group lookups (chat_names.go)
-	groupInfo groupInfoLookup  // live group metadata fetch; nil = no network
-	fts       bool             // messages_fts active (fts.go)
-	editNow   func() time.Time // per-store arrival clock for pending edit expiry
+	names      *chatNameCache   // resolved chat names + failed group lookups (chat_names.go)
+	groupInfo  groupInfoLookup  // live group metadata fetch; nil = no network
+	fts        bool             // messages_fts active (fts.go)
+	pendingNow func() time.Time // shared per-store arrival clock for pending metadata expiry
 }
 
 type ChatEphemeralSettings struct {
@@ -293,6 +293,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(messageReceiptsSchema); err != nil {
 		return fmt.Errorf("failed to ensure message_receipts table: %w", err)
 	}
+	if _, err := db.Exec(pendingReceiptsSchema); err != nil {
+		return fmt.Errorf("failed to ensure pending_receipts table: %w", err)
+	}
 	if _, err := applyNamedMigration(db, "labels_schema_v1", func(tx *sql.Tx) error {
 		_, err := tx.Exec(labelsSchema)
 		return err
@@ -438,8 +441,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to stat WhatsApp DB %s: %w", whatsappDBPath, err)
 	}
 
-	if err := store.migratePendingEditChats(context.Background(), whatsappDBPath); err != nil {
-		return fmt.Errorf("migrate pending edit chats: %w", err)
+	if err := store.migratePendingMetadataChats(context.Background(), whatsappDBPath); err != nil {
+		return fmt.Errorf("migrate pending metadata chats: %w", err)
 	}
 	alias := fmt.Sprintf("wa_mig_%d", time.Now().UnixNano())
 	tx, finish, err := store.beginMessageMigration(alias)
@@ -447,6 +450,18 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to start LID chat migration transaction: %w", err)
 	}
 	defer finish()
+	// The legacy copy below may create the canonical original after pending
+	// chat rekeying. Settle all now-exact keys in the same archive transaction.
+	commit := func() error {
+		now := store.pendingMetadataNow()
+		if err := prunePendingReceipts(tx, now); err != nil {
+			return err
+		}
+		if err := settleArchivedPendingReceipts(tx, "", now); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 
 	escapedPath := strings.ReplaceAll(whatsappDBPath, "'", "''")
 	if _, err := tx.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %s;", escapedPath, alias)); err != nil {
@@ -461,7 +476,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to inspect WhatsApp DB schema for LID migration: %w", err)
 	}
 	if lidMapTableExists == 0 {
-		if err := tx.Commit(); err != nil {
+		if err := commit(); err != nil {
 			return fmt.Errorf("failed to commit no-op LID chat migration: %w", err)
 		}
 		logger.Infof("Skipping LID chat migration: whatsmeow_lid_map table not found")
@@ -492,7 +507,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_to_phone;"); err != nil {
 			return fmt.Errorf("failed to clean temporary LID mapping table: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commit(); err != nil {
 			return fmt.Errorf("failed to commit no-op LID chat migration: %w", err)
 		}
 		logger.Infof("LID chat migration: nothing to migrate")
@@ -721,7 +736,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to clean temporary chat candidate table: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commit(); err != nil {
 		return fmt.Errorf("failed to commit LID chat migration: %w", err)
 	}
 
