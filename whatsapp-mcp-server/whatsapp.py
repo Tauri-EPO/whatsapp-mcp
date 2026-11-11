@@ -7192,6 +7192,43 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
     return _bridge_json(_bridge_request("POST", "/chat/archive", json={"chat_jid": target, "archived": archived}))
 
 
+def delete_chat(chat_jid: str, delete_media: bool = False, confirm: bool = False) -> dict[str, Any]:
+    """Delete a whole chat on the phone through the bridge's app-state endpoint."""
+    target = (chat_jid or "").strip()
+    if "@" not in target or not all(target.rsplit("@", 1)):
+        raise ToolError("invalid_argument", "chat_jid must be a full JID")
+    _require_allowed(target)
+    if confirm is not True:
+        raise ToolError("invalid_argument", "Deleting a chat is irreversible: call again with confirm=true")
+    return _bridge_json(
+        _bridge_request(
+            "POST", "/chat/delete", json={"chat_jid": target, "delete_media": bool(delete_media), "confirm": True}
+        )
+    )
+
+
+def _contact_target(jid: str) -> str:
+    target = (jid or "").strip()
+    if target.isdigit() and target.isascii():
+        return target
+    user, sep, server = target.rpartition("@")
+    if not sep or not user or server.lower() not in {"s.whatsapp.net", "lid"}:
+        raise ToolError("invalid_argument", "jid must be a phone number or a contact JID (@s.whatsapp.net or @lid)")
+    return target
+
+
+def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
+    """Block or unblock a contact through the bridge."""
+    target = _contact_target(jid)
+    _require_allowed(target)
+    return _bridge_json(_bridge_request("POST", "/block", json={"jid": target, "blocked": bool(blocked)}))
+
+
+def get_blocklist() -> dict[str, Any]:
+    """Read the account's blocklist; the bridge filters it by the chat allow-list."""
+    return _bridge_json(_bridge_request("GET", "/blocklist"))
+
+
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
     """Show (or clear) the 'typing…' presence in a chat."""
     target = normalize_recipient((chat_jid or "").strip())

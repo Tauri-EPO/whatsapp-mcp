@@ -100,6 +100,9 @@ EXPECTED_UNTRUSTED = {
 EXPECTED_TRUSTED = {
     "label_chat",
     "archive_chat",
+    "delete_chat",
+    "block_contact",
+    "get_blocklist",
     "bridge_status",
     "clear_media_refusal",
     "request_history",

@@ -75,6 +75,7 @@ TOOL_CALLS = [
     ("send_reaction", lambda target: (target, "MSG1", "")),
     ("send_typing", lambda target: (target, True)),
     ("archive_chat", lambda target: (target, True)),
+    ("delete_chat", lambda target: (target, False, True)),
     ("update_group", lambda target: (target, "Example")),
     ("mark_messages_read", lambda target: (["MSG1"], target)),
     ("edit_message", lambda target: (target, "MSG1", "edited")),

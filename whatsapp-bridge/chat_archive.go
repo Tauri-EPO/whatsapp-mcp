@@ -98,82 +98,106 @@ func handleArchiveChat(deps archiveDeps) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "Invalid request format")
 			return
 		}
-		req.ChatJID = strings.TrimSpace(req.ChatJID)
 		if req.Archived == nil {
 			writeError(w, http.StatusBadRequest, "Valid chat_jid and archived boolean are required")
 			return
 		}
-		chat, ok := authorizeChat(w, policy, req.ChatJID, false)
+		anchor, ok := deps.prepareChatAppState(ctx, w, policy, req.ChatJID, chatAppStateLabels{
+			verb: "archived", noun: "chat archive", action: "Archive",
+		})
 		if !ok {
 			return
 		}
-		req.ChatJID = chat.String()
-		if chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer && chat.Server != types.GroupServer {
-			writeError(w, http.StatusBadRequest, "Only direct chats and groups can be archived")
-			return
-		}
-		if !deps.connected() {
-			writeError(w, http.StatusServiceUnavailable, "WhatsApp client is not connected. Please wait for reconnection.")
-			return
-		}
-		target, err := deps.resolve(ctx, req.ChatJID)
-		if ctx.Err() != nil {
-			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
-			return
-		}
-		if err != nil || target.User == "" || target.Server == "" {
-			writeError(w, http.StatusBadRequest, "Cannot resolve chat_jid")
-			return
-		}
-		chats := []string{req.ChatJID}
-		addAlias := func(jid types.JID) {
-			if !jid.IsEmpty() && jid.String() != req.ChatJID && policy.Allows(jid.String()) {
-				chats = append(chats, jid.String())
-			}
-		}
-		addAlias(target)
-		if deps.twin != nil {
-			if twin, err := deps.twin(ctx, target); err == nil {
-				addAlias(twin)
-			}
-		}
-		key, ts, err := deps.store.archiveAnchor(ctx, chats)
-		if err != nil {
-			status := http.StatusInternalServerError
-			code := "internal"
-			var invalid archiveAnchorError
-			if errors.Is(err, sql.ErrNoRows) {
-				status = http.StatusNotFound
-				code = "not_found"
-			} else if ctx.Err() != nil {
-				status = http.StatusRequestTimeout
-				code = "bridge_unavailable"
-			} else if errors.As(err, &invalid) {
-				status = http.StatusUnprocessableEntity
-				code = "invalid_argument"
-			}
-			writeErrorCode(w, status, code, "Cannot anchor chat archive: "+err.Error())
-			return
-		}
-		key.RemoteJID = proto.String(target.String())
-		if key.GetParticipant() != "" {
-			sender, err := deps.resolve(ctx, key.GetParticipant())
-			if ctx.Err() != nil {
-				writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
-				return
-			}
-			if err != nil || sender.User == "" || sender.Server == "" {
-				writeError(w, http.StatusBadRequest, "Cannot resolve latest message sender")
-				return
-			}
-			key.Participant = proto.String(sender.String())
-		}
-		if ctx.Err() != nil {
-			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", "Archive request expired before send; nothing sent; safe to retry")
-			return
-		}
-		writeAppStateResult(w, deps.send(ctx, appstate.BuildArchive(target, *req.Archived, ts, key)), map[string]any{"archived": *req.Archived}, "Chat archive")
+		writeAppStateResult(w, deps.send(ctx, appstate.BuildArchive(anchor.target, *req.Archived, anchor.ts, anchor.key)), map[string]any{"archived": *req.Archived}, "Chat archive")
 	}
+}
+
+// chatAppStateLabels keeps each endpoint's wording in the shared refusals.
+type chatAppStateLabels struct{ verb, noun, action string }
+
+// chatAppStateAnchor is what a chat-level app-state patch needs: the patch
+// target (PN rewritten to LID), every stored alias of the chat and its newest row.
+type chatAppStateAnchor struct {
+	target types.JID
+	chats  []string
+	key    *waCommon.MessageKey
+	ts     time.Time
+}
+
+// prepareChatAppState authorizes, resolves and anchors a direct chat or group
+// for an app-state patch. It writes the refusal itself and reports ok=false;
+// nothing has been sent to WhatsApp at that point.
+func (deps archiveDeps) prepareChatAppState(ctx context.Context, w http.ResponseWriter, policy chatPolicy, raw string, labels chatAppStateLabels) (chatAppStateAnchor, bool) {
+	expired := labels.action + " request expired before send; nothing sent; safe to retry"
+	chat, ok := authorizeChat(w, policy, strings.TrimSpace(raw), false)
+	if !ok {
+		return chatAppStateAnchor{}, false
+	}
+	if chat.Server != types.DefaultUserServer && chat.Server != types.HiddenUserServer && chat.Server != types.GroupServer {
+		writeError(w, http.StatusBadRequest, "Only direct chats and groups can be "+labels.verb)
+		return chatAppStateAnchor{}, false
+	}
+	if !deps.connected() {
+		writeError(w, http.StatusServiceUnavailable, "WhatsApp client is not connected. Please wait for reconnection.")
+		return chatAppStateAnchor{}, false
+	}
+	target, err := deps.resolve(ctx, chat.String())
+	if ctx.Err() != nil {
+		writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", expired)
+		return chatAppStateAnchor{}, false
+	}
+	if err != nil || target.User == "" || target.Server == "" {
+		writeError(w, http.StatusBadRequest, "Cannot resolve chat_jid")
+		return chatAppStateAnchor{}, false
+	}
+	chats := []string{chat.String()}
+	addAlias := func(jid types.JID) {
+		if !jid.IsEmpty() && jid.String() != chat.String() && policy.Allows(jid.String()) {
+			chats = append(chats, jid.String())
+		}
+	}
+	addAlias(target)
+	if deps.twin != nil {
+		if twin, err := deps.twin(ctx, target); err == nil {
+			addAlias(twin)
+		}
+	}
+	key, ts, err := deps.store.archiveAnchor(ctx, chats)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "internal"
+		var invalid archiveAnchorError
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+			code = "not_found"
+		} else if ctx.Err() != nil {
+			status = http.StatusRequestTimeout
+			code = "bridge_unavailable"
+		} else if errors.As(err, &invalid) {
+			status = http.StatusUnprocessableEntity
+			code = "invalid_argument"
+		}
+		writeErrorCode(w, status, code, "Cannot anchor "+labels.noun+": "+err.Error())
+		return chatAppStateAnchor{}, false
+	}
+	key.RemoteJID = proto.String(target.String())
+	if key.GetParticipant() != "" {
+		sender, err := deps.resolve(ctx, key.GetParticipant())
+		if ctx.Err() != nil {
+			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", expired)
+			return chatAppStateAnchor{}, false
+		}
+		if err != nil || sender.User == "" || sender.Server == "" {
+			writeError(w, http.StatusBadRequest, "Cannot resolve latest message sender")
+			return chatAppStateAnchor{}, false
+		}
+		key.Participant = proto.String(sender.String())
+	}
+	if ctx.Err() != nil {
+		writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", expired)
+		return chatAppStateAnchor{}, false
+	}
+	return chatAppStateAnchor{target: target, chats: chats, key: key, ts: ts}, true
 }
 
 func writeAppStateResult(w http.ResponseWriter, err error, payload map[string]any, action string) {
