@@ -229,16 +229,30 @@ func ensureMessagesFTSBuild(db *sql.DB, available bool, migrate func(*sql.Tx) er
 		}
 		return false, nil
 	}
+	// A real published virtual index survives any failed upgrade transaction.
+	// Plain/broken leftovers and an unavailable module still require teardown.
+	var publishedKind string
 	fail := func(err error) (bool, error) {
-		// Rollback can restore an older index and its triggers. Always remove
-		// them before returning, so a failed optional index cannot break writes.
-		if _, cleanupErr := db.Exec(ftsTeardown); cleanupErr != nil {
-			return false, fmt.Errorf("migrate message search index: %w (teardown failed: %v)", err, cleanupErr)
+		missingModule := strings.Contains(err.Error(), "no such module")
+		cleanup, active := ftsTeardown, false
+		if publishedKind == "virtual" && !missingModule {
+			cleanup, active = "DROP TABLE IF EXISTS messages_fts_build", true
 		}
-		if strings.Contains(err.Error(), "no such module") {
+		if _, cleanupErr := db.Exec(cleanup); cleanupErr != nil {
+			return active, fmt.Errorf("migrate message search index: %w (cleanup failed: %v)", err, cleanupErr)
+		}
+		if missingModule {
 			return false, nil
 		}
-		return false, fmt.Errorf("migrate message search index: %w", err)
+		return active, fmt.Errorf("migrate message search index (retry next start): %w", err)
+	}
+	if existed {
+		if err := db.QueryRow("SELECT type FROM pragma_table_list WHERE schema='main' AND name=?", messagesFTSTable).Scan(&publishedKind); err != nil {
+			if strings.Contains(err.Error(), "no such module") {
+				return fail(err)
+			}
+			return false, fmt.Errorf("inspect published search index: %w", err)
+		}
 	}
 	applied, err := migrationApplied(db, originalContentFTSMigration)
 	if err != nil {
@@ -248,15 +262,15 @@ func ensureMessagesFTSBuild(db *sql.DB, available bool, migrate func(*sql.Tx) er
 	if err != nil {
 		return fail(err)
 	}
-	if applied && existed && compatible {
+	if applied && publishedKind == "virtual" && compatible {
 		if _, err := db.Exec(ftsViewSchema + ftsSchema); err != nil {
 			return fail(err)
 		}
 		return true, nil
 	}
 	if applied {
-		// Capability-off startup removed the index, not the archive. Rebuild
-		// even though an earlier incarnation completed the named migration.
+		// A removed index or rolled-back shape can outlive its completion marker.
+		// Only the complete replacement may publish that marker again.
 		if _, err := db.Exec("DELETE FROM schema_migrations WHERE name=?", originalContentFTSMigration); err != nil {
 			return fail(err)
 		}
@@ -267,15 +281,7 @@ func ensureMessagesFTSBuild(db *sql.DB, available bool, migrate func(*sql.Tx) er
 	}
 	if populated {
 		if err := build(); err != nil {
-			if strings.Contains(err.Error(), "no such module") {
-				return fail(err) // A missing module must never leave broken write triggers.
-			}
-			// The staged build has not touched the published table or triggers.
-			// Keep that index usable, leave the marker absent, and retry next start.
-			if _, cleanupErr := db.Exec("DROP TABLE IF EXISTS messages_fts_build"); cleanupErr != nil {
-				return existed, fmt.Errorf("build message search index: %w (staging cleanup: %v)", err, cleanupErr)
-			}
-			return existed, fmt.Errorf("build message search index (retry next start): %w", err)
+			return fail(err)
 		}
 	}
 	// Publish only the complete replacement and its marker, in one transaction.
