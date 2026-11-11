@@ -320,8 +320,20 @@
   {
     "path": "whatsapp-mcp-server/whatsapp.py",
     "function": "_query_predicate",
-    "fingerprint": "eef0717adbc5cd2a5b4eb4bae7d48b042ad8bd227290fe08fdfd6f1cca888015",
-    "reason": "predicate and temp table are module constants; QueryPredicate binds search text"
+    "fingerprint": "c60611d58a1e384575f40acb442cf51720d64efb417bc0c5e32d6e506bae3445",
+    "reason": "clause and temp table are internal SQL; QueryPredicate binds search text"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_original_match_keys",
+    "fingerprint": "c60611d58a1e384575f40acb442cf51720d64efb417bc0c5e32d6e506bae3445",
+    "reason": "clause and temp table are internal SQL; search text and page keys are bound below"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_original_match_keys",
+    "fingerprint": "99b1ee7c309bb98ad61c147f608e7aabb8b43c914260943d5d423075400b92ea",
+    "reason": "slots and predicate use internal SQL only; exact authorised keys and search text are bound"
   },
   {
     "path": "whatsapp-mcp-server/whatsapp.py",

@@ -525,20 +525,19 @@ MESSAGE_COLUMNS = (
 )
 
 
-def message_columns(cursor: sqlite3.Cursor) -> str:
-    """MESSAGE_COLUMNS as this store can answer it.
-
-    Older bridges may lack sender_server, location, forwarding_score or edit metadata. Select NULL for those
-    fields so all readers keep the same projection and old archives remain
-    readable without the MCP server changing the bridge-owned schema.
-    """
-    available = _schema_memo(
+def _message_column_names(cursor: sqlite3.Cursor) -> frozenset[str]:
+    return _schema_memo(
         "messages.projection_columns",
         MESSAGES_DB_PATH,
         # Iterate on the caller's cursor; never buffer archive rows here.
         lambda: frozenset(row[1] for row in cursor.execute("PRAGMA table_info(messages)")),
         schema=cursor,
     )
+
+
+def message_columns(cursor: sqlite3.Cursor) -> str:
+    """The fixed projection with NULL for columns absent from older archives."""
+    available = _message_column_names(cursor)
     columns = MESSAGE_COLUMNS
     for optional in ("sender_server", "location", "forwarding_score", "message_edit_timestamp", "original_content"):
         if optional not in available:
@@ -1240,6 +1239,7 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "transcript",
     "content_truncated",
     "original_content_truncated",
+    "matched_original",
 )
 # "notes" is on every chat row, whichever listing produced it.
 _CHAT_ROW_FIELDS: tuple[str, ...] = (
@@ -1331,6 +1331,8 @@ def shape_rows(
                 out[flag] = True
         if selected is not None:
             keep = [*selected, *(flag for _, flag in text_fields if out.get(flag))]
+            if out.get("matched_original"):
+                keep.append("matched_original")
             out = {name: out[name] for name in keep if name in out}
         if omit_nulls:
             out = {name: value for name, value in out.items() if not _is_empty(value)}
@@ -2599,6 +2601,9 @@ class QueryPredicate:
     join_params: list[Any] = field(default_factory=list)
     relevance_order: str | None = None
     match_index: int | None = None
+    original: bool = False
+    fts: bool = False
+    transcripts: bool = False
 
     def bind(self, filter_params: list[Any]) -> tuple[list[Any], int | None]:
         """The parameters in SQL order (join, filters, predicate) and where MATCH sits."""
@@ -2699,7 +2704,20 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
     if not query:
         return QueryPredicate(None, [])
     transcripts = _stage_transcript_hits(conn, query)
-    if _fts_query_kind(query) == "fts" and _fts_available(conn):
+    original = "original_content" in _message_column_names(conn.cursor())
+    # An older bridge index may exist alongside the new archive column. Until
+    # its owner upgrades it, substring search must still find the original text.
+    use_fts = _fts_query_kind(query) == "fts" and _fts_available(conn)
+    if use_fts and original:
+        use_fts = _schema_memo(
+            "fts.original_columns",
+            MESSAGES_DB_PATH,
+            lambda: {"content", "filename", "original_content"}.issubset(
+                row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")
+            ),
+            schema=conn,
+        )
+    if use_fts:
         if not transcripts:
             return QueryPredicate(
                 f"{MESSAGES_FTS_TABLE} MATCH ?",
@@ -2707,6 +2725,8 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
                 join=f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid",
                 relevance_order=f"bm25({MESSAGES_FTS_TABLE}), {_RELEVANCE_TIEBREAK}",
                 match_index=0,
+                original=original,
+                fts=True,
             )
         return QueryPredicate(
             None,
@@ -2715,19 +2735,28 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
             join_params=[query],
             relevance_order=f"hits.score, {_RELEVANCE_TIEBREAK}",
             match_index=0,
+            original=original,
+            fts=True,
+            transcripts=True,
         )
-    if not transcripts:
-        return QueryPredicate(_SUBSTRING_PREDICATE, [query, query, query, query])
+    clause, params = _SUBSTRING_PREDICATE, [query] * 4
+    if original:
+        clause = f"({clause} OR instr(LOWER(messages.original_content), LOWER(?)) > 0 OR instr(messages.original_content, ?) > 0)"
+        params.extend([query, query])
     # No index to rank with: the set is right, the order stays newest-first.
+    if transcripts:
+        clause = f"({clause} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))"  # nosec B608 # clause and temp table are internal SQL; QueryPredicate binds search text
     return QueryPredicate(
-        f"({_SUBSTRING_PREDICATE} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))",  # nosec B608 # predicate and temp table are module constants; QueryPredicate binds search text
-        [query, query, query, query],
+        clause,
+        params,
+        original=original,
+        transcripts=transcripts,
     )
 
 
 def _execute_message_sql(
     cur: sqlite3.Cursor, sql: str, params: list[Any], match_param_index: int | None, query: str | None
-) -> None:
+) -> str | None:
     """Execute a message query, retrying an FTS MATCH whose raw text is not FTS5 syntax."""
     try:
         cur.execute(sql, tuple(params))
@@ -2736,8 +2765,37 @@ def _execute_message_sql(
             raise
         # Raw text was not valid FTS5 syntax (operator characters, unbalanced
         # quotes...). Retry with every token quoted so it is matched literally.
-        params[match_param_index] = _fts_quote_tokens(query or "")
+        query = _fts_quote_tokens(query or "")
+        params[match_param_index] = query
         cur.execute(sql, tuple(params))
+    return query
+
+
+def _original_match_keys(
+    conn: sqlite3.Connection, predicate: QueryPredicate, query: str | None, messages: list[Message]
+) -> set[tuple[str, str]]:
+    """Hits requiring pre-edit text; inspect only the already authorised page.
+
+    Excluding the original column preserves FTS operators, phrases and accent
+    folding. A hit also supported by current text, filename or transcript is
+    not marked. Mixed-column AND hits are marked when they need the original.
+    """
+    if not predicate.original or not query or not messages:
+        return set()
+    clause, params = _SUBSTRING_PREDICATE, [query] * 4
+    if predicate.fts:
+        clause = "messages.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
+        params = [f"{{content filename}} : ({query})"]
+    if predicate.transcripts:
+        clause = f"({clause} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))"  # nosec B608 # clause and temp table are internal SQL; search text and page keys are bound below
+    keys = [(message.id, message.chat_jid) for message in messages]
+    current: set[tuple[str, str]] = set()
+    for start in range(0, len(keys), 200):
+        batch = keys[start : start + 200]
+        slots = ",".join("(?,?)" for _ in batch)
+        sql = f"SELECT id,chat_jid FROM messages WHERE (id,chat_jid) IN (VALUES {slots}) AND ({clause})"  # nosec B608 # slots and predicate use internal SQL only; exact authorised keys and search text are bound
+        current.update(conn.execute(sql, [*(value for key in batch for value in key), *params]))
+    return set(keys) - current
 
 
 def count_messages(
@@ -2933,6 +2991,10 @@ def list_messages_page(
 
         predicate = _query_predicate(conn, query)
         ranked = predicate.relevance_order is not None
+        if predicate.original:
+            # The marker must describe the text returned on this page even if
+            # another edit commits before the attribution/context queries.
+            conn.execute("BEGIN")
 
         # Build base query
         query_parts = [f"SELECT {message_columns(cur)} FROM messages"]  # nosec B608 # message_columns selects fixed schema-compatible columns; query values are bound below
@@ -3003,7 +3065,7 @@ def list_messages_page(
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit + 1, offset])
 
-        _execute_message_sql(cur, " ".join(query_parts), params, match_param_index, query)
+        matched_query = _execute_message_sql(cur, " ".join(query_parts), params, match_param_index, query)
         messages = cur.fetchall()
         has_more = len(messages) > limit
         messages = messages[:limit]
@@ -3017,6 +3079,14 @@ def list_messages_page(
                 next_cursor = encode_cursor({"k": "messages", "s": sort_by, "o": offset + limit})
 
         result = [_row_to_message(msg) for msg in messages]
+        original_keys = _original_match_keys(conn, predicate, matched_query, result)
+
+        def render(page: list[Message]) -> list[dict[str, Any]]:
+            rows = msgs_to_dicts(page)
+            for row in rows:
+                if (row["id"], row["chat_jid"]) in original_keys:
+                    row["matched_original"] = True
+            return rows
 
         if include_context and result:
             # One query per batch of hits (not two per hit); dedupe on (id, chat_jid)
@@ -3040,10 +3110,10 @@ def list_messages_page(
                 for ctx_msg in after_msgs:
                     _add(ctx_msg)
 
-            return PageResult(msgs_to_dicts(messages_with_context), next_cursor, has_more)
+            return PageResult(render(messages_with_context), next_cursor, has_more)
 
         # Return messages without context
-        return PageResult(msgs_to_dicts(result), next_cursor, has_more)
+        return PageResult(render(result), next_cursor, has_more)
 
     except sqlite3.Error as e:
         logger.error("Database error: %s", e)

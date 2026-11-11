@@ -9,6 +9,7 @@ import pytest
 import main
 import whatsapp
 from chat_policy import ChatPolicy
+from tests.conftest import BOB
 from whatsapp import _fts_query_kind, _fts_quote_tokens
 
 SCHEMA = """
@@ -17,15 +18,16 @@ CREATE TABLE messages (
     id TEXT, chat_jid TEXT, sender TEXT, sender_server TEXT, content TEXT, timestamp TIMESTAMP, is_from_me BOOLEAN,
     media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB,
     file_length INTEGER, deleted_at TIMESTAMP, view_once BOOLEAN NOT NULL DEFAULT 0, target_message_id TEXT, quoted_message_id TEXT,
+    original_content TEXT,
     PRIMARY KEY (id, chat_jid)
 );
 """
 
 # Mirrors whatsapp-bridge/fts.go (the bridge owns the index; tests replay it).
-FTS_SCHEMA = re.search(
-    r"const ftsSchema = `([^`]+)`",
-    (Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "fts.go").read_text(encoding="utf-8"),
-).group(1)
+_GO_FTS = (Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "fts.go").read_text(encoding="utf-8")
+FTS_SCHEMA = "".join(
+    re.search(rf"const {name} = `([^`]+)`", _GO_FTS).group(1) for name in ("ftsViewSchema", "ftsSchema")
+)
 
 CHAT = "111@s.whatsapp.net"
 ROWS = [
@@ -73,6 +75,108 @@ def ids(query, **kwargs):
 
 
 @pytest.mark.parametrize("with_fts", [True, False])
+def test_original_text_search_and_attribution(tmp_path, monkeypatch, with_fts):
+    path = _make_db(tmp_path, monkeypatch, with_fts)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE messages SET content='newword', original_content='oldword' WHERE id='m1'")
+    row = main.list_messages(query="oldword", include_context=False)["items"]
+    assert len(row) == 1 and row[0]["id"] == "m1"
+    assert row[0]["matched_original"] is True
+    assert row[0]["content"] == "newword" and row[0]["original_content"] == "oldword"
+    assert whatsapp.count_messages(query="oldword") == 1
+    assert main.list_messages(query="oldword", count_only=True) == {"count": 1}
+    current = main.list_messages(query="newword", include_context=False)["items"]
+    assert len(current) == 1 and not current[0].get("matched_original", False)
+    projected = main.list_messages(query="oldword", fields=["id"], max_content_chars=3, include_context=False)["items"]
+    assert projected == [
+        {"id": "m1", "matched_original": True, "content_truncated": True, "original_content_truncated": True}
+    ]
+    assert whatsapp.message_stats(query="oldword")["total"]["messages"] == 1
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries([BOB]))
+    assert ids("oldword") == []
+    assert whatsapp.count_messages(query="oldword") == 0
+    assert main.list_messages(query="oldword", chat_jid=CHAT)["error"]["code"] == "denied"
+
+
+@pytest.mark.parametrize(
+    ("query", "original"),
+    [
+        ("prepalavra", True),
+        ('"old phrase"', True),
+        ("old*", True),
+        ("oldword AND newword", True),
+        ("oldword OR newword", False),
+        ("oldword NOT absentword", True),
+        ("obra (casa) -", True),
+        ("original_content:oldword", True),
+        ("content:newword", False),
+    ],
+)
+def test_original_fts_operators_and_attribution(fts_db, query, original):
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute(
+            "UPDATE messages SET content='newword', original_content='oldword prépalavra old phrase obra (casa) -' WHERE id='m1'"
+        )
+    rows = main.list_messages(query=query, sort_by="relevance", include_context=False)["items"]
+    row = next(row for row in rows if row["id"] == "m1")
+    assert row.get("matched_original", False) is original
+    assert sum(row["id"] == "m1" for row in rows) == 1
+
+
+@pytest.mark.parametrize("with_fts", [True, False])
+def test_original_context_paging_and_composite_key(tmp_path, monkeypatch, with_fts):
+    path = _make_db(tmp_path, monkeypatch, with_fts)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE messages SET content='newword', original_content='会議 oldword' WHERE id='m1'")
+        conn.execute("INSERT INTO chats(jid,name) VALUES (?, 'Bob')", (BOB,))
+        conn.execute(
+            "INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,original_content) "
+            "VALUES ('m1',?,'5511888888888','oldword','2024-01-02T10:00:00',0,'oldword')",
+            (BOB,),
+        )
+        conn.execute("UPDATE messages SET timestamp=replace(timestamp,'T',' ') || '+00:00'")
+    result = main.list_messages(query="oldword", limit=1, include_context=True, context_before=0, context_after=1)
+    assert result["items"][0]["chat_jid"] == BOB and not result["items"][0].get("matched_original", False)
+    second = main.list_messages(
+        query="oldword", cursor=result["next_cursor"], limit=1, include_context=True, context_before=0, context_after=1
+    )
+    assert second["items"][0]["chat_jid"] == CHAT and second["items"][0]["matched_original"]
+    assert "matched_original" not in second["items"][1]  # a surrounding non-hit
+    unicode_hits = main.list_messages(query="会議", include_context=False)["items"]
+    assert next(row for row in unicode_hits if row["id"] == "m1")["matched_original"]
+    assert not next(row for row in unicode_hits if row["id"] == "m7").get("matched_original", False)
+
+
+def test_original_with_legacy_index_uses_read_only_fallback(tmp_path, monkeypatch):
+    path = _make_db(tmp_path, monkeypatch, False)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE messages SET content='newword', original_content='oldword' WHERE id='m1'")
+        conn.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='rowid')")
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+    assert ids("oldword") == ["m1"]
+    assert main.list_messages(query="oldword", include_context=False)["items"][0]["matched_original"]
+    with sqlite3.connect(path) as conn:
+        assert [row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")][:1] == ["content"]
+        assert "original_content" not in {row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")}
+
+
+def test_original_attribution_uses_the_returned_snapshot(fts_db, monkeypatch):
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("UPDATE messages SET content='newword', original_content='oldword' WHERE id='m1'")
+    real = whatsapp._original_match_keys
+
+    def edit_between_reads(conn, predicate, query, messages):
+        with sqlite3.connect(fts_db) as writer:
+            writer.execute("UPDATE messages SET content='oldword' WHERE id='m1'")
+        return real(conn, predicate, query, messages)
+
+    monkeypatch.setattr(whatsapp, "_original_match_keys", edit_between_reads)
+    row = main.list_messages(query="oldword", include_context=False)["items"][0]
+    assert row["content"] == "newword" and row["matched_original"]
+
+
+@pytest.mark.parametrize("with_fts", [True, False])
 def test_document_filename_search(tmp_path, monkeypatch, with_fts):
     path = _make_db(tmp_path, monkeypatch, with_fts)
     with sqlite3.connect(path) as conn:
@@ -82,10 +186,13 @@ def test_document_filename_search(tmp_path, monkeypatch, with_fts):
             [(kind, CHAT, kind, "Relatório técnico.pdf") for kind in ("document", "image", "audio", "video")],
         )
     queries = ("relatorio", "RELATÓRIO", "tecnico") if with_fts else ("Relatório", "técnico", "pdf")
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE messages SET original_content='Relatório técnico.pdf' WHERE media_type='document'")
     for query in queries:
         assert ids(query, sort_by="relevance") == ["document"]
         assert whatsapp.count_messages(query=query) == 1
         assert main.list_messages(query=query, count_only=True) == {"count": 1}
+        assert not main.list_messages(query=query, include_context=False)["items"][0].get("matched_original", False)
     if with_fts:
         for query in (
             '"relatorio tecnico"',

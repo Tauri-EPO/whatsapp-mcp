@@ -92,6 +92,19 @@ def test_a_stored_transcript_is_searchable_without_the_index(plain_db):
     assert ids("domingo") == ["v2"]
 
 
+@pytest.mark.parametrize("with_fts", [True, False])
+def test_original_match_supported_by_transcript_is_not_marked(tmp_path, monkeypatch, with_fts):
+    path = _make_db(tmp_path, monkeypatch, with_fts)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE messages SET original_content='domingo' WHERE id='v1'")
+    rows = whatsapp.list_messages(query="domingo", include_context=False, sort_by="relevance")
+    assert next(row for row in rows if row["id"] == "v1")["matched_original"]
+    media_notes.annotate_media(SHA_VOICE, "transcript", "domingo")
+    rows = whatsapp.list_messages(query="domingo", include_context=False, sort_by="relevance")
+    assert {row["id"] for row in rows} == {"v1", "v2"}
+    assert all(not row.get("matched_original", False) for row in rows)
+
+
 def test_the_count_matches_the_page(fts_db):
     assert whatsapp.count_messages(query="orcamento") == 2
     assert whatsapp.count_messages(query="domingo") == 1

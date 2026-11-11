@@ -86,7 +86,7 @@ func TestSecretEditRealSDKDecryption(t *testing.T) {
 
 func TestOriginalContentMigrationAndEmptyCaption(t *testing.T) {
 	ms, _ := lockedProductionStore(t)
-	if _, err := ms.db.Exec("ALTER TABLE messages DROP COLUMN original_content"); err != nil {
+	if _, err := ms.db.Exec(ftsTeardown + "ALTER TABLE messages DROP COLUMN original_content"); err != nil {
 		t.Fatal(err)
 	}
 	if err := ensureMessageStoreSchema(ms.db); err != nil {

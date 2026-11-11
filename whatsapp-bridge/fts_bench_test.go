@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// Run with -run '^$' -bench BenchmarkDocumentFilenameFTSMigration -benchtime=1x.
-// A real messages.db, one million synthetic rows and exactly 5% documents.
-func BenchmarkDocumentFilenameFTSMigration(b *testing.B) {
+// Run with -run '^$' -bench BenchmarkOriginalContentFTSMigration -benchtime=1x.
+// A real messages.db, one million synthetic rows, 5% documents and 10% edits.
+func BenchmarkOriginalContentFTSMigration(b *testing.B) {
 	for range b.N {
 		b.StopTimer()
 		db, err := sql.Open("sqlite", filepath.Join(b.TempDir(), "messages.db"))
@@ -18,11 +18,12 @@ func BenchmarkDocumentFilenameFTSMigration(b *testing.B) {
 		}
 		boundPool(db, messagesPoolConns)
 		if _, err := db.Exec(`PRAGMA journal_mode=WAL;
-			CREATE TABLE messages(id TEXT, content TEXT, media_type TEXT, filename TEXT);
+			CREATE TABLE messages(id TEXT, content TEXT, media_type TEXT, filename TEXT, original_content TEXT);
 			WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000000)
 			INSERT INTO messages SELECT printf('M%07d',n), 'synthetic archive text',
 				CASE WHEN n%20=0 THEN 'document' ELSE '' END,
-				CASE WHEN n%20=0 THEN printf('report_%07d.pdf',n) ELSE '' END FROM seq;
+				CASE WHEN n%20=0 THEN printf('report_%07d.pdf',n) ELSE '' END,
+				CASE WHEN n%10=0 THEN 'preeditword original archive text' ELSE NULL END FROM seq;
 			CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='rowid');
 			INSERT INTO messages_fts(messages_fts) VALUES('rebuild');`); err != nil {
 			b.Fatal(err)
@@ -40,10 +41,13 @@ func BenchmarkDocumentFilenameFTSMigration(b *testing.B) {
 			b.Fatalf("migration on=%v err=%v", on, err)
 		}
 		b.ReportMetric(elapsed.Seconds(), "migration_s")
-		b.Logf("1000000 rows / 50000 documents: migration %.3fs", elapsed.Seconds())
+		b.Logf("1000000 rows / 50000 documents / 100000 edits: migration %.3fs", elapsed.Seconds())
 		var hits int
 		if err := db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'report'").Scan(&hits); err != nil || hits != 50000 {
 			b.Fatalf("indexed documents=%d err=%v", hits, err)
+		}
+		if err := db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'preeditword'").Scan(&hits); err != nil || hits != 100000 {
+			b.Fatalf("indexed originals=%d err=%v", hits, err)
 		}
 		if err := db.Close(); err != nil {
 			b.Fatal(err)

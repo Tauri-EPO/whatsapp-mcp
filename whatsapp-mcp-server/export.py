@@ -41,7 +41,13 @@ EXPORT_BATCH = 1000
 # whole rows straight from msg_to_dict, so nothing is truncated, no transcript is
 # attached and the agent's own notes about a message stay out of what is, by
 # design, an archive of what other people wrote.
-PAGE_ONLY_FIELDS = ("transcript", "content_truncated", "original_content_truncated", "message_notes")
+PAGE_ONLY_FIELDS = (
+    "transcript",
+    "content_truncated",
+    "original_content_truncated",
+    "message_notes",
+    "matched_original",
+)
 EXPORT_FIELDS = tuple(name for name in whatsapp.MESSAGE_FIELDS if name not in PAGE_ONLY_FIELDS)
 
 
