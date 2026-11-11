@@ -136,3 +136,28 @@ def test_message_columns_uses_one_schema_probe(paired_dbs):
         assert "messages.original_content" in whatsapp.message_columns(conn.cursor())
         assert statements.count("PRAGMA table_info(messages)") == 1
         assert statements.count("PRAGMA main.schema_version") == 1
+
+
+def test_edits_and_forwarding_share_the_projection(paired_dbs):
+    with paired_dbs.messages() as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN message_edit_timestamp INTEGER")
+        conn.execute("ALTER TABLE messages ADD COLUMN original_content TEXT")
+        conn.execute("ALTER TABLE messages ADD COLUMN forwarding_score INTEGER")
+        conn.execute(
+            "INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,"
+            "message_edit_timestamp,original_content,forwarding_score) "
+            "VALUES ('EDITED',?,'5511999999999','newword','2026-10-08 10:00:00+00:00',0,1791453660123,'oldword',5)",
+            (ALICE,),
+        )
+    whatsapp._reset_schema_cache()
+    expected = {
+        "original_content": "oldword",
+        "edited_at": "2026-10-08T10:01:00.123000+00:00",
+        "forwarding_score": 5,
+        "forwarded": True,
+        "frequently_forwarded": True,
+    }
+    rows = main.list_messages(chat_jid=ALICE, include_context=False, fields=list(expected))["items"]
+    assert rows == [expected]
+    context = main.get_message_context(chat_jid=ALICE, message_id="EDITED", before=0, after=0, fields=list(expected))
+    assert context["message"] == expected
