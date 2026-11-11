@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp_types import ContentBlock
+from mcp_types import ContentBlock, ToolAnnotations
 from starlette.middleware import Middleware
 
 import whatsapp
@@ -105,6 +105,9 @@ from whatsapp import (
     archive_chat as whatsapp_archive_chat,
 )
 from whatsapp import (
+    block_contact as whatsapp_block_contact,
+)
+from whatsapp import (
     bridge_status as whatsapp_bridge_status,
 )
 from whatsapp import (
@@ -123,6 +126,9 @@ from whatsapp import (
     coverage as whatsapp_coverage,
 )
 from whatsapp import (
+    delete_chat as whatsapp_delete_chat,
+)
+from whatsapp import (
     delete_message as whatsapp_delete_message,
 )
 from whatsapp import (
@@ -133,6 +139,9 @@ from whatsapp import (
 )
 from whatsapp import (
     forward_message as whatsapp_forward_message,
+)
+from whatsapp import (
+    get_blocklist as whatsapp_get_blocklist,
 )
 from whatsapp import (
     get_chat as whatsapp_get_chat,
@@ -1852,6 +1861,65 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
         archived: True to archive (default); False to return it to the inbox
     """
     return whatsapp_archive_chat(chat_jid, archived)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+@tool_errors
+@mutating_tool
+def delete_chat(chat_jid: str, delete_media: bool = False, confirm: bool = False) -> dict[str, Any]:
+    """Delete a whole WhatsApp conversation on the phone and linked devices. IRREVERSIBLE.
+
+    This is the phone's "Delete chat", not archive_chat. Ask the user before calling
+    it, then call with confirm=true; without confirm nothing is sent. The phone
+    removes the conversation up to the newest locally stored message (the anchor,
+    reported as anchor_timestamp); anything newer survives. Only after WhatsApp
+    accepts the patch does the local archive drop the same rows and their cached
+    media (local_messages_removed / local_media_removed). Requires a connected bridge
+    and at least one stored message in the chat (not_found otherwise: nothing is
+    deleted with a guessed range). Statuses, broadcasts and newsletters are
+    unsupported. HTTP 408 means nothing was sent and retrying is safe; an unknown
+    outcome or confirmation warning means inspect the phone and never retry
+    automatically. local_cleanup_error means WhatsApp deleted the chat but the
+    archive was not fully cleaned: do not resend.
+
+    Args:
+        chat_jid: Full direct-chat or group JID from list_chats
+        delete_media: Also delete the chat's media from the phone's gallery (default False)
+        confirm: Must be true; the deletion cannot be undone
+    """
+    return whatsapp_delete_chat(chat_jid, delete_media, confirm)
+
+
+@mcp.tool()
+@tool_errors
+@mutating_tool
+def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
+    """Block a WhatsApp contact, or unblock it with blocked=False.
+
+    Blocking is account-wide: the contact can no longer message or call this
+    account, and sees no profile updates. Only contacts can be blocked, not
+    groups. Returns the updated blocklist (filtered by the chat allow-list).
+    A phone number is resolved to the contact's LID by WhatsApp; an unknown
+    number fails with bridge_unavailable and nothing changes. Repeating a call is
+    harmless. Requires a connected bridge.
+
+    Args:
+        jid: Phone number with country code, or a @s.whatsapp.net / @lid JID
+        blocked: True to block (default); False to unblock
+    """
+    return whatsapp_block_contact(jid, blocked)
+
+
+@mcp.tool()
+@tool_errors
+def get_blocklist() -> dict[str, Any]:
+    """List the contacts this account has blocked.
+
+    Each entry carries the contact's lid and, when WhatsApp knows it, phone_jid.
+    With a chat allow-list, entries outside it are left out. Requires a
+    connected bridge (the list is read from WhatsApp, not the local archive).
+    """
+    return whatsapp_get_blocklist()
 
 
 @mcp.tool()
