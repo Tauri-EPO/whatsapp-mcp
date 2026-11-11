@@ -52,6 +52,7 @@ type extractedMessage struct {
 	directPath string
 
 	quotedID, quotedSender, quotedContent string
+	forwardingScore                       *uint32
 	mentions                              []string
 	location                              *messageLocation
 	edit                                  *waE2E.ProtocolMessage
@@ -105,6 +106,7 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	}
 	e.quotedID, e.quotedSender, e.quotedContent = extractQuotedMessageInfo(e.inner)
 	e.mentions = extractMentionedJIDs(e.inner)
+	e.forwardingScore = extractForwardingScore(e.inner)
 	return e
 }
 
@@ -182,6 +184,7 @@ func storedMessageSnapshot(id, chatJID, sender string, ts time.Time, fromMe bool
 		FileEncSHA256:   e.fileEnc,
 		FileLength:      length,
 		QuotedMessageID: quotedID,
+		ForwardingScore: e.forwardingScore,
 		Mentions:        mentionsColumn(e.mentions),
 		Media:           messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location, retryChat: e.retryChat, retrySender: e.retrySender},
 	}

@@ -10,8 +10,8 @@ package main
 //
 // Forward re-sends the stored content (text, or the cached media file with
 // its caption) to another chat through the normal send path. The media is
-// fetched first if it is not cached. It arrives as a fresh message, without
-// WhatsApp's "Forwarded" label.
+// fetched first if it is not cached. It arrives as a fresh message with
+// the source forwarding score incremented and WhatsApp's "Forwarded" label.
 
 import (
 	"context"
@@ -227,6 +227,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicyResolver) http.Hand
 			return
 		}
 		sendCtx, cancelSend := requestContext(r, sendDeadline)
+		// Keep the same context through registration and send; the source may
+		// be refreshed in place after downloading media.
+		sendCtx = context.WithValue(sendCtx, forwardedSendKey{}, &source)
 		if mediaType != "" {
 			// The downloaded path uses a category name, not a caller filename.
 			sendCtx = context.WithValue(sendCtx, cachedForwardMIMEKey{}, true)
@@ -295,7 +298,7 @@ func (store *MessageStore) messageContentLookup(id, chatJID string) (forwardSour
 	source := forwardSource{id: id}
 	var presentation sql.NullString
 	var sha []byte
-	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256 FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation, &sha)
+	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256, forwarding_score FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation, &sha, &source.forwardingScore)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return forwardSource{}, false, nil

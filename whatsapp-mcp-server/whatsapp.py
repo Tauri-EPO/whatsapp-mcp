@@ -508,6 +508,7 @@ class Message:
     sha256: str | None = None
     # Native location fields; NULL on old text-only rows, never reconstructed.
     location: dict[str, Any] | None = None
+    forwarding_score: int | None = None
 
 
 # One column list and one mapper for every query that yields Message rows.
@@ -517,39 +518,37 @@ MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
     "messages.deleted_at, messages.view_once, messages.target_message_id, "
-    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location"
+    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location, messages.forwarding_score"
 )
 
 
 def message_columns(cursor: sqlite3.Cursor) -> str:
     """MESSAGE_COLUMNS as this store can answer it.
 
-    Older bridges may lack sender_server or location. Select NULL for those
+    Older bridges may lack sender_server, location or forwarding_score. Select NULL for those
     fields so all readers keep the same projection and old archives remain
     readable without the MCP server changing the bridge-owned schema.
     """
-    has_column = _schema_memo(
-        "messages.sender_server",
+    available = _schema_memo(
+        "messages.projection_columns",
         MESSAGES_DB_PATH,
-        # Iterated, not fetchall()'d: this runs on the caller's cursor, and
-        # export.py's guard against buffering a whole archive watches for it.
-        lambda: "sender_server" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        # Iterate on the caller's cursor; never buffer archive rows here.
+        lambda: frozenset(row[1] for row in cursor.execute("PRAGMA table_info(messages)")),
         schema=cursor,
     )
-    columns = MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
-    has_location = _schema_memo(
-        "messages.location",
-        MESSAGES_DB_PATH,
-        lambda: "location" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
-        schema=cursor,
-    )
-    return columns if has_location else columns.replace("messages.location", "NULL")
+    columns = MESSAGE_COLUMNS
+    for optional in ("sender_server", "location", "forwarding_score"):
+        if optional not in available:
+            columns = columns.replace(f"messages.{optional}", "NULL")
+    return columns
 
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
-    if len(row) == 16:  # legacy callers that materialized the old projection
-        row = (*row, None)
+    if len(row) in (16, 17):  # known legacy materialized projections
+        row = (*row, *((None,) * (18 - len(row))))
+    elif len(row) != 18:
+        raise ValueError(f"Unexpected message projection length: {len(row)}")
     (
         timestamp,
         sender,
@@ -568,6 +567,7 @@ def _row_to_message(row: tuple) -> Message:
         sha256,
         sender_server,
         location,
+        forwarding_score,
     ) = row
     return Message(
         timestamp=parse_db_time(timestamp),
@@ -589,6 +589,7 @@ def _row_to_message(row: tuple) -> Message:
         bytes=int(file_length) if file_length is not None else None,
         sha256=sha256 or None,
         location=_location_fields(location),
+        forwarding_score=forwarding_score,
     )
 
 
@@ -1146,6 +1147,10 @@ def msg_to_dict(
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
         "view_once": message.view_once,
+        "forwarding_score": message.forwarding_score,
+        "forwarded": message.forwarding_score is not None,
+        # Upstream VGP #311 documents WhatsApp "Forwarded many times" from score 5.
+        "frequently_forwarded": message.forwarding_score is not None and message.forwarding_score >= 5,
         "bytes": message.bytes if is_media else None,
         "sha256": sha256,
     }
@@ -4715,16 +4720,23 @@ def send_message(
         raise ToolError("invalid_argument", "chat_jid must be provided")
     _require_allowed(recipient)
     payload: dict[str, Any] = {"recipient": recipient, "message": message}
-    if quoted_message_id:
-        payload["quoted_message_id"] = quoted_message_id
-        payload["quoted_sender_jid"] = quoted_sender_jid
-        payload["quoted_content"] = quoted_content
+    payload.update(_quote_payload(quoted_message_id, quoted_sender_jid, quoted_content))
     if mentions:
         payload["mentions"] = mentions
     if dry_run:
         return True, DRY_RUN_MESSAGE, _dry_run("POST /api/send", payload, **_recipient_preview(recipient))
     result = _bridge_json(_bridge_request("POST", "/send", json=payload))
     return True, result.get("message", "Message sent"), _sent_info(result)
+
+
+def _quote_payload(quoted_message_id: str, quoted_sender_jid: str, quoted_content: str) -> dict[str, Any]:
+    if not quoted_message_id:
+        return {}
+    return {
+        "quoted_message_id": quoted_message_id,
+        "quoted_sender_jid": quoted_sender_jid,
+        "quoted_content": quoted_content,
+    }
 
 
 def _media_source(media_path: str, media_base64: str, upload_id: str = "") -> str:
@@ -4763,6 +4775,10 @@ def send_file(
     filename: str = "",
     upload_id: str = "",
     as_sticker: bool = False,
+    as_document: bool = False,
+    quoted_message_id: str = "",
+    quoted_sender_jid: str = "",
+    quoted_content: str = "",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Send a media file (image, video, document) with an optional caption.
 
@@ -4778,6 +4794,11 @@ def send_file(
     exists or the payload decodes) and returns the request that would have
     been posted; an inline payload is not written to disk for a dry run.
     """
+    if as_sticker and as_document:
+        raise ToolError("invalid_argument", "as_sticker and as_document are mutually exclusive")
+    options = _quote_payload(quoted_message_id, quoted_sender_jid, quoted_content)
+    if as_document:
+        options["as_document"] = True
     if as_sticker and caption:
         raise ToolError("invalid_argument", "A sticker cannot have a caption")
     recipient = normalize_recipient(recipient)
@@ -4790,7 +4811,17 @@ def send_file(
     _require_allowed(recipient)
     if source == "upload":
         with media_upload.uploaded_path(upload_id, consume=not dry_run) as path:
-            return send_file(recipient, path, caption, dry_run=dry_run, as_sticker=as_sticker)
+            return send_file(
+                recipient,
+                path,
+                caption,
+                dry_run=dry_run,
+                as_sticker=as_sticker,
+                as_document=as_document,
+                quoted_message_id=quoted_message_id,
+                quoted_sender_jid=quoted_sender_jid,
+                quoted_content=quoted_content,
+            )
     if source == "path":
         import media_remote
 
@@ -4799,7 +4830,7 @@ def send_file(
             cached = media_remote.lookup(source_chat, message_id)
             if cached is None:
                 raise ToolError("not_found", "source media is not cached")
-            payload = {"recipient": recipient, "media_path": media_path, "message": caption}
+            payload = {**options, "recipient": recipient, "media_path": media_path, "message": caption}
             if as_sticker:
                 payload["as_sticker"] = True
             if dry_run:
@@ -4828,7 +4859,7 @@ def send_file(
                 "For a file on another machine, POST /upload and use upload_id (http/sse), "
                 "or provide media_base64 with filename.",
             )
-        payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(media_path)}
+        payload = {**options, "recipient": recipient, "media_path": media_upload.bridge_media_path(media_path)}
         if as_sticker:
             payload["as_sticker"] = True
         if caption:
@@ -4856,6 +4887,7 @@ def send_file(
     if dry_run:
         upload_dir = media_upload.upload_dir()
         payload = {
+            **options,
             "recipient": recipient,
             "media_path": media_upload.bridge_media_path(os.path.join(upload_dir, "<upload>", name), preview=True),
         }
@@ -4874,7 +4906,7 @@ def send_file(
     path = media_upload.write_inline(data, name)
     result: dict[str, Any] = {}
     try:
-        payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(path)}
+        payload = {**options, "recipient": recipient, "media_path": media_upload.bridge_media_path(path)}
         if as_sticker:
             payload["as_sticker"] = True
         if caption:
@@ -4886,7 +4918,14 @@ def send_file(
 
 
 def send_audio_message(
-    recipient: str, media_path: str = "", media_base64: str = "", filename: str = "", upload_id: str = ""
+    recipient: str,
+    media_path: str = "",
+    media_base64: str = "",
+    filename: str = "",
+    upload_id: str = "",
+    quoted_message_id: str = "",
+    quoted_sender_jid: str = "",
+    quoted_content: str = "",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Send a voice note from exactly one of ``media_path``, ``media_base64``
     or HTTP ``upload_id``. Anything that is not an ``.ogg`` is
@@ -4902,7 +4941,13 @@ def send_audio_message(
     _require_allowed(recipient)
     if source == "upload":
         with media_upload.uploaded_path(upload_id) as path:
-            return send_audio_message(recipient, path)
+            return send_audio_message(
+                recipient,
+                path,
+                quoted_message_id=quoted_message_id,
+                quoted_sender_jid=quoted_sender_jid,
+                quoted_content=quoted_content,
+            )
     if source == "path":
         import media_remote
 
@@ -4914,7 +4959,13 @@ def send_audio_message(
             with media_remote.local_file(
                 media_path, media_upload.MAX_OUTBOX_BYTES, cached["sha256"], cache_only=True
             ) as local:
-                return send_audio_message(recipient, local)
+                return send_audio_message(
+                    recipient,
+                    local,
+                    quoted_message_id=quoted_message_id,
+                    quoted_sender_jid=quoted_sender_jid,
+                    quoted_content=quoted_content,
+                )
     cleanup: list[str] = []
     result: dict[str, Any] = {}
     try:
@@ -4946,6 +4997,7 @@ def send_audio_message(
                 raise ToolError("internal", f"Error converting file to opus ogg (is ffmpeg installed?): {e}") from e
             cleanup.append(path)
         payload = {"recipient": recipient, "media_path": media_upload.bridge_media_path(path)}
+        payload.update(_quote_payload(quoted_message_id, quoted_sender_jid, quoted_content))
         result = _bridge_json(_bridge_request("POST", "/send", json=payload, timeout=BRIDGE_MEDIA_TIMEOUT_S))
     finally:
         for stale in cleanup:

@@ -47,7 +47,7 @@ Rules worth knowing:
 
 - **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them. The single-row tools `get_chat` and `get_message_context` have no `count_only` — there is nothing to count — and passing it is refused as an [unknown argument](#unknown-arguments).
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `forwarded`, `frequently_forwarded`, `forwarding_score`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
 - **The long text `max_content_chars` cuts is the row's own.** `content` on message rows, `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
 
 ## Unknown arguments
@@ -753,6 +753,13 @@ person, and its user part would otherwise be reported as the phone number
 
 ### `list_messages`
 
+Message rows (also in `get_message_context`) expose `forwarded` and
+`frequently_forwarded`. `forwarding_score` is null for no forwarding evidence,
+0 for a forwarded message without a hop count, and the received hop count
+otherwise; scores >= 5 are frequently forwarded. Older archives without this
+column read as not forwarded/unknown. A forward is someone else's words, so do
+not attribute its content to the sender.
+
 Get messages with filters, date ranges, and sorting.
 
 **Parameters:**
@@ -985,7 +992,7 @@ and flat memory.
 - `chat_jid` / `exclude_chat_jid` (optional): one conversation or a list of them — see [Chat filters](#chat-filters)
 - `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`, or `messages-all-<timestamp>.ndjson` for anything but a single chat. An existing file is overwritten
 - `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
-- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `bytes`, `sha256`, `notes`). Default: all of them
+- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `forwarded`, `frequently_forwarded`, `forwarding_score`, `bytes`, `sha256`, `notes`). Default: all of them
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
 
 **Returns:**
@@ -1383,7 +1390,7 @@ its lock waits can add about 16 seconds after the remote effect.
 
 ### `forward_message`
 
-Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
+Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message with the "Forwarded" label; its forwarding score is the source score plus one (an unknown source score counts as zero). Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
 
 A phone destination uses the number WhatsApp has registered, as the send tools
 do. The bridge checks the destination as typed before any registration lookup,
@@ -1528,6 +1535,18 @@ When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOO
 
 ### `send_file`
 
+Set `as_document=true` to send the original bytes as a document, preserving
+image/video quality. `/api/send` accepts the same flag for any file extension;
+the upload uses document keys and the archive records `document`. Default false
+keeps the existing media behavior. `as_document` and `as_sticker` are mutually
+exclusive. Captions and quoted replies also work on document sends.
+
+Both `send_file` and `send_audio_message` accept `quoted_message_id`,
+`quoted_sender_jid` and `quoted_content`, with the same behavior as
+`send_message`: previews and an omitted sender are derived only from the
+destination chat. Unknown IDs keep caller-supplied fallback text; a message
+in another chat never supplies its content or sender.
+
 `as_sticker=True` sends RIFF/WEBP bytes as a real sticker, static or animated,
 from `media_path`, `media_base64` or `upload_id`. Non-WebP bytes (including a JPEG
 renamed to `.webp`) and any caption return `invalid_argument` before WhatsApp
@@ -1555,6 +1574,8 @@ Send a media file (image, video, document).
 - `media_base64`: The file's bytes, base64-encoded (a `data:` URL prefix is accepted). Exactly one of `media_path` / `media_base64` / `upload_id` is required
 - `upload_id`: Opaque ID returned by `POST /upload` on the HTTP/SSE server; avoids putting file bytes in the tool call. Unavailable on stdio
 - `filename` (required with `media_base64`): The name the recipient sees; its extension decides how WhatsApp presents the file (`report.pdf`, `photo.jpg`, `clip.mp4`). Directories and invisible controls are removed using the name sanitizer's glyph rules. Windows device basenames receive a safe prefix; the extension survives the 200-byte UTF-8 limit. Upload receipts and dry runs return the sanitized name
+- `as_document` (optional, default `false`): Send the original file as a document, regardless of extension
+- `quoted_message_id`, `quoted_sender_jid`, `quoted_content` (optional): Reply ID, sender and fallback text, as on `send_message`
 - `as_sticker` (optional, default `false`): Send real WebP bytes as a sticker; captions are refused
 - `caption` (optional): Caption for the media
 - `dry_run` (optional, default `false`): preview instead of sending — see [Dry runs](#dry-runs)
@@ -1624,6 +1645,9 @@ with `403`. Stdio has no upload route: use `media_base64` or a server path there
 
 
 ### `send_audio_message`
+
+Optional `quoted_message_id`, `quoted_sender_jid` and `quoted_content` send the
+voice note as a reply, using the same destination-chat lookup as `send_message`.
 
 Send a voice message (automatically converts to Opus .ogg format).
 

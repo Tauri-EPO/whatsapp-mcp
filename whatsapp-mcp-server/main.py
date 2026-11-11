@@ -773,6 +773,9 @@ def list_messages(
     note transcribed earlier carries its text in notes.transcript;
     include_transcripts=True lifts it onto the row as `transcript`.
 
+    Rows expose forwarded, frequently_forwarded (score >= 5) and nullable forwarding_score.
+    A forwarded message relays content; do not attribute those words to its sender.
+
     Args:
         after: ISO-8601 lower bound, read as UTC when it carries no offset
                (e.g., "2026-01-01" or "2026-01-01T09:00:00")
@@ -1051,6 +1054,7 @@ def export_messages(
                  content, is_from_me,
                  chat_jid, chat_name, media_type, filename, target_message_id,
                  reaction_to_message_id, poll_message_id, quoted_message_id,
+                 forwarded, frequently_forwarded, forwarding_score,
                  deleted_at, view_once, bytes, sha256, notes). Default: all of them
         sender_jid: Only messages from this sender
         from_me: True for what you sent, False for inbound only, None for both
@@ -1553,7 +1557,8 @@ def get_message_context(
     """Get context around a specific WhatsApp message.
 
     Messages use the same shape as list_messages (including media_type, filename,
-    sha256 and the notes recorded for media messages), and the same compact-read
+    sha256, forwarded, frequently_forwarded, forwarding_score and the notes recorded
+    for media messages), and the same compact-read
     arguments shape them. There is no count_only here: this tool returns one
     window, whose size you already gave as before/after.
 
@@ -2125,7 +2130,8 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
 
     Text is re-sent as is; media is re-uploaded from the local cache (fetched first
     if needed) together with its caption. The copy arrives as a fresh message
-    (no "Forwarded" label). Both chats must pass WHATSAPP_ALLOWED_CHATS.
+    with the "Forwarded" label and source forwarding score plus one (unknown counts as zero).
+    Both chats must pass WHATSAPP_ALLOWED_CHATS.
     A phone destination is resolved to WhatsApp's registered number; both the
     typed and registered destination must pass the allow-list before media is fetched.
     Media failures are media_refused (unsafe cache identity) or media_unavailable
@@ -2219,6 +2225,10 @@ def send_file(
     filename: str = "",
     upload_id: str = "",
     as_sticker: bool = False,
+    as_document: bool = False,
+    quoted_message_id: str = "",
+    quoted_sender_jid: str = "",
+    quoted_content: str = "",
 ) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
@@ -2249,11 +2259,16 @@ def send_file(
     RIFF/WEBP bytes without upload, send or budget reservation.
 
     Args:
+        quoted_message_id: Reply to this message ID in the destination chat.
+        quoted_sender_jid: Optional sender JID, derived from the same-chat archive when omitted.
+        quoted_content: Fallback quote text when no same-chat row is available.
         chat_jid: Phone number with country code (leading + and the separators
                   listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: Absolute path to the media file (image, video, document) on
                     the server, or a cached S3 media identifier. Leave empty
                     when sending `media_base64`.
+        as_document: Send the original file as a document, preserving bytes (default False).
+                     Mutually exclusive with as_sticker.
         as_sticker: Send RIFF/WEBP bytes as a sticker, without caption (default False).
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
@@ -2294,6 +2309,10 @@ def send_file(
         filename=filename,
         upload_id=upload_id,
         as_sticker=as_sticker,
+        as_document=as_document,
+        quoted_message_id=quoted_message_id,
+        quoted_sender_jid=quoted_sender_jid,
+        quoted_content=quoted_content,
     )
     return {"success": success, "message": status_message, **sent}
 
@@ -2302,7 +2321,14 @@ def send_file(
 @tool_errors
 @mutating_tool
 def send_audio_message(
-    chat_jid: str, media_path: str = "", media_base64: str = "", filename: str = "", upload_id: str = ""
+    chat_jid: str,
+    media_path: str = "",
+    media_base64: str = "",
+    filename: str = "",
+    upload_id: str = "",
+    quoted_message_id: str = "",
+    quoted_sender_jid: str = "",
+    quoted_content: str = "",
 ) -> dict[str, Any]:
     """Send any audio file as a WhatsApp voice message. If it errors due to ffmpeg not being installed, use send_file instead.
 
@@ -2317,6 +2343,9 @@ def send_audio_message(
     HTTP transport's body limit, 4 MiB by default, before that).
 
     Args:
+        quoted_message_id: Reply to this message ID in the destination chat.
+        quoted_sender_jid: Optional sender JID, derived from the same-chat archive when omitted.
+        quoted_content: Fallback quote text when no same-chat row is available.
         chat_jid: Phone number with country code (leading + and the separators
                   listed in docs/TOOLS.md accepted), direct-chat JID or group JID
         media_path: Absolute audio path or S3 media identifier; converted to Opus .ogg when needed.
@@ -2335,7 +2364,14 @@ def send_audio_message(
     batch rather than retrying it. Optional actions count when configured.
     """
     success, status_message, sent = whatsapp_audio_voice_message(
-        chat_jid, media_path, media_base64=media_base64, filename=filename, upload_id=upload_id
+        chat_jid,
+        media_path,
+        media_base64=media_base64,
+        filename=filename,
+        upload_id=upload_id,
+        quoted_message_id=quoted_message_id,
+        quoted_sender_jid=quoted_sender_jid,
+        quoted_content=quoted_content,
     )
     return {"success": success, "message": status_message, **sent}
 

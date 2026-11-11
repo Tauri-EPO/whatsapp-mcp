@@ -471,6 +471,17 @@ func extractMentionedJIDs(msg *waE2E.Message) []string {
 	return append([]string(nil), contextInfo.MentionedJID...)
 }
 
+// NULL means no forwarding evidence; an explicit forwarded flag with no hop
+// count is score zero. Keep a positive count even if the flag was omitted.
+func extractForwardingScore(msg *waE2E.Message) *uint32 {
+	ctx := sharedContextInfo(msg)
+	if ctx == nil || (!ctx.GetIsForwarded() && ctx.GetForwardingScore() == 0) {
+		return nil
+	}
+	score := ctx.GetForwardingScore()
+	return &score
+}
+
 // sharedContextInfo reads supported conversational families, never protocol
 // wrappers or payment authority. The enclosing context wins over a media header;
 // nil getters also cover sparse templates. SDK envelope unwrapping belongs to
