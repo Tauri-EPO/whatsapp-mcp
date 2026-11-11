@@ -126,6 +126,7 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 			view_once BOOLEAN NOT NULL DEFAULT 0,
 			target_message_id TEXT,
 			quoted_message_id TEXT,
+			forwarding_score INTEGER,
 			mentions TEXT,
 			sender_server TEXT,
 			direct_path TEXT,

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"mime"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 	source, ok := ctx.Value(forwardSourceKey{}).(*forwardSource)
 	if !ok {
 		kind, contentType, _ := classifySendMedia(ctx, path, data)
+		if asDocument, _ := ctx.Value(documentSendKey{}).(bool); asDocument {
+			kind = whatsmeow.MediaDocument
+		}
 		return kind, contentType, nil
 	}
 	p, err := source.presentation.forBytes(source.mediaType, data)
@@ -72,9 +76,13 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 			contentType = "audio/ogg; codecs=opus"
 		}
 		parsed, _, err := mime.ParseMediaType(contentType)
-		if err != nil || !strings.HasPrefix(parsed, "audio/") {
+		asDocument, _ := ctx.Value(documentSendKey{}).(bool)
+		if !asDocument && (err != nil || !strings.HasPrefix(parsed, "audio/")) {
 			return "", "", fmt.Errorf("cannot determine stored audio codec")
 		}
+	}
+	if asDocument, _ := ctx.Value(documentSendKey{}).(bool); asDocument {
+		upload = whatsmeow.MediaDocument
 	}
 	return upload, contentType, nil
 }
@@ -87,6 +95,13 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 	source, ok := ctx.Value(forwardSourceKey{}).(*forwardSource)
 	if !ok {
 		return buildOutboundMedia(kind, contentType, path, data, upload, caption, quote, mentions)
+	}
+	if asDocument, _ := ctx.Value(documentSendKey{}).(bool); asDocument && source.mediaType != "document" {
+		name := source.filename
+		if name == "" || generatedMediaName(name) {
+			name = "attachment" + filepath.Ext(path)
+		}
+		return buildOutboundMedia(whatsmeow.MediaDocument, contentType, name, data, upload, caption, quote, mentions)
 	}
 	p, err := source.presentation.forBytes(source.mediaType, data)
 	if err != nil {

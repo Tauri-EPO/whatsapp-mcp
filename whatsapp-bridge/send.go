@@ -64,6 +64,7 @@ type sentMessage struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
+	AsDocument      bool   `json:"as_document,omitempty"`
 	AsSticker       bool   `json:"as_sticker,omitempty"`
 	DryRun          bool   `json:"dry_run,omitempty"`
 	Recipient       string `json:"recipient"`
@@ -394,6 +395,8 @@ type outboundSendFunc func(context.Context, types.JID, *waE2E.Message) (whatsmeo
 
 const groupPermissionCode = "group_admin_required"
 const groupPermissionMessage = "This group is restricted to admins; this account cannot send messages here"
+
+type documentSendKey struct{}
 
 type stickerSendKey struct{}
 type stickerBytesKey struct{}
@@ -1213,8 +1216,8 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 		req.Recipient = typed.String()
 
-		if req.AsSticker && (req.Message != "" || req.MediaPath == "") {
-			writeError(w, http.StatusBadRequest, "as_sticker requires media and no caption")
+		if req.AsSticker && (req.AsDocument || req.Message != "" || req.MediaPath == "") {
+			writeError(w, http.StatusBadRequest, "as_sticker requires media, no caption and as_document=false")
 			return
 		}
 		if req.Message == "" && req.MediaPath == "" {
@@ -1266,6 +1269,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			return
 		}
 
+		ctx = context.WithValue(ctx, documentSendKey{}, req.AsDocument)
 		ctx = context.WithValue(ctx, stickerSendKey{}, req.AsSticker)
 		if req.AsSticker {
 			var cleanup func()

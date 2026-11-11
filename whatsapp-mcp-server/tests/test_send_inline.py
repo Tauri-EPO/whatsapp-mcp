@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 import audio
+import main
 import media_upload
 import whatsapp
 from errors import ToolError
@@ -58,6 +59,63 @@ def bridge(monkeypatch):
 
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
+
+
+@pytest.mark.parametrize("tool,name", [(main.send_file, "photo.png"), (main.send_audio_message, "voice.ogg")])
+@pytest.mark.parametrize("source", ["path", "inline", "upload", "remote"])
+def test_media_quote_options_reach_bridge(outbox, bridge, monkeypatch, tool, name, source):
+    from contextlib import contextmanager
+
+    import media_remote
+
+    data = OGG if name.endswith("ogg") else PDF
+    path = outbox / name
+    path.write_bytes(data)
+    kwargs = {"media_path": str(path)}
+    if source == "inline":
+        kwargs = {"media_base64": _b64(data), "filename": name}
+    elif source == "upload":
+        monkeypatch.setenv("WHATSAPP_MCP_TRANSPORT", "http")
+        with media_upload.receiving_upload(limit=1024) as uploaded:
+            with open(uploaded.pending, "wb", buffering=0) as handle:
+                uploaded.write(handle, data)
+            uploaded.finish(name)
+        kwargs = {"upload_id": uploaded.upload_id}
+    elif source == "remote":
+        monkeypatch.setattr(media_remote, "enabled", lambda: True)
+        monkeypatch.setattr(media_remote, "lookup", lambda *args: {"bytes": len(data), "sha256": "fake"})
+
+        @contextmanager
+        def local_file(*args, **kwargs):
+            yield str(path)
+
+        monkeypatch.setattr(media_remote, "local_file", local_file)
+        kwargs = {"media_path": f"whatsapp://media/{ALICE}/SOURCE"}
+    options = {"quoted_message_id": "QUOTE", "quoted_sender_jid": ALICE, "quoted_content": "fallback"}
+    if tool is main.send_file:
+        options["as_document"] = True
+    result = tool(ALICE, **kwargs, **options)
+    assert result["success"] is True
+    assert len(bridge) == 1
+    assert options.items() <= bridge[0]["json"].items()
+    assert bridge[0]["content"] == data or source == "remote"
+
+
+@pytest.mark.parametrize("source", ["path", "inline"])
+def test_document_quote_dry_run(outbox, bridge, source):
+    path = outbox / "photo.png"
+    path.write_bytes(PDF)
+    kwargs = {"media_path": str(path)} if source == "path" else {"media_base64": _b64(PDF), "filename": "photo.png"}
+    result = main.send_file(ALICE, **kwargs, as_document=True, quoted_message_id="QUOTE", dry_run=True)
+    assert result["payload"]["as_document"] is True
+    assert result["payload"]["quoted_message_id"] == "QUOTE"
+    assert not bridge
+
+
+def test_document_sticker_conflict(outbox, bridge):
+    result = main.send_file(ALICE, media_base64=_b64(PDF), filename="photo.png", as_document=True, as_sticker=True)
+    assert result["error"]["code"] == "invalid_argument"
+    assert not bridge
 
 
 # --- send_file ---------------------------------------------------------------
