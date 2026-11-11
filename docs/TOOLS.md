@@ -1289,14 +1289,17 @@ message; `for_everyone=false` only forgets the local row). **Irreversible.**
 return `invalid_argument` for now), `message_ids` (1–200 unique IDs from
 `list_messages` in that chat), `confirm` (default `false`).
 
-Without `confirm=true` it is a dry run read from `messages.db`: `would_delete`
-lists the IDs stored under that chat spelling (with `is_from_me`, `timestamp`,
-`media_type`), `not_found_in_this_chat_spelling` the rest; nothing is sent. With
+Without `confirm=true` it is a dry run read from `messages.db`, under the chat
+and its phone/LID twin as the bridge will look: `would_delete` lists the stored
+IDs (with `chat_jid`, `is_from_me`, `timestamp`, `media_type`), `not_found` the
+missing ones and `not_deletable` reaction or poll-vote pointer rows (not
+messages; they refuse the batch); nothing is sent. With
 `confirm=true` the bridge anchors every ID on its stored row under the chat and
 its phone/LID twin — one unknown ID refuses the whole batch with `not_found`,
 before anything is sent — and sends one app-state patch. After WhatsApp accepts
-it, the bridge removes those rows (twin copies included) and their cached media,
-media first; a row whose file could not be removed stays (`local_media_failed`).
+it, the bridge removes those rows (twin copies included), the reactions and
+votes aimed at them, polls left without their message, the chat row once it is
+empty, and their cached media, media first; a row whose file could not be removed stays (`local_media_failed`).
 Returns `deleted_for_me`, `local_messages_removed`, `local_media_removed`,
 `sent: true`, `confirmed: false`; `local_cleanup_error` means do not resend.
 Error semantics follow `archive_chat`. The MCP call waits up to 60 s. Annotated

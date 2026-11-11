@@ -153,6 +153,65 @@ func TestDeleteForMeLocalMediaFirst(t *testing.T) {
 	}
 }
 
+func TestDeleteForMeRefusesPointerRows(t *testing.T) {
+	store := newTestMessageStore(t)
+	if err := store.StoreMessage(storedMessage{ID: "R1", ChatJID: archiveTestChat, Sender: chatDeleteLID, Timestamp: time.Now(), MediaType: "reaction"}); err != nil {
+		t.Fatal(err)
+	}
+	deps := deleteForMeDepsFor(store, func(context.Context, appstate.PatchInfo) error { t.Fatal("sent"); return nil }, nil)
+	rec := httptest.NewRecorder()
+	handleDeleteForMe(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"chat_jid":"`+archiveTestChat+`","message_ids":["R1"],"confirm":true}`)))
+	if rec.Code != 422 || !strings.Contains(rec.Body.String(), "reaction or poll vote") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteForMeLocalRemovesOrphans(t *testing.T) {
+	ms := newTestMessageStore(t)
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := ms.StoreChat(archiveTestChat, "", ts); err != nil {
+		t.Fatal(err)
+	}
+	chatDeleteSeed(t, ms, "POLL", archiveTestChat, "", ts)
+	if err := ms.StoreMessage(storedMessage{ID: "R1", ChatJID: archiveTestChat, Sender: chatDeleteLID, Timestamp: ts, MediaType: "reaction"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.SetTargetMessageID("R1", archiveTestChat, "POLL"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.StorePoll("POLL", archiveTestChat, &pollCreation{Question: "q?", Options: []string{"a", "b"}, SelectableCount: 1}, ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.StorePollVote("POLL", archiveTestChat, chatDeleteLID, []string{"a"}, ts); err != nil {
+		t.Fatal(err)
+	}
+	_, local, _, err := ms.deleteForMeRefs(context.Background(), []string{archiveTestChat}, []string{"POLL"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.deleteForMeLocal(context.Background(), local); err != nil {
+		t.Fatal(err)
+	}
+	count := func(q string) int {
+		var n int
+		if err := ms.db.QueryRow(q, archiveTestChat).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for _, q := range []string{
+		`SELECT COUNT(*) FROM messages WHERE chat_jid = ?`,
+		`SELECT COUNT(*) FROM polls WHERE chat_jid = ?`,
+		`SELECT COUNT(*) FROM poll_votes WHERE chat_jid = ?`,
+		`SELECT COUNT(*) FROM chats WHERE jid = ?`,
+	} {
+		if n := count(q); n != 0 {
+			t.Fatalf("%s = %d, want 0", q, n)
+		}
+	}
+}
+
 func TestDeleteForMeMuxGuards(t *testing.T) {
 	for _, tc := range []struct {
 		name, allow, deny, chats string

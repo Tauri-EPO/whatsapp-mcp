@@ -13,6 +13,7 @@ from tool_policy import ToolPolicy
 pytestmark = pytest.mark.usefixtures("auth_runtime_store")
 
 CHAT = "5511999999999@s.whatsapp.net"
+LID = "100000000000001@lid"
 
 
 class Response:
@@ -53,7 +54,25 @@ def test_dry_run_reads_archive_and_sends_nothing(monkeypatch, archive):
     assert result["dry_run"] is True
     assert [row["message_id"] for row in result["would_delete"]] == ["IN1", "OUT1"]
     assert result["would_delete"][1]["is_from_me"] is True
-    assert result["not_found_in_this_chat_spelling"] == ["ELSE", "NOPE"]
+    assert result["not_found"] == ["ELSE", "NOPE"]
+    assert result["not_deletable"] == []
+
+
+def test_dry_run_sees_the_lid_twin_and_pointer_rows(monkeypatch, archive):
+    conn = sqlite3.connect(archive)
+    conn.executemany(
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+        [
+            ("ONLID", LID, 0, "2026-01-01 12:02:00+00:00", None),
+            ("REACT", CHAT, 1, "2026-01-01 12:03:00+00:00", "reaction"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(whatsapp, "lid_map_counterparts", lambda users: {"5511999999999": "100000000000001"})
+    result = main.delete_messages_for_me("5511999999999@S.WHATSAPP.NET", ["ONLID", "REACT"])
+    assert [(row["message_id"], row["chat_jid"]) for row in result["would_delete"]] == [("ONLID", LID)]
+    assert result["not_deletable"] == ["REACT"]
 
 
 def test_confirmed_payload(monkeypatch):
@@ -81,6 +100,7 @@ def test_confirmed_payload(monkeypatch):
         (CHAT, [" "]),
         (CHAT, [f"M{i}" for i in range(201)]),
         (CHAT, "M1"),
+        ("5511999999999:2@s.whatsapp.net", ["M1"]),
     ],
 )
 def test_refusals(monkeypatch, chat, ids):

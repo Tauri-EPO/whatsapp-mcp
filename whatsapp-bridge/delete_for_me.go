@@ -21,7 +21,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -69,46 +68,44 @@ func buildDeleteMessageForMePatch(chat types.JID, refs []deleteForMeRef) appstat
 }
 
 // deleteForMeRefs anchors every requested ID on its stored rows under the
-// chat's aliases: the first row (insertion order) builds the mutation, and
-// every row, twin copies included, is what the local cleanup removes.
-// Missing IDs are returned so the caller can refuse the batch.
+// chat's aliases in one query: the first row (insertion order) builds the
+// mutation, and every row, twin copies included, is what the local cleanup
+// removes. Missing IDs are returned so the caller can refuse the batch; a
+// reaction or vote pointer row is not a message the phone can delete.
 func (store *MessageStore) deleteForMeRefs(ctx context.Context, chats []string, ids []string) (patch, local []deleteForMeRef, missing []string, err error) {
-	in := "(" + strings.TrimSuffix(strings.Repeat("?,", len(chats)), ",") + ")"
-	query := `SELECT id, chat_jid, is_from_me, timestamp, media_type, filename FROM messages WHERE id = ? AND chat_jid IN ` + in + ` ORDER BY rowid` //nolint:gosec // Only "?" placeholders are concatenated; every value is bound.
+	query := `SELECT id, chat_jid, is_from_me, timestamp, COALESCE(media_type, ''), COALESCE(filename, '') FROM messages WHERE chat_jid IN ` + placeholders(len(chats)) + ` AND id IN ` + placeholders(len(ids)) + ` ORDER BY rowid` //nolint:gosec // Only "?" placeholders are concatenated; every value is bound.
+	rows, err := store.db.QueryContext(ctx, query, stringArgs(append(append([]string(nil), chats...), ids...))...)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	byID := make(map[string][]deleteForMeRef, len(ids))
+	for rows.Next() {
+		var ref deleteForMeRef
+		var rawTime any
+		if err := rows.Scan(&ref.row.ID, &ref.row.ChatJID, &ref.fromMe, &rawTime, &ref.row.MediaType, &ref.row.Filename); err != nil {
+			_ = rows.Close()
+			return nil, nil, nil, err
+		}
+		ref.row.Timestamp = anchorTime(rawTime)
+		byID[ref.row.ID] = append(byID[ref.row.ID], ref)
+	}
+	closeErr := rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	if closeErr != nil {
+		return nil, nil, nil, closeErr
+	}
 	for _, id := range ids {
-		args := []any{id}
-		for _, chat := range chats {
-			args = append(args, chat)
-		}
-		rows, err := store.db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		var found []deleteForMeRef
-		for rows.Next() {
-			var ref deleteForMeRef
-			var rawTime any
-			var mediaType, filename sql.NullString
-			if err := rows.Scan(&ref.row.ID, &ref.row.ChatJID, &ref.fromMe, &rawTime, &mediaType, &filename); err != nil {
-				_ = rows.Close()
-				return nil, nil, nil, err
-			}
-			ref.row.Timestamp = anchorTime(rawTime)
-			ref.row.MediaType, ref.row.Filename = mediaType.String, filename.String
-			found = append(found, ref)
-		}
-		closeErr := rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, nil, nil, err
-		}
-		if closeErr != nil {
-			return nil, nil, nil, closeErr
-		}
+		found := byID[id]
 		if len(found) == 0 {
 			missing = append(missing, id)
 			continue
 		}
-		if found[0].row.Timestamp.IsZero() {
+		switch first := found[0]; {
+		case first.row.MediaType == "reaction" || first.row.MediaType == "poll_vote":
+			return nil, nil, nil, archiveAnchorError("message " + id + " is a reaction or poll vote, not a message")
+		case first.row.Timestamp.IsZero():
 			return nil, nil, nil, archiveAnchorError("message " + id + " has an invalid timestamp")
 		}
 		patch = append(patch, found[0])
@@ -163,26 +160,9 @@ func handleDeleteForMe(deps deleteForMeDeps) http.HandlerFunc {
 			return
 		}
 		expired := "Delete for me request expired before send; nothing sent; safe to retry"
-		target, err := deps.resolve(ctx, chat.String())
-		if ctx.Err() != nil {
-			writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", expired)
+		target, chats, ok := deps.resolveChatAliases(ctx, w, policy, chat, expired)
+		if !ok {
 			return
-		}
-		if err != nil || target.User == "" || target.Server == "" {
-			writeError(w, http.StatusBadRequest, "Cannot resolve chat_jid")
-			return
-		}
-		chats := []string{chat.String()}
-		addAlias := func(jid types.JID) {
-			if !jid.IsEmpty() && jid.String() != chat.String() && policy.Allows(jid.String()) {
-				chats = append(chats, jid.String())
-			}
-		}
-		addAlias(target)
-		if deps.twin != nil {
-			if twin, err := deps.twin(ctx, target); err == nil {
-				addAlias(twin)
-			}
 		}
 		refs, local, missing, err := deps.store.deleteForMeRefs(ctx, chats, ids)
 		var invalid archiveAnchorError
@@ -219,8 +199,6 @@ func handleDeleteForMe(deps deleteForMeDeps) http.HandlerFunc {
 	}
 }
 
-var cacheableMediaType = map[string]bool{"image": true, "video": true, "audio": true, "document": true, "sticker": true}
-
 // deleteForMeLocal mirrors an accepted patch: cached media first (while the
 // rows exist), then the rows whose files are gone and every non-media row.
 func (b *Bridge) deleteForMeLocal(ctx context.Context, refs []deleteForMeRef) (chatDeleteCleanup, error) {
@@ -243,21 +221,26 @@ func (b *Bridge) deleteForMeLocal(ctx context.Context, refs []deleteForMeRef) (c
 	return result, mediaErr
 }
 
-// deleteMessageRows removes the listed (id, chat) rows in one transaction.
+// deleteMessageRows removes the listed rows in one transaction, then the
+// reactions and votes aimed at them, orphaned polls and an emptied chat row.
 func (store *MessageStore) deleteMessageRows(ctx context.Context, rows []mediaRow) (int64, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var removed int64
+	removed, err := deleteMessageKeys(ctx, tx, rows)
+	if err != nil {
+		return 0, err
+	}
+	byChat := map[string][]string{}
 	for _, row := range rows {
-		res, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id = ? AND chat_jid = ?`, row.ID, row.ChatJID)
-		if err != nil {
+		byChat[row.ChatJID] = append(byChat[row.ChatJID], row.ID)
+	}
+	for chat, ids := range byChat {
+		if err := deleteChatOrphans(ctx, tx, []string{chat}, ids); err != nil {
 			return 0, err
 		}
-		n, _ := res.RowsAffected()
-		removed += n
 	}
 	return removed, tx.Commit()
 }

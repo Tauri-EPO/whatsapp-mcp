@@ -5075,14 +5075,18 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
 DELETE_FOR_ME_MAX_IDS = 200
 
 
+def _direct_chat_jid(jid: str, argument: str) -> str:
+    """A direct-chat JID (@s.whatsapp.net or @lid) with its server lower-cased, or invalid_argument."""
+    user, sep, server = (jid or "").strip().rpartition("@")
+    server = server.lower()
+    if not sep or not user or "@" in user or ":" in user or server not in {"s.whatsapp.net", "lid"}:
+        raise ToolError("invalid_argument", f"{argument} must be a direct-chat JID (@s.whatsapp.net or @lid)")
+    return f"{user}@{server}"
+
+
 def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool = False) -> dict[str, Any]:
     """WhatsApp "Delete for me" through the bridge; a dry run without confirm."""
-    target = (chat_jid or "").strip()
-    user, sep, server = target.rpartition("@")
-    if not sep or not user or server.lower() not in {"s.whatsapp.net", "lid"}:
-        raise ToolError(
-            "invalid_argument", "chat_jid must be a direct-chat JID (@s.whatsapp.net or @lid); groups are not supported"
-        )
+    target = _direct_chat_jid(chat_jid, "chat_jid")
     if not isinstance(message_ids, list) or not message_ids:
         raise ToolError("invalid_argument", "message_ids must be a non-empty list")
     ids = [str(item).strip() for item in message_ids]
@@ -5092,28 +5096,46 @@ def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool 
         raise ToolError("invalid_argument", f"message_ids takes at most {DELETE_FOR_ME_MAX_IDS} IDs per call")
     _require_allowed(target)
     if confirm is not True:
+        # The bridge also matches the chat's phone/LID twin; so does the preview.
+        user, _, server = target.partition("@")
+        aliases = [target]
+        other = lid_map_counterparts([user]).get(user)
+        if other:
+            twin = f"{other}@{'lid' if server == 's.whatsapp.net' else 's.whatsapp.net'}"
+            if CHAT_POLICY.allows(twin):
+                aliases.append(twin)
         found: dict[str, dict[str, Any]] = {}
+        pointers: list[str] = []
         conn = _connect_messages_db()
         try:
             for item in ids:
-                row = conn.execute(
-                    "SELECT id, is_from_me, timestamp, media_type FROM messages WHERE chat_jid = ? AND id = ?",
-                    (target, item),
-                ).fetchone()
-                if row:
-                    found[item] = {
-                        "message_id": row[0],
-                        "is_from_me": bool(row[1]),
-                        "timestamp": row[2],
-                        "media_type": row[3],
-                    }
+                for alias in aliases:
+                    row = conn.execute(
+                        "SELECT id, chat_jid, is_from_me, timestamp, media_type FROM messages "
+                        "WHERE chat_jid = ? AND id = ? ORDER BY rowid LIMIT 1",
+                        (alias, item),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    if row[4] in ("reaction", "poll_vote"):
+                        pointers.append(item)
+                    else:
+                        found[item] = {
+                            "message_id": row[0],
+                            "chat_jid": row[1],
+                            "is_from_me": bool(row[2]),
+                            "timestamp": row[3],
+                            "media_type": row[4],
+                        }
+                    break
         finally:
             conn.close()
         return {
             "dry_run": True,
             "would_delete": [found[item] for item in ids if item in found],
-            "not_found_in_this_chat_spelling": [item for item in ids if item not in found],
-            "note": "Nothing sent. Call again with confirm=true; the bridge also checks the chat's phone/LID twin.",
+            "not_found": [item for item in ids if item not in found and item not in pointers],
+            "not_deletable": pointers,
+            "note": "Nothing sent. Call again with confirm=true; any not_found or not_deletable ID refuses the whole batch.",
         }
     return _bridge_json(
         _bridge_request(
@@ -7268,10 +7290,7 @@ def _contact_target(jid: str) -> str:
     target = normalize_recipient((jid or "").strip())
     if target.isdigit() and target.isascii():
         return target
-    user, sep, server = target.rpartition("@")
-    if not sep or not user or server.lower() not in {"s.whatsapp.net", "lid"}:
-        raise ToolError("invalid_argument", "jid must be a phone number or a contact JID (@s.whatsapp.net or @lid)")
-    return target
+    return _direct_chat_jid(target, "jid (a phone number or a contact JID)")
 
 
 def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
