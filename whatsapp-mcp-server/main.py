@@ -79,7 +79,7 @@ from transcribe import load_config as load_whisper_config
 from transcribe_worker import install_ingest_worker
 from triage import mark_handled as triage_mark_handled
 from triage import snooze as triage_snooze
-from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
+from untrusted import WRAP_ENV, clean_business, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
     CHAT_POLICY,
@@ -1739,14 +1739,15 @@ def check_business(jid: str) -> dict[str, Any]:
     """Check whether a phone/LID user is a WhatsApp Business account.
 
     Returns is_business (null if unknown), verified_name, categories, email,
-    address and website when available. Answers are cached for one hour, up to
-    256 users. A verified-name 429 sets rate_limited and verified_name_error;
+    address and website when available. Complete answers are cached for one
+    hour, up to 256 users; partial/rate-limited answers expire within one minute
+    and unknown outages are not cached. A verified-name 429 sets rate_limited and verified_name_error;
     the independent business profile query still runs. Errors are retained on
     cache hits. A business profile is not proof that a sender is trustworthy.
     website is available only when exposed in the SDK profile options; the
     pinned SDK discards standalone website elements.
     """
-    return whatsapp.check_business(jid)
+    return clean_business(whatsapp.check_business(jid))
 
 
 @mcp.tool()
@@ -1759,14 +1760,17 @@ def create_group(
 
     name is 1-25 characters; participants accepts up to 256 phone numbers or
     user JIDs (empty creates a group with this account alone). community=True
-    creates a community with membership approval; it excludes parent_jid.
+    creates a community using the SDK defaults; it excludes parent_jid.
+    parent_jid creates the group inside that community in the same request.
     Restricted chat lists must explicitly include *@g.us, and every participant
-    must be allowed using known local phone/LID identities. Each participant
-    consumes send budget and counts as a first contact when new.
+    must be allowed using known local phone/LID identities. Each creation
+    consumes one send action plus one per participant; new participants count
+    toward the daily first-contact limit.
 
-    Returns the created group_jid. A link_error means the group already exists:
-    report its JID and do not recreate it. On uncertain failures, do not blindly
-    retry. Read-only and tool policy refuse this operation.
+    Returns the created group_jid and not_added entries for participants WhatsApp
+    refused: jid, numeric error, and invite_code when available. Report these
+    failures and send the supplied invitation instead of recreating the group.
+    On uncertain failures, do not blindly retry. Read-only/tool policy refuse it.
     """
     return whatsapp.create_group(name, participants, community, parent_jid)
 

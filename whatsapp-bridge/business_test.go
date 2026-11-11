@@ -107,3 +107,33 @@ func TestBusinessCacheBoundAndAuthorization(t *testing.T) {
 		t.Fatal("cached answer bypassed new policy")
 	}
 }
+
+func TestBusinessPartialCacheExpiresQuickly(t *testing.T) {
+	for _, scenario := range []string{"complete", "rate-limited", "profile-failure", "user-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			client := &fakeBusinessClient{profile: &types.BusinessProfile{Email: "alice@example.test"}}
+			if scenario == "rate-limited" {
+				client.userErr = &whatsmeow.IQError{Code: 429}
+			}
+			if scenario == "user-failure" {
+				client.userErr = errors.New("offline")
+			}
+			if scenario == "profile-failure" {
+				client.user = types.UserInfo{VerifiedName: &types.VerifiedName{Details: &waVnameCert.VerifiedNameCertificate_Details{VerifiedName: proto.String("Alice")}}}
+				client.profileErr = errors.New("offline")
+			}
+			now := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+			cache := businessCache{now: func() time.Time { return now }}
+			jid := types.NewJID("5511999999999", types.DefaultUserServer)
+			cache.lookup(context.Background(), client, jid)
+			now = now.Add(time.Minute + time.Second)
+			answer := cache.lookup(context.Background(), client, jid)
+			if scenario != "complete" && (answer.Cached || client.userCalls != 2) {
+				t.Fatalf("rate limit remained cached: %+v calls=%d", answer, client.userCalls)
+			}
+			if scenario == "complete" && (!answer.Cached || client.userCalls != 1) {
+				t.Fatal("complete answer did not retain its hour cache")
+			}
+		})
+	}
+}

@@ -30,6 +30,12 @@ import (
 type mediaDownloader func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error)
 
 type Bridge struct {
+	peerReceiptMu              sync.Mutex
+	peerReceiptQueue           chan peerReceiptJob
+	peerReceiptWait            sync.WaitGroup
+	peerReceiptStopped         bool
+	peerReceiptDone            chan struct{}
+	peerReceiptProcessed       func() // Tests observe completion before reading SQLite.
 	businessProfiles           businessCache
 	ProxyEnabled               bool
 	forceReconnect             atomic.Bool
@@ -422,6 +428,9 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	b.labelSyncOnce.Do(func() {})
 	b.cancel()
+	b.peerReceiptMu.Lock()
+	b.peerReceiptStopped = true
+	b.peerReceiptMu.Unlock()
 	if b.RuntimeWebhook != nil {
 		b.RuntimeWebhook.remove()
 	}
@@ -447,6 +456,7 @@ func (b *Bridge) Shutdown(timeout time.Duration) {
 	}
 	done := make(chan struct{})
 	go func() {
+		b.peerReceiptWait.Wait()
 		if shares != nil {
 			shares.stop()
 		}

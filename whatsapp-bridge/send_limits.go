@@ -185,6 +185,10 @@ func (b *Bridge) releaseSendReservation(ctx context.Context, receipt *sendReserv
 // Reserve before the network call. Uncertain delivery and archive failure must
 // never refund a send: restarting cannot turn an ambiguous send into free budget.
 func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason string, delay int, err error) {
+	return b.reserveSendWithActions(ctx, targets, 0)
+}
+
+func (b *Bridge) reserveSendWithActions(ctx context.Context, targets []string, actions int64) (reason string, delay int, err error) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
 	known, enabled := false, false
@@ -237,7 +241,7 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason stri
 			fresh++
 		}
 	}
-	count := int64(len(targets))
+	count := int64(len(targets)) + actions
 	receipt := sendReservation{day: s.Day, count: count, fresh: fresh, previousLast: s.last}
 	refuse := func(name string, seconds float64) {
 		if reason == "" {
@@ -304,6 +308,10 @@ func (b *Bridge) reserveSend(ctx context.Context, targets []string) (reason stri
 }
 
 func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...string) bool {
+	return b.allowSendWithActions(w, r, 0, targets...)
+}
+
+func (b *Bridge) allowSendWithActions(w http.ResponseWriter, r *http.Request, actions int64, targets ...string) bool {
 	if b.Store == nil && b.RuntimeDefaults == nil {
 		return true
 	}
@@ -327,7 +335,7 @@ func (b *Bridge) allowSend(w http.ResponseWriter, r *http.Request, targets ...st
 		ctx, countCancel = context.WithTimeout(ctx, 100*time.Millisecond)
 		defer countCancel()
 	}
-	reason, delay, err := b.reserveSend(ctx, targets)
+	reason, delay, err := b.reserveSendWithActions(ctx, targets, actions)
 	if err != nil {
 		var failure *sendReservationFailure
 		if errors.As(err, &failure) {
@@ -420,4 +428,9 @@ func (b *Bridge) allowParticipantAdds(w http.ResponseWriter, r *http.Request, ta
 	// The handler already applies allowsIdentity to the complete batch. Counting
 	// uses parsed PN/LID identities; it must never add DM policy or network probes.
 	return b.allowSend(w, r, targets...)
+}
+
+func (b *Bridge) allowGroupCreation(w http.ResponseWriter, r *http.Request, targets ...string) bool {
+	// The action itself consumes budget even when no participants are supplied.
+	return b.allowSendWithActions(w, r, 1, targets...)
 }

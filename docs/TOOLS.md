@@ -1072,15 +1072,17 @@ The formatting and registered-number lookup rules apply to `send_message`, `send
 `create_group(name, participants=None, community=false, parent_jid=None)` creates
 a group or community and returns `group_jid`. Names are 1-25 characters;
 participants accepts up to 256 phone numbers or phone/LID user JIDs. Empty
-participants creates with the owner alone. `community=true` enables membership
-approval and excludes `parent_jid`; a parent links the created group to that
-community with `LinkGroup`.
+participants creates with the owner alone. `community=true` creates a community
+with the SDK defaults and excludes `parent_jid`; a parent creates the group
+inside that community in the same request (`LinkedParentJID`).
 
 Creation requires `*@g.us` in every effective restricted chat allow-list and
 every participant must pass the same local phone/LID identity checks as adding
-members. Participants consume send budgets and new ones count toward the daily
-first-contact limit. Read-only and tool policies refuse it. A `link_error` still
-returns success and the created JID: report the partial result, never recreate
+members. Each creation consumes one send action plus one per participant; new
+participants count toward the daily first-contact limit. Read-only and tool
+policies refuse it. `not_added` lists participants WhatsApp could not add, with
+`jid`, numeric `error`, and `invite_code` when available. Report these failures
+and send the supplied invitation to those participants instead of recreating
 the group. A network failure can have uncertain delivery; do not blindly retry.
 
 ### `list_subgroups`
@@ -1100,6 +1102,9 @@ Collection starts at upgrade; WhatsApp does not replay older receipts, and
 privacy settings can hide reads. Empty receipts do not prove unread status.
 Both IDs are required, messages received from others are excluded and the chat
 allow-list applies. Older stores without this table return an empty list.
+Peer events are queued in a bounded bridge worker (64 events, at most 16384 IDs
+and 1 MiB of IDs per event); overflow is logged and dropped, so missing receipts
+remain inconclusive. Each accepted event is written atomically.
 Receipts that arrive before the own original is archived are currently lost;
 [#814](https://github.com/Tauri-EPO/whatsapp-mcp/issues/814) tracks bounded pending
 retention for that ordering edge. This also makes empty results inconclusive.
@@ -1109,7 +1114,9 @@ retention for that ordering edge. This also makes empty results inconclusive.
 `check_business(jid)` accepts a full phone/LID user JID within the chat allow-list.
 Returns `is_business` (null when unknown), `verified_name`, `categories`, `email`,
 `address` and `website` when present. Queries are bounded by the bridge action
-deadline; up to 256 answers are cached for one hour, with `cached` marking hits.
+deadline; up to 256 complete answers are cached for one hour, with `cached`
+marking hits. Partial or rate-limited answers expire within one minute;
+unknown outages are not cached.
 A verified-name `usync` 429 sets `rate_limited` and `verified_name_error`; the
 business profile lookup still runs independently. `profile_error` reports a
 profile lookup failure; cache hits preserve errors. These metadata are

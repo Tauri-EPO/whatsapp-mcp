@@ -52,6 +52,88 @@ def test_old_receipt_store_empty(paired_dbs, monkeypatch):
     assert main.get_message_receipts(GROUP, "missing")["recipients"] == []
 
 
+def test_receipt_lids_use_one_map_connection_and_query(paired_dbs, monkeypatch):
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.unrestricted())
+    with paired_dbs.messages() as conn:
+        conn.execute(
+            "CREATE TABLE message_receipts(chat_jid TEXT,message_id TEXT,recipient TEXT,recipient_server TEXT,type TEXT,at TEXT)"
+        )
+        conn.execute("INSERT INTO messages(id,chat_jid,is_from_me) VALUES('own',?,1)", (GROUP,))
+        for user in ("100000000000001", "100000000000002"):
+            for kind in ("delivered", "read", "played"):
+                conn.execute(
+                    "INSERT INTO message_receipts VALUES(?,'own',?,'lid',?,'2026-11-10 01:00:00+00:00')",
+                    (GROUP, user, kind),
+                )
+    with paired_dbs.whatsmeow() as conn:
+        conn.executemany(
+            "INSERT INTO whatsmeow_lid_map VALUES (?,?)",
+            [("100000000000001", "5511999999999"), ("100000000000002", "5511888888888")],
+        )
+    original = whatsapp._connect_whatsmeow_db
+    connections, queries = [], []
+
+    def connect():
+        conn = original()
+        connections.append(conn)
+        conn.set_trace_callback(queries.append)
+        return conn
+
+    monkeypatch.setattr(whatsapp, "_connect_whatsmeow_db", connect)
+    recipients = main.get_message_receipts(GROUP, "own")["recipients"]
+    assert {row["jid"] for row in recipients} == {PHONE, "5511888888888@s.whatsapp.net"}
+    assert all(row["status"] == "played" for row in recipients)
+    assert len(connections) == 1
+    assert len([q for q in queries if "FROM whatsmeow_lid_map" in q]) == 1
+
+
+def test_create_group_reads_one_policy_snapshot(monkeypatch):
+    class ChangingPolicy:
+        calls = 0
+
+        def effective(self):
+            self.calls += 1
+            return ChatPolicy.from_entries(["*@g.us", PHONE]) if self.calls == 1 else ChatPolicy.from_entries([PHONE])
+
+        def __getattr__(self, name):
+            return getattr(self.effective(), name)
+
+    policy = ChangingPolicy()
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", policy)
+    monkeypatch.setattr(whatsapp, "_bridge_request", lambda *a, **k: {"success": True})
+    monkeypatch.setattr(whatsapp, "_bridge_json", lambda reply: reply)
+    assert whatsapp.create_group("Alice", [PHONE], parent_jid=GROUP)["success"]
+    assert policy.calls == 1
+
+
+@pytest.mark.parametrize("wrap", ["0", "1"])
+def test_location_multiline_address_survives_list_messages(paired_dbs, monkeypatch, wrap):
+    monkeypatch.setenv("WHATSAPP_WRAP_UNTRUSTED", wrap)
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.unrestricted())
+    address = "Alice Street\n" + "Bob Street " * 30
+    with paired_dbs.messages() as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN location TEXT")
+        conn.execute(
+            "INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,media_type,location) VALUES('LOC',?,'5511999999999','Alice','2026-11-10 01:00:00+00:00',0,'location',?)",
+            (PHONE, json.dumps({"live": False, "address": address, "latitude": 1.0, "longitude": 2.0})),
+        )
+    whatsapp._reset_schema_cache()
+    result = main.list_messages(chat_jid=PHONE, include_context=False)["items"][0]["location"]["address"]
+    assert result == (f"<untrusted>{address}</untrusted>" if wrap == "1" else address)
+
+
+def test_business_metadata_sanitization_is_scoped(monkeypatch):
+    monkeypatch.setattr(
+        whatsapp,
+        "check_business",
+        lambda jid: {"address": "Alice\nStreet\u202e", "email": "alice\n@example.test", "categories": ["Shop\u202e"]},
+    )
+    result = main.check_business(PHONE)
+    assert result["address"] == "AliceStreet"
+    assert result["email"] == "alice@example.test"
+    assert result["categories"] == ["Shop"]
+
+
 @pytest.mark.parametrize("denial", ["read-only", "allow-list", "deny-list"])
 async def test_create_policy_refuses_before_http(monkeypatch, group_http_bridge, denial):
     _, observed = group_http_bridge
@@ -86,13 +168,22 @@ async def test_create_chat_denies_whole_batch(monkeypatch, group_http_bridge, en
 
 async def test_create_sdk_through_http_and_partial_result(monkeypatch, group_http_bridge):
     reply, observed = group_http_bridge
-    reply.update(status=200, payload={"success": True, "group_jid": GROUP, "link_error": "created; linking failed"})
+    reply.update(
+        status=200,
+        payload={
+            "success": True,
+            "group_jid": GROUP,
+            "not_added": [{"jid": PHONE, "error": 403, "invite_code": "fake-invite"}],
+        },
+    )
     monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["*@g.us", PHONE]))
     async with group_sdk_client() as client:
         result = await client.call_tool("create_group", {"name": "Alice", "participants": [PHONE], "parent_jid": GROUP})
     assert not result.is_error
     payload = json.loads(result.content[0].text)
-    assert payload["group_jid"] == GROUP and payload["link_error"]
+    assert payload["group_jid"] == GROUP and payload["not_added"] == [
+        {"jid": PHONE, "error": 403, "invite_code": "fake-invite"}
+    ]
     assert observed[0][0].endswith("/group/create")
     assert observed[0][1] == {"name": "Alice", "participants": [PHONE], "community": False, "parent_jid": GROUP}
     assert observed[0][2].startswith("Bearer ")

@@ -13,7 +13,6 @@ import (
 
 type groupCreationClient interface {
 	CreateGroup(context.Context, whatsmeow.ReqCreateGroup) (*types.GroupInfo, error)
-	LinkGroup(context.Context, types.JID, types.JID) error
 	GetSubGroups(context.Context, types.JID) ([]*types.GroupLinkTarget, error)
 }
 
@@ -89,28 +88,33 @@ func handleCreateGroup(d groupCreationDeps) http.HandlerFunc {
 		}
 		ctx, cancel := requestContext(r, sendDeadline)
 		defer cancel()
-		if len(targets) > 0 && d.allowSend != nil && !d.allowSend(w, r, targets...) {
+		if d.allowSend != nil && !d.allowSend(w, r, targets...) {
 			return
 		}
 		create := whatsmeow.ReqCreateGroup{Name: name, Participants: unique}
 		create.IsParent = req.Community
-		if req.Community {
-			create.DefaultMembershipApprovalMode = "request_required"
-		}
+		create.LinkedParentJID = parent
 		info, err := d.client.CreateGroup(ctx, create)
 		if err != nil || info == nil || info.JID.IsEmpty() {
 			writeError(w, 502, "group creation failed; delivery may be uncertain, do not blindly retry")
 			return
 		}
 		result := map[string]any{"success": true, "group_jid": info.JID.String(), "community": req.Community}
-		// A failed second step must preserve the created JID to prevent duplicates.
 		if !parent.IsEmpty() {
-			if err = d.client.LinkGroup(ctx, parent, info.JID); err != nil {
-				result["link_error"] = "group created but linking failed; do not recreate the group"
-			} else {
-				result["parent_jid"] = parent.String()
-			}
+			result["parent_jid"] = parent.String()
 		}
+		notAdded := []map[string]any{}
+		for _, participant := range info.Participants {
+			if participant.Error == 0 && participant.AddRequest == nil {
+				continue
+			}
+			failure := map[string]any{"jid": participant.JID.String(), "error": participant.Error}
+			if participant.AddRequest != nil && participant.AddRequest.Code != "" {
+				failure["invite_code"] = participant.AddRequest.Code
+			}
+			notAdded = append(notAdded, failure)
+		}
+		result["not_added"] = notAdded
 		writeJSON(w, 200, result)
 	}
 }

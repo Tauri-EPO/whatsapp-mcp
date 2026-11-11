@@ -84,11 +84,6 @@ WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "valu
 NAME_KEYS = frozenset(
     {
         "name",
-        "verified_name",
-        "categories",
-        "email",
-        "address",
-        "website",
         "chat_name",
         "sender_name",
         "sender_push_name",
@@ -298,6 +293,14 @@ def clean_untrusted(payload: Any, *, wrap: bool) -> Any:
     if isinstance(payload, list):
         return [clean_untrusted(item, wrap=wrap) for item in payload]
     return payload
+
+
+def clean_business(payload: dict[str, Any]) -> dict[str, Any]:
+    """Clean business labels without treating location addresses as names."""
+    return {
+        key: _sanitize_names(value) if key in {"verified_name", "categories", "email", "address", "website"} else value
+        for key, value in payload.items()
+    }
 
 
 def untrusted_content(fn: Callable[..., Any]) -> Callable[..., Any]:

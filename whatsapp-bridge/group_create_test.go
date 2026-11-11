@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -14,19 +14,14 @@ import (
 )
 
 type fakeCreationClient struct {
-	created []whatsmeow.ReqCreateGroup
-	links   [][2]types.JID
-	linkErr error
-	groups  []*types.GroupLinkTarget
+	created      []whatsmeow.ReqCreateGroup
+	participants []types.GroupParticipant
+	groups       []*types.GroupLinkTarget
 }
 
 func (f *fakeCreationClient) CreateGroup(_ context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
 	f.created = append(f.created, req)
-	return &types.GroupInfo{JID: types.NewJID("120363000000000002", types.GroupServer)}, nil
-}
-func (f *fakeCreationClient) LinkGroup(_ context.Context, parent, child types.JID) error {
-	f.links = append(f.links, [2]types.JID{parent, child})
-	return f.linkErr
+	return &types.GroupInfo{JID: types.NewJID("120363000000000002", types.GroupServer), Participants: f.participants}, nil
 }
 func (f *fakeCreationClient) GetSubGroups(context.Context, types.JID) ([]*types.GroupLinkTarget, error) {
 	return f.groups, nil
@@ -59,7 +54,7 @@ func TestCreateGroupAuthorizationAndBudget(t *testing.T) {
 				t.Fatalf("%d: %s", w.Code, w.Body.String())
 			}
 			if tc.status != 200 {
-				if len(client.created)+len(client.links)+len(targets) != 0 {
+				if len(client.created)+len(targets) != 0 {
 					t.Fatal("effect before denial")
 				}
 				return
@@ -68,18 +63,23 @@ func TestCreateGroupAuthorizationAndBudget(t *testing.T) {
 				t.Fatal(client.created)
 			}
 			if tc.name == "allowed" {
-				if len(targets) != 1 || targets[0] != "5511999999999@s.whatsapp.net" || len(client.created[0].Participants) != 1 || len(client.links) != 1 {
-					t.Fatalf("targets=%v create=%+v links=%v", targets, client.created, client.links)
+				if len(targets) != 1 || targets[0] != "5511999999999@s.whatsapp.net" || len(client.created[0].Participants) != 1 || client.created[0].LinkedParentJID.String() != "120363000000000001@g.us" {
+					t.Fatalf("targets=%v create=%+v", targets, client.created)
 				}
-			} else if !client.created[0].IsParent || client.created[0].DefaultMembershipApprovalMode != "request_required" {
+			} else if !client.created[0].IsParent || client.created[0].DefaultMembershipApprovalMode != "" {
 				t.Fatal(client.created[0])
 			}
 		})
 	}
 }
 
-func TestCreateGroupLimitsAndPartialLink(t *testing.T) {
-	client := &fakeCreationClient{linkErr: errors.New("link failed")}
+func TestCreateGroupLimitsAndParticipantResults(t *testing.T) {
+	client := &fakeCreationClient{participants: []types.GroupParticipant{
+		{JID: types.NewJID("5511999999999", types.DefaultUserServer), Error: 403, AddRequest: &types.GroupParticipantAddRequest{Code: "fake-invite"}},
+		{JID: types.NewJID("5511888888888", types.DefaultUserServer), Error: 406},
+		{JID: types.NewJID("100000000000001", types.HiddenUserServer), AddRequest: &types.GroupParticipantAddRequest{Code: "fake-second"}},
+		{JID: types.NewJID("100000000000002", types.HiddenUserServer)},
+	}}
 	d := groupCreationDeps{client: client, connected: func() bool { return true }, policy: chatPolicy{}}
 	d.allowSend = func(w http.ResponseWriter, _ *http.Request, _ ...string) bool {
 		writeError(w, 429, "budget")
@@ -93,12 +93,27 @@ func TestCreateGroupLimitsAndPartialLink(t *testing.T) {
 	d.allowSend = nil
 	w = httptest.NewRecorder()
 	handleCreateGroup(d)(w, httptest.NewRequest("POST", "/api/group/create", strings.NewReader(`{"name":"Alice","parent_jid":"120363000000000001@g.us"}`)))
-	var result map[string]any
+	var result struct {
+		GroupJID  string `json:"group_jid"`
+		ParentJID string `json:"parent_jid"`
+		NotAdded  []struct {
+			JID        string `json:"jid"`
+			Error      int    `json:"error"`
+			InviteCode string `json:"invite_code"`
+		} `json:"not_added"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || result["group_jid"] != "120363000000000002@g.us" || result["link_error"] == nil {
+	if w.Code != 200 || result.GroupJID != "120363000000000002@g.us" || result.ParentJID != "120363000000000001@g.us" {
 		t.Fatal(result)
+	}
+	failures := result.NotAdded
+	if len(failures) != 3 {
+		t.Fatal(failures)
+	}
+	if failures[0].JID != "5511999999999@s.whatsapp.net" || failures[0].InviteCode != "fake-invite" || failures[0].Error != 403 || failures[1].JID != "5511888888888@s.whatsapp.net" || failures[1].Error != 406 || failures[1].InviteCode != "" || failures[2].Error != 0 || failures[2].InviteCode != "fake-second" {
+		t.Fatal(failures)
 	}
 }
 
@@ -123,7 +138,7 @@ func TestCreateGroupDurableFirstContactBudget(t *testing.T) {
 	b := newSettingsBridge(t)
 	limitPatch(t, b, `{"send.new_chats_per_day":1}`)
 	client := &fakeCreationClient{}
-	d := groupCreationDeps{client: client, connected: func() bool { return true }, policy: chatPolicy{}, allowSend: b.allowParticipantAdds}
+	d := groupCreationDeps{client: client, connected: func() bool { return true }, policy: chatPolicy{}, allowSend: b.allowGroupCreation}
 	post := func(body string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		handleCreateGroup(d)(w, httptest.NewRequest("POST", "/api/group/create", strings.NewReader(body)))
@@ -134,11 +149,39 @@ func TestCreateGroupDurableFirstContactBudget(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	usage, err := b.sendUsageSnapshot(context.Background())
-	if err != nil || usage.Today != 1 || usage.NewChatsToday != 1 {
+	if err != nil || usage.Today != 2 || usage.NewChatsToday != 1 {
 		t.Fatal(usage, err)
 	}
 	w = post(`{"name":"Bob","participants":["5511888888888"]}`)
 	if w.Code != 429 || len(client.created) != 1 {
 		t.Fatal(w.Code, w.Body.String(), client.created)
+	}
+}
+
+func TestCreateEmptyGroupConsumesMinuteBudget(t *testing.T) {
+	t.Setenv("WHATSAPP_SEND_RATE_PER_MINUTE", "1")
+	b := newSettingsBridge(t)
+	var err error
+	b.RuntimeDefaults, err = runtimeDefaults(func(name string) string {
+		if name == sendRateMinuteEnv {
+			return os.Getenv(name)
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeCreationClient{}
+	d := groupCreationDeps{client: client, connected: func() bool { return true }, policy: chatPolicy{}, allowSend: b.allowGroupCreation}
+	for i, want := range []int{200, 429} {
+		w := httptest.NewRecorder()
+		handleCreateGroup(d)(w, httptest.NewRequest("POST", "/api/group/create", strings.NewReader(`{"name":"Alice"}`)))
+		if w.Code != want {
+			t.Fatalf("call %d: %d %s", i, w.Code, w.Body.String())
+		}
+	}
+	usage, err := b.sendUsageSnapshot(context.Background())
+	if err != nil || usage.Today != 1 || usage.NewChatsToday != 0 || len(client.created) != 1 {
+		t.Fatal(usage, err, client.created)
 	}
 }

@@ -126,7 +126,11 @@ func (c *businessCache) lookup(ctx context.Context, client businessClient, jid t
 			}
 			delete(c.entries, oldest)
 		}
-		c.entries[jid] = businessEntry{result: result, expires: c.clock().Add(time.Hour)}
+		ttl := time.Hour
+		if result.RateLimited || result.VerifiedNameError != "" || result.ProfileError != "" || result.IsBusiness == nil {
+			ttl = time.Minute
+		}
+		c.entries[jid] = businessEntry{result: result, expires: c.clock().Add(ttl)}
 	}
 	return result
 }
