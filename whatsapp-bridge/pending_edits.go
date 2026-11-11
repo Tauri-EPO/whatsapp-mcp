@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -19,44 +20,45 @@ const (
 	pendingEditMaxBytes  = 64 << 10
 )
 
-type pendingEditPreparation struct {
-	identities   string
-	receiptChats string
-	readAt       int64
+type pendingMetadataPreparation struct {
+	identities string
+	readAt     int64
 }
 
-type pendingEditPreparationError string
+type pendingMetadataPreparationError string
 
-func (e pendingEditPreparationError) Error() string { return string(e) }
+func (e pendingMetadataPreparationError) Error() string { return string(e) }
 
-const errPendingEditPreparationChanged pendingEditPreparationError = "pending metadata identities changed before original persistence"
+const errPendingMetadataPreparationChanged pendingMetadataPreparationError = "pending edit identities changed before original persistence"
 
-// Content/version changes need no new SDK lookup, but a new typed author or
-// chat does. Observe the identity set before preparing aliases and recheck it
-// under the writer; no SDK read or archive cursor crosses that boundary.
+// Only edits require a writer-side identity recheck. A verified DM twin is
+// resolved once independently of receipt rows: receipt churn must never reject
+// an original, including when the first receipt arrives after preparation.
 const pendingEditIdentitiesSQL = `SELECT json_group_array(json_array(chat_jid,sender,sender_server)) FROM (
-	SELECT chat_jid,sender,sender_server FROM pending_edits
-	WHERE target_id=? AND is_from_me=? AND expires_ms>? ORDER BY chat_jid,sender,sender_server)`
+ SELECT chat_jid,sender,sender_server FROM pending_edits
+ WHERE target_id=? AND is_from_me=? AND expires_ms>? ORDER BY chat_jid,sender,sender_server)`
 
-const pendingMetadataIdentitiesSQL = `SELECT (` + pendingEditIdentitiesSQL + `), (` + pendingReceiptChatsSQL + `)`
-
-func (b *Bridge) preparePendingEdit(ctx context.Context, id, chat, sender string, own bool) (string, string, *pendingEditPreparation, error) {
-	prepared := &pendingEditPreparation{readAt: b.Store.pendingEditNow().UnixMilli()}
-	if err := b.Store.db.QueryRowContext(ctx, pendingMetadataIdentitiesSQL, id, own, prepared.readAt, id, prepared.readAt).Scan(&prepared.identities, &prepared.receiptChats); err != nil {
+func (b *Bridge) preparePendingMetadata(ctx context.Context, id, chat, sender string, own bool) (string, string, *pendingMetadataPreparation, error) {
+	chatAlias, err := b.pendingMetadataAlt(ctx, chat)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", "", nil, ctx.Err()
+		}
+		chatAlias = "" // an unavailable session mapping must not block an original
+	}
+	prepared := &pendingMetadataPreparation{readAt: b.Store.pendingMetadataNow().UnixMilli()}
+	if err := b.Store.db.QueryRowContext(ctx, pendingEditIdentitiesSQL, id, own, prepared.readAt).Scan(&prepared.identities); err != nil {
 		return "", "", nil, err
 	}
-	authorAlias, chatAlias, err := b.pendingEditAlias(ctx, id, chat, sender, own)
-	if err == nil && chatAlias == "" {
-		chatAlias, err = b.pendingReceiptChatAlias(ctx, chat, prepared.receiptChats)
-	}
+	authorAlias, err := b.pendingEditAuthorAlias(ctx, sender, chat, chatAlias, prepared.identities)
 	return authorAlias, chatAlias, prepared, err
 }
 
-func retryPendingEditPreparation(write func() error) error {
+func retryPendingMetadataPreparation(write func() error) error {
 	var err error
 	for range 3 {
 		err = write()
-		if !errors.Is(err, errPendingEditPreparationChanged) {
+		if !errors.Is(err, errPendingMetadataPreparationChanged) {
 			return err
 		}
 	}
@@ -77,9 +79,9 @@ CREATE INDEX IF NOT EXISTS idx_pending_edits_target ON pending_edits(target_id);
 CREATE INDEX IF NOT EXISTS idx_pending_edits_arrival ON pending_edits(arrived_ms);
 CREATE INDEX IF NOT EXISTS idx_pending_edits_chat_arrival ON pending_edits(chat_jid,arrived_ms);`
 
-func (s *MessageStore) pendingEditNow() time.Time {
-	if s.editNow != nil {
-		return s.editNow()
+func (s *MessageStore) pendingMetadataNow() time.Time {
+	if s.pendingNow != nil {
+		return s.pendingNow()
 	}
 	return time.Now()
 }
@@ -91,7 +93,7 @@ func prunePendingEdits(ex sqlExecer, now time.Time) error {
 
 // Match the namespace stored on messages, including hosted business senders.
 // The SDK's alternate-JID lookup also requires these canonical PN/LID servers.
-func pendingEditUserJID(sender string) (types.JID, bool) {
+func pendingMetadataUserJID(sender string) (types.JID, bool) {
 	jid, err := types.ParseJID(sender)
 	if err != nil || jid.User == "" {
 		return types.EmptyJID, false
@@ -120,7 +122,7 @@ func applyOrDeferMessageEdit(ex locationWriter, chat, sender string, own bool, e
 	if exists {
 		return applyMessageEditWith(ex, chat, sender, own, edit, fallback)
 	}
-	jid, ok := pendingEditUserJID(sender)
+	jid, ok := pendingMetadataUserJID(sender)
 	if !ok {
 		return nil // an unattributed/group author cannot authorize a later edit
 	}
@@ -167,81 +169,41 @@ func capPendingEdits(ex sqlExecer, chat string) error {
 	return err
 }
 
-// Resolve only a verified alternative author, before acquiring the archive writer.
-// No cursor or SDK read survives into consumption's transaction.
-func (b *Bridge) pendingEditAlias(ctx context.Context, id, chat, sender string, own bool) (string, string, error) {
-	author, ok := pendingEditUserJID(sender)
+// The prepared, drained edit snapshot determines whether its author needs an
+// alternate. Chat identity was resolved once for both metadata kinds already.
+func (b *Bridge) pendingEditAuthorAlias(ctx context.Context, sender, chat, chatAlias, snapshot string) (string, error) {
+	author, ok := pendingMetadataUserJID(sender)
 	if !ok {
-		return "", "", nil
+		return "", nil
 	}
-	opposite := types.HiddenUserServer
-	if author.Server == types.HiddenUserServer {
-		opposite = types.DefaultUserServer
+	var candidates [][3]string
+	if err := json.Unmarshal([]byte(snapshot), &candidates); err != nil {
+		return "", err
 	}
-	type pendingKey struct{ chat, user, server string }
-	rows, err := b.Store.db.QueryContext(ctx, `SELECT chat_jid,sender,sender_server FROM pending_edits WHERE target_id=? AND is_from_me=? AND expires_ms>?`, id, own, b.Store.pendingEditNow().UnixMilli())
-	if err != nil {
-		return "", "", err
-	}
-	var candidates []pendingKey
-	for rows.Next() {
-		var key pendingKey
-		if err := rows.Scan(&key.chat, &key.user, &key.server); err != nil {
-			_ = rows.Close()
-			return "", "", err
-		}
-		if (key.server == author.Server && key.user == author.User) || key.server == opposite {
-			candidates = append(candidates, key)
-		}
-	}
-	err = rows.Err()
-	_ = rows.Close() // SDK reads below hold neither a cursor nor an archive writer
-	if err != nil || len(candidates) == 0 {
-		return "", "", err
-	}
-	chatJID, _ := types.ParseJID(chat)
-	chatAlias := ""
 	for _, key := range candidates {
-		other, _ := types.ParseJID(key.chat)
-		if key.chat != chat && ((chatJID.Server == types.DefaultUserServer && other.Server == types.HiddenUserServer) ||
-			(chatJID.Server == types.HiddenUserServer && other.Server == types.DefaultUserServer)) {
-			chatAlias, err = b.pendingEditAlt(ctx, chat)
-			if err != nil {
-				if ctx.Err() != nil {
-					return "", "", ctx.Err()
-				}
-				// An unverified candidate in another DM must not make the
-				// original depend on session availability. Retain that edit.
-				chatAlias = ""
-			}
-			break
-		}
-	}
-	// An equal message ID in another group/channel is never a session lookup.
-	// Only the exact chat or its verified DM alias can need author resolution.
-	for _, key := range candidates {
-		if key.chat != chat && (chatAlias == "" || key.chat != chatAlias) {
+		if key[0] != chat && (chatAlias == "" || key[0] != chatAlias) {
 			continue
 		}
-		if key.server == opposite {
-			if sender == chat && chatAlias != "" {
-				return chatAlias, chatAlias, nil
-			}
-			alias, err := b.pendingEditAlt(ctx, sender)
-			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				return "", chatAlias, nil // unverified author cannot block the original
-			}
-			if sender == chat && chatAlias == "" {
-				chatAlias = alias
-			}
-			return alias, chatAlias, err
+		if key[2] == author.Server {
+			continue
 		}
+		if key[2] != types.DefaultUserServer && key[2] != types.HiddenUserServer {
+			continue
+		}
+		if sender == chat {
+			return chatAlias, nil
+		}
+		alias, err := b.pendingMetadataAlt(ctx, sender)
+		if err != nil && ctx.Err() == nil {
+			return "", nil
+		}
+		return alias, err
 	}
-	return "", chatAlias, nil
+	return "", nil
 }
 
-func (b *Bridge) pendingEditAlt(ctx context.Context, sender string) (string, error) {
-	jid, ok := pendingEditUserJID(sender)
+func (b *Bridge) pendingMetadataAlt(ctx context.Context, sender string) (string, error) {
+	jid, ok := pendingMetadataUserJID(sender)
 	if !ok {
 		return "", nil
 	}
@@ -252,7 +214,7 @@ func (b *Bridge) pendingEditAlt(ctx context.Context, sender string) (string, err
 	if err != nil {
 		return "", err
 	}
-	normalizedAlt, valid := pendingEditUserJID(alt.String())
+	normalizedAlt, valid := pendingMetadataUserJID(alt.String())
 	if valid && ((jid.Server == types.DefaultUserServer && normalizedAlt.Server == types.HiddenUserServer) ||
 		(jid.Server == types.HiddenUserServer && normalizedAlt.Server == types.DefaultUserServer)) {
 		return normalizedAlt.String(), nil
@@ -281,11 +243,11 @@ func consumePendingEdits(ex locationWriter, message storedMessage, now time.Time
 		AND is_from_me=:own AND deleted_at IS NULL
 		AND COALESCE(message_edit_timestamp,0) < (`+fmt.Sprintf(candidate, "edit_timestamp")+`)`,
 		sql.Named("id", message.ID), sql.Named("chat", message.ChatJID), sql.Named("sender", user), sql.Named("server", server),
-		sql.Named("own", message.IsFromMe), sql.Named("alias_user", aliasUser), sql.Named("alias_server", aliasServer), sql.Named("chat_alias", message.EditChatAlias))
+		sql.Named("own", message.IsFromMe), sql.Named("alias_user", aliasUser), sql.Named("alias_server", aliasServer), sql.Named("chat_alias", message.PendingChatAlias))
 	if err != nil {
 		return err
 	}
-	_, err = ex.Exec("DELETE FROM pending_edits WHERE target_id=? AND (chat_jid=? OR (?<>'' AND chat_jid=?))", message.ID, message.ChatJID, message.EditChatAlias, message.EditChatAlias)
+	_, err = ex.Exec("DELETE FROM pending_edits WHERE target_id=? AND (chat_jid=? OR (?<>'' AND chat_jid=?))", message.ID, message.ChatJID, message.PendingChatAlias, message.PendingChatAlias)
 	return err
 }
 
@@ -340,7 +302,7 @@ func (s *MessageStore) migratePendingMetadataChats(ctx context.Context, sessionP
 	}
 	return s.BatchContext(ctx, func(batch *messageBatch) error {
 		return batch.write(func() error {
-			now := s.pendingEditNow()
+			now := s.pendingMetadataNow()
 			if err := prunePendingEdits(batch.tx, now); err != nil {
 				return err
 			}
@@ -369,11 +331,11 @@ func (s *MessageStore) migratePendingMetadataChats(ctx context.Context, sessionP
 				if err := capPendingEdits(batch.tx, phone); err != nil {
 					return err
 				}
-				if err := migratePendingReceiptChat(batch.tx, chat, phone); err != nil {
+				if err := migratePendingReceiptChat(batch.tx, chat, phone, now); err != nil {
 					return err
 				}
 			}
-			return capPendingReceipts(batch.tx)
+			return nil
 		})
 	})
 }

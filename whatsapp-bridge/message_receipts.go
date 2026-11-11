@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"time"
 
@@ -120,6 +121,22 @@ func (b *Bridge) writePeerReceipts(v *events.Receipt, client *whatsmeow.Client) 
 	} else {
 		chat = resolveLIDChatContext(ctx, client, v.Chat, v.SenderAlt, v.RecipientAlt, false).ToNonAD()
 	}
+	// Reuse the verified resolution or wire alternate before another SDK read.
+	// An unresolved LID above has already had its one mapping lookup.
+	alias := receiptChatHint(chat, v.Chat)
+	if alias == "" && (chat == v.Sender.ToNonAD() || chat == v.SenderAlt.ToNonAD()) {
+		alias = receiptChatHint(chat, v.Sender)
+		if alias == "" {
+			alias = receiptChatHint(chat, v.SenderAlt)
+		}
+	}
+	if alias == "" && chat.Server == types.DefaultUserServer {
+		var err error
+		alias, err = b.pendingMetadataAlt(ctx, chat.String())
+		if err != nil && ctx.Err() != nil {
+			return
+		}
+	}
 	tx, err := b.Store.db.BeginTx(ctx, nil)
 	if err != nil {
 		b.Log.Errorf("Could not begin message receipt event: %v", err)
@@ -127,11 +144,12 @@ func (b *Bridge) writePeerReceipts(v *events.Receipt, client *whatsmeow.Client) 
 	}
 	defer func() { _ = tx.Rollback() }()
 	ex := &contextTransaction{Tx: tx, ctx: ctx}
-	now := b.Store.pendingEditNow()
+	now := b.Store.pendingMetadataNow()
 	if err := prunePendingReceipts(ex, now); err != nil {
 		b.Log.Errorf("Could not expire pending message receipts: %v", err)
 		return
 	}
+	inserted := false
 	// Bounded statements, one transaction for all IDs from this event.
 	for start := 0; start < len(v.MessageIDs); start += 256 {
 		ids, err := json.Marshal(v.MessageIDs[start:min(start+256, len(v.MessageIDs))])
@@ -140,35 +158,86 @@ func (b *Bridge) writePeerReceipts(v *events.Receipt, client *whatsmeow.Client) 
 			 (chat_jid,message_id,recipient,recipient_server,type,at)
 			 SELECT m.chat_jid,m.id,?,?,?,? FROM messages m
 			 JOIN json_each(?) batch ON batch.value=m.id
-			 WHERE m.chat_jid=? AND m.is_from_me=1
+			 WHERE (m.chat_jid=? OR (?<>'' AND m.chat_jid=? AND NOT EXISTS(
+    SELECT 1 FROM messages exact WHERE exact.chat_jid=? AND exact.id=m.id)))
+    AND m.is_from_me=1 AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
 			 ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type)
 			 DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`,
-				peer.User, peer.Server, kind, dbTime(v.Timestamp), string(ids), chat.String())
+				peer.User, peer.Server, kind, dbTime(v.Timestamp), string(ids), chat.String(), alias, alias, chat.String())
 		}
 		if err == nil {
-			// Absence is distinct from an inbound original. Never queue receipts
-			// for a known inbound message, and never insert one row at a time.
-			_, err = tx.ExecContext(ctx, `INSERT INTO pending_receipts
-			 (chat_jid,message_id,recipient,recipient_server,type,at,arrived_ms,expires_ms)
-			 SELECT ?,batch.value,?,?,?,?,?,? FROM json_each(?) batch
-			 WHERE batch.type='text' AND length(batch.value)>0
-			 AND length(CAST(batch.value AS BLOB))+?<=?
-			 AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.chat_jid=? AND m.id=batch.value)
-			 ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type)
-			 DO UPDATE SET at=MAX(pending_receipts.at,excluded.at)`,
-				chat.String(), peer.User, peer.Server, kind, dbTime(v.Timestamp), now.UnixMilli(), now.Add(pendingReceiptTTL).UnixMilli(),
-				string(ids), len(chat.String())+len(peer.User)+len(peer.Server)+len(kind), pendingReceiptKeyBytes, chat.String())
+			err = reconcilePendingReceiptIDs(ex, chat.String(), alias, string(ids), now)
+		}
+		if err == nil {
+			var added bool
+			added, err = storePendingReceiptIDs(ex, chat.String(), alias, peer, kind, v.Timestamp, now, string(ids))
+			inserted = inserted || added
 		}
 		if err != nil {
 			b.Log.Errorf("Could not store message receipt batch: %v", err)
 			return
 		}
 	}
-	if err := capPendingReceipts(ex); err != nil {
-		b.Log.Errorf("Could not bound pending message receipts: %v", err)
-		return
+	if inserted {
+		if err := capPendingReceipts(ex, chat.String()); err != nil {
+			b.Log.Errorf("Could not bound pending message receipts: %v", err)
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		b.Log.Errorf("Could not commit message receipt event: %v", err)
 	}
+}
+
+// Hints come from whatsmeow's verified message source or our resolution of it;
+// only opposite user namespaces can name a chat twin.
+func receiptChatHint(chat, hint types.JID) string {
+	current, valid := pendingMetadataUserJID(chat.String())
+	other, otherValid := pendingMetadataUserJID(hint.String())
+	if valid && otherValid && current.Server != other.Server {
+		return other.String()
+	}
+	return ""
+}
+
+// Direct and verified-twin archived originals settle previously parked evidence
+// in this event transaction. An exact inbound key cannot borrow an own twin.
+func reconcilePendingReceiptIDs(ex sqlExecer, chat, alias, ids string, now time.Time) error {
+	if _, err := ex.Exec(`INSERT INTO message_receipts (chat_jid,message_id,recipient,recipient_server,type,at)
+ SELECT m.chat_jid,p.message_id,p.recipient,p.recipient_server,p.type,p.at
+ FROM pending_receipts p JOIN messages m ON m.id=p.message_id
+ WHERE (p.chat_jid=:chat OR (:alias<>'' AND p.chat_jid=:alias))
+ AND (m.chat_jid=p.chat_jid OR (:alias<>'' AND m.chat_jid IN (:chat,:alias) AND NOT EXISTS(
+ SELECT 1 FROM messages exact WHERE exact.chat_jid=p.chat_jid AND exact.id=p.message_id)))
+ AND p.message_id IN (SELECT value FROM json_each(:ids)) AND p.expires_ms>:now
+ AND m.is_from_me=1 AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
+ ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type) DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`,
+		sql.Named("chat", chat), sql.Named("alias", alias), sql.Named("ids", ids), sql.Named("now", now.UnixMilli())); err != nil {
+		return err
+	}
+	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE (chat_jid=:chat OR (:alias<>'' AND chat_jid=:alias))
+ AND message_id IN (SELECT value FROM json_each(:ids)) AND EXISTS(SELECT 1 FROM messages m
+ WHERE m.id=pending_receipts.message_id AND (m.chat_jid=:chat OR (:alias<>'' AND m.chat_jid=:alias)))`, sql.Named("chat", chat), sql.Named("alias", alias), sql.Named("ids", ids))
+	return err
+}
+
+// Distinguish a new insert from a replay/update so cap scans run only on growth.
+// A known inbound or non-original stanza is never parked, including in its twin.
+func storePendingReceiptIDs(ex sqlExecer, chat, alias string, peer types.JID, kind string, stamp, now time.Time, ids string) (bool, error) {
+	res, err := ex.Exec(`INSERT INTO pending_receipts
+ (chat_jid,message_id,recipient,recipient_server,type,at,arrived_ms,expires_ms)
+ SELECT :chat,batch.value,:peer,:server,:kind,:at,:now,:expires FROM json_each(:ids) batch
+ WHERE batch.type='text' AND length(batch.value)>0 AND length(CAST(batch.value AS BLOB))+:key_bytes<=:max_bytes
+ AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.id=batch.value AND (m.chat_jid=:chat OR (:alias<>'' AND m.chat_jid=:alias)))
+ AND NOT EXISTS(SELECT 1 FROM receipt_nonoriginals n WHERE n.message_id=batch.value AND n.expires_ms>:now AND (n.chat_jid=:chat OR (:alias<>'' AND n.chat_jid=:alias)))
+ ON CONFLICT DO NOTHING`, sql.Named("chat", chat), sql.Named("alias", alias), sql.Named("peer", peer.User), sql.Named("server", peer.Server), sql.Named("kind", kind), sql.Named("at", dbTime(stamp)), sql.Named("now", now.UnixMilli()), sql.Named("expires", now.Add(pendingReceiptTTL).UnixMilli()), sql.Named("ids", ids), sql.Named("key_bytes", len(chat)+len(peer.User)+len(peer.Server)+len(kind)), sql.Named("max_bytes", pendingReceiptKeyBytes))
+	if err != nil {
+		return false, err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	_, err = ex.Exec(`UPDATE pending_receipts SET at=MAX(at,?) WHERE chat_jid=? AND recipient=? AND recipient_server=? AND type=? AND message_id IN (SELECT value FROM json_each(?))`, dbTime(stamp), chat, peer.User, peer.Server, kind, ids)
+	return count > 0, err
 }

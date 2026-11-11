@@ -226,6 +226,17 @@ func deleteMessageKeys(ctx context.Context, tx *sql.Tx, rows []mediaRow) (int64,
 // message is gone, and the chat row once no message is left under it.
 func deleteChatOrphans(ctx context.Context, tx *sql.Tx, chats, deletedIDs []string) error {
 	in := placeholders(len(chats))
+	for _, table := range []string{"pending_receipts", "receipt_nonoriginals"} {
+		query := `DELETE FROM ` + table + ` WHERE chat_jid IN ` + in //nolint:gosec // Table names are this fixed list; only placeholders enter SQL, all values are bound.
+		args := stringArgs(chats)
+		if len(deletedIDs) > 0 {
+			query += ` AND message_id IN ` + placeholders(len(deletedIDs))
+			args = stringArgs(append(append([]string(nil), chats...), deletedIDs...))
+		}
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
 	if len(deletedIDs) > 0 {
 		query := `DELETE FROM messages WHERE chat_jid IN ` + in + ` AND media_type IN ('reaction','poll_vote') AND COALESCE(target_message_id, filename) IN ` + placeholders(len(deletedIDs)) //nolint:gosec // Only "?" placeholders and literals are concatenated; every value is bound.
 		if _, err := tx.ExecContext(ctx, query, stringArgs(append(append([]string(nil), chats...), deletedIDs...))...); err != nil {

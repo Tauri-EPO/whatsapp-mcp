@@ -3,12 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"time"
 )
 
 const (
-	pendingReceiptTTL       = 24 * time.Hour
+	pendingReceiptTTL       = 2 * time.Minute
 	pendingReceiptGlobalCap = 4096
 	pendingReceiptChatCap   = 1024
 	pendingReceiptReaderCap = 256
@@ -26,51 +25,17 @@ const pendingReceiptsSchema = `CREATE TABLE IF NOT EXISTS pending_receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_receipts_expiry ON pending_receipts(expires_ms);
 CREATE INDEX IF NOT EXISTS idx_pending_receipts_target ON pending_receipts(message_id,chat_jid);
-CREATE INDEX IF NOT EXISTS idx_pending_receipts_arrival ON pending_receipts(arrived_ms);`
+CREATE INDEX IF NOT EXISTS idx_pending_receipts_arrival ON pending_receipts(arrived_ms);
+CREATE INDEX IF NOT EXISTS idx_pending_receipts_chat_arrival ON pending_receipts(chat_jid,arrived_ms);
+CREATE TABLE IF NOT EXISTS receipt_nonoriginals (
+ chat_jid TEXT NOT NULL, message_id TEXT NOT NULL, expires_ms INTEGER NOT NULL,
+ PRIMARY KEY(chat_jid,message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_receipt_nonoriginals_expiry ON receipt_nonoriginals(expires_ms);`
 
-const pendingReceiptChatsSQL = `SELECT json_group_array(chat_jid) FROM (
-	SELECT DISTINCT chat_jid FROM pending_receipts WHERE message_id=? AND expires_ms>? ORDER BY chat_jid)`
-
-// Only a verified DM twin is eligible; equal IDs in groups or unrelated chats
-// never suffice. The snapshot is already drained before any session lookup.
-func (b *Bridge) pendingReceiptChatAlias(ctx context.Context, chat, snapshot string) (string, error) {
-	current, valid := pendingEditUserJID(chat)
-	if !valid {
-		return "", nil
-	}
-	var candidates []string
-	if err := json.Unmarshal([]byte(snapshot), &candidates); err != nil {
-		return "", err
-	}
-	needsLookup := false
-	for _, candidate := range candidates {
-		other, valid := pendingEditUserJID(candidate)
-		if valid && other.Server != current.Server {
-			needsLookup = true
-			break
-		}
-	}
-	if !needsLookup {
-		return "", nil
-	}
-	alias, err := b.pendingEditAlt(ctx, chat)
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		return "", nil // an unverified candidate cannot block the original
-	}
-	for _, candidate := range candidates {
-		if candidate == alias {
-			return alias, nil
-		}
-	}
-	return "", nil
-}
-
-// Startup rekeys pending-only chats without fabricating originals or promoting
-// receipts. Collisions retain latest evidence but the earliest arrival/expiry.
-func migratePendingReceiptChat(ex sqlExecer, lid, phone string) error {
+// Startup reconciles verified pending twins with already archived originals too.
+// Collisions retain latest evidence but the earliest arrival/expiry.
+func migratePendingReceiptChat(ex sqlExecer, lid, phone string, now time.Time) error {
 	if _, err := ex.Exec(`INSERT INTO pending_receipts
 	 (chat_jid,message_id,recipient,recipient_server,type,at,arrived_ms,expires_ms)
 	 SELECT :phone,p.message_id,p.recipient,p.recipient_server,p.type,p.at,p.arrived_ms,p.expires_ms
@@ -84,36 +49,94 @@ func migratePendingReceiptChat(ex sqlExecer, lid, phone string) error {
 		sql.Named("phone", phone), sql.Named("lid", lid), sql.Named("max_bytes", pendingReceiptKeyBytes)); err != nil {
 		return err
 	}
-	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE chat_jid=?`, lid)
-	return err
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE chat_jid=?`, lid); err != nil {
+		return err
+	}
+	if _, err := ex.Exec(`INSERT INTO message_receipts (chat_jid,message_id,recipient,recipient_server,type,at)
+ SELECT p.chat_jid,p.message_id,p.recipient,p.recipient_server,p.type,p.at
+ FROM pending_receipts p JOIN messages m ON m.chat_jid=p.chat_jid AND m.id=p.message_id
+ WHERE p.chat_jid=? AND p.expires_ms>? AND m.is_from_me=1 AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
+ ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type) DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`, phone, now.UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE chat_jid=? AND EXISTS
+ (SELECT 1 FROM messages m WHERE m.chat_jid=pending_receipts.chat_jid AND m.id=pending_receipts.message_id)`, phone); err != nil {
+		return err
+	}
+	return capPendingReceipts(ex, phone)
 }
 
+// Two minutes covers ordinary event/write scheduling and the three SQLite busy
+// attempts (~16 s). Receipt events carry no stanza type, so unknown edits,
+// revokes and unsupported messages must not occupy a day-long pending buffer.
 func prunePendingReceipts(ex sqlExecer, now time.Time) error {
-	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE expires_ms<=?`, now.UnixMilli())
+	// The arrival guard also shortens rows created by a pre-upgrade longer TTL.
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE expires_ms<=? OR arrived_ms<=?`, now.UnixMilli(), now.Add(-pendingReceiptTTL).UnixMilli()); err != nil {
+		return err
+	}
+	_, err := ex.Exec(`DELETE FROM receipt_nonoriginals WHERE expires_ms<=?`, now.UnixMilli())
 	return err
 }
 
-// Called once per event, after bounded JSON batches, before committing. Keep
-// newest arrivals; repeated receipts may update at but never extend retention.
-func capPendingReceipts(ex sqlExecer) error {
-	for _, capSQL := range []struct {
-		query string
-		limit int
-	}{
-		{`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM (
-		 SELECT rowid,ROW_NUMBER() OVER (PARTITION BY chat_jid,recipient,recipient_server
-		 ORDER BY arrived_ms DESC,rowid DESC) n FROM pending_receipts) WHERE n>?)`, pendingReceiptReaderCap},
-		{`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM (
-		 SELECT rowid,ROW_NUMBER() OVER (PARTITION BY chat_jid
-		 ORDER BY arrived_ms DESC,rowid DESC) n FROM pending_receipts) WHERE n>?)`, pendingReceiptChatCap},
-		{`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM pending_receipts
-		 ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, pendingReceiptGlobalCap},
-	} {
-		if _, err := ex.Exec(capSQL.query, capSQL.limit); err != nil {
+// Only call after insertion/rekeying. Reader identities remain typed (a phone
+// and its LID each have 256 slots); reader/chat scans touch this chat only.
+func capPendingReceipts(ex sqlExecer, chat string) error {
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM (
+ SELECT rowid,ROW_NUMBER() OVER (PARTITION BY recipient,recipient_server ORDER BY arrived_ms DESC,rowid DESC) n
+ FROM pending_receipts WHERE chat_jid=?) WHERE n>?)`, chat, pendingReceiptReaderCap); err != nil {
+		return err
+	}
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM pending_receipts
+ WHERE chat_jid=? ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, chat, pendingReceiptChatCap); err != nil {
+		return err
+	}
+	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM pending_receipts
+ ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, pendingReceiptGlobalCap)
+	return err
+}
+
+// A known non-original stanza never authorizes an archived-message receipt.
+// Its bounded negative cache lasts only as long as the unknown-receipt buffer.
+func excludePeerReceiptStanza(ex sqlExecer, chat, id string, now time.Time) error {
+	if id == "" || len(chat)+len(id) > pendingReceiptKeyBytes {
+		return nil
+	}
+	if _, err := ex.Exec(`INSERT INTO receipt_nonoriginals VALUES(?,?,?) ON CONFLICT DO NOTHING`, chat, id, now.Add(pendingReceiptTTL).UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE chat_jid=? AND message_id=?`, chat, id); err != nil {
+		return err
+	}
+	_, err := ex.Exec(`DELETE FROM receipt_nonoriginals WHERE rowid IN (SELECT rowid FROM receipt_nonoriginals ORDER BY expires_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, pendingReceiptGlobalCap)
+	return err
+}
+
+func (b *Bridge) excludeNonOriginalReceipts(chat, id string, own bool) {
+	if !own || b.Store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	defer cancel()
+	alias, err := b.pendingMetadataAlt(ctx, chat)
+	if err != nil && ctx.Err() != nil {
+		return
+	}
+	err = b.Store.BatchContext(ctx, func(batch *messageBatch) error {
+		now := b.Store.pendingMetadataNow()
+		if err := prunePendingReceipts(batch.tx, now); err != nil {
 			return err
 		}
+		if err := excludePeerReceiptStanza(batch.tx, chat, id, now); err != nil {
+			return err
+		}
+		if alias != "" {
+			return excludePeerReceiptStanza(batch.tx, alias, id, now)
+		}
+		return nil
+	})
+	if err != nil {
+		b.Log.Warnf("Could not exclude non-original receipt metadata: %v", err)
 	}
-	return nil
 }
 
 // Run only after the canonical original write, inside that same transaction.
@@ -126,12 +149,13 @@ func consumePendingReceipts(ex sqlExecer, message storedMessage, now time.Time) 
 	 FROM pending_receipts p JOIN messages m ON m.chat_jid=:chat AND m.id=p.message_id
 	 WHERE (p.chat_jid=:chat OR (:alias<>'' AND p.chat_jid=:alias))
 	 AND p.message_id=:id AND p.expires_ms>:now AND m.is_from_me=1
+ AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
 	 ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type)
 	 DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`, sql.Named("chat", message.ChatJID),
-		sql.Named("alias", message.EditChatAlias), sql.Named("id", message.ID), sql.Named("now", now.UnixMilli())); err != nil {
+		sql.Named("alias", message.PendingChatAlias), sql.Named("id", message.ID), sql.Named("now", now.UnixMilli())); err != nil {
 		return err
 	}
 	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE message_id=? AND (chat_jid=? OR (?<>'' AND chat_jid=?))`,
-		message.ID, message.ChatJID, message.EditChatAlias, message.EditChatAlias)
+		message.ID, message.ChatJID, message.PendingChatAlias, message.PendingChatAlias)
 	return err
 }

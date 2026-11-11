@@ -4,13 +4,244 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestPendingReceiptsReviewArchivedTwin(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		for _, own := range []bool{false, true} {
+			t.Run(fmt.Sprintf("restart=%v/own=%v", restart, own), func(t *testing.T) {
+				ms, b, dispatch := pendingReceiptBridgeFixture(t)
+				pn := types.NewJID("5511999999999", types.DefaultUserServer)
+				lid := types.NewJID("100000000000001", types.HiddenUserServer)
+				at := time.Now()
+				chat := pn
+				if !restart {
+					chat = lid
+				}
+				if err := ms.StoreChat(chat.String(), "Alice", at); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.StoreMessage(storedMessage{ID: "archived", ChatJID: chat.String(), Content: "Alice", Timestamp: at, IsFromMe: own}); err != nil {
+					t.Fatal(err)
+				}
+				mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+				receiptChat := lid
+				if !restart {
+					mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+					mapping.pnByLID = map[types.JID]types.JID{lid: pn}
+					receiptChat = pn
+				}
+				dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: receiptChat, Sender: receiptChat}, MessageIDs: []string{"archived"}, Type: types.ReceiptTypeRead, Timestamp: at})
+				if restart {
+					if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(receiptSessionMapping(t), testLogger()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var durable int
+				if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts WHERE message_id='archived' AND chat_jid=?`, chat.String()).Scan(&durable); err != nil {
+					t.Fatal(err)
+				}
+				want := 0
+				if own {
+					want = 1
+				}
+				if durable != want || pendingReceiptCount(t, ms) != 0 {
+					t.Fatalf("durable=%d pending=%d want=%d", durable, pendingReceiptCount(t, ms), want)
+				}
+			})
+		}
+	}
+}
+
+func TestPendingReceiptsArchivedTwinWithWireHint(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		t.Run(fmt.Sprintf("own=%v", own), func(t *testing.T) {
+			ms, _, dispatch := pendingReceiptBridgeFixture(t)
+			pn := types.NewJID("5511999999999", types.DefaultUserServer)
+			lid := types.NewJID("100000000000001", types.HiddenUserServer)
+			at := time.Now()
+			if err := ms.StoreChat(lid.String(), "Alice", at); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.StoreMessage(storedMessage{ID: "hint", ChatJID: lid.String(), Content: "Alice", Timestamp: at, IsFromMe: own}); err != nil {
+				t.Fatal(err)
+			}
+			dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: pn, Sender: pn, SenderAlt: lid}, MessageIDs: []string{"hint"}, Type: types.ReceiptTypeRead, Timestamp: at})
+			var durable int
+			if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts WHERE chat_jid=? AND message_id='hint'`, lid.String()).Scan(&durable); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if own {
+				want = 1
+			}
+			if durable != want || pendingReceiptCount(t, ms) != 0 {
+				t.Fatal(durable, pendingReceiptCount(t, ms))
+			}
+		})
+	}
+}
+
+func TestPendingReceiptsReviewOutbound(t *testing.T) {
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	at := time.Now()
+	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"sent"}, Type: types.ReceiptTypeRead, Timestamp: at})
+	mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+	mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+	mapping.pnByLID = map[types.JID]types.JID{lid: pn}
+	b.Connected = func() bool { return true }
+	sends := 0
+	b.sendMessage = func(_ context.Context, to types.JID, _ *waE2E.Message) (whatsmeow.SendResponse, error) {
+		sends++
+		if to != lid {
+			t.Errorf("wire destination %s", to)
+		}
+		return whatsmeow.SendResponse{ID: "sent", Timestamp: at}, nil
+	}
+	b.Send = b.sendBackend()
+	response := httptest.NewRecorder()
+	b.handleSend(nil)(response, httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(`{"recipient":"5511999999999@s.whatsapp.net","message":"Alice"}`)))
+	if response.Code != http.StatusOK || sends != 1 || !strings.Contains(response.Body.String(), `"message_id":"sent"`) {
+		t.Fatal(response.Code, response.Body.String(), sends)
+	}
+	var durable int
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts WHERE message_id='sent' AND chat_jid=?`, pn.String()).Scan(&durable); err != nil || durable != 1 || pendingReceiptCount(t, ms) != 0 {
+		t.Fatal(durable, pendingReceiptCount(t, ms), err)
+	}
+}
+
+type receiptChurnGate struct {
+	*mockLIDStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *receiptChurnGate) GetLIDForPN(ctx context.Context, _ types.JID) (types.JID, error) {
+	select {
+	case g.entered <- struct{}{}:
+	case <-ctx.Done():
+		return types.EmptyJID, ctx.Err()
+	}
+	select {
+	case <-g.release:
+		return types.NewJID("100000000000001", types.HiddenUserServer), nil
+	case <-ctx.Done():
+		return types.EmptyJID, ctx.Err()
+	}
+}
+
+func TestPendingReceiptsConcurrentLiveAndHistoryOriginals(t *testing.T) {
+	for _, history := range []bool{false, true} {
+		t.Run(fmt.Sprintf("history=%v", history), func(t *testing.T) {
+			ms, b, dispatch := pendingReceiptBridgeFixture(t)
+			chat := types.NewJID("120363000000000001", types.GroupServer)
+			lid := types.NewJID("100000000000001", types.HiddenUserServer)
+			at := time.Now()
+			edit := extractMessage(pendingEditMessage("H0", "edited Alice", at.Add(time.Second), true), at, "edit").edit
+			if err := ms.ApplyMessageEdit(chat.String(), lid.String(), true, edit, at); err != nil {
+				t.Fatal(err)
+			}
+			gate := &receiptChurnGate{mockLIDStore: &mockLIDStore{}, entered: make(chan struct{}, 1), release: make(chan struct{})}
+			b.currentClient().Store.LIDs = gate
+			done := make(chan struct{})
+			finished := false
+			defer func() {
+				close(gate.release)
+				if !finished {
+					<-done
+				}
+			}()
+			go func() {
+				defer close(done)
+				if history {
+					h := largeHistoryFixture(2)
+					h.Data.Conversations[0].ID = proto.String(chat.String())
+					for _, row := range h.Data.Conversations[0].Messages {
+						row.Message.Key.FromMe = proto.Bool(true)
+					}
+					b.handleHistorySync(h)
+				} else {
+					original := buildTextMessage(chat, *b.currentClient().Store.ID, types.EmptyJID, types.EmptyJID, true, "Alice")
+					original.Info.ID = "H0"
+					b.handleEvent(original, nil)
+				}
+			}()
+			churn := 0
+		wait:
+			for {
+				select {
+				case <-done:
+					finished = true
+					break wait
+				case <-gate.entered:
+					if churn >= 3 {
+						t.Fatal("unbounded metadata preparation")
+					}
+					target := chat
+					if churn > 0 {
+						target = types.NewJID(fmt.Sprintf("120363000000000%03d", churn+1), types.GroupServer)
+					}
+					dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: target, Sender: types.NewJID("5511999999999", types.DefaultUserServer)}, MessageIDs: []string{"H0"}, Type: types.ReceiptTypeRead, Timestamp: at})
+					churn++
+					gate.release <- struct{}{}
+				case <-time.After(15 * time.Second):
+					t.Fatal("original did not finish")
+				}
+			}
+			var originals, receipts int
+			if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages WHERE chat_jid=?),(SELECT COUNT(*) FROM message_receipts WHERE chat_jid=? AND message_id='H0')`, chat.String(), chat.String()).Scan(&originals, &receipts); err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if history {
+				want = 2
+			}
+			if churn != 1 || originals != want || receipts != 1 {
+				t.Fatal("receipt churn rejected original", churn, originals, receipts)
+			}
+		})
+	}
+}
+
+func TestPendingReceiptsReviewChurnNeverRejectsOriginal(t *testing.T) {
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
+	chat := types.NewJID("120363000000000001", types.GroupServer)
+	peer := types.NewJID("5511999999999", types.DefaultUserServer)
+	at := time.Now()
+	if err := ms.StoreChat(chat.String(), "Alice", at); err != nil {
+		t.Fatal(err)
+	}
+	stored := b.storeLive("message", "churn", chat.String(), func() error {
+		return retryPendingMetadataPreparation(func() error {
+			if _, err := ms.db.Exec(`DELETE FROM pending_receipts WHERE message_id='churn'`); err != nil {
+				return err
+			}
+			_, alias, prepared, err := b.preparePendingMetadata(b.ctx, "churn", chat.String(), b.currentClient().Store.ID.String(), true)
+			if err != nil {
+				return err
+			}
+			dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: []string{"churn"}, Type: types.ReceiptTypeRead, Timestamp: at})
+			return ms.StoreMessage(storedMessage{ID: "churn", ChatJID: chat.String(), Content: "Alice", Timestamp: at, IsFromMe: true, PendingChatAlias: alias, PendingPreparation: prepared})
+		})
+	})
+	var originals int
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id='churn'`).Scan(&originals); err != nil || !stored || originals != 1 {
+		t.Fatal("receipt churn lost original", stored, originals, err)
+	}
+}
 
 func TestPendingReceiptsAliasDeniesUnrelatedChats(t *testing.T) {
 	ms, b, dispatch := pendingReceiptBridgeFixture(t)
@@ -47,46 +278,55 @@ func TestPendingReceiptsAliasDeniesUnrelatedChats(t *testing.T) {
 	}
 }
 
-func TestPendingReceiptsAliasPreparationRechecksAndRetries(t *testing.T) {
+func TestPendingReceiptsPreparedTwinDoesNotDependOnReceiptSnapshot(t *testing.T) {
+	ms, b, dispatch := pendingReceiptBridgeFixture(t)
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+	mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+	at := time.Now()
+	_, alias, prepared, err := b.preparePendingMetadata(b.ctx, "late", pn.String(), b.currentClient().Store.ID.String(), true)
+	if err != nil || alias != lid.String() {
+		t.Fatal(alias, err)
+	}
+	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"late"}, Type: types.ReceiptTypeRead, Timestamp: at})
+	if err := ms.StoreChat(pn.String(), "Alice", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.StoreMessage(storedMessage{ID: "late", ChatJID: pn.String(), Content: "Alice", Timestamp: at, IsFromMe: true, PendingChatAlias: alias, PendingPreparation: prepared}); err != nil {
+		t.Fatal(err)
+	}
+	var durable int
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts WHERE chat_jid=? AND message_id='late'`, pn.String()).Scan(&durable); err != nil || durable != 1 || pendingReceiptCount(t, ms) != 0 {
+		t.Fatal(durable, err)
+	}
+}
+
+func TestPendingMetadataSharesChatAliasLookup(t *testing.T) {
 	ms, b, dispatch := pendingReceiptBridgeFixture(t)
 	pn := types.NewJID("5511999999999", types.DefaultUserServer)
 	lid := types.NewJID("100000000000001", types.HiddenUserServer)
 	at := time.Now()
-	_, _, stale, err := b.preparePendingEdit(b.ctx, "late", pn.String(), b.currentClient().Store.ID.String(), true)
-	if err != nil {
+	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"shared"}, Type: types.ReceiptTypeRead, Timestamp: at})
+	edit := extractMessage(pendingEditMessage("shared", "edited Alice", at.Add(time.Second), true), at, "edit").edit
+	if err := ms.ApplyMessageEdit(lid.String(), lid.String(), false, edit, at); err != nil {
 		t.Fatal(err)
 	}
-	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"late"}, Type: types.ReceiptTypeRead, Timestamp: at})
-	mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
-	mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+	mapping := &historyTwinLIDs{mockLIDStore: mockLIDStore{lidByPN: map[types.JID]types.JID{pn: lid}}}
+	b.currentClient().Store.LIDs = mapping
+	author, alias, prepared, err := b.preparePendingMetadata(b.ctx, "shared", pn.String(), pn.String(), false)
+	if err != nil || mapping.calls != 1 || alias != lid.String() || author != lid.String() {
+		t.Fatal("duplicate chat lookup", mapping.calls, author, alias, err)
+	}
 	if err := ms.StoreChat(pn.String(), "Alice", at); err != nil {
 		t.Fatal(err)
 	}
-	row := storedMessage{ID: "late", ChatJID: pn.String(), Sender: b.currentClient().Store.ID.String(), Content: "Alice", Timestamp: at, IsFromMe: true, EditPreparation: stale}
-	if err := ms.StoreMessage(row); !errors.Is(err, errPendingEditPreparationChanged) {
-		t.Fatal("stale receipt preparation accepted", err)
+	if err := ms.StoreMessage(storedMessage{ID: "shared", ChatJID: pn.String(), Sender: pn.String(), Content: "Alice", Timestamp: at, EditAuthorAlias: author, PendingChatAlias: alias, PendingPreparation: prepared}); err != nil {
+		t.Fatal(err)
 	}
-	var originals int
-	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&originals); err != nil || originals != 0 || pendingReceiptCount(t, ms) != 1 {
-		t.Fatal(originals, err)
-	}
-	attempts := 0
-	if err := retryPendingEditPreparation(func() error {
-		attempts++
-		if attempts > 1 {
-			_, alias, prepared, err := b.preparePendingEdit(b.ctx, row.ID, row.ChatJID, row.Sender, true)
-			if err != nil {
-				return err
-			}
-			row.EditChatAlias, row.EditPreparation = alias, prepared
-		}
-		return ms.StoreMessage(row)
-	}); err != nil || attempts != 2 || pendingReceiptCount(t, ms) != 0 {
-		t.Fatal(attempts, err)
-	}
-	var durable int
-	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts WHERE chat_jid=? AND message_id='late'`, pn.String()).Scan(&durable); err != nil || durable != 1 {
-		t.Fatal("retry lost receipt", durable, err)
+	var content string
+	if err := ms.db.QueryRow(`SELECT content FROM messages WHERE id='shared' AND chat_jid=?`, pn.String()).Scan(&content); err != nil || content != "edited Alice" || pendingReceiptCount(t, ms) != 0 {
+		t.Fatal(content, err)
 	}
 }
 
@@ -94,6 +334,44 @@ type receiptAliasGate struct {
 	*mockLIDStore
 	entered chan struct{}
 	release chan struct{}
+}
+
+func TestPendingReceiptsOutboundAliasCancellationKeepsOriginal(t *testing.T) {
+	ms, b, _ := pendingReceiptBridgeFixture(t)
+	pn := types.NewJID("5511999999999", types.DefaultUserServer)
+	gate := &receiptAliasGate{mockLIDStore: &mockLIDStore{}, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	b.currentClient().Store.LIDs = gate
+	done := make(chan error, 1)
+	finished := false
+	defer func() {
+		b.cancel()
+		if !finished {
+			<-done
+		}
+	}()
+	go func() {
+		_, err := b.persistOutbound(pn, sentMessage{ID: "cancelled-alias", Timestamp: time.Now()}, "Alice", outboundMedia{}, "")
+		done <- err
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("lookup did not start")
+	}
+	b.cancel()
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled lookup lost original")
+	}
+	var originals int
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id='cancelled-alias' AND chat_jid=? AND is_from_me=1`, pn.String()).Scan(&originals); err != nil || originals != 1 {
+		t.Fatal(originals, err)
+	}
 }
 
 func (g *receiptAliasGate) GetLIDForPN(ctx context.Context, _ types.JID) (types.JID, error) {
@@ -118,7 +396,7 @@ func TestPendingReceiptsUnrelatedGroupNeedsNoSessionLookup(t *testing.T) {
 	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: group, Sender: pn}, MessageIDs: []string{"same"}, Type: types.ReceiptTypeRead, Timestamp: time.Now()})
 	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Second)
 	defer cancel()
-	_, alias, _, err := b.preparePendingEdit(ctx, "same", pn.String(), b.currentClient().Store.ID.String(), true)
+	_, alias, _, err := b.preparePendingMetadata(ctx, "same", group.String(), b.currentClient().Store.ID.String(), true)
 	if err != nil || alias != "" || len(gate.entered) != 0 || pendingReceiptCount(t, ms) != 1 {
 		t.Fatal("unrelated group caused a session lookup", alias, err)
 	}
@@ -141,7 +419,7 @@ func TestPendingReceiptsAliasLookupDrainsArchiveAndCancels(t *testing.T) {
 			ctx, cancel := context.WithCancel(b.ctx)
 			type result struct {
 				alias    string
-				prepared *pendingEditPreparation
+				prepared *pendingMetadataPreparation
 				err      error
 			}
 			done := make(chan result, 1)
@@ -157,7 +435,7 @@ func TestPendingReceiptsAliasLookupDrainsArchiveAndCancels(t *testing.T) {
 				}
 			}()
 			go func() {
-				_, alias, prepared, err := b.preparePendingEdit(ctx, "blocked", pn.String(), b.currentClient().Store.ID.String(), true)
+				_, alias, prepared, err := b.preparePendingMetadata(ctx, "blocked", pn.String(), b.currentClient().Store.ID.String(), true)
 				done <- result{alias, prepared, err}
 			}()
 			select {
@@ -200,7 +478,7 @@ func TestPendingReceiptsAliasLookupDrainsArchiveAndCancels(t *testing.T) {
 				if got.err != nil || got.alias != lid.String() {
 					t.Fatal(got)
 				}
-				if err := ms.StoreMessage(storedMessage{ID: "blocked", ChatJID: pn.String(), Content: "Alice", Timestamp: at, IsFromMe: true, EditChatAlias: got.alias, EditPreparation: got.prepared}); err != nil {
+				if err := ms.StoreMessage(storedMessage{ID: "blocked", ChatJID: pn.String(), Content: "Alice", Timestamp: at, IsFromMe: true, PendingChatAlias: got.alias, PendingPreparation: got.prepared}); err != nil {
 					t.Fatal(err)
 				}
 				if pendingReceiptCount(t, ms) != 0 {
@@ -219,7 +497,7 @@ func TestPendingReceiptsStartupAliasCollisionBounds(t *testing.T) {
 			lid := types.NewJID("100000000000001", types.HiddenUserServer)
 			first := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 			now := first
-			ms.editNow = func() time.Time { return now }
+			ms.pendingNow = func() time.Time { return now }
 			ids := []string{"same"}
 			if caps {
 				ids = make([]string, pendingReceiptReaderCap)
@@ -228,7 +506,7 @@ func TestPendingReceiptsStartupAliasCollisionBounds(t *testing.T) {
 				}
 			}
 			dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: pn}, MessageIDs: ids, Type: types.ReceiptTypeRead, Timestamp: first.Add(time.Minute)})
-			now = first.Add(time.Hour)
+			now = first.Add(30 * time.Second)
 			if caps {
 				for i := range ids {
 					ids[i] = fmt.Sprintf("phone-%03d", i)
@@ -267,7 +545,7 @@ func TestPendingReceiptsStartupAliasCollisionBounds(t *testing.T) {
 	}
 }
 
-func TestPendingReceiptsStartupAliasDoesNotPromoteOutsideCanonicalWrite(t *testing.T) {
+func TestPendingReceiptsStartupSettlesAlreadyArchivedOriginal(t *testing.T) {
 	for _, own := range []bool{false, true} {
 		t.Run(fmt.Sprintf("own=%v", own), func(t *testing.T) {
 			ms, _, dispatch := pendingReceiptBridgeFixture(t)
@@ -286,15 +564,12 @@ func TestPendingReceiptsStartupAliasDoesNotPromoteOutsideCanonicalWrite(t *testi
 				t.Fatal(err)
 			}
 			var durable int
-			if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts`).Scan(&durable); err != nil || durable != 0 {
-				t.Fatal("startup promoted", durable, err)
-			}
 			want := 0
 			if own {
 				want = 1
 			}
-			if pendingReceiptCount(t, ms) != want {
-				t.Fatal("startup inbound not discarded")
+			if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts`).Scan(&durable); err != nil || durable != want || pendingReceiptCount(t, ms) != 0 {
+				t.Fatal("startup did not settle known original", durable, err)
 			}
 			if err := ms.StoreMessage(row); err != nil {
 				t.Fatal(err)

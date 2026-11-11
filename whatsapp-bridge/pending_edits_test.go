@@ -165,7 +165,7 @@ func TestPendingEditIdentityDenialsAndVerifiedAlias(t *testing.T) {
 func TestPendingEditNewestAndExpiryDoesNotUseProtocolTime(t *testing.T) {
 	ms, _ := lockedProductionStore(t)
 	now := time.Unix(1900000000, 0)
-	ms.editNow = func() time.Time { return now }
+	ms.pendingNow = func() time.Time { return now }
 	stamp := time.Unix(1772359200, 0)
 	for _, age := range []time.Duration{time.Minute, 3 * time.Minute, 2 * time.Minute, 3 * time.Minute} {
 		edit := pendingEditMessage("ORDER-TARGET", fmt.Sprintf("version%dword", int(age/time.Minute)), stamp.Add(age), age == 3*time.Minute)
@@ -201,7 +201,7 @@ func TestPendingEditCapsAndReplayDoesNotExtendTTL(t *testing.T) {
 	ms, _ := lockedProductionStore(t)
 	now := time.Unix(1900000000, 0)
 	firstExpiry := now.Add(pendingEditTTL).UnixMilli()
-	ms.editNow = func() time.Time { return now }
+	ms.pendingNow = func() time.Time { return now }
 	stamp := time.Unix(1772359200, 0)
 	senders := []string{phonePN.String(), selfPhone.String(), "12025550100@s.whatsapp.net", "12025550101@s.whatsapp.net", "15551234567@s.whatsapp.net"}
 	if err := ms.Batch(func(batch *messageBatch) error {
@@ -420,7 +420,7 @@ func TestPendingEditCancellationDuringConsumptionRollsBack(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ms.editNow = func() time.Time { cancel(); return time.Now() }
+	ms.pendingNow = func() time.Time { cancel(); return time.Now() }
 	err := ms.BatchContext(ctx, func(batch *messageBatch) error {
 		return batch.StoreMessage(storedMessage{ID: "CANCEL-TARGET", ChatJID: phonePN.String(), Sender: phonePN.String(), Content: "oldword", Timestamp: stamp})
 	})
@@ -616,7 +616,7 @@ func TestPendingEditStartupAliasMergeKeepsNewestAndFirstExpiry(t *testing.T) {
 	stamp := time.Unix(1772359200, 0)
 	now := time.Now()
 	first := now
-	ms.editNow = func() time.Time { return now }
+	ms.pendingNow = func() time.Time { return now }
 	for index, chat := range []string{phoneLID.String(), phonePN.String()} {
 		edit := pendingEditMessage("MERGED-TARGET", fmt.Sprintf("merged%dword", index), stamp.Add(time.Duration(index+1)*time.Minute), index == 0)
 		if err := ms.ApplyMessageEdit(chat, phonePN.String(), false, edit.EditedMessage.Message.ProtocolMessage, stamp); err != nil {
@@ -766,7 +766,7 @@ func TestPendingEditExpiredAliasCannotBlockOriginalOnBrokenSession(t *testing.T)
 	b := testBridge(t, newTestClient(container.LIDMap), ms, testLogger())
 	stamp := time.Unix(1772359200, 0)
 	now := time.Now()
-	ms.editNow = func() time.Time { return now }
+	ms.pendingNow = func() time.Time { return now }
 	chat := types.NewJID("120363000000000001", types.GroupServer)
 	edit := incomingEdit("EXPIRED-ALIAS", "expirededitword", stamp.Add(time.Minute).UnixMilli()).EditedMessage.Message.ProtocolMessage
 	if err := ms.ApplyMessageEdit(chat.String(), phoneLID.String(), false, edit, stamp); err != nil {
@@ -1220,7 +1220,7 @@ func TestPendingEditLivePhoneSenderLIDHint(t *testing.T) {
 	}
 }
 
-func TestPendingEditPreparationRollbackRetryAndExhaustion(t *testing.T) {
+func TestPendingMetadataPreparationRollbackRetryAndExhaustion(t *testing.T) {
 	for _, mode := range []string{"rollback", "retry-and-repeat", "exhaustion"} {
 		t.Run(mode, func(t *testing.T) {
 			ms, _ := lockedProductionStore(t)
@@ -1230,7 +1230,7 @@ func TestPendingEditPreparationRollbackRetryAndExhaustion(t *testing.T) {
 				t.Fatal(err)
 			}
 			stamp := time.Unix(1772359200, 0)
-			_, _, stale, err := b.preparePendingEdit(b.ctx, "ATOMIC-TARGET", chat, phonePN.String(), false)
+			_, _, stale, err := b.preparePendingMetadata(b.ctx, "ATOMIC-TARGET", chat, phonePN.String(), false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1244,7 +1244,7 @@ func TestPendingEditPreparationRollbackRetryAndExhaustion(t *testing.T) {
 				alias, chatAlias, prepared := "", "", stale
 				if attempts > 1 || mode == "exhaustion" {
 					var err error
-					alias, chatAlias, prepared, err = b.preparePendingEdit(b.ctx, "ATOMIC-TARGET", chat, phonePN.String(), false)
+					alias, chatAlias, prepared, err = b.preparePendingMetadata(b.ctx, "ATOMIC-TARGET", chat, phonePN.String(), false)
 					if err != nil {
 						return err
 					}
@@ -1259,7 +1259,7 @@ func TestPendingEditPreparationRollbackRetryAndExhaustion(t *testing.T) {
 					if err := batch.StoreMessage(storedMessage{ID: "ATOMIC-PROBE", ChatJID: chat, Sender: phonePN.String(), Content: "probeword", Timestamp: stamp}); err != nil {
 						return err
 					}
-					original := storedMessage{ID: "ATOMIC-TARGET", ChatJID: chat, Sender: phonePN.String(), Content: "originalword", Timestamp: stamp, EditAuthorAlias: alias, EditChatAlias: chatAlias, EditPreparation: prepared}
+					original := storedMessage{ID: "ATOMIC-TARGET", ChatJID: chat, Sender: phonePN.String(), Content: "originalword", Timestamp: stamp, EditAuthorAlias: alias, PendingChatAlias: chatAlias, PendingPreparation: prepared}
 					if err := batch.StoreMessage(original); err != nil {
 						return err
 					}
@@ -1267,11 +1267,11 @@ func TestPendingEditPreparationRollbackRetryAndExhaustion(t *testing.T) {
 				})
 			}
 			if mode == "rollback" {
-				if err := write(); err != errPendingEditPreparationChanged {
+				if err := write(); err != errPendingMetadataPreparationChanged {
 					t.Fatalf("stale preparation error=%v", err)
 				}
 			} else {
-				stored := b.storeLive("message", "ATOMIC-TARGET", chat, func() error { return retryPendingEditPreparation(write) })
+				stored := b.storeLive("message", "ATOMIC-TARGET", chat, func() error { return retryPendingMetadataPreparation(write) })
 				if stored != (mode == "retry-and-repeat") {
 					t.Fatalf("stored=%v attempts=%d", stored, attempts)
 				}

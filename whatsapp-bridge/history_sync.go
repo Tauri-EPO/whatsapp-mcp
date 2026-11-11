@@ -210,14 +210,14 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			// unchanged and retry an entire transaction rather than individual rows.
 			chunk := messages
 			type preparedSender struct {
-				jid             types.JID
-				stored          string
-				wire            string
-				alias           string
-				chatAlias       string
-				editPreparation *pendingEditPreparation
-				own             bool
-				err             error
+				jid                types.JID
+				stored             string
+				wire               string
+				alias              string
+				chatAlias          string
+				pendingPreparation *pendingMetadataPreparation
+				own                bool
+				err                error
 			}
 			prepared := make(map[*waHistorySync.HistorySyncMsg]preparedSender)
 			storedInBatch := 0
@@ -281,8 +281,8 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					storedSenderJID := ready.stored
 					ex.retryChat, ex.retrySender = jid.String(), ready.wire
 					ex.editAuthorAlias = ready.alias
-					ex.editChatAlias = ready.chatAlias
-					ex.editPreparation = ready.editPreparation
+					ex.pendingChatAlias = ready.chatAlias
+					ex.pendingPreparation = ready.pendingPreparation
 
 					// Store message
 					msgID := ""
@@ -354,7 +354,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 			commitChunk := func(reprepare bool) error {
 				attempt := 0
 				return retry(func() error {
-					return retryPendingEditPreparation(func() error {
+					return retryPendingMetadataPreparation(func() error {
 						if reprepare || attempt > 0 {
 							// Failed reads and stale alias snapshots refresh outside the writer.
 							for _, row := range chunk {
@@ -366,7 +366,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 									ready.stored, ready.err = b.liveLocationSender(ctx, messageStore.db, row.Message.GetKey().GetID(), chatJID, storedSender(ready.jid), ready.own)
 								}
 								if ready.err == nil {
-									ready.alias, ready.chatAlias, ready.editPreparation, ready.err = b.preparePendingEdit(ctx, row.Message.GetKey().GetID(), chatJID, ready.stored, ready.own)
+									ready.alias, ready.chatAlias, ready.pendingPreparation, ready.err = b.preparePendingMetadata(ctx, row.Message.GetKey().GetID(), chatJID, ready.stored, ready.own)
 								}
 								prepared[row] = ready
 							}
@@ -424,11 +424,11 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					}
 					alias := ""
 					chatAlias := ""
-					var editPreparation *pendingEditPreparation
+					var pendingPreparation *pendingMetadataPreparation
 					if preparationErr == nil {
-						alias, chatAlias, editPreparation, preparationErr = b.preparePendingEdit(ctx, row.Message.GetKey().GetID(), chatJID, stored, own)
+						alias, chatAlias, pendingPreparation, preparationErr = b.preparePendingMetadata(ctx, row.Message.GetKey().GetID(), chatJID, stored, own)
 					}
-					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, alias: alias, chatAlias: chatAlias, editPreparation: editPreparation, own: own, err: preparationErr}
+					prepared[row] = preparedSender{jid: sender, stored: stored, wire: wireSender, alias: alias, chatAlias: chatAlias, pendingPreparation: pendingPreparation, own: own, err: preparationErr}
 				}
 				if stopping() {
 					return

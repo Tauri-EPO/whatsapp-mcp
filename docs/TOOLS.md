@@ -1123,18 +1123,26 @@ allow-list applies. Older stores without this table return an empty list.
 Peer events are queued in a bounded bridge worker (64 events, at most 16384 IDs
 and 1 MiB of IDs per event); overflow is logged and dropped, so missing receipts
 remain inconclusive. Each accepted event is written atomically.
-Receipts preceding the original are retained locally for at most 24 hours from
-first arrival: up to 4096 rows globally, 1024 per chat and 256 per reader per
-chat (all receipt types combined), with a 1024-byte combined identity key limit.
-Oldest arrivals are evicted at the count limits; repeated receipts keep the
-latest timestamp without extending expiry. Pending rows create no archive chats
-or messages. The canonical original write atomically promotes them only for a
-message this account sent, or discards them for an inbound original.
-Verified phone/LID chat twins are reconciled for live/history originals and on
-restart, including pending-only chats. Alias collisions preserve the first
-expiry and latest timestamp; matching by message ID alone is never allowed. Expiry, eviction and
-unavailable identity mappings can still leave receipts missing;
-an empty result remains inconclusive.
+Receipts preceding the original are retained locally for at most two minutes
+from first arrival: up to 4096 rows globally, 1024 per chat and 256 per typed
+reader identity per chat (all receipt types combined). Phone and LID namespaces
+have separate slots: a person whose LID evidence predates its phone mapping can
+occupy up to 512 rows across those two identities. Combined identity keys are
+limited to 1024 bytes. Oldest arrivals are evicted; replays keep the latest
+receipt timestamp without extending expiry. Receipt events carry no stanza
+type: two minutes covers ordinary write scheduling and the bounded SQLite busy
+retries without retaining unknown edit/revoke/unsupported IDs for a day.
+Known non-original stanza IDs are excluded using a separate two-minute cache
+bounded to 4096 IDs. Neither cache creates archive chats or messages.
+
+Live, history and bridge-sent originals atomically promote pending evidence only
+when the stored original belongs to this account, and discard it for inbound
+originals. Verified phone/LID chat twins also reconcile receipts when the own
+original is already archived, including on restart. Mapping reads precede the
+archive writer; new receipt rows cannot invalidate an original write. Alias
+collisions preserve the first expiry and latest timestamp; matching by message
+ID alone is never allowed. Expiry, eviction and unavailable identity mappings
+can still leave receipts missing; an empty result remains inconclusive.
 
 ### `check_business`
 

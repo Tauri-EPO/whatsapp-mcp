@@ -33,8 +33,8 @@ type storedMessage struct {
 	Media                               messageMediaOptions
 	Mentions                            string
 	EditAuthorAlias                     string // verified outside the writer, never inferred from digits
-	EditChatAlias                       string // verified alternative DM chat for pending metadata, prepared before the writer
-	EditPreparation                     *pendingEditPreparation
+	PendingChatAlias                    string // verified alternative DM chat for pending metadata, prepared before the writer
+	PendingPreparation                  *pendingMetadataPreparation
 	HistoryReplay                       bool // history preserves complete stored snapshots with another locator
 }
 
@@ -152,16 +152,16 @@ const insertMessageSQL = `INSERT INTO messages
 // messageBatch groups message writes in one transaction. Obtain one through
 // MessageStore.Batch; it is not safe for concurrent use.
 type messageBatch struct {
-	store          *MessageStore
-	tx             *contextTransaction
-	ctx            context.Context
-	stmt           *sql.Stmt
-	failure        error // first failed write; never issue more SQL after a possible rollback
-	pendingChecked bool
-	pendingActive  bool
-	receiptsActive bool
-	editPrepared   map[pendingOriginalKey]bool
-	historyReplay  bool
+	store            *MessageStore
+	tx               *contextTransaction
+	ctx              context.Context
+	stmt             *sql.Stmt
+	failure          error // first failed write; never issue more SQL after a possible rollback
+	pendingChecked   bool
+	pendingActive    bool
+	receiptsActive   bool
+	metadataPrepared map[pendingOriginalKey]bool
+	historyReplay    bool
 }
 
 type pendingOriginalKey struct {
@@ -244,24 +244,24 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 	message.HistoryReplay = b.historyReplay
 	return b.write(func() error {
 		key := pendingOriginalKey{id: message.ID, own: message.IsFromMe}
-		if prepared := message.EditPreparation; prepared != nil && !b.editPrepared[key] {
-			var current, receiptChats string
-			if err := b.tx.QueryRow(pendingMetadataIdentitiesSQL, message.ID, message.IsFromMe, prepared.readAt, message.ID, prepared.readAt).Scan(&current, &receiptChats); err != nil {
+		if prepared := message.PendingPreparation; prepared != nil && !b.metadataPrepared[key] {
+			var current string
+			if err := b.tx.QueryRow(pendingEditIdentitiesSQL, message.ID, message.IsFromMe, prepared.readAt).Scan(&current); err != nil {
 				return err
 			}
-			if current != prepared.identities || receiptChats != prepared.receiptChats {
-				return errPendingEditPreparationChanged
+			if current != prepared.identities {
+				return errPendingMetadataPreparationChanged
 			}
-			if b.editPrepared == nil {
-				b.editPrepared = make(map[pendingOriginalKey]bool)
+			if b.metadataPrepared == nil {
+				b.metadataPrepared = make(map[pendingOriginalKey]bool)
 			}
-			b.editPrepared[key] = true // later same-key rows see only this batch's effects
+			b.metadataPrepared[key] = true // later same-key rows see only this batch's effects
 		}
 		_, err := b.stmt.ExecContext(b.ctx, messageArgs(message)...)
 		if err != nil {
 			return err
 		}
-		now := b.store.pendingEditNow()
+		now := b.store.pendingMetadataNow()
 		if !b.pendingChecked {
 			if err := prunePendingEdits(b.tx, now); err != nil {
 				return err

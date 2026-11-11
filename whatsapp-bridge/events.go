@@ -227,6 +227,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// names, keep a structured copy for /api/poll and a message row with the
 	// poll's ID in `filename` (same convention as reactions). See polls.go.
 	if handled, pollID, voteContent := b.handlePollVote(context.Background(), msg, chatJID, sender, msgTimestamp); handled {
+		b.excludeNonOriginalReceipts(chatJID, msg.Info.ID, msg.Info.IsFromMe)
 		if voteContent != "" {
 			storeRow("poll vote", func() error {
 				var err error
@@ -244,6 +245,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// valid event meaning "reaction removed"; we store it (so consumers see the
 	// removal) rather than dropping it.
 	if reaction := msg.Message.GetReactionMessage(); reaction != nil {
+		b.excludeNonOriginalReceipts(chatJID, msg.Info.ID, msg.Info.IsFromMe)
 		reactedToID := ""
 		if key := reaction.GetKey(); key != nil {
 			reactedToID = key.GetID()
@@ -297,6 +299,10 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// receivers, the path or the keys.
 	b.handleHistoryShare(ex.inner, chatJID, msg.Info.ID, msg.Info.IsFromMe)
 
+	// Receipt events lack stanza types; remember known non-original IDs briefly.
+	if ex.edit != nil || ex.empty() {
+		b.excludeNonOriginalReceipts(chatJID, msg.Info.ID, msg.Info.IsFromMe)
+	}
 	// Skip if there's no content and no media
 	if ex.empty() {
 		return
@@ -324,12 +330,12 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 		}
 		if ex.edit == nil {
 			var err error
-			ex.editAuthorAlias, ex.editChatAlias, ex.editPreparation, err = b.preparePendingEdit(lookupCtx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
+			ex.editAuthorAlias, ex.pendingChatAlias, ex.pendingPreparation, err = b.preparePendingMetadata(lookupCtx, msg.Info.ID, chatJID, locationSender, msg.Info.IsFromMe)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					return err
 				}
-				ex.editAuthorAlias, ex.editChatAlias = "", ""
+				ex.editAuthorAlias, ex.pendingChatAlias = "", ""
 			}
 			// A delivery's verified phone alternative may be available before
 			// the SDK map catches up. Retain its original LID author for matching.
@@ -340,17 +346,17 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			// Incoming PN deliveries can carry the verified reverse LID hint.
 			// An outgoing SenderAlt may identify the peer, never our own author.
 			if ex.editAuthorAlias == "" && !msg.Info.IsFromMe && locationSender == storedSender(resolvedSender) {
-				author, authorOK := pendingEditUserJID(msg.Info.Sender.String())
-				alt, altOK := pendingEditUserJID(msg.Info.SenderAlt.String())
+				author, authorOK := pendingMetadataUserJID(msg.Info.Sender.String())
+				alt, altOK := pendingMetadataUserJID(msg.Info.SenderAlt.String())
 				if authorOK && altOK && author.Server == types.DefaultUserServer && alt.Server == types.HiddenUserServer {
 					ex.editAuthorAlias = alt.String()
-					if chat, ok := pendingEditUserJID(chatJID); ok && chat == author && ex.editChatAlias == "" {
-						ex.editChatAlias = alt.String()
+					if chat, ok := pendingMetadataUserJID(chatJID); ok && chat == author && ex.pendingChatAlias == "" {
+						ex.pendingChatAlias = alt.String()
 					}
 				}
 			}
-			if ex.editChatAlias == "" && msg.Info.Chat.Server == types.HiddenUserServer && resolvedChat.Server == types.DefaultUserServer {
-				ex.editChatAlias = msg.Info.Chat.ToNonAD().String()
+			if ex.pendingChatAlias == "" && msg.Info.Chat.Server == types.HiddenUserServer && resolvedChat.Server == types.DefaultUserServer {
+				ex.pendingChatAlias = msg.Info.Chat.ToNonAD().String()
 			}
 		}
 		return messageStore.BatchContext(writeCtx, func(batch *messageBatch) error {
@@ -359,7 +365,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 			return err
 		})
 	}
-	writeMessage := func() error { return retryPendingEditPreparation(writePreparedMessage) }
+	writeMessage := func() error { return retryPendingMetadataPreparation(writePreparedMessage) }
 	var stored bool
 	if ex.edit != nil {
 		// An edit updates an existing target; it must not create an empty chat

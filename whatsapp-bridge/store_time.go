@@ -103,7 +103,7 @@ func anchorTime(v any) time.Time {
 
 // Change this marker name when adding a timestamp column to the rewrite.
 // It is independent of other data migrations and of legacy user_version.
-const canonicalTimestampsMigration = "canonical_timestamps_v7_pending_receipts"
+const canonicalTimestampsMigration = "canonical_timestamps_v6_receipts"
 
 // canonicalTimeGlob matches exactly what dbTime produces, so rows already in
 // the canonical spelling are skipped by the migration without being parsed.
@@ -115,9 +115,9 @@ const canonicalTimeGlob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]
 // deliberately absent: it is an INTEGER of WhatsApp seconds, not a time
 // string. group_members.first_seen/last_seen are absent for the opposite
 // reason: that table postdates this migration, so every row it has ever held
-// was written through dbTime and there is nothing to rewrite.
+// was written through dbTime and there is nothing to rewrite. The same is true
+// of pending_receipts.at; adding a new dbTime-only table needs no new marker.
 var canonicalTimeColumns = []struct{ table, column string }{
-	{"pending_receipts", "at"},
 	{"message_receipts", "at"},
 	{"messages", "timestamp"},
 	{"messages", "deleted_at"},
