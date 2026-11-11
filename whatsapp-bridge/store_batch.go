@@ -28,6 +28,7 @@ type storedMessage struct {
 	MediaType, Filename, URL            string
 	MediaKey, FileSHA256, FileEncSHA256 []byte
 	FileLength                          any
+	ForwardingScore                     *uint32
 	QuotedMessageID                     string
 	Media                               messageMediaOptions
 	Mentions                            string
@@ -83,8 +84,8 @@ const validPresentationSQL = `(CASE
 // A text write does not turn a reaction/poll pointer into a text row: blank
 // media_type/filename keep their old values. Such a conversion needs an UPDATE.
 const insertMessageSQL = `INSERT INTO messages
-		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location, media_retry_chat, media_retry_sender, mentions)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)
+		(id, chat_jid, sender, sender_server, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, direct_path, media_presentation, location, media_retry_chat, media_retry_sender, mentions, forwarding_score)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			-- Keep a namespace the row already has only while the user part it
@@ -127,6 +128,7 @@ const insertMessageSQL = `INSERT INTO messages
 					THEN json_patch(messages.media_presentation, excluded.media_presentation)
 					ELSE excluded.media_presentation END
 				ELSE excluded.media_presentation END ELSE messages.media_presentation END,
+			forwarding_score = COALESCE(excluded.forwarding_score, messages.forwarding_score),
 			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id),
 			-- History is newest-first: an initial sample replayed after a later
 			-- same-key sample supplies the original metadata, not an older position.
@@ -378,7 +380,7 @@ func messageArgs(m storedMessage) []any {
 	sender, server := splitSenderJID(m.Sender)
 	return []any{m.ID, m.ChatJID, sender, server, m.Content, dbTime(m.Timestamp), m.IsFromMe,
 		m.MediaType, m.Filename, m.URL, m.MediaKey, m.FileSHA256, m.FileEncSHA256, length, quote,
-		path, m.Media.presentation.forFile(m.MediaType, m.FileSHA256).column(), m.Media.location.column(), m.Media.retryChat, retrySender, mentions,
+		path, m.Media.presentation.forFile(m.MediaType, m.FileSHA256).column(), m.Media.location.column(), m.Media.retryChat, retrySender, mentions, m.ForwardingScore,
 		sql.Named("complete_media", mediaComplete(m.ChatJID, m.URL, m.Media.directPath, m.MediaKey, m.FileSHA256, m.FileEncSHA256)),
 		sql.Named("history_replay", m.HistoryReplay)}
 }

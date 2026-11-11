@@ -237,6 +237,11 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
+	// Forwarding evidence is absent on old rows; zero is a forwarded flag
+	// without an explicit hop count.
+	if err := ensureColumn(db, "messages", "forwarding_score", "INTEGER"); err != nil {
+		return fmt.Errorf("failed to ensure messages.forwarding_score: %w", err)
+	}
 	// mentions: the users a message addressed, backfilled from the text for
 	// rows stored before the column existed (mentions.go).
 	if err := ensureColumn(db, "messages", "mentions", "TEXT"); err != nil {
@@ -609,7 +614,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
 			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation, location,
-			quoted_message_id, mentions, deleted_at, view_once, target_message_id, message_edit_timestamp, media_retry_chat, media_retry_sender, read_receipt_sent
+			quoted_message_id, mentions, deleted_at, view_once, target_message_id, message_edit_timestamp, media_retry_chat, media_retry_sender, read_receipt_sent, forwarding_score
 		)
 		SELECT
 			msg.id,
@@ -637,7 +642,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			msg.message_edit_timestamp,
 			msg.media_retry_chat,
 			msg.media_retry_sender,
-			msg.read_receipt_sent
+			msg.read_receipt_sent,
+			msg.forwarding_score
 		FROM messages msg
 		JOIN tmp_lid_to_phone m ON m.lid_jid = msg.chat_jid;
 	`)

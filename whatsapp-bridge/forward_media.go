@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"mime"
 	"strings"
 	"time"
@@ -16,22 +17,59 @@ import (
 type forwardSource struct {
 	content, mediaType, filename, id string
 	presentation                     *mediaPresentation
+	forwardingScore                  *uint32
 }
 
 type forwardSourceKey struct{}
+type forwardedSendKey struct{}
 
-func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.MediaType, string, error) {
+func markOutboundForward(msg *waE2E.Message, original *uint32) {
+	score := uint32(1)
+	if original != nil {
+		score = *original
+		// A saturated protocol counter must not wrap back to zero.
+		if score < math.MaxUint32 {
+			score++
+		}
+	}
+	if msg.Conversation != nil {
+		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{Text: msg.Conversation}
+		msg.Conversation = nil
+	}
+	slot := mediaContextInfo(msg)
+	if msg.ExtendedTextMessage != nil {
+		slot = &msg.ExtendedTextMessage.ContextInfo
+	}
+	if slot != nil {
+		if *slot == nil {
+			*slot = &waE2E.ContextInfo{}
+		}
+		(*slot).IsForwarded = proto.Bool(true)
+		(*slot).ForwardingScore = proto.Uint32(score)
+	}
+}
+
+func asDocumentSend(ctx context.Context) bool {
+	asDocument, _ := ctx.Value(documentSendKey{}).(bool)
+	return asDocument
+}
+
+func forwardMediaType(ctx context.Context, path string, data []byte) (upload whatsmeow.MediaType, contentType string, err error) {
+	asDocument := asDocumentSend(ctx)
+	defer func() {
+		if err == nil && asDocument {
+			upload = whatsmeow.MediaDocument
+		}
+	}()
 	source, ok := ctx.Value(forwardSourceKey{}).(*forwardSource)
 	if !ok {
-		kind, contentType, _ := classifySendMedia(ctx, path, data)
-		return kind, contentType, nil
+		upload, contentType, _ = classifySendMedia(ctx, path, data)
+		return upload, contentType, nil
 	}
 	p, err := source.presentation.forBytes(source.mediaType, data)
 	if err != nil {
 		return "", "", err
 	}
-	var upload whatsmeow.MediaType
-	var contentType string
 	switch source.mediaType {
 	case "document":
 		upload = whatsmeow.MediaDocument
@@ -72,7 +110,7 @@ func forwardMediaType(ctx context.Context, path string, data []byte) (whatsmeow.
 			contentType = "audio/ogg; codecs=opus"
 		}
 		parsed, _, err := mime.ParseMediaType(contentType)
-		if err != nil || !strings.HasPrefix(parsed, "audio/") {
+		if !asDocument && (err != nil || !strings.HasPrefix(parsed, "audio/")) {
 			return "", "", fmt.Errorf("cannot determine stored audio codec")
 		}
 	}
@@ -91,6 +129,13 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 	p, err := source.presentation.forBytes(source.mediaType, data)
 	if err != nil {
 		return nil, "", err
+	}
+	if kind == whatsmeow.MediaDocument && source.mediaType != "document" {
+		name := "attachment"
+		if extensions, _ := mime.ExtensionsByType(contentType); len(extensions) > 0 {
+			name += extensions[0]
+		}
+		return buildOutboundMedia(kind, contentType, name, data, upload, caption, quote, mentions)
 	}
 	switch source.mediaType {
 	case "audio":
