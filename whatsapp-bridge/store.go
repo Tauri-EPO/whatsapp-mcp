@@ -450,6 +450,18 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to start LID chat migration transaction: %w", err)
 	}
 	defer finish()
+	// The legacy copy below may create the canonical original after pending
+	// chat rekeying. Settle all now-exact keys in the same archive transaction.
+	commit := func() error {
+		now := store.pendingMetadataNow()
+		if err := prunePendingReceipts(tx, now); err != nil {
+			return err
+		}
+		if err := settleArchivedPendingReceipts(tx, "", now); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 
 	escapedPath := strings.ReplaceAll(whatsappDBPath, "'", "''")
 	if _, err := tx.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %s;", escapedPath, alias)); err != nil {
@@ -464,7 +476,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to inspect WhatsApp DB schema for LID migration: %w", err)
 	}
 	if lidMapTableExists == 0 {
-		if err := tx.Commit(); err != nil {
+		if err := commit(); err != nil {
 			return fmt.Errorf("failed to commit no-op LID chat migration: %w", err)
 		}
 		logger.Infof("Skipping LID chat migration: whatsmeow_lid_map table not found")
@@ -495,7 +507,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_to_phone;"); err != nil {
 			return fmt.Errorf("failed to clean temporary LID mapping table: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commit(); err != nil {
 			return fmt.Errorf("failed to commit no-op LID chat migration: %w", err)
 		}
 		logger.Infof("LID chat migration: nothing to migrate")
@@ -724,7 +736,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to clean temporary chat candidate table: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commit(); err != nil {
 		return fmt.Errorf("failed to commit LID chat migration: %w", err)
 	}
 

@@ -597,3 +597,47 @@ func TestPendingReceiptsStartupAliasEnforcesKeyBytes(t *testing.T) {
 		t.Fatal("longer canonical identity exceeded byte limit")
 	}
 }
+
+func TestPendingReceiptsStartupAfterOriginalChatMigration(t *testing.T) {
+	for _, sourceLID := range []bool{false, true} {
+		for _, own := range []bool{false, true} {
+			t.Run(fmt.Sprintf("source-lid=%v/own=%v", sourceLID, own), func(t *testing.T) {
+				ms, _, dispatch := pendingReceiptBridgeFixture(t)
+				pn := types.NewJID("5511999999999", types.DefaultUserServer)
+				lid := types.NewJID("100000000000001", types.HiddenUserServer)
+				source, receiptChat := pn, lid
+				if sourceLID {
+					source, receiptChat = lid, pn
+				}
+				at := time.Now()
+				dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: receiptChat, Sender: receiptChat}, MessageIDs: []string{"migrated"}, Type: types.ReceiptTypeRead, Timestamp: at})
+				if err := ms.StoreChat(source.String(), "Alice", at); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.StoreMessage(storedMessage{ID: "migrated", ChatJID: source.String(), Content: "Alice", Timestamp: at, IsFromMe: own}); err != nil {
+					t.Fatal(err)
+				}
+				if pendingReceiptCount(t, ms) != 1 {
+					t.Fatal("unmapped twin control missing")
+				}
+				path := receiptSessionMapping(t)
+				for range 2 {
+					if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(path, testLogger()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var originals, durable int
+				if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages WHERE id='migrated' AND chat_jid=?),(SELECT COUNT(*) FROM message_receipts WHERE message_id='migrated' AND chat_jid=?)`, pn.String(), pn.String()).Scan(&originals, &durable); err != nil {
+					t.Fatal(err)
+				}
+				want := 0
+				if own {
+					want = 1
+				}
+				if originals != 1 || durable != want || pendingReceiptCount(t, ms) != 0 {
+					t.Fatal("startup order stranded receipts", originals, durable, pendingReceiptCount(t, ms))
+				}
+			})
+		}
+	}
+}

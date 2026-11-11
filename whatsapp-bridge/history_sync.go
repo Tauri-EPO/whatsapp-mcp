@@ -234,9 +234,6 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					if msg == nil || msg.Message == nil {
 						continue
 					}
-					if msg.Message.Message.GetPollUpdateMessage() != nil {
-						continue
-					}
 
 					histMsgID := ""
 					if msg.Message != nil && msg.Message.Key != nil && msg.Message.Key.ID != nil {
@@ -246,6 +243,15 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					// unwrap, text, media, poll. Works on a local view; the
 					// whatsmeow payload is not mutated.
 					ex := extractMessage(msg.Message.Message, timestamp, histMsgID)
+					ready := prepared[msg]
+					if ready.own && (ex.edit != nil || ex.empty() || ex.inner.GetSecretEncryptedMessage() != nil) {
+						if err := batch.excludeNonOriginalReceipts(chatJID, ready.chatAlias, histMsgID); err != nil {
+							return err
+						}
+					}
+					if msg.Message.Message.GetPollUpdateMessage() != nil {
+						continue
+					}
 					if ex.edit != nil || ex.inner.GetSecretEncryptedMessage() != nil {
 						continue // edits run after original rows, including older chunks
 					}
@@ -269,7 +275,6 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 						}
 					}
 
-					ready := prepared[msg]
 					if ready.err != nil {
 						return ready.err // SDK failure was captured before the writer began
 					}

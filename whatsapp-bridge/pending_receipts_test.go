@@ -18,52 +18,68 @@ import (
 )
 
 func TestPendingReceiptsKnownNonOriginalPressure(t *testing.T) {
-	ms, b, dispatch := pendingReceiptBridgeFixture(t)
-	chat := types.NewJID("120363000000000001", types.GroupServer)
-	peer := types.NewJID("5511999999999", types.DefaultUserServer)
-	now := time.Now()
-	ms.pendingNow = func() time.Time { return now }
-	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: []string{"real"}, Type: types.ReceiptTypeRead, Timestamp: now})
-	ids := make([]string, pendingReceiptReaderCap+4)
-	for i := range ids {
-		ids[i] = fmt.Sprintf("nonoriginal-%03d", i)
-		msg := buildTextMessage(chat, *b.currentClient().Store.ID, types.EmptyJID, types.EmptyJID, true, "")
-		msg.Info.ID = ids[i]
-		switch i % 4 {
-		case 0:
-			msg.Message = pendingEditMessage("missing", "Alice", now, true)
-		case 1:
-			msg.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_REVOKE.Enum(), Key: &waCommon.MessageKey{ID: proto.String("missing")}}}
-		case 2:
-			msg.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Key: &waCommon.MessageKey{ID: proto.String("missing")}, Text: proto.String("👍")}}
-		default:
-			msg.Message = &waE2E.Message{}
-		}
-		b.handleEvent(msg, nil)
-	}
-	dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: ids, Type: types.ReceiptTypeRead, Timestamp: now})
-	var real, durable, excluded int
-	if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM pending_receipts WHERE message_id='real'),(SELECT COUNT(*) FROM message_receipts),(SELECT COUNT(*) FROM receipt_nonoriginals)`).Scan(&real, &durable, &excluded); err != nil {
-		t.Fatal(err)
-	}
-	if real != 1 || pendingReceiptCount(t, ms) != 1 || durable != 0 || excluded != len(ids) {
-		t.Fatal("non-original burst evicted useful receipt", real, durable, excluded)
-	}
-	// A quiet archive leaves no permanently active pending side table after the
-	// short reordering window, including the bounded non-original ID cache.
-	now = now.Add(pendingReceiptTTL)
-	active := true
-	if err := ms.Batch(func(batch *messageBatch) error {
-		if err := batch.StoreMessage(storedMessage{ID: "probe", ChatJID: chat.String(), Content: "Bob", Timestamp: now, IsFromMe: true}); err != nil {
-			return err
-		}
-		active = batch.receiptsActive
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM receipt_nonoriginals`).Scan(&excluded); err != nil || active || pendingReceiptCount(t, ms) != 0 || excluded != 0 {
-		t.Fatal(active, excluded, err)
+	for _, history := range []bool{false, true} {
+		t.Run(fmt.Sprintf("history=%v", history), func(t *testing.T) {
+			ms, b, dispatch := pendingReceiptBridgeFixture(t)
+			chat := types.NewJID("120363000000000001", types.GroupServer)
+			peer := types.NewJID("5511999999999", types.DefaultUserServer)
+			now := time.Now()
+			ms.pendingNow = func() time.Time { return now }
+			dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: []string{"real"}, Type: types.ReceiptTypeRead, Timestamp: now})
+			ids := make([]string, pendingReceiptReaderCap+4)
+			h := largeHistoryFixture(len(ids))
+			h.Data.Conversations[0].ID = proto.String(chat.String())
+			for i := range ids {
+				ids[i] = fmt.Sprintf("nonoriginal-%03d", i)
+				msg := buildTextMessage(chat, *b.currentClient().Store.ID, types.EmptyJID, types.EmptyJID, true, "")
+				msg.Info.ID = ids[i]
+				switch i % 4 {
+				case 0:
+					msg.Message = pendingEditMessage("missing", "Alice", now, true)
+				case 1:
+					msg.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_REVOKE.Enum(), Key: &waCommon.MessageKey{ID: proto.String("missing")}}}
+				case 2:
+					msg.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Key: &waCommon.MessageKey{ID: proto.String("missing")}, Text: proto.String("👍")}}
+				default:
+					msg.Message = &waE2E.Message{}
+				}
+				if history {
+					row := h.Data.Conversations[0].Messages[i].Message
+					row.Key.ID = proto.String(ids[i])
+					row.Key.FromMe = proto.Bool(true)
+					row.Message = msg.Message
+				} else {
+					b.handleEvent(msg, nil)
+				}
+			}
+			if history {
+				b.handleHistorySync(h)
+			}
+			dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: ids, Type: types.ReceiptTypeRead, Timestamp: now})
+			var real, durable, excluded int
+			if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM pending_receipts WHERE message_id='real'),(SELECT COUNT(*) FROM message_receipts),(SELECT COUNT(*) FROM receipt_nonoriginals)`).Scan(&real, &durable, &excluded); err != nil {
+				t.Fatal(err)
+			}
+			if real != 1 || pendingReceiptCount(t, ms) != 1 || durable != 0 || excluded != len(ids) {
+				t.Fatal("non-original burst evicted useful receipt", real, durable, excluded)
+			}
+			// A quiet archive leaves no permanently active pending side table after the
+			// short reordering window, including the bounded non-original ID cache.
+			now = now.Add(pendingReceiptTTL)
+			active := true
+			if err := ms.Batch(func(batch *messageBatch) error {
+				if err := batch.StoreMessage(storedMessage{ID: "probe", ChatJID: chat.String(), Content: "Bob", Timestamp: now, IsFromMe: true}); err != nil {
+					return err
+				}
+				active = batch.receiptsActive
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.db.QueryRow(`SELECT COUNT(*) FROM receipt_nonoriginals`).Scan(&excluded); err != nil || active || pendingReceiptCount(t, ms) != 0 || excluded != 0 {
+				t.Fatal(active, excluded, err)
+			}
+		})
 	}
 }
 

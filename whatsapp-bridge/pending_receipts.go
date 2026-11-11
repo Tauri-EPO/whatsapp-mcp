@@ -35,7 +35,11 @@ CREATE INDEX IF NOT EXISTS idx_receipt_nonoriginals_expiry ON receipt_nonorigina
 
 // Startup reconciles verified pending twins with already archived originals too.
 // Collisions retain latest evidence but the earliest arrival/expiry.
-func migratePendingReceiptChat(ex sqlExecer, lid, phone string, now time.Time) error {
+func migratePendingReceiptChat(ex locationWriter, lid, phone string, now time.Time) error {
+	var before, after int
+	if err := ex.QueryRow(`SELECT COUNT(*) FROM pending_receipts WHERE chat_jid=?`, phone).Scan(&before); err != nil {
+		return err
+	}
 	if _, err := ex.Exec(`INSERT INTO pending_receipts
 	 (chat_jid,message_id,recipient,recipient_server,type,at,arrived_ms,expires_ms)
 	 SELECT :phone,p.message_id,p.recipient,p.recipient_server,p.type,p.at,p.arrived_ms,p.expires_ms
@@ -49,21 +53,38 @@ func migratePendingReceiptChat(ex sqlExecer, lid, phone string, now time.Time) e
 		sql.Named("phone", phone), sql.Named("lid", lid), sql.Named("max_bytes", pendingReceiptKeyBytes)); err != nil {
 		return err
 	}
+	if err := ex.QueryRow(`SELECT COUNT(*) FROM pending_receipts WHERE chat_jid=?`, phone).Scan(&after); err != nil {
+		return err
+	}
 	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE chat_jid=?`, lid); err != nil {
 		return err
 	}
+	if err := settleArchivedPendingReceipts(ex, phone, now); err != nil {
+		return err
+	}
+	// Rekeying cannot grow the global buffer. Only a newly inserted phone key
+	// can grow this chat; collisions and edit-only migrations need no cap scan.
+	if after > before {
+		return capPendingReceiptChat(ex, phone)
+	}
+	return nil
+}
+
+// An empty chat selects every exact archived key. This also runs at the end
+// of the legacy archive migration, after that writer has created phone rows.
+func settleArchivedPendingReceipts(ex sqlExecer, chat string, now time.Time) error {
 	if _, err := ex.Exec(`INSERT INTO message_receipts (chat_jid,message_id,recipient,recipient_server,type,at)
  SELECT p.chat_jid,p.message_id,p.recipient,p.recipient_server,p.type,p.at
  FROM pending_receipts p JOIN messages m ON m.chat_jid=p.chat_jid AND m.id=p.message_id
- WHERE p.chat_jid=? AND p.expires_ms>? AND m.is_from_me=1 AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
- ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type) DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`, phone, now.UnixMilli()); err != nil {
+ WHERE (?='' OR p.chat_jid=?) AND p.expires_ms>? AND m.is_from_me=1 AND COALESCE(m.media_type,'') NOT IN ('reaction','poll_vote')
+ ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type) DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`, chat, chat, now.UnixMilli()); err != nil {
 		return err
 	}
-	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE chat_jid=? AND EXISTS
- (SELECT 1 FROM messages m WHERE m.chat_jid=pending_receipts.chat_jid AND m.id=pending_receipts.message_id)`, phone); err != nil {
+	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE (?='' OR chat_jid=?) AND EXISTS
+ (SELECT 1 FROM messages m WHERE m.chat_jid=pending_receipts.chat_jid AND m.id=pending_receipts.message_id)`, chat, chat); err != nil {
 		return err
 	}
-	return capPendingReceipts(ex, phone)
+	return nil
 }
 
 // Two minutes covers ordinary event/write scheduling and the three SQLite busy
@@ -81,6 +102,15 @@ func prunePendingReceipts(ex sqlExecer, now time.Time) error {
 // Only call after insertion/rekeying. Reader identities remain typed (a phone
 // and its LID each have 256 slots); reader/chat scans touch this chat only.
 func capPendingReceipts(ex sqlExecer, chat string) error {
+	if err := capPendingReceiptChat(ex, chat); err != nil {
+		return err
+	}
+	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM pending_receipts
+ ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, pendingReceiptGlobalCap)
+	return err
+}
+
+func capPendingReceiptChat(ex sqlExecer, chat string) error {
 	if _, err := ex.Exec(`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM (
  SELECT rowid,ROW_NUMBER() OVER (PARTITION BY recipient,recipient_server ORDER BY arrived_ms DESC,rowid DESC) n
  FROM pending_receipts WHERE chat_jid=?) WHERE n>?)`, chat, pendingReceiptReaderCap); err != nil {
@@ -90,9 +120,7 @@ func capPendingReceipts(ex sqlExecer, chat string) error {
  WHERE chat_jid=? ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, chat, pendingReceiptChatCap); err != nil {
 		return err
 	}
-	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE rowid IN (SELECT rowid FROM pending_receipts
- ORDER BY arrived_ms DESC,rowid DESC LIMIT -1 OFFSET ?)`, pendingReceiptGlobalCap)
-	return err
+	return nil
 }
 
 // A known non-original stanza never authorizes an archived-message receipt.
@@ -121,22 +149,27 @@ func (b *Bridge) excludeNonOriginalReceipts(chat, id string, own bool) {
 	if err != nil && ctx.Err() != nil {
 		return
 	}
-	err = b.Store.BatchContext(ctx, func(batch *messageBatch) error {
-		now := b.Store.pendingMetadataNow()
-		if err := prunePendingReceipts(batch.tx, now); err != nil {
-			return err
-		}
-		if err := excludePeerReceiptStanza(batch.tx, chat, id, now); err != nil {
-			return err
-		}
-		if alias != "" {
-			return excludePeerReceiptStanza(batch.tx, alias, id, now)
-		}
-		return nil
-	})
+	err = b.Store.BatchContext(ctx, func(batch *messageBatch) error { return batch.excludeNonOriginalReceipts(chat, alias, id) })
 	if err != nil {
 		b.Log.Warnf("Could not exclude non-original receipt metadata: %v", err)
 	}
+}
+
+// History already prepared its verified twin outside the writer too.
+func (b *messageBatch) excludeNonOriginalReceipts(chat, alias, id string) error {
+	return b.write(func() error {
+		now := b.store.pendingMetadataNow()
+		if err := prunePendingReceipts(b.tx, now); err != nil {
+			return err
+		}
+		if err := excludePeerReceiptStanza(b.tx, chat, id, now); err != nil {
+			return err
+		}
+		if alias != "" {
+			return excludePeerReceiptStanza(b.tx, alias, id, now)
+		}
+		return nil
+	})
 }
 
 // Run only after the canonical original write, inside that same transaction.
