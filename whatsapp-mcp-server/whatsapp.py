@@ -323,6 +323,7 @@ def _fts_current_exclusions(query: str, columns: str = "content filename") -> st
     implicit-AND phrases, up to the next explicit operator at the same depth.
     Whitespace-prefixed -term is the shorthand for NOT term; trailing literal
     hyphens and malformed syntax retain the existing quoted-query retry.
+    Empty columns normalise only the shorthand for the transcript index.
     """
     tokens = list(re.finditer(r'"(?:[^"]|"")*"|[(){}:+,*^-]|[^\s(){}:+,*^"-]+', query))
     end = 0
@@ -333,6 +334,7 @@ def _fts_current_exclusions(query: str, columns: str = "content filename") -> st
     if query[end:].strip():
         return query
     text = [token.group() for token in tokens]
+    replacements: list[tuple[int, int]] = []
     for i, token in enumerate(tokens):
         if (
             text[i] == "-"
@@ -345,6 +347,11 @@ def _fts_current_exclusions(query: str, columns: str = "content filename") -> st
             and (i + 2 == len(text) or text[i + 2] != ":")
         ):
             text[i] = "NOT"
+            replacements.append((token.start(), token.end()))
+    if not columns:
+        for start, stop in reversed(replacements):
+            query = query[:start] + "NOT " + query[stop:]
+        return query
     before: dict[int, list[str]] = {}
     opaque: list[bool] = []
     braces = 0

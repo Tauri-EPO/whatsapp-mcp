@@ -445,3 +445,15 @@ def test_deleting_a_transcript_whose_map_row_is_gone_still_clears_the_index(fts_
     media_notes.annotate_media(SHA_VOICE, "transcript", "")
     assert _index_rows(SHA_VOICE) == ([], [])
     assert ids("orcamento") == ["m1"]
+
+
+@pytest.mark.parametrize("with_fts", [True, False])
+def test_minus_exclusions_match_transcript_not_operator(tmp_path, monkeypatch, with_fts):
+    _make_db(tmp_path, monkeypatch, with_fts)
+    media_notes.annotate_media(SHA_VOICE, "transcript", "foo")
+    assert ids("foo NOT bar") == ["v1"]
+    assert ids("foo -bar") == ["v1"]
+    media_notes.annotate_media(SHA_VOICE, "transcript", "foo bar")
+    assert ids("foo NOT bar") == ids("foo -bar") == []
+    media_notes.annotate_media(SHA_VOICE, "transcript", "foo-bar")
+    assert ids("foo-bar") == ["v1"]  # malformed syntax still retries the original literal phrase
