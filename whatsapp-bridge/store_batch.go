@@ -33,7 +33,7 @@ type storedMessage struct {
 	Media                               messageMediaOptions
 	Mentions                            string
 	EditAuthorAlias                     string // verified outside the writer, never inferred from digits
-	EditChatAlias                       string // verified alternative DM chat, prepared before the writer
+	EditChatAlias                       string // verified alternative DM chat for pending metadata, prepared before the writer
 	EditPreparation                     *pendingEditPreparation
 	HistoryReplay                       bool // history preserves complete stored snapshots with another locator
 }
@@ -245,11 +245,11 @@ func (b *messageBatch) StoreMessage(message storedMessage) error {
 	return b.write(func() error {
 		key := pendingOriginalKey{id: message.ID, own: message.IsFromMe}
 		if prepared := message.EditPreparation; prepared != nil && !b.editPrepared[key] {
-			var current string
-			if err := b.tx.QueryRow(pendingEditIdentitiesSQL, message.ID, message.IsFromMe, prepared.readAt).Scan(&current); err != nil {
+			var current, receiptChats string
+			if err := b.tx.QueryRow(pendingMetadataIdentitiesSQL, message.ID, message.IsFromMe, prepared.readAt, message.ID, prepared.readAt).Scan(&current, &receiptChats); err != nil {
 				return err
 			}
-			if current != prepared.identities {
+			if current != prepared.identities || receiptChats != prepared.receiptChats {
 				return errPendingEditPreparationChanged
 			}
 			if b.editPrepared == nil {

@@ -20,15 +20,16 @@ const (
 )
 
 type pendingEditPreparation struct {
-	identities string
-	readAt     int64
+	identities   string
+	receiptChats string
+	readAt       int64
 }
 
 type pendingEditPreparationError string
 
 func (e pendingEditPreparationError) Error() string { return string(e) }
 
-const errPendingEditPreparationChanged pendingEditPreparationError = "pending edit identities changed before original persistence"
+const errPendingEditPreparationChanged pendingEditPreparationError = "pending metadata identities changed before original persistence"
 
 // Content/version changes need no new SDK lookup, but a new typed author or
 // chat does. Observe the identity set before preparing aliases and recheck it
@@ -37,12 +38,17 @@ const pendingEditIdentitiesSQL = `SELECT json_group_array(json_array(chat_jid,se
 	SELECT chat_jid,sender,sender_server FROM pending_edits
 	WHERE target_id=? AND is_from_me=? AND expires_ms>? ORDER BY chat_jid,sender,sender_server)`
 
+const pendingMetadataIdentitiesSQL = `SELECT (` + pendingEditIdentitiesSQL + `), (` + pendingReceiptChatsSQL + `)`
+
 func (b *Bridge) preparePendingEdit(ctx context.Context, id, chat, sender string, own bool) (string, string, *pendingEditPreparation, error) {
 	prepared := &pendingEditPreparation{readAt: b.Store.pendingEditNow().UnixMilli()}
-	if err := b.Store.db.QueryRowContext(ctx, pendingEditIdentitiesSQL, id, own, prepared.readAt).Scan(&prepared.identities); err != nil {
+	if err := b.Store.db.QueryRowContext(ctx, pendingMetadataIdentitiesSQL, id, own, prepared.readAt, id, prepared.readAt).Scan(&prepared.identities, &prepared.receiptChats); err != nil {
 		return "", "", nil, err
 	}
 	authorAlias, chatAlias, err := b.pendingEditAlias(ctx, id, chat, sender, own)
+	if err == nil && chatAlias == "" {
+		chatAlias, err = b.pendingReceiptChatAlias(ctx, chat, prepared.receiptChats)
+	}
 	return authorAlias, chatAlias, prepared, err
 }
 
@@ -283,9 +289,10 @@ func consumePendingEdits(ex locationWriter, message storedMessage, now time.Time
 }
 
 // Startup uses verified session mappings too, without attaching/reading that
-// database inside the pending-edits archive writer. Drain both readers first.
-func (s *MessageStore) migratePendingEditChats(ctx context.Context, sessionPath string) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT DISTINCT chat_jid FROM pending_edits WHERE chat_jid LIKE '%@lid' ORDER BY chat_jid")
+// database inside the pending-metadata archive writer. Drain both readers first.
+func (s *MessageStore) migratePendingMetadataChats(ctx context.Context, sessionPath string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT chat_jid FROM pending_edits WHERE chat_jid LIKE '%@lid'
+	 UNION SELECT chat_jid FROM pending_receipts WHERE chat_jid LIKE '%@lid' ORDER BY chat_jid`)
 	if err != nil {
 		return err
 	}
@@ -332,7 +339,11 @@ func (s *MessageStore) migratePendingEditChats(ctx context.Context, sessionPath 
 	}
 	return s.BatchContext(ctx, func(batch *messageBatch) error {
 		return batch.write(func() error {
-			if err := prunePendingEdits(batch.tx, s.pendingEditNow()); err != nil {
+			now := s.pendingEditNow()
+			if err := prunePendingEdits(batch.tx, now); err != nil {
+				return err
+			}
+			if err := prunePendingReceipts(batch.tx, now); err != nil {
 				return err
 			}
 			for _, chat := range chats {
@@ -357,8 +368,11 @@ func (s *MessageStore) migratePendingEditChats(ctx context.Context, sessionPath 
 				if err := capPendingEdits(batch.tx, phone); err != nil {
 					return err
 				}
+				if err := migratePendingReceiptChat(batch.tx, chat, phone); err != nil {
+					return err
+				}
 			}
-			return nil
+			return capPendingReceipts(batch.tx)
 		})
 	})
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,10 +12,16 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 // Use the real event worker and on-disk archive, including canonical writes.
 func pendingReceiptFixture(t *testing.T) (*MessageStore, func(*events.Receipt)) {
+	ms, _, dispatch := pendingReceiptBridgeFixture(t)
+	return ms, dispatch
+}
+
+func pendingReceiptBridgeFixture(t *testing.T) (*MessageStore, *Bridge, func(*events.Receipt)) {
 	t.Helper()
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms, err := NewMessageStore()
@@ -21,16 +29,99 @@ func pendingReceiptFixture(t *testing.T) (*MessageStore, func(*events.Receipt)) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, types.NewJID("5511888888888", types.DefaultUserServer)), ms, installRecordingLogger(t))
 	processed := make(chan struct{}, 1)
 	b.peerReceiptProcessed = func() { processed <- struct{}{} }
-	return ms, func(receipt *events.Receipt) {
+	return ms, b, func(receipt *events.Receipt) {
 		t.Helper()
 		b.handleEvent(receipt, nil)
 		select {
 		case <-processed:
 		case <-time.After(10 * time.Second):
 			t.Fatal("receipt worker did not finish")
+		}
+	}
+}
+
+func receiptSessionMapping(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "whatsapp.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundPool(db, sessionPoolConns)
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TABLE whatsmeow_lid_map(lid TEXT PRIMARY KEY,pn TEXT); INSERT INTO whatsmeow_lid_map VALUES('100000000000001','5511999999999')`); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestPendingReceiptsNewChatMapping(t *testing.T) {
+	for _, mode := range []string{"live", "history", "startup", "delivery-hint"} {
+		for _, own := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/own=%v", mode, own), func(t *testing.T) {
+				ms, b, dispatch := pendingReceiptBridgeFixture(t)
+				pn := types.NewJID("5511999999999", types.DefaultUserServer)
+				lid := types.NewJID("100000000000001", types.HiddenUserServer)
+				at := time.Now()
+				dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: lid, Sender: lid}, MessageIDs: []string{"H0"}, Type: types.ReceiptTypeRead, Timestamp: at})
+				if pendingReceiptCount(t, ms) != 1 {
+					t.Fatal("unmapped receipt missing")
+				}
+				mapping := b.currentClient().Store.LIDs.(*mockLIDStore)
+				if mode != "delivery-hint" {
+					mapping.lidByPN = map[types.JID]types.JID{pn: lid}
+					mapping.pnByLID = map[types.JID]types.JID{lid: pn}
+				}
+				if mode == "startup" {
+					if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(receiptSessionMapping(t), testLogger()); err != nil {
+						t.Fatal(err)
+					}
+					var chat string
+					var archived int
+					if err := ms.db.QueryRow(`SELECT chat_jid FROM pending_receipts`).Scan(&chat); err != nil {
+						t.Fatal(err)
+					}
+					if err := ms.db.QueryRow(`SELECT COUNT(*) FROM chats`).Scan(&archived); err != nil || chat != pn.String() || archived != 0 {
+						t.Fatal(chat, archived, err)
+					}
+				}
+				if mode == "history" {
+					history := largeHistoryFixture(1)
+					history.Data.Conversations[0].ID = proto.String(pn.String())
+					history.Data.Conversations[0].Messages[0].Message.Key.FromMe = proto.Bool(own)
+					b.handleHistorySync(history)
+				} else {
+					sender := pn
+					if own {
+						sender = *b.currentClient().Store.ID
+					}
+					original := buildTextMessage(pn, sender, types.EmptyJID, types.EmptyJID, own, "Alice")
+					if mode == "delivery-hint" {
+						original.Info.Chat = lid
+						if own {
+							original.Info.RecipientAlt = pn
+						} else {
+							original.Info.Sender, original.Info.SenderAlt = lid, pn
+						}
+					}
+					original.Info.ID, original.Info.Timestamp = "H0", at
+					b.handleEvent(original, nil)
+				}
+				var originals, receipts int
+				if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM messages WHERE id='H0' AND chat_jid=?),(SELECT COUNT(*) FROM message_receipts WHERE message_id='H0' AND chat_jid=? AND recipient=? AND recipient_server=?)`, pn.String(), pn.String(), lid.User, lid.Server).Scan(&originals, &receipts); err != nil {
+					t.Fatal(err)
+				}
+				want := 0
+				if own {
+					want = 1
+				}
+				if originals != 1 || receipts != want || pendingReceiptCount(t, ms) != 0 {
+					t.Fatal(originals, receipts, pendingReceiptCount(t, ms))
+				}
+			})
 		}
 	}
 }

@@ -440,7 +440,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to stat WhatsApp DB %s: %w", whatsappDBPath, err)
 	}
 
-	if err := store.migratePendingEditChats(context.Background(), whatsappDBPath); err != nil {
+	if err := store.migratePendingMetadataChats(context.Background(), whatsappDBPath); err != nil {
 		return fmt.Errorf("migrate pending edit chats: %w", err)
 	}
 	alias := fmt.Sprintf("wa_mig_%d", time.Now().UnixNano())
