@@ -42,9 +42,29 @@ jobs:
       - name: Install audio test tooling
         # Exercise the provider's real oversized-audio chunking and existing
         # audio integration tests rather than depending on the runner image.
+        # Bounded (issue #828): the runner's Azure mirror has failed DNS for
+        # half an hour at a time. Each attempt has network timeouts and a
+        # wall-clock cap; the second goes to archive.ubuntu.com directly. A
+        # failed install fails the job (rerun with `gh run rerun --failed`),
+        # it never skips the audio tests.
+        timeout-minutes: 12
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ffmpeg
+          set -u
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          install() {
+            timeout 300 sudo apt-get "${apt_opts[@]}" update -q \
+              && timeout 300 sudo apt-get "${apt_opts[@]}" install -q --no-install-recommends -y ffmpeg
+          }
+          if install; then exit 0; fi
+          echo "::warning::apt via the runner mirror failed; retrying against archive.ubuntu.com"
+          getent hosts azure.archive.ubuntu.com archive.ubuntu.com || true
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          install
+          command -v ffmpeg
       - name: Run tests
         run: |
           cd whatsapp-mcp-server
