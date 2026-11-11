@@ -30,6 +30,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 FROM python:3.13-slim
 
+# Debian security fixes land before the python:3.13-slim tag is rebuilt (zlib1g,
+# issue #813): take them at build time so the image does not ship a fixed CVE.
+RUN apt-get update     && apt-get upgrade -y --no-install-recommends     && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --uid 1000 --create-home --home-dir /app --shell /usr/sbin/nologin app \
     && mkdir -p /app/store /app/outbox \
     && chown app:app /app/store /app/outbox \

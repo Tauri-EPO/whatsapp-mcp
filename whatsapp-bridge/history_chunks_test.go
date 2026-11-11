@@ -211,10 +211,17 @@ func TestLiveEventRetriesDuringHistoryAndCommitsBetweenChunks(t *testing.T) {
 	b.historyBatchWriter = func(fn func(*messageBatch) error) error {
 		firstBatch := first
 		if !firstBatch {
+			// Once the live write is done every later chunk proceeds, even past
+			// the coordination deadline: a select over two ready channels picks
+			// at random and would abort the import.
 			select {
 			case <-liveDone:
-			case <-ctx.Done():
-				return ctx.Err()
+			default:
+				select {
+				case <-liveDone:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 		}
 		err := ms.Batch(func(batch *messageBatch) error {
@@ -269,9 +276,15 @@ func TestLiveEventRetriesDuringHistoryAndCommitsBetweenChunks(t *testing.T) {
 	live.Info.ID = "LIVE-DURING-HISTORY"
 	b.handleMessage(live)
 	close(liveDone)
+	// ctx bounds the coordination above (writer held, BUSY seen, first commit),
+	// which takes milliseconds. What is left is importing the rest of the 1001
+	// rows with FTS triggers and fsyncs, which under -race on a loaded Docker
+	// Desktop host measured 6-12 s (issue #811) and nothing here waits on ctx.
+	// Its own ceiling keeps a real hang failing without tying the bulk import
+	// to the coordination deadline.
 	select {
 	case <-historyDone:
-	case <-ctx.Done():
+	case <-time.After(2 * time.Minute):
 		t.Fatal("history did not finish after the live write")
 	}
 	var indexed int

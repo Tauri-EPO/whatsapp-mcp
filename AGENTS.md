@@ -282,7 +282,7 @@ uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT
 cd whatsapp-bridge
 go run .
 go vet ./... && go test ./...
-go test -race -timeout 25m ./...                 # CI runs it too (§6); needs cgo, ~9 min
+go test -race -timeout 45m ./...                 # CI runs it too (§6); needs cgo, ~9 min in CI, 25-35 min on Docker Desktop
 golangci-lint run                                # config in whatsapp-bridge/.golangci.yml; fails on unformatted files
 
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
@@ -299,12 +299,18 @@ The MCP server is a real package (issue #409): `pyproject.toml` declares `[build
 ```bash
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
-  sh -c 'go vet ./... && go test ./...'
+  sh -c 'go vet ./... && go test -timeout 30m ./...'
+# -timeout 30m: the one package outgrew Go's 10m default on this box. Measured
+# 2026-11-10/11 under Docker Desktop with other lanes running: 620 s, 787 s and
+# 811 s for the plain suite, with no test stuck (issue #809). A run that still
+# times out names the test it was in; read that before raising anything, and
+# never raise a per-test deadline to make the suite fit.
 # The race detector, which CI also runs (§6). -race needs cgo, and the alpine
 # image ships no C compiler, so install one first; -count=3 is what shakes out
 # the races that only appear when a leaked goroutine outlives its test. One
-# suite takes about nine minutes in CI; three repeats get 90m (not Go's 10m
-# default). For a quick single pass use -race -count=1 -timeout 25m.
+# suite takes about nine minutes in CI and 25-35 minutes here under load
+# (1463-2053 s measured); three repeats get 90m. For a single pass use
+# -race -count=1 -timeout 45m.
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 90m ./...'
@@ -336,7 +342,7 @@ The copy strips every CR from every file under `whatsapp-bridge/`, which is righ
 S=mylane
 V="-v wamcp-gomod-$S:/go/pkg/mod -v wamcp-gobuild-$S:/root/.cache/go-build"
 docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
-  sh -c 'go vet ./... && go test ./...'
+  sh -c 'go vet ./... && go test -timeout 30m ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 90m ./...'
 # golangci-lint runs on the LF copy built above (not on the CRLF tree), same cache volumes:
