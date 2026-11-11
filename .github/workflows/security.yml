@@ -203,3 +203,4 @@ jobs:
             trivy-${{ matrix.component }}.txt
             trivy-${{ matrix.component }}.txt.outcome
           retention-days: 30
+          overwrite: true

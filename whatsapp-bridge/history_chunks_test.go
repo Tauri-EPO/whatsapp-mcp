@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -208,20 +209,34 @@ func TestLiveEventRetriesDuringHistoryAndCommitsBetweenChunks(t *testing.T) {
 	writerHeld, liveBusy := make(chan struct{}), make(chan struct{})
 	firstCommitted, liveDone, historyDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	first := true
+	// stop ends the import when the test returns (the deferred cleanup below);
+	// ctx only bounds the coordination, which takes milliseconds.
+	stop := make(chan struct{})
+	// reached prefers an event that already happened over an expired ctx: a
+	// select over two ready channels picks at random (issue #811).
+	reached := func(ch <-chan struct{}) bool {
+		select {
+		case <-ch:
+			return true
+		default:
+		}
+		select {
+		case <-ch:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	b.historyBatchWriter = func(fn func(*messageBatch) error) error {
 		firstBatch := first
 		if !firstBatch {
-			// Once the live write is done every later chunk proceeds, even past
-			// the coordination deadline: a select over two ready channels picks
-			// at random and would abort the import.
 			select {
-			case <-liveDone:
+			case <-stop:
+				return errors.New("test finished")
 			default:
-				select {
-				case <-liveDone:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+			}
+			if !reached(liveDone) {
+				return ctx.Err()
 			}
 		}
 		err := ms.Batch(func(batch *messageBatch) error {
@@ -239,9 +254,7 @@ func TestLiveEventRetriesDuringHistoryAndCommitsBetweenChunks(t *testing.T) {
 				}
 				close(writerHeld)
 				// Hold the real SQLite writer until the live path actually gets BUSY.
-				select {
-				case <-liveBusy:
-				case <-ctx.Done():
+				if !reached(liveBusy) {
 					return ctx.Err()
 				}
 			}
@@ -258,15 +271,10 @@ func TestLiveEventRetriesDuringHistoryAndCommitsBetweenChunks(t *testing.T) {
 		if waits == 1 {
 			close(liveBusy)
 		}
-		select {
-		case <-firstCommitted:
-			return true
-		case <-ctx.Done():
-			return false
-		}
+		return reached(firstCommitted)
 	}
 	go func() { b.handleHistorySync(largeHistoryFixture(1001)); close(historyDone) }()
-	defer func() { cancel(); <-historyDone }()
+	defer func() { close(stop); cancel(); <-historyDone }()
 	select {
 	case <-writerHeld:
 	case <-ctx.Done():
