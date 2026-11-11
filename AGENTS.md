@@ -161,7 +161,7 @@ whatsapp-mcp/
 │   ├── chat_policy.go          # WHATSAPP_ALLOWED_CHATS enforcement on outbound endpoints
 │   ├── read_only.go            # WHATSAPP_READ_ONLY: 403 on every mutating /api/* endpoint
 │   ├── tool_policy.go          # WHATSAPP_ALLOW_TOOLS / _DENY_TOOLS: tool -> endpoint map, 403 on the rest
-│   ├── fts.go                  # FTS5 index over content and document filenames
+│   ├── fts.go                  # FTS5 index over content, document filenames and saved pre-edit text
 │   ├── media_inflight.go       # one transfer per destination file; the other callers share its result
 │   ├── media_cap.go           # automatic download byte budget, shared-cache checks
 │   ├── media_length.go        # declared-length presence and the NULL migration

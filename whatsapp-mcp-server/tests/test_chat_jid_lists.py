@@ -50,6 +50,7 @@ def archive(paired_dbs, monkeypatch):
     """The paired store with an FTS index, four conversations and some media."""
     monkeypatch.delenv("WHATSAPP_EXPORT_DIR", raising=False)
     with paired_dbs.messages() as c:
+        c.execute("ALTER TABLE messages ADD COLUMN original_content TEXT")
         c.executescript(FTS_SCHEMA)
         # The bridge indexes (chat_jid, timestamp); the plan test below needs it.
         c.execute("CREATE INDEX idx_messages_chat_timestamp ON messages(chat_jid, timestamp)")

@@ -19,7 +19,7 @@ func newMessagesDB(t *testing.T) *sql.DB {
 		CREATE TABLE messages (
 			id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP, is_from_me BOOLEAN,
 			media_type TEXT, filename TEXT, url TEXT, media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB,
-			file_length INTEGER, deleted_at TIMESTAMP, quoted_message_id TEXT,
+			file_length INTEGER, deleted_at TIMESTAMP, quoted_message_id TEXT, original_content TEXT,
 			PRIMARY KEY (id, chat_jid)
 		);
 	`); err != nil {
@@ -35,6 +35,110 @@ func countMatches(t *testing.T, db *sql.DB, match string) int {
 		t.Fatalf("MATCH %q: %v", match, err)
 	}
 	return n
+}
+
+func TestOriginalContentFTSAfterEditAndRestart(t *testing.T) {
+	ms, _ := lockedProductionStore(t)
+	// Reopening an empty store must preserve a usable, completed index.
+	if on, err := ensureMessagesFTS(ms.db); err != nil || !on {
+		t.Fatalf("empty restart on=%v err=%v", on, err)
+	}
+	stamp := time.Unix(1772359200, 0)
+	if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.StoreMessage(storedMessage{ID: "EDITED", ChatJID: phonePN.String(), Sender: phonePN.String(), Content: "oldword", Timestamp: stamp}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.UpdateMessageContent("EDITED", phonePN.String(), "newword", stamp.Add(time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if countMatches(t, ms.db, "oldword") != 1 || countMatches(t, ms.db, "newword") != 1 {
+			t.Fatal("both current and pre-edit words must find the same message")
+		}
+		if on, err := ensureMessagesFTS(ms.db); err != nil || !on {
+			t.Fatalf("restart on=%v err=%v", on, err)
+		}
+	}
+	if err := ms.UpdateMessageContent("EDITED", phonePN.String(), "latestword", stamp.Add(2*time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if countMatches(t, ms.db, "oldword") != 1 || countMatches(t, ms.db, "newword") != 0 || countMatches(t, ms.db, "latestword") != 1 {
+		t.Fatal("later edit must retain the first text and remove intermediate tokens")
+	}
+	if _, err := ms.db.Exec(`INSERT INTO messages_fts(messages_fts,rank) VALUES('integrity-check',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.db.Exec("DELETE FROM messages WHERE id='EDITED'"); err != nil {
+		t.Fatal(err)
+	}
+	if countMatches(t, ms.db, "oldword") != 0 || countMatches(t, ms.db, "latestword") != 0 {
+		t.Fatal("delete left stale edit tokens")
+	}
+}
+
+func TestOriginalContentFTSBoundedMigration(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprint(interrupted), func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			ms.db.SetMaxOpenConns(1) // A page cursor must be closed before a write.
+			if err := ms.StoreChat("5511999999999@s.whatsapp.net", "Alice", time.Unix(1772359200, 0)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ms.db.Exec(ftsTeardown + `
+				DELETE FROM schema_migrations WHERE name='messages_fts_original_content_v3';
+				PRAGMA user_version=999;
+				CREATE TABLE migration_probe(n INTEGER);
+				WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1041)
+				INSERT INTO messages(id,chat_jid,content,original_content)
+				SELECT printf('M%d',n),'5511999999999@s.whatsapp.net','currentword','originalword' FROM seq;
+				INSERT INTO messages(rowid,id,chat_jid,content,original_content) VALUES(-5,'NEGATIVE','5511999999999@s.whatsapp.net','currentword','originalword');
+				CREATE VIEW messages_fts_content AS SELECT rowid,content,filename FROM messages;
+				CREATE VIRTUAL TABLE messages_fts USING fts5(content,filename,content='messages_fts_content',content_rowid='rowid');
+				INSERT INTO messages_fts(messages_fts) VALUES('rebuild');`); err != nil {
+				t.Fatal(err)
+			}
+			chunks := 0
+			err := buildMessagesFTS(ms.db, func(n int) error {
+				chunks++
+				if n <= 0 || n > ftsBackfillChunk || countMatches(t, ms.db, "currentword") != 1042 || countMatches(t, ms.db, "originalword") != 0 {
+					t.Fatal("unbounded chunk or partial replacement published")
+				}
+				// A separate write on a one-connection pool proves each chunk has
+				// committed and released both its cursor and the SQLite writer.
+				if _, err := ms.db.Exec("INSERT INTO migration_probe VALUES(?)", n); err != nil {
+					return err
+				}
+				if interrupted {
+					return fmt.Errorf("interrupted after one committed chunk")
+				}
+				return nil
+			})
+			if (err != nil) != interrupted || !interrupted && chunks != 3 || interrupted && chunks != 1 {
+				t.Fatalf("chunks=%d err=%v", chunks, err)
+			}
+			if applied, err := migrationApplied(ms.db, originalContentFTSMigration); err != nil || applied {
+				t.Fatalf("unpublished replacement marked complete: %v %v", applied, err)
+			}
+			if on, err := ensureMessagesFTS(ms.db); err != nil || !on || countMatches(t, ms.db, "originalword") != 1042 {
+				t.Fatalf("migration/recovery on=%v err=%v", on, err)
+			}
+			if on, err := ensureMessagesFTSMigration(ms.db, true, func(*sql.Tx) error {
+				t.Fatal("completed migration rebuilt on restart")
+				return nil
+			}); err != nil || !on {
+				t.Fatalf("idempotent restart on=%v err=%v", on, err)
+			}
+			var markers, staging int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE name=?", originalContentFTSMigration).Scan(&markers); err != nil || markers != 1 {
+				t.Fatalf("markers=%d err=%v", markers, err)
+			}
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name GLOB 'messages_fts_build*'").Scan(&staging); err != nil || staging != 0 {
+				t.Fatalf("unpublished table remains: %d err=%v", staging, err)
+			}
+		})
+	}
 }
 
 // The linked pure-Go driver must provide FTS5. Its real index is created,
@@ -138,7 +242,7 @@ func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
 			if _, err := ensureMessagesFTS(store.db); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.db.Exec("DELETE FROM schema_migrations WHERE name=?", documentFilenameFTSMigration); err != nil {
+			if _, err := store.db.Exec("DELETE FROM schema_migrations WHERE name=?", originalContentFTSMigration); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := store.db.Exec(ftsTeardown + `
@@ -152,7 +256,7 @@ func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
 				t.Fatal("broken leftover trigger must refuse a real StoreMessage before cleanup")
 			}
 			on, err := ensureMessagesFTSMigration(store.db, true, func(tx *sql.Tx) error {
-				if _, err := tx.Exec(ftsTeardown + ftsSchema); err != nil {
+				if _, err := tx.Exec(ftsTeardown + ftsViewSchema + ftsSchema); err != nil {
 					return err
 				}
 				return fmt.Errorf("%s", failure)
@@ -255,7 +359,7 @@ func TestDocumentFilenameFTSMigration(t *testing.T) {
 	if on, err := ensureMessagesFTS(db); err != nil || !on {
 		t.Fatalf("restart must skip rebuild: on=%v err=%v", on, err)
 	}
-	if _, err := db.Exec(`DROP VIEW messages_fts_content;` + ftsSchema); err != nil {
+	if _, err := db.Exec(`DROP VIEW messages_fts_content;` + ftsViewSchema + ftsSchema); err != nil {
 		t.Fatal(err)
 	}
 	for _, step := range []struct {
@@ -283,5 +387,110 @@ func TestDocumentFilenameFTSMigration(t *testing.T) {
 	}
 	if on, err := ensureMessagesFTS(db); err != nil || !on || countMatches(t, db, "caption") != 1 {
 		t.Fatalf("re-enable: on=%v err=%v", on, err)
+	}
+}
+
+func legacyOriginalFTS(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(ftsTeardown + `
+		CREATE VIEW messages_fts_content AS SELECT rowid,content,filename FROM messages;
+		CREATE VIRTUAL TABLE messages_fts USING fts5(content,filename,content='messages_fts_content',content_rowid='rowid');
+		INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+		CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+			INSERT INTO messages_fts(rowid,content,filename) VALUES(new.rowid,new.content,new.filename);
+		END;
+		CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts,rowid,content,filename) VALUES('delete',old.rowid,old.content,old.filename);
+		END;
+		CREATE TRIGGER messages_fts_au AFTER UPDATE OF content,filename ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts,rowid,content,filename) VALUES('delete',old.rowid,old.content,old.filename);
+			INSERT INTO messages_fts(rowid,content,filename) VALUES(new.rowid,new.content,new.filename);
+		END;`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOriginalFTSRepairsRolledBackShapeWithMarker(t *testing.T) {
+	db := newMessagesDB(t)
+	if _, err := db.Exec(`INSERT INTO messages(id,chat_jid,content,original_content) VALUES('EDITED','c','foo','bar')`); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on {
+		t.Fatalf("initial index: on=%v err=%v", on, err)
+	}
+	legacyOriginalFTS(t, db) // A rolled-back image recreated v2, retaining v3's marker.
+	if applied, err := migrationApplied(db, originalContentFTSMigration); err != nil || !applied {
+		t.Fatalf("marker missing before repair: %v %v", applied, err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on || countMatches(t, db, "bar") != 1 {
+		t.Fatalf("shape repair: on=%v err=%v", on, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages_fts(messages_fts,rank) VALUES('integrity-check',1)`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOriginalFTSFailureKeepsPublishedIndex(t *testing.T) {
+	for _, phase := range []string{"build", "publication"} {
+		t.Run(phase, func(t *testing.T) {
+			db := newMessagesDB(t)
+			if _, err := db.Exec(`WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<513)
+		INSERT INTO messages(id,chat_jid,content,filename,original_content)
+		SELECT printf('M%d',n),'c','currentword','','originalword' FROM seq`); err != nil {
+				t.Fatal(err)
+			}
+			legacyOriginalFTS(t, db)
+			on, err := ensureMessagesFTSBuild(db, true, func(tx *sql.Tx) error {
+				if phase == "build" {
+					t.Fatal("failed build must not publish")
+				}
+				if _, err := tx.Exec(ftsIndexTeardown + `ALTER TABLE messages_fts_build RENAME TO messages_fts;` + ftsSchema); err != nil {
+					return err
+				}
+				return fmt.Errorf("injected SQLITE_FULL during publication")
+			}, func() error {
+				if phase == "build" {
+					return buildMessagesFTS(db, func(int) error { return fmt.Errorf("injected SQLITE_FULL") })
+				}
+				return buildMessagesFTS(db, nil)
+			})
+			if err == nil || !on || countMatches(t, db, "currentword") != 513 || countMatches(t, db, "originalword") != 0 {
+				t.Fatalf("old index lost on failed upgrade: on=%v err=%v", on, err)
+			}
+			var staging int
+			if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name GLOB 'messages_fts_build*'").Scan(&staging); err != nil || staging != 0 {
+				t.Fatalf("staging remains=%d err=%v", staging, err)
+			}
+			if applied, err := migrationApplied(db, originalContentFTSMigration); err != nil || applied {
+				t.Fatalf("failed build marked complete: %v %v", applied, err)
+			}
+			if _, err := db.Exec(`INSERT INTO messages(id,chat_jid,content,filename) VALUES('PROBE','c','insertword','');
+		UPDATE messages SET content='updateword' WHERE id='PROBE';`); err != nil {
+				t.Fatal(err)
+			}
+			if countMatches(t, db, "insertword") != 0 || countMatches(t, db, "updateword") != 1 {
+				t.Fatal("published insert/update triggers stopped working")
+			}
+			if _, err := db.Exec("DELETE FROM messages WHERE id='PROBE'"); err != nil || countMatches(t, db, "updateword") != 0 {
+				t.Fatalf("published delete trigger stopped working: %v", err)
+			}
+			if on, err := ensureMessagesFTS(db); err != nil || !on || countMatches(t, db, "originalword") != 513 {
+				t.Fatalf("next startup did not retry: on=%v err=%v", on, err)
+			}
+		})
+	}
+}
+
+func TestOriginalFTSEmptyArchiveSkipsStaging(t *testing.T) {
+	db := newMessagesDB(t)
+	on, err := ensureMessagesFTSBuild(db, true, func(tx *sql.Tx) error {
+		_, err := tx.Exec(ftsTeardown + ftsViewSchema + ftsSchema)
+		return err
+	}, func() error { t.Fatal("empty archive must not build a staging index"); return nil })
+	if err != nil || !on {
+		t.Fatalf("empty publication on=%v err=%v", on, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,chat_jid,content,original_content) VALUES('EDITED','c','foo','bar')`); err != nil || countMatches(t, db, "bar") != 1 {
+		t.Fatalf("empty archive's published trigger failed: %v", err)
 	}
 }

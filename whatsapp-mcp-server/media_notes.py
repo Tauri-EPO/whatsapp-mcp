@@ -696,7 +696,7 @@ def _match_transcripts(conn: sqlite3.Connection, needle: str) -> sqlite3.Cursor:
         f"WHERE {TRANSCRIPTS_FTS_TABLE} MATCH ? ORDER BY score"  # nosec B608 # fixed FTS table identifier; _match_transcripts binds the MATCH text
     )
     try:
-        return conn.execute(sql, (needle,))
+        return conn.execute(sql, (whatsapp._fts_current_exclusions(needle, ""),))
     except sqlite3.OperationalError:
         # Raw text was not valid FTS5 syntax (operator characters, unbalanced
         # quotes...); retry with every token quoted, as the message side does.

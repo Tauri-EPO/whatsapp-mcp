@@ -314,14 +314,50 @@
   {
     "path": "whatsapp-mcp-server/whatsapp.py",
     "function": "<module>",
-    "fingerprint": "f675452a4df3f3b9ee3f1f6ce0504672253a43e27c54763207be920ff737faea",
-    "reason": "both table names are module constants; QueryPredicate binds MATCH text"
+    "fingerprint": "5f814af1e8f9309fa370e1dd52b22e102da0206f6b9f35a45993951af818c064",
+    "reason": "table name is a module constant; MATCH text is bound by QueryPredicate"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "<module>",
+    "fingerprint": "696a9746684716545e656c5f61e1a8ec52fe8f372c2bae84e6dba15476719808",
+    "reason": "temp table name is a module constant; no external SQL fragments"
   },
   {
     "path": "whatsapp-mcp-server/whatsapp.py",
     "function": "_query_predicate",
-    "fingerprint": "eef0717adbc5cd2a5b4eb4bae7d48b042ad8bd227290fe08fdfd6f1cca888015",
-    "reason": "predicate and temp table are module constants; QueryPredicate binds search text"
+    "fingerprint": "6884fb8c1b43f7a9700a7a8635dc561e91c32aeb5bc931957c8a637dc168d777",
+    "reason": "branches are fixed internal SQL; all search values are bound in join_params"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_query_predicate",
+    "fingerprint": "c60611d58a1e384575f40acb442cf51720d64efb417bc0c5e32d6e506bae3445",
+    "reason": "clause and temp table are internal SQL; QueryPredicate binds search text"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_original_match_keys",
+    "fingerprint": "33feb621794e42ba87e5d72f1eb9ee5c8335df1847e1a4251c5b529db9ab58f6",
+    "reason": "slots contain placeholders only; already authorised page keys are bound below"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_original_match_keys",
+    "fingerprint": "fad77784f1778fb91a8f21f0ae0abfa7c2e9f88a1ceec1b1a4a2a70a12e35e50",
+    "reason": "page contains placeholders only; page keys and MATCH text are bound below"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_original_match_keys",
+    "fingerprint": "19ed1e6e4988303d54511281ccc619e5b4fe44ca7aeb350e0541621a75f0debc",
+    "reason": "page uses bound keys; substring predicate is a module constant with bound search values"
+  },
+  {
+    "path": "whatsapp-mcp-server/whatsapp.py",
+    "function": "_original_match_keys",
+    "fingerprint": "bed1d524a0a985d650c7ce55d9fd817167240223f7c3bf5dbbe583f3bc8ded6c",
+    "reason": "fixed page SQL and temp table name; no external SQL fragments"
   },
   {
     "path": "whatsapp-mcp-server/whatsapp.py",

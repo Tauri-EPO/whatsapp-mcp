@@ -79,7 +79,7 @@ func TestIncompleteMediaReplayPreservesCaptionAndFTS(t *testing.T) {
 	for _, batch := range []bool{false, true} {
 		t.Run(map[bool]string{false: "live", true: "history batch"}[batch], func(t *testing.T) {
 			ms := newTestMessageStore(t)
-			if _, err := ms.db.Exec(ftsSchema); err != nil {
+			if _, err := ms.db.Exec(ftsViewSchema + ftsSchema); err != nil {
 				t.Fatal(err)
 			}
 			ts := time.Now().Truncate(time.Second)

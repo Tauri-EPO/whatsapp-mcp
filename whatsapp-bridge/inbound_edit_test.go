@@ -64,13 +64,14 @@ func TestInboundEditWrappedReplacementKeepsCaptionAndMentions(t *testing.T) {
 					t.Fatal(err)
 				}
 				var oldFTS, newFTS int
-				if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'oldword'").Scan(&oldFTS); err != nil {
+				if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'content:oldword'").Scan(&oldFTS); err != nil {
 					t.Fatal(err)
 				}
 				if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'wrappededitword'").Scan(&newFTS); err != nil {
 					t.Fatal(err)
 				}
-				if content != "wrappededitword" || mentions != selfPhone.User || edited != stamp.Add(time.Minute).UnixMilli() || oldFTS != 0 || newFTS != 1 {
+				originalFTS := countMatches(t, ms.db, "original_content:oldword")
+				if content != "wrappededitword" || mentions != selfPhone.User || edited != stamp.Add(time.Minute).UnixMilli() || oldFTS != 0 || newFTS != 1 || originalFTS != 1 {
 					t.Fatalf("wrapped edit content=%q mentions=%q edited=%d oldFTS=%d newFTS=%d", content, mentions, edited, oldFTS, newFTS)
 				}
 			})
@@ -368,10 +369,11 @@ func TestInboundEditLiveAndHistoryTargetFTSAndReplay(t *testing.T) {
 			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'replacementword'").Scan(&fresh); err != nil {
 				t.Fatal(err)
 			}
-			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'originalword'").Scan(&old); err != nil {
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'content:originalword'").Scan(&old); err != nil {
 				t.Fatal(err)
 			}
-			if content != "replacementword" || other != "originalword" || rows != 2 || fresh != 1 || old != 1 || b.metrics.storeFailures.Load() != 0 {
+			originalFTS := countMatches(t, ms.db, "original_content:originalword")
+			if content != "replacementword" || other != "originalword" || rows != 2 || fresh != 1 || old != 1 || originalFTS != 1 || b.metrics.storeFailures.Load() != 0 {
 				t.Fatalf("content=%q other=%q rows=%d FTS=%d/%d failures=%d", content, other, rows, fresh, old, b.metrics.storeFailures.Load())
 			}
 		})
