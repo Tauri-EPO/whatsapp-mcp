@@ -134,16 +134,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// its final archive write; only SDK reads and retry waits are cancellable.
 	writeCtx := context.WithoutCancel(lookupCtx)
 	client, messageStore, logger := b.currentClient(), b.Store, b.Log
-	// View-once envelopes hide the real media one level down. Work on a local
-	// copy of the event with the envelope removed so every extractor below
-	// sees the real message and other handlers keep the original untouched.
-	original := msg.Message
-	// ParseWebMessage unwraps an edit into its new text and target ID. Its
-	// RawMessage retains the protocol key/timestamp needed for ordered updates.
-	// A direct or ephemeral protocol edit may have IsEdit=false in the SDK.
-	if msg.RawMessage != nil && extractMessage(msg.RawMessage, msg.Info.Timestamp, msg.Info.ID).edit != nil {
-		original = msg.RawMessage
-	}
+	extractionEvent := msg // retain SDK envelopes and the original decryption metadata
 	if inner, wrapped := unwrapViewOnce(msg.Message); wrapped {
 		unwrapped := *msg
 		unwrapped.Message = inner
@@ -287,7 +278,7 @@ func (b *Bridge) handleMessage(msg *events.Message) {
 	// Text, media, poll, quote and mentions in one pass (persist.go). The
 	// timestamp must be the retry-corrected one stored below: downloadMedia
 	// rebuilds the on-disk filename from the stored row.
-	ex := extractMessage(original, msgTimestamp, msg.Info.ID)
+	ex := b.extractIncomingMessage(lookupCtx, extractionEvent, msgTimestamp)
 	ex.retryChat, ex.retrySender = msg.Info.Chat.String(), msg.Info.Sender.ToNonAD().String()
 	// whatsmeow unwraps live envelopes before dispatch and keeps this flag.
 	if msg.IsViewOnce && !ex.viewOnce {

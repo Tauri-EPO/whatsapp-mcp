@@ -263,6 +263,7 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}
 	for column, spec := range map[string]string{
 		"message_edit_timestamp": "INTEGER NOT NULL DEFAULT 0",
+		"original_content":       "TEXT",
 		"read_receipt_sent":      "INTEGER NOT NULL DEFAULT 0",
 		"media_retry_chat":       "TEXT",
 		"media_retry_sender":     "TEXT",
@@ -617,7 +618,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, sender_server, content, timestamp, is_from_me,
 			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, direct_path, media_presentation, location,
-			quoted_message_id, mentions, deleted_at, view_once, target_message_id, message_edit_timestamp, media_retry_chat, media_retry_sender, read_receipt_sent, forwarding_score
+			quoted_message_id, mentions, deleted_at, view_once, target_message_id, message_edit_timestamp, original_content, media_retry_chat, media_retry_sender, read_receipt_sent, forwarding_score
 		)
 		SELECT
 			msg.id,
@@ -643,6 +644,7 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			msg.view_once,
 			msg.target_message_id,
 			msg.message_edit_timestamp,
+			msg.original_content,
 			msg.media_retry_chat,
 			msg.media_retry_sender,
 			msg.read_receipt_sent,

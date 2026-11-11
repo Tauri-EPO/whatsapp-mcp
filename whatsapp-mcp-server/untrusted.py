@@ -58,7 +58,7 @@ CLOSE_TAG = "</untrusted>"
 # "value" only ever a note (media_notes.py, notes.py) and "replaced" the note
 # value a write displaced; no tool carrying this decorator returns any of them
 # with a different meaning.
-WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "value", "replaced"})
+WRAPPED_KEYS = frozenset({"content", "original_content", "last_message", "transcript", "text", "value", "replaced"})
 
 # Business label names use the same untrusted name sanitization.
 # Result keys holding a short label somebody else chose: a contact's push name,

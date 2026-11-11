@@ -47,8 +47,8 @@ Rules worth knowing:
 
 - **`count_only` is a count, not a page.** Combining it with `fields`, `cursor` or `page` is refused with `invalid_argument` (they describe rows that are not returned); `limit`, `omit_nulls` and `max_content_chars` are simply ignored. `list_unread` returns `{"count": N, "chats_with_unread": N}` and counts *every* matching chat, not just `limit_chats` of them. The single-row tools `get_chat` and `get_message_context` have no `count_only` — there is nothing to count — and passing it is refused as an [unknown argument](#unknown-arguments).
 - **`content_truncated` survives a projection** that did not ask for it. Shortened text is never passed off as complete.
-- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `forwarded`, `frequently_forwarded`, `forwarding_score`, `bytes`, `sha256`, plus `notes`, `transcript` and `content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
-- **The long text `max_content_chars` cuts is the row's own.** `content` on message rows, `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
+- **The valid `fields` names are the keys the rows actually carry.** For messages: `id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `edited_at`, `original_content`, `view_once`, `forwarded`, `frequently_forwarded`, `forwarding_score`, `bytes`, `sha256`, plus `notes`, `transcript`, `content_truncated` and `original_content_truncated` when present. `list_chats`, `get_chat` and `list_unanswered` return chat rows, so their names are the chat ones: `jid`, `name`, `push_name`, `name_source`, `is_group`, `last_message_time`, `last_message`, `last_sender`, `last_is_from_me`, `last_read_time`, `has_messages`, `unread`, plus `last_inbound_time` and `age_hours` on `list_unanswered` only, and `is_status` on `list_chats` / `get_chat` only — those are refused on the other tool rather than accepted and then dropped.
+- **The long text `max_content_chars` cuts is the row's own.** `content` and `original_content` on message rows (the latter sets `original_content_truncated`), `last_message` on the chat rows of `list_chats` / `get_chat`; the flag is `content_truncated` either way. `list_unanswered` has no `max_content_chars` — use `include_last_message=false` to drop the text.
 
 ## Unknown arguments
 
@@ -772,7 +772,7 @@ Get messages with filters, date ranges, and sorting.
 - `before` / `after` (optional): ISO-8601 bounds (`2026-01-09` or `2026-01-09T18:00:00`)
 - `sender_jid` (optional): Only messages from this sender (phone number or JID)
 - `include_context` (optional, default `true`), `context_before` / `context_after` (default 1, max 50 each): surrounding messages for every match. The whole result is capped at 2000 rows; with large `limit` values the windows shrink to fit, so prefer `include_context=false` when paging through many matches
-- `query` (optional): Search message text, stored audio transcripts and original document filenames (generated image/audio/video names are excluded). With the bridge's FTS5 index (always available) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use the same `LOWER`/`instr` substring rule for content and original document filenames: ASCII case folding and otherwise exact Unicode characters, with no accent folding
+- `query` (optional): Search current message text (not `original_content`), stored audio transcripts and original document filenames (generated image/audio/video names are excluded). With the bridge's FTS5 index (always available) it is accent-insensitive and word-based: `orcamento` finds `orçamento`, `ana` no longer matches `semana`, and `AND` / `OR` / `NOT`, `"exact phrase"` and `prefix*` work. Queries in scripts without word spacing (CJK, Thai) and bridges built without FTS5 use the same `LOWER`/`instr` substring rule for content and original document filenames: ASCII case folding and otherwise exact Unicode characters, with no accent folding
 - `sort_by` (optional): "newest" (default), "oldest", or "relevance" (best match for `query` first)
 - `include_deleted` (optional, default `true`): keep messages that were "deleted for everyone". They are returned with their original text/media and a `deleted_at` timestamp; `false` hides them
 - `unread_only` (optional, default `false`): only inbound messages newer than their chat's read marker (`last_read_time`, as read on any linked device). `unread_only=true, sort_by="oldest", include_context=false` lists what still needs attention, oldest first
@@ -783,6 +783,17 @@ Get messages with filters, date ranges, and sorting.
 - `mentions_me` (optional, default `false`): `true` keeps only the messages that **mentioned you** — see [Mentions of you](#mentions-of-you)
 - `include_transcripts` (optional, default `false`): `true` copies the stored transcript of each voice note onto its row as `transcript`. It comes from the same batched `notes.db` lookup the rows already do, costs no extra query and **never** transcribes: audio never passed to `transcribe_audio` simply has none. `media_type="audio", include_transcripts=true` reads a conversation held by voice
 - `fields`, `omit_nulls`, `max_content_chars`, `count_only`: shape the response instead of returning every key of every row — see [Compact reads](#compact-reads). Start a bulk read with `count_only=true`
+
+Message rows include `edited_at` (ISO-8601 UTC, from the latest edit's Unix
+millisecond timestamp) and `original_content` (the text before the first edit).
+`get_message_context` returns the same fields on the anchor and surrounding
+messages. A `null` original means unknown or unedited: rows first edited before
+this upgrade cannot recover their original text, and later edits keep it unknown.
+For new edits, later edits and history replays retain the first saved text,
+including an empty caption. An edit timestamp outside the representable date
+range is returned as `null`; the message remains readable. `max_content_chars`
+also limits `original_content`, setting `original_content_truncated=true` when
+shortened; the flag survives a `fields` projection like `content_truncated`.
 
 The four filters above are plain WHERE predicates, so they combine with each other and with
 every filter above: `from_me=false, media_type="document", exclude_groups=true`
@@ -992,7 +1003,7 @@ and flat memory.
 - `chat_jid` / `exclude_chat_jid` (optional): one conversation or a list of them — see [Chat filters](#chat-filters)
 - `out_path` (optional): file name, or relative path, **inside the export directory**. Default `messages-<chat>-<timestamp>.ndjson`, or `messages-all-<timestamp>.ndjson` for anything but a single chat. An existing file is overwritten
 - `format` (optional, default `"ndjson"`): one JSON object per line, UTF-8, oldest first. The only format today
-- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `view_once`, `forwarded`, `frequently_forwarded`, `forwarding_score`, `bytes`, `sha256`, `notes`). Default: all of them
+- `fields` (optional): subset of the message keys to write (`id`, `timestamp`, `sender_jid`, `sender_phone`, `sender_lid`, `sender_name`, `sender_push_name`, `sender_display`, `content`, `is_from_me`, `chat_jid`, `chat_name`, `media_type`, `location`, `filename`, `target_message_id`, `reaction_to_message_id`, `poll_message_id`, `quoted_message_id`, `deleted_at`, `edited_at`, `original_content`, `view_once`, `forwarded`, `frequently_forwarded`, `forwarding_score`, `bytes`, `sha256`, `notes`). Default: all of them
 - `sender_jid`, `from_me`, `has_media`, `media_type`, `exclude_groups`, `include_deleted`: the same predicates as `list_messages`
 
 **Returns:**

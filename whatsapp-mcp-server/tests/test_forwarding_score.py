@@ -40,7 +40,7 @@ def test_legacy_archive_has_unknown_forwarding(paired_dbs):
     assert all(r["forwarding_score"] is None and not r["forwarded"] and not r["frequently_forwarded"] for r in rows)
 
 
-@pytest.mark.parametrize("length", [0, 1, 15, 19, 20])
+@pytest.mark.parametrize("length", [0, 1, 15, 19, 21])
 def test_malformed_projection_is_refused(length):
     row = (
         "2026-11-01 00:00:00+00:00",
@@ -64,11 +64,12 @@ def test_malformed_projection_is_refused(length):
         None,
         None,
     )
+    row = (*row, None)  # 20 columns is now the complete edit + forwarding projection.
     with pytest.raises(ValueError):
         whatsapp._row_to_message(row[:length])
 
 
-@pytest.mark.parametrize("length", [16, 17, 18])
+@pytest.mark.parametrize("length", [16, 17, 18, 20])
 def test_known_projection_versions(length):
     row = (
         "2026-11-01 00:00:00+00:00",
@@ -90,9 +91,10 @@ def test_known_projection_versions(length):
         None,
         None,
     )
-    message = whatsapp._row_to_message(row[:length])
+    message = whatsapp._row_to_message((*row, None, None)[:length])
     assert message.id == "LEGACY"
     assert message.forwarding_score is None
+    assert message.edited_at is None and message.original_content is None
 
 
 @pytest.mark.parametrize(

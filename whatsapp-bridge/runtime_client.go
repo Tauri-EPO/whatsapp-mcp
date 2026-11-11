@@ -9,6 +9,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -179,6 +180,9 @@ func (b *Bridge) bindRuntimeClient() {
 	}
 	b.PollVoteDecrypt = func(ctx context.Context, evt *events.Message) ([][]byte, error) {
 		return whatsmeowPollVoteDecrypter(b.currentClient())(ctx, evt)
+	}
+	b.SecretEditDecrypt = func(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
+		return b.currentClient().DecryptSecretEncryptedMessage(ctx, evt)
 	}
 	b.IsOnWhatsApp = func(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {
 		return b.currentClient().IsOnWhatsApp(ctx, phones)

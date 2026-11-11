@@ -508,6 +508,8 @@ class Message:
     sha256: str | None = None
     # Native location fields; NULL on old text-only rows, never reconstructed.
     location: dict[str, Any] | None = None
+    edited_at: datetime | None = None
+    original_content: str | None = None
     forwarding_score: int | None = None
 
 
@@ -518,14 +520,15 @@ MESSAGE_COLUMNS = (
     "messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, "
     "messages.chat_jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
     "messages.deleted_at, messages.view_once, messages.target_message_id, "
-    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location, messages.forwarding_score"
+    "messages.file_length, lower(hex(messages.file_sha256)), messages.sender_server, messages.location, messages.forwarding_score, "
+    "messages.message_edit_timestamp, messages.original_content"
 )
 
 
 def message_columns(cursor: sqlite3.Cursor) -> str:
     """MESSAGE_COLUMNS as this store can answer it.
 
-    Older bridges may lack sender_server, location or forwarding_score. Select NULL for those
+    Older bridges may lack sender_server, location, forwarding_score or edit metadata. Select NULL for those
     fields so all readers keep the same projection and old archives remain
     readable without the MCP server changing the bridge-owned schema.
     """
@@ -537,7 +540,7 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
         schema=cursor,
     )
     columns = MESSAGE_COLUMNS
-    for optional in ("sender_server", "location", "forwarding_score"):
+    for optional in ("sender_server", "location", "forwarding_score", "message_edit_timestamp", "original_content"):
         if optional not in available:
             columns = columns.replace(f"messages.{optional}", "NULL")
     return columns
@@ -545,9 +548,9 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
-    if len(row) in (16, 17):  # known legacy materialized projections
-        row = (*row, *((None,) * (18 - len(row))))
-    elif len(row) != 18:
+    if len(row) in (16, 17, 18):  # known legacy materialized projections
+        row = (*row, *((None,) * (20 - len(row))))
+    elif len(row) != 20:
         raise ValueError(f"Unexpected message projection length: {len(row)}")
     (
         timestamp,
@@ -568,7 +571,16 @@ def _row_to_message(row: tuple) -> Message:
         sender_server,
         location,
         forwarding_score,
+        edit_timestamp,
+        original_content,
     ) = row
+    try:
+        edited_at = (
+            datetime.fromtimestamp(edit_timestamp / 1000, UTC) if edit_timestamp and edit_timestamp > 0 else None
+        )
+    except (OSError, OverflowError, ValueError):
+        # An invalid remote edit timestamp must not hide an otherwise readable row.
+        edited_at = None
     return Message(
         timestamp=parse_db_time(timestamp),
         sender=sender,
@@ -589,6 +601,8 @@ def _row_to_message(row: tuple) -> Message:
         bytes=int(file_length) if file_length is not None else None,
         sha256=sha256 or None,
         location=_location_fields(location),
+        edited_at=edited_at,
+        original_content=original_content,
         forwarding_score=forwarding_score,
     )
 
@@ -1146,6 +1160,8 @@ def msg_to_dict(
         "poll_message_id": (_target_id(message) if message.media_type == "poll_vote" else None),
         "quoted_message_id": message.quoted_message_id,
         "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
+        "edited_at": message.edited_at.isoformat() if message.edited_at else None,
+        "original_content": message.original_content,
         "view_once": message.view_once,
         "forwarding_score": message.forwarding_score,
         "forwarded": message.forwarding_score is not None,
@@ -1223,6 +1239,7 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "message_notes",
     "transcript",
     "content_truncated",
+    "original_content_truncated",
 )
 # "notes" is on every chat row, whichever listing produced it.
 _CHAT_ROW_FIELDS: tuple[str, ...] = (
@@ -1291,7 +1308,8 @@ def shape_rows(
     Order matters: truncation runs first (so a projection on the text field still
     gets the shortened text) and `content_truncated` survives a projection that
     did not ask for it, because losing that flag would make the truncated text
-    look complete.
+    look complete. Message rows also truncate `original_content`, with its own
+    `original_content_truncated` flag retained under the same projection rule.
     """
     selected = validate_fields(fields, known)
     limit = int(max_content_chars) if max_content_chars is not None else None
@@ -1303,12 +1321,16 @@ def shape_rows(
     shaped: list[dict[str, Any]] = []
     for row in rows:
         out = dict(row)
-        content = out.get(content_key)
-        if limit is not None and isinstance(content, str) and len(content) > limit:
-            out[content_key] = content[:limit]
-            out["content_truncated"] = True
+        text_fields = [(content_key, "content_truncated")]
+        if content_key == "content":
+            text_fields.append(("original_content", "original_content_truncated"))
+        for key, flag in text_fields:
+            content = out.get(key)
+            if limit is not None and isinstance(content, str) and len(content) > limit:
+                out[key] = content[:limit]
+                out[flag] = True
         if selected is not None:
-            keep = [*selected, "content_truncated"] if out.get("content_truncated") else selected
+            keep = [*selected, *(flag for _, flag in text_fields if out.get(flag))]
             out = {name: out[name] for name in keep if name in out}
         if omit_nulls:
             out = {name: value for name, value in out.items() if not _is_empty(value)}
