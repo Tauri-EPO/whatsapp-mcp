@@ -132,4 +132,11 @@ func TestPeerReceiptsFollowOriginalDeletion(t *testing.T) {
 	if n := count(); n != 1 {
 		t.Fatalf("after single original delete receipts=%d, want only newer original", n)
 	}
+	result, err = b.deleteForMeLocal(context.Background(), []deleteForMeRef{{row: mediaRow{ID: "later", ChatJID: group.String()}, fromMe: true}})
+	if err != nil || result.Messages != 1 {
+		t.Fatal(result, err)
+	}
+	if n := count(); n != 0 {
+		t.Fatalf("after delete-for-me receipts=%d, want none", n)
+	}
 }

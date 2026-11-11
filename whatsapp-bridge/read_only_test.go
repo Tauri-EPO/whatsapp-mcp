@@ -94,6 +94,7 @@ var readOnlyMutatingEndpoints = []struct {
 	{"/api/block", `{"jid":"5511999999999@s.whatsapp.net","blocked":true}`},
 	{"/api/chat/label", `{"chat_jid":"5511999999999@s.whatsapp.net","label_id":"1","labeled":true}`},
 	{"/api/delete", `{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"M1","for_everyone":true}`},
+	{"/api/delete-for-me", `{"chat_jid":"5511999999999@s.whatsapp.net","message_ids":["M1"],"confirm":true}`},
 	{"/api/edit", `{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"M1","text":"new"}`},
 	{"/api/forward", `{"chat_jid":"5511999999999@s.whatsapp.net","message_id":"M1","to_chat_jid":"120363000000000001@g.us"}`},
 	{"/api/group/participants", `{"group_jid":"120363000000000001@g.us","action":"remove","participants":["5511999999999"]}`},

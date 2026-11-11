@@ -124,6 +124,34 @@ type chatAppStateAnchor struct {
 	ts     time.Time
 }
 
+// resolveChatAliases resolves the patch target (PN rewritten to LID) and every
+// stored alias of an authorized chat the policy also permits. It writes the
+// refusal itself and reports ok=false; nothing has been sent at that point.
+func (deps archiveDeps) resolveChatAliases(ctx context.Context, w http.ResponseWriter, policy chatPolicy, chat types.JID, expired string) (types.JID, []string, bool) {
+	target, err := deps.resolve(ctx, chat.String())
+	if ctx.Err() != nil {
+		writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", expired)
+		return types.EmptyJID, nil, false
+	}
+	if err != nil || target.User == "" || target.Server == "" {
+		writeError(w, http.StatusBadRequest, "Cannot resolve chat_jid")
+		return types.EmptyJID, nil, false
+	}
+	chats := []string{chat.String()}
+	addAlias := func(jid types.JID) {
+		if !jid.IsEmpty() && jid.String() != chat.String() && policy.Allows(jid.String()) {
+			chats = append(chats, jid.String())
+		}
+	}
+	addAlias(target)
+	if deps.twin != nil {
+		if twin, err := deps.twin(ctx, target); err == nil {
+			addAlias(twin)
+		}
+	}
+	return target, chats, true
+}
+
 // prepareChatAppState authorizes, resolves and anchors a direct chat or group
 // for an app-state patch. It writes the refusal itself and reports ok=false;
 // nothing has been sent to WhatsApp at that point.
@@ -141,26 +169,9 @@ func (deps archiveDeps) prepareChatAppState(ctx context.Context, w http.Response
 		writeError(w, http.StatusServiceUnavailable, "WhatsApp client is not connected. Please wait for reconnection.")
 		return chatAppStateAnchor{}, false
 	}
-	target, err := deps.resolve(ctx, chat.String())
-	if ctx.Err() != nil {
-		writeErrorCode(w, http.StatusRequestTimeout, "bridge_unavailable", expired)
+	target, chats, ok := deps.resolveChatAliases(ctx, w, policy, chat, expired)
+	if !ok {
 		return chatAppStateAnchor{}, false
-	}
-	if err != nil || target.User == "" || target.Server == "" {
-		writeError(w, http.StatusBadRequest, "Cannot resolve chat_jid")
-		return chatAppStateAnchor{}, false
-	}
-	chats := []string{chat.String()}
-	addAlias := func(jid types.JID) {
-		if !jid.IsEmpty() && jid.String() != chat.String() && policy.Allows(jid.String()) {
-			chats = append(chats, jid.String())
-		}
-	}
-	addAlias(target)
-	if deps.twin != nil {
-		if twin, err := deps.twin(ctx, target); err == nil {
-			addAlias(twin)
-		}
 	}
 	key, ts, err := deps.store.archiveAnchor(ctx, chats)
 	if err != nil {

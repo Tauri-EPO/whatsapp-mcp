@@ -177,6 +177,7 @@ whatsapp-mcp/
 │   ├── hours_env.go            # resolveHoursEnv: the "whole hours, 0 disables" variables of the periodic passes
 │   ├── group_manage.go         # /api/group/participants, /subject, /invite, /leave
 │   ├── delete_message.go       # /api/delete (revoke / local delete)
+│   ├── delete_for_me.go        # /api/delete-for-me: hand-built deleteMessageForMe patch (DMs), then local rows and media
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
 │   ├── webhook_runtime.go      # opt-in operator receiver, pinned HTTPS, HMAC and bounded delivery queue

@@ -12,7 +12,7 @@ reason: "quota"` and a subsequent read streams without retaining a cache copy.
 Local paths keep their existing behavior. See
 [Media storage backends](CONFIGURATION.md#media-storage-backends).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -1329,6 +1329,40 @@ Revoked messages keep their content locally with `deleted_at` set, the same as
 revokes received from another device. Local-only deletion removes the row (the
 FTS index follows); downloaded media is left in `store/`. Respects
 `WHATSAPP_ALLOWED_CHATS`.
+
+
+### `delete_messages_for_me`
+
+WhatsApp's "Delete for me": the messages disappear from this account's phone and
+linked devices, whoever sent them and however old they are; the other side keeps
+its copies. Not `delete_message` (revoke for everyone needs your own recent
+message; `for_everyone=false` only forgets the local row). **Irreversible.**
+
+**Parameters:** `chat_jid` (direct-chat JID, `@s.whatsapp.net` or `@lid`; groups
+return `invalid_argument` for now), `message_ids` (1–200 unique IDs from
+`list_messages` in that chat), `confirm` (default `false`).
+
+Without `confirm=true` it is a dry run read from `messages.db`, under the chat
+and its phone/LID twin as the bridge will look: `would_delete` lists the stored
+IDs (with `chat_jid`, `is_from_me`, `timestamp`, `media_type`), `not_found` the
+missing ones and `not_deletable` reaction or poll-vote pointer rows (not
+messages; they refuse the batch); nothing is sent. With
+`confirm=true` the bridge anchors every ID on its stored row under the chat and
+its phone/LID twin — one unknown ID refuses the whole batch with `not_found`,
+before anything is sent — and sends one app-state patch. After WhatsApp accepts
+it, the bridge removes those rows (twin copies included), the reactions and
+votes aimed at them, polls left without their message, the chat row once it is
+empty, and their cached media, media first; a row whose file could not be removed stays (`local_media_failed`).
+Returns `deleted_for_me`, `local_messages_removed`, `local_media_removed`,
+`sent: true`, `confirmed: false`; `local_cleanup_error` means do not resend.
+Error semantics follow `archive_chat`. The MCP call waits up to 60 s. Annotated
+`destructiveHint`; hidden and refused in read-only mode.
+
+whatsmeow has no builder for this patch: the bridge sends index
+`[deleteMessageForMe, chat, id, fromMe, "0"]`, version 3, with
+`DeleteMessageForMeAction{deleteMedia: true, messageTimestamp: seconds}`, the
+shape upstream VGP #293 verified on a live paired bridge. Groups need the
+sender in the participant slot, which is unverified, so they are refused.
 
 ### `edit_message`
 

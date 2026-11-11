@@ -105,6 +105,7 @@ EXPECTED_TRUSTED = {
     "label_chat",
     "archive_chat",
     "delete_chat",
+    "delete_messages_for_me",
     "block_contact",
     "get_blocklist",
     "bridge_status",
