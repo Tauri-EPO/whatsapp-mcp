@@ -89,6 +89,9 @@ func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPoli
 		if !ok {
 			return
 		}
+		// Every archive key below is the authorized canonical spelling (issue
+		// #827): an uppercase server passes authorization but is not the key.
+		req.ChatJID = chat.String()
 
 		if !req.ForEveryone {
 			if err := store.DeleteMessageRow(req.MessageID, req.ChatJID); err != nil {

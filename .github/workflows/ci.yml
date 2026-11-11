@@ -42,9 +42,30 @@ jobs:
       - name: Install audio test tooling
         # Exercise the provider's real oversized-audio chunking and existing
         # audio integration tests rather than depending on the runner image.
+        # Issue #828: apt on the runner hung 30-40 minutes when its Ubuntu
+        # mirrors (Azure, archive and security alike) failed DNS. The binary
+        # now comes from the same static image the server Dockerfile copies
+        # (mwader/static-ffmpeg:7.1, from Docker Hub, which the Docker Build
+        # job reaches during those outages), so the tests run the ffmpeg we
+        # ship. apt stays as a bounded fallback. Either way a missing ffmpeg
+        # fails the job (rerun with `gh run rerun --failed`); the audio tests
+        # are never skipped.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ffmpeg
+          set -u
+          image=mwader/static-ffmpeg:7.1
+          if timeout -k 15 180 docker pull -q "$image"; then
+            id=$(docker create "$image")
+            sudo docker cp "$id:/ffmpeg" /usr/local/bin/ffmpeg
+            docker rm "$id" >/dev/null
+          else
+            echo "::warning::could not pull $image; falling back to apt (bounded)"
+            apt_opts=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+            timeout -k 15 150 sudo apt-get "${apt_opts[@]}" -o APT::Update::Error-Mode=any update -q
+            timeout -k 15 240 sudo apt-get "${apt_opts[@]}" install -q --no-install-recommends -y ffmpeg
+          fi
+          command -v ffmpeg
+          ffmpeg -hide_banner -version | head -1
       - name: Run tests
         run: |
           cd whatsapp-mcp-server
@@ -61,7 +82,7 @@ jobs:
     # Step caps: 2 + 3 + 23 + 3 + 27 + 3 + 16 + 5 = 82 minutes.
     # Eight extra minutes let the job retain diagnostics/cleanup at its edge;
     # successful recent runs take 31-34 minutes.
-    timeout-minutes: 90
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 2
@@ -87,14 +108,17 @@ jobs:
           cd whatsapp-bridge
           go test -timeout 2m -v -run 'TestOperatorSocket' ./...
       - name: Race detector
-        timeout-minutes: 27
+        # 40 m package / 42 m step (issue #825): a complete run expired at
+        # 1500 s with no failure or race report, and a merged-tree run took
+        # 1781 s. The job cap is the 97 minutes of step caps plus 8 of margin.
+        timeout-minutes: 42
         # Own step so its cost and its failures are legible. The shipped binary
         # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it
         # (issue #351). The suite is one package and takes about nine minutes
         # under -race, so go test's default ten-minute timeout no longer fits.
         run: |
           cd whatsapp-bridge
-          go test -race -timeout 25m ./...
+          go test -race -timeout 40m ./...
       - uses: astral-sh/setup-uv@v7
         timeout-minutes: 3
       - name: Real MinIO and MCP media integration
