@@ -164,8 +164,8 @@ func TestCachedPNGDocumentNameReachesWireArchiveAndCache(t *testing.T) {
 	if name != "attachment.png" || kind != "document" || presentation["mime"] != "image/png" || score.Valid {
 		t.Fatalf("archive name=%s kind=%s presentation=%v score=%v", name, kind, presentation, score)
 	}
-	cached := filepath.Join(chatMediaDir(testGroupJID), mediaFileName("document", ts, "SENT", name))
-	got, err := os.ReadFile(cached)
+	cached := filepath.Join(testGroupJID, mediaFileName("document", ts, "SENT", name))
+	got, err := root.ReadFile(cached)
 	if err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("outbound cache %s bytes=%x err=%v", cached, got, err)
 	}

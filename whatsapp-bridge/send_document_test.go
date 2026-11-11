@@ -161,6 +161,8 @@ func TestSendDocumentDeniedBeforeEffects(t *testing.T) {
 func TestCachedMediaAsDocument(t *testing.T) {
 	for _, tc := range []struct{ kind, name, title, wantName, wantTitle string }{
 		{"image", "image_20261101_000000_SOURCE.jpg", "", "attachment", "attachment"},
+		{"video", "video_20261101_000000_SOURCE.mp4", "", "attachment", "attachment"},
+		{"sticker", "sticker_20261101_000000_SOURCE.webp", "", "attachment", "attachment"},
 		{"document", "report.pdf", "Original title", "report.pdf", "Original title"},
 		{"audio", "voice.ogg", "", "attachment", "attachment"},
 	} {
