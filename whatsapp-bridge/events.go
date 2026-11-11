@@ -615,6 +615,7 @@ func (b *Bridge) handleEvent(evt interface{}, reconnectChan chan<- bool) {
 		}
 
 	case *events.Receipt:
+		b.storePeerReceipts(v)
 		// Persist read state so consumers can distinguish genuine unread
 		// from "latest message is inbound". Only our own reads count.
 		if isSelfReadReceipt(v) {

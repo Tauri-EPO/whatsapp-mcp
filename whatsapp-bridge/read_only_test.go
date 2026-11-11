@@ -98,6 +98,7 @@ var readOnlyMutatingEndpoints = []struct {
 	{"/api/group/subject", `{"group_jid":"120363000000000001@g.us","name":"new"}`},
 	{"/api/group/invite", `{"group_jid":"120363000000000001@g.us","reset":true}`},
 	{"/api/group/leave", `{"group_jid":"120363000000000001@g.us"}`},
+	{"/api/group/create", `{"name":"Alice","participants":["5511999999999"]}`},
 	{"/api/media/purge", `{"chat_jid":"5511999999999@s.whatsapp.net","dry_run":false}`},
 	{"/api/history", `{"chat_jid":"5511999999999@s.whatsapp.net","count":50}`},
 }

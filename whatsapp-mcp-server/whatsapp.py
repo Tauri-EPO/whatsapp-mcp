@@ -12,6 +12,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import islice
@@ -5047,6 +5048,51 @@ def get_group_members(group_jid: str, limit: int = 100, page: int = 0, cursor: s
     return payload
 
 
+def get_message_receipts(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """Latest stored receipt per recipient and type, for own messages only."""
+    chat_jid, message_id = (chat_jid or "").strip(), (message_id or "").strip()
+    if not chat_jid or not message_id:
+        raise ToolError("invalid_argument", "chat_jid and message_id are required")
+    _require_allowed(chat_jid)
+    recipients: dict[str, dict[str, str]] = {}
+    with closing(_connect_messages_db()) as conn:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_receipts' AND type='table'").fetchone():
+            for alias in _chat_jid_aliases(chat_jid):
+                if not _readable(alias):
+                    continue
+                rows = conn.execute(
+                    """SELECT r.recipient, r.recipient_server, r.type, r.at
+                    FROM message_receipts r JOIN messages m ON m.chat_jid=r.chat_jid AND m.id=r.message_id
+                    WHERE r.chat_jid=? AND r.message_id=? AND m.is_from_me=1""",
+                    (alias, message_id),
+                ).fetchall()
+                for user, server, kind, at in rows:
+                    jid = f"{user}@{server}"
+                    if server == "lid":
+                        twins = _participant_twins(jid)
+                        jid = next((t for t in twins if t.endswith("@s.whatsapp.net")), jid)
+                    kinds = recipients.setdefault(jid, {})
+                    kinds[kind] = max(kinds.get(kind, ""), at)
+    rank = {"delivered": 0, "read": 1, "played": 2}
+    return {
+        "chat_jid": chat_jid,
+        "message_id": message_id,
+        "recipients": [
+            {"jid": jid, "status": max(kinds, key=lambda k: rank.get(k, -1)), "receipts": kinds}
+            for jid, kinds in sorted(recipients.items())
+        ],
+    }
+
+
+def check_business(jid: str) -> dict[str, Any]:
+    """Check a phone/LID business identity without treating failures as people."""
+    jid = (jid or "").strip()
+    _require_allowed(jid)
+    if not jid.endswith(("@s.whatsapp.net", "@lid")):
+        raise ToolError("invalid_argument", "jid must be a phone or LID user JID")
+    return _bridge_json(_bridge_request("GET", "/business", params={"jid": jid}))
+
+
 def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Tally of a native WhatsApp poll seen by the bridge (question, options, votes)."""
     message_id, chat_jid = (message_id or "").strip(), (chat_jid or "").strip()
@@ -7108,6 +7154,37 @@ def _group_jid(value: str) -> str:
         raise ToolError("invalid_argument", f"Not a group JID: {jid!r} (expected ...@g.us)")
     _require_allowed(jid)
     return jid
+
+
+def create_group(
+    name: str, participants: list[str] | None = None, community: bool = False, parent_jid: str | None = None
+) -> dict[str, Any]:
+    """Create a group/community; restricted lists must explicitly allow all groups."""
+    policy = CHAT_POLICY
+    if policy.restricted and "g.us" not in policy.servers:
+        raise ToolError("denied", "Creating a group requires *@g.us in the chat allow-list")
+    name = (name or "").strip()
+    if not name or len(name) > 25 or (community and parent_jid) or len(participants or []) > 256:
+        raise ToolError(
+            "invalid_argument",
+            "name must be 1-25 characters; community and parent_jid are exclusive; maximum 256 participants",
+        )
+    cleaned = list(dict.fromkeys(str(p).strip() for p in (participants or [])))
+    if policy.restricted:
+        for participant in cleaned:
+            policy.require_participant(participant, _participant_twins(participant))
+    body: dict[str, Any] = {"name": name, "participants": cleaned, "community": community}
+    if parent_jid:
+        body["parent_jid"] = _group_jid(parent_jid)
+    return _bridge_json(_bridge_request("POST", "/group/create", json=body))
+
+
+def list_subgroups(chat_jid: str) -> dict[str, Any]:
+    """List authorized groups linked to a community."""
+    jid = _group_jid(chat_jid)
+    result = _bridge_json(_bridge_request("GET", "/group/subgroups", params={"jid": jid}))
+    result["groups"] = [g for g in result.get("groups", []) if _readable(g.get("jid"))]
+    return result
 
 
 def manage_group_participants(group_jid: str, action: str, participants: list[str]) -> dict[str, Any]:

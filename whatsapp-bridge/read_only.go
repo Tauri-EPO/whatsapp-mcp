@@ -6,7 +6,7 @@ package main
 // may act on; WHATSAPP_READ_ONLY restricts *what it may do*. When set, every
 // endpoint with an external side effect answers 403 with the shared JSON error
 // shape: send, react, typing, chat/archive, chat/label, mark-read, delete, edit, forward, the four group
-// endpoints, media purge and the on-demand history request.
+// endpoints, group creation, media purge and the on-demand history request.
 //
 // The MCP server enforces the same variable on its tools (tool_policy.py) and
 // hides them from tools/list, so a model never sees them. This second check is
@@ -14,7 +14,8 @@ package main
 // the same belt-and-braces split the chat allow-list uses.
 //
 // Reads stay open, including /api/download (it only fills the local media
-// cache) and /api/group/members, /api/poll, /api/health, /api/ready.
+// cache) and /api/group/members, /api/group/subgroups, /api/business,
+// /api/poll, /api/health, /api/ready.
 
 import (
 	"net/http"

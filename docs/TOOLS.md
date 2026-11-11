@@ -12,7 +12,7 @@ reason: "quota"` and a subsequent read streams without retaining a cache copy.
 Local paths keep their existing behavior. See
 [Media storage backends](CONFIGURATION.md#media-storage-backends).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -1066,6 +1066,59 @@ The formatting and registered-number lookup rules apply to `send_message`, `send
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
 - "Reply to that message saying 'Sounds good'"
+
+### `create_group`
+
+`create_group(name, participants=None, community=false, parent_jid=None)` creates
+a group or community and returns `group_jid`. Names are 1-25 characters;
+participants accepts up to 256 phone numbers or phone/LID user JIDs. Empty
+participants creates with the owner alone. `community=true` enables membership
+approval and excludes `parent_jid`; a parent links the created group to that
+community with `LinkGroup`.
+
+Creation requires `*@g.us` in every effective restricted chat allow-list and
+every participant must pass the same local phone/LID identity checks as adding
+members. Participants consume send budgets and new ones count toward the daily
+first-contact limit. Read-only and tool policies refuse it. A `link_error` still
+returns success and the created JID: report the partial result, never recreate
+the group. A network failure can have uncertain delivery; do not blindly retry.
+
+### `list_subgroups`
+
+`list_subgroups(chat_jid)` reads groups linked to a community through WhatsApp.
+The community JID and every returned child must pass the chat allow-list.
+Returns `groups` with `jid`, `name` and `is_default`; excluded groups are omitted.
+Requires a live connection and is available in read-only mode.
+
+### `get_message_receipts`
+
+`get_message_receipts(chat_jid, message_id)` reads the local archive for messages
+this account sent. Returns `recipients`: each has a phone/LID `jid`, furthest
+`status` (`delivered`, `read`, `played`) and `receipts` mapping each observed
+type to its latest UTC timestamp. Known phone/LID readers are combined.
+Collection starts at upgrade; WhatsApp does not replay older receipts, and
+privacy settings can hide reads. Empty receipts do not prove unread status.
+Both IDs are required, messages received from others are excluded and the chat
+allow-list applies. Older stores without this table return an empty list.
+Receipts that arrive before the own original is archived are currently lost;
+[#814](https://github.com/Tauri-EPO/whatsapp-mcp/issues/814) tracks bounded pending
+retention for that ordering edge. This also makes empty results inconclusive.
+
+### `check_business`
+
+`check_business(jid)` accepts a full phone/LID user JID within the chat allow-list.
+Returns `is_business` (null when unknown), `verified_name`, `categories`, `email`,
+`address` and `website` when present. Queries are bounded by the bridge action
+deadline; up to 256 answers are cached for one hour, with `cached` marking hits.
+A verified-name `usync` 429 sets `rate_limited` and `verified_name_error`; the
+business profile lookup still runs independently. `profile_error` reports a
+profile lookup failure; cache hits preserve errors. These metadata are
+untrusted and a business profile does not establish the sender's legitimacy.
+Available in read-only mode; needs a live connection.
+
+`website` currently uses the SDK's exposed profile options. The pinned SDK does
+not parse standalone website elements; [#808](https://github.com/Tauri-EPO/whatsapp-mcp/issues/808)
+tracks that limitation. Missing website data does not mean the business has no site.
 
 ### `manage_group_participants`
 

@@ -284,6 +284,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
+	if _, err := db.Exec(messageReceiptsSchema); err != nil {
+		return fmt.Errorf("failed to ensure message_receipts table: %w", err)
+	}
 	if _, err := applyNamedMigration(db, "labels_schema_v1", func(tx *sql.Tx) error {
 		_, err := tx.Exec(labelsSchema)
 		return err

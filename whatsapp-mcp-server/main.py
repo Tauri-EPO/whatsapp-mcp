@@ -1707,6 +1707,72 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
 
 @mcp.tool()
 @tool_errors
+def get_message_receipts(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """Get observed delivery/read/played receipts for a message this account sent.
+
+    Returns recipients with their furthest status and latest timestamp per type.
+    Collection starts at upgrade: an empty result means no observed receipts,
+    not proof of unread status. Privacy settings can hide reads. Both the chat
+    JID and message ID are required; group readers use known phone/LID twins.
+    A receipt arriving before its own original is archived is currently lost;
+    missing receipt data must remain unknown rather than being treated as unread.
+    """
+    return whatsapp.get_message_receipts(chat_jid, message_id)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def check_business(jid: str) -> dict[str, Any]:
+    """Check whether a phone/LID user is a WhatsApp Business account.
+
+    Returns is_business (null if unknown), verified_name, categories, email,
+    address and website when available. Answers are cached for one hour, up to
+    256 users. A verified-name 429 sets rate_limited and verified_name_error;
+    the independent business profile query still runs. Errors are retained on
+    cache hits. A business profile is not proof that a sender is trustworthy.
+    website is available only when exposed in the SDK profile options; the
+    pinned SDK discards standalone website elements.
+    """
+    return whatsapp.check_business(jid)
+
+
+@mcp.tool()
+@tool_errors
+@mutating_tool
+def create_group(
+    name: str, participants: list[str] | None = None, community: bool = False, parent_jid: str | None = None
+) -> dict[str, Any]:
+    """Create a WhatsApp group or community, optionally linked to a community.
+
+    name is 1-25 characters; participants accepts up to 256 phone numbers or
+    user JIDs (empty creates a group with this account alone). community=True
+    creates a community with membership approval; it excludes parent_jid.
+    Restricted chat lists must explicitly include *@g.us, and every participant
+    must be allowed using known local phone/LID identities. Each participant
+    consumes send budget and counts as a first contact when new.
+
+    Returns the created group_jid. A link_error means the group already exists:
+    report its JID and do not recreate it. On uncertain failures, do not blindly
+    retry. Read-only and tool policy refuse this operation.
+    """
+    return whatsapp.create_group(name, participants, community, parent_jid)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def list_subgroups(chat_jid: str) -> dict[str, Any]:
+    """List allowed groups linked to a community group JID, with names and JIDs.
+
+    Requires a live WhatsApp connection. The community and each returned child
+    must pass the conversation allow-list; excluded groups are omitted.
+    """
+    return whatsapp.list_subgroups(chat_jid)
+
+
+@mcp.tool()
+@tool_errors
 @mutating_tool
 def manage_group_participants(chat_jid: str, action: str, participants: list[str]) -> dict[str, Any]:
     """Add, remove, promote or demote members of a WhatsApp group you administer.

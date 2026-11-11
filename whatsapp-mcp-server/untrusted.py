@@ -84,6 +84,11 @@ WRAPPED_KEYS = frozenset({"content", "last_message", "transcript", "text", "valu
 NAME_KEYS = frozenset(
     {
         "name",
+        "verified_name",
+        "categories",
+        "email",
+        "address",
+        "website",
         "chat_name",
         "sender_name",
         "sender_push_name",

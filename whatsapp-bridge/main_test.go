@@ -184,6 +184,9 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		t.Fatalf("failed to create group_members table: %v", err)
 	}
+	if _, err := db.Exec(messageReceiptsSchema); err != nil {
+		t.Fatal(err)
+	}
 	return &MessageStore{db: db}
 }
 
