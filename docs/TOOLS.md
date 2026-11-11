@@ -756,7 +756,7 @@ person, and its user part would otherwise be reported as the phone number
 Message rows (also in `get_message_context`) expose `forwarded` and
 `frequently_forwarded`. `forwarding_score` is null for no forwarding evidence,
 0 for a forwarded message without a hop count, and the received hop count
-otherwise; scores >= 4 are frequently forwarded. Older archives without this
+otherwise; scores >= 5 are frequently forwarded. Older archives without this
 column read as not forwarded/unknown. A forward is someone else's words, so do
 not attribute its content to the sender.
 
@@ -1248,7 +1248,7 @@ its lock waits can add about 16 seconds after the remote effect.
 
 ### `forward_message`
 
-Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message without the "Forwarded" label. Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
+Re-send a stored message to another chat: text as is, media re-uploaded from the local cache (fetched first if needed) with its caption. Arrives as a fresh message with the "Forwarded" label; its forwarding score is the source score plus one (an unknown source score counts as zero). Both chats must pass `WHATSAPP_ALLOWED_CHATS`. **Parameters:** `chat_jid`, `message_id`, `to_chat_jid`. Returns the new message's `message_id`, `chat_jid`, `timestamp`.
 
 A phone destination uses the number WhatsApp has registered, as the send tools
 do. The bridge checks the destination as typed before any registration lookup,

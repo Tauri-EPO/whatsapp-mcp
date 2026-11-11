@@ -761,7 +761,7 @@ def list_messages(
     note transcribed earlier carries its text in notes.transcript;
     include_transcripts=True lifts it onto the row as `transcript`.
 
-    Rows expose forwarded, frequently_forwarded and nullable forwarding_score.
+    Rows expose forwarded, frequently_forwarded (score >= 5) and nullable forwarding_score.
     A forwarded message relays content; do not attribute those words to its sender.
 
     Args:
@@ -1962,7 +1962,8 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
 
     Text is re-sent as is; media is re-uploaded from the local cache (fetched first
     if needed) together with its caption. The copy arrives as a fresh message
-    (no "Forwarded" label). Both chats must pass WHATSAPP_ALLOWED_CHATS.
+    with the "Forwarded" label and source forwarding score plus one (unknown counts as zero).
+    Both chats must pass WHATSAPP_ALLOWED_CHATS.
     A phone destination is resolved to WhatsApp's registered number; both the
     typed and registered destination must pass the allow-list before media is fetched.
     Media failures are media_refused (unsafe cache identity) or media_unavailable

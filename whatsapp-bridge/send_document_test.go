@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -159,9 +160,9 @@ func TestSendDocumentDeniedBeforeEffects(t *testing.T) {
 
 func TestCachedMediaAsDocument(t *testing.T) {
 	for _, tc := range []struct{ kind, name, title, wantName, wantTitle string }{
-		{"image", "image_20261101_000000_SOURCE.jpg", "", "attachment.jpg", "attachment.jpg"},
+		{"image", "image_20261101_000000_SOURCE.jpg", "", "attachment", "attachment"},
 		{"document", "report.pdf", "Original title", "report.pdf", "Original title"},
-		{"audio", "voice.ogg", "", "voice.ogg", "voice.ogg"},
+		{"audio", "voice.ogg", "", "attachment", "attachment"},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
@@ -180,18 +181,41 @@ func TestCachedMediaAsDocument(t *testing.T) {
 				source := ctx.Value(forwardSourceKey{}).(*forwardSource)
 				source.presentation = &mediaPresentation{Title: proto.String(tc.title)}
 			}
-			kind, mime, err := forwardMediaType(ctx, path, data)
+			kind, mimeType, err := forwardMediaType(ctx, path, data)
 			if err != nil || kind != whatsmeow.MediaDocument {
 				t.Fatalf("kind=%s err=%v", kind, err)
 			}
-			packet, _, err := buildForwardMedia(ctx, kind, mime, path, data, whatsmeow.UploadResponse{}, "caption", outboundQuote{id: "QUOTE"}, nil)
+			packet, _, err := buildForwardMedia(ctx, kind, mimeType, path, data, whatsmeow.UploadResponse{}, "caption", outboundQuote{id: "QUOTE"}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			doc := packet.GetDocumentMessage()
-			if doc == nil || doc.GetFileName() != tc.wantName || doc.GetTitle() != tc.wantTitle || doc.GetContextInfo().GetStanzaID() != "QUOTE" {
+			wantName, wantTitle := tc.wantName, tc.wantTitle
+			if tc.kind != "document" {
+				extensions, err := mime.ExtensionsByType(mimeType)
+				if err != nil || len(extensions) == 0 {
+					t.Fatalf("extensions: %v", err)
+				}
+				wantName, wantTitle = "attachment"+extensions[0], "attachment"+extensions[0]
+			}
+			if doc == nil || doc.GetFileName() != wantName || doc.GetTitle() != wantTitle || doc.GetContextInfo().GetStanzaID() != "QUOTE" {
 				t.Fatalf("document=%v", doc)
 			}
 		})
+	}
+}
+
+func TestDocumentRequiresMediaPath(t *testing.T) {
+	b := testBridge(t, nil, newTestMessageStore(t), testLogger())
+	b.Send = func(context.Context, string, string, string, string, string, string, []string) (bool, string, sentMessage) {
+		t.Fatal("invalid document reached sender")
+		return false, "", sentMessage{}
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(`{"recipient":"120363000000000001@g.us","message":"text","as_document":true}`))
+	req.Header.Set("Authorization", "Bearer "+readOnlyTestToken)
+	rec := httptest.NewRecorder()
+	b.newRESTMux(8080, readOnlyTestToken).ServeHTTP(rec, req)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "as_document requires media_path") {
+		t.Fatalf("status=%d %s", rec.Code, rec.Body.String())
 	}
 }

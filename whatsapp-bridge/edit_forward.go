@@ -10,14 +10,15 @@ package main
 //
 // Forward re-sends the stored content (text, or the cached media file with
 // its caption) to another chat through the normal send path. The media is
-// fetched first if it is not cached. It arrives as a fresh message, without
-// WhatsApp's "Forwarded" label.
+// fetched first if it is not cached. It arrives as a fresh message with
+// the source forwarding score incremented and WhatsApp's "Forwarded" label.
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -270,6 +271,15 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicyResolver) http.Hand
 			// context and its budget, without creating another deadline.
 			source = current
 		}
+		score := uint32(1)
+		if source.forwardingScore != nil {
+			score = *source.forwardingScore
+			// A saturated protocol counter must not wrap back to zero.
+			if score < math.MaxUint32 {
+				score++
+			}
+		}
+		sendCtx = context.WithValue(sendCtx, forwardedSendKey{}, score)
 		if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(sendCtx), to) {
 			return
 		}
@@ -295,7 +305,7 @@ func (store *MessageStore) messageContentLookup(id, chatJID string) (forwardSour
 	source := forwardSource{id: id}
 	var presentation sql.NullString
 	var sha []byte
-	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256 FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation, &sha)
+	err := store.db.QueryRow(`SELECT content, COALESCE(media_type, ''), COALESCE(filename, ''), media_presentation, file_sha256, forwarding_score FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(&source.content, &source.mediaType, &source.filename, &presentation, &sha, &source.forwardingScore)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return forwardSource{}, false, nil

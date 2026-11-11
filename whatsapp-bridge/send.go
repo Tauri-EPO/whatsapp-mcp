@@ -640,6 +640,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		msg = buildOutboundTextWithQuote(message, quote, mentionedJIDs)
 	}
 
+	if score, ok := ctx.Value(forwardedSendKey{}).(uint32); ok {
+		markOutboundForward(msg, score)
+	}
 	applyChatEphemeralSettings(msg, settings)
 
 	// Send message
@@ -669,6 +672,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		media := outboundMediaColumns(mediaPath, upload)
+		media.forwardingScore = extractForwardingScore(msg)
 		if source, ok := ctx.Value(cachedSendSourceKey{}).(*forwardSource); ok {
 			media.filename = source.filename
 		}
@@ -740,15 +744,15 @@ func (b *Bridge) retryOutbound(chatWrite, messageWrite func() error) error {
 	})
 }
 
-// outboundMedia is the media half of an outbound row: the columns
-// StoreMessage takes for a file this bridge uploaded. The zero value is a
-// text-only send.
+// outboundMedia carries uploaded-file columns and optional forwarding
+// provenance for the outbound row. Its zero value is an original text send.
 type outboundMedia struct {
 	mediaType, filename, url            string
 	directPath                          string
 	mediaKey, fileSHA256, fileEncSHA256 []byte
 	fileLength                          uint64
 	presentation                        *mediaPresentation
+	forwardingScore                     *uint32
 	retryChat, retrySender              string
 }
 
@@ -803,6 +807,7 @@ func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID,
 			FileEncSHA256:   m.fileEncSHA256,
 			FileLength:      m.fileLength,
 			QuotedMessageID: quotedMsgID,
+			ForwardingScore: m.forwardingScore,
 			Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
 		},
 	)
@@ -1216,6 +1221,10 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 		req.Recipient = typed.String()
 
+		if req.AsDocument && req.MediaPath == "" {
+			writeError(w, http.StatusBadRequest, "as_document requires media_path")
+			return
+		}
 		if req.AsSticker && (req.AsDocument || req.Message != "" || req.MediaPath == "") {
 			writeError(w, http.StatusBadRequest, "as_sticker requires media, no caption and as_document=false")
 			return

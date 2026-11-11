@@ -527,35 +527,26 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
     fields so all readers keep the same projection and old archives remain
     readable without the MCP server changing the bridge-owned schema.
     """
-    has_column = _schema_memo(
-        "messages.sender_server",
+    available = _schema_memo(
+        "messages.projection_columns",
         MESSAGES_DB_PATH,
-        # Iterated, not fetchall()'d: this runs on the caller's cursor, and
-        # export.py's guard against buffering a whole archive watches for it.
-        lambda: "sender_server" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        # Iterate on the caller's cursor; never buffer archive rows here.
+        lambda: frozenset(row[1] for row in cursor.execute("PRAGMA table_info(messages)")),
         schema=cursor,
     )
-    columns = MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
-    has_location = _schema_memo(
-        "messages.location",
-        MESSAGES_DB_PATH,
-        lambda: "location" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
-        schema=cursor,
-    )
-    if not has_location:
-        columns = columns.replace("messages.location", "NULL")
-    has_forwarding = _schema_memo(
-        "messages.forwarding_score",
-        MESSAGES_DB_PATH,
-        lambda: "forwarding_score" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
-        schema=cursor,
-    )
-    return columns if has_forwarding else columns.replace("messages.forwarding_score", "NULL")
+    columns = MESSAGE_COLUMNS
+    for optional in ("sender_server", "location", "forwarding_score"):
+        if optional not in available:
+            columns = columns.replace(f"messages.{optional}", "NULL")
+    return columns
 
 
 def _row_to_message(row: tuple) -> Message:
     """Build a Message from a row selected with MESSAGE_COLUMNS (in that order)."""
-    row = (*row, *((None,) * (18 - len(row))))  # legacy materialized projections
+    if len(row) in (16, 17):  # known legacy materialized projections
+        row = (*row, *((None,) * (18 - len(row))))
+    elif len(row) != 18:
+        raise ValueError(f"Unexpected message projection length: {len(row)}")
     (
         timestamp,
         sender,
@@ -1156,7 +1147,8 @@ def msg_to_dict(
         "view_once": message.view_once,
         "forwarding_score": message.forwarding_score,
         "forwarded": message.forwarding_score is not None,
-        "frequently_forwarded": message.forwarding_score is not None and message.forwarding_score >= 4,
+        # Upstream VGP #311 documents WhatsApp "Forwarded many times" from score 5.
+        "frequently_forwarded": message.forwarding_score is not None and message.forwarding_score >= 5,
         "bytes": message.bytes if is_media else None,
         "sha256": sha256,
     }
