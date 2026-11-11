@@ -161,6 +161,10 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	group := liveGroupOps(client, func() bool { return b.Connected() })
 	group.allowSend = b.allowParticipantAdds
 	registerGroupManagement(mux, mutate, group, b.Policy, b.recordGroupRoster)
+	creation := groupCreationDeps{client: client, connected: b.Connected, policy: b.Policy, twin: group.twin, allowSend: b.allowGroupCreation}
+	mux.HandleFunc("/api/group/create", mutate(requireMethod(http.MethodPost, handleCreateGroup(creation))))
+	mux.HandleFunc("/api/group/subgroups", auth(requireMethod(http.MethodGet, handleSubGroups(creation))))
+	mux.HandleFunc("/api/business", auth(requireMethod(http.MethodGet, handleCheckBusiness(client, &b.businessProfiles, b.Policy, b.Connected))))
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.

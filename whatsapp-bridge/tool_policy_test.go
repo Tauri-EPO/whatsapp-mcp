@@ -134,6 +134,7 @@ func TestEndpointPolicyOverREST(t *testing.T) {
 		{"allow-list names the tool", allowReactions, "/api/react", true},
 		{"allow-list omits the tool", allowReactions, "/api/send", false},
 		{"allow-list omits group leave", allowReactions, "/api/group/leave", false},
+		{"allow-list omits group creation", allowReactions, "/api/group/create", false},
 		{"allow-list omits history", allowReactions, "/api/history", false},
 		{"deny-list names the tool", denyDestructive, "/api/delete", false},
 		{"deny-list covers every tool of the endpoint", denyDestructive, "/api/send", false},
