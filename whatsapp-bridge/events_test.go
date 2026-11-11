@@ -148,7 +148,14 @@ func TestHandleEvent_GroupInfoRenameAndEphemeral(t *testing.T) {
 
 func TestHandleEvent_SelfReadReceiptMarksChatRead(t *testing.T) {
 	peer := types.NewJID("5511888888888", types.DefaultUserServer)
-	ms := newTestMessageStore(t)
+	// Peer receipts use a background worker. Every pooled connection must
+	// see the same archive while the foreground checks our own read marker.
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms, err := NewMessageStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
 	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
 	t1 := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Minute)
