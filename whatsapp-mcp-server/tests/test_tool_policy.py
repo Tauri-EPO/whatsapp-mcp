@@ -29,6 +29,8 @@ from tool_policy import (
 EXPECTED_MUTATING = {
     "label_chat",
     "archive_chat",
+    "delete_chat",
+    "block_contact",
     "send_message",
     "send_file",
     "send_audio_message",
@@ -36,6 +38,7 @@ EXPECTED_MUTATING = {
     "send_typing",
     "mark_messages_read",
     "delete_message",
+    "delete_messages_for_me",
     "edit_message",
     "forward_message",
     "manage_group_participants",
@@ -48,6 +51,7 @@ EXPECTED_MUTATING = {
 
 # Reads (and local-only writes) that must survive read-only mode.
 EXPECTED_READABLE = {
+    "get_blocklist",
     "list_labels",
     "list_messages",
     "list_chats",

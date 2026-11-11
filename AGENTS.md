@@ -127,6 +127,8 @@ whatsapp-mcp/
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
 │   ├── labels.go               # cached Business labels, chat associations, REST endpoints and startup sync
 │   ├── chat_archive.go         # /api/chat/archive: archive/unarchive anchored to the newest stored message
+│   ├── chat_delete.go          # /api/chat/delete: deleteChat patch on the shared anchor, then local rows and media up to it
+│   ├── block.go                # /api/block, /api/blocklist: UpdateBlocklist / GetBlocklist, user JIDs only
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── umask_unix.go           # startup-only POSIX owner-only creation mask
 │   ├── umask_other.go          # creation-mask no-op on non-POSIX systems
@@ -172,6 +174,7 @@ whatsapp-mcp/
 │   ├── hours_env.go            # resolveHoursEnv: the "whole hours, 0 disables" variables of the periodic passes
 │   ├── group_manage.go         # /api/group/participants, /subject, /invite, /leave
 │   ├── delete_message.go       # /api/delete (revoke / local delete)
+│   ├── delete_for_me.go        # /api/delete-for-me: hand-built deleteMessageForMe patch (DMs), then local rows and media
 │   ├── history_ondemand.go     # POST /api/history
 │   ├── webhook.go              # outbound webhook for inbound messages
 │   ├── webhook_runtime.go      # opt-in operator receiver, pinned HTTPS, HMAC and bounded delivery queue

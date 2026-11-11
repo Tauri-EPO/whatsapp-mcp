@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp_types import ContentBlock
+from mcp_types import ContentBlock, ToolAnnotations
 from starlette.middleware import Middleware
 
 import whatsapp
@@ -105,6 +105,9 @@ from whatsapp import (
     archive_chat as whatsapp_archive_chat,
 )
 from whatsapp import (
+    block_contact as whatsapp_block_contact,
+)
+from whatsapp import (
     bridge_status as whatsapp_bridge_status,
 )
 from whatsapp import (
@@ -123,7 +126,13 @@ from whatsapp import (
     coverage as whatsapp_coverage,
 )
 from whatsapp import (
+    delete_chat as whatsapp_delete_chat,
+)
+from whatsapp import (
     delete_message as whatsapp_delete_message,
+)
+from whatsapp import (
+    delete_messages_for_me as whatsapp_delete_messages_for_me,
 )
 from whatsapp import (
     download_media as whatsapp_download_media,
@@ -133,6 +142,9 @@ from whatsapp import (
 )
 from whatsapp import (
     forward_message as whatsapp_forward_message,
+)
+from whatsapp import (
+    get_blocklist as whatsapp_get_blocklist,
 )
 from whatsapp import (
     get_chat as whatsapp_get_chat,
@@ -1856,6 +1868,65 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
     return whatsapp_archive_chat(chat_jid, archived)
 
 
+@mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+@tool_errors
+@mutating_tool
+def delete_chat(chat_jid: str, delete_media: bool = False, confirm: bool = False) -> dict[str, Any]:
+    """Delete a whole WhatsApp conversation on the phone and linked devices. IRREVERSIBLE.
+
+    This is the phone's "Delete chat", not archive_chat. Ask the user before calling
+    it, then call with confirm=true; without confirm nothing is sent. The phone
+    removes the conversation up to the newest locally stored message (the anchor,
+    reported as anchor_timestamp); anything newer survives. Only after WhatsApp
+    accepts the patch does the local archive drop the same rows and their cached
+    media (local_messages_removed / local_media_removed). Requires a connected bridge
+    and at least one stored message in the chat (not_found otherwise: nothing is
+    deleted with a guessed range). Statuses, broadcasts and newsletters are
+    unsupported. HTTP 408 means nothing was sent and retrying is safe; an unknown
+    outcome or confirmation warning means inspect the phone and never retry
+    automatically. local_cleanup_error means WhatsApp deleted the chat but the
+    archive was not fully cleaned: do not resend.
+
+    Args:
+        chat_jid: Full direct-chat or group JID from list_chats
+        delete_media: Also delete the chat's media from the phone's gallery (default False)
+        confirm: Must be true; the deletion cannot be undone
+    """
+    return whatsapp_delete_chat(chat_jid, delete_media, confirm)
+
+
+@mcp.tool()
+@tool_errors
+@mutating_tool
+def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
+    """Block a WhatsApp contact, or unblock it with blocked=False.
+
+    Blocking is account-wide: the contact can no longer message or call this
+    account, and sees no profile updates. Only contacts can be blocked, not
+    groups. Returns the updated blocklist (filtered by the chat allow-list).
+    A phone number is resolved to the contact's LID by WhatsApp; an unknown
+    number fails with bridge_unavailable and nothing changes. Repeating a call is
+    harmless. Requires a connected bridge.
+
+    Args:
+        jid: Phone number with country code, or a @s.whatsapp.net / @lid JID
+        blocked: True to block (default); False to unblock
+    """
+    return whatsapp_block_contact(jid, blocked)
+
+
+@mcp.tool()
+@tool_errors
+def get_blocklist() -> dict[str, Any]:
+    """List the contacts this account has blocked.
+
+    Each entry carries the contact's lid and, when WhatsApp knows it, phone_jid.
+    With a chat allow-list, entries outside it are left out. Requires a
+    connected bridge (the list is read from WhatsApp, not the local archive).
+    """
+    return whatsapp_get_blocklist()
+
+
 @mcp.tool()
 @tool_errors
 @mutating_tool
@@ -1920,6 +1991,33 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     """
     success, status_message = whatsapp_delete_message(chat_jid, message_id, for_everyone)
     return {"success": success, "message": status_message, "for_everyone": for_everyone}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+@tool_errors
+@mutating_tool
+def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool = False) -> dict[str, Any]:
+    """WhatsApp "Delete for me": remove messages from this account's phone and linked devices.
+
+    Works for any sender and any age; the other side keeps its copies (unlike
+    delete_message for_everyone=True, which needs your own recent message). It
+    is IRREVERSIBLE. Without confirm=true this is a dry run: nothing is sent, and
+    the answer lists which IDs are stored in this chat (would_delete) and which
+    are not. Then call again with confirm=true. Direct chats only for now; groups
+    return invalid_argument. Up to 200 IDs per call, all or nothing: an ID the
+    bridge does not have for this chat refuses the whole batch with not_found.
+    After WhatsApp accepts the patch, the local rows and their cached media go
+    too (local_messages_removed); local_cleanup_error means the phone deleted
+    them but the archive was not fully cleaned: do not resend. HTTP 408 means
+    nothing was sent; an unknown outcome means inspect the phone, never retry
+    automatically.
+
+    Args:
+        chat_jid: Direct-chat JID (@s.whatsapp.net or @lid) from list_chats
+        message_ids: IDs from list_messages in that chat (1-200, unique)
+        confirm: True to delete; False (default) only previews
+    """
+    return whatsapp_delete_messages_for_me(chat_jid, message_ids, confirm)
 
 
 @mcp.tool()
