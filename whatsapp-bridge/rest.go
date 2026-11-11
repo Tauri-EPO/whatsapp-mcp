@@ -204,6 +204,10 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	mux.HandleFunc("/api/chat/delete", mutate(requireMethod(http.MethodPost, handleDeleteChat(chatDeleteDeps{
 		archiveDeps: chatAppState, cleanup: b.deleteChatLocal,
 	}))))
+	// Delete for me: hand-built deleteMessageForMe patch, DMs only (delete_for_me.go).
+	mux.HandleFunc("/api/delete-for-me", mutate(requireMethod(http.MethodPost, handleDeleteForMe(deleteForMeDeps{
+		archiveDeps: chatAppState, cleanup: b.deleteForMeLocal,
+	}))))
 
 	// Block / unblock a contact and read the blocklist (block.go).
 	blocking := blockDeps{

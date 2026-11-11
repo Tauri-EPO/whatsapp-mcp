@@ -38,6 +38,7 @@ EXPECTED_MUTATING = {
     "send_typing",
     "mark_messages_read",
     "delete_message",
+    "delete_messages_for_me",
     "edit_message",
     "forward_message",
     "manage_group_participants",
