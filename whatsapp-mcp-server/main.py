@@ -800,14 +800,17 @@ def list_messages(
         query: Search current and pre-edit message content, stored transcripts and original document
                filenames (excluding generated names). With FTS this is accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
-               "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
-               (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*'). Voice notes
+               "semana"); supports AND / OR / NOT, -term, "exact phrase" and prefix*
+               (e.g. 'boleto OR fatura', '"nota fiscal"', 'orcament*').
+               Exclusions consult current text and filenames, never saved pre-edit text;
+               saved originals carry lower relevance weight. Voice notes
                whose transcript was already stored (transcribe_audio, or the
                TRANSCRIBE_ON_INGEST worker) match on what was said in them, with
                the same operators, and are ranked next to the written hits. Without FTS or
-               for scripts without word spacing or an older index, both text fields and document filenames use
+               for scripts without word spacing, both text fields and document filenames use
                the same LOWER/instr substring rule: ASCII case folding, otherwise
-               exact Unicode characters and no accent folding
+               exact Unicode characters and no accent folding. An older index keeps FTS
+               on current text/filenames and uses substring matching for saved originals
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0); ignored when cursor is set
         include_context: Include surrounding messages for context (default True)

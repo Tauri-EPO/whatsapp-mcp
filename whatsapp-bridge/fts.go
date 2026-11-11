@@ -195,6 +195,30 @@ func ensureMessagesFTSCapability(db *sql.DB, available bool) (bool, error) {
 }
 
 func ensureMessagesFTSMigration(db *sql.DB, available bool, migrate func(*sql.Tx) error) (bool, error) {
+	return ensureMessagesFTSBuild(db, available, migrate, func() error { return buildMessagesFTS(db, nil) })
+}
+
+func messagesFTSHasOriginal(db *sql.DB) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(messages_fts)")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == "original_content" {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func ensureMessagesFTSBuild(db *sql.DB, available bool, migrate func(*sql.Tx) error, build func() error) (bool, error) {
 	existed, err := messagesFTSExists(db)
 	if err != nil {
 		return false, fmt.Errorf("inspect fts schema: %w", err)
@@ -220,7 +244,11 @@ func ensureMessagesFTSMigration(db *sql.DB, available bool, migrate func(*sql.Tx
 	if err != nil {
 		return fail(err)
 	}
-	if applied && existed {
+	compatible, err := messagesFTSHasOriginal(db)
+	if err != nil {
+		return fail(err)
+	}
+	if applied && existed && compatible {
 		if _, err := db.Exec(ftsViewSchema + ftsSchema); err != nil {
 			return fail(err)
 		}
@@ -233,8 +261,22 @@ func ensureMessagesFTSMigration(db *sql.DB, available bool, migrate func(*sql.Tx
 			return fail(err)
 		}
 	}
-	if err := buildMessagesFTS(db, nil); err != nil {
-		return fail(err)
+	var populated bool
+	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM messages LIMIT 1)").Scan(&populated); err != nil {
+		return false, err
+	}
+	if populated {
+		if err := build(); err != nil {
+			if strings.Contains(err.Error(), "no such module") {
+				return fail(err) // A missing module must never leave broken write triggers.
+			}
+			// The staged build has not touched the published table or triggers.
+			// Keep that index usable, leave the marker absent, and retry next start.
+			if _, cleanupErr := db.Exec("DROP TABLE IF EXISTS messages_fts_build"); cleanupErr != nil {
+				return existed, fmt.Errorf("build message search index: %w (staging cleanup: %v)", err, cleanupErr)
+			}
+			return existed, fmt.Errorf("build message search index (retry next start): %w", err)
+		}
 	}
 	// Publish only the complete replacement and its marker, in one transaction.
 	if _, err := applyNamedMigration(db, originalContentFTSMigration, migrate); err != nil {

@@ -296,3 +296,94 @@ class TestHelpers:
         assert _fts_quote_tokens("obra (casa) -") == '"obra" "(casa)" "-"'
         assert _fts_quote_tokens("orcament*") == '"orcament"*'
         assert _fts_quote_tokens('say "hi"') == '"say" """hi"""'
+
+
+@pytest.mark.parametrize("query", ["foo NOT bar", "foo -bar", "foo NOT (bar OR baz)", "foo NOT bar baz"])
+def test_edit_exclusions_only_consult_current_text(fts_db, query):
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute("UPDATE messages SET content='foo', original_content='bar baz' WHERE id='m1'")
+        conn.execute("UPDATE messages SET content='foo bar baz', original_content='foo' WHERE id='m2'")
+    rows = main.list_messages(query=query, include_context=False)["items"]
+    assert [row["id"] for row in rows] == ["m1"]
+    assert not rows[0].get("matched_original", False)
+    assert whatsapp.count_messages(query=query) == 1
+    assert whatsapp.message_stats(query=query)["total"]["messages"] == 1
+
+
+def test_saved_original_has_lower_relevance(fts_db):
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute("UPDATE messages SET content='rankword', original_content=NULL WHERE id='m1'")
+        conn.execute("UPDATE messages SET content='otherword', original_content='rankword' WHERE id='m2'")
+    rows = main.list_messages(query="rankword", sort_by="relevance", include_context=False)["items"]
+    assert [row["id"] for row in rows] == ["m1", "m2"]
+    assert rows[1]["matched_original"] and not rows[0].get("matched_original", False)
+
+
+def test_legacy_index_preserves_operators_accents_and_rank(tmp_path, monkeypatch):
+    path = _make_db(tmp_path, monkeypatch, False)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE VIRTUAL TABLE messages_fts USING fts5(content,filename,content='messages',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2')"
+        )
+        conn.execute("UPDATE messages SET original_content='orcamento' WHERE id='m3'")
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+    assert ids("obra NOT casa") == ["m1"]
+    assert ids('"nota fiscal"') == ["m6"]
+    assert ids("orcament*", sort_by="relevance") == ["m2", "m1"]
+    assert ids("orcamento", sort_by="relevance") == ["m2", "m1", "m3"]
+    assert main.list_messages(query="orcamento", sort_by="relevance", include_context=False)["items"][-1][
+        "matched_original"
+    ]
+
+
+def test_attribution_skips_unedited_page_and_probes_only_page_rowids(fts_db, monkeypatch):
+    real = whatsapp._original_match_keys
+    trace = []
+
+    def probe(conn, predicate, query, messages):
+        conn.set_trace_callback(trace.append)
+        try:
+            return real(conn, predicate, query, messages)
+        finally:
+            conn.set_trace_callback(None)
+
+    monkeypatch.setattr(whatsapp, "_original_match_keys", probe)
+    assert ids("orcamento")
+    assert not trace  # No attribution SQL at all when this page has no originals.
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute("UPDATE messages SET original_content='priorword' WHERE id='m1'")
+    assert ids("priorword") == ["m1"]
+    statement = next(sql for sql in trace if sql.lstrip().upper().startswith(("SELECT", "WITH")))
+    with sqlite3.connect(fts_db) as conn:
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + statement)]
+    assert any("messages_fts VIRTUAL TABLE INDEX" in detail and "=" in detail for detail in plan), plan
+
+
+def test_schema_predicate_and_rows_share_snapshot(fts_db, monkeypatch):
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("UPDATE messages SET content='newword', original_content='oldword' WHERE id='m1'")
+    real = whatsapp._query_predicate
+
+    def replace_after_probe(conn, query, transcripts=False):
+        predicate = real(conn, query, transcripts)
+        with sqlite3.connect(fts_db) as writer:
+            writer.executescript(
+                "DROP TRIGGER messages_fts_ai; DROP TRIGGER messages_fts_au; DROP TRIGGER messages_fts_ad; DROP TABLE messages_fts; CREATE VIRTUAL TABLE messages_fts USING fts5(content,filename,content='messages',content_rowid='rowid');"
+            )
+        return predicate
+
+    monkeypatch.setattr(whatsapp, "_query_predicate", replace_after_probe)
+    rows = main.list_messages(query="oldword", include_context=False)["items"]
+    assert len(rows) == 1 and rows[0]["id"] == "m1" and rows[0]["matched_original"]
+
+
+@pytest.mark.parametrize(
+    "query", ["foo NOT bar", "foo -bar", "foo -(bar OR baz)", 'foo NOT "bar baz"', "foo NOT NEAR(bar baz)"]
+)
+def test_original_positive_terms_ignore_original_excluded_words(fts_db, query):
+    with sqlite3.connect(fts_db) as conn:
+        conn.execute("UPDATE messages SET content='otherword', original_content='foo bar baz' WHERE id='m1'")
+        conn.execute("UPDATE messages SET content='foo bar baz', original_content='foo' WHERE id='m2'")
+    rows = main.list_messages(query=query, include_context=False)["items"]
+    assert len(rows) == 1 and rows[0]["id"] == "m1" and rows[0]["matched_original"]

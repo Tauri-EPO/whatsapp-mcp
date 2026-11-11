@@ -146,10 +146,12 @@ func NewMessageStore() (*MessageStore, error) {
 	// substring scan when the index is unavailable.
 	ftsOn, ftsErr := ensureMessagesFTS(db)
 	switch {
+	case ftsErr != nil && ftsOn:
+		bridgeLog.Warnf("full-text search upgrade deferred; existing index retained: %v", ftsErr)
 	case ftsErr != nil:
 		bridgeLog.Warnf("full-text search index unavailable: %v", ftsErr)
 	case ftsOn:
-		bridgeLog.Infof("Full-text search index (FTS5) active for messages.content and original document filenames")
+		bridgeLog.Infof("Full-text search index (FTS5) active for content, document filenames and saved pre-edit text")
 	default:
 		bridgeLog.Infof("SQLite built without FTS5: message search uses the substring scan")
 	}

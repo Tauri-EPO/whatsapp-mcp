@@ -389,3 +389,96 @@ func TestDocumentFilenameFTSMigration(t *testing.T) {
 		t.Fatalf("re-enable: on=%v err=%v", on, err)
 	}
 }
+
+func legacyOriginalFTS(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(ftsTeardown + `
+		CREATE VIEW messages_fts_content AS SELECT rowid,content,filename FROM messages;
+		CREATE VIRTUAL TABLE messages_fts USING fts5(content,filename,content='messages_fts_content',content_rowid='rowid');
+		INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+		CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+			INSERT INTO messages_fts(rowid,content,filename) VALUES(new.rowid,new.content,new.filename);
+		END;
+		CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts,rowid,content,filename) VALUES('delete',old.rowid,old.content,old.filename);
+		END;
+		CREATE TRIGGER messages_fts_au AFTER UPDATE OF content,filename ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts,rowid,content,filename) VALUES('delete',old.rowid,old.content,old.filename);
+			INSERT INTO messages_fts(rowid,content,filename) VALUES(new.rowid,new.content,new.filename);
+		END;`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOriginalFTSRepairsRolledBackShapeWithMarker(t *testing.T) {
+	db := newMessagesDB(t)
+	if _, err := db.Exec(`INSERT INTO messages(id,chat_jid,content,original_content) VALUES('EDITED','c','foo','bar')`); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on {
+		t.Fatalf("initial index: on=%v err=%v", on, err)
+	}
+	legacyOriginalFTS(t, db) // A rolled-back image recreated v2, retaining v3's marker.
+	if applied, err := migrationApplied(db, originalContentFTSMigration); err != nil || !applied {
+		t.Fatalf("marker missing before repair: %v %v", applied, err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on || countMatches(t, db, "bar") != 1 {
+		t.Fatalf("shape repair: on=%v err=%v", on, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages_fts(messages_fts,rank) VALUES('integrity-check',1)`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOriginalFTSBuildFailureKeepsPublishedIndex(t *testing.T) {
+	db := newMessagesDB(t)
+	if _, err := db.Exec(`WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<513)
+		INSERT INTO messages(id,chat_jid,content,filename,original_content)
+		SELECT printf('M%d',n),'c','currentword','','originalword' FROM seq`); err != nil {
+		t.Fatal(err)
+	}
+	legacyOriginalFTS(t, db)
+	on, err := ensureMessagesFTSBuild(db, true, func(*sql.Tx) error {
+		t.Fatal("failed build must not publish")
+		return nil
+	}, func() error {
+		return buildMessagesFTS(db, func(int) error { return fmt.Errorf("injected SQLITE_FULL") })
+	})
+	if err == nil || !on || countMatches(t, db, "currentword") != 513 || countMatches(t, db, "originalword") != 0 {
+		t.Fatalf("old index lost on failed build: on=%v err=%v", on, err)
+	}
+	var staging int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name GLOB 'messages_fts_build*'").Scan(&staging); err != nil || staging != 0 {
+		t.Fatalf("staging remains=%d err=%v", staging, err)
+	}
+	if applied, err := migrationApplied(db, originalContentFTSMigration); err != nil || applied {
+		t.Fatalf("failed build marked complete: %v %v", applied, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,chat_jid,content,filename) VALUES('PROBE','c','insertword','');
+		UPDATE messages SET content='updateword' WHERE id='PROBE';`); err != nil {
+		t.Fatal(err)
+	}
+	if countMatches(t, db, "insertword") != 0 || countMatches(t, db, "updateword") != 1 {
+		t.Fatal("published insert/update triggers stopped working")
+	}
+	if _, err := db.Exec("DELETE FROM messages WHERE id='PROBE'"); err != nil || countMatches(t, db, "updateword") != 0 {
+		t.Fatalf("published delete trigger stopped working: %v", err)
+	}
+	if on, err := ensureMessagesFTS(db); err != nil || !on || countMatches(t, db, "originalword") != 513 {
+		t.Fatalf("next startup did not retry: on=%v err=%v", on, err)
+	}
+}
+
+func TestOriginalFTSEmptyArchiveSkipsStaging(t *testing.T) {
+	db := newMessagesDB(t)
+	on, err := ensureMessagesFTSBuild(db, true, func(tx *sql.Tx) error {
+		_, err := tx.Exec(ftsTeardown + ftsViewSchema + ftsSchema)
+		return err
+	}, func() error { t.Fatal("empty archive must not build a staging index"); return nil })
+	if err != nil || !on {
+		t.Fatalf("empty publication on=%v err=%v", on, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,chat_jid,content,original_content) VALUES('EDITED','c','foo','bar')`); err != nil || countMatches(t, db, "bar") != 1 {
+		t.Fatalf("empty archive's published trigger failed: %v", err)
+	}
+}

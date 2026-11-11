@@ -801,8 +801,13 @@ current text, document filename and stored transcript alone do not satisfy the
 query. This includes an `AND` query combining current and pre-edit words. The
 flag survives `fields` projections; surrounding messages that are not hits have
 no flag. Later edits keep the first saved text, not intermediate versions.
-An older index uses substring matching until the bridge upgrades it; an archive
-without saved original text can search only the text it still knows.
+For FTS queries, `NOT` and `-term` exclusions inspect current text and document
+filenames; a word present only in saved pre-edit text never excludes a hit.
+Saved pre-edit text has lower relevance weight than current text or filenames.
+An older index retains word/phrase/operator searches, accent folding and ranking
+for current text and filenames; saved originals use literal substring matching
+until the bridge upgrades it. An archive without saved original text can search
+only the text it still knows.
 
 The four filters above are plain WHERE predicates, so they combine with each other and with
 every filter above: `from_me=false, media_type="document", exclude_groups=true`

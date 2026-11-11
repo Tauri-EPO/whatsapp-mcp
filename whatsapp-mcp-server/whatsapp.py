@@ -316,6 +316,65 @@ def _fts_query_kind(query: str) -> str:
     return "fts"
 
 
+def _fts_current_exclusions(query: str, columns: str = "content filename") -> str:
+    """Scope NOT operands to current columns, leaving positive terms searchable in originals.
+
+    Quoted phrases and NEAR groups are opaque. A NOT operand includes its
+    implicit-AND phrases, up to the next explicit operator at the same depth.
+    Whitespace-prefixed -term is the shorthand for NOT term; trailing literal
+    hyphens and malformed syntax retain the existing quoted-query retry.
+    """
+    tokens = list(re.finditer(r'"(?:[^"]|"")*"|[(){}:+,*^-]|[^\s(){}:+,*^"-]+', query))
+    end = 0
+    for token in tokens:
+        if query[end : token.start()].strip():
+            return query
+        end = token.end()
+    if query[end:].strip():
+        return query
+    text = [token.group() for token in tokens]
+    for i, token in enumerate(tokens):
+        if (
+            text[i] == "-"
+            and i
+            and i + 1 < len(text)
+            and token.start()
+            and query[token.start() - 1].isspace()
+            and token.end() == tokens[i + 1].start()
+            and text[i + 1] != "{"
+            and (i + 2 == len(text) or text[i + 2] != ":")
+        ):
+            text[i] = "NOT"
+    before: dict[int, list[str]] = {}
+    opaque: list[bool] = []
+    braces = 0
+    for i, value in enumerate(text):
+        if value == "{":
+            braces += 1
+        elif value == "}":
+            braces -= 1
+        elif value == "(":
+            opaque.append(bool(opaque and opaque[-1]) or (i > 0 and text[i - 1] == "NEAR"))
+        elif value == ")":
+            if opaque:
+                opaque.pop()
+        elif value == "NOT" and not braces and not (opaque and opaque[-1]):
+            depth = 0
+            j = i + 1
+            while j < len(text):
+                item = text[j]
+                if item == ")" and not depth:
+                    break
+                if not depth and item in {"AND", "OR", "NOT"}:
+                    break
+                depth += (item == "(") - (item == ")")
+                j += 1
+            if j > i + 1:
+                before.setdefault(i + 1, []).append(f"{{{columns}}} : (")
+                before.setdefault(j, []).append(")")
+    return " ".join(part for i in range(len(text) + 1) for part in [*before.get(i, []), *text[i : i + 1]])
+
+
 def _fts_quote_tokens(query: str) -> str:
     """Escape a free-text query so FTS5 treats every token literally (implicit AND).
 
@@ -2677,15 +2736,36 @@ def _stage_transcript_hits(conn: sqlite3.Connection, query: str) -> bool:
 # MATCH inside an OR, so the two sides are unioned in a subquery instead and
 # joined on rowid; MIN() keeps the better score when a message matches on both.
 # The scores come from two indexes, so ordering across them is an approximation
-# — the same tokenizer and the same bm25 weights, over different corpora.
-_RANKED_UNION_JOIN = (
-    "JOIN (SELECT rid, MIN(score) AS score FROM ("
-    f"SELECT rowid AS rid, bm25({MESSAGES_FTS_TABLE}) AS score FROM {MESSAGES_FTS_TABLE} "
-    f"WHERE {MESSAGES_FTS_TABLE} MATCH ? "
-    "UNION ALL "
-    f"SELECT m.rowid, t.score FROM messages m JOIN {_TRANSCRIPT_HITS_TABLE} t ON t.sha = m.file_sha256"
-    ") GROUP BY rid) hits ON hits.rid = messages.rowid"  # nosec B608 # both table names are module constants; QueryPredicate binds MATCH text
+# — the same tokenizer, over different corpora; saved originals have half weight.
+_FTS_RANKED_HITS = (
+    f"SELECT rowid AS rid, bm25({MESSAGES_FTS_TABLE}, 1.0, 1.0, 0.5) AS score FROM {MESSAGES_FTS_TABLE} "  # nosec B608 # table name is a module constant; MATCH text is bound by QueryPredicate
+    f"WHERE {MESSAGES_FTS_TABLE} MATCH ?"
 )
+_ORIGINAL_SUBSTRING_HITS = (
+    "SELECT rowid AS rid, 0.0 AS score FROM messages WHERE original_content IS NOT NULL AND "
+    "(instr(LOWER(original_content), LOWER(?)) > 0 OR instr(original_content, ?) > 0)"
+)
+_TRANSCRIPT_RANKED_HITS = (
+    f"SELECT m.rowid AS rid, t.score FROM messages m JOIN {_TRANSCRIPT_HITS_TABLE} t ON t.sha = m.file_sha256"  # nosec B608 # temp table name is a module constant; no external SQL fragments
+)
+
+
+def _fts_column_names(conn: sqlite3.Connection) -> frozenset[str]:
+    return _schema_memo(
+        "fts.columns",
+        MESSAGES_DB_PATH,
+        lambda: frozenset(row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")),
+        schema=conn,
+    )
+
+
+def _prepare_message_query(conn: sqlite3.Connection, query: str | None) -> QueryPredicate:
+    transcripts = _stage_transcript_hits(conn, query) if query else False
+    # Staging may commit TEMP writes. Pin the archive snapshot before any
+    # schema probes, predicate construction, row reads or attribution.
+    conn.execute("BEGIN")
+    return _query_predicate(conn, query, transcripts)
+
 
 # The store key (id, chat_jid) breaks the remaining ties so the offset a
 # relevance cursor carries keeps pointing at the same row between pages, even
@@ -2693,7 +2773,7 @@ _RANKED_UNION_JOIN = (
 _RELEVANCE_TIEBREAK = "messages.timestamp DESC, messages.id DESC, messages.chat_jid DESC"
 
 
-def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredicate:
+def _query_predicate(conn: sqlite3.Connection, query: str | None, transcripts: bool = False) -> QueryPredicate:
     """Content-search predicate shared by the message list and count queries.
 
     The FTS5 index serves the query when it exists and the text is
@@ -2703,41 +2783,46 @@ def _query_predicate(conn: sqlite3.Connection, query: str | None) -> QueryPredic
     """
     if not query:
         return QueryPredicate(None, [])
-    transcripts = _stage_transcript_hits(conn, query)
     original = "original_content" in _message_column_names(conn.cursor())
-    # An older bridge index may exist alongside the new archive column. Until
-    # its owner upgrades it, substring search must still find the original text.
     use_fts = _fts_query_kind(query) == "fts" and _fts_available(conn)
-    if use_fts and original:
-        use_fts = _schema_memo(
-            "fts.original_columns",
-            MESSAGES_DB_PATH,
-            lambda: {"content", "filename", "original_content"}.issubset(
-                row[1] for row in conn.execute("PRAGMA table_info(messages_fts)")
-            ),
-            schema=conn,
-        )
     if use_fts:
-        if not transcripts:
+        columns = _fts_column_names(conn)
+        current_columns = " ".join(name for name in ("content", "filename") if name in columns)
+        match = _fts_current_exclusions(query, current_columns)
+        legacy_original = original and "original_content" not in columns
+        if not transcripts and not legacy_original:
             return QueryPredicate(
                 f"{MESSAGES_FTS_TABLE} MATCH ?",
-                [query],
+                [match],
                 join=f"JOIN {MESSAGES_FTS_TABLE} ON {MESSAGES_FTS_TABLE}.rowid = messages.rowid",
-                relevance_order=f"bm25({MESSAGES_FTS_TABLE}), {_RELEVANCE_TIEBREAK}",
+                relevance_order=f"bm25({MESSAGES_FTS_TABLE}, 1.0, 1.0, 0.5), {_RELEVANCE_TIEBREAK}",
                 match_index=0,
                 original=original,
                 fts=True,
             )
+        branches, params = [_FTS_RANKED_HITS], [match]
+        if legacy_original:
+            # Keep indexed operators/accents/ranking for current text while a
+            # rolled-back bridge still has the two-column index.
+            branches.append(_ORIGINAL_SUBSTRING_HITS)
+            params.extend([query, query])
+        if transcripts:
+            branches.append(_TRANSCRIPT_RANKED_HITS)
+        join = (
+            "JOIN (SELECT rid, MIN(score) AS score FROM ("  # nosec B608 # branches are fixed internal SQL; all search values are bound in join_params
+            + " UNION ALL ".join(branches)
+            + ") GROUP BY rid) hits ON hits.rid = messages.rowid"
+        )
         return QueryPredicate(
             None,
             [],
-            join=_RANKED_UNION_JOIN,
-            join_params=[query],
+            join=join,
+            join_params=params,
             relevance_order=f"hits.score, {_RELEVANCE_TIEBREAK}",
             match_index=0,
             original=original,
             fts=True,
-            transcripts=True,
+            transcripts=transcripts,
         )
     clause, params = _SUBSTRING_PREDICATE, [query] * 4
     if original:
@@ -2780,21 +2865,31 @@ def _original_match_keys(
     folding. A hit also supported by current text, filename or transcript is
     not marked. Mixed-column AND hits are marked when they need the original.
     """
-    if not predicate.original or not query or not messages:
+    keys = [(message.id, message.chat_jid) for message in messages if message.original_content is not None]
+    if not predicate.original or not query or not keys:
         return set()
-    clause, params = _SUBSTRING_PREDICATE, [query] * 4
-    if predicate.fts:
-        clause = "messages.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
-        params = [f"{{content filename}} : ({query})"]
-    if predicate.transcripts:
-        clause = f"({clause} OR messages.file_sha256 IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE}))"  # nosec B608 # clause and temp table are internal SQL; search text and page keys are bound below
-    keys = [(message.id, message.chat_jid) for message in messages]
     current: set[tuple[str, str]] = set()
     for start in range(0, len(keys), 200):
         batch = keys[start : start + 200]
         slots = ",".join("(?,?)" for _ in batch)
-        sql = f"SELECT id,chat_jid FROM messages WHERE (id,chat_jid) IN (VALUES {slots}) AND ({clause})"  # nosec B608 # slots and predicate use internal SQL only; exact authorised keys and search text are bound
-        current.update(conn.execute(sql, [*(value for key in batch for value in key), *params]))
+        page = f"WITH page AS MATERIALIZED (SELECT rowid AS rid,id,chat_jid,content,filename,media_type,file_sha256 FROM messages WHERE (id,chat_jid) IN (VALUES {slots})) "  # nosec B608 # slots contain placeholders only; already authorised page keys are bound below
+        params: list[Any] = [value for key in batch for value in key]
+        if predicate.fts:
+            columns = " ".join(name for name in ("content", "filename") if name in _fts_column_names(conn))
+            sql = page + (
+                "SELECT messages.id,messages.chat_jid FROM page AS messages CROSS JOIN messages_fts "  # nosec B608 # page contains placeholders only; page keys and MATCH text are bound below
+                "ON messages_fts.rowid=messages.rid WHERE messages_fts MATCH ?"
+            )
+            params.append(f"{{{columns}}} : ({_fts_current_exclusions(query, columns)})")
+        else:
+            sql = page + "SELECT id,chat_jid FROM page AS messages WHERE " + _SUBSTRING_PREDICATE  # nosec B608 # page uses bound keys; substring predicate is a module constant with bound search values
+            params.extend([query] * 4)
+        if predicate.transcripts:
+            sql += (
+                " UNION SELECT id,chat_jid FROM page AS messages WHERE file_sha256 "  # nosec B608 # fixed page SQL and temp table name; no external SQL fragments
+                f"IN (SELECT sha FROM {_TRANSCRIPT_HITS_TABLE})"
+            )
+        current.update(conn.execute(sql, params))
     return set(keys) - current
 
 
@@ -2822,7 +2917,7 @@ def count_messages(
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
-        predicate = _query_predicate(conn, query)
+        predicate = _prepare_message_query(conn, query)
         where_clauses, params = MessageFilters(
             after=after,
             before=before,
@@ -2989,12 +3084,8 @@ def list_messages_page(
         conn = _connect_messages_db()
         cur = conn.cursor()
 
-        predicate = _query_predicate(conn, query)
+        predicate = _prepare_message_query(conn, query)
         ranked = predicate.relevance_order is not None
-        if predicate.original:
-            # The marker must describe the text returned on this page even if
-            # another edit commits before the attribution/context queries.
-            conn.execute("BEGIN")
 
         # Build base query
         query_parts = [f"SELECT {message_columns(cur)} FROM messages"]  # nosec B608 # message_columns selects fixed schema-compatible columns; query values are bound below
@@ -3199,7 +3290,7 @@ def message_stats(
     try:
         conn = _connect_messages_db()
         cur = conn.cursor()
-        predicate = _query_predicate(conn, query)
+        predicate = _prepare_message_query(conn, query)
         clauses, filter_params = MessageFilters(
             after=after,
             before=before,
