@@ -148,6 +148,8 @@ func TestHandleEvent_GroupInfoRenameAndEphemeral(t *testing.T) {
 
 func TestHandleEvent_SelfReadReceiptMarksChatRead(t *testing.T) {
 	peer := types.NewJID("5511888888888", types.DefaultUserServer)
+	// Peer receipts use a background worker. Every pooled connection must
+	// see the same archive while the foreground checks our own read marker.
 	t.Setenv(storeDirEnv, t.TempDir())
 	ms, err := NewMessageStore()
 	if err != nil {

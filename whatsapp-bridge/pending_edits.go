@@ -273,12 +273,13 @@ func consumePendingEdits(ex locationWriter, message storedMessage, now time.Time
 	// All three fields select the same newest candidate. FTS triggers and the
 	// pending deletion participate in the original message's transaction.
 	_, err := ex.Exec(`UPDATE messages SET
+		original_content=CASE WHEN COALESCE(message_edit_timestamp,0)=0 THEN COALESCE(original_content,content) ELSE original_content END,
 		content=(`+fmt.Sprintf(candidate, "content")+`),
 		mentions=(`+fmt.Sprintf(candidate, "mentions")+`),
 		message_edit_timestamp=(`+fmt.Sprintf(candidate, "edit_timestamp")+`)
 		WHERE id=:id AND chat_jid=:chat AND sender=:sender AND sender_server IS :server
 		AND is_from_me=:own AND deleted_at IS NULL
-		AND message_edit_timestamp < (`+fmt.Sprintf(candidate, "edit_timestamp")+`)`,
+		AND COALESCE(message_edit_timestamp,0) < (`+fmt.Sprintf(candidate, "edit_timestamp")+`)`,
 		sql.Named("id", message.ID), sql.Named("chat", message.ChatJID), sql.Named("sender", user), sql.Named("server", server),
 		sql.Named("own", message.IsFromMe), sql.Named("alias_user", aliasUser), sql.Named("alias_server", aliasServer), sql.Named("chat_alias", message.EditChatAlias))
 	if err != nil {

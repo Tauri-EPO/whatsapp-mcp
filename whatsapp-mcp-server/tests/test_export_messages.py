@@ -101,6 +101,22 @@ def test_fields_subset(store):
     assert all(set(row) == {"id", "timestamp"} for row in lines(result["path"]))
 
 
+def test_export_edit_metadata_fields(store):
+    with sqlite3.connect(whatsapp.MESSAGES_DB_PATH) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN message_edit_timestamp INTEGER")
+        conn.execute("ALTER TABLE messages ADD COLUMN original_content TEXT")
+        conn.execute(
+            "UPDATE messages SET message_edit_timestamp=1791453660123, original_content='oldword' WHERE id='a1'"
+        )
+    whatsapp._reset_schema_cache()
+    result = export.export_messages(fields=["id", "edited_at", "original_content"], out_path="edits.ndjson")
+    assert lines(result["path"])[0] == {
+        "id": "a1",
+        "edited_at": "2026-10-08T10:01:00.123000+00:00",
+        "original_content": "oldword",
+    }
+
+
 def test_empty_result_still_writes_a_file(store):
     result = export.export_messages(chat_jid=A, after="2030-01-01", out_path="none.ndjson")
     assert (result["count"], result["first_timestamp"], result["bytes"]) == (0, None, 0)

@@ -12,6 +12,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 // Keep history write locks bounded; the next sync safely upserts partial imports.
@@ -245,7 +246,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					// unwrap, text, media, poll. Works on a local view; the
 					// whatsmeow payload is not mutated.
 					ex := extractMessage(msg.Message.Message, timestamp, histMsgID)
-					if ex.edit != nil {
+					if ex.edit != nil || ex.inner.GetSecretEncryptedMessage() != nil {
 						continue // edits run after original rows, including older chunks
 					}
 					content, mediaType, filename := ex.content, ex.mediaType, ex.filename
@@ -475,7 +476,7 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 					if row == nil || row.Message == nil {
 						continue
 					}
-					ex := extractMessage(row.Message.Message, timestamp, row.Message.GetKey().GetID())
+					ex := b.extractHistoryMessage(ctx, jid, row.Message)
 					if ex.edit == nil {
 						continue
 					}
@@ -517,6 +518,30 @@ func (b *Bridge) handleHistorySyncWithSharesContext(ctx context.Context, history
 	// Return to the SDK before retrying secrets that a later notification carries.
 	b.queueHistoryPollVotes(voteJobs)
 	b.Log.Infof("History sync complete. Stored %d messages.", syncedCount)
+}
+
+// Decrypt history edits only after the original rows commit, so SDK secret
+// lookups never happen while an archive writer is held. Peer shares do not
+// reach this step: a group peer cannot authenticate another author's edit.
+func (b *Bridge) extractHistoryMessage(ctx context.Context, chat types.JID, info *waWeb.WebMessageInfo) extractedMessage {
+	ts := time.Unix(int64(info.GetMessageTimestamp()), 0) //nolint:gosec // WhatsApp epoch seconds
+	msg := &events.Message{Message: info.Message}
+	msg.Info.ID, msg.Info.Timestamp = info.GetKey().GetID(), ts
+	if ex := extractMessage(info.Message, ts, msg.Info.ID); ex.inner.GetSecretEncryptedMessage() != nil {
+		client := b.currentClient()
+		if client == nil {
+			return extractedMessage{}
+		}
+		// Let the SDK derive wire authorship and own-account metadata exactly as
+		// it does for live deliveries, without mutating history's shared payload.
+		parsed, err := client.ParseWebMessage(chat, proto.Clone(info).(*waWeb.WebMessageInfo))
+		if err != nil {
+			b.Log.Debugf("Cannot parse secret edit %s in %s", msg.Info.ID, chat)
+			return extractedMessage{}
+		}
+		msg = parsed
+	}
+	return b.extractIncomingMessage(ctx, msg, ts)
 }
 
 // Used only after a chunk fails: count actual storable rows, excluding sparse
