@@ -42,6 +42,7 @@ const (
 // fails otherwise — and the tool names with the MCP server's, which
 // tests/test_bridge_tool_policy.py checks from the Python side.
 var endpointTools = map[string][]string{
+	"/api/group/create":       {"create_group"},
 	"/api/send":               {"send_message", "send_file", "send_audio_message"},
 	"/api/react":              {"send_reaction"},
 	"/api/typing":             {"send_typing"},
@@ -68,6 +69,9 @@ var endpointTools = map[string][]string{
 // leave the host.
 // Accepted in both lists, enforced by the MCP server only.
 var unenforcedTools = []string{
+	"check_business",
+	"list_subgroups",
+	"get_message_receipts",
 	"annotate",
 	"annotate_media",
 	"bridge_status",

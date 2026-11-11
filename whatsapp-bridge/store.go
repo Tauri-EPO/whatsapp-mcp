@@ -289,6 +289,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if _, err := db.Exec(groupMembersSchema); err != nil {
 		return fmt.Errorf("failed to ensure group_members table: %w", err)
 	}
+	if _, err := db.Exec(messageReceiptsSchema); err != nil {
+		return fmt.Errorf("failed to ensure message_receipts table: %w", err)
+	}
 	if _, err := applyNamedMigration(db, "labels_schema_v1", func(tx *sql.Tx) error {
 		_, err := tx.Exec(labelsSchema)
 		return err
@@ -676,6 +679,17 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		WHERE dest.file_sha256=r.sha256
 		ON CONFLICT(id,chat_jid) DO NOTHING`); err != nil {
 		return fmt.Errorf("failed to migrate media cache references: %w", err)
+	}
+	// The DELETE trigger removes source receipts, so carry them to the same
+	// owned destination message first and retain the latest colliding receipt.
+	if _, err := tx.Exec(`INSERT INTO message_receipts(chat_jid,message_id,recipient,recipient_server,type,at)
+		SELECT map.phone_jid,r.message_id,r.recipient,r.recipient_server,r.type,r.at
+		FROM message_receipts r JOIN tmp_lid_to_phone map ON map.lid_jid=r.chat_jid
+		JOIN messages dest ON dest.id=r.message_id AND dest.chat_jid=map.phone_jid
+		WHERE dest.is_from_me=1
+		ON CONFLICT(chat_jid,message_id,recipient,recipient_server,type)
+		DO UPDATE SET at=MAX(message_receipts.at,excluded.at)`); err != nil {
+		return fmt.Errorf("failed to migrate message receipts: %w", err)
 	}
 	deleteMessagesResult, err := tx.Exec(`
 		DELETE FROM messages

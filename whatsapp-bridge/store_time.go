@@ -103,7 +103,7 @@ func anchorTime(v any) time.Time {
 
 // Change this marker name when adding a timestamp column to the rewrite.
 // It is independent of other data migrations and of legacy user_version.
-const canonicalTimestampsMigration = "canonical_timestamps_v5_group_settings"
+const canonicalTimestampsMigration = "canonical_timestamps_v6_receipts"
 
 // canonicalTimeGlob matches exactly what dbTime produces, so rows already in
 // the canonical spelling are skipped by the migration without being parsed.
@@ -117,6 +117,7 @@ const canonicalTimeGlob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]
 // reason: that table postdates this migration, so every row it has ever held
 // was written through dbTime and there is nothing to rewrite.
 var canonicalTimeColumns = []struct{ table, column string }{
+	{"message_receipts", "at"},
 	{"messages", "timestamp"},
 	{"messages", "deleted_at"},
 	{"chats", "last_message_time"},

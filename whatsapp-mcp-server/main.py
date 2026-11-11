@@ -79,7 +79,7 @@ from transcribe import load_config as load_whisper_config
 from transcribe_worker import install_ingest_worker
 from triage import mark_handled as triage_mark_handled
 from triage import snooze as triage_snooze
-from untrusted import WRAP_ENV, parse_wrap_env, untrusted_content
+from untrusted import WRAP_ENV, clean_business, parse_wrap_env, untrusted_content
 from whatsapp import (
     CHAT_FIELDS,
     CHAT_POLICY,
@@ -1720,6 +1720,76 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
         cursor: next_cursor from the previous page
     """
     return whatsapp_get_group_members(chat_jid, limit=limit, page=page, cursor=cursor)
+
+
+@mcp.tool()
+@tool_errors
+def get_message_receipts(chat_jid: str, message_id: str) -> dict[str, Any]:
+    """Get observed delivery/read/played receipts for a message this account sent.
+
+    Returns recipients with their furthest status and latest timestamp per type.
+    Collection starts at upgrade: an empty result means no observed receipts,
+    not proof of unread status. Privacy settings can hide reads. Both the chat
+    JID and message ID are required; group readers use known phone/LID twins.
+    A receipt arriving before its own original is archived is currently lost;
+    missing receipt data must remain unknown rather than being treated as unread.
+    """
+    return whatsapp.get_message_receipts(chat_jid, message_id)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def check_business(jid: str) -> dict[str, Any]:
+    """Check whether a phone/LID user is a WhatsApp Business account.
+
+    Returns is_business (null if unknown), verified_name, categories, email,
+    address and website when available. Complete answers are cached for one
+    hour, up to 256 users; partial/rate-limited answers expire within one minute
+    and unknown outages are not cached. A verified-name 429 sets rate_limited and verified_name_error;
+    the independent business profile query still runs. Errors are retained on
+    cache hits. A business profile is not proof that a sender is trustworthy.
+    website is available only when exposed in the SDK profile options; the
+    pinned SDK discards standalone website elements.
+    """
+    return clean_business(whatsapp.check_business(jid))
+
+
+@mcp.tool()
+@tool_errors
+@mutating_tool
+def create_group(
+    name: str, participants: list[str] | None = None, community: bool = False, parent_jid: str | None = None
+) -> dict[str, Any]:
+    """Create a WhatsApp group or community, optionally linked to a community.
+
+    name is 1-25 characters; participants accepts up to 256 phone numbers or
+    user JIDs (empty creates a group with this account alone). community=True
+    creates a community using the SDK defaults; it excludes parent_jid.
+    parent_jid creates the group inside that community in the same request.
+    Restricted chat lists must explicitly include *@g.us, and every participant
+    must be allowed using known local phone/LID identities. Each creation
+    consumes one send action plus one per participant; new participants count
+    toward the daily first-contact limit.
+
+    Returns the created group_jid and not_added entries for participants WhatsApp
+    refused: jid, numeric error, and invite_code when available. Report these
+    failures and send the supplied invitation instead of recreating the group.
+    On uncertain failures, do not blindly retry. Read-only/tool policy refuse it.
+    """
+    return whatsapp.create_group(name, participants, community, parent_jid)
+
+
+@mcp.tool()
+@tool_errors
+@untrusted_content
+def list_subgroups(chat_jid: str) -> dict[str, Any]:
+    """List allowed groups linked to a community group JID, with names and JIDs.
+
+    Requires a live WhatsApp connection. The community and each returned child
+    must pass the conversation allow-list; excluded groups are omitted.
+    """
+    return whatsapp.list_subgroups(chat_jid)
 
 
 @mcp.tool()

@@ -81,6 +81,9 @@ whatsapp-mcp/
 │   ├── connection_problem.go   # classified connection failures, persisted ban expiry and dial blocking
 │   ├── connection_events.go    # opt-in safe connection webhooks with debounced disconnection
 │   ├── events.go               # whatsmeow event dispatch, handleMessage, calls, reconnect loop
+│   ├── message_receipts.go     # peer delivery/read/played receipts for archived own messages
+│   ├── group_create.go         # allow-listed group/community creation and subgroup reads
+│   ├── business.go             # bounded cached business identity/profile lookup
 │   ├── history_sync.go         # handleHistorySync (phone replays at pair time / on demand)
 │   ├── persist.go              # one extraction + storage path shared by live messages and history sync
 │   ├── store_failures.go       # a row that cannot be written: bounded retry on a busy database, one ERROR with ID + chat, a counter
@@ -229,6 +232,12 @@ whatsapp-mcp/
 ```
 
 Data flow: MCP client → MCP server → reads `messages.db` directly for everything read-only, calls bridge REST (`WHATSAPP_API_URL`, default `http://localhost:8080/api`) for sends, media, group info, polls, deletes → bridge → WhatsApp Web.
+
+`messages.db.message_receipts` holds observed peer delivery/read/played receipts
+for own messages, keyed by chat, message, recipient namespace and type. The
+bridge writes bounded batches with `dbTime`; MCP reads it without network calls.
+Deleting an original removes its receipts through a schema trigger keyed by
+both chat and message ID, including bounded chat cleanup and single-row deletes.
 
 Three SQLite databases in the store directory: `whatsapp.db` (whatsmeow: session, contacts, LID map — opaque) and `messages.db` (ours: `chats`, `messages`, `pending_edits`, `calls`, `polls`, `poll_votes`, `group_members`, `labels`, `chat_labels`, `messages_fts`, `schema_migrations` (bridge-owned, one row per applied one-off migration)) are written by the bridge and only read by the MCP server; `notes.db` (`media_notes`, keyed by content hash, plus per-message `media_refusals` (dated cache-identity refusals), `notes_meta` (the transcript index version and `ingest_sent_since`, the instant sent audio started counting for the ingest worker) and the `transcripts_fts` index over the stored transcripts) is created lazily and owned by the MCP server, and the bridge never writes its rows or schema. SQLite readers may create/update owner-only `-wal`/`-shm` coordination sidecars (0600, same uid), and large export queries may spill temporary SQLite files. The single exception for operator export/snapshot (#659/#660) opens an existing `notes.db` strictly read-only (`file:` URI `mode=ro`, never `immutable`), on its own short-lived handle with `boundPool`, to stream notes or `VACUUM INTO` a separate copy; a missing file is expected because creation is lazy — the "never create FTS from Python" rule is about `messages.db` only.
 
