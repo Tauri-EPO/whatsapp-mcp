@@ -1151,14 +1151,16 @@ row, no pointer rows). WhatsApp deletes the conversation **up to that anchor**;
 messages newer than it survive. A chat without a stored message returns
 `not_found`: the bridge never sends a guessed range (whatsmeow would default to
 "now"). Only after the server accepts the patch, the bridge removes the same
-range from `messages.db` under every stored alias (messages, calls, polls and
-their votes; the chat row when nothing newer is left) and then the cached media
-of those rows, local or S3. Group rosters and label associations stay.
+range locally under every stored alias: first the cached media of those rows
+(local or S3), then the rows in one transaction (messages, calls, polls and
+their votes; the chat row when no message is left). A media row whose file could
+not be removed stays, counted in `local_media_failed`, so `purge_media` can
+still reach it. Group rosters and label associations stay. The MCP call waits
+up to 60 s (send plus cleanup).
 
 Returns `{"success": true, "deleted": true, "delete_media": …, "anchor_timestamp":
 "…", "local_messages_removed": N, "local_media_removed": N, "sent": true,
-"confirmed": false}`; `local_media_failed` counts cached files that could not be
-removed. `local_cleanup_error` means WhatsApp accepted the deletion but the
+"confirmed": false}`. `local_cleanup_error` means WhatsApp accepted the deletion but the
 local archive was not fully cleaned: **do not resend**. Error semantics follow
 `archive_chat`: 408 nothing sent, safe to retry; 503 not applied; other failures
 have an unknown outcome, so inspect the phone and never retry automatically.

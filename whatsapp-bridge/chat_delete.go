@@ -7,7 +7,8 @@ package main
 // everything up to that anchor; so does the local cleanup, which runs only
 // after the server accepted the patch: rows of every stored alias with a
 // timestamp at or before the anchor, their calls and polls, and
-// their cached media. Anything newer than the anchor stays on both sides.
+// their cached media (removed first, see deleteChatLocal). Anything newer
+// than the anchor stays on both sides.
 //
 // Irreversible. No anchor means no patch: whatsmeow would fall back to "now",
 // a range the phone never saw. An uncertain outcome is never retried here.
@@ -24,7 +25,8 @@ import (
 )
 
 // Local cleanup gets its own budget: the patch is already accepted, so a
-// cancelled request must not leave the archive half-deleted.
+// cancelled request must not leave the archive half-deleted. Send (20 s) plus
+// cleanup stays under the MCP client's 60 s timeout for this one call.
 const chatDeleteCleanupBudget = 15 * time.Second
 
 type chatDeleteCleanup struct {
@@ -68,7 +70,7 @@ func handleDeleteChat(deps chatDeleteDeps) http.HandlerFunc {
 		}
 		err := deps.send(ctx, appstate.BuildDeleteChat(anchor.target, anchor.ts, anchor.key, req.DeleteMedia))
 		payload := map[string]any{"deleted": true, "delete_media": req.DeleteMedia, "anchor_timestamp": dbTime(anchor.ts)}
-		if err == nil || strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:") {
+		if appStateAccepted(err) {
 			// Accepted by the server: mirror it locally on a budget of its own.
 			cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(r.Context()), chatDeleteCleanupBudget)
 			result, cleanErr := deps.cleanup(cleanCtx, anchor.chats, anchor.ts)
@@ -87,9 +89,11 @@ func handleDeleteChat(deps chatDeleteDeps) http.HandlerFunc {
 }
 
 // deleteChatLocal removes what the accepted deleteChat patch removed on the
-// phone. Media rows are collected first (the file names derive from them),
-// rows go in one transaction, and the files after it: a leftover file is
-// reported, never a row that points at nothing.
+// phone. Cached media goes first, while the rows still exist: the file names
+// derive from them, and the S3 references cascade away with the rows. A media
+// row is deleted only when its file is gone (or was never cached), so a file
+// that could not be removed keeps a row a later purge can still find; a media
+// row stored after the collection is left alone for the same reason.
 func (b *Bridge) deleteChatLocal(ctx context.Context, chats []string, upTo time.Time) (chatDeleteCleanup, error) {
 	var result chatDeleteCleanup
 	var media []mediaRow
@@ -102,42 +106,49 @@ func (b *Bridge) deleteChatLocal(ctx context.Context, chats []string, upTo time.
 			return result, err
 		}
 	}
-	removed, err := b.Store.deleteChatRows(ctx, chats, upTo)
+	var gone []mediaRow
+	var mediaErr error
+	storage := b.mediaStorage()
+	const batch = 256
+	for start := 0; start < len(media) && mediaErr == nil; start += batch {
+		rows := media[start:min(start+batch, len(media))]
+		results, err := storage.Delete(ctx, rows, false)
+		byKey := make(map[[2]string]PurgeResult, len(results))
+		for _, res := range results {
+			byKey[[2]string{res.MessageID, res.ChatJID}] = res
+		}
+		for _, row := range rows {
+			res, ok := byKey[[2]string{row.ID, row.ChatJID}]
+			switch {
+			case ok && res.Purged:
+				result.MediaRemoved++
+				gone = append(gone, row)
+			case ok && res.Reason == purgeReasonNotCached:
+				gone = append(gone, row)
+			default:
+				result.MediaFailed++
+			}
+		}
+		if err != nil {
+			mediaErr = err
+			result.MediaFailed += len(media) - min(start+batch, len(media))
+		}
+	}
+	removed, err := b.Store.deleteChatRows(ctx, chats, upTo, gone)
 	result.Messages = removed
 	if err != nil {
 		return result, err
 	}
-	if len(media) == 0 || (b.MediaStorage == nil && b.StoreRoot == nil) {
-		return result, nil
-	}
-	finder := &cachedMediaFinder{root: b.StoreRoot}
-	defer finder.Close()
-	storage := b.mediaStorage()
-	if b.MediaStorage == nil {
-		storage = localMediaStorage{root: b.StoreRoot, finder: finder}
-	}
-	const batch = 256
-	for start := 0; start < len(media); start += batch {
-		rows := media[start:min(start+batch, len(media))]
-		results, err := storage.Delete(ctx, rows, false)
-		if err != nil {
-			result.MediaFailed += len(media) - start
-			return result, err
-		}
-		for _, res := range results {
-			if res.Purged {
-				result.MediaRemoved++
-			} else if res.Reason != purgeReasonNotCached {
-				result.MediaFailed++
-			}
-		}
-	}
-	return result, nil
+	return result, mediaErr
 }
 
-// deleteChatRows deletes the chat's rows up to the anchor in one transaction.
-// The chat row itself goes only when no newer message is left under it.
-func (store *MessageStore) deleteChatRows(ctx context.Context, chats []string, upTo time.Time) (int64, error) {
+// cacheableMediaTypes are the kinds EachMediaRowMatching walks.
+const cacheableMediaTypes = `('image','video','audio','document','sticker')`
+
+// deleteChatRows deletes, in one transaction, the chat's non-media rows up to
+// the anchor and the listed media rows, then what only they referenced. The
+// chat row itself goes only when no message is left under it.
+func (store *MessageStore) deleteChatRows(ctx context.Context, chats []string, upTo time.Time, media []mediaRow) (int64, error) {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -152,11 +163,19 @@ func (store *MessageStore) deleteChatRows(ctx context.Context, chats []string, u
 		}
 		return append(out, extra...)
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE chat_jid IN `+in+` AND timestamp <= ?`, args(bound)...) //nolint:gosec // Only "?" placeholders are concatenated; every value is bound.
+	res, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE chat_jid IN `+in+` AND timestamp <= ? AND COALESCE(media_type, '') NOT IN `+cacheableMediaTypes, args(bound)...) //nolint:gosec // Only "?" placeholders and a literal list are concatenated; every value is bound.
 	if err != nil {
 		return 0, err
 	}
 	removed, _ := res.RowsAffected()
+	for _, row := range media {
+		res, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id = ? AND chat_jid = ?`, row.ID, row.ChatJID)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		removed += n
+	}
 	for _, stmt := range []string{
 		`DELETE FROM calls WHERE chat_jid IN ` + in + ` AND timestamp <= ?`,
 		`DELETE FROM polls WHERE chat_jid IN ` + in + ` AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = polls.message_id AND m.chat_jid = polls.chat_jid)`,

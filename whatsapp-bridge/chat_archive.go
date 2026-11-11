@@ -200,6 +200,12 @@ func (deps archiveDeps) prepareChatAppState(ctx context.Context, w http.Response
 	return chatAppStateAnchor{target: target, chats: chats, key: key, ts: ts}, true
 }
 
+// appStateAccepted reports whether the server took the patch: no error, or the
+// pinned library's prefix that proves acceptance before its confirmation fetch failed.
+func appStateAccepted(err error) bool {
+	return err == nil || strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:")
+}
+
 func writeAppStateResult(w http.ResponseWriter, err error, payload map[string]any, action string) {
 	if err != nil {
 		var notSent appStateNotSentError
@@ -207,8 +213,7 @@ func writeAppStateResult(w http.ResponseWriter, err error, payload map[string]an
 			writeErrorCode(w, 408, "bridge_unavailable", action+" request expired waiting for writer; nothing sent; safe to retry")
 			return
 		}
-		// This pinned-library prefix proves acceptance before confirmation failed.
-		if strings.HasPrefix(err.Error(), "failed to fetch app state after sending update:") {
+		if appStateAccepted(err) {
 			payload["warning"] = "Patch accepted; app-state confirmation failed. Do not retry automatically."
 		} else if errors.Is(err, whatsmeow.ErrAppStateUpdate) || errors.Is(err, whatsmeow.ErrNotConnected) || err.Error() == "no app state keys found, creating app state keys is not yet supported" {
 			writeErrorCode(w, 503, "bridge_unavailable", action+" was not applied; safe to retry after resolving the bridge error: "+err.Error())

@@ -62,11 +62,19 @@ def test_get_blocklist(monkeypatch):
     assert seen[0][0].endswith("/api/blocklist")
 
 
+def test_get_blocklist_filtered_by_mcp_allow_list(monkeypatch):
+    other = {"lid": "100000000000002@lid", "phone_jid": "5511888888888@s.whatsapp.net"}
+    _capture(monkeypatch, "get", {"success": True, "blocklist": [{"lid": LID, "phone_jid": CHAT}, other]})
+    monkeypatch.setattr(whatsapp, "CHAT_POLICY", ChatPolicy.from_entries(["5511999999999"]))
+    assert main.get_blocklist()["blocklist"] == [{"lid": LID, "phone_jid": CHAT}]
+
+
 def test_delete_chat_payload(monkeypatch):
     seen = _capture(monkeypatch, "post", {"success": True, "deleted": True, "local_messages_removed": 3})
     assert main.delete_chat(CHAT, delete_media=True, confirm=True)["local_messages_removed"] == 3
     assert seen[0][0].endswith("/api/chat/delete")
     assert seen[0][1]["json"] == {"chat_jid": CHAT, "delete_media": True, "confirm": True}
+    assert seen[0][1]["timeout"] >= 60
 
 
 @pytest.mark.parametrize("confirm", [False, "true", 1])

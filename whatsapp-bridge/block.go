@@ -27,8 +27,11 @@ type updateBlocklistFunc func(context.Context, types.JID, events.BlocklistChange
 type blockDeps struct {
 	policy    chatPolicyResolver
 	connected func() bool
-	update    updateBlocklistFunc
-	list      blocklistFunc
+	// resolveRecipient is the shared registered-number lookup /api/send uses
+	// (canonicalRecipientJID, its cache and the second allow-list check).
+	resolveRecipient func(context.Context, http.ResponseWriter, string) (string, bool)
+	update           updateBlocklistFunc
+	list             blocklistFunc
 }
 
 type blocklistEntry struct {
@@ -86,6 +89,16 @@ func handleBlock(deps blockDeps) http.HandlerFunc {
 		}
 		ctx, cancel := requestContext(r, blockDeadline)
 		defer cancel()
+		if jid.Server == types.DefaultUserServer && deps.resolveRecipient != nil {
+			// A typed number may not be the registered one (Brazilian ninth digit).
+			registered, ok := deps.resolveRecipient(ctx, w, jid.String())
+			if !ok {
+				return
+			}
+			if jid, ok = authorizeChat(w, policy, registered, true); !ok {
+				return
+			}
+		}
 		action := events.BlocklistChangeActionUnblock
 		if *req.Blocked {
 			action = events.BlocklistChangeActionBlock

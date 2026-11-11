@@ -7202,13 +7202,17 @@ def delete_chat(chat_jid: str, delete_media: bool = False, confirm: bool = False
         raise ToolError("invalid_argument", "Deleting a chat is irreversible: call again with confirm=true")
     return _bridge_json(
         _bridge_request(
-            "POST", "/chat/delete", json={"chat_jid": target, "delete_media": bool(delete_media), "confirm": True}
+            "POST",
+            "/chat/delete",
+            # Send (20 s) plus local cleanup (15 s) can outlast the default read timeout.
+            timeout=max(_bridge_timeout(), 60.0),
+            json={"chat_jid": target, "delete_media": bool(delete_media), "confirm": True},
         )
     )
 
 
 def _contact_target(jid: str) -> str:
-    target = (jid or "").strip()
+    target = normalize_recipient((jid or "").strip())
     if target.isdigit() and target.isascii():
         return target
     user, sep, server = target.rpartition("@")
@@ -7225,8 +7229,17 @@ def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
 
 
 def get_blocklist() -> dict[str, Any]:
-    """Read the account's blocklist; the bridge filters it by the chat allow-list."""
-    return _bridge_json(_bridge_request("GET", "/blocklist"))
+    """Read the account's blocklist, filtered by the chat allow-list on both sides."""
+    payload = _bridge_json(_bridge_request("GET", "/blocklist"))
+    entries = payload.get("blocklist")
+    if CHAT_POLICY.restricted and isinstance(entries, list):
+        payload["blocklist"] = [
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and any(CHAT_POLICY.allows(entry.get(key) or "") for key in ("lid", "phone_jid") if entry.get(key))
+        ]
+    return payload
 
 
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:

@@ -208,6 +208,9 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	// Block / unblock a contact and read the blocklist (block.go).
 	blocking := blockDeps{
 		policy: b.Policy, connected: func() bool { return b.Connected() },
+		resolveRecipient: func(ctx context.Context, w http.ResponseWriter, to string) (string, bool) {
+			return b.registeredRecipient(ctx, w, to, nil)
+		},
 		update: func(ctx context.Context, jid types.JID, action events.BlocklistChangeAction) ([]types.BlocklistItem, error) {
 			list, err := client.UpdateBlocklist(ctx, jid, action, "")
 			if err != nil || list == nil {

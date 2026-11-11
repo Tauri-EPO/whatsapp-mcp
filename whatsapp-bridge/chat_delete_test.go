@@ -196,6 +196,70 @@ func TestDeleteChatLocalRemovesUpToAnchor(t *testing.T) {
 	}
 }
 
+// deleteChatStorage stands in for S3: its references cascade away with the
+// message rows, so Delete must run while the rows still exist.
+type deleteChatStorage struct {
+	mediaStorage
+	t     *testing.T
+	ms    *MessageStore
+	fail  map[string]bool
+	calls *int
+}
+
+func (s deleteChatStorage) Delete(_ context.Context, rows []mediaRow, dry bool) ([]PurgeResult, error) {
+	*s.calls++
+	out := make([]PurgeResult, 0, len(rows))
+	for _, row := range rows {
+		var n int
+		if err := s.ms.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = ? AND chat_jid = ?`, row.ID, row.ChatJID).Scan(&n); err != nil || n != 1 || dry {
+			s.t.Fatalf("media delete after its row was gone (n=%d err=%v dry=%v)", n, err, dry)
+		}
+		if s.fail[row.ID] {
+			out = append(out, PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Reason: "unreachable"})
+			continue
+		}
+		out = append(out, PurgeResult{MessageID: row.ID, ChatJID: row.ChatJID, Purged: true, Bytes: 1})
+	}
+	return out, nil
+}
+
+func TestDeleteChatLocalMediaBeforeRowsAndFailedFileKeepsRow(t *testing.T) {
+	ms := newTestMessageStore(t)
+	b := testBridge(t, nil, ms, installRecordingLogger(t))
+	calls := 0
+	b.MediaStorage = deleteChatStorage{t: t, ms: ms, fail: map[string]bool{"BAD": true}, calls: &calls}
+	anchor := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := ms.StoreChat(archiveTestChat, "", anchor); err != nil {
+		t.Fatal(err)
+	}
+	chatDeleteSeed(t, ms, "GOOD", archiveTestChat, "image", anchor.Add(-time.Minute))
+	chatDeleteSeed(t, ms, "BAD", archiveTestChat, "video", anchor.Add(-time.Minute))
+	chatDeleteSeed(t, ms, "TXT", archiveTestChat, "", anchor)
+	result, err := b.deleteChatLocal(context.Background(), []string{archiveTestChat}, anchor)
+	if err != nil || calls != 1 || result.MediaRemoved != 1 || result.MediaFailed != 1 || result.Messages != 2 {
+		t.Fatalf("result=%+v err=%v calls=%d", result, err, calls)
+	}
+	var left []string
+	rows, err := ms.db.Query(`SELECT id FROM messages WHERE chat_jid = ?`, archiveTestChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		_ = rows.Scan(&id)
+		left = append(left, id)
+	}
+	_ = rows.Close()
+	if strings.Join(left, ",") != "BAD" {
+		t.Fatalf("left=%v: only the row whose file could not be removed may stay", left)
+	}
+	var chats int
+	_ = ms.db.QueryRow(`SELECT COUNT(*) FROM chats WHERE jid = ?`, archiveTestChat).Scan(&chats)
+	if chats != 1 {
+		t.Fatal("chat row removed while a message is still stored under it")
+	}
+}
+
 func TestDeleteChatMuxGuards(t *testing.T) {
 	for _, tc := range []struct {
 		name, allow, deny, chats string

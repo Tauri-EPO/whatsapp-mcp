@@ -82,6 +82,53 @@ func TestBlockRefusalsSendNothing(t *testing.T) {
 	}
 }
 
+func TestBlockPhoneUsesRegisteredNumber(t *testing.T) {
+	var got types.JID
+	deps := blockDeps{policy: chatPolicy{}, connected: func() bool { return true },
+		resolveRecipient: func(_ context.Context, _ http.ResponseWriter, to string) (string, bool) {
+			if to != "5511888888888@s.whatsapp.net" {
+				t.Fatalf("lookup for %q", to)
+			}
+			return "5511999999999@s.whatsapp.net", true
+		},
+		update: func(_ context.Context, jid types.JID, _ events.BlocklistChangeAction) ([]types.BlocklistItem, error) {
+			got = jid
+			return nil, nil
+		}}
+	rec := httptest.NewRecorder()
+	handleBlock(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jid":"5511888888888","blocked":true}`)))
+	if rec.Code != 200 || got.String() != "5511999999999@s.whatsapp.net" {
+		t.Fatalf("status=%d got=%s body=%s", rec.Code, got, rec.Body.String())
+	}
+
+	// The registered number is checked against the allow-list again; a refusal blocks nobody.
+	deps.policy = parseChatPolicy("5511888888888")
+	deps.update = func(context.Context, types.JID, events.BlocklistChangeAction) ([]types.BlocklistItem, error) {
+		t.Fatal("blocked a number outside the allow-list")
+		return nil, nil
+	}
+	rec = httptest.NewRecorder()
+	handleBlock(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jid":"5511888888888","blocked":true}`)))
+	if rec.Code != 403 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// LIDs are not phone numbers: no lookup.
+	deps.policy = chatPolicy{}
+	deps.resolveRecipient = func(context.Context, http.ResponseWriter, string) (string, bool) {
+		t.Fatal("LID sent to the phone lookup")
+		return "", false
+	}
+	deps.update = func(context.Context, types.JID, events.BlocklistChangeAction) ([]types.BlocklistItem, error) {
+		return nil, nil
+	}
+	rec = httptest.NewRecorder()
+	handleBlock(deps)(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jid":"100000000000001@lid","blocked":true}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestBlockUpdateFailureIs502(t *testing.T) {
 	deps := blockDeps{policy: chatPolicy{}, connected: func() bool { return true },
 		update: func(context.Context, types.JID, events.BlocklistChangeAction) ([]types.BlocklistItem, error) {
