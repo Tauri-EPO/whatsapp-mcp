@@ -290,8 +290,8 @@ uv run main.py                                   # stdio; WHATSAPP_MCP_TRANSPORT
 # Go bridge — pure Go (modernc.org/sqlite, FTS5 built in); no cgo, no C toolchain
 cd whatsapp-bridge
 go run .
-go vet ./... && go test ./...
-go test -race -timeout 25m ./...                 # CI runs it too (§6); needs cgo, ~9 min
+go vet ./... && go test -timeout 30m ./...
+go test -race -timeout 45m ./...                 # CI runs it too (§6); needs cgo, ~9 min in CI, 25-35 min on Docker Desktop
 golangci-lint run                                # config in whatsapp-bridge/.golangci.yml; fails on unformatted files
 
 # Containers (both components, MCP over streamable HTTP) — see docs/DOCKER.md
@@ -308,15 +308,21 @@ The MCP server is a real package (issue #409): `pyproject.toml` declares `[build
 ```bash
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
-  sh -c 'go vet ./... && go test ./...'
+  sh -c 'go vet ./... && go test -timeout 30m ./...'
+# -timeout 30m: the one package outgrew Go's 10m default on this box. Measured
+# 2026-11-10/11 under Docker Desktop with other lanes running: 620 s, 787 s and
+# 811 s for the plain suite, with no test stuck (issue #809). A run that still
+# times out names the test it was in; read that before raising anything, and
+# never raise a per-test deadline to make the suite fit.
 # The race detector, which CI also runs (§6). -race needs cgo, and the alpine
 # image ships no C compiler, so install one first; -count=3 is what shakes out
 # the races that only appear when a leaked goroutine outlives its test. One
-# suite takes about nine minutes in CI; three repeats get 90m (not Go's 10m
-# default). For a quick single pass use -race -count=1 -timeout 25m.
+# suite takes about nine minutes in CI and 25-35 minutes here under load
+# (1463-2053 s measured); three repeats get 120m. For a single pass use
+# -race -count=1 -timeout 45m.
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
-  sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 90m ./...'
+  sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 120m ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -w /src golangci/golangci-lint:v2.14.0 golangci-lint run
 ```
@@ -345,9 +351,9 @@ The copy strips every CR from every file under `whatsapp-bridge/`, which is righ
 S=mylane
 V="-v wamcp-gomod-$S:/go/pkg/mod -v wamcp-gobuild-$S:/root/.cache/go-build"
 docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
-  sh -c 'go vet ./... && go test ./...'
+  sh -c 'go vet ./... && go test -timeout 30m ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
-  sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 90m ./...'
+  sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 120m ./...'
 # golangci-lint runs on the LF copy built above (not on the CRLF tree), same cache volumes:
 docker run --rm -v "$(cd "$LF" && pwd -W)/whatsapp-bridge:/src" $V -w /src \
   golangci/golangci-lint:v2.14.0 golangci-lint run
@@ -371,7 +377,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.14.0 with `whatsapp-bridge/.golangci.yml`: linters `errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`, `nolintlint` and the `gofmt` formatter (an unformatted file fails the job — see §5 for checking it from a CRLF checkout). Suppress a finding only with `//nolint:<linter> // <why>` on the line; `nolintlint` rejects a bare `//nolint`, a directive without a reason, and one that no longer silences anything, so delete a suppression once its finding is gone |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit | Bandit **1.9.4** fails its job on production medium/high findings and on test findings except fixture IDs B104, B108, B310 and B608. Production targets are explicit top-level `.py` files; tests have a separate recursive scan with those four skips (three B103 permission fixtures are individually justified). The summary reports real scanner exits, finding details and scan errors; incomplete reports also fail. Reviewed suppressions name the test ID and explain the specific construction |
-| pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only), report in the job summary |
+| pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only); a green job is not a clean scan: the outcome line and full table are in the log, the job summary and the `trivy-<component>` artifact (`gh run download <run> -n trivy-server`, 30 days) |
 | Docker Build | both images build with buildx (GHA cache); smoke: bridge starts and reports the FTS state, every module in `py-modules` imports inside the image (the arm64 bridge has the next row) |
 | Bridge arm64 (QEMU) | the arm64 bridge image starts under QEMU and reports the FTS state; the whole Go test suite runs as an arm64 binary in that image (about 10 minutes cold, parallel to the other jobs; the image cross-compiles on the native builder; runtime smoke and tests still execute under QEMU); QEMU actions are on the allowed list (`docker/setup-qemu-action`) |
 
