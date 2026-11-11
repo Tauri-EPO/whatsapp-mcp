@@ -39,6 +39,10 @@ func countMatches(t *testing.T, db *sql.DB, match string) int {
 
 func TestOriginalContentFTSAfterEditAndRestart(t *testing.T) {
 	ms, _ := lockedProductionStore(t)
+	// Reopening an empty store must preserve a usable, completed index.
+	if on, err := ensureMessagesFTS(ms.db); err != nil || !on {
+		t.Fatalf("empty restart on=%v err=%v", on, err)
+	}
 	stamp := time.Unix(1772359200, 0)
 	if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
 		t.Fatal(err)

@@ -175,7 +175,17 @@ func ensureMessagesFTS(db *sql.DB) (bool, error) {
 
 func ensureMessagesFTSCapability(db *sql.DB, available bool) (bool, error) {
 	return ensureMessagesFTSMigration(db, available, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(ftsIndexTeardown + `ALTER TABLE messages_fts_build RENAME TO messages_fts;` + ftsSchema); err != nil {
+		// An empty archive needs no staged tokens. Avoid ALTER TABLE's full
+		// schema rewrite when creating a new store (also common in tests).
+		var populated bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM messages LIMIT 1)").Scan(&populated); err != nil {
+			return err
+		}
+		publish := ftsIndexTeardown + `ALTER TABLE messages_fts_build RENAME TO messages_fts;` + ftsSchema
+		if !populated {
+			publish = ftsTeardown + ftsViewSchema + ftsSchema
+		}
+		if _, err := tx.Exec(publish); err != nil {
 			return err
 		}
 		// This replacement also covers the older filename migration.
