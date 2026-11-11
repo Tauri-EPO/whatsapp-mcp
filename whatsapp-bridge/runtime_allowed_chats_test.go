@@ -114,6 +114,7 @@ func TestRuntimeChatsCapturedRESTHandlersAndParticipantOperations(t *testing.T) 
 		{"POST", "/api/edit", `{"chat_jid":"` + bob + `","message_id":"B1","text":"fake text"}`},
 		{"POST", "/api/forward", `{"chat_jid":"` + bob + `","message_id":"B1","to_chat_jid":"5511999999999@s.whatsapp.net"}`},
 		{"POST", "/api/delete", `{"chat_jid":"` + bob + `","message_id":"B1"}`},
+		{"POST", "/api/delete-for-me", `{"chat_jid":"` + bob + `","message_ids":["B1"],"confirm":true}`},
 		{"POST", "/api/history", `{"chat_jid":"` + bob + `"}`},
 		{"POST", "/api/download", `{"chat_jid":"` + bob + `","message_id":"B1"}`},
 		{"POST", "/api/media/purge", `{"chat_jid":"` + bob + `"}`},
