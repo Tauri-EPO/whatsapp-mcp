@@ -17,6 +17,7 @@ import (
 
 // Use the real event worker and on-disk archive, including canonical writes.
 func pendingReceiptFixture(t *testing.T) (*MessageStore, func(*events.Receipt)) {
+	t.Helper()
 	ms, _, dispatch := pendingReceiptBridgeFixture(t)
 	return ms, dispatch
 }

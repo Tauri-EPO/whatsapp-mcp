@@ -1129,8 +1129,11 @@ chat (all receipt types combined), with a 1024-byte combined identity key limit.
 Oldest arrivals are evicted at the count limits; repeated receipts keep the
 latest timestamp without extending expiry. Pending rows create no archive chats
 or messages. The canonical original write atomically promotes them only for a
-message this account sent, or discards them for an inbound original. Expiry,
-eviction and unavailable identity mappings can still leave receipts missing;
+message this account sent, or discards them for an inbound original.
+Verified phone/LID chat twins are reconciled for live/history originals and on
+restart, including pending-only chats. Alias collisions preserve the first
+expiry and latest timestamp; matching by message ID alone is never allowed. Expiry, eviction and
+unavailable identity mappings can still leave receipts missing;
 an empty result remains inconclusive.
 
 ### `check_business`

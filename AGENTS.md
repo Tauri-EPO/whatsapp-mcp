@@ -98,7 +98,7 @@ whatsapp-mcp/
 │   ├── jid.go                  # phone <-> LID resolution helpers; shared nil-safe LID-map read
 │   ├── quoted_participant.go   # the quoted sender JID a reply's recipients can match against a member
 │   ├── outbound_quote.go       # same-chat typed quote previews and context-bound archive lookups
-│   ├── pending_receipts.go    # bounded, expiring peer receipts consumed only with canonical own originals
+│   ├── pending_receipts.go     # bounded, expiring peer receipts consumed only with canonical own originals
 │   ├── pending_edits.go        # bounded, expiring edits consumed atomically with delayed originals
 │   ├── send.go                 # /api/send types, sendWhatsAppMessage, media upload, Ogg Opus analysis
 │   ├── recipient_cache.go      # bounded, expiring typed -> registered number answers, cleared on reconnect
@@ -317,8 +317,11 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/p
 # never raise a per-test deadline to make the suite fit.
 # The race detector, which CI also runs (§6). -race needs cgo, and the alpine
 # image ships no C compiler, so install one first; -count=3 is what shakes out
-# the races that only appear when a leaked goroutine outlives its test. One
-# suite takes about nine minutes in CI and 25-35 minutes here under load
+# the races that only appear when a leaked goroutine outlives its test.
+# CI allows 40m for the complete race package: a 25m run expired near the end
+# while its active webhook test had run only 4s (#825), and the merged local
+# suite then passed in 29m40s. Individual deadlines stay unchanged.
+# One suite takes 25-35 minutes here under load
 # (1463-2053 s measured); three repeats get 120m. For a single pass use
 # -race -count=1 -timeout 45m.
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \

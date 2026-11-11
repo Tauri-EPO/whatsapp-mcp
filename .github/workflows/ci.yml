@@ -58,10 +58,10 @@ jobs:
   go:
     name: Go Build
     runs-on: ubuntu-latest
-    # Step caps: 2 + 3 + 23 + 3 + 27 + 3 + 16 + 5 = 82 minutes.
+    # Step caps: 2 + 3 + 23 + 3 + 42 + 3 + 16 + 5 = 97 minutes.
     # Eight extra minutes let the job retain diagnostics/cleanup at its edge;
     # successful recent runs take 31-34 minutes.
-    timeout-minutes: 90
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@v7
         timeout-minutes: 2
@@ -87,14 +87,16 @@ jobs:
           cd whatsapp-bridge
           go test -timeout 2m -v -run 'TestOperatorSocket' ./...
       - name: Race detector
-        timeout-minutes: 27
+        timeout-minutes: 42
         # Own step so its cost and its failures are legible. The shipped binary
         # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it
-        # (issue #351). The suite is one package and takes about nine minutes
-        # under -race, so go test's default ten-minute timeout no longer fits.
+        # (issue #351). Run 43002022523 exhausted 25m near the package's end
+        # while its active webhook test had run for only 4s (#825). This is
+        # an aggregate suite allowance: the merged local suite took 29m40s.
+        # Individual test deadlines stay intact.
         run: |
           cd whatsapp-bridge
-          go test -race -timeout 25m ./...
+          go test -race -timeout 40m ./...
       - uses: astral-sh/setup-uv@v7
         timeout-minutes: 3
       - name: Real MinIO and MCP media integration
