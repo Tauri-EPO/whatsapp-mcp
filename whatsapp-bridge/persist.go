@@ -32,9 +32,9 @@ type messageWriter interface {
 
 // extractedMessage is the storable view of a waE2E.Message.
 type extractedMessage struct {
-	editAuthorAlias string // verified author alternative prepared before the writer
-	editChatAlias   string // verified chat alternative prepared before the writer
-	editPreparation *pendingEditPreparation
+	editAuthorAlias    string // verified author alternative prepared before the writer
+	pendingChatAlias   string // verified chat alternative prepared before the writer
+	pendingPreparation *pendingMetadataPreparation
 	// inner is the message with SDK envelopes removed; downstream
 	// extractors (quotes, ephemeral settings, webhook media) should use it.
 	inner    *waE2E.Message
@@ -231,25 +231,25 @@ func storedMessageSnapshot(id, chatJID, sender string, ts time.Time, fromMe bool
 		length = storedMediaLength(e.fileLen)
 	}
 	return storedMessage{
-		EditAuthorAlias: e.editAuthorAlias,
-		EditChatAlias:   e.editChatAlias,
-		EditPreparation: e.editPreparation,
-		ID:              id,
-		ChatJID:         chatJID,
-		Sender:          sender,
-		Content:         e.content,
-		Timestamp:       ts,
-		IsFromMe:        fromMe,
-		MediaType:       e.mediaType,
-		Filename:        e.filename,
-		URL:             e.url,
-		MediaKey:        e.mediaKey,
-		FileSHA256:      e.fileSHA,
-		FileEncSHA256:   e.fileEnc,
-		FileLength:      length,
-		QuotedMessageID: quotedID,
-		ForwardingScore: e.forwardingScore,
-		Mentions:        mentionsColumn(e.mentions),
-		Media:           messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location, retryChat: e.retryChat, retrySender: e.retrySender},
+		EditAuthorAlias:    e.editAuthorAlias,
+		PendingChatAlias:   e.pendingChatAlias,
+		PendingPreparation: e.pendingPreparation,
+		ID:                 id,
+		ChatJID:            chatJID,
+		Sender:             sender,
+		Content:            e.content,
+		Timestamp:          ts,
+		IsFromMe:           fromMe,
+		MediaType:          e.mediaType,
+		Filename:           e.filename,
+		URL:                e.url,
+		MediaKey:           e.mediaKey,
+		FileSHA256:         e.fileSHA,
+		FileEncSHA256:      e.fileEnc,
+		FileLength:         length,
+		QuotedMessageID:    quotedID,
+		ForwardingScore:    e.forwardingScore,
+		Mentions:           mentionsColumn(e.mentions),
+		Media:              messageMediaOptions{directPath: e.directPath, presentation: mediaPresentationOf(e.inner), location: e.location, retryChat: e.retryChat, retrySender: e.retrySender},
 	}
 }

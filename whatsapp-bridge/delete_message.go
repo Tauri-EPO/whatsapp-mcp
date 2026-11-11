@@ -45,14 +45,21 @@ type revokeFunc func(ctx context.Context, chat types.JID, id types.MessageID) er
 // DeleteMessageRow removes a message from the local archive. Returns
 // sql.ErrNoRows when nothing matched.
 func (store *MessageStore) DeleteMessageRow(messageID, chatJID string) error {
-	res, err := store.db.Exec(`DELETE FROM messages WHERE id = ? AND chat_jid = ?`, messageID, chatJID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return store.Batch(func(batch *messageBatch) error {
+		res, err := batch.tx.Exec(`DELETE FROM messages WHERE id = ? AND chat_jid = ?`, messageID, chatJID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return sql.ErrNoRows
+		}
+		for _, table := range []string{"pending_receipts", "receipt_nonoriginals"} {
+			if _, err := batch.tx.Exec(`DELETE FROM `+table+` WHERE message_id=? AND chat_jid=?`, messageID, chatJID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func writeDeleteResponse(w http.ResponseWriter, status int, resp DeleteMessageResponse) {
@@ -82,6 +89,9 @@ func handleDeleteMessage(store *MessageStore, revoke revokeFunc, policy chatPoli
 		if !ok {
 			return
 		}
+		// Every archive key below is the authorized canonical spelling (issue
+		// #827): an uppercase server passes authorization but is not the key.
+		req.ChatJID = chat.String()
 
 		if !req.ForEveryone {
 			if err := store.DeleteMessageRow(req.MessageID, req.ChatJID); err != nil {

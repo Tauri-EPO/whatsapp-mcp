@@ -115,7 +115,8 @@ const canonicalTimeGlob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]
 // deliberately absent: it is an INTEGER of WhatsApp seconds, not a time
 // string. group_members.first_seen/last_seen are absent for the opposite
 // reason: that table postdates this migration, so every row it has ever held
-// was written through dbTime and there is nothing to rewrite.
+// was written through dbTime and there is nothing to rewrite. The same is true
+// of pending_receipts.at; adding a new dbTime-only table needs no new marker.
 var canonicalTimeColumns = []struct{ table, column string }{
 	{"message_receipts", "at"},
 	{"messages", "timestamp"},
