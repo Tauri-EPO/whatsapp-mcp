@@ -123,6 +123,63 @@ func TestPendingReceiptsReviewOutbound(t *testing.T) {
 	}
 }
 
+func TestPendingReceiptsOutboundNonOriginalStanzas(t *testing.T) {
+	for _, kind := range []string{"react", "edit", "delete"} {
+		for _, early := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/early=%v", kind, early), func(t *testing.T) {
+				ms, b, dispatch := pendingReceiptBridgeFixture(t)
+				chat := types.NewJID("120363000000000001", types.GroupServer)
+				peer := types.NewJID("5511999999999", types.DefaultUserServer)
+				at := time.Now()
+				if err := ms.StoreChat(chat.String(), "Alice", at); err != nil {
+					t.Fatal(err)
+				}
+				if err := ms.StoreMessage(storedMessage{ID: "target", ChatJID: chat.String(), Sender: b.currentClient().Store.ID.String(), Content: "Alice", Timestamp: at, IsFromMe: true}); err != nil {
+					t.Fatal(err)
+				}
+				dispatch(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: []string{"real"}, Type: types.ReceiptTypeRead, Timestamp: at})
+				stanzaID := "stanza-" + kind
+				receipt := &events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer}, MessageIDs: []string{stanzaID}, Type: types.ReceiptTypeRead, Timestamp: at}
+				b.Connected = func() bool { return true }
+				b.RESTBind = defaultBridgeBind
+				sends := 0
+				b.sendMessage = func(_ context.Context, to types.JID, _ *waE2E.Message) (whatsmeow.SendResponse, error) {
+					sends++
+					if to != chat {
+						t.Errorf("non-original destination %s", to)
+					}
+					if early {
+						dispatch(receipt)
+					}
+					return whatsmeow.SendResponse{ID: stanzaID, Timestamp: at}, nil
+				}
+				body := `{"chat_jid":"` + chat.String() + `","message_id":"target","text":"Bob","for_everyone":true}`
+				if kind == "react" {
+					body = `{"recipient":"` + chat.String() + `","message_id":"target","emoji":"👍","from_me":true}`
+				}
+				const token = "fake-receipts-bridge-token"
+				r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/"+kind, strings.NewReader(body))
+				r.Header.Set("Authorization", "Bearer "+token)
+				response := httptest.NewRecorder()
+				b.newRESTMux(8080, token).ServeHTTP(response, r)
+				if response.Code != http.StatusOK || sends != 1 {
+					t.Fatal(response.Code, response.Body.String(), sends)
+				}
+				if !early {
+					dispatch(receipt)
+				}
+				var pending, durable int
+				if err := ms.db.QueryRow(`SELECT (SELECT COUNT(*) FROM pending_receipts WHERE message_id=?),(SELECT COUNT(*) FROM message_receipts WHERE message_id=?)`, stanzaID, stanzaID).Scan(&pending, &durable); err != nil {
+					t.Fatal(err)
+				}
+				if pending != 0 || durable != 0 || pendingReceiptCount(t, ms) != 1 {
+					t.Fatal("own stanza parked", pending, durable, pendingReceiptCount(t, ms))
+				}
+			})
+		}
+	}
+}
+
 type receiptChurnGate struct {
 	*mockLIDStore
 	entered chan struct{}

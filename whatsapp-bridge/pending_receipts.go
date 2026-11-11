@@ -4,6 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 )
 
 const (
@@ -191,4 +195,20 @@ func consumePendingReceipts(ex sqlExecer, message storedMessage, now time.Time) 
 	_, err := ex.Exec(`DELETE FROM pending_receipts WHERE message_id=? AND (chat_jid=? OR (?<>'' AND chat_jid=?))`,
 		message.ID, message.ChatJID, message.PendingChatAlias, message.PendingChatAlias)
 	return err
+}
+
+// Retain the SDK-generated stanza ID even when this device never echoes its
+// own edit/revoke/reaction event. No such stanza can create an archive original.
+func (b *Bridge) sendNonOriginalMessage(ctx context.Context, chat types.JID, message *waE2E.Message) (whatsmeow.SendResponse, error) {
+	send := b.sendMessage
+	if send == nil {
+		send = func(ctx context.Context, chat types.JID, message *waE2E.Message) (whatsmeow.SendResponse, error) {
+			return b.currentClient().SendMessage(ctx, chat, message)
+		}
+	}
+	response, err := send(ctx, chat, message)
+	if response.ID != "" {
+		b.excludeNonOriginalReceipts(chat.String(), response.ID, true)
+	}
+	return response, err
 }

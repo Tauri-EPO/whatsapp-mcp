@@ -135,12 +135,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 			}
 			message := client.BuildEdit(chat, id, &waE2E.Message{Conversation: proto.String(text)})
 			stamp := message.GetEditedMessage().GetMessage().GetProtocolMessage().GetTimestampMS()
-			var err error
-			if b.sendMessage != nil {
-				_, err = b.sendMessage(ctx, chat, message)
-			} else {
-				_, err = client.SendMessage(ctx, chat, message)
-			}
+			_, err := b.sendNonOriginalMessage(ctx, chat, message)
 			return stamp, err
 		},
 		b.Policy,
@@ -174,7 +169,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 				return errors.New("WhatsApp client is not connected")
 			}
 			// Revoke = a protocol message keyed to the original (own) message.
-			_, err := client.SendMessage(ctx, chat, client.BuildRevoke(chat, types.EmptyJID, id))
+			_, err := b.sendNonOriginalMessage(ctx, chat, client.BuildRevoke(chat, types.EmptyJID, id))
 			return err
 		},
 		b.Policy,

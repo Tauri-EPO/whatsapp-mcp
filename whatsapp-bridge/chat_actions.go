@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waE2E"
 	"net/http"
 
 	"go.mau.fi/whatsmeow/types"
@@ -62,13 +60,8 @@ func (b *Bridge) handleReact() http.HandlerFunc {
 		if !b.allowSendAction(w, r.WithContext(ctx), chatJID.String()) {
 			return
 		}
-		send := b.sendMessage
-		if send == nil {
-			send = func(ctx context.Context, jid types.JID, msg *waE2E.Message) (whatsmeow.SendResponse, error) {
-				return client.SendMessage(ctx, jid, msg)
-			}
-		}
-		if _, err := send(ctx, chatJID, msg); err != nil {
+
+		if _, err := b.sendNonOriginalMessage(ctx, chatJID, msg); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
