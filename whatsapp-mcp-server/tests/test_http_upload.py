@@ -79,10 +79,14 @@ def test_upload_policy_read_failure_is_denied_without_storing(monkeypatch):
 def test_upload_then_real_mcp_send_removes_file(monkeypatch, tool, filename):
     content = b"%PDF-fake\n" + b"x" * (5 * 1024 * 1024)
     calls = []
+    options = {"quoted_message_id": "QUOTE", "quoted_sender_jid": ALICE, "quoted_content": "fallback"}
+    if tool == "send_file":
+        options["as_document"] = True
 
     def bridge(method, endpoint, **kwargs):
         path = Path(kwargs["json"]["media_path"])
         assert path.is_relative_to(Path(media_upload.upload_dir()))
+        assert options.items() <= kwargs["json"].items()
         calls.append((endpoint, path.read_bytes(), path.name))
 
         class Response:
@@ -111,7 +115,10 @@ def test_upload_then_real_mcp_send_removes_file(monkeypatch, tool, filename):
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
-                "params": {"name": tool, "arguments": {"chat_jid": ALICE, "upload_id": receipt["upload_id"]}},
+                "params": {
+                    "name": tool,
+                    "arguments": {"chat_jid": ALICE, "upload_id": receipt["upload_id"], **options},
+                },
             },
         )
         assert sent.status_code == 200

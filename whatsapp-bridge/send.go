@@ -64,6 +64,7 @@ type sentMessage struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
+	AsDocument      bool   `json:"as_document,omitempty"`
 	AsSticker       bool   `json:"as_sticker,omitempty"`
 	DryRun          bool   `json:"dry_run,omitempty"`
 	Recipient       string `json:"recipient"`
@@ -395,6 +396,8 @@ type outboundSendFunc func(context.Context, types.JID, *waE2E.Message) (whatsmeo
 const groupPermissionCode = "group_admin_required"
 const groupPermissionMessage = "This group is restricted to admins; this account cannot send messages here"
 
+type documentSendKey struct{}
+
 type stickerSendKey struct{}
 type stickerBytesKey struct{}
 
@@ -637,6 +640,9 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		msg = buildOutboundTextWithQuote(message, quote, mentionedJIDs)
 	}
 
+	if source, ok := ctx.Value(forwardedSendKey{}).(*forwardSource); ok {
+		markOutboundForward(msg, source.forwardingScore)
+	}
 	applyChatEphemeralSettings(msg, settings)
 
 	// Send message
@@ -666,6 +672,7 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		media := outboundMediaColumns(mediaPath, upload)
+		media.forwardingScore = extractForwardingScore(msg)
 		if source, ok := ctx.Value(cachedSendSourceKey{}).(*forwardSource); ok {
 			media.filename = source.filename
 		}
@@ -737,15 +744,15 @@ func (b *Bridge) retryOutbound(chatWrite, messageWrite func() error) error {
 	})
 }
 
-// outboundMedia is the media half of an outbound row: the columns
-// StoreMessage takes for a file this bridge uploaded. The zero value is a
-// text-only send.
+// outboundMedia carries uploaded-file columns and optional forwarding
+// provenance for the outbound row. Its zero value is an original text send.
 type outboundMedia struct {
 	mediaType, filename, url            string
 	directPath                          string
 	mediaKey, fileSHA256, fileEncSHA256 []byte
 	fileLength                          uint64
 	presentation                        *mediaPresentation
+	forwardingScore                     *uint32
 	retryChat, retrySender              string
 }
 
@@ -800,6 +807,7 @@ func (m outboundMedia) store(messageStore *MessageStore, id, chatJID, senderJID,
 			FileEncSHA256:   m.fileEncSHA256,
 			FileLength:      m.fileLength,
 			QuotedMessageID: quotedMsgID,
+			ForwardingScore: m.forwardingScore,
 			Media:           messageMediaOptions{directPath: m.directPath, presentation: m.presentation, retryChat: m.retryChat, retrySender: m.retrySender},
 		},
 	)
@@ -1213,8 +1221,12 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 		}
 		req.Recipient = typed.String()
 
-		if req.AsSticker && (req.Message != "" || req.MediaPath == "") {
-			writeError(w, http.StatusBadRequest, "as_sticker requires media and no caption")
+		if req.AsDocument && req.MediaPath == "" {
+			writeError(w, http.StatusBadRequest, "as_document requires media_path")
+			return
+		}
+		if req.AsSticker && (req.AsDocument || req.Message != "" || req.MediaPath == "") {
+			writeError(w, http.StatusBadRequest, "as_sticker requires media, no caption and as_document=false")
 			return
 		}
 		if req.Message == "" && req.MediaPath == "" {
@@ -1266,6 +1278,7 @@ func (b *Bridge) handleSend(allowedMediaRoots []string) http.HandlerFunc {
 			return
 		}
 
+		ctx = context.WithValue(ctx, documentSendKey{}, req.AsDocument)
 		ctx = context.WithValue(ctx, stickerSendKey{}, req.AsSticker)
 		if req.AsSticker {
 			var cleanup func()
