@@ -90,3 +90,49 @@ def test_invalid_edit_time_does_not_hide_message(paired_dbs, stamp):
     assert row["edited_at"] is None
     context = main.get_message_context(chat_jid=ALICE, message_id="EDITED", before=0, after=0)
     assert context["message"]["edited_at"] is None
+
+
+@pytest.mark.parametrize("fields", [None, ["original_content"], ["content"]])
+def test_original_content_respects_response_limit(paired_dbs, fields):
+    with paired_dbs.messages() as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN original_content TEXT")
+        conn.execute(
+            "INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,original_content) "
+            "VALUES ('EDITED',?,'5511999999999','newword','2026-10-08 10:00:00+00:00',0,'oldword')",
+            (ALICE,),
+        )
+    whatsapp._reset_schema_cache()
+    row = main.list_messages(chat_jid=ALICE, include_context=False, fields=fields, max_content_chars=3)["items"][0]
+    assert row["original_content_truncated"] is True
+    assert row["content_truncated"] is True
+    if fields is None or "original_content" in fields:
+        assert row["original_content"] == "old"
+    if fields is None or "content" in fields:
+        assert row["content"] == "new"
+    context = main.get_message_context(
+        chat_jid=ALICE, message_id="EDITED", before=0, after=0, fields=fields, max_content_chars=3
+    )
+    assert context["message"] == row
+    full = main.list_messages(chat_jid=ALICE, include_context=False)["items"][0]
+    assert full["original_content"] == "oldword"
+    assert "original_content_truncated" not in full
+    assert whatsapp.validate_fields(["original_content_truncated"]) == ["original_content_truncated"]
+
+
+def test_message_columns_uses_one_schema_probe(paired_dbs):
+    whatsapp._reset_schema_cache()
+    with paired_dbs.messages() as conn:
+        statements = []
+        conn.set_trace_callback(statements.append)
+        before = whatsapp.message_columns(conn.cursor())
+        assert statements.count("PRAGMA table_info(messages)") == 1
+        assert statements.count("PRAGMA main.schema_version") == 1
+        assert "messages.original_content" not in before
+        statements.clear()
+        assert whatsapp.message_columns(conn.cursor()) == before
+        assert statements == ["PRAGMA main.schema_version"]
+        conn.execute("ALTER TABLE messages ADD COLUMN original_content TEXT")
+        statements.clear()
+        assert "messages.original_content" in whatsapp.message_columns(conn.cursor())
+        assert statements.count("PRAGMA table_info(messages)") == 1
+        assert statements.count("PRAGMA main.schema_version") == 1

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
@@ -270,6 +272,132 @@ func TestEditOriginalContentWrittenOnce(t *testing.T) {
 			}
 			if content != "latestword" || before != "oldword" {
 				t.Fatalf("content=%q original=%q", content, before)
+			}
+		})
+	}
+}
+
+func TestEditOriginalContentUnknownBeforeUpgrade(t *testing.T) {
+	for _, mode := range []string{"incoming", "outbound", "pending"} {
+		for _, previous := range []any{nil, int64(0), int64(1)} {
+			t.Run(fmt.Sprintf("%s/%v", mode, previous), func(t *testing.T) {
+				ms, _ := lockedProductionStore(t)
+				// Old nullable schemas must behave like an unedited zero timestamp.
+				if _, err := ms.db.Exec("ALTER TABLE messages DROP COLUMN message_edit_timestamp; ALTER TABLE messages ADD COLUMN message_edit_timestamp INTEGER"); err != nil {
+					t.Fatal(err)
+				}
+				stamp := time.Unix(1772359200, 0)
+				if err := ms.StoreChat(phonePN.String(), "Alice", stamp); err != nil {
+					t.Fatal(err)
+				}
+				edit := extractMessage(incomingEdit("TARGET", "newword", stamp.Add(time.Minute).UnixMilli()), stamp, "EDIT").edit
+				if mode == "pending" {
+					if err := ms.ApplyMessageEdit(phonePN.String(), phonePN.String(), false, edit, stamp); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := ms.db.Exec(`INSERT INTO messages(id,chat_jid,sender,sender_server,content,timestamp,is_from_me,message_edit_timestamp)
+					VALUES ('TARGET',? ,?,'s.whatsapp.net','oldword',?,0,?)`, phonePN.String(), phonePN.User, dbTime(stamp), previous); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				switch mode {
+				case "incoming":
+					err = ms.ApplyMessageEdit(phonePN.String(), phonePN.String(), false, edit, stamp)
+				case "outbound":
+					err = ms.UpdateMessageContent("TARGET", phonePN.String(), "newword", stamp.Add(time.Minute).UnixMilli())
+				case "pending":
+					err = ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: phonePN.String(), Sender: phonePN.String(), Content: "oldword", Timestamp: stamp})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var content string
+				var original *string
+				if err := ms.db.QueryRow("SELECT content, original_content FROM messages WHERE id='TARGET'").Scan(&content, &original); err != nil {
+					t.Fatal(err)
+				}
+				if content != "newword" || previous == int64(1) && original != nil || previous != int64(1) && (original == nil || *original != "oldword") {
+					t.Fatalf("previous=%v content=%q original=%v", previous, content, original)
+				}
+			})
+		}
+	}
+}
+
+func TestSecretEditFailureKeepsDeliveryEffects(t *testing.T) {
+	for _, mode := range []string{"missing-secret", "unexpected", "unsupported", "view-once-missing-secret"} {
+		t.Run(mode, func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			rec := installRecordingLogger(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, rec)
+			stamp := time.Unix(1772359200, 0)
+			evt := secretEditEvent(stamp.Add(time.Minute))
+			evt.Info.Chat = types.NewJID("120363000000000001", types.GroupServer)
+			evt.Info.IsGroup = true
+			evt.IsViewOnce = mode == "view-once-missing-secret"
+			b.origTimes.remember(evt.Info.ID, stamp)
+			b.SecretEditDecrypt = func(context.Context, *events.Message) (*waE2E.Message, error) {
+				if strings.Contains(mode, "missing-secret") {
+					return nil, fmt.Errorf("wrapped: %w", whatsmeow.ErrOriginalMessageSecretNotFound)
+				}
+				return nil, errors.New("privateword")
+			}
+			if mode == "unsupported" {
+				evt.Message.SecretEncryptedMessage.SecretEncType = waE2E.SecretEncryptedMessage_EVENT_EDIT.Enum()
+			}
+			b.handleEvent(evt, nil)
+			if _, exists := b.origTimes.take(evt.Info.ID); exists {
+				t.Fatal("failed/unsupported secret retained retry timestamp")
+			}
+			var members, messages int
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM group_members WHERE group_jid=?", evt.Info.Chat.String()).Scan(&members); err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&messages); err != nil {
+				t.Fatal(err)
+			}
+			if members != 1 || messages != 0 {
+				t.Fatalf("members=%d messages=%d", members, messages)
+			}
+			wantLevel := "[DEBUG] Failed to decrypt"
+			if mode == "unexpected" {
+				wantLevel = "[WARN] Failed to decrypt"
+			}
+			if mode != "unsupported" && !strings.Contains(rec.String(), wantLevel) || strings.Contains(rec.String(), "privateword") {
+				t.Fatalf("unexpected secret logging: %s", rec.String())
+			}
+		})
+	}
+}
+
+func TestSecretEditHistoryBatch(t *testing.T) {
+	for _, first := range []bool{false, true} {
+		t.Run(fmt.Sprint(first), func(t *testing.T) {
+			ms, _ := lockedProductionStore(t)
+			b := testBridge(t, newTestClient(&mockLIDStore{}), ms, testLogger())
+			fixture := largeHistoryFixture(2)
+			rows := fixture.Data.Conversations[0].Messages
+			stamp := time.Unix(1772359200, 0)
+			rows[0].Message.Key.ID = proto.String("TARGET")
+			rows[1].Message.Message = secretEditEvent(stamp.Add(time.Minute)).Message
+			rows[1].Message.MessageTimestamp = proto.Uint64(1772359260)
+			calls := 0
+			b.SecretEditDecrypt = func(ctx context.Context, evt *events.Message) (*waE2E.Message, error) {
+				calls++
+				if ctx == nil || evt.Info.Chat != phonePN || evt.Info.Sender != phonePN || evt.Info.ID != "H1" || evt.Info.IsFromMe {
+					t.Fatalf("bad history decrypt metadata: %+v", evt.Info)
+				}
+				return &waE2E.Message{Conversation: proto.String("historyeditword")}, nil
+			}
+			if first {
+				rows[0], rows[1] = rows[1], rows[0]
+			}
+			b.handleHistorySync(fixture)
+			assertPendingArchive(t, ms, "TARGET", phonePN.String(), "historyeditword", "", stamp.Add(time.Minute).UnixMilli())
+			var original string
+			if err := ms.db.QueryRow("SELECT original_content FROM messages WHERE id='TARGET'").Scan(&original); err != nil || original != "history searchable" || calls != 1 {
+				t.Fatalf("original=%q calls=%d err=%v", original, calls, err)
 			}
 		})
 	}

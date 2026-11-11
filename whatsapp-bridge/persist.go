@@ -7,9 +7,12 @@ package main
 // message in place; extractMessage works on a local copy instead.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -106,6 +109,67 @@ func extractMessage(m *waE2E.Message, ts time.Time, id string) extractedMessage 
 	e.quotedID, e.quotedSender, e.quotedContent = extractQuotedMessageInfo(e.inner)
 	e.mentions = extractMentionedJIDs(e.inner)
 	return e
+}
+
+// Live deliveries and own-phone history share edit extraction, outside archive
+// writers. Decryption never changes the SDK event or the target's author/chat.
+func (b *Bridge) extractIncomingMessage(ctx context.Context, msg *events.Message, ts time.Time) extractedMessage {
+	original := msg.Message
+	// The SDK unwraps ordinary edits to their replacement; RawMessage retains
+	// the protocol key and ordering timestamp. Direct edits need no special flag.
+	if msg.RawMessage != nil && extractMessage(msg.RawMessage, ts, msg.Info.ID).edit != nil {
+		original = msg.RawMessage
+	}
+	ex := extractMessage(original, ts, msg.Info.ID)
+	encrypted := ex.inner.GetSecretEncryptedMessage()
+	if encrypted == nil {
+		return ex
+	}
+	// Keep the outer payload available for receipt-side metadata/history shares,
+	// but never archive an unsupported or undecryptable encrypted delivery row.
+	// Retain the SDK flag so the live view-once fallback cannot add a placeholder.
+	ignored := extractedMessage{inner: ex.inner, viewOnce: ex.viewOnce || msg.IsViewOnce}
+	if encrypted.GetSecretEncType() != waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
+		b.Log.Debugf("Unhandled secret-encrypted message type: %s", encrypted.GetSecretEncType())
+		return ignored
+	}
+	if encrypted.GetTargetMessageKey().GetID() == "" || b.SecretEditDecrypt == nil {
+		return ignored
+	}
+	decryptEvent := msg
+	if msg.Message != ex.inner {
+		view := *msg
+		view.Message = ex.inner
+		decryptEvent = &view
+	}
+	decrypted, err := b.SecretEditDecrypt(ctx, decryptEvent)
+	if err != nil {
+		// Missing originals/secrets are routine during sync. Other SDK failures
+		// warrant a warning, but error text may contain remote data: omit it.
+		log := b.Log.Warnf
+		if errors.Is(err, whatsmeow.ErrOriginalMessageSecretNotFound) {
+			log = b.Log.Debugf
+		}
+		log("Failed to decrypt message edit %s in %s", msg.Info.ID, msg.Info.Chat)
+		return ignored
+	}
+	replacement, stamp := decrypted, int64(0)
+	if edit := extractMessage(decrypted, ts, msg.Info.ID).edit; edit != nil {
+		replacement = edit.GetEditedMessage()
+		if edit.GetTimestampMS() > 0 {
+			stamp = edit.GetTimestampMS()
+		}
+	}
+	if replacement == nil {
+		return ignored
+	}
+	// Zero uses the caller's retry-corrected delivery time. The encrypted key
+	// and outer sender/chat remain authoritative, including for deferred edits.
+	ex.edit = &waE2E.ProtocolMessage{
+		Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(), Key: encrypted.GetTargetMessageKey(),
+		EditedMessage: replacement, TimestampMS: proto.Int64(stamp),
+	}
+	return ex
 }
 
 // empty reports a message with nothing to store (no text, no media).

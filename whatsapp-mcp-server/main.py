@@ -762,7 +762,8 @@ def list_messages(
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
     Edited messages carry edited_at (UTC) and original_content (the text before
-    the first recorded edit); both are null when unavailable.
+    the first edit); null original_content means the original is unknown or the
+    message is unedited, including messages first edited before this upgrade.
     Media messages carry media_type and filename (the sender's original document name,
     or the bridge's generated name for images/audio/video); pass id + chat_jid to
     download_media to fetch the file.
@@ -790,7 +791,7 @@ def list_messages(
                an error, not an empty page.
         exclude_chat_jid: Same shape, dropped from the result — the way to read
                everything except a few noisy chats
-        query: Search message content, stored transcripts and original document
+        query: Search current message content (not original_content), stored transcripts and original document
                filenames (excluding generated names). With FTS this is accent-insensitive and
                word-based (e.g. "orcamento" finds "orçamento", "ana" does not match
                "semana"); supports AND / OR / NOT, "exact phrase" and prefix*
@@ -844,8 +845,9 @@ def list_messages(
                  when unlisted, so shortened text is never passed off as whole.
         omit_nulls: Drop keys that carry nothing (null, false, empty text, empty
                  notes) instead of serialising them. Combines with fields.
-        max_content_chars: Cut `content` to this many characters and mark the row
-                 content_truncated=true. Use it to skim long messages; re-read the
+        max_content_chars: Cut `content` and `original_content` to this many characters,
+                 marking content_truncated or original_content_truncated respectively.
+                 Use it to skim long messages; re-read the
                  chat without it (or with get_message_context) for the full text.
         mentions_me: Only messages that mentioned you (the WhatsApp @-mention,
                  matched on both spellings of your own account, not a text
@@ -1053,7 +1055,8 @@ def export_messages(
                  content, is_from_me,
                  chat_jid, chat_name, media_type, filename, target_message_id,
                  reaction_to_message_id, poll_message_id, quoted_message_id,
-                 deleted_at, view_once, bytes, sha256, notes). Default: all of them
+                 deleted_at, edited_at, original_content, view_once, bytes, sha256, notes).
+                 Default: all of them; null original_content means unknown or unedited
         sender_jid: Only messages from this sender
         from_me: True for what you sent, False for inbound only, None for both
         has_media: True for messages carrying a file, False for messages without a file
@@ -1132,7 +1135,8 @@ def list_unread(
         fields: Keep only these keys on each message row (same names as list_messages);
                 an unknown name is an error listing the valid ones
         omit_nulls: Drop message keys that carry nothing (null, false, empty text)
-        max_content_chars: Cut each message's `content` and set content_truncated=true
+        max_content_chars: Cut content/original_content, setting their respective
+                content_truncated/original_content_truncated flags
         count_only: Return {"count": N, "chats_with_unread": N} over every matching
                 chat — limit_chats/limit_per_chat and the shaping arguments do not
                 apply, and no message row is read. Combining it with fields is an error.
@@ -1568,7 +1572,8 @@ def get_message_context(
         fields: Keep only these keys on each row; an unknown name is an error
                 listing the valid ones
         omit_nulls: Drop keys that carry nothing (null, false, empty text, empty notes)
-        max_content_chars: Cut `content` and set content_truncated=true on the row
+        max_content_chars: Cut content/original_content, setting their respective
+                content_truncated/original_content_truncated flags
     """
     context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
     # One notes lookup and one sender lookup for the whole window.

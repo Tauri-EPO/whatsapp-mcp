@@ -529,31 +529,17 @@ def message_columns(cursor: sqlite3.Cursor) -> str:
     fields so all readers keep the same projection and old archives remain
     readable without the MCP server changing the bridge-owned schema.
     """
-    has_column = _schema_memo(
-        "messages.sender_server",
+    available = _schema_memo(
+        "messages.columns",
         MESSAGES_DB_PATH,
         # Iterated, not fetchall()'d: this runs on the caller's cursor, and
         # export.py's guard against buffering a whole archive watches for it.
-        lambda: "sender_server" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
+        lambda: {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
         schema=cursor,
     )
-    columns = MESSAGE_COLUMNS if has_column else MESSAGE_COLUMNS.replace("messages.sender_server", "NULL")
-    has_location = _schema_memo(
-        "messages.location",
-        MESSAGES_DB_PATH,
-        lambda: "location" in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
-        schema=cursor,
-    )
-    if not has_location:
-        columns = columns.replace("messages.location", "NULL")
-    for name in ("message_edit_timestamp", "original_content"):
-        has_edit_column = _schema_memo(
-            f"messages.{name}",
-            MESSAGES_DB_PATH,
-            lambda: name in {row[1] for row in cursor.execute("PRAGMA table_info(messages)")},
-            schema=cursor,
-        )
-        if not has_edit_column:
+    columns = MESSAGE_COLUMNS
+    for name in ("sender_server", "location", "message_edit_timestamp", "original_content"):
+        if name not in available:
             columns = columns.replace(f"messages.{name}", "NULL")
     return columns
 
@@ -1245,6 +1231,7 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "message_notes",
     "transcript",
     "content_truncated",
+    "original_content_truncated",
 )
 # "notes" is on every chat row, whichever listing produced it.
 _CHAT_ROW_FIELDS: tuple[str, ...] = (
@@ -1313,7 +1300,8 @@ def shape_rows(
     Order matters: truncation runs first (so a projection on the text field still
     gets the shortened text) and `content_truncated` survives a projection that
     did not ask for it, because losing that flag would make the truncated text
-    look complete.
+    look complete. Message rows also truncate `original_content`, with its own
+    `original_content_truncated` flag retained under the same projection rule.
     """
     selected = validate_fields(fields, known)
     limit = int(max_content_chars) if max_content_chars is not None else None
@@ -1325,12 +1313,16 @@ def shape_rows(
     shaped: list[dict[str, Any]] = []
     for row in rows:
         out = dict(row)
-        content = out.get(content_key)
-        if limit is not None and isinstance(content, str) and len(content) > limit:
-            out[content_key] = content[:limit]
-            out["content_truncated"] = True
+        text_fields = [(content_key, "content_truncated")]
+        if content_key == "content":
+            text_fields.append(("original_content", "original_content_truncated"))
+        for key, flag in text_fields:
+            content = out.get(key)
+            if limit is not None and isinstance(content, str) and len(content) > limit:
+                out[key] = content[:limit]
+                out[flag] = True
         if selected is not None:
-            keep = [*selected, "content_truncated"] if out.get("content_truncated") else selected
+            keep = [*selected, *(flag for _, flag in text_fields if out.get(flag))]
             out = {name: out[name] for name in keep if name in out}
         if omit_nulls:
             out = {name: value for name, value in out.items() if not _is_empty(value)}
