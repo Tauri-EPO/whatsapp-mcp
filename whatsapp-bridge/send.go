@@ -640,8 +640,8 @@ func sendWhatsAppMessageWithNetwork(ctx context.Context, client *whatsmeow.Clien
 		msg = buildOutboundTextWithQuote(message, quote, mentionedJIDs)
 	}
 
-	if score, ok := ctx.Value(forwardedSendKey{}).(uint32); ok {
-		markOutboundForward(msg, score)
+	if source, ok := ctx.Value(forwardedSendKey{}).(*forwardSource); ok {
+		markOutboundForward(msg, source.forwardingScore)
 	}
 	applyChatEphemeralSettings(msg, settings)
 

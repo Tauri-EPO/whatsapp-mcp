@@ -170,3 +170,20 @@ func TestCachedPNGDocumentNameReachesWireArchiveAndCache(t *testing.T) {
 		t.Fatalf("outbound cache %s bytes=%x err=%v", cached, got, err)
 	}
 }
+
+func TestCachedDocumentRefusesMismatchedPresentation(t *testing.T) {
+	for _, kind := range []string{"image", "video", "audio", "sticker"} {
+		t.Run(kind, func(t *testing.T) {
+			source := &forwardSource{mediaType: kind, presentation: &mediaPresentation{Hash: strings.Repeat("0", 64)}}
+			ctx := context.WithValue(t.Context(), documentSendKey{}, true)
+			ctx = context.WithValue(ctx, forwardSourceKey{}, source)
+			data := []byte("changed cached bytes")
+			if _, _, err := forwardMediaType(ctx, "cached", data); err == nil {
+				t.Fatal("classification accepted mismatched cached bytes")
+			}
+			if packet, _, err := buildForwardMedia(ctx, whatsmeow.MediaDocument, "image/png", "cached", data, whatsmeow.UploadResponse{}, "", outboundQuote{}, nil); err == nil || packet != nil {
+				t.Fatal("document builder accepted mismatched cached bytes")
+			}
+		})
+	}
+}

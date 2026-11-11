@@ -18,7 +18,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -228,6 +227,9 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicyResolver) http.Hand
 			return
 		}
 		sendCtx, cancelSend := requestContext(r, sendDeadline)
+		// Keep the same context through registration and send; the source may
+		// be refreshed in place after downloading media.
+		sendCtx = context.WithValue(sendCtx, forwardedSendKey{}, &source)
 		if mediaType != "" {
 			// The downloaded path uses a category name, not a caller filename.
 			sendCtx = context.WithValue(sendCtx, cachedForwardMIMEKey{}, true)
@@ -271,15 +273,6 @@ func handleForwardMessage(deps forwardDeps, policy chatPolicyResolver) http.Hand
 			// context and its budget, without creating another deadline.
 			source = current
 		}
-		score := uint32(1)
-		if source.forwardingScore != nil {
-			score = *source.forwardingScore
-			// A saturated protocol counter must not wrap back to zero.
-			if score < math.MaxUint32 {
-				score++
-			}
-		}
-		sendCtx = context.WithValue(sendCtx, forwardedSendKey{}, score)
 		if deps.allowSend != nil && !deps.allowSend(w, r.WithContext(sendCtx), to) {
 			return
 		}

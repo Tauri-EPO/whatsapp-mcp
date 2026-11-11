@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"mime"
 	"strings"
 	"time"
@@ -22,7 +23,15 @@ type forwardSource struct {
 type forwardSourceKey struct{}
 type forwardedSendKey struct{}
 
-func markOutboundForward(msg *waE2E.Message, score uint32) {
+func markOutboundForward(msg *waE2E.Message, original *uint32) {
+	score := uint32(1)
+	if original != nil {
+		score = *original
+		// A saturated protocol counter must not wrap back to zero.
+		if score < math.MaxUint32 {
+			score++
+		}
+	}
 	if msg.Conversation != nil {
 		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{Text: msg.Conversation}
 		msg.Conversation = nil
@@ -117,16 +126,16 @@ func buildForwardMedia(ctx context.Context, kind whatsmeow.MediaType, contentTyp
 	if !ok {
 		return buildOutboundMedia(kind, contentType, path, data, upload, caption, quote, mentions)
 	}
+	p, err := source.presentation.forBytes(source.mediaType, data)
+	if err != nil {
+		return nil, "", err
+	}
 	if kind == whatsmeow.MediaDocument && source.mediaType != "document" {
 		name := "attachment"
 		if extensions, _ := mime.ExtensionsByType(contentType); len(extensions) > 0 {
 			name += extensions[0]
 		}
 		return buildOutboundMedia(kind, contentType, name, data, upload, caption, quote, mentions)
-	}
-	p, err := source.presentation.forBytes(source.mediaType, data)
-	if err != nil {
-		return nil, "", err
 	}
 	switch source.mediaType {
 	case "audio":
