@@ -37,7 +37,8 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | **Groups and polls** | group members, add/remove/promote members, rename, invite link, leave, native poll results with every voter's choice |
 | **Memory** | deleted messages keep their content, view-once media is archived without consuming the phone's view, calls are logged, and the agent keeps its own notes across sessions — about files, chats, contacts and individual messages (label, importance, summary, a dated log), returned inline wherever the target is listed, versioned so a rewrite never loses what it replaced |
 | **Business labels** | `list_labels` reads the cached catalog and `label_chat` applies or removes an existing label on a conversation |
-| **File chats** | `archive_chat` archives or unarchives a conversation on the phone while keeping its local history |
+| **File chats** | `archive_chat` archives or unarchives a conversation on the phone while keeping its local history; `delete_chat` deletes it on the phone (irreversible, `confirm=true`) and drops the same range locally |
+| **Block** | `block_contact` blocks or unblocks a contact, `get_blocklist` lists who is blocked |
 | **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result; `coverage` shows what the archive really holds and which periods are missing; `request_history` asks the phone to backfill a chat whose archive starts too late |
 
 The full list with parameters is in [docs/TOOLS.md](docs/TOOLS.md).

@@ -12,7 +12,7 @@ reason: "quota"` and a subsequent read streams without retaining a cache copy.
 Local paths keep their existing behavior. See
 [Media storage backends](CONFIGURATION.md#media-storage-backends).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `edit_message`, `forward_message`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -1144,6 +1144,54 @@ retrying either case. Hidden and refused in read-only mode.
 The LID index spelling was observed on two paired accounts (six and four direct
 chat settings, counts only). End-to-end archive on a paired phone and message
 range key matching, including group participant spelling, remain unverified.
+
+### `delete_chat`
+
+Delete a whole direct conversation or group on the phone and linked devices — the
+phone's "Delete chat". **Irreversible.** **Parameters:** `chat_jid` (full JID from
+`list_chats`), `delete_media` (optional, default `false`: also remove the chat's
+media from the phone's gallery), `confirm` (must be `true`; anything else returns
+`invalid_argument` and sends nothing).
+
+The patch is anchored exactly like `archive_chat` (newest permitted phone/LID twin
+row, no pointer rows). WhatsApp deletes the conversation **up to that anchor**;
+messages newer than it survive. A chat without a stored message returns
+`not_found`: the bridge never sends a guessed range (whatsmeow would default to
+"now"). Only after the server accepts the patch, the bridge removes the same
+range locally under every stored alias: first the cached media of those rows
+(local or S3), then the rows in one transaction (messages, calls, polls and
+their votes; the chat row when no message is left). A media row whose file could
+not be removed stays, counted in `local_media_failed`, so `purge_media` can
+still reach it. Group rosters and label associations stay. The MCP call waits
+up to 60 s (send plus cleanup).
+
+Returns `{"success": true, "deleted": true, "delete_media": …, "anchor_timestamp":
+"…", "local_messages_removed": N, "local_media_removed": N, "sent": true,
+"confirmed": false}`. `local_cleanup_error` means WhatsApp accepted the deletion but the
+local archive was not fully cleaned: **do not resend**. Error semantics follow
+`archive_chat`: 408 nothing sent, safe to retry; 503 not applied; other failures
+have an unknown outcome, so inspect the phone and never retry automatically.
+Annotated `destructiveHint`. Hidden and refused in read-only mode.
+
+### `block_contact`
+
+Block a contact, or unblock it with `blocked=false`. **Parameters:** `jid` (phone
+number with country code, `@s.whatsapp.net` or `@lid` JID), `blocked` (optional,
+default `true`). Groups, broadcasts and newsletters return `invalid_argument`.
+WhatsApp addresses blocks by LID: a phone number without a known LID is looked
+up first, and an unknown number fails with `bridge_unavailable` (502) without
+changing anything. Repeating a call is harmless. Returns the updated `blocklist`
+(same shape as `get_blocklist`). Hidden and refused in read-only mode.
+
+### `get_blocklist`
+
+The contacts this account has blocked, read from WhatsApp (not the archive), so
+it needs a connected bridge. Each entry has `lid` and, when known, `phone_jid`.
+With `WHATSAPP_ALLOWED_CHATS` set, entries whose phone and LID are both outside
+it are left out.
+
+Both tools reimplement the capability of upstream lharries #395 against this
+fork's policy layers; end-to-end on a paired phone remains to be verified.
 
 ### `list_labels`
 

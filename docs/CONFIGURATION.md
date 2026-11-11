@@ -657,12 +657,12 @@ Why this matters: an agent that reads any group or forwarded message is reading
 attacker-controlled text. Told "never send without approval", it is one prompt
 injection away from sending. With read-only on there is no send tool to call.
 
-**Blocked** (17 tools / 15 endpoints): `send_message`, `send_file`,
-`send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `label_chat`, `mark_messages_read`,
+**Blocked** (19 tools / 17 endpoints): `send_message`, `send_file`,
+`send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`,
 `delete_message`, `edit_message`, `forward_message`,
 `manage_group_participants`, `update_group`, `get_group_invite_link`,
 `leave_group`, `purge_media`, `request_history`; on the bridge `/api/send`, `/api/react`,
-`/api/typing`, `/api/chat/archive`, `/api/chat/label`, `/api/mark-read`, `/api/delete`, `/api/edit`, `/api/forward`,
+`/api/typing`, `/api/chat/archive`, `/api/chat/delete`, `/api/block`, `/api/chat/label`, `/api/mark-read`, `/api/delete`, `/api/edit`, `/api/forward`,
 `/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
 `/api/group/leave`, `/api/media/purge`, `/api/history`.
 
