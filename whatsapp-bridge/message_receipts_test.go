@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -81,5 +82,54 @@ func TestPeerReceiptLIDDirectChat(t *testing.T) {
 	}
 	if chat != pn.String() {
 		t.Fatal(chat)
+	}
+}
+
+func TestPeerReceiptsFollowOriginalDeletion(t *testing.T) {
+	t.Setenv(storeDirEnv, t.TempDir())
+	ms := newTestMessageStore(t)
+	self := types.NewJID("5511888888888", types.DefaultUserServer)
+	peer := types.NewJID("5511999999999", types.DefaultUserServer)
+	b := testBridge(t, newTestClientWithSelf(&mockLIDStore{}, self), ms, installRecordingLogger(t))
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	other := types.NewJID("120363000000000002", types.GroupServer)
+	at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	for _, chat := range []types.JID{group, other} {
+		if err := ms.StoreChat(chat.String(), "Alice", at); err != nil {
+			t.Fatal(err)
+		}
+		if err := ms.StoreMessage(storedMessage{ID: "same", ChatJID: chat.String(), Sender: self.String(), Content: "Alice", Timestamp: at, IsFromMe: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ms.StoreMessage(storedMessage{ID: "later", ChatJID: group.String(), Sender: self.String(), Content: "Bob", Timestamp: at.Add(time.Minute), IsFromMe: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, chat := range []types.JID{group, other} {
+		b.handleEvent(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: peer, IsGroup: true}, MessageIDs: []string{"same", "later"}, Type: types.ReceiptTypeRead, Timestamp: at.Add(time.Hour)}, nil)
+	}
+	count := func() int {
+		var n int
+		if err := ms.db.QueryRow(`SELECT COUNT(*) FROM message_receipts`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(); n != 3 {
+		t.Fatalf("receipt fixture count=%d", n)
+	}
+	result, err := b.deleteChatLocal(context.Background(), []string{group.String()}, at)
+	if err != nil || result.Messages != 1 {
+		t.Fatal(result, err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("after bounded chat delete receipts=%d, want newer original and other chat only", n)
+	}
+	// Every original DELETE uses the same schema cleanup, including single rows.
+	if _, err := ms.db.Exec(`DELETE FROM messages WHERE chat_jid=? AND id=?`, other.String(), "same"); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("after single original delete receipts=%d, want only newer original", n)
 	}
 }

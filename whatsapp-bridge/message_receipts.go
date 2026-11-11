@@ -14,7 +14,12 @@ const messageReceiptsSchema = `CREATE TABLE IF NOT EXISTS message_receipts (
  recipient TEXT NOT NULL, recipient_server TEXT NOT NULL,
  type TEXT NOT NULL, at TIMESTAMP NOT NULL,
  PRIMARY KEY(chat_jid, message_id, recipient, recipient_server, type)
-);`
+);
+CREATE TRIGGER IF NOT EXISTS message_receipts_original_delete
+AFTER DELETE ON messages BEGIN
+ DELETE FROM message_receipts
+ WHERE chat_jid=OLD.chat_jid AND message_id=OLD.id;
+END;`
 
 // Receipts from peers acknowledge our messages; IsFromMe describes the receipt
 // sender, not the message. The SQL checks ownership using the full message key.
