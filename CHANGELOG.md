@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.11.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.10.0...v2.11.0) (2026-11-12)
+
+
+### Features
+
+* add forwarding labels and quoted document sends ([#812](https://github.com/Tauri-EPO/whatsapp-mcp/issues/812)) ([bfa8765](https://github.com/Tauri-EPO/whatsapp-mcp/commit/bfa8765803856efbe0e15e7b643529ff2da81da0))
+* add message receipts, group creation and business checks ([#818](https://github.com/Tauri-EPO/whatsapp-mcp/issues/818)) ([cfca7ec](https://github.com/Tauri-EPO/whatsapp-mcp/commit/cfca7ec66288f2e9d50bd7cb5f4e558dabbb607a)), closes [#804](https://github.com/Tauri-EPO/whatsapp-mcp/issues/804) [#806](https://github.com/Tauri-EPO/whatsapp-mcp/issues/806) [#807](https://github.com/Tauri-EPO/whatsapp-mcp/issues/807)
+* block_contact, get_blocklist and delete_chat through the bridge ([#810](https://github.com/Tauri-EPO/whatsapp-mcp/issues/810)) ([f649d64](https://github.com/Tauri-EPO/whatsapp-mcp/commit/f649d6462672e0050afd89d9ecc903d2f0902816))
+* bridge_status answers minimally by default; full payload behind detail=true ([#832](https://github.com/Tauri-EPO/whatsapp-mcp/issues/832)) ([aa0e684](https://github.com/Tauri-EPO/whatsapp-mcp/commit/aa0e6840ccfb63d0563cd92ad589a7ef1ef3e3c1))
+* delete_messages_for_me ("Delete for me") through the bridge ([#817](https://github.com/Tauri-EPO/whatsapp-mcp/issues/817)) ([fed58b0](https://github.com/Tauri-EPO/whatsapp-mcp/commit/fed58b03f43510968afc50fe7497dd64063b493d))
+* search saved pre-edit message text ([#826](https://github.com/Tauri-EPO/whatsapp-mcp/issues/826)) ([499d419](https://github.com/Tauri-EPO/whatsapp-mcp/commit/499d41974c42699194ace19996c4cac540202c5c)), closes [#821](https://github.com/Tauri-EPO/whatsapp-mcp/issues/821)
+
+
+### Bug fixes
+
+* decrypt secret-encrypted edits and preserve original text ([#820](https://github.com/Tauri-EPO/whatsapp-mcp/issues/820)) ([88694b5](https://github.com/Tauri-EPO/whatsapp-mcp/commit/88694b543123b0eafd5bbe364c8c792ffeb6b734)), closes [#801](https://github.com/Tauri-EPO/whatsapp-mcp/issues/801)
+* legacy /api/delete uses the authorized canonical chat key ([#830](https://github.com/Tauri-EPO/whatsapp-mcp/issues/830)) ([412ad76](https://github.com/Tauri-EPO/whatsapp-mcp/commit/412ad767eae12b4121ccc471d223c566232b620b))
+* retain receipts that precede their own originals ([#823](https://github.com/Tauri-EPO/whatsapp-mcp/issues/823)) ([8a392d3](https://github.com/Tauri-EPO/whatsapp-mcp/commit/8a392d3e390c11a1c5bf126ebb242ade5d436510)), closes [#814](https://github.com/Tauri-EPO/whatsapp-mcp/issues/814) [#824](https://github.com/Tauri-EPO/whatsapp-mcp/issues/824)
+
+
+### Dependencies
+
+* bump golang.org/x/net and take Debian fixes in the server image; readable Trivy reports, steadier Go gates ([#822](https://github.com/Tauri-EPO/whatsapp-mcp/issues/822)) ([8d7d338](https://github.com/Tauri-EPO/whatsapp-mcp/commit/8d7d33823cbc16e789a523a997ff06368afebf1f))
+
 ## [2.10.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.9.4...v2.10.0) (2026-11-10)
 
 
