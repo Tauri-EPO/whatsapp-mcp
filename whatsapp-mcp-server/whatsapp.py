@@ -6475,27 +6475,8 @@ def owner_identity_local() -> dict[str, str | None] | None:
     return _remember_owner(owner) if owner else None
 
 
-def bridge_status() -> dict[str, Any]:
-    """Health, readiness and build identity of the bridge in one call.
-
-    Never raises for a bridge that is down: returns ok=false with the reason,
-    so the agent can tell "bridge unreachable" from "nothing matched".
-    """
-    status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL, "whisper": _whisper_status()}
-    from runtime_settings import ingest_setting
-
-    try:
-        status["transcription_ingest_chats"] = ingest_setting()
-    except (OSError, sqlite3.Error, ValueError):
-        status["transcription_ingest_chats"] = {"error": "Runtime setting unavailable"}
-    from transcription_usage import current_usage
-
-    try:
-        status["transcription_usage"] = current_usage()
-        status["transcription_usage"]["minutes"] = status["transcription_usage"]["seconds"] / 60
-    except (OSError, sqlite3.Error, ValueError):
-        status["transcription_usage"] = {"error": "Transcription usage unavailable"}
-    status.update(_endpoint_cert_status())
+def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
+    """/api/health folded into status: ok, paired, connected, reason, problems, pairing."""
     try:
         health = _bridge_request("GET", "/health", timeout=10)
     except ToolError as exc:
@@ -6540,15 +6521,14 @@ def bridge_status() -> dict[str, Any]:
     if isinstance(problem, dict):
         status["connection_problem"] = problem
         kind = problem.get("kind")
-        if kind in ("banned", "locked", "client_outdated", "temporarily_banned"):
+        if kind in BLOCKING_CONNECTION_PROBLEMS:
             status["ok"] = False
             status["reason"] = f"WhatsApp connection problem: {kind}; see docs/TROUBLESHOOTING.md"
     action = body.get("pairing_action")
     if isinstance(action, str) and action:
         status["pairing_action"] = action
         if not status["paired"] and (
-            not isinstance(problem, dict)
-            or problem.get("kind") not in ("banned", "locked", "client_outdated", "temporarily_banned")
+            not isinstance(problem, dict) or problem.get("kind") not in BLOCKING_CONNECTION_PROBLEMS
         ):
             status["reason"] = action
     if pairing_state in ("pairing_required", "expired"):
@@ -6558,6 +6538,41 @@ def bridge_status() -> dict[str, Any]:
         status["pairing_state"] = pairing_state
         status["ok"] = False
         status["reason"] = f"WhatsApp pairing step: {pairing_state}; operator intervention required; see docs/DOCKER.md"
+    return status
+
+
+# Connection problems that block the account (bridge connection_problem.kind).
+BLOCKING_CONNECTION_PROBLEMS = ("banned", "locked", "client_outdated", "temporarily_banned")
+
+
+def bridge_status(minimal: bool = False) -> dict[str, Any]:
+    """Health, readiness and build identity of the bridge in one call.
+
+    Never raises for a bridge that is down: returns ok=false with the reason,
+    so the agent can tell "bridge unreachable" from "nothing matched".
+    minimal=True asks /health only: no whisper or endpoint probes, no notes.db
+    reads, no /version or owner lookup (issue #831).
+    """
+    if minimal:
+        return _bridge_health_status({"ok": False})
+    status: dict[str, Any] = {"ok": False, "bridge_url": WHATSAPP_API_BASE_URL, "whisper": _whisper_status()}
+    from runtime_settings import ingest_setting
+
+    try:
+        status["transcription_ingest_chats"] = ingest_setting()
+    except (OSError, sqlite3.Error, ValueError):
+        status["transcription_ingest_chats"] = {"error": "Runtime setting unavailable"}
+    from transcription_usage import current_usage
+
+    try:
+        status["transcription_usage"] = current_usage()
+        status["transcription_usage"]["minutes"] = status["transcription_usage"]["seconds"] / 60
+    except (OSError, sqlite3.Error, ValueError):
+        status["transcription_usage"] = {"error": "Transcription usage unavailable"}
+    status.update(_endpoint_cert_status())
+    status = _bridge_health_status(status)
+    if "connected" not in status:
+        return status
     try:
         version = _bridge_request("GET", "/version", timeout=10)
         if version.status_code == 200:

@@ -22,8 +22,8 @@ builder (`DOCKER_BUILDKIT=0`) rejects the flag.
 
 ### Account connection problems
 
-`/api/health` stays alive and `bridge_status` reports `connection_problem`
-with `kind`, numeric WhatsApp `code`, `since`, and, for temporary bans,
+`/api/health` stays alive and `bridge_status` reports `restriction: {kind, expires_at}`
+(`bridge_status(detail=true)` the full `connection_problem`) with `kind`, numeric WhatsApp `code`, `since`, and, for temporary bans,
 `temp_ban_reason` and `expires_at`. Metrics expose a gauge per kind and
 temporary-ban counters by reason. These diagnostics contain no WebAuthn options.
 An unlink can coexist with a restriction: `unlinked_at` records the revocation,
@@ -445,7 +445,7 @@ the next start picks the change up and stops warning.
 
 ## whisper configured but not reachable
 
-- **`bridge_status` answers `"whisper": { "configured": true, "backend": "url",
+- **`bridge_status(detail=true)` answers `"whisper": { "configured": true, "backend": "url",
   "reachable": false }`**, and with `TRANSCRIBE_ON_INGEST=1` the MCP log repeats
   `transcribe_on_ingest: the whisper backend is unavailable (...)` once per
   round. The MCP server probes `WHISPER_URL` from inside the mcp container,

@@ -66,7 +66,7 @@ def test_ok_when_paired_and_connected(monkeypatch):
             }
         ),
     )
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     assert out["ok"] is True and out["connected"] and out["paired"] and out["uptime_seconds"] == 42
     assert out["version"]["commit"] == "abc" and out["version"]["fts5"] is True
     assert out["media_files"] == 1
@@ -90,7 +90,7 @@ def test_awaiting_pairing_reports_reason(monkeypatch):
             }
         ),
     )
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     # No identity before pairing: the key is absent rather than null.
     assert out["ok"] is False and "QR" in out["reason"] and "version" not in out and "owner" not in out
 
@@ -101,7 +101,7 @@ def test_unreachable_never_raises(monkeypatch):
 
     monkeypatch.setattr(whatsapp.bridge_http, "get", down)
     monkeypatch.setattr(whatsapp.time, "sleep", lambda s: None)
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     assert out["ok"] is False and "unreachable" in out["reason"] and "error" not in out
     assert "owner" not in out
 
@@ -122,7 +122,7 @@ def test_account_problem_replaces_automatic_repair_advice(monkeypatch, kind, cod
             }
         ),
     )
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     assert out["ok"] is False and out["connection_problem"] == problem
     assert kind in out["reason"] and "scan the QR" not in out["reason"]
 
@@ -140,7 +140,7 @@ def test_passkey_state_reaches_the_mcp_tool(monkeypatch, state):
             }
         ),
     )
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     assert out["ok"] is False and out["pairing_state"] == state
     assert "operator intervention" in out["reason"]
 
@@ -173,7 +173,7 @@ def test_pairing_recovery_guidance_reaches_the_mcp_tool(monkeypatch, state, acti
             }
         ),
     )
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     assert out["ok"] is False
     assert out["pairing_state"] == state
     assert out["pairing_action"] == action and out["reason"] == action
@@ -203,6 +203,6 @@ def test_unlink_cleanup_guidance_keeps_account_restriction_reason(monkeypatch, k
             }
         ),
     )
-    out = main.bridge_status()
+    out = main.bridge_status(detail=True)
     assert out["ok"] is False and out["connection_problem"]["kind"] == kind
     assert out["pairing_action"] == action and kind in out["reason"]

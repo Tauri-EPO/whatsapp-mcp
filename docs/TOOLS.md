@@ -350,7 +350,13 @@ that long does not appear in a real archive.
 
 ### `bridge_status`
 
-Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
+Health of the bridge in one call. Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
+
+**Default answer (minimal, issue #831):** `ok`, `paired`, `connected`; a short generic `reason` when `ok` is false (bridge unreachable, not paired, pairing in progress, account restricted, disconnected — never the bridge URL, exception text or operator API paths); `pairing_state` during a pairing step; `restriction: {kind, expires_at?}` when WhatsApp banned, locked or outdated the account; and `transcription_configured`, read from configuration without any probe. It asks the bridge's `/api/health` only: no whisper or endpoint probe, no notes.db read. Nothing else: no bridge URL, own phone number, build, transcription backend, cache sizes or send usage, which a hosted operator may not want in the end user's AI client.
+
+**`detail=true`** returns the full payload described below, with the detailed `reason`. Ask for it before planning transcription work (`whisper.reachable`), to size the cache or read `send_usage`, or when you need the account's own `owner` identity. With `WHATSAPP_STATUS_DETAIL=false` the deployment refuses detail: the answer stays minimal and carries `detail: "unavailable on this deployment"`. `ok` means the same in both shapes.
+
+The rest of this section describes the `detail=true` payload.
 
 Account restrictions add `connection_problem` with `kind`, numeric `code`,
 `since` and temporary-ban reason/expiry. Passkey linking steps add
@@ -459,7 +465,7 @@ touches the filesystem is the `audio` block below, and it is bounded.
 
 #### The `audio` block: how much is left to transcribe
 
-`bridge_status.whisper` says whether transcription is *possible*; `audio` says
+`bridge_status().transcription_configured` (and, with `detail=true`, `whisper`) says whether transcription is *possible*; `audio` says
 how much of it is *pending*, over exactly the same window, chat filter and
 allow-list as the numbers above:
 
@@ -856,7 +862,7 @@ message_stats(mentions_me=True, group_by="chat")   # which groups address me
 ```
 
 Who "you" is comes from the paired account itself and is reported by
-[`bridge_status`](#bridge_status) under `owner`. Without a paired store (and an
+[`bridge_status(detail=true)`](#bridge_status) under `owner`. Without a paired store (and an
 unreachable bridge) the filter answers `bridge_unavailable` rather than an empty
 page — "nobody mentioned you" and "I don't know who you are" are different
 answers.
@@ -1730,7 +1736,7 @@ Requires a configured HTTP provider, or a whisper backend configured with either
 whisper.cpp `whisper-server` you run yourself, see
 [Voice-note transcription](DOCKER.md#voice-note-transcription)) or `WHISPER_BIN` + `WHISPER_MODEL` (a local
 `whisper-cli` binary and a `ggml-*.bin` model). Whether this deployment has one
-is reported by [`bridge_status`](#bridge_status) under `whisper`: check it before
+is reported by [`bridge_status`](#bridge_status) as `transcription_configured`, and with `detail=true` under `whisper`: check it before
 walking a folder of voice notes, because without a backend every call here fails
 identically. Whisper audio is normalised to 16 kHz WAV with ffmpeg. The HTTP
 provider uses `WHATSAPP_TRANSCRIPTION_LANGUAGE` (default auto) and uploads only
@@ -2294,7 +2300,7 @@ Totals per chat and per media type so the agent knows where the bytes are.
 Returns `total` (`files`, `bytes`, `cached_files`, `cached_bytes`,
 `duplicate_groups`, `duplicate_bytes`: what the copies beyond the first of each
 hash add up to), `by_chat` (with `distinct_files`, `cached_files`,
-`cached_bytes` from the directory on disk) and `by_type`. `bridge_status()`
+`cached_bytes` from the directory on disk) and `by_type`. `bridge_status(detail=true)`
 shows the same cache from the operator's side (`store_bytes`, `media_bytes`,
 `media_files`).
 
@@ -2857,7 +2863,7 @@ through this door either, and neither does a group the triage notes hide — and
 `count_only` counts the ordinary rule alone.
 
 It needs a paired deployment, since the account's own identity is what a mention
-is matched against ([`bridge_status`](#bridge_status) → `owner`), and it reads
+is matched against ([`bridge_status(detail=true)`](#bridge_status) → `owner`), and it reads
 the same `mentions` column as [`mentions_me`](#list_messages) — including its
 caveat about messages archived before that column existed.
 
@@ -3156,8 +3162,8 @@ CREATE TABLE calls (
 Outbound sends share the bridge's instance budget (text, file/audio, forwards and
 group participant additions). A `rate_limited` tool error includes
 `retry_after_s` and the exhausted limit; stop and report to the operator instead
-of repeatedly retrying. `bridge_status.send_usage` reports UTC daily counts and
+of repeatedly retrying. `bridge_status(detail=true).send_usage` reports UTC daily counts and
 effective limits. Oversized batches return `limit_exceeds_batch` with no retry
 delay; split the batch. See [send budgets](CONFIGURATION.md#outbound-send-budgets-and-mcp-token-rotation).
 
-Transcription results include `duration_s`, `provider` and `model`; successful uncached runs are metered in notes.db. Cache hits return stored metadata; legacy transcripts have null duration_s when no duration was recorded. A monthly cap with scope `all` returns `transcription_quota_exceeded` before provider upload when the file does not fit. `bridge_status.transcription_usage` reports UTC monthly usage and remaining quota.
+Transcription results include `duration_s`, `provider` and `model`; successful uncached runs are metered in notes.db. Cache hits return stored metadata; legacy transcripts have null duration_s when no duration was recorded. A monthly cap with scope `all` returns `transcription_quota_exceeded` before provider upload when the file does not fit. `bridge_status(detail=true).transcription_usage` reports UTC monthly usage and remaining quota.

@@ -223,6 +223,18 @@ def _on_ingest_requested(raw: str | None) -> bool:
         return False
 
 
+def transcription_configured(env: Mapping[str, str] | None = None) -> bool:
+    """Whether a transcription backend is configured, from configuration alone (no probe)."""
+    get = _env_reader(env)
+    if get("WHATSAPP_TRANSCRIPTION_PROVIDER") not in (None, "whisper_cpp"):
+        try:
+            load_config(env)
+        except TranscriptionError:
+            return False
+        return True
+    return bool(get("WHISPER_URL") or get("WHISPER_BIN"))
+
+
 def describe_status(
     env: Mapping[str, str] | None = None,
     probe: Callable[[str], bool] = probe_server,

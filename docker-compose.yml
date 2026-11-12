@@ -233,6 +233,8 @@ services:
       WHATSAPP_WRAP_UNTRUSTED: ${WHATSAPP_WRAP_UNTRUSTED:-}
       # Shape of read_media documents: resource (default), base64 or text.
       WHATSAPP_MEDIA_INLINE: ${WHATSAPP_MEDIA_INLINE:-}
+      # false: bridge_status(detail=true) stays minimal (no internals to the agent).
+      WHATSAPP_STATUS_DETAIL: ${WHATSAPP_STATUS_DETAIL:-}
       # Voice-note transcription (transcribe_audio tool): a whisper.cpp server you
       # run, reachable from this container (docs/DOCKER.md, "Voice-note transcription").
       WHATSAPP_STORE_DIR: /app/store

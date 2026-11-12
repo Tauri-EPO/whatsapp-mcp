@@ -72,15 +72,17 @@ from tool_policy import (
     load_tool_policy,
     mutating_tool,
     offers_download,
+    parse_bool_env,
     registered_tool_names,
 )
-from transcribe import TranscriptionError, confine_audio_path, transcribe_file
+from transcribe import TranscriptionError, confine_audio_path, transcribe_file, transcription_configured
 from transcribe import load_config as load_whisper_config
 from transcribe_worker import install_ingest_worker
 from triage import mark_handled as triage_mark_handled
 from triage import snooze as triage_snooze
 from untrusted import WRAP_ENV, clean_business, parse_wrap_env, untrusted_content
 from whatsapp import (
+    BLOCKING_CONNECTION_PROBLEMS,
     CHAT_FIELDS,
     CHAT_POLICY,
     MESSAGES_MAX_LIMIT,
@@ -258,27 +260,91 @@ MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
 mcp = MediaResourceServer("whatsapp", version=MCP_VERSION)
 
 
+STATUS_DETAIL_ENV = "WHATSAPP_STATUS_DETAIL"
+
+
+def _status_detail_allowed() -> bool:
+    """WHATSAPP_STATUS_DETAIL: unset allows detail=true; false refuses it (issue #831)."""
+    raw = os.getenv(STATUS_DETAIL_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return parse_bool_env(raw, STATUS_DETAIL_ENV)
+
+
+def _minimal_reason(full: dict[str, Any], restriction: str | None) -> str:
+    """A reason without bridge URLs, exception text or operator API paths."""
+    if "connected" not in full:
+        return "bridge unreachable"
+    if restriction:
+        return f"WhatsApp account restricted ({restriction}); the operator must act"
+    if full.get("pairing_state"):
+        return "WhatsApp pairing in progress; the operator must complete it"
+    if not full.get("paired"):
+        return "not paired with a phone yet; the operator must pair it"
+    return "paired but disconnected from WhatsApp; it reconnects automatically"
+
+
+def _minimal_status(full: dict[str, Any]) -> dict[str, Any]:
+    """ok/paired/connected, a generic reason when not ok, the restriction and transcription flag.
+
+    No bridge URL, own phone/LID, build, transcription backend, cache sizes or
+    send usage: a hosted operator may not want those in the end user's AI client.
+    """
+    out: dict[str, Any] = {
+        "ok": bool(full.get("ok")),
+        "paired": bool(full.get("paired")),
+        "connected": bool(full.get("connected")),
+    }
+    problem = full.get("connection_problem")
+    kind = problem.get("kind") if isinstance(problem, dict) else None
+    restriction = kind if kind in BLOCKING_CONNECTION_PROBLEMS else None
+    if not out["ok"]:
+        out["reason"] = _minimal_reason(full, restriction)
+    if full.get("pairing_state"):
+        out["pairing_state"] = full["pairing_state"]
+    if restriction and isinstance(problem, dict):
+        out["restriction"] = {"kind": restriction}
+        if problem.get("expires_at"):
+            out["restriction"]["expires_at"] = problem["expires_at"]
+    # Configuration only, never a probe: whether transcribe_audio can work at all.
+    out["transcription_configured"] = transcription_configured()
+    return out
+
+
 @mcp.tool()
 @tool_errors
-def bridge_status() -> dict[str, Any]:
-    """Health of the WhatsApp bridge: is it reachable, paired and connected, and which build runs.
+def bridge_status(detail: bool = False) -> dict[str, Any]:
+    """Health of the WhatsApp bridge: is it reachable, paired and connected.
 
     Call this first when a tool returns nothing you expected or reports
-    bridge_unavailable. Returns ok=true when the bridge is paired and connected;
-    otherwise ok=false with a human-readable reason (unreachable, awaiting QR
-    pairing, disconnected). Also reports uptime_seconds, store_bytes / media_bytes /
-    media_files (cache size), the build (version, commit, go, whatsmeow, fts5) and
-    whisper: {configured, backend ("url" | "bin"), reachable, model, on_ingest} —
-    check it before planning transcription work, because with configured=false every
-    transcribe_audio call fails and voice notes stay unreadable on this deployment.
-    With WHATSAPP_PUBLIC_URL set it also reports endpoint_cert_expires_at and
-    endpoint_cert_days_left for the published HTTPS endpoint (endpoint_cert_error
-    when the handshake fails): a low or negative days_left is why other clients
-    cannot connect while this session still works.
-    Includes send_usage: UTC send/new-chat/refusal counts and effective send limits.
+    bridge_unavailable. The default answer is small: ok=true when the bridge is
+    paired and connected; otherwise ok=false with a short reason (unreachable,
+    not paired, pairing in progress, restricted, disconnected), pairing_state
+    during a pairing step, restriction {kind, expires_at?} when WhatsApp banned,
+    locked or outdated the account, and transcription_configured: with false,
+    every transcribe_audio call fails here.
+
+    Pass detail=true only when you need deployment internals: before planning
+    transcription work (whisper: {configured, backend, reachable, model,
+    on_ingest}: whether the backend answers, not just whether it is set), to
+    size the cache (uptime_seconds, store_bytes, media_bytes, media_files), to read
+    send_usage (UTC counts and effective send limits), the build (version, commit,
+    go, whatsmeow, fts5), the account's own phone/LID (owner), or, with
+    WHATSAPP_PUBLIC_URL set, endpoint_cert_expires_at / endpoint_cert_days_left (a
+    low or negative days_left is why other clients cannot connect). A deployment
+    may refuse detail: the answer then stays minimal with
+    detail="unavailable on this deployment"; do not ask the user to change it.
     Read-only; never fails, so it is safe to call before anything else.
+
+    Args:
+        detail: True for the full deployment payload (default False)
     """
-    return whatsapp_bridge_status()
+    if detail and _status_detail_allowed():
+        return whatsapp_bridge_status()
+    out = _minimal_status(whatsapp_bridge_status(minimal=True))
+    if detail:
+        out["detail"] = "unavailable on this deployment"
+    return out
 
 
 @mcp.tool()
@@ -861,7 +927,7 @@ def list_messages(
         mentions_me: Only messages that mentioned you (the WhatsApp @-mention,
                  matched on both spellings of your own account, not a text
                  search). This is how you find what a group actually addressed
-                 to you: bridge_status → owner says who "you" is here. Needs a
+                 to you: bridge_status(detail=true) → owner says who "you" is here. Needs a
                  paired bridge.
         count_only: Return {"count": N} for exactly these filters and no rows —
                  the cheap way to size a job before pulling it. Combining it with
@@ -1298,7 +1364,7 @@ def list_unanswered(
                 describes the conversation, not the triage state: a row a later
                 message brought back can name a mention older than its
                 handled_at. Needs a paired deployment: the account's own LID is
-                what a mention is matched against (see bridge_status → owner).
+                what a mention is matched against (see bridge_status(detail=true) → owner).
 
     Returns:
         Chat dictionaries in the list_chats shape (jid, name, push_name, name_source,
@@ -2486,7 +2552,7 @@ def get_media_stats(chat_jid: str | list[str] = "", exclude_chat_jid: str | list
     Read-only. `bytes` comes from the message rows (what WhatsApp reported),
     `cached_bytes` from the files actually on disk under the store directory.
     `duplicate_bytes` is how much the copies beyond the first of each sha256 add up
-    to. Compare with bridge_status() store_bytes / media_bytes for the operator view.
+    to. Compare with bridge_status(detail=true) store_bytes / media_bytes for the operator view.
 
     Args:
         chat_jid: Restrict to one chat, or a list of them (default: every allowed chat)
@@ -3130,9 +3196,10 @@ def transcribe_audio(
     and WHATSAPP_TRANSCRIPTION_URL/MODEL. A remote HTTP provider receives only
     reencoded, metadata-free Opus audio under one whole-file WHISPER_TIMEOUT_S budget
     as a third-party processor; redirects and automatic fallbacks are disabled.
-    **bridge_status().whisper says whether this
-    deployment has one**: when it reports configured=false (or reachable=false) every
-    call here fails, so check once instead of failing per file.
+    **bridge_status().transcription_configured says whether this
+    deployment has one** (bridge_status(detail=true).whisper adds whether it answers,
+    where detail is allowed): with false every call here fails, so check once
+    instead of failing per file.
     A download failing with `media_retry_backoff` means the sender's phone was asked
     for the file recently and did not deliver it: do not retry before `retry_after_s`.
 
@@ -3297,6 +3364,7 @@ if __name__ == "__main__":
         # tools themselves consult the environment per call (untrusted.py).
         _wrap_untrusted = parse_wrap_env(os.getenv(WRAP_ENV))
         _media_inline = parse_inline_env(os.getenv(INLINE_ENV))
+        _status_detail_allowed()
         import runtime_settings
 
         runtime_settings.capture_environment()
