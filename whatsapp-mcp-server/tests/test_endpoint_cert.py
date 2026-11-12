@@ -325,7 +325,7 @@ class TestBridgeStatusIntegration:
         _healthy(monkeypatch)
         monkeypatch.delenv("WHATSAPP_PUBLIC_URL", raising=False)
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert not [key for key in out if key.startswith("endpoint_cert")]
 
@@ -338,7 +338,7 @@ class TestBridgeStatusIntegration:
             lambda host, port: {"endpoint_cert_expires_at": "2026-12-01T00:00:00Z", "endpoint_cert_days_left": 84},
         )
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert out["ok"] is True
         assert out["endpoint_cert_days_left"] == 84
@@ -348,7 +348,7 @@ class TestBridgeStatusIntegration:
         _healthy(monkeypatch)
         monkeypatch.setenv("WHATSAPP_PUBLIC_URL", "http://myserver.tail1234.ts.net/mcp")
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert out["ok"] is True
         assert "WHATSAPP_PUBLIC_URL" in out["endpoint_cert_error"]
@@ -363,6 +363,6 @@ class TestBridgeStatusIntegration:
 
         monkeypatch.setattr(endpoint_cert, "status", boom)
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert out["ok"] is True and "probe exploded" in out["endpoint_cert_error"]

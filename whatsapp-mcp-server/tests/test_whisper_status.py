@@ -149,7 +149,7 @@ class TestBridgeStatusIntegration:
         monkeypatch.setenv("WHISPER_URL", "http://whisper:8178/inference")
         monkeypatch.setattr(transcribe.httpx, "head", lambda url, timeout=None: object())
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert out["ok"] is True
         assert out["whisper"]["backend"] == "url" and out["whisper"]["reachable"] is True
@@ -162,7 +162,7 @@ class TestBridgeStatusIntegration:
 
         monkeypatch.setattr(transcribe, "describe_status", boom)
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert out["ok"] is True
         assert out["whisper"]["configured"] is False and "probe exploded" in out["whisper"]["error"]
@@ -176,6 +176,6 @@ class TestBridgeStatusIntegration:
         monkeypatch.delenv("WHISPER_URL", raising=False)
         monkeypatch.delenv("WHISPER_BIN", raising=False)
 
-        out = main.bridge_status()
+        out = main.bridge_status(detail=True)
 
         assert out["ok"] is False and out["whisper"]["configured"] is False

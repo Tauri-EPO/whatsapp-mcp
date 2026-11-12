@@ -72,6 +72,7 @@ from tool_policy import (
     load_tool_policy,
     mutating_tool,
     offers_download,
+    parse_bool_env,
     registered_tool_names,
 )
 from transcribe import TranscriptionError, confine_audio_path, transcribe_file
@@ -258,27 +259,77 @@ MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
 mcp = MediaResourceServer("whatsapp", version=MCP_VERSION)
 
 
+STATUS_DETAIL_ENV = "WHATSAPP_STATUS_DETAIL"
+# Connection problems that block the account; the minimal answer names them.
+_BLOCKING_PROBLEMS = ("banned", "locked", "client_outdated", "temporarily_banned")
+
+
+def _status_detail_allowed() -> bool:
+    """WHATSAPP_STATUS_DETAIL: unset allows detail=true; false refuses it (issue #831)."""
+    raw = os.getenv(STATUS_DETAIL_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return parse_bool_env(raw, STATUS_DETAIL_ENV)
+
+
+def _minimal_status(full: dict[str, Any]) -> dict[str, Any]:
+    """ok/paired/connected, the reason when not ok and the blocking restriction, nothing else.
+
+    No bridge URL, own phone/LID, build, transcription backend, cache sizes or
+    send usage: a hosted operator may not want those in the end user's AI client.
+    """
+    out: dict[str, Any] = {
+        "ok": bool(full.get("ok")),
+        "paired": bool(full.get("paired")),
+        "connected": bool(full.get("connected")),
+    }
+    if not out["ok"] and full.get("reason"):
+        out["reason"] = full["reason"]
+    if full.get("pairing_state"):
+        out["pairing_state"] = full["pairing_state"]
+    problem = full.get("connection_problem")
+    if isinstance(problem, dict) and problem.get("kind") in _BLOCKING_PROBLEMS:
+        out["restriction"] = {"kind": problem["kind"]}
+        if problem.get("expires_at"):
+            out["restriction"]["expires_at"] = problem["expires_at"]
+    return out
+
+
 @mcp.tool()
 @tool_errors
-def bridge_status() -> dict[str, Any]:
-    """Health of the WhatsApp bridge: is it reachable, paired and connected, and which build runs.
+def bridge_status(detail: bool = False) -> dict[str, Any]:
+    """Health of the WhatsApp bridge: is it reachable, paired and connected.
 
     Call this first when a tool returns nothing you expected or reports
-    bridge_unavailable. Returns ok=true when the bridge is paired and connected;
-    otherwise ok=false with a human-readable reason (unreachable, awaiting QR
-    pairing, disconnected). Also reports uptime_seconds, store_bytes / media_bytes /
-    media_files (cache size), the build (version, commit, go, whatsmeow, fts5) and
-    whisper: {configured, backend ("url" | "bin"), reachable, model, on_ingest} —
-    check it before planning transcription work, because with configured=false every
-    transcribe_audio call fails and voice notes stay unreadable on this deployment.
-    With WHATSAPP_PUBLIC_URL set it also reports endpoint_cert_expires_at and
-    endpoint_cert_days_left for the published HTTPS endpoint (endpoint_cert_error
-    when the handshake fails): a low or negative days_left is why other clients
-    cannot connect while this session still works.
-    Includes send_usage: UTC send/new-chat/refusal counts and effective send limits.
+    bridge_unavailable. The default answer is small: ok=true when the bridge is
+    paired and connected; otherwise ok=false with a human-readable reason
+    (unreachable, awaiting QR pairing, disconnected), pairing_state during a
+    pairing step, and restriction {kind, expires_at?} when WhatsApp banned, locked
+    or outdated the account.
+
+    Pass detail=true only when you need deployment internals: before planning
+    transcription work (whisper: {configured, backend, reachable, model,
+    on_ingest} — with configured=false every transcribe_audio call fails), to
+    size the cache (uptime_seconds, store_bytes, media_bytes, media_files), to read
+    send_usage (UTC counts and effective send limits), the build (version, commit,
+    go, whatsmeow, fts5), the account's own phone/LID (owner), or, with
+    WHATSAPP_PUBLIC_URL set, endpoint_cert_expires_at / endpoint_cert_days_left (a
+    low or negative days_left is why other clients cannot connect). An operator
+    can disable detail with WHATSAPP_STATUS_DETAIL=false; the answer then says
+    detail is unavailable and stays minimal.
     Read-only; never fails, so it is safe to call before anything else.
+
+    Args:
+        detail: True for the full deployment payload (default False)
     """
-    return whatsapp_bridge_status()
+    full = whatsapp_bridge_status()
+    allowed = _status_detail_allowed()
+    if detail and allowed:
+        return full
+    out = _minimal_status(full)
+    if detail:
+        out["detail"] = f"unavailable: disabled by the operator ({STATUS_DETAIL_ENV}=false)"
+    return out
 
 
 @mcp.tool()
@@ -2486,7 +2537,7 @@ def get_media_stats(chat_jid: str | list[str] = "", exclude_chat_jid: str | list
     Read-only. `bytes` comes from the message rows (what WhatsApp reported),
     `cached_bytes` from the files actually on disk under the store directory.
     `duplicate_bytes` is how much the copies beyond the first of each sha256 add up
-    to. Compare with bridge_status() store_bytes / media_bytes for the operator view.
+    to. Compare with bridge_status(detail=true) store_bytes / media_bytes for the operator view.
 
     Args:
         chat_jid: Restrict to one chat, or a list of them (default: every allowed chat)
@@ -3130,7 +3181,7 @@ def transcribe_audio(
     and WHATSAPP_TRANSCRIPTION_URL/MODEL. A remote HTTP provider receives only
     reencoded, metadata-free Opus audio under one whole-file WHISPER_TIMEOUT_S budget
     as a third-party processor; redirects and automatic fallbacks are disabled.
-    **bridge_status().whisper says whether this
+    **bridge_status(detail=true).whisper says whether this
     deployment has one**: when it reports configured=false (or reachable=false) every
     call here fails, so check once instead of failing per file.
     A download failing with `media_retry_backoff` means the sender's phone was asked
@@ -3297,6 +3348,7 @@ if __name__ == "__main__":
         # tools themselves consult the environment per call (untrusted.py).
         _wrap_untrusted = parse_wrap_env(os.getenv(WRAP_ENV))
         _media_inline = parse_inline_env(os.getenv(INLINE_ENV))
+        _status_detail_allowed()
         import runtime_settings
 
         runtime_settings.capture_environment()

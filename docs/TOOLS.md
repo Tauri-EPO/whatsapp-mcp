@@ -350,7 +350,13 @@ that long does not appear in a real archive.
 
 ### `bridge_status`
 
-Health of the bridge in one call: reachable, paired, connected, uptime, cache size and build. No parameters. Returns `ok: true` when paired and connected, else `ok: false` with a `reason` (unreachable, awaiting QR pairing, disconnected). Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
+Health of the bridge in one call. Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
+
+**Default answer (minimal, issue #831):** `ok`, `paired`, `connected`; `reason` when `ok` is false (unreachable, awaiting QR pairing, disconnected); `pairing_state` during a pairing step; `restriction: {kind, expires_at?}` when WhatsApp banned, locked or outdated the account. Nothing else: no bridge URL, own phone number, build, transcription backend, cache sizes or send usage, which a hosted operator may not want in the end user's AI client.
+
+**`detail=true`** returns the full payload described below. Ask for it before planning transcription work (`whisper`), to size the cache or read `send_usage`, or when you need the account's own `owner` identity. With `WHATSAPP_STATUS_DETAIL=false` the operator refuses detail: the answer stays minimal and carries `detail: "unavailable: …"`. `ok` means the same in both shapes.
+
+The rest of this section describes the `detail=true` payload.
 
 Account restrictions add `connection_problem` with `kind`, numeric `code`,
 `since` and temporary-ban reason/expiry. Passkey linking steps add
