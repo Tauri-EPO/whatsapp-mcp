@@ -921,7 +921,7 @@ two-second total deadline also covers response headers arriving slowly.
 `transcript_error`; a 400 file rejection parks that file for review.
 
 Without either, `transcribe_audio` returns a clear "no whisper backend
-configured" error and everything else works. `bridge_status().whisper.reachable`
+configured" error and everything else works. `bridge_status(detail=true).whisper.reachable`
 says whether the URL answers, and `scripts/smoke.sh` probes it as step 5.
 
 ### Example: whisper.cpp next to the stack

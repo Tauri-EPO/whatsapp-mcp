@@ -61,7 +61,7 @@ body:
     id: bridge-version
     attributes:
       label: Bridge build
-      description: "`version` and `commit` from the `bridge_status` tool (inside its `version` object), or from `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`. Example: `v2.0.0`, commit `575ee0b`."
+      description: "`version` and `commit` from `bridge_status(detail=true)` (inside its `version` object), or from `docker compose exec bridge wget -qO- http://127.0.0.1:8080/api/version`. Example: `v2.0.0`, commit `575ee0b`."
     validations:
       required: true
 
