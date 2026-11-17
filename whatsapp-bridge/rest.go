@@ -67,9 +67,9 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	if hostWarning != "" {
 		b.Log.Warnf("%s", hostWarning)
 	}
-	// plain = bearer + Host only. /api/me, /api/health and /api/ready register
-	// with it so they answer without the settings table; every other route
-	// pins one runtime settings snapshot for the request (runtimePolicyGuard).
+	// plain = bearer + Host only. Identity and health do not need settings.
+	// SDK routes pin a settings snapshot through runtimePolicyGuard; webhook
+	// routes authorize their own policy snapshot without retaining an SDK client.
 	plain := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
 	}
@@ -78,17 +78,13 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	}
 	// mutate = auth + the WHATSAPP_READ_ONLY refusal (403, read_only.go) + the
 	// per-tool allow/deny lists (tool_policy.go), in that order: read-only wins,
-	// then the lists narrow further. Every endpoint with a side effect registers
-	// with it; reads keep plain auth except the sensitive webhook read. A new
-	// route must be classified and endpointTools must gain a row for it.
+	// then the lists narrow further. SDK side effects register with it; the
+	// client-independent webhook test repeats these guards in webhook_status.go.
+	// A new route must be classified and endpointTools must gain a row for it.
 	mutate := func(h http.HandlerFunc) http.HandlerFunc {
 		return plain(b.ReadOnly.guard(b.runtimePolicyGuard(b.runtimeToolGuard(h))))
 	}
 	mux := http.NewServeMux()
-	// Agent webhook access is inspection and a synthetic test only. Operator
-	// destination configuration/removal handlers are never registered here.
-	mux.HandleFunc("/api/webhook", auth(b.runtimeToolGuard(requireMethod(http.MethodGet, b.handleWebhookStatus()))))
-	mux.HandleFunc("/api/webhook/test", mutate(requireMethod(http.MethodPost, b.handleRuntimeWebhookTest)))
 	mux.HandleFunc("/api/media/blob", auth(requireMethod(http.MethodGet, b.handleMediaBlob)))
 	mux.HandleFunc("/api/media/cache", auth(requireMethod(http.MethodGet, b.handleMediaCache)))
 	mux.HandleFunc("/api/labels", auth(requireMethod(http.MethodGet, handleLabels(messageStore, b.Policy, func(ctx context.Context, chat types.JID) (types.JID, error) {
@@ -256,6 +252,7 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 // SDK request that holds the handoff gate. Liveness stays 200 while unpaired;
 // readiness still requires both pairing and an active connection.
 func (b *Bridge) registerStatusEndpoints(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc) {
+	b.registerWebhookEndpoints(mux, auth)
 	mux.HandleFunc("/api/health", auth(requireMethod(http.MethodGet, b.handleHealth())))
 	mux.HandleFunc("/api/ready", auth(requireMethod(http.MethodGet, b.handleReady())))
 	mux.HandleFunc("/api/version", handleVersion(buildInfo().withFTS(b.Store != nil && b.Store.fts)))

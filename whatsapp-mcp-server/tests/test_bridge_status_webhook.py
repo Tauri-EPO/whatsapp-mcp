@@ -19,6 +19,12 @@ def view(configured=False, enabled=False, reason="runtime webhook disabled", **e
         "last_success": None,
         "queued": 0,
         "dropped": 0,
+        "events": [],
+        "forward_self": False,
+        "forward_status": False,
+        "forward_channels": False,
+        "forward_broadcasts": False,
+        "authorization_set": False,
         **extra,
     }
 
@@ -46,8 +52,16 @@ def bridge(monkeypatch, webhook, paired=True, connected=True):
         if url.endswith("/health"):
             payload = {"paired": paired, "connected": connected}
             if webhook is not None:
-                payload["webhook"] = webhook
+                payload["webhook"] = (
+                    {key: webhook[key] for key in COMPACT_FIELDS}
+                    if isinstance(webhook, dict) and all(key in webhook for key in COMPACT_FIELDS)
+                    else webhook
+                )
             return httpx.Response(200, json=payload)
+        if url.endswith("/webhook"):
+            if webhook is None or (isinstance(webhook, dict) and webhook.get("reason") == "runtime webhook disabled"):
+                return httpx.Response(404, json={})
+            return httpx.Response(200, json=webhook)
         if url.endswith("/version") or url.endswith("/me"):
             return httpx.Response(503, json={})
         raise AssertionError(f"unexpected endpoint: {url}")
@@ -63,7 +77,11 @@ def test_webhook_states_and_detail_policy(monkeypatch, webhook, detail, allowed,
     calls = bridge(monkeypatch, webhook, paired, connected)
     monkeypatch.setenv(main.STATUS_DETAIL_ENV, str(allowed))
     out = main.bridge_status(detail=detail)
-    assert out["webhook"] == (webhook if detail and allowed else {key: webhook[key] for key in COMPACT_FIELDS})
+    assert out["webhook"] == (
+        webhook
+        if detail and allowed and webhook["reason"] != "runtime webhook disabled"
+        else {key: webhook[key] for key in COMPACT_FIELDS}
+    )
     assert out["ok"] is (paired and connected)
     assert "error" not in out
     assert all("/operator/" not in url for url in calls)
@@ -110,7 +128,7 @@ def test_extra_operator_fields_never_reach_tool(monkeypatch, detail):
     )
     out = main.bridge_status(detail=detail)
     serialized = json.dumps(out)
-    for private in ("fake-secret", "Bearer fake-auth", "fake-fingerprint", "secret_fingerprint", "authorization"):
+    for private in ("fake-secret", "Bearer fake-auth", "fake-fingerprint", '"secret_fingerprint"', '"authorization":'):
         assert private not in serialized
     assert out["webhook"] == (sanitized if detail else {key: sanitized[key] for key in COMPACT_FIELDS})
 

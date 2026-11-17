@@ -12,7 +12,7 @@ import main
 import tool_policy
 import whatsapp
 from http_oauth import load_oauth_config, required_tool_scope
-from tests.test_bridge_status_webhook import STATES
+from tests.test_bridge_status_webhook import COMPACT_FIELDS, STATES
 from tool_policy import ToolPolicy
 
 pytestmark = pytest.mark.usefixtures("auth_runtime_store")
@@ -31,6 +31,7 @@ VIEW = {
 def isolated(monkeypatch):
     monkeypatch.setattr(tool_policy, "_active", ToolPolicy())
     monkeypatch.setattr(tool_policy, "_runtime", False)
+    monkeypatch.delenv(main.STATUS_DETAIL_ENV, raising=False)
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "fake-bridge-token-issue-834")
     monkeypatch.setenv("WHATSAPP_OPERATOR_TOKEN", "fake-operator-token-never-forwarded")
 
@@ -90,7 +91,15 @@ def test_detail_status_and_get_share_the_sanitized_view(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "delivered,reason", [(True, ""), (False, "http_403"), (False, "receiver_refused"), (False, "delivery_failed")]
+    "delivered,reason",
+    [
+        (True, ""),
+        (False, "http_403"),
+        (False, "receiver_refused"),
+        (False, "delivery_failed"),
+        (False, "http_600"),
+        (False, "http_999"),
+    ],
 )
 def test_synthetic_result(monkeypatch, delivered, reason):
     result = {"delivered": delivered, "reason": reason, "event_id": "fake-event-id"}
@@ -106,8 +115,13 @@ def test_synthetic_result(monkeypatch, delivered, reason):
     "status,code,text",
     [
         (404, "not_found", "Runtime webhook is disabled"),
-        (409, "conflict", "Configure an enabled webhook first"),
-        (401, "denied", "denied"),
+        (409, "webhook_not_ready", "only the operator"),
+        (401, "internal", "credential"),
+        (400, "invalid_argument", "failed"),
+        (422, "invalid_argument", "failed"),
+        (408, "bridge_unavailable", "failed"),
+        (429, "rate_limited", "failed"),
+        (503, "bridge_unavailable", "failed"),
         (403, "denied", "denied"),
         (500, "bridge_unavailable", "failed"),
     ],
@@ -129,7 +143,7 @@ def test_synthetic_reason_cannot_echo_private_text(monkeypatch):
         {"delivered": False, "reason": "fake-private-credential", "event_id": "fake-event-id"},
     )
     result = main.test_webhook()
-    assert result["error"]["code"] == "bridge_unavailable"
+    assert result["reason"] == "runtime webhook reason unavailable"
     assert "fake-private-credential" not in json.dumps(result)
 
 
@@ -198,6 +212,107 @@ async def test_oauth_read_and_send_scopes(monkeypatch, scope):
 def test_no_configuration_tool_exists():
     names = tool_policy.registered_tool_names(main.mcp)
     assert "set_webhook" not in names and "delete_webhook" not in names
+
+
+def test_hosting_detail_refusal_keeps_get_compact(monkeypatch):
+    response(monkeypatch, "GET", "/webhook", 200, VIEW)
+    monkeypatch.setenv(main.STATUS_DETAIL_ENV, "false")
+    assert main.get_webhook() == {key: VIEW[key] for key in COMPACT_FIELDS}
+
+
+@pytest.mark.parametrize("status", [403, 404, 500, 503])
+def test_detail_status_falls_back_when_protected_read_is_unavailable(monkeypatch, status):
+    compact = {key: VIEW[key] for key in COMPACT_FIELDS}
+
+    def fake(url, **_kwargs):
+        if url.endswith("/health"):
+            # Even an older bridge incorrectly returning detail cannot reopen it.
+            return httpx.Response(200, json={"paired": True, "connected": True, "webhook": VIEW})
+        if url.endswith("/webhook"):
+            return httpx.Response(status, json={"error": {"message": "fake-private-credential"}})
+        return httpx.Response(503, json={})
+
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fake)
+    out = main.bridge_status(detail=True)
+    assert out["ok"] is True and out["webhook"] == compact
+    assert "error" not in out
+
+
+def test_detail_status_respects_python_tool_denial(monkeypatch):
+    monkeypatch.setattr(tool_policy, "_active", ToolPolicy(deny=frozenset({"get_webhook"})))
+
+    def fake(url, **_kwargs):
+        assert not url.endswith("/webhook"), "denied detail tool was implicitly called"
+        if url.endswith("/health"):
+            return httpx.Response(200, json={"paired": True, "connected": True, "webhook": VIEW})
+        return httpx.Response(503, json={})
+
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fake)
+    assert main.bridge_status(detail=True)["webhook"] == {key: VIEW[key] for key in COMPACT_FIELDS}
+
+
+@pytest.mark.parametrize("case", ["status600", "status999", "status000", "private_url", "private_auth", "missing"])
+def test_stored_reason_is_sanitized_in_every_shape(monkeypatch, case):
+    reason = {
+        "status600": "http_600",
+        "status999": "http_999",
+        "status000": "http_000",
+        "private_url": "https://example.com/private-path?private-query",
+        "private_auth": "Bearer fake-private-credential",
+        "missing": None,
+    }[case]
+    expected = reason if case.startswith("status") else "runtime webhook reason unavailable"
+    view = {**VIEW, "reason": reason, "forward_status": True}
+
+    def fake(url, **_kwargs):
+        if url.endswith("/health"):
+            return httpx.Response(200, json={"paired": True, "connected": True, "webhook": view})
+        if url.endswith("/webhook"):
+            return httpx.Response(200, json=view)
+        return httpx.Response(503, json={})
+
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fake)
+    for detail in (False, True):
+        safe_reason = main.bridge_status(detail=detail)["webhook"]["reason"] == expected
+        assert safe_reason, "stored reason escaped sanitization in bridge_status"
+    safe_reason = main.get_webhook()["reason"] == expected
+    assert safe_reason, "stored reason escaped sanitization in get_webhook"
+    assert main.get_webhook()["forward_status"] is True
+    monkeypatch.setenv(main.STATUS_DETAIL_ENV, "false")
+    compact = main.get_webhook()
+    safe_reason = compact["reason"] == expected
+    assert safe_reason and set(compact) == set(COMPACT_FIELDS), "compact reason or shape is unsafe"
+
+
+def test_transport_error_does_not_echo_private_text(monkeypatch, caplog):
+    def fail(*_args, **_kwargs):
+        raise whatsapp.ToolError("bridge_unavailable", "fake-private-credential")
+
+    monkeypatch.setattr(whatsapp, "_bridge_request", fail)
+    for tool in (main.get_webhook, main.test_webhook):
+        result = tool()
+        assert result["error"]["code"] == "bridge_unavailable"
+        assert "fake-private-credential" not in json.dumps(result)
+    assert "fake-private-credential" not in caplog.text
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ReadError])
+def test_http_transport_errors_are_not_logged_or_returned(monkeypatch, caplog, failure):
+    private = "Bearer fake-private-credential https://example.com/private-path?private-query"
+
+    def fail(*_args, **_kwargs):
+        raise failure(private)
+
+    monkeypatch.setattr(whatsapp.bridge_http, "get", fail)
+    monkeypatch.setattr(whatsapp.bridge_http, "post", fail)
+    monkeypatch.setattr(whatsapp.time, "sleep", lambda _: None)
+    for tool in (main.get_webhook, main.test_webhook):
+        result = tool()
+        assert result["error"]["code"] == "bridge_unavailable"
+        safe_result = private not in json.dumps(result)
+        assert safe_result, "HTTP transport diagnostic leaked in a tool result"
+    safe_log = private not in caplog.text
+    assert safe_log, "HTTP transport diagnostic leaked in logs"
 
 
 @pytest.mark.asyncio

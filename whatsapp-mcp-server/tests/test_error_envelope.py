@@ -84,6 +84,7 @@ def test_codes_are_documented():
         "media_retry_backoff",
         "invalid_argument",
         "conflict",
+        "webhook_not_ready",
         "too_large",
         "internal",
     }

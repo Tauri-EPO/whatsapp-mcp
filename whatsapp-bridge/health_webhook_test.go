@@ -16,6 +16,14 @@ func TestMaskedWebhookURL(t *testing.T) {
 		{"https://example.com/hooks/private-token-abcd?key=private-query#private-fragment", "https://example.com/…abcd"},
 		{"https://private-user:private-password@example.com/hooks/private-token-abcd", "https://example.com/…abcd"},
 		{"https://example.com/abc", "https://example.com/…"},
+		{"https://example.com/abcd", "https://example.com/…"},
+		{"https://example.com/a/bc", "https://example.com/…"},
+		{"https://example.com/hook/", "https://example.com/…"},
+		{"https://example.com/abcdefghijk", "https://example.com/…"},
+		{"https://example.com/abcdefghijkl", "https://example.com/…ijkl"},
+		{"https://example.com/abcdefghij/", "https://example.com/…"},
+		{"https://example.com/abcdefghijk/", "https://example.com/…ijk/"},
+		{"https://example.com/%61%62%63%64", "https://example.com/…"},
 		{"https://example.com/", "https://example.com/…"},
 		{"https://example.com", "https://example.com/…"},
 		{"https://example.com:8443/hooks/private-token-abcd", "https://example.com:8443/…abcd"},
@@ -65,9 +73,19 @@ func TestHealthWebhookViewLifecycleAndAuth(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("health returned %d", rec.Code)
 		}
+		var health struct{ Webhook map[string]any }
+		if json.Unmarshal(rec.Body.Bytes(), &health) != nil || len(health.Webhook) != 4 {
+			t.Fatal("health exposed noncompact webhook fields")
+		}
 		var body struct{ Webhook webhookStatusView }
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
+		}
+		if b.RuntimeWebhook != nil {
+			rec = get(handler, "/api/webhook", "Bearer test-token-0123456789")
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body.Webhook) != nil {
+				t.Fatal("detailed webhook read failed")
+			}
 		}
 		for _, leak := range []string{fakeWebhookSecret, authorization, path, query, "secret_fingerprint"} {
 			if strings.Contains(rec.Body.String(), leak) {

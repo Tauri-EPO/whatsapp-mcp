@@ -318,13 +318,14 @@ def get_webhook() -> dict[str, Any]:
     """Inspect the existing runtime webhook without changing its destination.
 
     Returns configured, enabled, a bridge-masked url, events, forward_self,
-    forward_channels, forward_broadcasts, authorization_set (boolean only),
+    forward_status, forward_channels, forward_broadcasts, authorization_set (boolean only),
     last_success, consecutive_failures, reason, queued and dropped. No destination
     means configured=false. Runtime disabled returns a clear not_found error.
-    Read-only; configuration and removal require the private operator listener.
+    WHATSAPP_STATUS_DETAIL=false keeps only configured, enabled, consecutive_failures
+    and reason. Read-only; configuration/removal require the private operator listener.
     Secrets, Authorization values, fingerprints, full paths and queries stay private.
     """
-    return whatsapp.get_webhook()
+    return whatsapp.get_webhook(detail=_status_detail_allowed())
 
 
 @mcp.tool()
@@ -335,7 +336,8 @@ def test_webhook() -> dict[str, Any]:
 
     Returns delivered, reason and event_id, without message content or credentials.
     A refusal or receiver failure has delivered=false and a safe reason code.
-    Runtime disabled returns not_found; no enabled destination returns conflict.
+    Runtime disabled returns not_found; no enabled destination returns webhook_not_ready.
+    Only the operator can configure or re-enable it; repeating this call cannot fix it.
     Requires send permission and is unavailable in read-only mode. This cannot
     change or remove the destination; use get_webhook to inspect it first.
     """
@@ -358,7 +360,8 @@ def bridge_status(detail: bool = False) -> dict[str, Any]:
     webhook reports configured, enabled, consecutive_failures and reason for
     the runtime receiver; unavailable status is explicit. It never changes ok.
     detail=true adds url (already masked by the bridge), last_success, queued
-    and dropped, plus events, forwarding filters and authorization_set (boolean).
+    and dropped, plus events, forwarding filters (including forward_status) and
+    authorization_set (boolean), only when get_webhook is permitted and available.
     Full paths, query strings and webhook credentials stay private.
 
     Pass detail=true only when you need deployment internals: before planning

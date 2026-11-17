@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -14,13 +15,20 @@ import (
 func (b *Bridge) handleHealth() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		status := b.healthStatus()
-		status["webhook"] = b.webhookStatus()
+		status["webhook"] = b.webhookStatus().compact()
 		writeJSON(w, http.StatusOK, status)
 	}
 }
 
-// Only the authenticated REST health response gets this view. The private
-// operator health keeps its existing snapshot, including operator-only fields.
+// The detailed view is served only by the tool-policy-protected webhook read.
+// Health carries the four-field compact projection; operator health is unchanged.
+type webhookCompactStatus struct {
+	Configured bool   `json:"configured"`
+	Enabled    bool   `json:"enabled"`
+	Failures   int    `json:"consecutive_failures"`
+	Reason     string `json:"reason"`
+}
+
 type webhookStatusView struct {
 	runtimeWebhookFilters
 	Configured  bool       `json:"configured"`
@@ -35,6 +43,10 @@ type webhookStatusView struct {
 	Dropped     uint64     `json:"dropped"`
 }
 
+func (s webhookStatusView) compact() webhookCompactStatus {
+	return webhookCompactStatus{Configured: s.Configured, Enabled: s.Enabled, Failures: s.Failures, Reason: s.Reason}
+}
+
 func (b *Bridge) webhookStatus() webhookStatusView {
 	if b.RuntimeWebhook == nil {
 		return webhookStatusView{Events: []string{}, Reason: "runtime webhook disabled"}
@@ -46,7 +58,7 @@ func (b *Bridge) webhookStatus() webhookStatusView {
 	return webhookStatusView{
 		runtimeWebhookFilters: s.runtimeWebhookFilters, Events: s.Events, AuthSet: s.AuthSet,
 		Configured: true, Enabled: s.Enabled, URL: maskedWebhookURL(s.URL),
-		LastSuccess: s.LastSuccess, Failures: s.Failures, Reason: s.Reason,
+		LastSuccess: s.LastSuccess, Failures: s.Failures, Reason: safeWebhookReason(s.Reason),
 		Queued: s.Queued, Dropped: s.Dropped,
 	}
 }
@@ -58,12 +70,31 @@ func maskedWebhookURL(raw string) string {
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return ""
 	}
-	path := []rune(u.EscapedPath())
+	path := []rune(strings.TrimPrefix(u.EscapedPath(), "/"))
 	suffix := ""
-	if len(path) > 4 {
+	if len([]rune(strings.TrimPrefix(u.Path, "/"))) >= 12 {
 		suffix = string(path[len(path)-4:])
 	}
 	return u.Scheme + "://" + u.Host + "/…" + suffix
+}
+
+// Reasons are codes, never receiver error text. Keep unknown future values
+// private until explicitly supported by the agent-facing contract.
+func safeWebhookReason(reason string) string {
+	switch reason {
+	case "", "receiver_refused", "request_failed", "delivery_failed", "cancelled", "disabled", "configuration_changed", "expired", "payload_limit", "queue_full":
+		return reason
+	}
+	if len(reason) == 8 && strings.HasPrefix(reason, "http_") {
+		valid := true
+		for _, c := range reason[5:] {
+			valid = valid && c >= '0' && c <= '9'
+		}
+		if valid {
+			return reason
+		}
+	}
+	return "runtime webhook reason unavailable"
 }
 
 // handleReady serves GET /api/ready.
